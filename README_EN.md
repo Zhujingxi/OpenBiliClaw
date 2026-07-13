@@ -390,7 +390,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X and YouTube native-save executors are wired and fixture-tested but not real-account verified; Xiaohongshu, Douyin, and Zhihu native-save executors remain deferred. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, and Douyin native-save executors are wired and fixture-tested but not real-account verified; the Zhihu executor remains deferred. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -566,7 +566,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
-- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to native targets; Reddit/X and YouTube executors are wired and fixture-tested but not real-account verified; Xiaohongshu / Douyin / Zhihu executors remain deferred
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first; with explicit consent, Bilibili can sync to native targets; Reddit/X, YouTube, Xiaohongshu, and Douyin executors are wired and fixture-tested but not real-account verified; Zhihu remains deferred
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -593,7 +593,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ├─────────┴──────────┴───────────┴───────────────┤
 │ LLM / source adapters · /api/saved/* · router · Bilibili native save │
 │ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
-│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT executors (fixture-only; three pending)│
+│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY executors (fixture-only; Zhihu pending)│
 └────────────────────────────────────────────────┘
 ```
 

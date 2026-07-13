@@ -18,12 +18,65 @@ import {
   buildDyTaskUrl,
   buildDyExecuteMessageData,
   computeDyTaskTimeoutMs,
+  executeTask,
   isValidDyTask,
   onTabReady,
+  postDyNativeSaveResult,
   pollDyTaskNow,
   shouldOpenDyTaskActive,
   shouldFinalizeHotTask,
 } from "../src/background/dy-task-dispatcher.ts";
+import type { NativeSaveResult, NativeSaveTask } from "../src/shared/native-save.ts";
+
+const nativeTask: NativeSaveTask = {
+  id: "123e4567-e89b-42d3-a456-426614174012",
+  type: "native_save",
+  platform: "douyin",
+  platform_slug: "dy",
+  item_key: "douyin:7300000000000000000",
+  content_id: "7300000000000000000",
+  content_url: "https://www.douyin.com/video/7300000000000000000",
+  content_type: "video",
+  requested_action: "favorite",
+  resolved_action: "favorite",
+  target_label: "抖音收藏",
+};
+
+test("dy task native_save union and dispatcher close through the exact authenticated result contract", async () => {
+  assert.equal(isValidDyTask(nativeTask), true);
+  assert.equal(isValidDyTask({ ...nativeTask, platform: "xiaohongshu", platform_slug: "xhs" }), false);
+  assert.equal(buildDyTaskUrl(nativeTask), nativeTask.content_url);
+  const result: NativeSaveResult = {
+    task_id: nativeTask.id,
+    item_key: nativeTask.item_key,
+    status: "synced",
+    error_code: "",
+    error_message: "",
+  };
+  const calls: unknown[] = [];
+  await executeTask(nativeTask, {
+    run: async (receivedTask, slug, postResult) => {
+      calls.push([receivedTask, slug]);
+      await postResult(result);
+    },
+    postResult: async (received) => { calls.push(received); },
+  });
+  assert.deepEqual(calls, [[nativeTask, "dy"], result]);
+
+  const requests: unknown[] = [];
+  await postDyNativeSaveResult(result, {
+    resolveUrl: async (path) => `http://127.0.0.1:8420/api${path}`,
+    fetch: async (input, init) => { requests.push([input, init]); },
+  });
+  assert.deepEqual(requests, [[
+    "http://127.0.0.1:8420/api/sources/dy/task-result",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(result),
+    },
+  ]]);
+});
 
 test("buildDyTaskUrl routes bootstrap_profile to the douyin home", () => {
   // The content-script executor will navigate from this initial URL to

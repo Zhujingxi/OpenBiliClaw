@@ -30,6 +30,8 @@ import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
 import { registerE2EExecutor } from "./e2e-executor.ts";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveDouyin } from "./native-save/douyin.ts";
 
 let behaviorCollectorStarted = false;
 
@@ -55,6 +57,9 @@ function startDouyinBehaviorCollector(): void {
 
 startDouyinBehaviorCollector();
 registerE2EExecutor("douyin");
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  installNativeSaveExecutor("douyin", saveDouyin);
+}
 
 // TEMP DEBUG: relay content-script events to daemon (see debug-log.ts).
 function debugLog(event: string, data?: unknown): void {

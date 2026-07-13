@@ -221,15 +221,17 @@ test("native save content runtime evicts the oldest completed outcome after 256 
   }
 });
 
-test("native save docs identify Reddit, X, and YouTube wiring without overstating account verification", () => {
+test("native save docs identify five wired executors without overstating account verification", () => {
   const runtime = readFileSync(resolve("../docs/modules/runtime.md"), "utf8");
   const changelog = readFileSync(resolve("../docs/changelog.md"), "utf8");
   const architecture = readFileSync(resolve("../docs/architecture.md"), "utf8");
+  const extensionModule = readFileSync(resolve("../docs/modules/extension.md"), "utf8");
+  const savedSyncModule = readFileSync(resolve("../docs/modules/saved-sync.md"), "utf8");
   for (const text of [runtime, changelog, architecture]) {
     assert.match(text, /NATIVE_SAVE_EXECUTE/);
-    assert.match(text, /Reddit\/X 与 YouTube executor 已接入/);
+    assert.match(text, /(?:5\/6 executor 已接|五者仅|至此 5\/6 executor 已接)/);
     assert.match(text, /尚未真实账号验证/);
-    assert.match(text, /小红书、抖音、知乎.*待接/);
+    assert.match(text, /知乎.*待接/);
     assert.match(text, /共享 MV3 recovery barrier/);
     assert.match(text, /2xx 未确认|2xx-unconfirmed/);
     assert.match(text, /(?:结构化.*rate|rate.*结构化|structured.*rate)/i);
@@ -239,23 +241,32 @@ test("native save docs identify Reddit, X, and YouTube wiring without overstatin
   const spec = readFileSync(resolve("../docs/spec.md"), "utf8");
   assert.match(spec, /shared MV3 recovery barrier/);
   assert.match(runtime, /createYouTubeBrowserEnvironment/);
-  assert.match(runtime, /3\/6 executor 已接/);
+  assert.match(runtime, /createXiaohongshuBrowserEnvironment/);
+  assert.match(runtime, /createDouyinBrowserEnvironment/);
+  assert.match(runtime, /5\/6 executor 已接/);
+  assert.match(extensionModule, /Reddit.*X.*YouTube.*小红书.*抖音.*5\/6.*fixture/s);
+  assert.match(extensionModule, /知乎.*待接/);
+  assert.doesNotMatch(extensionModule, /其它平台账号写入 adapter 仍属后续计划/);
+  assert.match(savedSyncModule, /5\/6.*executor 已接/);
+  assert.match(savedSyncModule, /尚未真实账号验证/);
+  assert.match(savedSyncModule, /知乎.*待接/);
+  assert.doesNotMatch(savedSyncModule, /扩展 executor 尚未实现/);
 });
 
-test("README prose matches the fixture-tested Reddit, X, and YouTube executor architecture", () => {
+test("README prose matches the five fixture-tested executor architecture", () => {
   const readme = readFileSync(resolve("../README.md"), "utf8");
   const readmeEn = readFileSync(resolve("../README_EN.md"), "utf8");
-  assert.match(readme, /Reddit\/X 与 YouTube 原生保存 executor 已接入.*fixture.*未真实账号验证/);
-  assert.match(readme, /小红书、抖音、知乎.*仍待接/);
+  assert.match(readme, /Reddit\/X、YouTube、小红书与抖音原生保存 executor 已接入.*fixture.*未真实账号验证/);
+  assert.match(readme, /知乎原生保存 executor 仍待接/);
   assert.doesNotMatch(readme, /扩展只负责同步 x\.com cookie \+ 捕获互动/);
-  assert.match(readmeEn, /Reddit\/X and YouTube native-save executors are wired.*fixture-tested.*not real-account verified/i);
-  assert.match(readmeEn, /Xiaohongshu, Douyin, and Zhihu.*remain deferred/i);
+  assert.match(readmeEn, /Reddit\/X, YouTube, Xiaohongshu, and Douyin native-save executors are wired.*fixture-tested.*not real-account verified/i);
+  assert.match(readmeEn, /Zhihu executor remains deferred/i);
   assert.doesNotMatch(readmeEn, /extension only syncs the x\.com cookie and captures engagement/i);
 
   const coreFeatures = readme.match(/## ✨ 核心特性([\s\S]*?)\n## /)?.[1] ?? "";
   const keyFeatures = readmeEn.match(/## ✨ Key Features([\s\S]*?)\n## /)?.[1] ?? "";
-  assert.match(coreFeatures, /Reddit\/X 与 YouTube.*executor 已接入.*fixture.*未真实账号验证/);
-  assert.match(coreFeatures, /小红书.*抖音.*知乎.*executor 仍待接/);
-  assert.match(keyFeatures, /Reddit\/X and YouTube.*executors are wired.*fixture-tested.*not real-account verified/i);
-  assert.match(keyFeatures, /Xiaohongshu.*Douyin.*Zhihu.*executors remain deferred/i);
+  assert.match(coreFeatures, /Reddit\/X、YouTube、小红书与抖音.*executor 已接入.*fixture.*未真实账号验证/);
+  assert.match(coreFeatures, /知乎 executor 仍待接/);
+  assert.match(keyFeatures, /Reddit\/X, YouTube, Xiaohongshu, and Douyin.*executors are wired.*fixture-tested.*not real-account verified/i);
+  assert.match(keyFeatures, /Zhihu remains deferred/i);
 });

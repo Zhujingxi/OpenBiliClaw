@@ -53,6 +53,8 @@ function releaseDispatcherMutex(label: string): void {
 
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
+import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 45_000;
 const TASK_TIMEOUT_MS = 30_000;
@@ -66,7 +68,7 @@ const POLL_ALARM_NAME = "openbiliclaw-xhs-task-poll";
 
 export type XhsBootstrapScope = "saved" | "liked" | "xhs_history";
 
-export interface XhsTask {
+export interface XhsLegacyTask {
   id: string;
   type: "search" | "creator" | "bootstrap_profile";
   keyword?: string;
@@ -77,6 +79,8 @@ export interface XhsTask {
   scroll_wait_ms?: number;
   max_stagnant_scroll_rounds?: number;
 }
+
+export type XhsTask = XhsLegacyTask | NativeSaveTask;
 
 export interface XhsTaskResult {
   task_id: string;
@@ -106,6 +110,7 @@ let taskNavigationFallbackId: ReturnType<typeof setTimeout> | null = null;
 // ---------------------------------------------------------------------------
 
 export function buildTaskUrl(task: XhsTask): string | null {
+  if (task.type === "native_save") return task.content_url;
   if (task.type === "search" && task.keyword) {
     return `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(task.keyword)}`;
   }
@@ -119,6 +124,9 @@ export function buildTaskUrl(task: XhsTask): string | null {
 }
 
 export function isValidTask(task: unknown): task is XhsTask {
+  if (isNativeSaveTask(task)) {
+    return task.platform === "xiaohongshu" && task.platform_slug === "xhs";
+  }
   if (typeof task !== "object" || task === null) return false;
   const t = task as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return false;
@@ -128,7 +136,7 @@ export function isValidTask(task: unknown): task is XhsTask {
   return true;
 }
 
-function bootstrapScrollableScopeCount(task: XhsTask): number {
+function bootstrapScrollableScopeCount(task: XhsLegacyTask): number {
   const scopes =
     Array.isArray(task.scopes) && task.scopes.length > 0
       ? task.scopes
@@ -137,7 +145,7 @@ function bootstrapScrollableScopeCount(task: XhsTask): number {
   return Math.max(1, count);
 }
 
-export function computeTaskTimeoutMs(task: XhsTask): number {
+export function computeTaskTimeoutMs(task: XhsLegacyTask): number {
   if (task.type !== "bootstrap_profile") return TASK_TIMEOUT_MS;
   const rounds =
     typeof task.max_scroll_rounds === "number" && Number.isFinite(task.max_scroll_rounds)
@@ -163,7 +171,7 @@ export function computeTaskTimeoutMs(task: XhsTask): number {
   );
 }
 
-function shouldActivateBeforeExecute(task: XhsTask): boolean {
+function shouldActivateBeforeExecute(task: XhsLegacyTask): boolean {
   // Init-time bootstrap runs in a foreground tab so the user can see
   // their profile being pulled (transparency) and so XHS's lazy-load
   // / scroll virtualization actually fires (it pauses for inactive
@@ -173,7 +181,7 @@ function shouldActivateBeforeExecute(task: XhsTask): boolean {
   return bootstrapNavigationCount > 0;
 }
 
-function buildExecuteMessageData(task: XhsTask): Record<string, unknown> {
+function buildExecuteMessageData(task: XhsLegacyTask): Record<string, unknown> {
   const data: Record<string, unknown> = { task_id: task.id, type: task.type };
   if (task.scopes !== undefined) data.scopes = task.scopes;
   if (task.max_items_per_scope !== undefined) {
@@ -187,7 +195,7 @@ function buildExecuteMessageData(task: XhsTask): Record<string, unknown> {
   return data;
 }
 
-function isScrollableBootstrapTask(task: XhsTask): boolean {
+function isScrollableBootstrapTask(task: XhsLegacyTask): boolean {
   return (
     task.type === "bootstrap_profile" &&
     typeof task.max_scroll_rounds === "number" &&
@@ -221,7 +229,7 @@ function recordDispatcherDebug(event: string, data: Record<string, unknown> = {}
   }
 }
 
-function buildTimeoutDebug(task: XhsTask): Record<string, unknown> {
+function buildTimeoutDebug(task: XhsLegacyTask): Record<string, unknown> {
   const debug: Record<string, unknown> = {
     xhs_dispatcher: {
       reason: "timeout",
@@ -283,6 +291,53 @@ async function reportTaskResult(result: XhsTaskResult): Promise<void> {
   }
 }
 
+export interface XhsNativeSaveResultTransport {
+  resolveUrl: (path: string) => Promise<string>;
+  fetch: (input: string, init: RequestInit) => Promise<unknown>;
+}
+
+const XHS_NATIVE_SAVE_RESULT_TRANSPORT: XhsNativeSaveResultTransport = {
+  resolveUrl: apiUrl,
+  fetch: authenticatedFetch,
+};
+
+export async function postXhsNativeSaveResult(
+  result: NativeSaveResult,
+  transport: XhsNativeSaveResultTransport = XHS_NATIVE_SAVE_RESULT_TRANSPORT,
+): Promise<void> {
+  try {
+    await transport.fetch(await transport.resolveUrl("/sources/xhs/task-result"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(result),
+    });
+  } catch {
+    // Backend transient unavailability should not crash the service worker.
+  }
+}
+
+export interface XhsNativeSaveDispatchDependencies {
+  run: (
+    task: NativeSaveTask,
+    platformSlug: "xhs",
+    postResult: (result: NativeSaveResult) => Promise<void>,
+  ) => Promise<void>;
+  postResult: (result: NativeSaveResult) => Promise<void>;
+}
+
+/** Behavior seam used by executeTask and tests to keep native-result closure explicit. */
+export async function dispatchXhsNativeSaveTask(
+  task: NativeSaveTask,
+  dependencies: XhsNativeSaveDispatchDependencies,
+): Promise<void> {
+  await dependencies.run(task, "xhs", dependencies.postResult);
+}
+
+const XHS_NATIVE_SAVE_DISPATCH_DEPENDENCIES: XhsNativeSaveDispatchDependencies = {
+  run: runNativeSaveTask,
+  postResult: postXhsNativeSaveResult,
+};
+
 function cleanupTask(): void {
   if (taskTimeoutId !== null) {
     clearTimeout(taskTimeoutId);
@@ -310,7 +365,7 @@ function cleanupTask(): void {
   releaseDispatcherMutex("xhs");
 }
 
-function armTaskTimeout(task: XhsTask): void {
+function armTaskTimeout(task: XhsLegacyTask): void {
   if (taskTimeoutId !== null) {
     clearTimeout(taskTimeoutId);
     taskTimeoutId = null;
@@ -330,7 +385,7 @@ function armTaskTimeout(task: XhsTask): void {
   }, computeTaskTimeoutMs(task));
 }
 
-async function sendExecuteMessageToTab(tabId: number, task: XhsTask): Promise<void> {
+async function sendExecuteMessageToTab(tabId: number, task: XhsLegacyTask): Promise<void> {
   if (shouldActivateBeforeExecute(task)) {
     recordDispatcherDebug("activate_tab_before_execute", { tab_id: tabId });
     await chrome.tabs.update(tabId, { active: true });
@@ -346,7 +401,7 @@ async function sendExecuteMessageToTab(tabId: number, task: XhsTask): Promise<vo
   recordDispatcherDebug("send_execute_message_done", { tab_id: tabId });
 }
 
-function handleExecuteMessageFailure(task: XhsTask): void {
+function handleExecuteMessageFailure(task: XhsLegacyTask): void {
   if (currentTaskId !== task.id) return;
   recordDispatcherDebug("send_execute_message_failed");
   void reportTaskResult({
@@ -365,7 +420,7 @@ function clearNavigationFallback(): void {
   }
 }
 
-function armClickedNavigationFallback(task: XhsTask, tabId: number): void {
+function armClickedNavigationFallback(task: XhsLegacyTask, tabId: number): void {
   clearNavigationFallback();
   taskNavigationFallbackId = setTimeout(() => {
     taskNavigationFallbackId = null;
@@ -379,7 +434,7 @@ function armClickedNavigationFallback(task: XhsTask, tabId: number): void {
   }, BOOTSTRAP_CLICKED_NAVIGATION_FALLBACK_MS);
 }
 
-function armTaskLoadListener(task: XhsTask): void {
+function armTaskLoadListener(task: XhsLegacyTask): void {
   if (taskUpdateListener !== null) {
     chrome.tabs.onUpdated.removeListener(taskUpdateListener);
     taskUpdateListener = null;
@@ -401,7 +456,20 @@ function armTaskLoadListener(task: XhsTask): void {
   chrome.tabs.onUpdated.addListener(listener);
 }
 
-export async function executeTask(task: XhsTask): Promise<void> {
+export async function executeTask(
+  task: XhsTask,
+  nativeDependencies: XhsNativeSaveDispatchDependencies = XHS_NATIVE_SAVE_DISPATCH_DEPENDENCIES,
+): Promise<void> {
+  if (task.type === "native_save") {
+    if (taskInFlight) return;
+    taskInFlight = true;
+    try {
+      await dispatchXhsNativeSaveTask(task, nativeDependencies);
+    } finally {
+      taskInFlight = false;
+    }
+    return;
+  }
   if (taskInFlight) return;
   // Cross-source mutex — bail if Douyin dispatcher is currently
   // running a task. The XHS task remains in the queue and the next
@@ -496,6 +564,7 @@ export async function handleTaskResult(result: XhsTaskResult): Promise<void> {
 }
 
 async function pollOnce(): Promise<void> {
+  await ensureNativeSaveTaskRecovery();
   if (taskInFlight) return;
   const task = await fetchNextTask();
   if (!task) return;
