@@ -478,6 +478,50 @@ def test_ensure_embedding_model_async_reports_global_pull_progress(
     assert snap["total"] == 568 * 1024 * 1024
 
 
+def test_main_source_selftest_does_not_migrate_ignored_project_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source-checkout"
+    project_root = tmp_path / "selftest-profile"
+    source_data = source_root / "data"
+    source_data.mkdir(parents=True)
+    config_bytes = b"[api]\nport = 18420\n"
+    data_bytes = b"source-only ignored data"
+    (source_root / "config.toml").write_bytes(config_bytes)
+    (source_data / "marker.bin").write_bytes(data_bytes)
+
+    monkeypatch.setenv("OPENBILICLAW_SELFTEST", "1")
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    monkeypatch.setattr(entry.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(
+        entry,
+        "__file__",
+        str(source_root / "packaging" / "entry.py"),
+    )
+    monkeypatch.setattr(entry, "_redirect_output_to_logfile", lambda _root: None)
+    monkeypatch.setattr(entry, "_notify_starting", lambda: None)
+    monkeypatch.setattr(entry, "_copy_legacy_packaged_user_data", lambda *_args: None)
+    monkeypatch.setattr(entry, "_inject_bundled_ollama_on_path", lambda _resources: False)
+    monkeypatch.setattr(entry, "_seed_default_config", lambda *_args: False)
+    monkeypatch.setattr(
+        entry,
+        "_repair_unloadable_config",
+        lambda *_args: entry._ConfigRepairResult(False, False),
+    )
+    monkeypatch.setattr(entry, "_close_splash", lambda: None)
+
+    import openbiliclaw.api.app as api_app
+
+    monkeypatch.setattr(api_app, "create_app", lambda: SimpleNamespace())
+
+    entry.main()
+
+    assert (source_root / "config.toml").read_bytes() == config_bytes
+    assert (source_data / "marker.bin").read_bytes() == data_bytes
+    assert not (project_root / "config.toml").exists()
+    assert not (project_root / "data" / "marker.bin").exists()
+
+
 def test_main_uses_configured_api_host_when_env_host_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -613,7 +657,12 @@ def test_main_disables_uvicorn_access_log_in_tray_mode(
     monkeypatch.setattr(entry.sys, "frozen", True, raising=False)
     monkeypatch.setattr(entry, "_redirect_output_to_logfile", lambda _root: None)
     monkeypatch.setattr(entry, "_notify_starting", lambda: None)
-    monkeypatch.setattr(entry, "_migrate_legacy_install_dir_data", lambda *_args: None)
+    migration_calls: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        entry,
+        "_migrate_legacy_install_dir_data",
+        lambda *args: migration_calls.append(args),
+    )
     monkeypatch.setattr(entry, "_inject_bundled_ollama_on_path", lambda _resources: False)
     monkeypatch.setattr(entry, "_packaged_ollama_preflight", lambda: None)
     monkeypatch.setattr(entry, "_ensure_embedding_model_async", lambda: None)
@@ -653,6 +702,7 @@ def test_main_disables_uvicorn_access_log_in_tray_mode(
 
     assert seen["tray"] is True
     assert seen["access_log"] is False
+    assert len(migration_calls) == 1
 
 
 def test_notify_starting_noop_when_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
