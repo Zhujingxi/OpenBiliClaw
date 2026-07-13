@@ -89,8 +89,9 @@ removed = db.remove_saved_membership("favorite", item.item_key)
 - 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表及其 stable `item_key` link，但用户可见读取以 normalized membership 为准。状态 / 移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key；移除时按旧行已持久化的 `item_key` 同步清理迁移来源行。多个非 Bilibili 平台共享该裸 ID 时状态返回 `False`、移除也返回 `False`，不删除任何一侧。
 - 平台 adapter、platform-neutral HTTP API，以及插件 side panel / 桌面 Web / 移动 Web
   保存与同步 UI 已接入同一 normalized store。Bilibili 保持 direct adapter，六平台已注册 extension-backed adapter；
-  其它来源的本地 membership 仍可正常保存、列出和删除，手动同步会返回稳定
-  `unsupported`，直到各平台后续计划实现对应 adapter。
+  stable runtime broker wiring 也已完成。其它来源的本地 membership 仍可正常保存、列出和删除，
+  手动同步会进入 durable extension job ledger。Tasks 4–8 继续负责 extension executors 和经验证的
+  真实账号写入；这些任务完成前不能宣称六平台账号写入已经闭环。
 
 `native_save_states` 完整字段如下：
 

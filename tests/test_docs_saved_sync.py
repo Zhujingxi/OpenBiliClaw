@@ -70,6 +70,7 @@ def test_saved_sync_docs_register_extension_adapters_without_claiming_executor()
     architecture = Path("docs/architecture.md").read_text(encoding="utf-8")
     spec = Path("docs/spec.md").read_text(encoding="utf-8")
     module = Path("docs/modules/saved-sync.md").read_text(encoding="utf-8")
+    storage = Path("docs/modules/storage.md").read_text(encoding="utf-8")
     changelog = Path("docs/changelog.md").read_text(encoding="utf-8")
     readme = Path("README.md").read_text(encoding="utf-8")
     readme_en = Path("README_EN.md").read_text(encoding="utf-8")
@@ -80,7 +81,10 @@ def test_saved_sync_docs_register_extension_adapters_without_claiming_executor()
     assert "扩展 executor 尚未实现" in architecture
     assert "Tasks 4–8" in architecture
     assert "Tasks 4–8" in module
+    assert "Tasks 4–8" in storage
+    assert "runtime broker" in storage
     assert "Phase 1 只注册 Bilibili 账号写入 adapter" not in architecture
     assert "其它来源当前保持 local-only" not in architecture
     assert "账号写入 adapter\n仍是后续独立计划" not in module
     assert "Phase 1 尚无 adapter 的平台" not in module
+    assert "直到各平台后续计划实现对应 adapter" not in storage
