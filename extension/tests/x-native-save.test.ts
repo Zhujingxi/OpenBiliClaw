@@ -106,8 +106,11 @@ function browserDomFixture(options: {
   staleToast?: boolean;
   unrelatedStructuredError?: boolean;
   newRateToastAfterClick?: boolean;
+  confirmAfterClick?: boolean;
+  initialBookmarked?: boolean;
+  targetRateAlert?: boolean;
 } = {}): { document: Document; clicks: () => number } {
-  let bookmarked = false;
+  let bookmarked = options.initialBookmarked ?? false;
   let clickCount = 0;
   const staleToast = { textContent: "请求过于频繁，请稍后再试" };
   const unrelatedError = { textContent: "Rate limit exceeded" };
@@ -117,7 +120,7 @@ function browserDomFixture(options: {
     click() {
       clickCount += 1;
       if (options.newRateToastAfterClick) toasts.push(newToast);
-      else bookmarked = true;
+      if (options.confirmAfterClick ?? !options.newRateToastAfterClick) bookmarked = true;
     },
   };
   const article = {
@@ -127,7 +130,9 @@ function browserDomFixture(options: {
       return null;
     },
     querySelectorAll(selector: string) {
-      return selector.includes("[role='alert']") ? [] : [];
+      return selector.includes("[role='alert']") && options.targetRateAlert
+        ? [{ textContent: "Rate limit exceeded" }]
+        : [];
     },
   };
   const statusLink = {
@@ -172,5 +177,23 @@ test("X browser save accepts a newly appeared platform rate toast after the targ
   env.sleep = async () => {};
 
   assert.deepEqual(await saveX(task, env), { status: "rate_limited" });
+  assert.equal(dom.clicks(), 1);
+});
+
+test("X browser save prefers initial removeBookmark proof over a stale target rate alert", async () => {
+  const dom = browserDomFixture({ initialBookmarked: true, targetRateAlert: true });
+  const env = createXBrowserEnvironment(dom.document, task.content_url);
+  env.sleep = async () => {};
+
+  assert.deepEqual(await saveX(task, env), { status: "already_synced" });
+  assert.equal(dom.clicks(), 0);
+});
+
+test("X browser save prefers post-click removeBookmark proof over a new rate toast", async () => {
+  const dom = browserDomFixture({ newRateToastAfterClick: true, confirmAfterClick: true });
+  const env = createXBrowserEnvironment(dom.document, task.content_url);
+  env.sleep = async () => {};
+
+  assert.deepEqual(await saveX(task, env), { status: "synced" });
   assert.equal(dom.clicks(), 1);
 });

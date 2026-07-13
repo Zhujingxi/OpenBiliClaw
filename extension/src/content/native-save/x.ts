@@ -39,8 +39,8 @@ function supportedTweet(task: NativeSaveTask, currentUrl: string): boolean {
 
 async function confirmBookmarked(task: NativeSaveTask, env: XNativeSaveEnvironment): Promise<boolean> {
   for (let attempt = 0; attempt < CONFIRM_ATTEMPTS; attempt += 1) {
-    if (env.isRateLimited(task.content_id)) return false;
     if (env.findTweetControl(task.content_id, "removeBookmark")) return true;
+    if (env.isRateLimited(task.content_id)) return false;
     if (attempt + 1 < CONFIRM_ATTEMPTS) await env.sleep(CONFIRM_INTERVAL_MS);
   }
   return false;
@@ -54,8 +54,8 @@ export async function saveX(
   if (!supportedTweet(task, env.currentUrl)) {
     return { status: "unsupported", error_code: "unsupported_content_type" };
   }
-  if (env.isRateLimited(task.content_id)) return { status: "rate_limited" };
   if (env.findTweetControl(task.content_id, "removeBookmark")) return { status: "already_synced" };
+  if (env.isRateLimited(task.content_id)) return { status: "rate_limited" };
   const control = env.findTweetControl(task.content_id, "bookmark");
   if (!control) return { status: "failed", error_code: "native_save_failed" };
   try {
