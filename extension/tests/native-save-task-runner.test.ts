@@ -7,6 +7,7 @@ import {
 } from "../src/background/dispatcher-mutex.ts";
 import {
   handleNativeSaveContentResult,
+  recoverRecordedNativeSaveTaskTab,
   runNativeSaveTask,
 } from "../src/background/native-save-task-runner.ts";
 import type { NativeSaveResult, NativeSaveTask } from "../src/shared/native-save.ts";
@@ -127,6 +128,39 @@ test("native save runner posts a safe failure when tab creation throws", async (
     assert.equal(posted[0]?.error_code, "native_save_failed");
     assert.equal(state.runtimeListenerCount(), 0);
     assert.equal(dispatcherMutexHolder(), null);
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save runner records only its tab identity and clears it on normal cleanup", async () => {
+  const state = installChromeMock();
+  try {
+    const running = runNativeSaveTask(task, "reddit", async () => {}, { timeoutMs: 50 });
+    await tick();
+    assert.deepEqual(state.sessionStorage, { openbiliclaw_native_save_task_tab_id: 42 });
+    state.emitRuntimeMessage(
+      { type: "NATIVE_SAVE_RESULT", platform: "reddit", task_id: task.id, item_key: task.item_key, status: "synced" },
+      { url: task.content_url, tab: { id: 42, url: task.content_url } },
+    );
+    await running;
+    assert.deepEqual(state.sessionStorage, {});
+    assert.deepEqual(state.removedTabs, [42]);
+  } finally {
+    state.restore();
+  }
+});
+
+test("native save restart recovery closes only the recorded orphan and clears the record", async () => {
+  const state = installChromeMock();
+  state.sessionStorage.openbiliclaw_native_save_task_tab_id = 77;
+  state.tabById.set(77, { id: 77, url: "https://x.com/i/status/123", status: "complete" });
+  state.tabById.set(88, { id: 88, url: "https://www.reddit.com/r/test/", status: "complete" });
+  try {
+    await recoverRecordedNativeSaveTaskTab();
+    assert.deepEqual(state.removedTabs, [77]);
+    assert.equal(state.tabById.has(88), true);
+    assert.deepEqual(state.sessionStorage, {});
   } finally {
     state.restore();
   }

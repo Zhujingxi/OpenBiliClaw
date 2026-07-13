@@ -51,6 +51,12 @@ import {
   pollRedditTaskNow,
 } from "./reddit-task-dispatcher.ts";
 import {
+  startXTaskPolling,
+  handleXTaskAlarm,
+  pollXTaskNow,
+} from "./x-task-dispatcher.ts";
+import { recoverRecordedNativeSaveTaskTab } from "./native-save-task-runner.ts";
+import {
   startBiliTaskPolling,
   handleBiliTaskAlarm,
   handleBiliTaskResult,
@@ -258,6 +264,10 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
   if (eventType === "reddit_task_available") {
     pollRedditTaskNow();
+    return;
+  }
+  if (eventType === "x_task_available") {
+    pollXTaskNow();
     return;
   }
   if (eventType === "bili_task_available") {
@@ -507,21 +517,29 @@ function startPlatformTaskPolling(): void {
   startYtTaskPolling();
   startZhihuTaskPolling();
   startRedditTaskPolling();
+  startXTaskPolling();
   startBiliTaskPolling();
+}
+
+async function startServiceWorkerAfterRecovery(): Promise<void> {
+  // MV3 workers can stop between tab creation and cleanup. Session storage records
+  // only the runner-owned numeric tab ID, so recovery must finish before polling
+  // can create a new task tab and never scans or closes arbitrary Reddit/X tabs.
+  await recoverRecordedNativeSaveTaskTab();
+  await ensureSession();
+  await connectRuntimeStream();
+  startPlatformTaskPolling();
+  startCookieSync();
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureFlushAlarm();
-  void (async () => { await ensureSession(); await connectRuntimeStream(); })();
-  startPlatformTaskPolling();
-  startCookieSync();
+  void startServiceWorkerAfterRecovery();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureFlushAlarm();
-  void (async () => { await ensureSession(); await connectRuntimeStream(); })();
-  startPlatformTaskPolling();
-  startCookieSync();
+  void startServiceWorkerAfterRecovery();
 });
 
 chrome.action.onClicked.addListener((tab) => {
@@ -684,6 +702,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleYtTaskAlarm(alarm.name);
   handleZhihuTaskAlarm(alarm.name);
   handleRedditTaskAlarm(alarm.name);
+  handleXTaskAlarm(alarm.name);
   handleBiliTaskAlarm(alarm.name);
   if (handleCookieSyncAlarm(alarm.name)) {
     return;
@@ -724,9 +743,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 });
 
 ensureFlushAlarm();
-void (async () => { await ensureSession(); await connectRuntimeStream(); })();
-startPlatformTaskPolling();
-startCookieSync();
+void startServiceWorkerAfterRecovery();
 
 // Popup writes a new backend port → chrome.storage.onChanged fires here.
 // Close the existing runtime-stream WS so the next connect attempt opens

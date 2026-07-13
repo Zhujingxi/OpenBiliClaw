@@ -8,6 +8,8 @@ import { releaseDispatcherMutex, tryAcquireDispatcherMutex } from "./dispatcher-
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
+import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { runNativeSaveTask } from "./native-save-task-runner.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const POLL_ALARM_NAME = "openbiliclaw-reddit-task-poll";
@@ -17,7 +19,7 @@ const MAX_TIMEOUT_MS = 240_000;
 const CONTENT_SCRIPT_RETRY_INTERVAL_MS = 250;
 const CONTENT_SCRIPT_READY_TIMEOUT_MS = 8_000;
 
-export interface RedditTask {
+export interface RedditLegacyTask {
   id: string;
   type: RedditTaskType;
   keywords?: string[];
@@ -33,7 +35,12 @@ export interface RedditTask {
   fetch_timeout_ms?: number;
 }
 
+export type RedditTask = RedditLegacyTask | NativeSaveTask;
+
 export function isValidRedditTask(task: unknown): task is RedditTask {
+  if (isNativeSaveTask(task)) {
+    return task.platform === "reddit" && task.platform_slug === "reddit";
+  }
   if (typeof task !== "object" || task === null) return false;
   const t = task as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return false;
@@ -59,6 +66,7 @@ export function isValidRedditTask(task: unknown): task is RedditTask {
 }
 
 export function computeRedditTaskTimeoutMs(task: RedditTask): number {
+  if (task.type === "native_save") return 240_000;
   let breadth = 1;
   if (task.type === "search") breadth = Math.max(1, task.keywords?.length ?? 1);
   if (task.type === "subreddit") breadth = Math.max(1, task.subreddits?.length ?? 1);
@@ -68,7 +76,7 @@ export function computeRedditTaskTimeoutMs(task: RedditTask): number {
 }
 
 export function shouldOpenRedditTaskActive(task: RedditTask): boolean {
-  return task.type === "bootstrap_events";
+  return task.type === "bootstrap_events" || task.type === "native_save";
 }
 
 let taskInFlight = false;
@@ -90,6 +98,18 @@ async function fetchNextTask(): Promise<RedditTask | null> {
 }
 
 async function postTaskResult(result: RedditTaskResult): Promise<void> {
+  try {
+    await authenticatedFetch(await apiUrl("/sources/reddit/task-result"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(result),
+    });
+  } catch {
+    // Backend transient unavailability should not crash the service worker.
+  }
+}
+
+async function postNativeSaveResult(result: NativeSaveResult): Promise<void> {
   try {
     await authenticatedFetch(await apiUrl("/sources/reddit/task-result"), {
       method: "POST",
@@ -124,6 +144,7 @@ function cleanupTask(): void {
 }
 
 function armTaskTimeout(task: RedditTask): void {
+  if (task.type === "native_save") return;
   taskTimeoutId = setTimeout(async () => {
     await postTaskResult({
       task_id: task.id,
@@ -179,6 +200,7 @@ async function injectRedditContentScriptInto(tabId: number): Promise<void> {
 }
 
 function sendExecuteMessage(task: RedditTask, startedAt: number = Date.now()): void {
+  if (task.type === "native_save") return;
   if (!currentTask || currentTask.id !== task.id || taskTabId === null) return;
   const tabId = taskTabId;
   void (async () => {
@@ -220,6 +242,16 @@ function sendExecuteMessage(task: RedditTask, startedAt: number = Date.now()): v
 }
 
 export async function executeTask(task: RedditTask): Promise<void> {
+  if (task.type === "native_save") {
+    if (taskInFlight) return;
+    taskInFlight = true;
+    try {
+      await runNativeSaveTask(task, "reddit", postNativeSaveResult);
+    } finally {
+      taskInFlight = false;
+    }
+    return;
+  }
   if (taskInFlight) return;
   if (!tryAcquireDispatcherMutex("reddit")) return;
   taskInFlight = true;

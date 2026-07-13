@@ -16,6 +16,7 @@ export interface ChromeMockState {
   executedScripts: Array<{ files?: string[]; tabId?: number; world?: string }>;
   fetchCalls: Array<{ body?: unknown; method?: string; url: string }>;
   queryResult: ChromeMockTab[];
+  sessionStorage: Record<string, unknown>;
   tabById: Map<number, ChromeMockTab>;
   nextCreatedTabStatus: string;
   createImpl: (opts: { active?: boolean; url: string }) => Promise<ChromeMockTab>;
@@ -54,6 +55,7 @@ export function installChromeMock(): ChromeMockState {
     executedScripts: [],
     fetchCalls: [],
     queryResult: [],
+    sessionStorage: {},
     tabById: new Map(),
     nextCreatedTabStatus: "complete",
     createImpl: async (opts) => {
@@ -125,6 +127,19 @@ export function installChromeMock(): ChromeMockState {
       local: {
         get(_key: string, callback: (items: Record<string, unknown>) => void) {
           callback({});
+        },
+      },
+      session: {
+        async get(key: string) {
+          return Object.hasOwn(state.sessionStorage, key)
+            ? { [key]: state.sessionStorage[key] }
+            : {};
+        },
+        async set(items: Record<string, unknown>) {
+          Object.assign(state.sessionStorage, items);
+        },
+        async remove(key: string) {
+          delete state.sessionStorage[key];
         },
       },
       onChanged: {

@@ -221,12 +221,14 @@ test("native save content runtime evicts the oldest completed outcome after 256 
   }
 });
 
-test("native save shared contract is documented as infrastructure without a wired executor", () => {
+test("native save docs identify Reddit and X wiring without overstating account verification", () => {
   const runtime = readFileSync(resolve("../docs/modules/runtime.md"), "utf8");
   const changelog = readFileSync(resolve("../docs/changelog.md"), "utf8");
   const architecture = readFileSync(resolve("../docs/architecture.md"), "utf8");
   for (const text of [runtime, changelog, architecture]) {
     assert.match(text, /NATIVE_SAVE_EXECUTE/);
-    assert.match(text, /尚未接入平台 executor/);
+    assert.match(text, /Reddit\/X executor 已接入/);
+    assert.match(text, /尚未真实账号验证/);
+    assert.match(text, /小红书、抖音、YouTube、知乎.*待接/);
   }
 });

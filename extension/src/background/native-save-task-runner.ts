@@ -13,6 +13,7 @@ import { releaseDispatcherMutex, tryAcquireDispatcherMutex } from "./dispatcher-
 const DEFAULT_TIMEOUT_MS = 240_000;
 const DEFAULT_READINESS_RETRY_MS = 250;
 const DEFAULT_MUTEX_RETRY_MS = 50;
+const NATIVE_SAVE_TAB_SESSION_KEY = "openbiliclaw_native_save_task_tab_id";
 
 export interface NativeSaveRunnerOptions {
   timeoutMs?: number;
@@ -147,6 +148,42 @@ async function removeTabBestEffort(tabId: number): Promise<void> {
   } catch {
     // The user may have closed the tab, or Chrome cleanup may fail.
   }
+}
+
+async function recordNativeSaveTaskTab(tabId: number): Promise<void> {
+  await chrome.storage.session.set({ [NATIVE_SAVE_TAB_SESSION_KEY]: tabId });
+}
+
+async function clearRecordedNativeSaveTaskTab(tabId: number): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(NATIVE_SAVE_TAB_SESSION_KEY);
+    if (stored[NATIVE_SAVE_TAB_SESSION_KEY] === tabId) {
+      await chrome.storage.session.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+    }
+  } catch {
+    // A closed tab is safe even if best-effort session cleanup fails.
+  }
+}
+
+/** Close only the runner-owned tab recorded before a previous MV3 worker stopped. */
+export async function recoverRecordedNativeSaveTaskTab(): Promise<void> {
+  let tabId: unknown;
+  try {
+    const stored = await chrome.storage.session.get(NATIVE_SAVE_TAB_SESSION_KEY);
+    tabId = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+  } catch {
+    return;
+  }
+  if (typeof tabId !== "number" || !Number.isInteger(tabId) || tabId < 0) {
+    try {
+      await chrome.storage.session.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+    } catch {
+      // Invalid runner metadata is safe to discard best-effort.
+    }
+    return;
+  }
+  await removeTabBestEffort(tabId);
+  await clearRecordedNativeSaveTaskTab(tabId);
 }
 
 async function createTabBeforeDeadline(
@@ -284,6 +321,7 @@ export async function runNativeSaveTask(
         const tab = await createTabBeforeDeadline(task.content_url, deadline);
         if (tab.id === undefined) throw new Error("native-save task tab has no ID");
         tabId = tab.id;
+        await recordNativeSaveTaskTab(tabId);
         const loadedTab = await waitForTabLoad(tabId, deadline);
         if (!isAllowedNativeSavePageUrl(task.platform, loadedTab.url)) {
           throw new Error("native-save task tab left its allow-listed platform");
@@ -326,6 +364,7 @@ export async function runNativeSaveTask(
     }
     if (tabId !== null) {
       await removeTabBestEffort(tabId);
+      await clearRecordedNativeSaveTaskTab(tabId);
     }
     if (mutexAcquired) {
       try {

@@ -307,8 +307,9 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 │  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
 │  │ NATIVE_SAVE_EXECUTE/RESULT：global mutex + absolute deadline + bounded replay │
-│  │ final/source URL 与 tab/task/item 严格关联；尚未接入平台 executor │
-│  │ 或 service-worker/source dispatcher；unsupported_content_type 保持 local-only │
+│  │ final/source URL 与 tab/task/item 严格关联；Reddit/X executor + dispatcher 已接 │
+│  │ （尚未真实账号验证）；MV3 session 定点回收 runner orphan tab；XHS/DY/YT/知乎待接 │
+│  │ unsupported_content_type 保持 local-only                         │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │

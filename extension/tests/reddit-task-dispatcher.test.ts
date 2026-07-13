@@ -9,6 +9,7 @@ import {
   shouldOpenRedditTaskActive,
   type RedditTask,
 } from "../src/background/reddit-task-dispatcher.ts";
+import type { NativeSaveTask } from "../src/shared/native-save.ts";
 import { installChromeMock } from "./helpers/chrome-mock.ts";
 
 test("isValidRedditTask accepts all discovery task types", () => {
@@ -45,6 +46,24 @@ test("isValidRedditTask rejects malformed tasks", () => {
   assert.equal(isValidRedditTask({ id: "search", type: "search", keywords: [] }), false);
   assert.equal(isValidRedditTask({ id: "subreddit", type: "subreddit", subreddits: [] }), false);
   assert.equal(isValidRedditTask({ id: "related", type: "related", related_urls: [] }), false);
+});
+
+test("reddit task native_save union accepts only the Reddit native contract", () => {
+  const nativeTask: NativeSaveTask = {
+    id: "123e4567-e89b-42d3-a456-426614174003",
+    type: "native_save",
+    platform: "reddit",
+    platform_slug: "reddit",
+    item_key: "reddit:t3_abc123",
+    content_id: "t3_abc123",
+    content_url: "https://www.reddit.com/r/test/comments/abc123/title/",
+    content_type: "post",
+    requested_action: "favorite",
+    resolved_action: "favorite",
+    target_label: "Reddit Saved",
+  };
+  assert.equal(isValidRedditTask(nativeTask), true);
+  assert.equal(isValidRedditTask({ ...nativeTask, platform: "twitter", platform_slug: "x" }), false);
 });
 
 test("computeRedditTaskTimeoutMs scales with breadth", () => {
