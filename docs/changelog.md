@@ -4,11 +4,16 @@
 
 ---
 
+## v0.3.165 / extension v0.3.165 / desktop v0.3.165：Firefox 签名安装修复（2026-07-14）
+
+后端源码走 `backend-v0.3.165`，浏览器插件走 `extension-v0.3.165`，桌面安装包走 `desktop-v0.3.165`。
+
+- **Firefox 正式 XPI 恢复发布**：Firefox manifest 的稳定 Gecko ID 改为 `openbiliclaw-firefox@whiteguo233.github.io`，避开旧 ID 已被其他 AMO 作者占用导致的 403；扩展测试锁定该 ID，发布链路通过当前 AMO 账号做 unlisted 签名并要求产出 `openbiliclaw-extension-v0.3.165-firefox.xpi`，签名失败会直接阻止 release。
+
 ## v0.3.164 / extension v0.3.164 / desktop v0.3.164：持续补货、Web 可靠交互与安全对话（2026-07-13）
 
 后端源码走 `backend-v0.3.164`，浏览器插件走 `extension-v0.3.164`，桌面安装包走 `desktop-v0.3.164`。
 
-- **Firefox AMO 身份迁移**：Firefox manifest 的稳定 Gecko ID 改为 `openbiliclaw-firefox@whiteguo233.github.io`，避开旧 ID 已被其他 AMO 作者占用导致的 403；扩展测试锁定该 ID，启用签名时 AMO 失败会让 release 失败，不再把未签名 ZIP 当作正式安装包。
 - **Linux CI 并发回归去抖**：refill 优先级测试先确认新 refill waiter 已实际入队，并持有其槽位到优先顺序断言完成，避免把 refill 正常退出后的 maintenance 准入误判为门控失效；50 轮持续补货 E2E 继续由每轮 2 秒功能超时守卫，移除会受共享 runner 负载影响的额外 1 秒墙钟断言。
 - **OpenAI-compatible 结构化 JSON 合约兼容**：`LLMService` 的普通 / 多模态 structured 路径会把已有大写 `JSON` 归一为小写 `json`，若完全缺失则只追加最小 `json` 标记，满足部分兼容端点在 `response_format=json_object` 下的字面消息检查；非结构化调用、业务提示、画像、准入阈值、user 内容和 core-memory 排序均不变。
 - **候选批量评估不再虚占 16384 输出 token 配额**：文本与多模态 evaluator 的单次 `max_tokens` 统一收敛为 4096，仍覆盖生产观测中 30 条 JSON 评分约 1500–3000 tokens 的输出，同时避免 OpenAI-compatible 服务按声明上限预留额度并对 8 条真实评估直接返回 `insufficient_quota`。真实商汤回归覆盖空池补货、全部消费后再次评估 / 入池 / 文案回填，以及后台 3 槽占用时交互第 4 槽仍可进入。
