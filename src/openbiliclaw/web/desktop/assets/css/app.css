@@ -1316,12 +1316,6 @@
 }
 .saved-page .saved-empty { padding: 64px 24px; text-align: center; color: var(--fg-2); }
 @media (max-width: 820px), (pointer: coarse) {
-  .video-card .feedback-icon-btn.watch-later-btn,
-  .video-card .feedback-icon-btn.favorite-btn,
-  .delight-feedback-actions .feedback-icon-btn.watch-later-btn,
-  .delight-feedback-actions .feedback-icon-btn.favorite-btn {
-    flex-basis: 44px; width: 44px; min-width: 44px; height: 44px; min-height: 44px;
-  }
   .saved-page .small-btn, .saved-page .pill-btn, .saved-load-retry { min-width: 44px; min-height: 44px; }
 }
 
