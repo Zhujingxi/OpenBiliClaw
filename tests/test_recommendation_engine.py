@@ -3913,6 +3913,103 @@ async def test_visual_bonus_map_empty_when_inactive() -> None:
 
 
 @pytest.mark.asyncio
+async def test_visual_bonus_map_withheld_when_pool_mostly_unwarmed() -> None:
+    """Fairness guard: right after enabling multimodal on an existing pool, most
+    covers aren't warmed yet. serve() must withhold the bonus for the whole batch
+    (rather than favour the warmed minority) until coverage is sufficient.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    urls = [f"https://i0.hdslb.com/bfs/archive/{i}.jpg" for i in range(3)]
+    cands = [DiscoveredContent(bvid=f"BV{i}", title="t", cover_url=urls[i]) for i in range(3)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "d.db")
+        db.initialize()
+        try:
+            # Only 1/3 warmed → coverage 0.33 < 0.6 → withhold everything.
+            one = {image_embedding_cache_key_for_url(urls[0]): [1.0, 0.0, 0.0]}
+            engine = RecommendationEngine(
+                llm=_DummyLLM(),
+                database=db,
+                embedding_service=_CoverVisualEmb(one, active=True),  # type: ignore[arg-type]
+            )
+            assert await engine._visual_bonus_map(cands, _build_profile()) == {}
+
+            # All 3 warmed → coverage 1.0 → bonus applies.
+            full = {image_embedding_cache_key_for_url(u): [1.0, 0.0, 0.0] for u in urls}
+            engine_full = RecommendationEngine(
+                llm=_DummyLLM(),
+                database=db,
+                embedding_service=_CoverVisualEmb(full, active=True),  # type: ignore[arg-type]
+            )
+            applied = await engine_full._visual_bonus_map(cands, _build_profile())
+            assert len(applied) == 3 and all(v > 0.0 for v in applied.values())
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_pool_covers_backfills_unwarmed_only(monkeypatch) -> None:
+    """Pool cover prewarm embeds old content whose cover was never warmed
+    (multimodal enabled after admission), skips already-warmed and cover-less.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    warm_url = "https://i0.hdslb.com/bfs/archive/warm.jpg"
+    cold_url = "https://i0.hdslb.com/bfs/archive/cold.jpg"
+    warm_key = image_embedding_cache_key_for_url(warm_url)
+
+    class _Emb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+
+        def __init__(self) -> None:
+            self.embedded_keys: list[str] = []
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        def lookup_cached_image(self, key: str) -> list[float]:
+            return [0.1, 0.0] if key == warm_key else []
+
+        async def embed_image(
+            self, image_bytes: bytes, *, mime_type: str = "image/jpeg", cache_key: str = ""
+        ) -> list[float]:
+            self.embedded_keys.append(cache_key)
+            return [0.2, 0.3]
+
+    async def fake_prepare(cover_url, *, max_px, quality, timeout_seconds):
+        return b"jpeg-bytes", "image/jpeg"
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.multimodal.prepare_cover_bytes_for_embedding", fake_prepare
+    )
+
+    emb = _Emb()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "e.db")
+        db.initialize()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+        )
+        cands = [
+            DiscoveredContent(bvid="BVWARM", title="t", cover_url=warm_url),
+            DiscoveredContent(bvid="BVCOLD", title="t", cover_url=cold_url),
+            DiscoveredContent(bvid="BVNONE", title="t", cover_url=""),
+        ]
+        try:
+            warmed = await engine._prewarm_pool_covers(cands)
+        finally:
+            db.close()
+
+    assert warmed == 1  # only the cold-missing cover got embedded
+    assert emb.embedded_keys == [image_embedding_cache_key_for_url(cold_url)]
+
+
+@pytest.mark.asyncio
 async def test_precompute_delight_scores_uses_dynamic_pool_top_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

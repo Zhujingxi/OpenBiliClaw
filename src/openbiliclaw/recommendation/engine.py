@@ -57,6 +57,16 @@ _VISUAL_COVER_BONUS_MAX = 0.05  # hard cap on the additive nudge to delight_scor
 _VISUAL_COVER_SIM_FLOOR = 0.15  # cross-modal cosine at/below → zero bonus
 _VISUAL_COVER_SIM_CEIL = 0.45  # cross-modal cosine at/above → full bonus
 _VISUAL_COVER_MAX_ANCHORS = 8  # profile interest anchors compared per run
+# Fairness guard for the serve() hot path: right after a user enables
+# multimodal, pool content admitted BEFORE the switch has no warmed cover
+# vector yet (serve() is lookup-only and never fetches). Applying the bonus to
+# only the warmed subset would systematically favour freshly-discovered items
+# over older ones — not because their covers are better, but because the old
+# ones simply aren't embedded yet. So serve() withholds the bonus for the whole
+# batch until at least this fraction of cover-bearing candidates are warmed; the
+# background pool-cover prewarm backfills the rest within a refresh cycle. Delight
+# is unaffected (it cold-fetches per candidate, so every item gets its true bonus).
+_VISUAL_COVER_MIN_COVERAGE = 0.6
 
 
 @dataclass
@@ -884,6 +894,16 @@ class RecommendationEngine:
                 warmed,
                 len(candidates),
             )
+        # Backfill cover embeddings for the same pool window when multimodal is
+        # active — so enabling it later doesn't leave older pool content without
+        # a cover vector while newly-discovered items get warmed at admission.
+        # No-op (and zero cost) when multimodal is off. Best-effort: a cover
+        # failure must not affect the MMR prewarm return contract above.
+        if self._cover_embedding_active():
+            try:
+                await self._prewarm_pool_covers(candidates)
+            except Exception:
+                logger.debug("Pool cover prewarm raised (ignored)", exc_info=True)
         return warmed
 
     async def precompute_pool_copy(
@@ -1574,10 +1594,7 @@ class RecommendationEngine:
         if not cover_url:
             return 0.0
 
-        from openbiliclaw.llm.embedding import (
-            cosine_similarity,
-            image_embedding_cache_key_for_url,
-        )
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
 
         cache_key = image_embedding_cache_key_for_url(cover_url)
         cover_vec: list[float] = []
@@ -1605,10 +1622,21 @@ class RecommendationEngine:
         if not cover_vec:
             return 0.0
 
+        return self._cover_bonus_from_vec(cover_vec, anchor_vecs)
+
+    @staticmethod
+    def _cover_bonus_from_vec(
+        cover_vec: list[float],
+        anchor_vecs: list[list[float]],
+    ) -> float:
+        """Map cover↔anchor cross-modal cosine to the bounded additive bonus."""
+        if not cover_vec or not anchor_vecs:
+            return 0.0
+        from openbiliclaw.llm.embedding import cosine_similarity
+
         max_sim = 0.0
         for anchor_vec in anchor_vecs:
             max_sim = max(max_sim, cosine_similarity(cover_vec, anchor_vec))
-
         span = _VISUAL_COVER_SIM_CEIL - _VISUAL_COVER_SIM_FLOOR
         if span <= 0:
             return 0.0
@@ -1623,21 +1651,90 @@ class RecommendationEngine:
         """Per-candidate cover-visual bonus for the serve() ranking (lookup-only).
 
         Returns ``{}`` — a no-op that leaves the ranking byte-identical — when
-        multimodal embedding is inactive or the profile has no interest anchors.
-        Never fetches a cover on this hot path (``allow_fetch=False``): a warm
-        miss simply contributes no bonus and the discovery warmer fills it for
-        the next batch.
+        multimodal embedding is inactive, the profile has no interest anchors,
+        or too few cover-bearing candidates are warmed yet (fairness guard, see
+        ``_VISUAL_COVER_MIN_COVERAGE``). Never fetches a cover on this hot path:
+        a warm miss contributes no bonus and the pool-cover prewarm backfills it.
         """
         anchor_vecs = await self._visual_anchor_vectors(profile)
         if not anchor_vecs:
             return {}
+        embedding = self._embedding_service
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if not callable(lookup):
+            return {}
+
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        with_cover = 0
+        warmed = 0
         bonuses: dict[str, float] = {}
         for candidate in candidates:
-            bonus = await self._visual_cover_bonus(candidate, anchor_vecs, allow_fetch=False)
+            bvid = str(getattr(candidate, "bvid", "") or "")
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not bvid or not cover_url:
+                continue
+            with_cover += 1
+            cover_vec = lookup(image_embedding_cache_key_for_url(cover_url)) or []
+            if not cover_vec:
+                continue
+            warmed += 1
+            bonus = self._cover_bonus_from_vec(cover_vec, anchor_vecs)
             if bonus > 0.0:
-                bonuses[str(getattr(candidate, "bvid", "") or "")] = bonus
-        bonuses.pop("", None)
+                bonuses[bvid] = bonus
+        # Fairness guard: withhold the bonus for the whole batch until enough
+        # cover-bearing candidates are warmed, so a half-backfilled pool doesn't
+        # tilt the ranking toward freshly-discovered items over older ones.
+        if with_cover == 0 or warmed / with_cover < _VISUAL_COVER_MIN_COVERAGE:
+            return {}
         return bonuses
+
+    def _cover_embedding_active(self) -> bool:
+        active = getattr(self._embedding_service, "image_embedding_active", None)
+        return bool(callable(active) and active())
+
+    async def _prewarm_pool_covers(self, candidates: list[DiscoveredContent]) -> int:
+        """Backfill cover embeddings for content already in the pool (URL-keyed).
+
+        Companion to discovery's per-admission ``_warm_cover_embeddings``: covers
+        the case where multimodal was enabled AFTER items were pooled, so the
+        lookup-only ``serve()`` path and delight treat old and new content
+        consistently instead of silently favouring freshly-discovered covers.
+        Idempotent (skips already-warmed keys), best-effort, no-op when off.
+        """
+        if not candidates or not self._cover_embedding_active():
+            return 0
+        embed_image = getattr(self._embedding_service, "embed_image", None)
+        lookup = getattr(self._embedding_service, "lookup_cached_image", None)
+        if not callable(embed_image):
+            return 0
+
+        from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        warmed = 0
+        for candidate in candidates:
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not cover_url:
+                continue
+            key = image_embedding_cache_key_for_url(cover_url)
+            if callable(lookup) and lookup(key):
+                continue  # already warm — idempotent
+            try:
+                prepared = await prepare_cover_bytes_for_embedding(
+                    cover_url, max_px=384, quality=72, timeout_seconds=6
+                )
+                if prepared is None:
+                    continue
+                image_bytes, mime_type = prepared
+                vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=key)
+                if vec:
+                    warmed += 1
+            except Exception:
+                logger.debug("pool cover prewarm failed for %s", candidate.bvid, exc_info=True)
+        if warmed:
+            logger.info("Pool cover prewarm: warmed %d cover embedding(s)", warmed)
+        return warmed
 
     @staticmethod
     def _evo_delight_reason(item: DiscoveredContent) -> str:
