@@ -4457,8 +4457,10 @@ def create_app(
         return int(ctx.database.count_watch_later())
 
     def _safe_native_status(value: object) -> NativeSaveStatus:
-        if isinstance(value, str) and value in NATIVE_SAVE_STATUSES:
-            return cast("NativeSaveStatus", value)
+        if isinstance(value, str):
+            for status in NATIVE_SAVE_STATUSES:
+                if value == status:
+                    return status
         return "failed"
 
     def _safe_result_text(value: object, *, limit: int = 512) -> str:
