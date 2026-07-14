@@ -50,6 +50,11 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
       ``LLMProviderExecutionError`` in the chain reports that no provider was
       available (typically during guided init, before a chat LLM is
       configured).
+    - ``"model_not_found"`` when the provider reachably answered but the
+      configured model does not exist (a local Ollama model never pulled → 404
+      ``not_found_error``, or a wrong/inaccessible model name). Retrying won't
+      help until the user pulls/renames the model, but the loop should log one
+      calm actionable line rather than a full traceback.
     - ``None`` for anything else — a genuine error the caller should keep
       logging loudly.
 
@@ -58,7 +63,7 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
     missing provider.
     """
     kind = classify_llm_failure_kind(exc)
-    return kind if kind in {"rate_limited", "no_provider"} else None
+    return kind if kind in {"rate_limited", "no_provider", "model_not_found"} else None
 
 
 # Substrings that mark an upstream content-moderation / compliance refusal.
@@ -77,6 +82,20 @@ _LLM_MODERATION_MARKERS = (
 )
 
 _LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+# The provider host was reachable and answered, but the configured *model* is
+# missing: a local Ollama model that was never pulled returns HTTP 404 with
+# ``{"type": "not_found_error", "message": "model 'x' not found, try pulling it
+# first"}``; OpenAI-compat 404s say ``the model 'x' does not exist``. Distinct
+# from ``no_provider`` (no chat provider configured at all) and from auth (401):
+# retrying is futile until the user pulls/renames the model, so callers should
+# surface an actionable "pull the model / fix the name" hint, not a traceback.
+_LLM_MODEL_NOT_FOUND_MARKERS = (
+    "not_found_error",
+    "try pulling it first",
+    "no such model",
+    "does not exist or you do not have access",
+    "model does not exist",
+)
 _LLM_QUOTA_MARKERS = (
     "rate limit",
     "insufficient_quota",
@@ -147,7 +166,7 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
 
     seen: set[int] = set()
     current: BaseException | None = exc
-    rate_limited = no_provider = auth_failed = False
+    rate_limited = no_provider = auth_failed = model_not_found = False
     timed_out = invalid_response = connection = server_error = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
@@ -160,6 +179,10 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
             "no provider was available" in message
         ):
             no_provider = True
+        if any(marker in message for marker in _LLM_MODEL_NOT_FOUND_MARKERS) or (
+            "model" in message and "not found" in message
+        ):
+            model_not_found = True
         if any(marker in message for marker in _LLM_AUTH_MARKERS):
             auth_failed = True
         if isinstance(current, (LLMTimeoutError, TimeoutError)) or any(
@@ -194,6 +217,8 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
         return "rate_limited"
     if no_provider:
         return "no_provider"
+    if model_not_found:
+        return "model_not_found"
     if auth_failed:
         return "auth_failed"
     if timed_out:
@@ -228,12 +253,16 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     current: BaseException | None = exc
     moderation = auth_failed = rate_limited = False
     timed_out = no_provider = empty_response = False
-    ssl_failed = connect_failed = False
+    ssl_failed = connect_failed = model_not_found = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
         if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
             moderation = True
+        if any(marker in message for marker in _LLM_MODEL_NOT_FOUND_MARKERS) or (
+            "model" in message and "not found" in message
+        ):
+            model_not_found = True
         if any(marker in message for marker in _LLM_AUTH_MARKERS):
             auth_failed = True
         if isinstance(current, LLMRateLimitError) or any(
@@ -271,6 +300,12 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     if moderation:
         return (
             "AI 服务上游因内容合规策略拒绝了本次请求；可更换一个不带内容审查的模型 / 服务商后重试。"
+        )
+    if model_not_found:
+        return (
+            "AI 服务找不到所配置的模型（HTTP 404）。本地 Ollama 模型可能尚未拉取"
+            "（先执行 `ollama pull <模型名>`），或模型名 / 访问权限填错。"
+            "请到设置页核对对话模型名称后重试。"
         )
     if auth_failed:
         return (

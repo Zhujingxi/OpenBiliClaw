@@ -166,6 +166,23 @@ def test_classify_llm_unavailability_returns_none_for_unrelated_error() -> None:
     assert classify_llm_unavailability(ValueError("Expected scored JSON array")) is None
 
 
+def test_classify_llm_unavailability_model_not_found_through_chain() -> None:
+    # Real shape from the guided-init log: ollama 404 for a model never pulled,
+    # wrapped up through the preference-analysis path. Loops must treat this as
+    # an expected, calmly-logged deferral — not an "Unexpected error" traceback.
+    try:
+        try:
+            raise LLMProviderError(
+                "ollama request failed: HTTP 404: "
+                '{"message": "model \'llama3\' not found, try pulling it first", '
+                '"type": "not_found_error"}'
+            )
+        except LLMProviderError as inner:
+            raise LLMProviderExecutionError(str(inner)) from inner
+    except LLMProviderExecutionError as wrapped:
+        assert classify_llm_unavailability(wrapped) == "model_not_found"
+
+
 def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
     with pytest.raises(LLMRateLimitError) as exc_info:
         try:
@@ -179,6 +196,18 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
     ("error", "expected"),
     [
         (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "auth_failed"),
+        (
+            LLMProviderError(
+                "ollama request failed: HTTP 404: "
+                '{"code": null, "message": "model \'llama3\' not found, try pulling '
+                'it first", "param": null, "type": "not_found_error"}'
+            ),
+            "model_not_found",
+        ),
+        (
+            LLMProviderError("The model `gpt-x` does not exist or you do not have access to it."),
+            "model_not_found",
+        ),
         (ConnectionError("connection reset by peer"), "connection"),
         (OSError("network is unreachable"), "connection"),
         (
@@ -245,6 +274,19 @@ def test_describe_llm_failure_content_moderation_500() -> None:
         reason = describe_llm_failure(exc)
     assert reason is not None
     assert "内容合规" in reason
+
+
+def test_describe_llm_failure_model_not_found() -> None:
+    reason = describe_llm_failure(
+        LLMProviderError(
+            "ollama request failed: HTTP 404: "
+            '{"message": "model \'llama3\' not found, try pulling it first", '
+            '"type": "not_found_error"}'
+        )
+    )
+    assert reason is not None
+    assert "404" in reason
+    assert "ollama pull" in reason.lower() or "拉取" in reason
 
 
 def test_describe_llm_failure_no_provider() -> None:
