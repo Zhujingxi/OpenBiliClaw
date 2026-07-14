@@ -189,9 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.167 (2026-07-14)**
+📌 Latest: **v0.3.168 (2026-07-14)**
 
-- **Domestic LLM gateways always connect direct** — turn on a proxy for overseas models and your DeepSeek / SenseNova / Qwen / Zhipu (and localhost) gateways are auto-forced direct, ending the "SenseTime always times out" hang; genuinely overseas gateways still use the proxy, no manual switching.
+- **Initialization no longer hangs forever at 49%** — profile timeouts now show the real cause and recovery action, pool timeouts enter the app and continue filling in the background, and stale CA paths no longer break every network client.
+- **DashScope multimodal cover embeddings** — optionally use Alibaba Bailian or Gemini cover semantics for a bounded visual boost in regular and delight recommendations; rankings remain unchanged while disabled.
+- **One-line installs reliably update old checkouts** — regenerated dirty lockfiles are safely restored before fast-forwarding, while genuine local edits get a prominent warning and an optional stash-preserving update path.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

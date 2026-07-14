@@ -4,13 +4,16 @@
 
 ---
 
-## v0.3.168（未发布）：初始化任务有界化与网络环境防护（2026-07-14）
+## v0.3.168 / extension v0.3.168 / desktop v0.3.168：初始化有界化、多模态封面与升级可靠性（2026-07-14）
+
+后端源码走 `backend-v0.3.168`，浏览器插件走 `extension-v0.3.168`，桌面安装包走 `desktop-v0.3.168`。
 
 - **Issue #113 的 49% 卡死改为有界失败 / 降级完成**：共享 `run_guided_init()` 给阶段 2 偏好分析和阶段 3 画像生成各加 360 秒墙钟上限，超时会取消底层 provider 调用并分别落成 `analyze_failed` / `profile_failed`，把「检查模型地址、网络和代理后重试」直接显示在初始化页；阶段 4 首池补货设 600 秒上限，超时按既有 discovery 部分成功语义结束，不再让整个初始化无限等待。三个 timeout 都是可注入的可选参数，CLI 与 API 默认共用同一上限，取消仍沿既有 `CancelledError` 路径收尾并清理并行 sibling task。
 - **后台画像错误真正进入初始化状态接口**：`AccountSyncService` 的 `analyze_events()` 同样有 360 秒墙钟上限，超时会取消任务、写入安全可操作的 `last_sync_error`，且继续保持「不推进游标 / 不写同步时间 / 下轮可重试」语义。`GET /api/init-status` 现在会读取 `last_account_sync_error` 中的画像分析失败：当前 LLM 探针仍失败时保留 `reason=llm_not_ready` 并用真实错误补充 `detail`；探针已恢复时返回 `reason=analyze_failed`、允许用户立即重试。此前 v0.3.166 虽记录了该字段但状态接口并未消费，文档与实现现已对齐。
 - **超时原因与恢复动作同步到三端**：360 秒硬失败的 `detail` 现在明确写出「AI 服务在 6 分钟内未返回」、Base URL / 模型名 / 网络 / 代理 / 服务过慢等常见原因，以及「到模型设置测试后重试」的下一步；桌面 Web、`/setup/` 和 popup 对 `analyze_failed` / `profile_failed` 及后台 account-sync 的 `llm_not_ready + 画像分析失败 detail` 都优先展示这段人类文案，不再出现 `analyze_failed` 机器码或通用「条件未满足」。600 秒 discovery 超时会以 `reason=discovery_timeout`、`partial_success=true` 和可见 `detail` 持久化并下发，三端说明画像已生成、首池本次未完成、后台会继续补池；`init_completed` 流事件也携带同一原因。错误文本使用 `aria-live`，硬失败切为 assertive 播报，同时保留重试、模型设置 / 上一步及「先进入应用」恢复入口。
 - **不存在的 CA 环境路径不再让所有网络客户端构造即崩溃**：进入 `[network].mode=system` 时会检查 `SSL_CERT_FILE` / `SSL_CERT_DIR` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`；仅删除指向不存在文件或目录的失效覆盖，让 httpx / OpenSSL 回退到默认可信 CA store，同时完整保留 `HTTPS_PROXY` 等代理环境。存在的私有 CA 路径保持不动，TLS 验证从未关闭。
 - **一句话安装不再因脏 lockfile 把用户永久困在旧版**：`install.sh` / `install.ps1` 复跑时，若已有 checkout 落后 origin 但工作树「脏」，此前会静默跳过自动更新——而装机时 `uv sync` / `npm ci` 必然改写 `uv.lock` / `extension/package-lock.json`，于是大量用户在完全没察觉的情况下一直跑几周前的旧代码（有人卡在 5 月 23 号的 v0.3.89）。现在:①若脏文件**只是这些可再生的 lockfile**，自动 `git checkout HEAD` 还原后正常 fast-forward 更新（缺文件的老 checkout 用 `git cat-file -e` 判定，不会中断）;②若存在**真实代码改动**,打印醒目多行告警——当前版本 → 最新版本、「继续将运行旧代码」、改动文件清单、手动更新命令,并支持 `FORCE_UPDATE=1` 让安装器自动 `git stash` 后更新再 `git stash pop` 还原改动;③干净工作树行为不变（正常 FF）。macOS/Linux 与原生 Windows 两条安装脚本同步，真实 origin/落后 checkout 覆盖 lockfile-only / 缺文件 / 真实改动 / FORCE_UPDATE / 干净 五种场景验证通过。
+- **多模态封面 embedding 与 DashScope（阿里百炼）provider（重做 #100）**：新增原生 `DashScopeEmbeddingProvider`，支持 `qwen3-vl-embedding` 文本/图片同空间向量；可选 `[llm.embedding].multimodal_enabled` 会预热推荐池封面，并在惊喜推荐和普通推荐中加入有界、只加不减的视觉相关性加成。热路径只读缓存、不现抓封面；缓存覆盖率不足 60% 时整批不加成，避免新内容因先预热而压过旧内容。provider 与开关已接入桌面 Web、扩展设置页、配置 API 和 CLI 展示，默认关闭时排序行为不变。
 
 ## v0.3.167 / extension v0.3.167 / desktop v0.3.167：国内大模型网关代理豁免（2026-07-14）
 
@@ -29,13 +32,6 @@
 - **「模型未找到」不再被误判为泛化错误**：`classify_llm_failure_kind` / `classify_llm_unavailability` 新增 `model_not_found` 类别，识别本地 Ollama 模型未拉取（HTTP 404 `not_found_error` / `try pulling it first`）与 OpenAI 兼容端「model does not exist」——区别于 `no_provider`（完全没配 provider）与 `auth_failed`（401）。后台 `account_sync` / 反馈批处理循环因此对该错误只记一行可操作日志（提示拉取模型或改模型名）而非整段 traceback；`describe_llm_failure` 给初始化页返回「先 `ollama pull <模型名>` 或核对模型名」的中文提示。
 - **空换批不再抹掉正在看的推荐**：移动 Web 与扩展 side panel 的“换一批”改为事务式替换，只有拿到非空新批次才覆盖当前卡片；后端因过滤、并发消费或库存状态短暂不同步返回 `items=[]` 时保留原列表、停止本轮自动续页并给出明确提示，同时重新读取 `/api/runtime-status` 收敛库存。桌面 Web 原有空响应保护保持不变；CLI 为无持久卡片状态的单次输出，不适用列表保留语义。
 - **真实换批不再把后端拖成“未连接”**：在 9.2 万事件、4.1 千推荐历史、300 条可换库存的真实库上复现到 `POST /api/recommendations/reshuffle` 已选出 10 条后超时，期间连 `/api/ping` 都被 SQLite 池维护压住。数据库初始化现在为 `recommendations(bvid)` 与 `events(event_type, id DESC)` 补热路径索引，消除 pool readiness / maintenance 中反复 `NOT EXISTS` 与最近已看查询的历史全表扫描；async refresh / force-refresh / post-refresh 的原子库存维护，以及推荐 serve 的 readiness / 候选读取与过滤、curator 评分和推荐历史批写，统一在 worker thread 执行。`/api/runtime-status` 与消费后的 pool snapshot 也不再同步占用 FastAPI 事件循环，即使成熟库查询或维护较慢，`/api/ping` / runtime stream 仍可响应。启动前维护与 detached shown 小批量提交保持同步，后者避免共享 SQLite 连接在异步任务清理时发生跨线程关闭竞态；原子事务、库存口径与 CLI 行为不变。
-- **新增多模态封面 embedding 链路 + DashScope（阿里百炼）provider（重做 #100）**：
-  - `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API（非 OpenAI `/v1/embeddings`），默认 `qwen3-vl-embedding`，仅 embedding（`complete` 拒绝），`embed()` 文本向量与既有 openai/gemini/ollama 文本消费方无缝接入；出站统一走 `network.outbound_httpx_kwargs()`（默认 direct=`trust_env=False`，遵守铁律 1；国内 endpoint 直连策略见 v0.3.167）。
-  - 可选 `[llm.embedding].multimodal_enabled` + 多模态模型（Gemini `gemini-embedding-2` 族 / qwen3-vl）启用**封面视觉链路**:`EmbeddingService.embed_image()` 打封面 image-only 向量（与文本同空间、空向量不落缓存）；discovery 入池按 `image_embedding_cache_key_for_url` 预热；recommendation **两条路径一致消费**该封面向量:惊喜 `precompute_delight_scores()`(加到 `delight_score`) 与正常 `serve()` 排序(「封面↔兴趣锚点」跨模态余弦并入 relevance 项,同步 `_ranking_key`/`score_override`/MMR)。`serve()` 是延迟敏感热路径,只读预热缓存、**绝不现抓封面**(`allow_fetch=False`)。加成**有界、只加不减**(`_VISUAL_COVER_BONUS_MAX=0.05`)。默认关闭时两条路径打分/排序均与旧版逐字节一致、不改变谁入选。**开启后旧内容不掉队**:`prewarm_pool_covers`(挂 `prewarm_pool_mmr_embeddings`,refresh+启动)幂等回填池内老候选的封面向量;回填未完成前 `serve()` 有覆盖率公平门(已热封面占比 < 0.6 则整批不加成),避免新内容仅因先预热而系统性压过旧内容。
-  - **四面契约（铁律 5）**:`dashscope` provider 与「封面视觉加成」开关(`multimodal_enabled`)已接入插件设置页与桌面 Web 设置的 Embedding 段（API `EmbeddingConfigOut` 读写 + 往复测试），不再只能手改 TOML；移动 Web 不含 LLM 配置编辑面故不涉及，CLI `config-show` 随 dataclass 自动展示。
-  - **修复(真实环境 E2E 捕获)**:`config._SUPPORTED_EMBEDDING_PROVIDERS` 校验白名单漏了 `dashscope`，导致后端能构建该 provider、但设置页保存时 `PUT /api/config` 校验 400（“配置校验失败，未写入”）。已补入 `dashscope` 并同步错误提示；新增 `PUT /api/config` 接受 dashscope 的回归测试。这类跨层漂移是单测(只覆盖 registry 构建路径)看不到、必须端到端跑真实 serve-api 才暴露的。
-  - ⚠️ 跨模态余弦 floor/ceil 为**保守未标定**初值（铁律 3）：换真实多模态模型后需按日志观测 `max_sim` 分布重标权重；当前小幅、单向、opt-in 设计保证误标也不伤默认推荐质量。
-
 ## v0.3.165 / extension v0.3.165 / desktop v0.3.165：Firefox 签名安装修复（2026-07-14）
 
 后端源码走 `backend-v0.3.165`，浏览器插件走 `extension-v0.3.165`，桌面安装包走 `desktop-v0.3.165`。
