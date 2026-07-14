@@ -13,11 +13,13 @@ import shutil
 import socket
 import subprocess
 import time
+import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
+from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,6 +69,8 @@ from openbiliclaw.api.models import (
     ExtensionE2ERunIn,
     ExtensionE2ERunOut,
     ExtensionE2ERunStatus,
+    ExtensionNativeSaveE2EAuthorizationIn,
+    ExtensionNativeSaveResultIn,
     FavoriteAddIn,
     FavoriteItem,
     FavoriteListResponse,
@@ -106,6 +110,15 @@ from openbiliclaw.api.models import (
     RedditCookieResponse,
     RedditSourceConfigOut,
     RuntimeStatusResponse,
+    SavedItemIn,
+    SavedItemKeyIn,
+    SavedItemStateResponse,
+    SavedListItem,
+    SavedListResponse,
+    SavedSyncBatchResponse,
+    SavedSyncConfigOut,
+    SavedSyncItemResponse,
+    SavedSyncRequest,
     SchedulerConfigOut,
     SourceCredentialItem,
     SourcesBrowserConfigOut,
@@ -134,6 +147,7 @@ from openbiliclaw.api.models import (
     ZhihuLoginStateIn,
     ZhihuLoginStateResponse,
     ZhihuSourceConfigOut,
+    validate_saved_item_key,
 )
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
@@ -153,6 +167,18 @@ from openbiliclaw.runtime.image_cache import (
 from openbiliclaw.runtime.keyword_fetch import (
     mark_keyword_terminal_from_xhs_task,
     source_keyword_id_from_xhs_task,
+)
+from openbiliclaw.saved_sync.extension_broker import (
+    ExtensionNativeSaveResultIn as BrokerExtensionNativeSaveResultIn,
+)
+from openbiliclaw.saved_sync.identity import make_item_key
+from openbiliclaw.saved_sync.models import (
+    NATIVE_SAVE_STATUSES,
+    NativeSaveResult,
+    NativeSaveStatus,
+    SavedItemInput,
+    SavedListKind,
+    SavedSyncBatchResult,
 )
 from openbiliclaw.soul.dislike_writeback import (
     apply_new_dislikes,
@@ -295,6 +321,158 @@ _E2E_ACTION_EVENT_TYPES: dict[ExtensionE2EAction, frozenset[str]] = {
     "repost": frozenset({"share", "repost"}),
     "bookmark": frozenset({"bookmark", "favorite"}),
 }
+_NATIVE_SAVE_E2E_CONTENT_TYPES: dict[str, frozenset[str]] = {
+    "youtube": frozenset({"video"}),
+    "xiaohongshu": frozenset({"note", "video"}),
+    "douyin": frozenset({"aweme", "video"}),
+    "twitter": frozenset({"tweet", "status"}),
+    "zhihu": frozenset({"question", "answer", "article"}),
+    "reddit": frozenset({"post", "comment"}),
+}
+
+
+def _native_save_e2e_content_id_from_url(
+    platform: str,
+    content_type: str,
+    value: str,
+) -> str:
+    """Return the exact identity accepted by the production content executor."""
+    if (
+        not value
+        or value != value.strip()
+        or len(value) > 2048
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        return ""
+    try:
+        parsed = urlparse(value)
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() != "https"
+        or not hostname
+        or hostname.endswith(".")
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        return ""
+
+    def host_is_or_subdomain(*hosts: str) -> bool:
+        return any(hostname == host or hostname.endswith(f".{host}") for host in hosts)
+
+    if platform == "youtube":
+        if hostname == "youtu.be":
+            if parsed.query:
+                return ""
+            match = re.fullmatch(r"/([A-Za-z0-9_-]{11})/?", parsed.path)
+            return match.group(1) if match else ""
+        if hostname not in {"youtube.com", "www.youtube.com"}:
+            return ""
+        if parsed.path == "/watch":
+            match = re.fullmatch(r"v=([A-Za-z0-9_-]{11})", parsed.query)
+            return match.group(1) if match else ""
+        if parsed.query:
+            return ""
+        match = re.fullmatch(r"/shorts/([A-Za-z0-9_-]{11})/?", parsed.path)
+        return match.group(1) if match else ""
+    if parsed.query and platform != "xiaohongshu":
+        return ""
+    if platform == "xiaohongshu":
+        if not host_is_or_subdomain("xiaohongshu.com"):
+            return ""
+        if parsed.query:
+            try:
+                query = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            except ValueError:
+                return ""
+            if (
+                any(key not in {"xsec_token", "xsec_source"} or not item for key, item in query)
+                or len({key for key, _item in query}) != len(query)
+                or "xsec_token" not in {key for key, _item in query}
+            ):
+                return ""
+        match = re.fullmatch(
+            r"/(?:explore|discovery/item)/([A-Za-z0-9_-]+)/?",
+            parsed.path,
+        )
+        return match.group(1) if match else ""
+    if platform == "douyin":
+        if not host_is_or_subdomain("douyin.com"):
+            return ""
+        match = re.fullmatch(r"/video/([A-Za-z0-9_-]+)/?", parsed.path)
+        return match.group(1) if match else ""
+    if platform == "twitter":
+        if not host_is_or_subdomain("x.com", "twitter.com"):
+            return ""
+        match = re.fullmatch(r"/(?:i|[^/]+)/status/([0-9]+)/?", parsed.path)
+        return match.group(1) if match else ""
+    elif platform == "zhihu":
+        if hostname not in {"zhihu.com", "www.zhihu.com", "zhuanlan.zhihu.com"}:
+            return ""
+        if content_type == "article":
+            match = re.fullmatch(r"/p/([0-9]+)/?", parsed.path)
+            return f"article:{match.group(1)}" if match else ""
+        if hostname not in {"zhihu.com", "www.zhihu.com"}:
+            return ""
+        if content_type == "question":
+            match = re.fullmatch(r"/question/([0-9]+)/?", parsed.path)
+            return f"question:{match.group(1)}" if match else ""
+        if content_type == "answer":
+            match = re.fullmatch(r"/question/[0-9]+/answer/([0-9]+)/?", parsed.path)
+            return f"answer:{match.group(1)}" if match else ""
+    elif platform == "reddit":
+        if not host_is_or_subdomain("reddit.com", "redd.it"):
+            return ""
+        parts = [part.lower() for part in parsed.path.split("/") if part]
+        if content_type == "post" and host_is_or_subdomain("redd.it"):
+            if len(parts) == 1 and re.fullmatch(r"[a-z0-9]+", parts[0]):
+                return f"t3_{parts[0]}"
+            return ""
+        try:
+            index = parts.index("comments")
+        except ValueError:
+            return ""
+        if content_type == "post" and len(parts) > index + 1:
+            post_id = parts[index + 1]
+            return f"t3_{post_id}" if re.fullmatch(r"[a-z0-9]+", post_id) else ""
+        if content_type == "comment" and len(parts) > index + 3:
+            comment_id = parts[index + 3]
+            return f"t1_{comment_id}" if re.fullmatch(r"[a-z0-9]+", comment_id) else ""
+    return ""
+
+
+def _native_save_e2e_membership_matches(
+    authorization: ExtensionNativeSaveE2EAuthorizationIn,
+    item: SavedItemInput,
+    route: object,
+) -> bool:
+    content_type = item.content_type.strip()
+    if (
+        item.platform != authorization.platform
+        or item.content_id != authorization.content_id
+        or content_type not in _NATIVE_SAVE_E2E_CONTENT_TYPES[authorization.platform]
+        or _native_save_e2e_content_id_from_url(
+            authorization.platform,
+            content_type,
+            item.content_url,
+        )
+        != authorization.content_id
+    ):
+        return False
+    return (
+        getattr(route, "requested_action", None) == authorization.action
+        and getattr(route, "resolved_action", None)
+        == (
+            authorization.action
+            if authorization.platform == "youtube" or authorization.action == "favorite"
+            else "favorite"
+        )
+        and getattr(route, "resolved_target", None) == authorization.expected_target
+    )
 
 
 @dataclass
@@ -305,6 +483,7 @@ class _ExtensionE2ERunState:
     after_event_id: int
     expected_actions: dict[ExtensionE2EPlatform, list[ExtensionE2EAction]]
     event: asyncio.Event
+    native_save_authorization: ExtensionNativeSaveE2EAuthorizationIn | None = None
     extension_result: ExtensionE2EResultIn | None = None
     error: str = ""
 
@@ -727,6 +906,31 @@ def _build_extension_e2e_report(
     timeout_seconds: int,
 ) -> ExtensionE2ERunOut:
     result = state.extension_result
+    if state.native_save_authorization is not None:
+        native_result = result.native_save_result if result is not None else None
+        error = state.error
+        if timed_out:
+            native_run_status: ExtensionE2ERunStatus = "timeout"
+            error = error or "extension e2e result timed out"
+        elif native_result is None:
+            native_run_status = "failed"
+            error = error or "native save result missing"
+        elif native_result.task_status in {"synced", "already_synced"}:
+            native_run_status = "ok"
+        elif native_result.task_status in {"pending", "syncing"}:
+            native_run_status = "timeout"
+            error = "native save task did not reach a terminal state"
+        else:
+            native_run_status = "failed"
+            error = native_result.error_code or native_result.task_status
+        return ExtensionE2ERunOut(
+            run_id=state.run_id,
+            status=native_run_status,
+            error=error,
+            timeout_seconds=timeout_seconds,
+            native_save_result=native_result,
+        )
+
     action_results: dict[
         tuple[ExtensionE2EPlatform, ExtensionE2EAction], tuple[ExtensionE2EActionStatus, str]
     ] = {}
@@ -3379,10 +3583,22 @@ def create_app(
         return {"ok": True}
 
     def _serialize_recommendation_items(items: list[Any]) -> list[RecommendationOut]:
+        def item_key_for(content: Any) -> str:
+            explicit = str(getattr(content, "item_key", "") or "").strip()
+            if explicit:
+                return explicit
+            bvid = str(getattr(content, "bvid", "") or "")
+            return make_item_key(
+                str(getattr(content, "source_platform", "") or "bilibili"),
+                str(getattr(content, "content_id", "") or bvid),
+                str(getattr(content, "content_url", "") or ""),
+            )
+
         return [
             RecommendationOut(
                 id=int(item.recommendation_id),
                 bvid=str(item.content.bvid),
+                item_key=item_key_for(item.content),
                 title=str(item.content.title),
                 up_name=str(item.content.up_name),
                 cover_url=str(item.content.cover_url),
@@ -4198,6 +4414,7 @@ def create_app(
                 RecommendationOut(
                     id=int(row["id"]),
                     bvid=str(row.get("bvid", "")),
+                    item_key=str(row.get("item_key", "")),
                     title=str(row.get("title", "")),
                     up_name=str(row.get("up_name", "")),
                     cover_url=str(row.get("cover_url", "")),
@@ -4226,12 +4443,251 @@ def create_app(
             ]
         )
 
-    # ── Watch-later (稍后再看) ────────────────────────────────────
+    # ── Platform-neutral saved memberships and native sync ─────────
+
+    def _saved_service() -> Any:
+        service = getattr(ctx, "saved_sync_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="saved sync service unavailable")
+        return service
+
+    def _saved_count(list_kind: SavedListKind) -> int:
+        if list_kind == "favorite":
+            return int(ctx.database.count_favorites())
+        return int(ctx.database.count_watch_later())
+
+    def _safe_native_status(value: object) -> NativeSaveStatus:
+        if isinstance(value, str) and value in NATIVE_SAVE_STATUSES:
+            return cast("NativeSaveStatus", value)
+        return "failed"
+
+    def _safe_result_text(value: object, *, limit: int = 512) -> str:
+        if not isinstance(value, str):
+            return ""
+        filtered = "".join(
+            character for character in value if not unicodedata.category(character).startswith("C")
+        )
+        return filtered[:limit]
+
+    def _saved_state_response(
+        list_kind: SavedListKind,
+        item_key: str,
+    ) -> SavedItemStateResponse:
+        row = ctx.database.get_saved_membership(list_kind, item_key)
+        if row is None:
+            return SavedItemStateResponse(saved=False, item_key=item_key)
+        return SavedItemStateResponse(
+            saved=True,
+            item_key=item_key,
+            sync_status=_safe_native_status(row.get("sync_status")),
+            sync_task_id=str(row.get("sync_task_id", "")),
+            resolved_action=str(row.get("resolved_action", "")),
+            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+            error_message=_safe_result_text(row.get("last_error_message", "")),
+        )
+
+    def _saved_list_item(row: dict[str, Any]) -> SavedListItem:
+        return SavedListItem(
+            item_key=str(row.get("item_key", "")),
+            source_platform=str(row.get("source_platform", "")),
+            content_id=str(row.get("content_id", "")),
+            content_url=str(row.get("content_url", "")),
+            content_type=str(row.get("content_type", "") or "video"),
+            title=str(row.get("title", "")),
+            author_name=str(row.get("author_name", "")),
+            cover_url=str(row.get("cover_url", "")),
+            note=str(row.get("note", "")),
+            added_at=str(row.get("added_at", "")),
+            sync_status=_safe_native_status(row.get("sync_status")),
+            sync_task_id=str(row.get("sync_task_id", "")),
+            requested_action=str(row.get("requested_action", "")),
+            resolved_action=str(row.get("resolved_action", "")),
+            resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+            error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+            error_message=_safe_result_text(row.get("last_error_message", "")),
+        )
+
+    def _sync_item_response(result: NativeSaveResult) -> SavedSyncItemResponse:
+        return SavedSyncItemResponse(
+            item_key=result.item_key,
+            status=_safe_native_status(result.status),
+            resolved_action=result.resolved_action,
+            resolved_target=_safe_result_text(result.resolved_target, limit=256),
+            error_code=_safe_result_text(result.error_code, limit=128),
+            error_message=_safe_result_text(result.error_message),
+        )
+
+    def _sync_batch_response(result: SavedSyncBatchResult) -> SavedSyncBatchResponse:
+        return SavedSyncBatchResponse(
+            task_id=result.task_id,
+            items=[_sync_item_response(item) for item in result.items],
+        )
+
+    @app.post("/api/saved/{list_kind}", response_model=SavedItemStateResponse)
+    async def saved_add(
+        list_kind: SavedListKind,
+        payload: SavedItemIn,
+    ) -> SavedItemStateResponse:
+        item = SavedItemInput(
+            source_platform=payload.source_platform,
+            content_id=payload.content_id,
+            content_url=payload.content_url,
+            content_type=payload.content_type,
+            title=payload.title,
+            author_name=payload.author_name,
+            cover_url=payload.cover_url,
+        )
+        saved_sync = getattr(getattr(ctx, "config", None), "saved_sync", None)
+        auto_sync = bool(getattr(saved_sync, "auto_sync_enabled", False))
+        try:
+            result = _saved_service().save_local(
+                list_kind,
+                item,
+                note=payload.note,
+                auto_sync=auto_sync,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid saved item") from exc
+        if result.sync_status == "pending" and result.sync_task_id:
+            return SavedItemStateResponse(
+                saved=result.saved,
+                item_key=result.item_key,
+                sync_status="pending",
+                sync_task_id=result.sync_task_id,
+            )
+        if result.sync_task_id:
+            try:
+                created = _saved_service().get_sync_task(result.sync_task_id)
+            except (AttributeError, ValueError):  # pragma: no cover - compatibility injection
+                created = SavedSyncBatchResult(task_id=result.sync_task_id, items=())
+            created_item = next(
+                (item for item in created.items if item.item_key == result.item_key),
+                None,
+            )
+            if created_item is not None:
+                item_response = _sync_item_response(created_item)
+                return SavedItemStateResponse(
+                    saved=result.saved,
+                    item_key=result.item_key,
+                    sync_status=item_response.status,
+                    sync_task_id=result.sync_task_id,
+                    resolved_action=item_response.resolved_action,
+                    resolved_target=item_response.resolved_target,
+                    error_code=item_response.error_code,
+                    error_message=item_response.error_message,
+                )
+        state = _saved_state_response(list_kind, result.item_key)
+        return state.model_copy(
+            update={
+                "saved": result.saved,
+                "sync_status": result.sync_status,
+                "sync_task_id": result.sync_task_id,
+            }
+        )
+
+    @app.post("/api/saved/{list_kind}/remove", response_model=SavedItemStateResponse)
+    async def saved_remove(
+        list_kind: SavedListKind,
+        payload: SavedItemKeyIn,
+    ) -> SavedItemStateResponse:
+        ctx.database.remove_saved_membership(list_kind, payload.item_key)
+        return _saved_state_response(list_kind, payload.item_key)
+
+    @app.get("/api/saved/{list_kind}/status", response_model=SavedItemStateResponse)
+    async def saved_status(
+        list_kind: SavedListKind,
+        item_key: str = Query(...),
+    ) -> SavedItemStateResponse:
+        try:
+            normalized_key = validate_saved_item_key(item_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid item_key") from exc
+        return _saved_state_response(list_kind, normalized_key)
+
+    @app.get("/api/saved/{list_kind}", response_model=SavedListResponse)
+    async def saved_list(
+        list_kind: SavedListKind,
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> SavedListResponse:
+        rows = ctx.database.list_saved_memberships(list_kind, limit=limit, offset=offset)
+        return SavedListResponse(
+            items=[_saved_list_item(row) for row in rows],
+            total=_saved_count(list_kind),
+        )
+
+    @app.post("/api/saved/{list_kind}/sync", response_model=SavedSyncBatchResponse)
+    async def saved_sync(
+        list_kind: SavedListKind,
+        payload: SavedSyncRequest,
+    ) -> SavedSyncBatchResponse:
+        trigger = "manual_single" if len(payload.item_keys) == 1 else "manual_batch"
+        try:
+            created = _saved_service().create_sync_task(
+                list_kind,
+                payload.item_keys,
+                trigger,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid sync selection") from exc
+        return _sync_batch_response(created)
+
+    @app.get("/api/saved-sync/tasks/{task_id}", response_model=SavedSyncBatchResponse)
+    async def saved_sync_task(task_id: UUID) -> SavedSyncBatchResponse:
+        service = _saved_service()
+        try:
+            exists = service.has_sync_task(str(task_id))
+            result = service.get_sync_task(str(task_id)) if exists else None
+        except ValueError as exc:  # pragma: no cover - UUID path validation protects this
+            raise HTTPException(status_code=422, detail="invalid task_id") from exc
+        if result is None:
+            raise HTTPException(status_code=404, detail="saved sync task not found")
+        return _sync_batch_response(result)
+
+    # ── Legacy Bilibili watch-later (稍后再看) ─────────────────────
+
+    def _legacy_saved_state(
+        list_kind: SavedListKind,
+        bvid: str,
+    ) -> tuple[bool, str, NativeSaveStatus | None, str, str, str, str, str]:
+        normalized_bvid = bvid.strip()
+        if not normalized_bvid:
+            raise HTTPException(status_code=422, detail="bvid is required")
+        item_key = make_item_key("bilibili", normalized_bvid)
+        row = ctx.database.get_saved_membership(list_kind, item_key)
+        return (
+            row is not None,
+            item_key,
+            _safe_native_status(row.get("sync_status")) if row is not None else None,
+            str(row.get("sync_task_id", "")) if row is not None else "",
+            str(row.get("resolved_action", "")) if row is not None else "",
+            _safe_result_text(row.get("resolved_target", ""), limit=256) if row is not None else "",
+            _safe_result_text(row.get("last_error_code", ""), limit=128) if row is not None else "",
+            _safe_result_text(row.get("last_error_message", "")) if row is not None else "",
+        )
 
     def _watch_later_state(bvid: str) -> WatchLaterStateResponse:
+        (
+            saved,
+            item_key,
+            sync_status,
+            sync_task_id,
+            resolved_action,
+            resolved_target,
+            error_code,
+            error_message,
+        ) = _legacy_saved_state("watch_later", bvid)
         return WatchLaterStateResponse(
-            saved=ctx.database.is_in_watch_later(bvid),
+            saved=saved,
             total=ctx.database.count_watch_later(),
+            item_key=item_key,
+            sync_status=sync_status,
+            sync_task_id=sync_task_id,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @app.post("/api/watch-later", response_model=WatchLaterStateResponse)
@@ -4239,6 +4695,13 @@ def create_app(
         bvid = payload.bvid.strip()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
+        _saved_service().save_local(
+            "watch_later",
+            SavedItemInput("bilibili", bvid),
+            note=payload.note.strip(),
+            auto_sync=False,
+        )
+        # Keep the compatibility table and cached metadata snapshot aligned.
         ctx.database.add_to_watch_later(bvid, note=payload.note.strip())
         return _watch_later_state(bvid)
 
@@ -4257,17 +4720,26 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> WatchLaterListResponse:
-        rows = ctx.database.list_watch_later(limit=limit, offset=offset)
+        rows = ctx.database.list_saved_memberships("watch_later", limit=limit, offset=offset)
         return WatchLaterListResponse(
             items=[
                 WatchLaterItem(
-                    bvid=str(row.get("bvid", "")),
+                    bvid=str(row.get("content_id", "")),
+                    item_key=str(row.get("item_key", "")),
+                    content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
-                    up_name=str(row.get("up_name", "")),
+                    up_name=str(row.get("author_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
+                    sync_status=_safe_native_status(row.get("sync_status")),
+                    sync_task_id=str(row.get("sync_task_id", "")),
+                    resolved_action=str(row.get("resolved_action", "")),
+                    resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                    error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                    error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
                 for row in rows
             ],
@@ -4277,9 +4749,26 @@ def create_app(
     # ── Favorites (收藏夹) ────────────────────────────────────────
 
     def _favorite_state(bvid: str) -> FavoriteStateResponse:
+        (
+            saved,
+            item_key,
+            sync_status,
+            sync_task_id,
+            resolved_action,
+            resolved_target,
+            error_code,
+            error_message,
+        ) = _legacy_saved_state("favorite", bvid)
         return FavoriteStateResponse(
-            saved=ctx.database.is_in_favorites(bvid),
+            saved=saved,
             total=ctx.database.count_favorites(),
+            item_key=item_key,
+            sync_status=sync_status,
+            sync_task_id=sync_task_id,
+            resolved_action=resolved_action,
+            resolved_target=resolved_target,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @app.post("/api/favorites", response_model=FavoriteStateResponse)
@@ -4287,6 +4776,13 @@ def create_app(
         bvid = payload.bvid.strip()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
+        _saved_service().save_local(
+            "favorite",
+            SavedItemInput("bilibili", bvid),
+            note=payload.note.strip(),
+            auto_sync=False,
+        )
+        # Keep the compatibility table and cached metadata snapshot aligned.
         ctx.database.add_to_favorites(bvid, note=payload.note.strip())
         return _favorite_state(bvid)
 
@@ -4305,17 +4801,26 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
     ) -> FavoriteListResponse:
-        rows = ctx.database.list_favorites(limit=limit, offset=offset)
+        rows = ctx.database.list_saved_memberships("favorite", limit=limit, offset=offset)
         return FavoriteListResponse(
             items=[
                 FavoriteItem(
-                    bvid=str(row.get("bvid", "")),
+                    bvid=str(row.get("content_id", "")),
+                    item_key=str(row.get("item_key", "")),
+                    content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                     title=str(row.get("title", "")),
-                    up_name=str(row.get("up_name", "")),
+                    up_name=str(row.get("author_name", "")),
                     cover_url=str(row.get("cover_url", "")),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    content_type=str(row.get("content_type", "") or "video"),
                     added_at=str(row.get("added_at", "")),
+                    sync_status=_safe_native_status(row.get("sync_status")),
+                    sync_task_id=str(row.get("sync_task_id", "")),
+                    resolved_action=str(row.get("resolved_action", "")),
+                    resolved_target=_safe_result_text(row.get("resolved_target", ""), limit=256),
+                    error_code=_safe_result_text(row.get("last_error_code", ""), limit=128),
+                    error_message=_safe_result_text(row.get("last_error_message", "")),
                 )
                 for row in rows
             ],
@@ -4872,6 +5377,8 @@ def create_app(
                 "phase": "ready",
                 "message": "发现了一条你可能会意外喜欢的内容",
                 "bvid": str(row.get("bvid", "")),
+                "item_key": str(row.get("item_key", "")),
+                "content_id": str(row.get("content_id", "") or row.get("bvid", "")),
                 "title": str(row.get("title", "")),
                 "delight_reason": str(row.get("delight_reason", "")),
                 "delight_score": float(row.get("delight_score", 0.0) or 0.0),
@@ -4960,6 +5467,8 @@ def create_app(
         items = [
             {
                 "bvid": str(row.get("bvid", "")),
+                "item_key": str(row.get("item_key", "")),
+                "content_id": str(row.get("content_id", "") or row.get("bvid", "")),
                 "title": str(row.get("title", "")),
                 "delight_reason": str(row.get("delight_reason", "")),
                 "delight_score": float(row.get("delight_score", 0.0) or 0.0),
@@ -7586,6 +8095,69 @@ def create_app(
                 await publish({"type": "bili_task_available", "source": "task_kick"})
         return {"ok": True}
 
+    def _claim_extension_native_task(slug: str) -> dict[str, Any] | None:
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        if broker is None:
+            return None
+        job = broker.claim_next(slug)
+        if job is None:
+            return None
+        return {
+            "id": job.job_id,
+            "type": "native_save",
+            "item_key": job.item_key,
+            "platform": job.platform,
+            "platform_slug": job.platform_slug,
+            "content_id": job.content_id,
+            "content_url": job.content_url,
+            "content_type": job.content_type,
+            "requested_action": job.requested_action,
+            "resolved_action": job.resolved_action,
+            "target_label": job.target_label,
+        }
+
+    def _is_extension_native_job(task_id: str, slug: str | None = None) -> bool:
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        return bool(broker is not None and broker.owns(task_id, slug))
+
+    def _submit_extension_native_result(slug: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from pydantic import ValidationError
+
+        try:
+            result = ExtensionNativeSaveResultIn.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail="invalid native-save result") from exc
+        broker = getattr(ctx, "extension_native_save_broker", None)
+        accepted = bool(
+            broker is not None
+            and broker.submit_result(
+                slug,
+                BrokerExtensionNativeSaveResultIn(
+                    task_id=result.task_id,
+                    item_key=result.item_key,
+                    status=result.status,
+                    error_code=result.error_code,
+                    error_message=result.error_message,
+                ),
+            )
+        )
+        if not accepted:
+            raise HTTPException(status_code=409, detail="native_save_result_conflict")
+        return {"ok": True}
+
+    def _require_legacy_task(queue: Any, task_id: str) -> dict[str, Any]:
+        task = queue.get(task_id) if queue is not None else None
+        if task is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        return cast("dict[str, Any]", task)
+
+    async def _kick_source_task(slug: str) -> dict[str, Any]:
+        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
+        if callable(publish):
+            with suppress(Exception):
+                await publish({"type": f"{slug}_task_available", "source": "task_kick"})
+        return {"ok": True}
+
     # ── XHS task queue endpoints (extension dispatcher) ──────────────
 
     from openbiliclaw.sources.xhs_tasks import (
@@ -7607,6 +8179,10 @@ def create_app(
     def xhs_next_task(response: Any = None) -> Any:
         """Claim and return the oldest runnable xhs task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("xhs")
+        if native_task is not None:
+            return native_task
 
         # 204 No Content responses MUST NOT carry a body (RFC 7230).
         # JSONResponse(204, None) serialises None to "null" (4 bytes),
@@ -7632,7 +8208,14 @@ def create_app(
     @app.post("/api/sources/xhs/task-result")
     async def xhs_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a task result from the extension dispatcher."""
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "xhs"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("xhs", payload)
+
         status = payload.get("status", "")
         urls = payload.get("urls", [])
         notes = [note for note in payload.get("notes", []) if isinstance(note, dict)]
@@ -7643,20 +8226,15 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _xhs_task_queue is None:
-            return {"ok": True}
-
-        task = _xhs_task_queue.get(task_id)
+        legacy_queue = _xhs_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes, enriched_notes = _xhs_task_queue.merge_result_with_enrichment(
+            added_notes, enriched_notes = legacy_queue.merge_result_with_enrichment(
                 task_id,
                 urls=urls,
                 notes=notes if notes else None,
@@ -7759,7 +8337,7 @@ def create_app(
                         propagated,
                     )
         else:
-            _xhs_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
             if task is not None:
@@ -8441,6 +9019,10 @@ def create_app(
         """Return the oldest pending dy task, or 204 if none."""
         from starlette.responses import Response
 
+        native_task = _claim_extension_native_task("dy")
+        if native_task is not None:
+            return native_task
+
         if _dy_task_queue is None:
             return Response(status_code=204)
         task = _dy_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -8467,7 +9049,14 @@ def create_app(
         (Douyin has its own posts in ``dy_post`` scope which we treat as
         a weak ``view`` signal — they're meant to count as input).
         """
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "dy"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("dy", payload)
+
         status = payload.get("status", "")
         videos = [v for v in payload.get("videos", []) if isinstance(v, dict)]
         # TEMP DEBUG: surface incoming partial debug field for the dy
@@ -8485,20 +9074,15 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _dy_task_queue is None:
-            return {"ok": True}
-
-        task = _dy_task_queue.get(task_id)
+        legacy_queue = _dy_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_videos = _dy_task_queue.merge_result(
+            added_videos = legacy_queue.merge_result(
                 task_id,
                 videos=videos if videos else None,
                 scope_counts=scope_counts,
@@ -8530,7 +9114,7 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("dy", propagated_keys)
         else:
-            _dy_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
@@ -8563,21 +9147,38 @@ def create_app(
         """Broadcast `xhs_task_available` so any subscribed extension
         service-worker triggers an immediate poll. Idempotent and best
         effort — failures here never affect task state."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "xhs_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("xhs")
 
     @app.post("/api/sources/dy/kick")
     async def dy_task_kick() -> dict[str, Any]:
         """Broadcast `dy_task_available` over runtime-stream. See
         xhs_task_kick docstring for rationale."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "dy_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("dy")
+
+    @app.get("/api/sources/x/next-task")
+    def x_next_task(response: Any = None) -> Any:
+        """Return the oldest pending X native-save task, or 204 if none."""
+        from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("x")
+        return native_task if native_task is not None else Response(status_code=204)
+
+    @app.post("/api/sources/x/task-result")
+    async def x_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+        """Accept an X native-save callback from the extension dispatcher."""
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if not _is_extension_native_job(task_id):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        if not _is_extension_native_job(task_id, "x"):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        return _submit_extension_native_result("x", payload)
+
+    @app.post("/api/sources/x/kick")
+    async def x_task_kick() -> dict[str, Any]:
+        """Broadcast `x_task_available` over runtime-stream."""
+        return await _kick_source_task("x")
 
     # ── YouTube bootstrap endpoints ────────────────────────────────
     from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
@@ -8604,6 +9205,10 @@ def create_app(
         """Return the oldest pending Reddit task, or 204 if none."""
         from starlette.responses import Response
 
+        native_task = _claim_extension_native_task("reddit")
+        if native_task is not None:
+            return native_task
+
         if _reddit_task_queue is None:
             return Response(status_code=204)
         task = _reddit_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -8623,6 +9228,13 @@ def create_app(
     async def reddit_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a Reddit task result from the extension dispatcher."""
         task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "reddit"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("reddit", payload)
+
         status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -8632,16 +9244,13 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _reddit_task_queue is None:
-            return {"ok": True}
+        legacy_queue = _reddit_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        _require_legacy_task(legacy_queue, task_id)
 
         if status in {"partial", "ok", "empty"}:
-            _reddit_task_queue.merge_result(
+            legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -8649,7 +9258,7 @@ def create_app(
                 complete=status in {"ok", "empty"},
             )
         else:
-            _reddit_task_queue.fail(
+            legacy_queue.fail(
                 task_id,
                 error=str(payload.get("error", "") or ""),
                 debug=debug,
@@ -8660,16 +9269,16 @@ def create_app(
     @app.post("/api/sources/reddit/kick")
     async def reddit_task_kick() -> dict[str, Any]:
         """Broadcast `reddit_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "reddit_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("reddit")
 
     @app.get("/api/sources/zhihu/next-task")
     def zhihu_next_task(response: Any = None) -> Any:
         """Return the oldest pending Zhihu task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("zhihu")
+        if native_task is not None:
+            return native_task
 
         if _zhihu_task_queue is None:
             return Response(status_code=204)
@@ -8696,6 +9305,13 @@ def create_app(
         pipeline.
         """
         task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "zhihu"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("zhihu", payload)
+
         status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -8705,15 +9321,10 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _zhihu_task_queue is None:
-            return {"ok": True}
-
-        task = _zhihu_task_queue.get(task_id)
+        legacy_queue = _zhihu_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
         task_payload: dict[str, Any] = {}
         if task and task.get("payload_json"):
@@ -8725,7 +9336,7 @@ def create_app(
 
         if status in {"partial", "ok"} or status == "empty":
             is_final = status in {"ok", "empty"}
-            added_items = _zhihu_task_queue.merge_result(
+            added_items = legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -8758,18 +9369,14 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("zhihu", propagated_keys)
         else:
-            _zhihu_task_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
+            legacy_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
 
         return {"ok": True}
 
     @app.post("/api/sources/zhihu/kick")
     async def zhihu_task_kick() -> dict[str, Any]:
         """Broadcast `zhihu_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "zhihu_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("zhihu")
 
     _yt_task_queue: YtTaskQueue | None = None
     if hasattr(ctx.database, "conn"):
@@ -8779,6 +9386,10 @@ def create_app(
     def yt_next_task(response: Any = None) -> Any:
         """Return the oldest pending YouTube task, or 204 if none."""
         from starlette.responses import Response
+
+        native_task = _claim_extension_native_task("yt")
+        if native_task is not None:
+            return native_task
 
         if _yt_task_queue is None:
             return Response(status_code=204)
@@ -8798,7 +9409,14 @@ def create_app(
     @app.post("/api/sources/yt/task-result")
     async def yt_task_result(payload: dict[str, Any]) -> dict[str, Any]:
         """Accept a YouTube task result from the extension dispatcher."""
-        task_id = payload.get("task_id", "")
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            if not _is_extension_native_job(task_id, "yt"):
+                raise HTTPException(status_code=409, detail="task_result_conflict")
+            return _submit_extension_native_result("yt", payload)
+
         status = payload.get("status", "")
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
@@ -8808,20 +9426,15 @@ def create_app(
         if not isinstance(debug, dict):
             debug = None
 
-        if not task_id:
-            from fastapi import HTTPException
-
-            raise HTTPException(status_code=422, detail="task_id is required")
-
-        if _yt_task_queue is None:
-            return {"ok": True}
-
-        task = _yt_task_queue.get(task_id)
+        legacy_queue = _yt_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
 
         if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
             is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_items = _yt_task_queue.merge_result(
+            added_items = legacy_queue.merge_result(
                 task_id,
                 items=items if items else None,
                 scope_counts=scope_counts,
@@ -8853,18 +9466,14 @@ def create_app(
                     await _ingest_profile_update_events(profile_events)
                 _mark_source_bootstrap_keys("yt", propagated_keys)
         else:
-            _yt_task_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
         return {"ok": True}
 
     @app.post("/api/sources/yt/kick")
     async def yt_task_kick() -> dict[str, Any]:
         """Broadcast `yt_task_available` over runtime-stream."""
-        publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
-        if callable(publish):
-            with suppress(Exception):
-                await publish({"type": "yt_task_available", "source": "task_kick"})
-        return {"ok": True}
+        return await _kick_source_task("yt")
 
     @app.post("/api/extension/e2e/run", response_model=ExtensionE2ERunOut)
     async def extension_e2e_run(
@@ -8879,7 +9488,36 @@ def create_app(
         if registry:
             raise HTTPException(status_code=409, detail="e2e_run_in_progress")
 
-        expected_actions = _extension_e2e_actions_for_request(payload)
+        native_save_authorization = payload.native_save_authorization
+        expected_actions = (
+            {}
+            if native_save_authorization is not None
+            else _extension_e2e_actions_for_request(payload)
+        )
+        if native_save_authorization is not None:
+            item_key = make_item_key(
+                native_save_authorization.platform,
+                native_save_authorization.content_id,
+            )
+            try:
+                item, route = _saved_service().validate_native_save_selection(
+                    native_save_authorization.action,
+                    item_key,
+                )
+            except (AttributeError, ValueError):
+                raise HTTPException(
+                    status_code=422,
+                    detail="native_save_authorization_not_saved_content",
+                ) from None
+            if not _native_save_e2e_membership_matches(
+                native_save_authorization,
+                item,
+                route,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="native_save_authorization_not_saved_content",
+                )
         if not payload.allow_state_changing:
             blocked_actions = sorted(
                 {
@@ -8908,6 +9546,7 @@ def create_app(
             after_event_id=after_event_id,
             expected_actions=expected_actions,
             event=asyncio.Event(),
+            native_save_authorization=native_save_authorization,
         )
         registry[run_id] = state
         timed_out = False
@@ -8917,21 +9556,32 @@ def create_app(
             if not callable(publish):
                 state.error = "extension_runtime_unavailable"
             else:
-                delivered = await publish(
-                    {
-                        "type": "extension_e2e_run",
-                        "source": "api",
-                        "run_id": run_id,
-                        "token": token,
-                        "platforms": list(expected_actions.keys()),
-                        "actions": {
-                            platform: list(actions)
-                            for platform, actions in expected_actions.items()
-                        },
-                        "allow_state_changing": payload.allow_state_changing,
-                        "timeout_seconds": payload.timeout_seconds,
-                    }
-                )
+                runtime_event: dict[str, object] = {
+                    "type": "extension_e2e_run",
+                    "source": "api",
+                    "run_id": run_id,
+                    "token": token,
+                    "platforms": list(expected_actions.keys()),
+                    "actions": {
+                        platform: list(actions) for platform, actions in expected_actions.items()
+                    },
+                    "allow_state_changing": payload.allow_state_changing,
+                    "timeout_seconds": payload.timeout_seconds,
+                }
+                if native_save_authorization is not None:
+                    native_save_callback_deadline_ms = (
+                        int(time.time() * 1000) + payload.timeout_seconds * 1000
+                    )
+                    runtime_event["native_save_authorization"] = (
+                        native_save_authorization.model_dump()
+                    )
+                    runtime_event["native_save_execution_deadline_ms"] = (
+                        native_save_callback_deadline_ms - 1000
+                    )
+                    runtime_event["native_save_callback_deadline_ms"] = (
+                        native_save_callback_deadline_ms
+                    )
+                delivered = await publish(runtime_event)
                 if delivered is False:
                     state.error = "extension_runtime_unavailable"
 
@@ -8967,6 +9617,21 @@ def create_app(
         if not secrets.compare_digest(state.token, payload.token):
             raise HTTPException(status_code=403, detail="bad token")
 
+        authorization = getattr(state, "native_save_authorization", None)
+        if authorization is not None:
+            result = payload.native_save_result
+            if result is None:
+                raise HTTPException(status_code=409, detail="native_save_result_required")
+            if (
+                result.platform != authorization.platform
+                or result.action != authorization.action
+                or result.content_id != authorization.content_id
+                or result.expected_target != authorization.expected_target
+            ):
+                raise HTTPException(status_code=409, detail="native_save_result_mismatch")
+        elif payload.native_save_result is not None:
+            raise HTTPException(status_code=409, detail="unexpected_native_save_result")
+
         state.extension_result = payload
         state.event.set()
         return {"ok": True, "run_id": payload.run_id}
@@ -8979,11 +9644,14 @@ def create_app(
         in chrome://extensions.
 
         Best-effort — silent when no event-hub is wired."""
+        delivered = False
         publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
         if callable(publish):
             with suppress(Exception):
-                await publish({"type": "extension_reload", "source": "dev"})
-        return {"ok": True}
+                delivered = bool(
+                    await publish({"type": "extension_reload", "source": "dev"})
+                )
+        return {"ok": True, "delivered": delivered}
 
     def _autostart_status_out(
         request: Request,
@@ -9465,6 +10133,9 @@ def create_app(
             autostart=AutostartConfigOut(
                 enabled=cfg.autostart.enabled,
                 manage_ollama=cfg.autostart.manage_ollama,
+            ),
+            saved_sync=SavedSyncConfigOut(
+                auto_sync_enabled=cfg.saved_sync.auto_sync_enabled,
             ),
             storage=StorageConfigOut(db_path=cfg.storage.db_path),
             logging=LoggingConfigOut(
@@ -10370,6 +11041,12 @@ def create_app(
                     enabled, replace = _mode_to_flags(cast("str", raw_mode))
                     cfg.discovery.inspiration_search_enabled = enabled
                     cfg.discovery.inspiration_replace_merged_keywords = replace
+
+        # Apply saved-sync updates
+        if "saved_sync" in update:
+            saved_sync_data = update["saved_sync"]
+            if "auto_sync_enabled" in saved_sync_data:
+                cfg.saved_sync.auto_sync_enabled = saved_sync_data["auto_sync_enabled"]
 
         # Apply storage updates
         if "storage" in update:

@@ -10,10 +10,11 @@ required.
   - ``database`` — owns the SQLite connection
   - ``memory_manager`` — owns file-backed memory layers
   - ``event_hub`` — holds live WebSocket subscriber queues
+  - ``extension_native_save_broker`` — owns durable extension save jobs
   - ``presence`` — tracks shared extension runtime-stream presence
 
 **Swappable components** (rebuilt on hot-reload):
-  - ``llm_registry``, ``llm_service``, ``bilibili_client``
+  - ``llm_registry``, ``llm_service``, ``bilibili_client``, ``saved_sync_service``
   - ``soul_engine``, ``dialogue``
   - ``discovery_engine``, ``recommendation_engine``
   - ``runtime_controller``, ``account_sync_service``
@@ -253,6 +254,9 @@ class RuntimeContext:
     database: Any = None
     memory_manager: Any = None
     event_hub: Any = None
+    # Stable, test-injectable execution bridge. Production adapter registration
+    # is intentionally owned by the native-save runtime wiring layer.
+    extension_native_save_broker: Any = None
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # v0.3.63+: tracks every detached ``asyncio.create_task`` spawned by
     # the runtime (refresh manual / per-strategy precompute, recommendation
@@ -284,6 +288,7 @@ class RuntimeContext:
     llm_registry: Any = None
     llm_service: Any = None
     bilibili_client: Any = None
+    saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
     discovery_engine: Any = None
@@ -293,8 +298,38 @@ class RuntimeContext:
     auto_update_service: Any = None
 
     def __post_init__(self) -> None:
-        """Cache one callback object that remains valid across hot reloads."""
+        """Initialize stable callbacks and local-only saved-list behavior."""
         self.pool_inventory_commit_callback = self._handle_pool_inventory_commit
+
+        if self.database is None:
+            return
+        from openbiliclaw.saved_sync.adapters.extension import (
+            build_extension_native_save_adapters,
+        )
+        from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveBroker
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
+
+        if self.extension_native_save_broker is None:
+
+            async def wake_platform(platform_slug: str) -> None:
+                publish = getattr(self.event_hub, "publish", None)
+                if callable(publish):
+                    with suppress(Exception):
+                        await publish({"type": f"{platform_slug}_task_available"})
+
+            self.extension_native_save_broker = ExtensionNativeSaveBroker(
+                self.database,
+                wake_platform=wake_platform,
+            )
+        if self.saved_sync_service is None:
+            self.saved_sync_service = SavedSyncService(
+                self.database,
+                NativeSaveRouter(
+                    build_extension_native_save_adapters(self.extension_native_save_broker)
+                ),
+                task_starter=lambda name, coro: self.task_registry.track(name, coro),
+            )
 
     def add_pool_inventory_commit_subscriber(self, callback: Any) -> None:
         """Register a stable post-commit observer once for this context."""
@@ -446,6 +481,12 @@ class RuntimeContext:
         from openbiliclaw.runtime.account_sync import AccountSyncService
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
         from openbiliclaw.runtime.updater import AutoUpdateService
+        from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
+        from openbiliclaw.saved_sync.adapters.extension import (
+            build_extension_native_save_adapters,
+        )
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
         from openbiliclaw.soul.dialogue import SocraticDialogue
         from openbiliclaw.soul.engine import SoulEngine
 
@@ -482,6 +523,16 @@ class RuntimeContext:
                 configured_cookie=new_config.bilibili.cookie,
             ),
             proxy=new_config.bilibili.proxy or None,
+        )
+        new_saved_sync_service = SavedSyncService(
+            self.database,
+            NativeSaveRouter(
+                (
+                    *build_extension_native_save_adapters(self.extension_native_save_broker),
+                    BilibiliNativeSaveAdapter(new_bilibili_client),
+                )
+            ),
+            task_starter=lambda name, coro: self.task_registry.track(name, coro),
         )
 
         # 3. Soul engine (reuses stable memory_manager)
@@ -1081,6 +1132,7 @@ class RuntimeContext:
         self.llm_registry = new_registry
         self.llm_service = new_llm_service
         self.bilibili_client = new_bilibili_client
+        self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
         self.discovery_engine = new_discovery_engine
@@ -1103,7 +1155,7 @@ class RuntimeContext:
 
         logger.info(
             "Hot-reload complete — rebuilt %d swappable components",
-            11,
+            12,
         )
 
     async def restart_background_tasks(

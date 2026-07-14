@@ -1367,3 +1367,123 @@ class TestMobileWebViewModels:
             assert.equal(getSourceLabel("unknown"), "unknown");
         """)
         )
+
+    def test_saved_sync_view_model_sanitizes_status_and_extension_copy(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            globalThis.location = { protocol: "http:", host: "127.0.0.1:8420" };
+            const {
+              getSavedSyncViewModel,
+              normalizeSavedListItem,
+            } = await import("./src/openbiliclaw/web/js/views/saved.js");
+
+            const normalized = normalizeSavedListItem({
+              item_key: "youtube:abc\\u0000",
+              source_platform: "youtube",
+              content_id: "abc",
+              sync_status: "unexpected-status",
+              error_message: "unsafe\\u2028message",
+            });
+            assert.equal(normalized.item_key, "youtube:abc");
+            assert.equal(normalized.sync_status, "failed");
+            assert.equal(normalized.error_message, "unsafemessage");
+
+            assert.deepEqual(
+              getSavedSyncViewModel({
+                item_key: "youtube:abc",
+                source_platform: "youtube",
+                content_id: "abc",
+                sync_status: "extension_required",
+              }),
+              {
+                item_key: "youtube:abc",
+                source_platform: "youtube",
+                content_id: "abc",
+                content_url: "",
+                content_type: "video",
+                title: "abc",
+                author_name: "",
+                cover_url: "",
+                sync_status: "extension_required",
+                resolved_target: "",
+                error_code: "",
+                error_message: "",
+                label: "需要连接插件",
+                tone: "warning",
+                retryable: true,
+                detail: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
+                actionable: true,
+                busy: false,
+                localOnly: false,
+                actionLabel: "重试同步",
+              },
+            );
+
+            const unsupported = getSavedSyncViewModel({
+              item_key: "youtube:abc",
+              source_platform: "youtube",
+              content_id: "abc",
+              sync_status: "unsupported",
+              error_code: "unsupported_content_type",
+              error_message: "adapter unavailable",
+            });
+            assert.equal(unsupported.label, "仅本地保存");
+            assert.equal(unsupported.tone, "neutral");
+            assert.equal(unsupported.retryable, false);
+            assert.equal(unsupported.detail, "此内容类型暂不支持平台同步，仅保存在本地。");
+            assert.equal(unsupported.actionable, false);
+            assert.equal(unsupported.localOnly, true);
+
+            const rollingUpgrade = getSavedSyncViewModel({
+              item_key: "youtube:abc",
+              source_platform: "youtube",
+              content_id: "abc",
+              sync_status: "unsupported",
+              error_code: "unsupported_adapter_missing",
+            });
+            assert.equal(rollingUpgrade.retryable, true);
+            assert.match(rollingUpgrade.detail, /更新|升级/);
+
+            const supportedPlatforms = [
+              "youtube",
+              "twitter",
+              "xiaohongshu",
+              "douyin",
+              "zhihu",
+              "reddit",
+            ];
+            for (const platform of supportedPlatforms) {
+              const ready = getSavedSyncViewModel({
+                item_key: `${platform}:1`,
+                source_platform: platform,
+                content_id: "1",
+              });
+              assert.equal(ready.label, "待同步", platform);
+              assert.equal(ready.actionable, true, platform);
+            }
+
+            for (const sync_status of ["pending", "syncing"]) {
+              const busy = getSavedSyncViewModel({
+                item_key: "youtube:abc",
+                source_platform: "youtube",
+                content_id: "abc",
+                sync_status,
+                sync_task_id: sync_status === "pending" ? "task-1" : "",
+              });
+              assert.equal(busy.actionable, false);
+              assert.equal(busy.busy, true);
+            }
+
+            const localPending = getSavedSyncViewModel({
+              item_key: "youtube:abc",
+              source_platform: "youtube",
+              content_id: "abc",
+              sync_status: "pending",
+              sync_task_id: "",
+            });
+            assert.equal(localPending.actionable, true);
+            assert.equal(localPending.busy, false);
+            assert.match(localPending.detail, /手动同步/);
+        """)
+        )

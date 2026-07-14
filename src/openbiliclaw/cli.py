@@ -10019,6 +10019,7 @@ def config_show() -> None:
             ),
         ),
         ("海外自定义代理", cfg.network.proxy or "未设置"),
+        ("收藏自动同步", "开启" if cfg.saved_sync.auto_sync_enabled else "关闭"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

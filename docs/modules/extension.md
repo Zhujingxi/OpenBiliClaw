@@ -25,9 +25,10 @@
 | 惊喜推荐平台标识 | ✅ | 消息流惊喜卡和 delight banner 均显示来源平台 chip（`platformDisplayName`，popup-helpers.js），无封面时也可见；桌面 Web 的惊喜大卡平台徽章同步改为不依赖封面存在（v0.3.162+）。 |
 | X 推荐卡来源与文字卡 | ✅ | 插件 side panel、移动 Web 与桌面 Web 会把 `x` / `twitter` / `x.com` / `twitter.com` 统一归一为 `source_platform="twitter"`，标签显示 `X (Twitter)`，不再退成 Web 或 B 站；X tweet / thread 或无有效封面的推荐使用 `body_text` / title 渲染文本卡，桌面 Web 点击上报同步携带 `content_id` / `content_url` / `source_platform`。 |
 | 知乎候选链接保真 | ✅ | 知乎任务 executor 对站内 API 响应做 lossless JSON 解析，把超过 JS 安全整数范围的裸整数 token 先转成字符串；归一化 discovery / 收藏 / 动态条目时也会优先从 URL 字符串解析 question / answer / article ID，再退回 JSON 字段，避免 19 位 question id 被 `Number` 舍入后拼出不可打开链接。 |
-| 收藏夹 / 稍后再看 | ✅ | 推荐卡和 delight banner 都提供「时钟=稍后再看」「星星=收藏」两个互相独立的 SVG toggle（乐观 UI、失败回退、懒加载状态）；popup tab bar 已对齐移动 Web / 桌面 Web，提供独立「稍后」页（`viewWatchLater/watchLaterList`，`loadWatchLater` 拉 `/api/watch-later`）和「收藏」页（`viewFavorites/favoritesList`，`loadFavorites` 拉 `/api/favorites`），列表项展示 16:9 头图缩略图并支持打开 / 单条移除；列表页移除走共享的乐观绑定 `bindSavedCardRemove`——点击即从列表消失，DELETE（10s 超时）失败时卡片原位恢复、按钮变「重试」并打 console.error，不再等响应返回才动 DOM（旧实现静默吞错，DELETE 被同源慢请求排队时表现为「点了没反应」）；封面 URL 会和推荐卡一样归一化后走 `/api/image-proxy`。插件 popup 侧保存状态统一由 `popup-saved-sync.js` 管理：同一 bvid 的推荐卡、惊喜横幅按钮、保存列表移除会同步更新，且用户刚点击后的状态不会被旧的懒加载查询覆盖。详见 [收藏夹 spec](../specs/favorites.md) 与 [稍后再看 spec](../specs/watch-later.md)。 |
 | 惊喜推荐正向保留 | ✅ | 插件 side panel、桌面 Web 和移动 Web 对惊喜推荐采用同一反馈语义：`喜欢 / 收藏 / 稍后再看 / 聊一聊` 保留候选在队列中；`去看看` 当场保留卡片但会上报 `view` 标记已读（三端统一，下次队列重灌不再出现）；`不感兴趣 / 忽略 / 关闭` 才立即移出当前队列。`popup-helpers.getDelightUiState()` 显式输出 `show_status / show_actions / like_pressed / like_disabled`，side panel 分开渲染结果和动作；已喜欢候选无论来自本地成功、队列重灌还是 `delight.liked` 实时事件，都显示结果、保留完整动作组，并只将 like 设为 `aria-pressed="true"` 与 duplicate-disabled。服务端非 pending 状态在队列合并时优先于本地 pending，失败的 like 不写入选中态。三端默认加载数量统一读取 `[scheduler].delight_queue_limit`，桌面 Web 设置页保存后插件和移动端随下一次队列拉取同步生效。 |
 | Firefox 140+ 支持 | ✅ | `manifest.firefox.json` 使用 `sidebar_action` 承载同一套 popup UI，`openExtensionUi()` 按 Chrome sidePanel -> Firefox sidebarAction -> tab 降级；Firefox manifest 在构建时注入主 manifest version，并声明 AMO 所需 `data_collection_permissions`。unlisted AMO 包固定使用项目自有 Gecko ID `openbiliclaw-firefox@whiteguo233.github.io`，签名凭据必须来自拥有该 ID 的 AMO 账号。发布链路会把 `dist-firefox/` 先打成未签名 `openbiliclaw-extension-v*-firefox.zip`（开发 / 临时加载 / AMO 输入），再通过 `web-ext sign --channel=unlisted` 生成可直接安装的 `openbiliclaw-extension-v*-firefox.xpi`；启用签名时若 AMO 签名失败，release 会直接失败，不会静默只发布 ZIP。 |
+| 收藏夹 / 稍后再看 | ✅ | 推荐卡和 delight banner 的「时钟=稍后再看」「星星=收藏」统一把 canonical identity 交给 `/api/saved/*`；optimistic 状态只代表本地保存，平台失败不取消按下态。独立「稍后 / 收藏」页采用后端状态驱动：六个平台都保留手动同步入口；`pending` 只有在带非空 task ID 时才视为执行中并禁用重复动作，空 task ID 仍是可手动同步的本地保存；`unsupported_content_type` 才是 local-only / 无按钮，`unsupported_adapter_missing` 仅作滚动升级重试兼容；`extension_required` 显示连接已安装登录态插件的指引和重试，成功态展示真实 `resolved_target`。页面级「同步未同步内容（N）」继续保留，任务轮询完成后按平台显示成功/总数。移除只删本地 membership。「全部稍后看」只移除本地保存成功项。设置页默认关闭「保存时自动同步到对应平台」，首次开启确认账号写入警告；手动同步不受开关影响。saved/config 的单个 Abort deadline 覆盖设备会话交换与 401 强制刷新；批量同步和重试加载会在重渲染前捕获列表级焦点并优先还原到同一动作。 |
+| 原生保存验证边界 | ✅（6/6 executor + 真实账号验证） | 本地 / CI / 默认 smoke 只验证默认关闭、local-first membership、列表与任务状态。六平台真实 favorite / watch-later 只能在 `allow_state_changing=true` 且 exact platform/action/public content ID/expected target 的精确命名授权同时存在时，经 production durable broker 执行。Task 10 为 trusted-local `/api/extension/e2e/run` 增加 dedicated 模式：exact envelope 与 generic actions 互斥，扩展仅提交一个 canonical item 到 `/api/saved/{action}/sync`、严格关联同一 task/item/resolved target，再用 six-field callback 回传。通用捕捉 E2E runner 即使收到有效 envelope 也固定拒绝 favorite/bookmark。Reddit / X / YouTube / 小红书 / 抖音 / 知乎六个 executor 均已接入并完成 fixture；登录态只存在于已安装扩展，job 不含账号 ID、Cookie 或账号凭据，小红书仅可携带 saved membership 已有的公开笔记导航 `xsec_token/xsec_source`，授权与结果仍只有安全字段。一般 runner 只在 tab 创建/加载阶段占用共享 mutex；XHS 手动 native-save 使用 exact route + identity/control fence，可越过后台 discovery mutex并由 single-flight poll 防重复领取。YouTube duplicate exact `OpenBiliClaw` rows 优先 checked proof，否则稳定复用一个且不删除列表；知乎支持 current `Favlists-item` 与异步创建表单；小红书支持 current `noteContainer/collect-wrapper`。2026-07-14 六个平台 favorite 与 watch-later/fallback 真实终态均为 `synced/already_synced`，完整矩阵以 runbook 为准。 |
 | 持续补货与通知 | ✅ | 运行状态已接入 popup，service worker 会拉取高置信通知并回写发送状态 |
 | 设置页源策略控制 | ✅ | side panel 设置页已按「模型 / 平台源 / 调度 / 通用 / 日志」分 tab；模型 tab 可设置 LLM / embedding 的显式备选 Provider，留空即不 fallback，并明确 embedding 不再跟随默认 LLM；LLM 与 embedding 默认配置旁提供「测试」按钮，按当前表单草稿调用 `/api/config/probe-service` 做无写入连通性探测并行内展示结果（v0.3.157+ 与桌面 Web 对齐：备选下拉禁用与默认 Provider 同名的选项、同名旧配置显示行内警告而不静默改数据，另有「测试备选 Provider」按钮走 `kind="llm_fallback"` 精确探测备选）；平台源 tab 按 Bilibili / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / 通用网页 / 候选池配比独立分块，可开关各平台 discovery，编辑各源预算和候选池占比，并按已有事件向后端请求推荐比例；调度 tab 暴露后台暂停、断开宽限、真实 refresh / probe 频率和猜测兴趣参数；日志 tab 用单个「完整日志路径」编辑后端日志文件位置 |
 | 海外网络模式设置 | ✅ | v0.3.165+ 通用 tab 与桌面 Web 对齐提供 `direct / system / custom` 三档和自定义代理地址；加载、保存及「测试网络」均提交同一 `network.mode + proxy` 草稿。默认直连明确忽略环境代理，只有 system 继承，custom 缺地址由后端 400 拒绝。 |
@@ -186,6 +187,7 @@ extension/
 - 会启动 Reddit 任务轮询；收到 runtime stream 的 `reddit_task_available` 后立即打开 / 复用带 `openbiliclaw_reddit_task` 标记的 Reddit 任务 tab。`bootstrap_events` 会先读 `/api/me.json`，再用当前浏览器的 `reddit.com` 登录态读取 saved、upvoted 和 subscribed subreddit，回传 `reddit_saved` / `reddit_upvoted` / `reddit_subscribed` 初始化信号；`search` / `hot` / `subreddit` / `related` discovery 则读取同源 `.json` endpoint，回传 `reddit_search` / `reddit_hot` / `reddit_subreddit` / `reddit_related` 候选到 `/api/sources/reddit/task-result`。dispatcher 在 tab load 后会对 content script listener 做短重试，吸收真实页面 complete 早于 isolated script 注册的时序抖动；service worker 冷启动和热 reload 后会在顶层启动 Reddit poll alarm，避免只靠 `onInstalled/onStartup` 导致新来源不轮询
 - 以 `client=background` 连接 `/api/runtime-stream` 后，后端先发送 `xhs_login_state_sync_requested` / `zhihu_login_state_sync_requested`，扩展只读取 Cookie store 并上报两个布尔心跳；如果本地缺少 B 站 Cookie，还会收到 `bilibili_cookie_sync_requested`；如果 `[sources.douyin].enabled=true` 且缺少抖音 Cookie，会收到 `douyin_cookie_sync_requested`。小红书 / 知乎另由 startup、`cookies.onChanged` 和独立小时 alarm 兜底。所有同步请求只在本机后端与扩展间传递，不会为刷新配置页打开或请求平台页面。后端也把这条 WebSocket 作为 extension presence 信号：连接建立时允许后台 LLM 工作，最后一个连接断开后进入 `extension_disconnect_grace_seconds` 宽限；服务端 reader 会主动 `receive()` 检测 idle disconnect，避免浏览器断开后 presence 卡住
 - 收到 `extension_e2e_run` 后会调用 `background/e2e-runner.ts`：按目标平台打开或复用标签页，复用时也会导航到平台稳定入口，等待页面 ready，再向 content script 发送 `OBC_E2E_EXECUTE`；runner 会先等待捕捉 buffer settle 并 flush，再把执行结果 POST 到 `/api/extension/e2e/result`，sendMessage / tab load / 整体运行都有独立超时，避免单个平台页面卡住整个后端请求
+- generic event 若请求 `favorite` / `bookmark` mutation，runner 在打开 tab 前固定拒绝并且不发送 `OBC_E2E_EXECUTE`；即使同时塞入有效 envelope 也不放行。这是刻意的关联 fence：通用入口页 DOM runner 无法把授权的 `content_id` / target 绑定到将要点击的元素。只有 backend 发布的 dedicated event（空 generic platforms/actions + exact `native_save_authorization`）会调用单一 `/api/saved/{action}/sync`，轮询同一 durable task 并以 exact item/resolved action/target 关联后构造 six-field callback
 - 连接 `/api/runtime-stream` 之前会先 HTTP `GET /api/ping`（2 秒超时）做一次活性探针，仅在后端可达时再 `new WebSocket(...)`。这样 fresh-install 用户先装扩展、后启动后端时，`chrome://extensions` 不会被浏览器层 WebSocket 失败计入「错误」徽标；探针失败后按固定 1 秒间隔继续重试，直到后端可达。探活不再打 `/api/health`：health 会同步等一次 embedding 实探（冷缓存可达数秒），2 秒预算下会把健康但冷启动的后端误判为掉线；`/api/ping` 返回 404（旧后端）时回退 `/api/health`（12 秒预算）
 - 工具栏 badge 是三态决策表（`background/badge.ts` 纯函数，`tests/badge.test.ts` 覆盖）：后端不可达 → 浅灰 `!` + 「先运行 openbiliclaw start」title；可达但 `runtime-status.initialized=false`（引导初始化从未完成）→ 橙色 `!` + 「点击图标开始引导初始化」title——此前该状态清空 badge，和健康后端视觉一致，新装用户拿不到任何主动信号；可达且已初始化 → 清空。WS 连上时用 `/api/runtime-status`（零探针）刷新 init 态，收到 `init_completed` / `refresh.pool_updated` 事件立即清除橙标；`/api/events` 返回 200 + 全量 `not_initialized` 拒收（未初始化时后端消费并丢弃事件、不重试）也会点亮橙标（`flushResponseReportsUninitialized` 纯函数判定），行为信号不再静默蒸发；popup 侧 `getPopupState` 在 runtime 快照缺失（拉取瞬时失败）且推荐为空时渲染「后端状态暂时没读到」过渡态而非 uninitialized——快照缺失≠未初始化，避免对健康后端闪 init CTA；popup 内仍会显示「后端还没开张，先运行 `openbiliclaw start`」
 - Cookie 监听器幂等注册，避免 onInstalled / onStartup / 冷启动重复挂载导致同一次登录触发多次 POST
@@ -218,15 +220,31 @@ POST /api/extension/e2e/run
 
 ```json
 {
-  "platform": "douyin",
-  "action": "share",
-  "url": "https://www.douyin.com/",
-  "timeout_ms": 45000,
+  "platforms": ["douyin"],
+  "actions": {"douyin": ["share"]},
+  "timeout_seconds": 45,
   "allow_state_changing": false
 }
 ```
 
 默认只允许不改变账号状态或副作用极低的动作：`snapshot`、`scroll`、普通 `click` 和安全分享入口点击。`like`、`favorite`、`follow`、`comment`、X 的 `repost` 等会改变平台状态的动作，必须显式传 `allow_state_changing=true`。为了避免误测，`share` 只匹配安全分享入口的 click / share 捕捉结果，不会把 X 的转推 / repost mutation 算作普通分享成功。
+
+Native-save 的边界更严格：`allow_state_changing=true` 单独不构成授权。Task 10 dedicated
+模式还必须校验 exact `native_save_authorization` 的平台、action、public `content_id` 和
+`expected_target`，并拒绝任何 generic actions。通用 `extension_e2e_run` DOM 分支不执行
+native-save mutation；dedicated 分支也不会开入口 tab 或发送 `OBC_E2E_EXECUTE`，只会提交
+已存在且已由 canonical URL/content type/content ID 与 production route 共同验证的 exact saved
+membership 到 production sync API。后端发送比总 run timeout 少 1 秒的绝对 execution deadline，
+把最后 1 秒保留给 six-field callback，避免 registry cleanup 竞态；endpoint 解析、认证刷新、
+每个请求与按剩余时间截断的 poll sleep 均在相应 deadline 内。membership URL 预检与六平台
+executor 使用相同的 exact host/path/query/fragment/port 规则，并同时匹配 fallback 后的
+`resolved_action`。真实 broker 数据流为
+`extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`，扩展只用
+当前浏览器现有登录态执行，并在 mutation 前绑定 task/platform/item/content URL/action/target；
+结果通过 authenticated `task-result` 回到后端。状态语义固定为
+`synced` / `already_synced` / `login_required` / `rate_limited` /
+`unsupported_content_type` / `extension_required` / `failed`，详细矩阵和安全记录格式见
+[六平台 runbook](../testing/six-platform-native-save-e2e.md)。
 
 content executor 的 selector 策略按平台收敛在 `src/content/e2e-executor.ts`：优先找当前页面可见的 action button / role button / aria-label，并排除“取消点赞”“已收藏”“Following”等反向或已激活状态；X / 小红书这类图标按钮会走平台专属 selector fallback，页面元素慢渲染时会在短窗口内重试。执行器只返回“是否点到了 DOM”，最终成功标准仍以后端是否在 `/api/events` 中看到对应平台、动作和时间窗口内的真实事件为准。
 
@@ -392,6 +410,7 @@ CLI 入口：
 - 收到后台 `refresh.pool_updated` 时，推荐 tab 只更新池子数量、最近补货数量、方向提示和底部可换提示；移动 Web 空态也会用同一 runtime status 重新计算“还有多少可换 / 多少素材在整理”。不会调用 `/api/recommendations` 替换当前列表，用户已续页出来的历史内容会保留到下一次主动“换一批”或页面重新初始化。首次初始化推荐列表后会再读一次 `/api/runtime-status`，避免 `/api/recommendations` 从候选池 bootstrap 后仍显示 bootstrap 前库存
 - popup API 现在会统一规范化推荐项，追加出来的 `cover_url` 也会被收敛成可直接加载的 `https://` 地址；推荐点击 payload 会保留 `content_id / content_url / source_platform`，因此 YouTube 等跨源卡片打开后也会被后端记成对应来源，而不是落回 B 站 BV 号语义
 - 推荐、惊喜推荐和消息内封面图会通过 `popup-helpers.buildImageProxyPath()` 生成 `/api/image-proxy?url=...`，再用 `popup-backend-config.getBackendOrigin()` 拼成当前后端绝对地址；图片加载失败时保留已有 wrapper fallback，不让卡片布局塌缩
+- 保存页刷新失败时保留最后一次成功的列表，错误行提供「重试加载」；全部 saved read/write/status/sync/task 请求都有 Abort timeout，且同一 deadline 从后端地址解析开始，覆盖初次设备会话交换、401 强制换票、受保护请求与响应解析，认证 fetch 接收同一 AbortSignal。每次成功加载会按 `sync_task_id` 去重恢复非终态 task，task→item ownership 把关联行显示为「同步中」并从单项 / 批量候选排除；side panel 重新可见时立即恢复查询，pagehide 清理 tracker。批量同步与重试加载会先捕获列表级焦点，重渲染后优先回到同一列表动作；卡片动作消失时再依次落到相邻卡片动作、列表动作、页面标题。「全部稍后看」按结果下标保留失败项，采用服务端 URL fallback `item_key` 更新状态，并把自动同步 task 纳入同一 ownership。coarse pointer 下推荐 / delight 保存按钮至少 44×44，sync 文案切换预留固定宽度。
 - `/api/recommendations/refresh` 仍保留为后台补货入口，用于继续往候选池里持续进货
 - popup 推荐卡片现在不会再把空 `expression / topic_label` 补成固定占位文案；后端预生成没完成时，这两块会直接隐藏
 - popup 的收藏 / 稍后再看 toggle 统一走 `createSavedToggleRegistry()`：同一 bvid 可以被多个按钮注册，任一按钮增删成功后所有可见按钮同步 `aria-pressed` / title / 文本；旧的懒加载 `GET /api/watch-later/{bvid}` / `GET /api/favorites/{bvid}` 结果如果发生在用户点击或收藏列表加载 / 移除之后会被忽略，避免状态回跳。收藏列表中移除条目也会反向同步惊喜横幅里的收藏按钮，推荐卡稍后再看也会与惊喜横幅稍后再看同步。注册表会在每次状态同步时剪除已脱离 DOM（`isConnected === false`）的按钮，并在推荐列表 / 惊喜横幅 `replaceChildren` 后调用 `pruneDetached()`，避免按钮随重渲染在注册表里无限堆积。
@@ -561,7 +580,8 @@ npm run build
 - inline comment 采用轻量输入，不支持复杂反馈历史浏览
 - side panel 视觉验证当前以静态快照 + extension 构建回归为主，仍建议结合真实后端做一次手动联调
 - 浏览器通知当前只推送一条最高分未通知内容，不做通知中心或多条队列
-- 惊喜推荐当前只维护一个首屏候选位，不做多条轮播或历史收件箱；`稍后看` 只在当前 popup 会话里隐藏，不做长期持久化
+- 惊喜推荐当前只维护一个首屏候选位，不做多条历史收件箱；`稍后看` / `收藏`
+  已通过 `/api/saved/*` 长期持久化，只有 `忽略` 仍是当前候选队列的本地展示动作
 - 认知变化通知当前只提示最重要的一条，不支持用户确认/反驳，也不会在插件里维护完整通知历史
 - 聚合型认知卡片如果后端暂时拿不到可信标题，会保守显示为“基于最近几条相关内容”，不会伪造具体视频名
 - “换一批”依赖 discovery pool 当前已有候选；如果候选池本身供给不足，仍可能提示“池子里这会儿还没刷出新的”

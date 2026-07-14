@@ -193,6 +193,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 - **Overseas routing: direct / system / custom proxy** — the `[network]` modes default to direct and are switchable from desktop web and the extension settings, so LLM calls are no longer silently strangled by a stale system proxy.
 - **Init failures now show the real cause** — when profile / preference analysis hits an SSL-cert or proxy-interception error, the init page tells you to disable the proxy / allowlist the endpoint instead of retrying forever (issue #113).
+- **Seven-platform favorites and watch later are live** — every surface saves locally first and auto-sync stays off by default; the real-account regression completed both actions or the documented favorite fallback across all seven platforms as `synced/already_synced`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -388,7 +389,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X uses server-side cookie replay (the extension only syncs the x.com cookie and captures engagement). None of them need an extra CDP debugging Chrome. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -564,6 +565,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -604,7 +606,15 @@ background ─ background admission (default 3) ──────┘
 │             → pool accounting · viewed identity    │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
-│   Unified admission · SQLite (events · pool · recs)│
+│ /api/saved/* · router · Bilibili native save      │
+│ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
+│ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
+│ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
+│ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
+│ trusted-local E2E exact auth → one saved-sync item → six-field callback │
+│ unsupported_adapter_missing retryable · unsupported_content_type local-only │
+│ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
+│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
 Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning
@@ -629,9 +639,9 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 | **Xiaohongshu** | passive collection · search · creator subscriptions · init import | Extension reads your logged-in pages; zero backend crawling |
 | **Douyin** | init import · search · hot · feed | Extension background tab with real DOM interactions; never steals focus |
 | **YouTube** | init import · Takeout offline import · search / trending / channel | Extension reads profile signals; steady-state refill is backend-direct |
-| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay; the extension only syncs cookies |
+| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor's first real favorite finished `synced` |
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
-| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli by default; the extension syncs your session automatically |
+| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor is fixture-tested, but the first real write remains uncertain after a 2xx response lacked old-DOM confirmation |
 | **Generic Web** | browser + LLM extraction | Adapts to any webpage |
 
 What happens after discovery:

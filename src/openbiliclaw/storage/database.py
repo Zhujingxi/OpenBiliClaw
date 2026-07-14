@@ -14,12 +14,14 @@ import secrets
 import sqlite3
 import statistics
 import time
+import unicodedata
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from uuid import UUID
 
 from openbiliclaw.discovery.admission import (
     DEFAULT_ADMISSION_MIN_SCORE,
@@ -33,6 +35,17 @@ from openbiliclaw.discovery.inspiration import (
     derive_inspiration_axis_id,
 )
 from openbiliclaw.published_time import normalize_published_time
+from openbiliclaw.saved_sync.identity import (
+    canonical_source_platform,
+    content_storage_key,
+    make_item_key,
+)
+from openbiliclaw.saved_sync.models import (
+    NATIVE_SAVE_STATUSES,
+    NATIVE_SAVE_TERMINAL_STATUSES,
+    SavedItemInput,
+    SavedListKind,
+)
 from openbiliclaw.sources.platforms import (
     PLATFORM_BILIBILI as _BILIBILI_SOURCE_FAMILY,
 )
@@ -58,6 +71,8 @@ from openbiliclaw.sources.platforms import (
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +144,52 @@ class _RawTrimPlan:
 # pragmatic middle ground.
 _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
+_NATIVE_INTERNAL_RUNNER_PREFIX = "__openbiliclaw_"
+_LEGACY_NATIVE_SAVE_RUNNER_ID = f"{_NATIVE_INTERNAL_RUNNER_PREFIX}legacy_runner__"
+_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS = {
+    "youtube": "yt",
+    "xiaohongshu": "xhs",
+    "douyin": "dy",
+    "twitter": "x",
+    "zhihu": "zhihu",
+    "reddit": "reddit",
+}
+_EXTENSION_NATIVE_SAVE_HOSTS = {
+    "youtube": ("youtube.com", "youtu.be"),
+    "xiaohongshu": ("xiaohongshu.com",),
+    "douyin": ("douyin.com", "iesdouyin.com"),
+    "twitter": ("x.com", "twitter.com"),
+    "zhihu": ("zhihu.com",),
+    "reddit": ("reddit.com", "redd.it"),
+}
+_EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS = {
+    "youtube": frozenset({"v"}),
+    "xiaohongshu": frozenset({"xsec_token", "xsec_source"}),
+}
+_EXTENSION_NATIVE_SAVE_ACTIONS = frozenset({"favorite", "watch_later"})
+_EXTENSION_NATIVE_SAVE_RESULT_STATUSES = frozenset(
+    {"synced", "already_synced", "login_required", "rate_limited", "unsupported", "failed"}
+)
+_EXTENSION_NATIVE_SAVE_SLUGS = frozenset(_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS.values())
+_EXTENSION_NATIVE_SAVE_RESULT_MESSAGES = {
+    ("synced", ""): "",
+    ("already_synced", ""): "",
+    ("login_required", ""): "Platform login required",
+    ("rate_limited", ""): "Platform native save rate limited",
+    ("unsupported", "unsupported_content_type"): (
+        "Content type is unsupported for platform native save"
+    ),
+    ("failed", "native_save_failed"): "Platform native save failed",
+    ("failed", "native_save_timeout"): "Platform native-save task timed out",
+    ("failed", "native_content_not_ready"): "Platform content did not become ready",
+    ("failed", "native_control_not_found"): "Platform save control was not found",
+    ("failed", "native_dialog_not_opened"): "Platform save dialog did not open",
+    ("failed", "native_target_not_found"): "Platform save target was not found uniquely",
+    ("failed", "native_request_rejected"): "Platform native-save request was rejected",
+    ("failed", "native_confirmation_not_observed"): (
+        "Platform native-save confirmation was not observed"
+    ),
+}
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _VIEW_CONTENT_ID_METADATA_KEYS = (
@@ -607,6 +668,7 @@ CREATE TABLE IF NOT EXISTS events (
 -- Content cache (discovered/evaluated content)
 CREATE TABLE IF NOT EXISTS content_cache (
     bvid        TEXT PRIMARY KEY,
+    item_key    TEXT NOT NULL DEFAULT '',
     title       TEXT,
     up_name     TEXT,
     up_mid      INTEGER,
@@ -718,6 +780,7 @@ CREATE INDEX IF NOT EXISTS idx_discovery_candidates_content_id
 CREATE TABLE IF NOT EXISTS recommendations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     bvid        TEXT NOT NULL,
+    item_key    TEXT NOT NULL DEFAULT '',
     expression  TEXT,                -- Friend-style recommendation text
     topic       TEXT,                -- Personal topic label
     confidence  REAL DEFAULT 0.0,
@@ -834,6 +897,144 @@ def _xhs_self_author_guard_params(xhs_self_nickname: str | None) -> tuple[str, s
     return (nickname, nickname, nickname)
 
 
+def _validated_extension_native_save_uuid(value: object, field_name: str) -> str:
+    raw_text = str(value or "")
+    if any(unicodedata.category(character).startswith("C") for character in raw_text):
+        raise ValueError(f"{field_name} must not contain control characters")
+    text = raw_text.strip()
+    try:
+        parsed = UUID(text)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"{field_name} must be a UUID") from exc
+    if str(parsed) != text.lower():
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    return text.lower()
+
+
+def _validated_extension_native_save_text(
+    value: object,
+    field_name: str,
+    *,
+    max_length: int,
+    allow_blank: bool = False,
+) -> str:
+    raw_text = str(value or "")
+    if any(unicodedata.category(character).startswith("C") for character in raw_text):
+        raise ValueError(f"{field_name} must not contain control characters")
+    text = raw_text.strip()
+    if not text and not allow_blank:
+        raise ValueError(f"{field_name} must not be blank")
+    if len(text) > max_length:
+        raise ValueError(f"{field_name} must be at most {max_length} characters")
+    return text
+
+
+def _canonical_extension_native_save_url(platform: str, value: object) -> str:
+    raw_url = _validated_extension_native_save_text(value, "content_url", max_length=2048)
+    try:
+        parts = urlsplit(raw_url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("content_url must use an allow-listed platform HTTPS host") from exc
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    allowed_hosts = _EXTENSION_NATIVE_SAVE_HOSTS[platform]
+    if (
+        parts.scheme.lower() != "https"
+        or not hostname
+        or port not in {None, 443}
+        or parts.username is not None
+        or parts.password is not None
+        or not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts)
+    ):
+        raise ValueError("content_url must use an allow-listed platform HTTPS host")
+    retained_fields = _EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS.get(platform, frozenset())
+    retained_query = [
+        (key, item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if key in retained_fields
+    ]
+    if platform == "youtube" and retained_query:
+        videos = [item for key, item in retained_query if key == "v"]
+        if len(videos) != 1 or not videos[0]:
+            raise ValueError("content_url has an invalid YouTube navigation query")
+    if platform == "xiaohongshu" and retained_query:
+        seen_fields: set[str] = set()
+        for key, item in retained_query:
+            if key in seen_fields or not item:
+                raise ValueError("content_url has an invalid Xiaohongshu navigation query")
+            seen_fields.add(key)
+        if "xsec_token" not in seen_fields:
+            raise ValueError("content_url has an invalid Xiaohongshu navigation query")
+    query = urlencode(retained_query)
+    return urlunsplit(("https", hostname, parts.path or "/", query, ""))
+
+
+def _validated_extension_native_save_job(
+    job: ExtensionNativeSaveJob,
+) -> dict[str, str]:
+    job_id = _validated_extension_native_save_uuid(job.job_id, "job_id")
+    platform = canonical_source_platform(job.platform)
+    if platform != job.platform or platform not in _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS:
+        raise ValueError("platform must be a supported canonical platform")
+    platform_slug = _validated_extension_native_save_text(
+        job.platform_slug, "platform_slug", max_length=16
+    ).lower()
+    if platform_slug != _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS[platform]:
+        raise ValueError("platform_slug does not match platform")
+    content_id = _validated_extension_native_save_text(job.content_id, "content_id", max_length=512)
+    content_url = _canonical_extension_native_save_url(platform, job.content_url)
+    item_key = _validated_extension_native_save_text(job.item_key, "item_key", max_length=768)
+    if item_key != make_item_key(platform, content_id, content_url):
+        raise ValueError("item_key does not match the canonical platform identity")
+    content_type = _validated_extension_native_save_text(
+        job.content_type, "content_type", max_length=128
+    )
+    requested_action = _validated_extension_native_save_text(
+        job.requested_action, "requested_action", max_length=32
+    )
+    resolved_action = _validated_extension_native_save_text(
+        job.resolved_action, "resolved_action", max_length=32
+    )
+    if requested_action not in _EXTENSION_NATIVE_SAVE_ACTIONS:
+        raise ValueError("requested_action is invalid")
+    if resolved_action not in _EXTENSION_NATIVE_SAVE_ACTIONS:
+        raise ValueError("resolved_action is invalid")
+    target_label = _validated_extension_native_save_text(
+        job.target_label, "target_label", max_length=256
+    )
+    return {
+        "job_id": job_id,
+        "platform": platform,
+        "platform_slug": platform_slug,
+        "item_key": item_key,
+        "content_id": content_id,
+        "content_url": content_url,
+        "content_type": content_type,
+        "requested_action": requested_action,
+        "resolved_action": resolved_action,
+        "target_label": target_label,
+    }
+
+
+def _validated_extension_native_save_result(
+    status: object, error_code: object, error_message: object
+) -> tuple[str, str, str]:
+    safe_status = _validated_extension_native_save_text(status, "status", max_length=32)
+    if safe_status not in _EXTENSION_NATIVE_SAVE_RESULT_STATUSES:
+        raise ValueError("status is invalid")
+    safe_code = _validated_extension_native_save_text(
+        error_code, "error_code", max_length=128, allow_blank=True
+    )
+    _validated_extension_native_save_text(
+        error_message, "error_message", max_length=512, allow_blank=True
+    )
+    try:
+        safe_message = _EXTENSION_NATIVE_SAVE_RESULT_MESSAGES[(safe_status, safe_code)]
+    except KeyError as exc:
+        raise ValueError("status and error_code combination is invalid") from exc
+    return safe_status, safe_code, safe_message
+
+
 def _normalize_admission_min_score(value: object) -> float:
     if isinstance(value, bool):
         return _DEFAULT_ADMISSION_MIN_SCORE
@@ -879,6 +1080,7 @@ class Database:
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_multisource_columns()
+        self._ensure_content_identity_columns()
         self._ensure_recommendation_read_indexes()
         self._ensure_source_recipes_table()
         self._ensure_xhs_observed_urls_table()
@@ -889,6 +1091,7 @@ class Database:
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
+        self._ensure_saved_sync_tables()
         self._ensure_auth_state_table()
         self._ensure_init_runs_table()
         self.reset_stale_discovery_candidate_evaluations()
@@ -955,6 +1158,7 @@ class Database:
             raise RuntimeError("Database not initialized. Call initialize() first.")
         conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
@@ -1626,10 +1830,25 @@ class Database:
             kwargs.get("published_at"),
             label=kwargs.get("published_label"),
         )
+        source_platform = str(kwargs.get("source_platform", "bilibili") or "").strip()
+        raw_content_id = str(kwargs.get("content_id", bvid) or "").strip()
+        identity_content_id = raw_content_id if source_platform else bvid.strip()
+        item_key = str(kwargs.get("item_key", "") or "").strip() or make_item_key(
+            source_platform or "bilibili",
+            identity_content_id,
+            str(kwargs.get("content_url", "") or ""),
+        )
+        existing_identity_row = self.conn.execute(
+            "SELECT bvid FROM content_cache WHERE item_key = ?",
+            (item_key,),
+        ).fetchone()
+        if existing_identity_row is not None:
+            bvid = str(existing_identity_row["bvid"])
         self._execute_write(
             """
             INSERT INTO content_cache (
                 bvid,
+                item_key,
                 title,
                 up_name,
                 up_mid,
@@ -1670,7 +1889,7 @@ class Database:
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
@@ -1776,6 +1995,7 @@ class Database:
                     ELSE content_cache.pool_status
                 END,
                 source = excluded.source,
+                item_key = excluded.item_key,
                 content_id = excluded.content_id,
                 content_url = excluded.content_url,
                 source_platform = excluded.source_platform,
@@ -1804,6 +2024,7 @@ class Database:
             """,
             (
                 bvid,
+                item_key,
                 kwargs.get("title", ""),
                 kwargs.get("up_name", ""),
                 kwargs.get("up_mid", 0),
@@ -2590,6 +2811,22 @@ class Database:
                     existing.add(bvid)
                 if content_id:
                     existing.add(content_id)
+        return existing
+
+    def get_existing_content_cache_item_keys(self, item_keys: Sequence[str]) -> set[str]:
+        """Return canonical identities already present in the evaluated content cache."""
+        clean = _unique_clean_strings(item_keys)
+        if not clean:
+            return set()
+        self._ensure_fresh_read()
+        existing: set[str] = set()
+        for chunk in _chunks(clean, 900):
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"SELECT item_key FROM content_cache WHERE item_key IN ({placeholders})",
+                chunk,
+            )
+            existing.update(str(row["item_key"]) for row in cursor.fetchall())
         return existing
 
     def count_discovery_candidates_by_source_status(self) -> dict[str, dict[str, int]]:
@@ -5244,6 +5481,7 @@ class Database:
         self,
         bvid: str,
         *,
+        item_key: str = "",
         confidence: float,
         expression: str = "",
         topic: str = "",
@@ -5252,12 +5490,38 @@ class Database:
         """Insert a recommendation history record."""
         cursor = self._execute_write(
             """
-            INSERT INTO recommendations (bvid, expression, topic, confidence, presented)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO recommendations
+                (bvid, item_key, expression, topic, confidence, presented)
+            VALUES (
+                ?,
+                COALESCE(
+                    NULLIF(?, ''),
+                    (SELECT item_key FROM content_cache WHERE bvid = ?),
+                    ?
+                ),
+                ?, ?, ?, ?
+            )
             """,
-            (bvid, expression, topic, confidence, presented),
+            (
+                bvid,
+                item_key.strip(),
+                bvid,
+                self._fallback_recommendation_item_key(bvid),
+                expression,
+                topic,
+                confidence,
+                presented,
+            ),
         )
         return cursor.lastrowid or 0
+
+    @staticmethod
+    def _fallback_recommendation_item_key(bvid: str) -> str:
+        """Build a canonical fallback when no cache identity row is available."""
+        storage_key = bvid.strip()
+        if ":" in storage_key:
+            return storage_key
+        return make_item_key("bilibili", storage_key)
 
     def batch_insert_recommendations(
         self,
@@ -5303,11 +5567,22 @@ class Database:
                         cursor.execute(
                             """
                             INSERT INTO recommendations
-                                (bvid, expression, topic, confidence, presented)
-                            VALUES (?, ?, ?, ?, ?)
+                                (bvid, item_key, expression, topic, confidence, presented)
+                            VALUES (
+                                ?,
+                                COALESCE(
+                                    NULLIF(?, ''),
+                                    (SELECT item_key FROM content_cache WHERE bvid = ?),
+                                    ?
+                                ),
+                                ?, ?, ?, ?
+                            )
                             """,
                             (
                                 str(item.get("bvid", "")),
+                                str(item.get("item_key", "")).strip(),
+                                str(item.get("bvid", "")),
+                                self._fallback_recommendation_item_key(str(item.get("bvid", ""))),
                                 str(item.get("expression", "")),
                                 str(item.get("topic", "")),
                                 float(item.get("confidence", 0.0) or 0.0),
@@ -5446,7 +5721,19 @@ class Database:
         cursor = self.conn.execute(
             f"""
             SELECT
-                r.*,
+                r.id,
+                r.bvid,
+                COALESCE(NULLIF(r.item_key, ''), c.item_key, '') AS item_key,
+                r.expression,
+                r.topic,
+                r.confidence,
+                r.presented,
+                r.feedback,
+                r.feedback_type,
+                r.feedback_note,
+                r.created_at,
+                r.presented_at,
+                r.feedback_at,
                 COALESCE(c.title, '') AS title,
                 COALESCE(c.up_name, '') AS up_name,
                 COALESCE(c.cover_url, '') AS cover_url,
@@ -5466,9 +5753,14 @@ class Database:
                 COALESCE(c.comment_count, 0) AS comment_count,
                 COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
-            LEFT JOIN content_cache AS c ON c.bvid = COALESCE(
-                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
-                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            LEFT JOIN content_cache AS c ON c.item_key = COALESCE(
+                NULLIF(r.item_key, ''),
+                (SELECT item_key FROM content_cache WHERE bvid = r.bvid),
+                (
+                    SELECT CASE WHEN COUNT(*) = 1 THEN MIN(item_key) END
+                    FROM content_cache
+                    WHERE content_id = r.bvid
+                )
             )
             WHERE (
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
@@ -5476,7 +5768,7 @@ class Database:
             )
             AND {admission_sql}
             {processed_clause}
-            ORDER BY created_at DESC, id DESC
+            ORDER BY r.created_at DESC, r.id DESC
             LIMIT ?
             """,
             (*admission_params, limit),
@@ -5818,6 +6110,176 @@ class Database:
         if added:
             self.conn.execute("UPDATE content_cache SET content_id = bvid WHERE content_id = ''")
 
+    def _ensure_content_identity_columns(self) -> None:
+        """Backfill canonical identity columns for cache and recommendation rows."""
+        cache_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        }
+        if "item_key" not in cache_columns:
+            self.conn.execute(
+                "ALTER TABLE content_cache ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+
+        cache_rows = self.conn.execute(
+            """
+            SELECT bvid, item_key, source_platform, content_id, content_url
+            FROM content_cache
+            WHERE item_key = ''
+            """
+        ).fetchall()
+        for row in cache_rows:
+            storage_key = str(row["bvid"] or "").strip()
+            source_platform = str(row["source_platform"] or "").strip()
+            platform = canonical_source_platform(source_platform or "bilibili")
+            content_id = str(row["content_id"] or "").strip()
+            if not source_platform:
+                content_id = storage_key
+            item_key = make_item_key(
+                platform,
+                content_id or storage_key,
+                str(row["content_url"] or ""),
+            )
+            self.conn.execute(
+                "UPDATE content_cache SET item_key = ? WHERE bvid = ?",
+                (item_key, storage_key),
+            )
+
+        recommendation_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(recommendations)").fetchall()
+        }
+        if "item_key" not in recommendation_columns:
+            self.conn.execute(
+                "ALTER TABLE recommendations ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+        self._consolidate_content_identity_duplicates()
+        self.conn.execute(
+            """
+            UPDATE recommendations AS r
+            SET item_key = COALESCE(
+                (SELECT c.item_key FROM content_cache AS c WHERE c.bvid = r.bvid),
+                ''
+            )
+            WHERE r.item_key = ''
+            """
+        )
+
+    @staticmethod
+    def _content_identity_metadata_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() in {"", "[]", "{}"}
+        if isinstance(value, (int, float)):
+            return value == 0
+        return False
+
+    def _consolidate_content_identity_duplicates(self) -> None:
+        """Merge legacy cache rows that normalize to one canonical identity."""
+        duplicate_keys = self.conn.execute(
+            """
+            SELECT item_key
+            FROM content_cache
+            WHERE item_key != ''
+            GROUP BY item_key
+            HAVING COUNT(*) > 1
+            ORDER BY item_key
+            """
+        ).fetchall()
+        if not duplicate_keys:
+            return
+
+        columns = [
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        ]
+        merge_columns = [column for column in columns if column not in {"bvid", "item_key"}]
+        for duplicate in duplicate_keys:
+            item_key = str(duplicate["item_key"])
+            members = [
+                dict(row)
+                for row in self.conn.execute(
+                    "SELECT * FROM content_cache WHERE item_key = ? ORDER BY bvid",
+                    (item_key,),
+                ).fetchall()
+            ]
+            canonical_members: list[dict[str, Any]] = []
+            for member in members:
+                if str(member["bvid"]) == item_key:
+                    canonical_members.append(member)
+                    continue
+                platform = canonical_source_platform(
+                    str(member.get("source_platform") or "bilibili")
+                )
+                content_id = str(member.get("content_id") or member.get("bvid") or "")
+                try:
+                    expected_storage_key = content_storage_key(
+                        platform,
+                        content_id,
+                        str(member.get("content_url") or ""),
+                    )
+                except ValueError:
+                    continue
+                if str(member["bvid"]) == expected_storage_key:
+                    canonical_members.append(member)
+            keeper = min(canonical_members or members, key=lambda row: str(row["bvid"]))
+            keeper_bvid = str(keeper["bvid"])
+            merged = dict(keeper)
+            for member in members:
+                for column in merge_columns:
+                    if self._content_identity_metadata_missing(
+                        merged.get(column)
+                    ) and not self._content_identity_metadata_missing(member.get(column)):
+                        merged[column] = member[column]
+
+            changed_columns = [
+                column for column in merge_columns if merged.get(column) != keeper.get(column)
+            ]
+            if changed_columns:
+                assignments = ", ".join(f"{column} = ?" for column in changed_columns)
+                self.conn.execute(
+                    f"UPDATE content_cache SET {assignments} WHERE bvid = ?",
+                    [*(merged[column] for column in changed_columns), keeper_bvid],
+                )
+
+            member_bvids = [str(member["bvid"]) for member in members]
+            self._redirect_legacy_saved_identity(member_bvids, item_key)
+            placeholders = ", ".join("?" for _ in member_bvids)
+            self.conn.execute(
+                f"""
+                UPDATE recommendations
+                SET bvid = ?, item_key = ?
+                WHERE bvid IN ({placeholders}) OR item_key = ?
+                """,
+                [keeper_bvid, item_key, *member_bvids, item_key],
+            )
+            removed_bvids = [bvid for bvid in member_bvids if bvid != keeper_bvid]
+            if removed_bvids:
+                removed_placeholders = ", ".join("?" for _ in removed_bvids)
+                self.conn.execute(
+                    f"DELETE FROM content_cache WHERE bvid IN ({removed_placeholders})",
+                    removed_bvids,
+                )
+
+    def _redirect_legacy_saved_identity(self, storage_keys: list[str], item_key: str) -> None:
+        """Preserve legacy saved-list identity before duplicate cache rows are removed."""
+        if not storage_keys:
+            return
+        placeholders = ", ".join("?" for _ in storage_keys)
+        for table_name in ("watch_later", "favorites"):
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            if exists is None:
+                continue
+            self._ensure_legacy_saved_item_key_column(table_name)
+            self.conn.execute(
+                f"UPDATE {table_name} SET item_key = ? WHERE bvid IN ({placeholders})",
+                [item_key, *storage_keys],
+            )
+
     def _ensure_discovery_candidate_columns(self) -> None:
         """Backfill discovery-candidate lifecycle columns for existing databases."""
 
@@ -5878,6 +6340,10 @@ class Database:
                 ON recommendations (created_at DESC, id DESC);
             CREATE INDEX IF NOT EXISTS idx_content_cache_content_id
                 ON content_cache (content_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key
+                ON content_cache (item_key);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_item_key
+                ON recommendations (item_key);
         """)
 
     def _ensure_source_recipes_table(self) -> None:
@@ -5939,11 +6405,13 @@ class Database:
             CREATE TABLE IF NOT EXISTS watch_later (
                 bvid     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                note     TEXT DEFAULT ''
+                note     TEXT DEFAULT '',
+                item_key TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_watch_later_added
                 ON watch_later(added_at DESC);
         """)
+        self._ensure_legacy_saved_item_key_column("watch_later")
 
     def _ensure_discovery_keywords_table(self) -> None:
         """Create the unified search-keyword store + planner single-flight lock.
@@ -8069,60 +8537,61 @@ class Database:
 
     def add_to_watch_later(self, bvid: str, note: str = "") -> bool:
         """Bookmark a video. Returns True if newly inserted, False if updated."""
+        item = self._bilibili_saved_item_input(bvid)
+        self.upsert_saved_membership("watch_later", item, note)
         self._execute_write(
             """
-            INSERT INTO watch_later (bvid, note)
-            VALUES (?, ?)
+            INSERT INTO watch_later (bvid, note, item_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 added_at = CURRENT_TIMESTAMP,
-                note = excluded.note
+                note = excluded.note,
+                item_key = excluded.item_key
             """,
-            (bvid.strip(), note),
+            (bvid.strip(), note, item.item_key),
         )
         return self.conn.total_changes > 0
 
     def remove_from_watch_later(self, bvid: str) -> bool:
         """Remove a bookmark. Returns True if a row was deleted."""
-        self._execute_write(
-            "DELETE FROM watch_later WHERE bvid = ?",
-            (bvid.strip(),),
-        )
-        return self.conn.total_changes > 0
+        item_key = self._resolve_legacy_saved_item_key("watch_later", bvid)
+        if item_key is None:
+            return False
+        return self.remove_saved_membership("watch_later", item_key)
 
     def is_in_watch_later(self, bvid: str) -> bool:
         """Check whether a video is bookmarked."""
-        row = self.conn.execute(
-            "SELECT 1 FROM watch_later WHERE bvid = ?",
-            (bvid.strip(),),
-        ).fetchone()
-        return row is not None
+        item_key = self._resolve_legacy_saved_item_key("watch_later", bvid)
+        return (
+            item_key is not None and self.get_saved_membership("watch_later", item_key) is not None
+        )
 
     def count_watch_later(self) -> int:
         """Return total number of bookmarked videos."""
-        row = self.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM saved_memberships WHERE list_kind = ?",
+            ("watch_later",),
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def list_watch_later(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return bookmarked videos with content_cache metadata, newest first."""
-        cursor = self.conn.execute(
-            """
-            SELECT
-                w.bvid,
-                w.added_at,
-                w.note,
-                COALESCE(c.title, '') AS title,
-                COALESCE(c.up_name, '') AS up_name,
-                COALESCE(c.cover_url, '') AS cover_url,
-                COALESCE(c.content_url, '') AS content_url,
-                COALESCE(c.source_platform, '') AS source_platform
-            FROM watch_later AS w
-            LEFT JOIN content_cache AS c ON c.bvid = w.bvid
-            ORDER BY w.added_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            {
+                "bvid": row["content_id"],
+                "item_key": row["item_key"],
+                "content_id": row["content_id"],
+                "added_at": row["added_at"],
+                "note": row["note"],
+                "title": row["title"],
+                "up_name": row["author_name"],
+                "cover_url": row["cover_url"],
+                "content_url": row["content_url"],
+                "source_platform": row["source_platform"],
+                "content_type": row["content_type"],
+            }
+            for row in self.list_saved_memberships("watch_later", limit, offset)
+        ]
 
     def _ensure_favorites_table(self) -> None:
         """Create the favorites (收藏夹) table for existing databases.
@@ -8135,11 +8604,2105 @@ class Database:
             CREATE TABLE IF NOT EXISTS favorites (
                 bvid     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                note     TEXT DEFAULT ''
+                note     TEXT DEFAULT '',
+                item_key TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_favorites_added
                 ON favorites(added_at DESC);
         """)
+        self._ensure_legacy_saved_item_key_column("favorites")
+
+    def _ensure_legacy_saved_item_key_column(self, table_name: str) -> None:
+        """Add the stable normalized identity link to a trusted legacy saved table."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if "item_key" not in columns:
+            self.conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _ensure_saved_sync_tables(self) -> None:
+        """Create normalized saved-content tables and import legacy saved rows once."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS saved_items (
+                item_key        TEXT PRIMARY KEY,
+                source_platform TEXT NOT NULL,
+                content_id      TEXT NOT NULL,
+                content_url     TEXT NOT NULL DEFAULT '',
+                content_type    TEXT NOT NULL DEFAULT 'video',
+                title           TEXT NOT NULL DEFAULT '',
+                author_name     TEXT NOT NULL DEFAULT '',
+                cover_url       TEXT NOT NULL DEFAULT '',
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS saved_memberships (
+                list_kind TEXT NOT NULL CHECK (list_kind IN ('favorite', 'watch_later')),
+                item_key  TEXT NOT NULL REFERENCES saved_items(item_key) ON DELETE CASCADE,
+                note      TEXT NOT NULL DEFAULT '',
+                added_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (list_kind, item_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_memberships_item_key
+                ON saved_memberships(item_key);
+            CREATE TABLE IF NOT EXISTS native_save_states (
+                list_kind          TEXT NOT NULL,
+                item_key           TEXT NOT NULL,
+                requested_action   TEXT NOT NULL,
+                resolved_action    TEXT NOT NULL DEFAULT '',
+                resolved_target    TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN (
+                        'pending', 'syncing', 'synced', 'already_synced',
+                        'login_required', 'unsupported', 'rate_limited',
+                        'extension_required', 'failed'
+                    )),
+                task_id            TEXT NOT NULL DEFAULT '',
+                execution_id       TEXT NOT NULL DEFAULT '',
+                task_claimed_at    TIMESTAMP,
+                task_started_at    TIMESTAMP,
+                task_heartbeat_at  TIMESTAMP,
+                task_runner_id     TEXT NOT NULL DEFAULT '',
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                last_attempt_at    TIMESTAMP,
+                synced_at          TIMESTAMP,
+                PRIMARY KEY (list_kind, item_key),
+                FOREIGN KEY (list_kind, item_key)
+                    REFERENCES saved_memberships(list_kind, item_key) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS native_save_tasks (
+                task_id     TEXT PRIMARY KEY,
+                list_kind   TEXT NOT NULL CHECK (list_kind IN ('favorite', 'watch_later')),
+                trigger     TEXT NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS native_save_task_items (
+                task_id            TEXT NOT NULL
+                    REFERENCES native_save_tasks(task_id) ON DELETE CASCADE,
+                item_key           TEXT NOT NULL,
+                ordinal            INTEGER NOT NULL,
+                requested_action   TEXT NOT NULL,
+                resolved_action    TEXT NOT NULL DEFAULT '',
+                resolved_target    TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL
+                    CHECK (status IN (
+                        'pending', 'syncing', 'synced', 'already_synced',
+                        'login_required', 'unsupported', 'rate_limited',
+                        'extension_required', 'failed'
+                    )),
+                is_live            INTEGER NOT NULL DEFAULT 0 CHECK (is_live IN (0, 1)),
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (task_id, item_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_native_save_task_items_order
+                ON native_save_task_items(task_id, ordinal, item_key);
+            CREATE TABLE IF NOT EXISTS extension_native_save_jobs (
+                job_id             TEXT PRIMARY KEY,
+                platform           TEXT NOT NULL,
+                platform_slug      TEXT NOT NULL,
+                item_key           TEXT NOT NULL,
+                content_id         TEXT NOT NULL,
+                content_url        TEXT NOT NULL,
+                content_type       TEXT NOT NULL,
+                requested_action   TEXT NOT NULL
+                    CHECK(requested_action IN ('favorite', 'watch_later')),
+                resolved_action    TEXT NOT NULL
+                    CHECK(resolved_action IN ('favorite', 'watch_later')),
+                target_label       TEXT NOT NULL,
+                status             TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending', 'in_progress', 'synced', 'already_synced',
+                        'login_required', 'rate_limited', 'unsupported', 'failed',
+                        'extension_required', 'cancelled'
+                    )),
+                claimed_at         TIMESTAMP,
+                completed_at       TIMESTAMP,
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_extension_native_save_jobs_claim
+                ON extension_native_save_jobs(platform_slug, status, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_native_save_jobs_active_item
+                ON extension_native_save_jobs(platform, item_key, requested_action)
+                WHERE status IN ('pending', 'in_progress');
+            CREATE TABLE IF NOT EXISTS saved_sync_migrations (
+                name       TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        native_state_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(native_save_states)").fetchall()
+        }
+        if "execution_id" not in native_state_columns:
+            self.conn.execute(
+                "ALTER TABLE native_save_states ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "task_runner_id" not in native_state_columns:
+            self.conn.execute(
+                "ALTER TABLE native_save_states ADD COLUMN task_runner_id TEXT NOT NULL DEFAULT ''"
+            )
+        for column_name in ("task_claimed_at", "task_started_at", "task_heartbeat_at"):
+            if column_name not in native_state_columns:
+                self.conn.execute(
+                    f"ALTER TABLE native_save_states ADD COLUMN {column_name} TIMESTAMP"
+                )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_claimed_at = CURRENT_TIMESTAMP
+            WHERE status = 'pending' AND task_id != '' AND task_claimed_at IS NULL
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_heartbeat_at = CURRENT_TIMESTAMP
+            WHERE status IN ('pending', 'syncing')
+              AND task_id != '' AND task_started_at IS NOT NULL
+              AND task_heartbeat_at IS NULL
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_runner_id = ?
+            WHERE status IN ('pending', 'syncing')
+              AND task_id != '' AND task_started_at IS NOT NULL
+              AND task_runner_id = ''
+              AND task_heartbeat_at IS NOT NULL
+            """,
+            (_LEGACY_NATIVE_SAVE_RUNNER_ID,),
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO native_save_tasks (task_id, list_kind, trigger, created_at)
+            SELECT task_id, MIN(list_kind), 'legacy',
+                   COALESCE(MIN(task_claimed_at), MIN(last_attempt_at), CURRENT_TIMESTAMP)
+            FROM native_save_states
+            WHERE task_id != ''
+            GROUP BY task_id
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO native_save_task_items (
+                task_id, item_key, ordinal, requested_action, resolved_action,
+                resolved_target, status, is_live, last_error_code, last_error_message,
+                updated_at
+            )
+            SELECT
+                task_id,
+                item_key,
+                ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY item_key) - 1,
+                requested_action,
+                resolved_action,
+                resolved_target,
+                status,
+                CASE WHEN status IN ('pending', 'syncing') THEN 1 ELSE 0 END,
+                last_error_code,
+                last_error_message,
+                COALESCE(last_attempt_at, task_claimed_at, CURRENT_TIMESTAMP)
+            FROM native_save_states
+            WHERE task_id != ''
+            """
+        )
+        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            migrated = self.conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                ("legacy_saved_tables_v1",),
+            ).fetchone()
+            if migrated is None:
+                self._migrate_legacy_saved_list("watch_later", "watch_later")
+                self._migrate_legacy_saved_list("favorites", "favorite")
+                self.conn.execute(
+                    "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                    ("legacy_saved_tables_v1",),
+                )
+            stable_links = self.conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                ("legacy_saved_item_keys_v2",),
+            ).fetchone()
+            if stable_links is None:
+                self._backfill_legacy_saved_item_keys("watch_later", "watch_later")
+                self._backfill_legacy_saved_item_keys("favorites", "favorite")
+                self.conn.execute(
+                    "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                    ("legacy_saved_item_keys_v2",),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.migrate_legacy_native_save_unsupported()
+
+    def migrate_legacy_native_save_unsupported(self) -> int:
+        """Mark only pre-adapter unsupported rows for the six extension sources."""
+        migration_name = "extension_adapter_missing_unsupported_v1"
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            migrated = conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                (migration_name,),
+            ).fetchone()
+            if migrated is not None:
+                conn.commit()
+                return 0
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET last_error_code = 'unsupported_adapter_missing',
+                    last_error_message =
+                        'Native save adapter was unavailable; retry is now supported'
+                WHERE status = 'unsupported'
+                  AND last_error_code IN ('', 'unsupported')
+                  AND item_key IN (
+                      SELECT item_key
+                      FROM saved_items
+                      WHERE source_platform IN (
+                          'youtube', 'xiaohongshu', 'douyin',
+                          'twitter', 'zhihu', 'reddit'
+                      )
+                  )
+                """
+            )
+            conn.execute(
+                "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                (migration_name,),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_or_reuse_extension_native_save_job(
+        self, job: ExtensionNativeSaveJob
+    ) -> dict[str, Any]:
+        """Atomically persist or reuse one active extension native-save job."""
+        payload = _validated_extension_native_save_job(job)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                """
+                SELECT * FROM extension_native_save_jobs
+                WHERE platform = ? AND item_key = ? AND requested_action = ?
+                  AND status IN ('pending', 'in_progress')
+                """,
+                (
+                    payload["platform"],
+                    payload["item_key"],
+                    payload["requested_action"],
+                ),
+            ).fetchone()
+            if active is None:
+                conn.execute(
+                    """
+                    INSERT INTO extension_native_save_jobs (
+                        job_id, platform, platform_slug, item_key, content_id,
+                        content_url, content_type, requested_action, resolved_action,
+                        target_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["job_id"],
+                        payload["platform"],
+                        payload["platform_slug"],
+                        payload["item_key"],
+                        payload["content_id"],
+                        payload["content_url"],
+                        payload["content_type"],
+                        payload["requested_action"],
+                        payload["resolved_action"],
+                        payload["target_label"],
+                    ),
+                )
+                active = conn.execute(
+                    "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
+                    (payload["job_id"],),
+                ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if active is None:
+            raise RuntimeError("extension native-save job insert did not persist")
+        return dict(active)
+
+    def claim_extension_native_save_job(
+        self, platform_slug: str, lease_seconds: float
+    ) -> dict[str, Any] | None:
+        """Claim the oldest pending platform job after expiring uncertain stale claims."""
+        slug = self._validated_extension_native_save_slug(platform_slug)
+        lease = self._validated_extension_native_save_lease(lease_seconds)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_stale_extension_native_save_jobs_in_transaction(conn, slug, lease)
+            pending = conn.execute(
+                """
+                SELECT job_id FROM extension_native_save_jobs
+                WHERE platform_slug = ? AND status = 'pending'
+                ORDER BY created_at, job_id
+                LIMIT 1
+                """,
+                (slug,),
+            ).fetchone()
+            claimed = None
+            if pending is not None:
+                job_id = str(pending["job_id"])
+                cursor = conn.execute(
+                    """
+                    UPDATE extension_native_save_jobs
+                    SET status = 'in_progress',
+                        claimed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                    WHERE job_id = ? AND status = 'pending'
+                    """,
+                    (job_id,),
+                )
+                if cursor.rowcount == 1:
+                    claimed = conn.execute(
+                        "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return dict(claimed) if claimed is not None else None
+
+    def complete_extension_native_save_job(
+        self,
+        job_id: str,
+        platform_slug: str,
+        item_key: str,
+        status: str,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """Complete one claimed job when slug, UUID, and item identity match."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        safe_slug = self._validated_extension_native_save_slug(platform_slug)
+        safe_item_key = _validated_extension_native_save_text(item_key, "item_key", max_length=768)
+        safe_status, safe_code, safe_message = _validated_extension_native_save_result(
+            status, error_code, error_message
+        )
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = ?, last_error_code = ?, last_error_message = ?,
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND platform_slug = ? AND item_key = ?
+                  AND status = 'in_progress'
+                """,
+                (safe_status, safe_code, safe_message, safe_job_id, safe_slug, safe_item_key),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def cancel_unclaimed_extension_native_save_job(self, job_id: str) -> bool:
+        """Cancel a pending job without touching a possibly state-changing claimed job."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = 'cancelled',
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND status = 'pending'
+                """,
+                (safe_job_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def mark_unclaimed_extension_native_save_job_extension_required(self, job_id: str) -> bool:
+        """Durably mark a still-pending job when no extension claims it in time."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = 'extension_required',
+                    last_error_code = 'extension_unavailable',
+                    last_error_message = 'OpenBiliClaw extension is unavailable',
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND status = 'pending'
+                """,
+                (safe_job_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def get_extension_native_save_job(self, job_id: str) -> dict[str, Any] | None:
+        """Return a copied durable extension job row by canonical UUID."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM extension_native_save_jobs WHERE job_id = ?", (safe_job_id,)
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def owns_extension_native_save_job(self, job_id: str, platform_slug: str | None = None) -> bool:
+        """Return global job ownership, optionally restricted to one exact slug."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        if platform_slug is None:
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ?",
+                    (safe_job_id,),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        try:
+            safe_slug = self._validated_extension_native_save_slug(platform_slug)
+            row = conn.execute(
+                "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ? AND platform_slug = ?",
+                (safe_job_id, safe_slug),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def expire_stale_extension_native_save_jobs(
+        self, platform_slug: str, lease_seconds: float
+    ) -> int:
+        """Fail stale claimed writes without returning them to the pending queue."""
+        slug = self._validated_extension_native_save_slug(platform_slug)
+        lease = self._validated_extension_native_save_lease(lease_seconds)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            count = self._expire_stale_extension_native_save_jobs_in_transaction(conn, slug, lease)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return count
+
+    def _expire_stale_extension_native_save_jobs_in_transaction(
+        self, conn: sqlite3.Connection, platform_slug: str, lease_seconds: float
+    ) -> int:
+        cursor = conn.execute(
+            """
+            UPDATE extension_native_save_jobs
+            SET status = 'failed',
+                last_error_code = 'extension_task_timeout',
+                last_error_message = 'Extension native-save task timed out',
+                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE platform_slug = ? AND status = 'in_progress'
+              AND claimed_at IS NOT NULL
+              AND (JULIANDAY('now') - JULIANDAY(claimed_at)) * 86400.0 >= ?
+            """,
+            (platform_slug, lease_seconds),
+        )
+        return cursor.rowcount
+
+    @staticmethod
+    def _validated_extension_native_save_slug(platform_slug: object) -> str:
+        slug = _validated_extension_native_save_text(
+            platform_slug, "platform_slug", max_length=16
+        ).lower()
+        if slug not in _EXTENSION_NATIVE_SAVE_SLUGS:
+            raise ValueError("platform_slug is invalid")
+        return slug
+
+    @staticmethod
+    def _validated_extension_native_save_lease(lease_seconds: object) -> float:
+        if isinstance(lease_seconds, bool):
+            raise ValueError("lease_seconds must be a positive finite number")
+        try:
+            lease = float(cast("Any", lease_seconds))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("lease_seconds must be a positive finite number") from exc
+        if not math.isfinite(lease) or lease <= 0:
+            raise ValueError("lease_seconds must be a positive finite number")
+        return lease
+
+    def _migrate_legacy_saved_list(self, table_name: str, list_kind: SavedListKind) -> None:
+        """Copy one trusted legacy saved table into normalized storage."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        platform_sql, content_id_sql, item_key_sql = self._legacy_saved_identity_sql()
+        cache_join_sql = """
+            c.bvid = COALESCE(
+                (SELECT exact.bvid FROM content_cache AS exact WHERE exact.bvid = legacy.bvid),
+                (
+                    SELECT linked.bvid
+                    FROM content_cache AS linked
+                    WHERE linked.item_key = NULLIF(TRIM(legacy.item_key), '')
+                )
+            )
+        """
+
+        self.conn.execute(
+            f"""
+            INSERT OR IGNORE INTO saved_items (
+                item_key, source_platform, content_id, content_url, content_type,
+                title, author_name, cover_url, created_at, updated_at
+            )
+            SELECT
+                {item_key_sql},
+                {platform_sql},
+                {content_id_sql},
+                COALESCE(c.content_url, ''),
+                COALESCE(NULLIF(c.content_type, ''), 'video'),
+                COALESCE(c.title, ''),
+                COALESCE(NULLIF(c.author_name, ''), c.up_name, ''),
+                COALESCE(c.cover_url, ''),
+                legacy.added_at,
+                legacy.added_at
+            FROM {table_name} AS legacy
+            LEFT JOIN content_cache AS c ON {cache_join_sql}
+            """
+        )
+        self.conn.execute(
+            f"""
+            INSERT OR IGNORE INTO saved_memberships (list_kind, item_key, note, added_at)
+            SELECT ?, {item_key_sql}, COALESCE(legacy.note, ''), legacy.added_at
+            FROM {table_name} AS legacy
+            LEFT JOIN content_cache AS c ON {cache_join_sql}
+            """,
+            (list_kind,),
+        )
+        self._backfill_legacy_saved_item_keys(table_name, list_kind)
+
+    @staticmethod
+    def _legacy_saved_identity_sql() -> tuple[str, str, str]:
+        """Return shared SQL expressions for canonicalizing one joined legacy saved row."""
+        complete_identity_sql = """
+            NULLIF(TRIM(c.source_platform), '') IS NOT NULL
+            AND NULLIF(TRIM(c.content_id), '') IS NOT NULL
+        """
+        platform_sql = f"""
+            CASE WHEN {complete_identity_sql} THEN
+                CASE LOWER(TRIM(c.source_platform))
+                    WHEN 'bili' THEN 'bilibili'
+                    WHEN 'xhs' THEN 'xiaohongshu'
+                    WHEN 'dy' THEN 'douyin'
+                    WHEN 'yt' THEN 'youtube'
+                    WHEN 'x' THEN 'twitter'
+                    WHEN 'zh' THEN 'zhihu'
+                    WHEN 'rd' THEN 'reddit'
+                    ELSE LOWER(TRIM(c.source_platform))
+                END
+            ELSE 'bilibili'
+            END
+        """
+        content_id_sql = (
+            f"CASE WHEN {complete_identity_sql} THEN TRIM(c.content_id) ELSE legacy.bvid END"
+        )
+        item_key_sql = f"({platform_sql}) || ':' || ({content_id_sql})"
+        return platform_sql, content_id_sql, item_key_sql
+
+    def _backfill_legacy_saved_item_keys(
+        self,
+        table_name: str,
+        list_kind: SavedListKind,
+    ) -> None:
+        """Persist the migration-time identity link without creating memberships."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        _, _, item_key_sql = self._legacy_saved_identity_sql()
+        self.conn.execute(
+            f"""
+            UPDATE {table_name} AS legacy
+            SET item_key = COALESCE(
+                (
+                    SELECT {item_key_sql}
+                    FROM content_cache AS c
+                    JOIN saved_memberships AS m
+                      ON m.list_kind = ? AND m.item_key = ({item_key_sql})
+                    WHERE c.bvid = legacy.bvid
+                    LIMIT 1
+                ),
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.list_kind = ?
+                      AND m.item_key = 'bilibili:' || legacy.bvid
+                ) THEN 'bilibili:' || legacy.bvid ELSE '' END
+            )
+            WHERE item_key = ''
+            """,
+            (list_kind, list_kind),
+        )
+
+    @staticmethod
+    def _saved_list_kind(value: str) -> SavedListKind:
+        list_kind = value.strip()
+        if list_kind not in {"favorite", "watch_later"}:
+            raise ValueError("list_kind must be 'favorite' or 'watch_later'")
+        return cast("SavedListKind", list_kind)
+
+    @staticmethod
+    def _native_task_id(value: str) -> str:
+        task_id = value.strip()
+        if not task_id:
+            raise ValueError("task_id must not be blank")
+        return task_id
+
+    @staticmethod
+    def _native_execution_id(value: str) -> str:
+        execution_id = value.strip()
+        if not execution_id:
+            raise ValueError("execution_id must not be blank")
+        return execution_id
+
+    @staticmethod
+    def _native_runner_id(value: str) -> str:
+        runner_id = value.strip()
+        if not runner_id:
+            raise ValueError("runner_id must not be blank")
+        if runner_id.startswith(_NATIVE_INTERNAL_RUNNER_PREFIX):
+            raise ValueError("runner_id uses a reserved internal prefix")
+        return runner_id
+
+    def _bilibili_saved_item_input(self, bvid: str) -> SavedItemInput:
+        """Build a Bilibili compatibility input with any cached metadata snapshot."""
+        content_id = bvid.strip()
+        row = self.conn.execute(
+            """
+            SELECT title, up_name, author_name, cover_url, content_url, content_type
+            FROM content_cache
+            WHERE bvid = ?
+            """,
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return SavedItemInput(source_platform="bilibili", content_id=content_id)
+        return SavedItemInput(
+            source_platform="bilibili",
+            content_id=content_id,
+            content_url=str(row["content_url"] or ""),
+            content_type=str(row["content_type"] or "video"),
+            title=str(row["title"] or ""),
+            author_name=str(row["author_name"] or row["up_name"] or ""),
+            cover_url=str(row["cover_url"] or ""),
+        )
+
+    def _resolve_legacy_saved_item_key(self, list_kind: str, content_id: str) -> str | None:
+        """Resolve a legacy raw-ID removal to one unambiguous normalized membership."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_content_id = content_id.strip()
+        bilibili_key = f"bilibili:{normalized_content_id}"
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT m.item_key
+            FROM saved_memberships AS m
+            JOIN saved_items AS i ON i.item_key = m.item_key
+            WHERE m.list_kind = ?
+              AND (m.item_key = ? OR i.content_id = ?)
+            ORDER BY CASE WHEN m.item_key = ? THEN 0 ELSE 1 END, m.item_key
+            """,
+            (normalized_kind, bilibili_key, normalized_content_id, bilibili_key),
+        ).fetchall()
+        if rows and str(rows[0]["item_key"]) == bilibili_key:
+            return bilibili_key
+        if len(rows) == 1:
+            return str(rows[0]["item_key"])
+        if len(rows) > 1:
+            return None
+        return bilibili_key
+
+    @staticmethod
+    def _saved_membership_select() -> str:
+        return """
+            SELECT
+                m.list_kind,
+                i.item_key,
+                i.source_platform,
+                i.content_id,
+                i.content_url,
+                i.content_type,
+                i.title,
+                i.author_name,
+                i.cover_url,
+                i.created_at,
+                i.updated_at,
+                m.note,
+                m.added_at,
+                COALESCE(n.requested_action, '') AS requested_action,
+                COALESCE(n.resolved_action, '') AS resolved_action,
+                COALESCE(n.resolved_target, '') AS resolved_target,
+                COALESCE(n.status, 'pending') AS sync_status,
+                COALESCE(n.task_id, '') AS sync_task_id,
+                COALESCE(n.last_error_code, '') AS last_error_code,
+                COALESCE(n.last_error_message, '') AS last_error_message,
+                n.last_attempt_at,
+                n.synced_at
+            FROM saved_memberships AS m
+            JOIN saved_items AS i ON i.item_key = m.item_key
+            LEFT JOIN native_save_states AS n
+                ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+        """
+
+    def upsert_saved_membership(
+        self,
+        list_kind: str,
+        item: SavedItemInput,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Atomically upsert an item snapshot and its local list membership."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        item_key = item.item_key
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO saved_items (
+                    item_key, source_platform, content_id, content_url, content_type,
+                    title, author_name, cover_url
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_key) DO UPDATE SET
+                    source_platform = excluded.source_platform,
+                    content_id = excluded.content_id,
+                    content_url = excluded.content_url,
+                    content_type = excluded.content_type,
+                    title = excluded.title,
+                    author_name = excluded.author_name,
+                    cover_url = excluded.cover_url,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    item_key,
+                    item.platform,
+                    item.content_id.strip(),
+                    item.content_url.strip(),
+                    item.content_type.strip() or "video",
+                    item.title.strip(),
+                    item.author_name.strip(),
+                    item.cover_url.strip(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO saved_memberships (list_kind, item_key, note)
+                VALUES (?, ?, ?)
+                ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                    note = excluded.note,
+                    added_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_kind, item_key, note),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        row = self.get_saved_membership(normalized_kind, item_key)
+        if row is None:  # pragma: no cover - transaction succeeded but row vanished externally
+            raise RuntimeError("saved membership disappeared after upsert")
+        return row
+
+    def remove_saved_membership(self, list_kind: str, item_key: str) -> bool:
+        """Remove a normalized membership and any matching legacy compatibility row."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        legacy_table = "favorites" if normalized_kind == "favorite" else "watch_later"
+        legacy_bvid = (
+            normalized_key.removeprefix("bilibili:")
+            if normalized_key.startswith("bilibili:")
+            else None
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active_state = conn.execute(
+                """
+                SELECT task_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                  AND status IN ('pending', 'syncing') AND task_id != ''
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if active_state is not None:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'not_saved_locally',
+                        last_error_message = 'Item is not saved locally',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status IN ('pending', 'syncing')
+                    """,
+                    (str(active_state["task_id"]), normalized_key),
+                )
+            cursor = conn.execute(
+                "DELETE FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            )
+            removed = int(cursor.rowcount or 0) > 0
+            direct_bilibili_clause = "bvid = ? OR" if legacy_bvid is not None else ""
+            legacy_params = (legacy_bvid, normalized_key) if legacy_bvid else (normalized_key,)
+            legacy_cursor = conn.execute(
+                f"""
+                DELETE FROM {legacy_table}
+                WHERE {direct_bilibili_clause} item_key = ?
+                """,
+                legacy_params,
+            )
+            removed = removed or int(legacy_cursor.rowcount or 0) > 0
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        self._ensure_fresh_read()
+        return removed
+
+    def get_saved_membership(self, list_kind: str, item_key: str) -> dict[str, Any] | None:
+        """Return one normalized membership with its current native-sync state."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            self._saved_membership_select() + " WHERE m.list_kind = ? AND m.item_key = ?",
+            (normalized_kind, item_key.strip()),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_saved_memberships(
+        self,
+        list_kind: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List normalized memberships newest first with native-sync state."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            self._saved_membership_select()
+            + " WHERE m.list_kind = ? ORDER BY m.added_at DESC, m.item_key ASC LIMIT ? OFFSET ?",
+            (normalized_kind, limit, offset),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_native_save_state(
+        self,
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+        resolved_action: str = "",
+        resolved_target: str = "",
+        status: str = "pending",
+        task_id: str = "",
+        execution_id: str = "",
+        last_error_code: str = "",
+        last_error_message: str = "",
+    ) -> None:
+        """Persist the latest native-save routing and execution state for one item."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        normalized_task_id = task_id.strip()
+        if not isinstance(status, str) or status not in NATIVE_SAVE_STATUSES:
+            raise ValueError("invalid native save status")
+        if task_id and not normalized_task_id:
+            raise ValueError("task_id must not be blank")
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            membership = conn.execute(
+                "SELECT 1 FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if membership is None:
+                raise ValueError(
+                    f"saved membership does not exist: {normalized_kind}/{normalized_key}"
+                )
+            if execution_id or status == "syncing" or (status == "pending" and normalized_task_id):
+                raise ValueError("active task ownership must use the atomic claim APIs")
+            current = conn.execute(
+                """
+                SELECT status, task_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if (
+                current is not None
+                and str(current["status"]) in {"pending", "syncing"}
+                and str(current["task_id"])
+            ):
+                raise ValueError("active task ownership must use the atomic claim APIs")
+            if current is not None and status == "pending" and str(current["status"]) != "pending":
+                raise ValueError("invalid native save status transition to pending")
+            conn.execute(
+                """
+                INSERT INTO native_save_states (
+                    list_kind, item_key, requested_action, resolved_action, resolved_target,
+                    status, task_id, execution_id, last_error_code, last_error_message,
+                    last_attempt_at, synced_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    CASE WHEN ? IN ('synced', 'already_synced')
+                        THEN CURRENT_TIMESTAMP ELSE NULL END
+                )
+                ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                    requested_action = excluded.requested_action,
+                    resolved_action = excluded.resolved_action,
+                    resolved_target = excluded.resolved_target,
+                    status = excluded.status,
+                    task_id = excluded.task_id,
+                    execution_id = excluded.execution_id,
+                    last_error_code = excluded.last_error_code,
+                    last_error_message = excluded.last_error_message,
+                    last_attempt_at = CASE
+                        WHEN excluded.status = 'pending' THEN native_save_states.last_attempt_at
+                        ELSE CURRENT_TIMESTAMP
+                    END,
+                    synced_at = CASE
+                        WHEN excluded.status IN ('synced', 'already_synced')
+                            THEN CURRENT_TIMESTAMP
+                        ELSE native_save_states.synced_at
+                    END
+                """,
+                (
+                    normalized_kind,
+                    normalized_key,
+                    requested_action,
+                    resolved_action,
+                    resolved_target,
+                    status,
+                    normalized_task_id,
+                    "",
+                    last_error_code,
+                    last_error_message,
+                    status,
+                    status,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def ensure_native_save_state(
+        self,
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+    ) -> dict[str, Any]:
+        """Insert a pending state only when absent and return the effective state.
+
+        Existing active, claimed, syncing, retryable, and terminal rows are never
+        modified. This closes the local-save/task-claim read-then-write race.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            membership = conn.execute(
+                "SELECT 1 FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if membership is None:
+                raise ValueError(
+                    f"saved membership does not exist: {normalized_kind}/{normalized_key}"
+                )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO native_save_states (
+                    list_kind, item_key, requested_action, status
+                ) VALUES (?, ?, ?, 'pending')
+                """,
+                (normalized_kind, normalized_key, requested_action),
+            )
+            row = conn.execute(
+                """
+                SELECT requested_action, resolved_action, resolved_target, status,
+                       task_id, execution_id, last_error_code, last_error_message,
+                       last_attempt_at, synced_at, task_claimed_at, task_started_at,
+                       task_heartbeat_at, task_runner_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if row is None:  # pragma: no cover - insert/select share one write transaction
+            raise RuntimeError("native save state disappeared during ensure")
+        return dict(row)
+
+    def claim_native_sync_task(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None,
+        task_id: str,
+    ) -> list[str]:
+        """Atomically assign eligible memberships to one durable pending task.
+
+        A pending row with a non-empty task owner is deliberately ineligible so
+        duplicate/manual task creation cannot steal it and invalidate polling for
+        the original task ID.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        params: list[Any] = [normalized_kind]
+        item_filter = ""
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND m.item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT m.item_key
+                FROM saved_memberships AS m
+                LEFT JOIN native_save_states AS n
+                  ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                WHERE m.list_kind = ?
+                  AND (
+                      n.status IS NULL
+                      OR (n.status = 'pending' AND n.task_id = '')
+                      OR n.status IN (
+                          'login_required', 'rate_limited',
+                          'extension_required', 'failed'
+                      )
+                  )
+                """
+                + item_filter
+                + " ORDER BY m.added_at DESC, m.item_key ASC",
+                params,
+            ).fetchall()
+            claimed_keys = [str(row["item_key"]) for row in rows]
+            for item_key in claimed_keys:
+                conn.execute(
+                    """
+                    INSERT INTO native_save_states (
+                        list_kind, item_key, requested_action, status, task_id,
+                        execution_id, resolved_action, resolved_target,
+                        last_error_code, last_error_message, last_attempt_at,
+                        task_claimed_at, task_started_at
+                    )
+                    VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL,
+                            CURRENT_TIMESTAMP, NULL)
+                    ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                        requested_action = excluded.requested_action,
+                        status = 'pending',
+                        task_id = excluded.task_id,
+                        execution_id = '',
+                        resolved_action = '',
+                        resolved_target = '',
+                        last_error_code = '',
+                        last_error_message = '',
+                        task_claimed_at = CURRENT_TIMESTAMP,
+                        task_started_at = NULL,
+                        task_heartbeat_at = NULL,
+                        task_runner_id = ''
+                    """,
+                    (normalized_kind, item_key, normalized_kind, normalized_task_id),
+                )
+            conn.commit()
+            return claimed_keys
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_native_sync_task_snapshot(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None,
+        task_id: str,
+        trigger: str,
+    ) -> list[dict[str, Any]]:
+        """Create one durable task ledger and atomically claim its live items.
+
+        ``item_keys is None`` selects every currently eligible membership. An
+        explicit selection snapshots every requested key in caller order:
+        missing keys become terminal ``not_saved_locally`` failures, terminal
+        native states become terminal no-ops, and rows already owned by another
+        task become terminal ``sync_already_in_progress`` no-ops.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_trigger = trigger.strip()
+        if not normalized_trigger:
+            raise ValueError("trigger must not be blank")
+        explicit_selection = item_keys is not None
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if (
+            raw_keys
+            and len(cleaned_keys) != len(dict.fromkeys(raw_keys))
+            and any(not key.strip() for key in raw_keys)
+        ):
+            raise ValueError("item_keys must not contain blank keys")
+
+        retryable_statuses = {
+            "login_required",
+            "rate_limited",
+            "extension_required",
+            "failed",
+        }
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO native_save_tasks (task_id, list_kind, trigger)
+                VALUES (?, ?, ?)
+                """,
+                (normalized_task_id, normalized_kind, normalized_trigger),
+            )
+            if explicit_selection:
+                selected_keys = cleaned_keys
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT m.item_key
+                    FROM saved_memberships AS m
+                    LEFT JOIN native_save_states AS n
+                      ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                    WHERE m.list_kind = ?
+                      AND (
+                          n.status IS NULL
+                          OR (n.status = 'pending' AND n.task_id = '')
+                          OR n.status IN (
+                              'login_required', 'rate_limited',
+                              'extension_required', 'failed'
+                          )
+                          OR (
+                              n.status = 'unsupported'
+                              AND n.last_error_code = 'unsupported_adapter_missing'
+                          )
+                      )
+                    ORDER BY m.added_at DESC, m.item_key ASC
+                    """,
+                    (normalized_kind,),
+                ).fetchall()
+                selected_keys = [str(row["item_key"]) for row in rows]
+
+            for ordinal, item_key in enumerate(selected_keys):
+                row = conn.execute(
+                    """
+                    SELECT
+                        m.item_key,
+                        n.requested_action,
+                        n.resolved_action,
+                        n.resolved_target,
+                        n.status,
+                        n.task_id,
+                        n.last_error_code,
+                        n.last_error_message
+                    FROM saved_memberships AS m
+                    LEFT JOIN native_save_states AS n
+                      ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                    WHERE m.list_kind = ? AND m.item_key = ?
+                    """,
+                    (normalized_kind, item_key),
+                ).fetchone()
+                requested_action: str = normalized_kind
+                resolved_action: str = normalized_kind
+                resolved_target = ""
+                status: str = "failed"
+                is_live = 0
+                error_code = "not_saved_locally"
+                error_message = "Item is not saved locally"
+
+                if row is not None:
+                    current_status = str(row["status"] or "pending")
+                    current_task_id = str(row["task_id"] or "")
+                    requested_action = str(row["requested_action"] or normalized_kind)
+                    resolved_action = str(row["resolved_action"] or normalized_kind)
+                    resolved_target = str(row["resolved_target"] or "")
+                    error_code = str(row["last_error_code"] or "")
+                    error_message = str(row["last_error_message"] or "")
+                    eligible = (
+                        row["status"] is None
+                        or (current_status == "pending" and not current_task_id)
+                        or current_status in retryable_statuses
+                        or (
+                            current_status == "unsupported"
+                            and error_code == "unsupported_adapter_missing"
+                        )
+                    )
+                    if eligible:
+                        status = "pending"
+                        is_live = 1
+                        resolved_action = normalized_kind
+                        resolved_target = ""
+                        error_code = ""
+                        error_message = ""
+                        conn.execute(
+                            """
+                            INSERT INTO native_save_states (
+                                list_kind, item_key, requested_action, status, task_id,
+                                execution_id, resolved_action, resolved_target,
+                                last_error_code, last_error_message, last_attempt_at,
+                                task_claimed_at, task_started_at
+                            )
+                            VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL,
+                                    CURRENT_TIMESTAMP, NULL)
+                            ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                                requested_action = excluded.requested_action,
+                                status = 'pending',
+                                task_id = excluded.task_id,
+                                execution_id = '',
+                                resolved_action = '',
+                                resolved_target = '',
+                                last_error_code = '',
+                                last_error_message = '',
+                                task_claimed_at = CURRENT_TIMESTAMP,
+                                task_started_at = NULL,
+                                task_heartbeat_at = NULL,
+                                task_runner_id = ''
+                            """,
+                            (
+                                normalized_kind,
+                                item_key,
+                                normalized_kind,
+                                normalized_task_id,
+                            ),
+                        )
+                    elif current_status in NATIVE_SAVE_TERMINAL_STATUSES:
+                        status = current_status
+                    else:
+                        status = "failed"
+                        error_code = "sync_already_in_progress"
+                        error_message = "Item already belongs to an active sync task"
+
+                conn.execute(
+                    """
+                    INSERT INTO native_save_task_items (
+                        task_id, item_key, ordinal, requested_action, resolved_action,
+                        resolved_target, status, is_live, last_error_code,
+                        last_error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_task_id,
+                        item_key,
+                        ordinal,
+                        requested_action,
+                        resolved_action,
+                        resolved_target,
+                        status,
+                        is_live,
+                        error_code,
+                        error_message,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.list_native_sync_task_items(normalized_task_id)
+
+    def native_sync_task_exists(self, task_id: str) -> bool:
+        """Return whether a durable task ledger exists, including empty tasks."""
+        normalized_task_id = self._native_task_id(task_id)
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            "SELECT 1 FROM native_save_tasks WHERE task_id = ?",
+            (normalized_task_id,),
+        ).fetchone()
+        return row is not None
+
+    def list_native_sync_task_items(self, task_id: str) -> list[dict[str, Any]]:
+        """Return immutable task membership with its task-scoped result snapshot."""
+        normalized_task_id = self._native_task_id(task_id)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT
+                t.list_kind,
+                i.task_id,
+                i.item_key,
+                i.ordinal,
+                i.requested_action,
+                i.resolved_action,
+                i.resolved_target,
+                i.status,
+                i.is_live,
+                i.last_error_code,
+                i.last_error_message,
+                i.updated_at
+            FROM native_save_task_items AS i
+            JOIN native_save_tasks AS t ON t.task_id = i.task_id
+            WHERE i.task_id = ?
+            ORDER BY i.ordinal ASC, i.item_key ASC
+            """,
+            (normalized_task_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def discard_native_sync_task(self, task_id: str) -> bool:
+        """Delete an unreturned task ledger after task-starter registration fails."""
+        normalized_task_id = self._native_task_id(task_id)
+        cursor = self._execute_write(
+            "DELETE FROM native_save_tasks WHERE task_id = ?",
+            (normalized_task_id,),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def release_native_sync_task(self, task_id: str) -> int:
+        """Release pending ownership when a task could not be registered."""
+        normalized_task_id = self._native_task_id(task_id)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+            WHERE task_id = ? AND status = 'pending' AND execution_id = ''
+            """,
+            (normalized_task_id,),
+        )
+        return int(cursor.rowcount or 0)
+
+    def release_stale_pending_native_sync_tasks(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Release pending owners whose task never started or lost its heartbeat."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        item_filter = ""
+        params: list[Any] = [normalized_kind]
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        age = max(0, int(stale_after_seconds))
+        cutoff = f"-{age} seconds"
+        params.extend((cutoff, cutoff))
+        where_sql = (
+            """
+            WHERE list_kind = ? AND status = 'pending' AND task_id != ''
+            """
+            + item_filter
+            + """
+              AND (
+                  (task_started_at IS NULL AND task_claimed_at IS NOT NULL
+                   AND task_claimed_at <= datetime('now', ?))
+                  OR
+                  (task_started_at IS NOT NULL
+                   AND (task_heartbeat_at IS NULL
+                        OR task_heartbeat_at <= datetime('now', ?)))
+              )
+            """
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT task_id, item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (str(row["task_id"]), str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                    task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_stale_pending_native_sync_task(
+        self,
+        task_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Release stale pending rows while polling one known task."""
+        normalized_task_id = self._native_task_id(task_id)
+        age = max(0, int(stale_after_seconds))
+        cutoff = f"-{age} seconds"
+        params = (normalized_task_id, cutoff, cutoff)
+        where_sql = """
+            WHERE task_id = ? AND status = 'pending'
+              AND (
+                  (task_started_at IS NULL AND task_claimed_at IS NOT NULL
+                   AND task_claimed_at <= datetime('now', ?))
+                  OR
+                  (task_started_at IS NOT NULL
+                   AND (task_heartbeat_at IS NULL
+                        OR task_heartbeat_at <= datetime('now', ?)))
+              )
+        """
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (normalized_task_id, str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                    task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_native_sync_task_runner(
+        self,
+        task_id: str,
+        runner_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> bool:
+        """Atomically acquire the single batch-runner lease for a task."""
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        age = max(0, int(stale_after_seconds))
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                """
+                SELECT 1
+                FROM native_save_states
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                LIMIT 1
+                """,
+                (normalized_task_id,),
+            ).fetchone()
+            if active is None:
+                conn.commit()
+                return True
+            conflicting = conn.execute(
+                """
+                SELECT 1
+                FROM native_save_states
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                  AND task_runner_id NOT IN ('', ?)
+                  AND task_heartbeat_at IS NOT NULL
+                  AND task_heartbeat_at > datetime('now', ?)
+                LIMIT 1
+                """,
+                (normalized_task_id, normalized_runner_id, f"-{age} seconds"),
+            ).fetchone()
+            if conflicting is not None:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_runner_id = ?,
+                    task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP),
+                    task_heartbeat_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                """,
+                (normalized_runner_id, normalized_task_id),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def heartbeat_native_sync_task(self, task_id: str, runner_id: str) -> int:
+        """Refresh the task lease protecting all remaining batch rows."""
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_heartbeat_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND task_runner_id = ? AND task_started_at IS NOT NULL
+                  AND status IN ('pending', 'syncing')
+                """,
+                (normalized_task_id, normalized_runner_id),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_pending_native_sync_task(self, task_id: str, runner_id: str) -> int:
+        """Release unclaimed pending rows when a runner exits normally or by cancellation."""
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        params = (normalized_task_id, normalized_runner_id)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT item_key
+                FROM native_save_states
+                WHERE task_id = ? AND task_runner_id = ?
+                  AND status = 'pending' AND execution_id = ''
+                """,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (normalized_task_id, str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                    task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+                WHERE task_id = ? AND task_runner_id = ?
+                  AND status = 'pending' AND execution_id = ''
+                """,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_native_save_item(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        runner_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Atomically claim one pending task item for adapter execution."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET status = 'syncing', execution_id = ?, last_attempt_at = CURRENT_TIMESTAMP
+                WHERE list_kind = ? AND item_key = ? AND task_id = ? AND task_runner_id = ?
+                  AND status = 'pending' AND execution_id = ''
+                """,
+                (
+                    normalized_execution_id,
+                    normalized_kind,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_runner_id,
+                ),
+            )
+            claimed = int(cursor.rowcount or 0) > 0
+            if claimed:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'syncing', updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status = 'pending'
+                    """,
+                    (normalized_task_id, normalized_key),
+                )
+            conn.commit()
+            return claimed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_native_save_claim_route(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        resolved_action: str,
+        resolved_target: str,
+    ) -> bool:
+        """Persist the router-owned destination for a live execution claim."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET resolved_action = ?, resolved_target = ?
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    resolved_action,
+                    resolved_target,
+                    normalized_kind,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            updated = int(cursor.rowcount or 0) > 0
+            if updated:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET resolved_action = ?, resolved_target = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status = 'syncing'
+                    """,
+                    (
+                        resolved_action,
+                        resolved_target,
+                        normalized_task_id,
+                        normalized_key,
+                    ),
+                )
+            conn.commit()
+            return updated
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def heartbeat_native_save_claim(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Refresh a live adapter lease only while the execution owner matches."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET last_attempt_at = CURRENT_TIMESTAMP
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    normalized_kind,
+                    item_key.strip(),
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_native_save_claim(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        *,
+        requested_action: str,
+        resolved_action: str,
+        resolved_target: str,
+        status: str,
+        last_error_code: str = "",
+        last_error_message: str = "",
+    ) -> bool:
+        """Complete one item only when the caller still owns its execution claim."""
+        if not isinstance(status, str) or status not in NATIVE_SAVE_TERMINAL_STATUSES:
+            raise ValueError("completion requires a terminal status")
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET requested_action = ?, resolved_action = ?, resolved_target = ?,
+                    status = ?, execution_id = '', task_runner_id = '', last_error_code = ?,
+                    last_error_message = ?,
+                    synced_at = CASE WHEN ? IN ('synced', 'already_synced')
+                        THEN CURRENT_TIMESTAMP ELSE synced_at END
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    requested_action,
+                    resolved_action,
+                    resolved_target,
+                    status,
+                    last_error_code,
+                    last_error_message,
+                    status,
+                    normalized_kind,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            completed = int(cursor.rowcount or 0) > 0
+            if completed:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET requested_action = ?, resolved_action = ?, resolved_target = ?,
+                        status = ?, is_live = 0, last_error_code = ?,
+                        last_error_message = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status = 'syncing'
+                    """,
+                    (
+                        requested_action,
+                        resolved_action,
+                        resolved_target,
+                        status,
+                        last_error_code,
+                        last_error_message,
+                        normalized_task_id,
+                        normalized_key,
+                    ),
+                )
+            conn.commit()
+            return completed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def reconcile_stale_native_save_claims(
+        self,
+        task_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Turn abandoned syncing leases into explicit retryable failures."""
+        normalized_task_id = self._native_task_id(task_id)
+        age = max(0, int(stale_after_seconds))
+        params = (normalized_task_id, f"-{age} seconds")
+        where_sql = """
+            WHERE task_id = ? AND status = 'syncing'
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at <= datetime('now', ?)
+        """
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (normalized_task_id, str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET status = 'failed', execution_id = '', task_runner_id = '',
+                    last_error_code = 'interrupted',
+                    last_error_message = 'Native save was interrupted'
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def reconcile_stale_native_save_claims_for_list(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Recover stale syncing rows selected by a normal manual-list action."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        item_filter = ""
+        params: list[Any] = [normalized_kind]
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        age = max(0, int(stale_after_seconds))
+        params.append(f"-{age} seconds")
+        where_sql = (
+            """
+            WHERE list_kind = ? AND status = 'syncing'
+            """
+            + item_filter
+            + """
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at <= datetime('now', ?)
+            """
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT task_id, item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (str(row["task_id"]), str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET status = 'failed', execution_id = '', task_runner_id = '',
+                    last_error_code = 'interrupted',
+                    last_error_message = 'Native save was interrupted'
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_native_sync_eligible(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """List memberships eligible for an initial sync or a manual retry."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        params: list[Any] = [normalized_kind]
+        item_filter = ""
+        if item_keys:
+            cleaned_keys = [item_key.strip() for item_key in item_keys]
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND m.item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            self._saved_membership_select()
+            + """
+            WHERE m.list_kind = ?
+              AND (
+                  n.status IS NULL
+                  OR (n.status = 'pending' AND n.task_id = '')
+                  OR n.status IN (
+                      'login_required', 'rate_limited',
+                      'extension_required', 'failed'
+                  )
+                  OR (
+                      n.status = 'unsupported'
+                      AND n.last_error_code = 'unsupported_adapter_missing'
+                  )
+              )
+            """
+            + item_filter
+            + " ORDER BY m.added_at DESC, m.item_key ASC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_native_save_states_by_task(self, task_id: str) -> list[dict[str, Any]]:
+        """Return all persisted item results for a native-save task."""
+        normalized_task_id = self._native_task_id(task_id)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT
+                n.list_kind,
+                n.item_key,
+                i.source_platform,
+                i.content_id,
+                i.content_url,
+                i.content_type,
+                i.title,
+                i.author_name,
+                i.cover_url,
+                m.note,
+                m.added_at,
+                n.requested_action,
+                n.resolved_action,
+                n.resolved_target,
+                n.status,
+                n.task_id,
+                n.execution_id,
+                n.task_claimed_at,
+                n.task_started_at,
+                n.task_heartbeat_at,
+                n.task_runner_id,
+                n.last_error_code,
+                n.last_error_message,
+                n.last_attempt_at,
+                n.synced_at
+            FROM native_save_states AS n
+            JOIN saved_memberships AS m
+                ON m.list_kind = n.list_kind AND m.item_key = n.item_key
+            JOIN saved_items AS i ON i.item_key = n.item_key
+            WHERE n.task_id = ?
+            ORDER BY m.added_at DESC, n.item_key ASC
+            """,
+            (normalized_task_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ── Auth state (password gate revocation epoch) ──────────────
 
@@ -8530,75 +11093,80 @@ class Database:
 
     def add_to_favorites(self, bvid: str, note: str = "") -> bool:
         """Save a video to favorites. Returns True if newly inserted."""
+        item = self._bilibili_saved_item_input(bvid)
+        self.upsert_saved_membership("favorite", item, note)
         self._execute_write(
             """
-            INSERT INTO favorites (bvid, note)
-            VALUES (?, ?)
+            INSERT INTO favorites (bvid, note, item_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 added_at = CURRENT_TIMESTAMP,
-                note = excluded.note
+                note = excluded.note,
+                item_key = excluded.item_key
             """,
-            (bvid.strip(), note),
+            (bvid.strip(), note, item.item_key),
         )
         return self.conn.total_changes > 0
 
     def remove_from_favorites(self, bvid: str) -> bool:
         """Remove a favorite. Returns True if a row was deleted."""
-        self._execute_write(
-            "DELETE FROM favorites WHERE bvid = ?",
-            (bvid.strip(),),
-        )
-        return self.conn.total_changes > 0
+        item_key = self._resolve_legacy_saved_item_key("favorite", bvid)
+        if item_key is None:
+            return False
+        return self.remove_saved_membership("favorite", item_key)
 
     def is_in_favorites(self, bvid: str) -> bool:
         """Check whether a video is favorited."""
-        row = self.conn.execute(
-            "SELECT 1 FROM favorites WHERE bvid = ?",
-            (bvid.strip(),),
-        ).fetchone()
-        return row is not None
+        item_key = self._resolve_legacy_saved_item_key("favorite", bvid)
+        return item_key is not None and self.get_saved_membership("favorite", item_key) is not None
 
     def count_favorites(self) -> int:
         """Return total number of favorited videos."""
-        row = self.conn.execute("SELECT COUNT(*) FROM favorites").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM saved_memberships WHERE list_kind = ?",
+            ("favorite",),
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def list_favorites(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return favorited videos with content_cache metadata, newest first."""
-        cursor = self.conn.execute(
-            """
-            SELECT
-                f.bvid,
-                f.added_at,
-                f.note,
-                COALESCE(c.title, '') AS title,
-                COALESCE(c.up_name, '') AS up_name,
-                COALESCE(c.cover_url, '') AS cover_url,
-                COALESCE(c.content_url, '') AS content_url,
-                COALESCE(c.source_platform, '') AS source_platform
-            FROM favorites AS f
-            LEFT JOIN content_cache AS c ON c.bvid = f.bvid
-            ORDER BY f.added_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            {
+                "bvid": row["content_id"],
+                "item_key": row["item_key"],
+                "content_id": row["content_id"],
+                "added_at": row["added_at"],
+                "note": row["note"],
+                "title": row["title"],
+                "up_name": row["author_name"],
+                "cover_url": row["cover_url"],
+                "content_url": row["content_url"],
+                "source_platform": row["source_platform"],
+                "content_type": row["content_type"],
+            }
+            for row in self.list_saved_memberships("favorite", limit, offset)
+        ]
 
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]:
         """Return ``(cover_url, pool_status, is_saved)`` for every cached-cover candidate.
 
-        ``is_saved`` is True when the bvid is in favorites or watch_later. Consumed
-        by the image-cache cleanup (:mod:`openbiliclaw.runtime.image_cache`) to decide
-        which cached cover files are safe to evict: covers of saved or still-pending
-        content are kept; covers of consumed, unsaved content are eligible for removal.
+        ``is_saved`` is True when the canonical item key has a normalized saved
+        membership, with legacy Bilibili tables retained as a compatibility fallback.
+        Consumed by the image-cache cleanup (:mod:`openbiliclaw.runtime.image_cache`)
+        to decide which cached cover files are safe to evict: covers of saved or
+        still-pending content are kept; covers of consumed, unsaved content are
+        eligible for removal.
         """
         cursor = self.conn.execute(
             """
             SELECT
                 COALESCE(cc.cover_url, '') AS cover_url,
                 COALESCE(cc.pool_status, 'fresh') AS pool_status,
-                CASE WHEN f.bvid IS NOT NULL OR w.bvid IS NOT NULL THEN 1 ELSE 0 END AS is_saved
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.item_key = cc.item_key
+                ) OR f.bvid IS NOT NULL OR w.bvid IS NOT NULL THEN 1 ELSE 0 END AS is_saved
             FROM content_cache AS cc
             LEFT JOIN favorites AS f ON f.bvid = cc.bvid
             LEFT JOIN watch_later AS w ON w.bvid = cc.bvid
@@ -8630,6 +11198,11 @@ class Database:
               AND cc.discovered_at >= datetime('now', ?)
               AND (
                 COALESCE(cc.pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
+                OR EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.item_key = cc.item_key
+                )
                 OR f.bvid IS NOT NULL
                 OR w.bvid IS NOT NULL
               )

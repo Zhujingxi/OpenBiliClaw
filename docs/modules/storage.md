@@ -4,11 +4,12 @@
 
 `src/openbiliclaw/storage/` 负责本地 SQLite 数据库、schema 初始化、候选池计数和高频读写路径。它不理解 runtime state 或用户画像，只提供确定性的持久化 API。
 
-本模块当前承担三类边界：
+本模块当前承担四类边界：
 
 - 行为、推荐、候选池、聊天和鉴权状态的 SQLite 表结构管理。
 - 推荐池 `content_cache` 的可换 / raw / pending 计数口径。
 - discovery 待评估池 `discovery_candidates` 的生命周期管理。
+- 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
 
 ## 已实现功能
 
@@ -16,6 +17,9 @@
 |------|------|------|
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、近期已看、self-XHS 与 delight guards。 |
+| 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
+| 扩展原生保存 job ledger 与旧状态迁移 | ✅ | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；task URL 只允许平台 HTTPS host 与默认端口，输出移除 fragment/非导航 query（YouTube 仅保留身份参数 `v`；小红书仅保留打开公开笔记所需的单值非空 `xsec_token/xsec_source`，其它 key 仍剥离）。partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。命名迁移只把六个 canonical 平台的旧 `unsupported`/空 error code 改为 `unsupported_adapter_missing`，绝不改 Bilibili、未知平台或 `unsupported_content_type`。 |
+| 推荐链路 canonical identity | ✅ | `content_cache.item_key` 唯一索引、`recommendations.item_key` 普通索引；初始化按平台 + raw `content_id` 回填旧行，并在建唯一索引前确定性合并 canonical 重复行（优先 canonical storage key、填补非空元数据、重定向 recommendation 引用）。若 loser 仍被旧 `watch_later` / `favorites` 引用，consolidation 会先为真实 legacy schema 补 additive `item_key` 并写入 canonical key；后续 normalized saved migration 在 exact `bvid` 不存在时用该稳定键 join keeper，既保留 membership，也不绕过 Task 2 的单次 marker / no-resurrection 语义。B 站 `bvid` 主键保持 raw BV 兼容，非 B 站 `bvid` 存储键使用 namespaced identity，API 继续从独立字段输出 raw ID 与 authoritative URL。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
 | 原子库存维护与历史恢复 | ✅ | `maintain_pool_inventory()` 在短连接 `BEGIN IMMEDIATE` 中先恢复仍合格的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；保护 canonical available 底线并在不变量失败时整体回滚。 |
 | 七平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
@@ -31,6 +35,7 @@
 | serve 平台保底查询 | ✅ | `get_pool_candidates_for_platform(platform, limit=5)` 复用 `get_pool_candidates()` 同一 servable WHERE / guards / 排序，追加 `COALESCE(NULLIF(source_platform,''),'bilibili')` 平台过滤，供推荐 serve 对窗口内缺席平台补拉；`list_servable_pool_platforms()` 返回当前可服务候选的去重平台 token（复用 `_load_available_pool_candidate_rows` 的同口径守卫）。 |
 | `style_key` 历史值迁移 | ✅ | `Database.initialize()` 会把 `content_cache` / `discovery_candidates` 中已知旧内容风格 key 迁移到新的观看模式 key；写入 `cache_content()` 和 `update_discovery_candidate_evaluations()` 时也会归一化已知旧值。 |
 | 封面粘性保护 | ✅ | `cache_content()` upsert 对 `cover_url` 用 `COALESCE(NULLIF(excluded,''), 现值)`——带空封面的重摄入（如互动数据刷新、事件驱动 related-chain）不再抹掉已有好封面，与 `author_name` / `body_text` 同一保护策略（v0.3.162+）。 |
+| 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
 
 ## 公开 API
 
@@ -52,6 +57,82 @@ url_platform = infer_source_platform_from_url(
 ```
 
 `CANONICAL_SOURCE_FAMILIES` 固定按 `bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit` 枚举。别名归一包括 `bili`、`xhs/rednote`、`dy/tiktok`、`yt`、`x`、`zh/知乎`、`rd`；strategy 归类使用 B 站精确 key 与其他平台前缀，URL 推断只匹配解析后的精确 host 或其子域，不扫描整条 URL 子串。数据库保留 `_pool_source_family()`、`_normalize_source_platform_key()` 私有兼容入口，但两者均委托该规则表。
+
+### Saved Memberships And Native State
+
+```python
+from openbiliclaw.saved_sync.models import SavedItemInput
+
+item = SavedItemInput(
+    source_platform="youtube",
+    content_id="video-123",
+    content_url="https://www.youtube.com/watch?v=video-123",
+    title="Example",
+)
+membership = db.upsert_saved_membership("favorite", item, note="稍后整理")
+native = db.ensure_native_save_state("favorite", item.item_key, "favorite")
+current = db.get_saved_membership("favorite", item.item_key)
+rows = db.list_saved_memberships("favorite", limit=50, offset=0)
+
+task_rows = db.create_native_sync_task_snapshot(
+    "favorite", [item.item_key], "task-id", "manual_selected"
+)
+if db.claim_native_sync_task_runner("task-id", "runner-id") and db.claim_native_save_item(
+    "favorite", item.item_key, "task-id", "runner-id", "execution-id"
+):
+    db.update_native_save_claim_route(
+        "favorite", item.item_key, "task-id", "execution-id",
+        "favorite", "OpenBiliClaw",
+    )
+    db.heartbeat_native_save_claim(
+        "favorite", item.item_key, "task-id", "execution-id"
+    )
+    db.heartbeat_native_sync_task("task-id", "runner-id")
+task_rows = db.list_native_sync_task_items("task-id")
+removed = db.remove_saved_membership("favorite", item.item_key)
+```
+
+存储契约：
+
+- `saved_items.item_key` 是平台 canonical identity；不同平台可安全复用相同裸 `content_id`。
+- `content_cache` 与 `recommendations` 用同一 canonical `item_key` 做跨源关联；新推荐写入会随历史记录持久化该键，读取不再依赖可能跨平台碰撞的裸 ID。
+- `saved_memberships` 以 `(list_kind, item_key)` 为主键，同一内容可同时属于 `favorite` 与 `watch_later`。无 `native_save_states` 行时，membership 查询返回 `sync_status="pending"`。
+- 封面预取和清理读取以 `content_cache.item_key → saved_memberships.item_key` 判断是否已保存，不依赖 legacy 表是否有同 BVID 行；初始化会为反向关联补 `saved_memberships(item_key)` 索引，并保留旧表 join 作为兼容 fallback。
+- `native_save_states` 以同一联合键引用 membership；状态写入在启用外键的事务内先验证本地 membership，未本地保存的 key 会抛出 `ValueError`，不会留下 orphan state。所有 DAO 写入只接受显式 `NativeSaveStatus` 集合；新建表还有等价 `CHECK`。`ensure_native_save_state()` 使用 `INSERT OR IGNORE` 并在同一事务返回 effective row，任何已存在的 pending / claimed / syncing / retryable / terminal 状态都不会被本地重复保存降级或清空 owner。兼容用 `upsert_native_save_state()` 只能插入 / 刷新无 owner 的 pending 或写允许的 terminal 快照：传入未知 / 带空白状态、`execution_id`、`status='syncing'`、带 `task_id` 的 pending，覆盖已有 active owner，或把 terminal 降回 pending 都会拒绝；它不能建立 / 改写 task ownership。`complete_native_save_claim()` 只接受 terminal 状态，`pending/syncing/unknown` 不会清空 execution owner。
+- `native_save_tasks` 以 UUID 为主键；`native_save_task_items` 以 `(task_id, item_key)` 为主键并保存请求顺序、requested/resolved action、target、status/error 与 `is_live`。task/item 集合不引用 membership，因此本地删除后轮询快照仍存在。`create_native_sync_task_snapshot()` 在一个 `BEGIN IMMEDIATE` 中写 task/items 并领取 eligible 的 live owner；缺失、terminal、已有 owner 与零 eligible 都形成可查询快照。
+- `extension_native_save_jobs` 是与 native task ledger 分离的浏览器执行 ledger。每个 mutation 使用独立短连接覆盖完整事务，避免六 source 线程在 process-wide connection 嵌套 `BEGIN IMMEDIATE`；`create_or_reuse_extension_native_save_job()` 原子复用 active row，并把显式默认 443 / 尾点 host 规范为无端口标准 hostname，拒绝其它 port、凭证或跨平台 host。查询参数默认全部移除；YouTube 只保留唯一非空 `v`，小红书带 query 时必须保留唯一非空 `xsec_token`、可选唯一非空 `xsec_source`，重复、空值或只有 source 均拒绝入队。`claim_extension_native_save_job()` 按平台领取最老 pending job；`owns_extension_native_save_job(job_id)` 检查全局 namespace，传 `platform_slug` 时进一步限制 exact source；`complete_extension_native_save_job()` 只接受匹配 platform slug + job UUID + item key 的 in-progress row；`mark_unclaimed_extension_native_save_job_extension_required()` 与 `cancel_unclaimed_extension_native_save_job()` 只更新 pending；`expire_stale_extension_native_save_jobs()` 把不确定的 claimed write 固定完成为 `failed/extension_task_timeout`，绝不重放。所有读取返回新的 `dict` copy。
+- 扩展 ledger 的 URL 只接受六平台 allow-listed HTTPS host，去 fragment、token 与 tracking query；YouTube 仅保留身份字段 `v`。结果 code 使用显式集合，result message 只从后端 status/code 映射生成，拒绝 Unicode category-C 输入，因此 Cookie、token、HTML 或平台响应正文不会进入 SQLite。
+- 当前 task ledger 采用数据库生命周期保留：已返回任务没有 TTL、容量上限或自动删除，只有 starter 注册失败且未返回的 ledger 会回滚删除。未来若引入 bounded pruning，必须先定义轮询保留窗口、容量阈值以及 active/recent task 保护；该策略当前延期，不能假定存在后台清理。
+- `claim_native_sync_task()` 保留为底层兼容 owner 入口；生产 service 使用上述快照 DAO 原子建立 ledger 与 ownership。执行前 `claim_native_sync_task_runner(task_id, runner_id)` 原子取得唯一 runner lease；fresh 的其它 runner 返回 `False`，stale lease 才允许接管。task heartbeat、item claim 与 pending release 都要求 runner token 匹配。runner 正常 / 取消退出释放余项；崩溃由 poll / manual-create 在 5 分钟后回收。所有 task / runner 边界拒绝空白 ID，公开 runner ID 还拒绝 `__openbiliclaw_` 保留前缀。
+- `claim_native_save_item()` 还要求当前 `task_runner_id` 匹配，用 `execution_id` 原子执行 `pending → syncing`；`update_native_save_claim_route()`、`heartbeat_native_save_claim()`、`complete_native_save_claim()` 要求 `(list_kind, item_key, task_id, execution_id, status='syncing')` owner 完整匹配，旧 worker 无法刷新或完成新 owner。task 与 item heartbeat 使用 `open_connection()` 的独立短连接，不占用 process-wide write connection；service 在线程中调用并对 transient SQLite lock 做有界退避。`reconcile_stale_native_save_claims(task_id)` 供轮询恢复一个已知 task；`reconcile_stale_native_save_claims_for_list(list_kind, item_keys)` 供普通手动创建在 eligibility selection 前恢复匹配的崩溃遗留项。两者只把超过 5 分钟无 item heartbeat 的 `syncing` 写成 `failed/interrupted`。
+- `list_native_sync_eligible()` 是只读诊断 / selection 视图；`list_native_save_states_by_task()` 只用于 live runner 工作集，durable polling 必须使用 `native_sync_task_exists()` + `list_native_sync_task_items()`。claim、route、complete、membership 删除和 stale/cancel recovery 都在同一事务同步更新 task item 快照。
+- 初始化只在 `saved_sync_migrations` 缺少 `legacy_saved_tables_v1` 时迁移旧表。迁移用当时的 `content_cache` 恢复平台、内容 ID 与元数据；身份字段不完整时按兼容语义回落 `bilibili:<legacy bvid>`。解析出的 canonical key 同时写入旧 `watch_later.item_key` / `favorites.item_key`，之后的状态和删除不再依赖可变或可清理的 `content_cache`。marker 在两个列表都复制成功后写入，避免已删除的 normalized membership 下次启动复活；`legacy_saved_item_keys_v2` 只为此前已迁移数据库补稳定关联，不重新导入 membership。
+- 旧 `add/remove/list/count/status` Bilibili wrappers 继续维护兼容表及其 stable `item_key` link，但用户可见读取以 normalized membership 为准。状态 / 移除 wrapper 会优先匹配 Bilibili key，否则只在裸 `content_id` 唯一对应一个 normalized membership 时解析跨平台 key；移除时按旧行已持久化的 `item_key` 同步清理迁移来源行。多个非 Bilibili 平台共享该裸 ID 时状态返回 `False`、移除也返回 `False`，不删除任何一侧。
+- 平台 adapter、platform-neutral HTTP API，以及插件 side panel / 桌面 Web / 移动 Web
+  保存与同步 UI 已接入同一 normalized store。Bilibili 保持 direct adapter，六平台已注册 extension-backed adapter；
+  stable runtime broker wiring 也已完成。其它来源的本地 membership 仍可正常保存、列出和删除，
+  手动同步会进入 durable extension job ledger。六平台 extension executors 已 6/6 接线并通过 fixture；
+  2026-07-14 逐平台授权真实回归的 favorite 与 watch-later/fallback 均为 `synced/already_synced`。
+
+`native_save_states` 完整字段如下：
+
+| 字段 | 语义 |
+|------|------|
+| `list_kind`, `item_key` | 联合主键，同时外键引用 `saved_memberships`。 |
+| `requested_action` | 用户请求的 `favorite` / `watch_later`。 |
+| `resolved_action`, `resolved_target` | capability router 决定且由 execution owner fence 写入的平台动作 / 目标。 |
+| `status` | `pending`、`syncing` 或逐次尝试的 terminal 状态。 |
+| `task_id` | 当前 live batch owner ID；空串表示尚未被任务领取。durable polling 的 UUID 与结果位于独立 task ledger。 |
+| `execution_id` | 单次 adapter 调用 owner token；仅 `syncing` 生命周期非空。 |
+| `task_claimed_at` | task 领取时间，供“已领取但 runner 未启动”保护窗判断。 |
+| `task_started_at` | runner 首次开始时间；非空后不会走 never-started 回收。 |
+| `task_heartbeat_at` | batch runner 最近心跳；保护尚未逐项 claim 的后排 pending，崩溃后作为 5 分钟回收租约。 |
+| `task_runner_id` | 当前唯一 batch runner token。升级时，已有 `task_id + task_started_at` 的 active 旧行写入保留 legacy sentinel，并在缺 heartbeat 时补 fresh lease，防 rolling upgrade 立即抢走旧 runner；lease stale 后新 runner才可接管。 |
+| `last_error_code`, `last_error_message` | 安全归一化错误，不存平台响应正文或异常正文。 |
+| `last_attempt_at` | execution claim / heartbeat 最近时间，供 5 分钟 stale 判定。 |
+| `synced_at` | 最近一次 `synced` / `already_synced` 完成时间。 |
+
+其父表字段：`saved_items(item_key, source_platform, content_id, content_url, content_type, title, author_name, cover_url, created_at, updated_at)` 保存 canonical 内容快照；`saved_memberships(list_kind, item_key, note, added_at)` 保存本地列表归属；`saved_sync_migrations(name, applied_at)` 保存 legacy migration marker。旧 `watch_later` / `favorites` 继续保留 `bvid, added_at, note, item_key` 兼容字段。
 
 ### Discovery Candidates
 

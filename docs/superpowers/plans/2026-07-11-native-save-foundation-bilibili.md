@@ -569,7 +569,7 @@ class FakeAdapter:
     def target_label(self, action: NativeSaveAction) -> str:
         if self.capability.platform == "reddit":
             return "Reddit Saved"
-        return "B站稍后观看" if action == "watch_later" else "B站 OpenBiliClaw 收藏夹"
+        return "B站稍后再看" if action == "watch_later" else "B站 OpenBiliClaw 收藏夹"
 
     async def save(
         self, item: SavedItemInput, route: NativeSaveRoute
@@ -1037,7 +1037,7 @@ Using the installed extension browser and the same backend/config root:
 
 1. Confirm auto sync defaults off on popup, desktop, and mobile settings.
 2. Save one Bilibili item and confirm only local DB membership/state changes.
-3. Confirm saved-page target reads `B站稍后观看` or `B站 OpenBiliClaw 收藏夹`.
+3. Confirm saved-page target reads `B站稍后再看` or `B站 OpenBiliClaw 收藏夹`.
 4. Confirm bulk local save removes only successful items from the delight queue.
 
 Expected: no Bilibili account state changes during this step.

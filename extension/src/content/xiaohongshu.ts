@@ -30,10 +30,13 @@ import {
   extractSelfInfoFromState,
 } from "./xhs/bootstrap.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveXiaohongshu, verifyXiaohongshu } from "./native-save/xiaohongshu.ts";
 
 startCollector(xiaohongshuAdapter);
 registerTaskExecutor();
 registerE2EExecutor("xiaohongshu");
+installNativeSaveExecutor("xiaohongshu", saveXiaohongshu, verifyXiaohongshu);
 
 // ── Token sniffer bridge (isolated world receiver) ──────────────────
 //

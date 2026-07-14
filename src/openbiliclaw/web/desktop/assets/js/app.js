@@ -952,19 +952,22 @@
     }
 
     function normalizeRecommendation(item) {
-      const contentId = String(item?.content_id ?? item?.bvid ?? "");
-      const contentType = String(item?.content_type ?? "video").trim().toLowerCase() || "video";
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      const contentId = canonical.content_id;
+      const contentType = canonical.content_type.toLowerCase();
       const bodyText = decodeHtmlEntities(item?.body_text ?? "");
       return {
         id: Number(item?.id ?? Date.now()),
         bvid: String(item?.bvid ?? contentId),
+        item_key: canonical.item_key,
         content_id: contentId,
         title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
         up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
-        content_url: String(item?.content_url ?? ""),
+        content_url: canonical.content_url,
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
-        platform: normalizeSourcePlatform(item),
+        platform: canonical.source_platform,
+        source_platform: canonical.source_platform,
         content_type: contentType,
         body_text: bodyText,
         duration: Number(item?.duration ?? 0) || 0,
@@ -1843,12 +1846,109 @@
     // ── Saved pages: 稍后再看 (watch-later) & 收藏 (favorites) ──────
     // The two are independent backend collections sharing one list UI.
 
-    function watchLaterStatus(bvid) {
-      return requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`);
+    const SAVED_SYNC_PRESENTATION = {
+      pending: ["待同步", "neutral", false], syncing: ["同步中", "info", false],
+      synced: ["已同步", "success", false], already_synced: ["已同步", "success", false],
+      login_required: ["需要登录", "warning", true], unsupported: ["仅本地保存", "neutral", false],
+      rate_limited: ["同步失败", "error", true], extension_required: ["需要连接插件", "warning", true],
+      failed: ["同步失败", "error", true]
+    };
+    function safeSavedText(value, maxLength = 240) {
+      return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
     }
 
-    function favoriteStatus(bvid) {
-      return requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`);
+    function desktopSavedItem(itemOrBvid = {}) {
+      const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      return {
+        ...item,
+        item_key: safeSavedText(canonical.item_key, 2048),
+        source_platform: safeSavedText(canonical.source_platform, 64),
+        content_id: safeSavedText(canonical.content_id, 2048),
+        content_url: safeSavedText(canonical.content_url, 2048),
+        content_type: safeSavedText(canonical.content_type, 128),
+        title: safeSavedText(item.title || canonical.content_id),
+        author_name: safeSavedText(item.author_name || item.up_name),
+        cover_url: safeSavedText(item.cover_url, 2048),
+        sync_status: SAVED_SYNC_PRESENTATION[item.sync_status] ? item.sync_status : (item.sync_status ? "failed" : ""),
+        resolved_target: safeSavedText(item.resolved_target),
+        error_code: safeSavedText(item.error_code, 96),
+        error_message: safeSavedText(item.error_message)
+      };
+    }
+
+    const desktopSavedApi = window.OpenBiliClawSavedSync.createStrictSavedApi(requestJsonStrict);
+    const desktopSavedMutations = window.OpenBiliClawSavedSync.createSavedMutationRegistry();
+    const desktopSavedListStates = {
+      watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
+      favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
+    };
+    const desktopSyncingKeys = {
+      watch_later: window.OpenBiliClawSavedSync.createSavedSubmissionFence(),
+      favorite: window.OpenBiliClawSavedSync.createSavedSubmissionFence()
+    };
+    const desktopSavedPendingFocus = { watch_later: null, favorite: null };
+    function createDesktopSavedTaskRuntime() {
+      const tracker = window.OpenBiliClawSavedSync.createDurableTaskTracker({
+        poll: (taskId) => desktopSavedApi.pollTask(taskId),
+        isVisible: () => !document.hidden
+      });
+      return {
+        tracker,
+        coordinator: window.OpenBiliClawSavedSync.createSavedTaskCoordinator({
+          tracker,
+          fetchTask: (taskId) => desktopSavedApi.pollTask(taskId)
+        })
+      };
+    }
+    const desktopSavedTaskRuntimes = {
+      watch_later: createDesktopSavedTaskRuntime(),
+      favorite: createDesktopSavedTaskRuntime()
+    };
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) {
+        for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.resumeAll();
+      }
+    });
+    window.addEventListener("pagehide", () => {
+      for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.dispose();
+    }, { once: true });
+    function saveDesktopItem(listKind, item) {
+      return desktopSavedApi.save(listKind, desktopSavedItem(item));
+    }
+    function removeDesktopSavedItem(listKind, itemKey) {
+      return desktopSavedApi.remove(listKind, itemKey);
+    }
+    function savedStatus(listKind, itemOrBvid) {
+      const itemKey = desktopSavedItem(itemOrBvid).item_key;
+      return desktopSavedApi.status(listKind, itemKey);
+    }
+    function watchLaterStatus(itemOrBvid) { return savedStatus("watch_later", itemOrBvid); }
+    function favoriteStatus(itemOrBvid) { return savedStatus("favorite", itemOrBvid); }
+    function fetchDesktopSaved(listKind) { return desktopSavedApi.list(listKind); }
+    function syncDesktopSaved(listKind, itemKeys) {
+      return desktopSavedApi.sync(listKind, itemKeys);
+    }
+
+    function summarizeDesktopSavedTask(items) {
+      const groups = new Map();
+      for (const item of items) {
+        const slug = item.item_key.split(":", 1)[0] || "unknown";
+        const group = groups.get(slug) || [0, 0];
+        group[1] += 1;
+        if (["synced", "already_synced"].includes(item.status)) group[0] += 1;
+        groups.set(slug, group);
+      }
+      return Array.from(groups, ([slug, [success, total]]) => `${platformName(slug)} ${success}/${total}`).join(" · ");
+    }
+
+    function savedSyncEligible(item, listKind = "") {
+      return window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(
+        item.sync_status,
+        item.error_code,
+        item.sync_task_id
+      )
+        && !desktopSavedTaskRuntimes[listKind]?.coordinator.owns(item.item_key);
     }
 
     function updateSavedBadge(badgeId, total) {
@@ -1864,20 +1964,33 @@
       }
     }
 
-    function renderSavedList(listId, emptyId, items, onRemove) {
+    function renderSavedList(listKind, listId, emptyId, items, reload) {
       const grid = document.getElementById(listId);
       const empty = document.getElementById(emptyId);
       if (!grid) return;
+      const focusRoot = grid.closest(".saved-page") || grid;
+      const focusToken = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot)
+        || desktopSavedPendingFocus[listKind];
       const rows = Array.isArray(items) ? items : [];
       if (!rows.length) {
         grid.replaceChildren();
         if (empty) empty.removeAttribute("hidden");
+        if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
+          desktopSavedPendingFocus[listKind] = null;
+        }
         return;
       }
       if (empty) empty.setAttribute("hidden", "");
       grid.replaceChildren(...rows.map((item) => {
+        item = desktopSavedItem(item);
+        if (desktopSyncingKeys[listKind].has(item.item_key)
+          || desktopSavedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
+          item.sync_status = "syncing";
+        }
+        const syncPresentation = window.OpenBiliClawSavedSync.getSavedSyncPresentation(item);
         const card = document.createElement("article");
         card.className = "video-card saved-card";
+        card.dataset.itemKey = item.item_key;
         const url = contentUrl(item);
         const coverContent = `
             ${coverImg(item)}
@@ -1888,11 +2001,13 @@
             ? `<a class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
             : `<button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
           <div>
-            <p class="video-title">${escapeHtml(item.title || item.bvid)}</p>
-            <p class="video-meta">${escapeHtml(item.up_name || "")}</p>
+            <p class="video-title">${escapeHtml(item.title || item.content_id)}</p>
+            <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
+            <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(syncPresentation.tone)}">${escapeHtml(syncPresentation.label)}</span><span>${escapeHtml(syncPresentation.detail)}</span></p>
           </div>
           <div class="card-actions saved-card-actions">
-            <button class="small-btn saved-remove" type="button">移除</button>
+            ${syncPresentation.actionable || syncPresentation.busy ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button" aria-disabled="${syncPresentation.busy}" aria-label="${escapeHtml(syncPresentation.busy ? `${syncPresentation.label}，请稍候` : syncPresentation.actionLabel)}" ${syncPresentation.busy ? "disabled" : ""}>${escapeHtml(syncPresentation.actionLabel)}</button>` : ""}
+            <button class="small-btn saved-remove" data-saved-action="remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
           </div>`;
         const cover = card.querySelector(".cover");
         cover.addEventListener("click", () => {
@@ -1901,49 +2016,180 @@
         cover.addEventListener("auxclick", (event) => {
           if (url && event.button === 1) trackRecommendationClick(item);
         });
+        card.querySelector(".saved-sync-one")?.addEventListener("click", (e) => {
+          desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, e.currentTarget);
+          void runDesktopSavedSync(listKind, [item], e.currentTarget, reload);
+        });
         card.querySelector(".saved-remove").addEventListener("click", async (e) => {
           const btn = e.currentTarget;
+          desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, btn);
           btn.disabled = true;
           try {
-            await onRemove(item.bvid);
-            card.remove();
-          } catch {
+            await removeDesktopSavedItem(listKind, item.item_key);
+            await reload();
+          } catch (error) {
             btn.disabled = false;
+            const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+            if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地移除失败，请重试。"; }
           }
         });
         return card;
       }));
+      if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
+        desktopSavedPendingFocus[listKind] = null;
+      }
+    }
+
+    async function runDesktopSavedSync(listKind, selected, activeButton, reload, confirmBatch = false) {
+      const coordinator = desktopSavedTaskRuntimes[listKind].coordinator;
+      const eligible = selected.filter((item) => savedSyncEligible(item, listKind)
+        && !desktopSyncingKeys[listKind].has(item.item_key));
+      if (!eligible.length || activeButton?.disabled) return;
+      const platforms = Array.from(new Set(eligible.map((item) => platformName(item.source_platform))));
+      if (confirmBatch && !window.confirm(`将同步 ${eligible.length} 项到 ${platforms.join("、")}，继续吗？`)) return;
+      const eligibleKeys = eligible.map((item) => item.item_key);
+      if (!desktopSyncingKeys[listKind].claim(eligibleKeys)) return;
+      const status = document.getElementById(listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus");
+      let submitted = false;
+      if (activeButton) {
+        const focusRoot = activeButton.closest(".saved-page") || activeButton.parentElement;
+        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, activeButton)
+          || { kind: "list", action: "sync-all" };
+        activeButton.disabled = true;
+        activeButton.setAttribute("aria-disabled", "true");
+        activeButton.setAttribute("aria-busy", "true");
+        activeButton.textContent = "同步中…";
+      }
+      if (status) { status.removeAttribute("role"); status.textContent = `正在同步 ${eligible.length} 项…`; }
+      try {
+        const task = await syncDesktopSaved(listKind, eligibleKeys);
+        const taskId = safeSavedText(task?.task_id, 64);
+        if (!taskId) throw new Error("同步任务缺少 task_id，请重试。");
+        coordinator.track(task, eligibleKeys, {
+          onProgress: () => { if (status) status.textContent = `正在同步 ${eligible.length} 项…`; },
+          onBackground: () => { if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。"; },
+          onPollError: () => { if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。"; },
+          onTerminal: (terminalTask) => {
+            if (status) status.textContent = summarizeDesktopSavedTask(terminalTask.items) || "同步已完成";
+            void reload();
+          }
+        });
+        submitted = true;
+        if (status) status.textContent = `同步任务已提交 · ${eligible.length} 项`;
+      } catch (error) {
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "同步失败，请重试。"; }
+      } finally {
+        desktopSyncingKeys[listKind].release(eligibleKeys);
+        if (!submitted && activeButton) {
+          activeButton.disabled = false;
+          activeButton.setAttribute("aria-disabled", "false");
+          activeButton.removeAttribute("aria-busy");
+        }
+        await reload();
+      }
+    }
+
+    function bindDesktopSavedBatch(listKind, items, reload) {
+      const id = listKind === "watch_later" ? "watchLaterSyncAll" : "favoritesSyncAll";
+      const button = document.getElementById(id);
+      if (!button) return;
+      const count = items.filter((item) => savedSyncEligible(item, listKind)
+        && !desktopSyncingKeys[listKind].has(item.item_key)).length;
+      button.textContent = `同步未同步内容（${count}）`;
+      window.OpenBiliClawSavedSync.updateSavedBatchButtonState(button, count);
+      button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
+    }
+
+    function showDesktopSavedLoadError(listKind, status, state, reload) {
+      if (!status) return;
+      status.setAttribute("role", "alert");
+      status.dataset.loadError = "true";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "small-btn saved-load-retry";
+      retry.dataset.savedListAction = "retry";
+      retry.textContent = "重试加载";
+      retry.addEventListener("click", (event) => {
+        const focusRoot = status.closest(".saved-page") || status.parentElement;
+        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(
+          focusRoot,
+          event.currentTarget,
+        ) || { kind: "list", action: "retry" };
+        void reload();
+      });
+      status.replaceChildren(document.createTextNode(`${state.snapshot().error} `), retry);
+    }
+
+    function desktopRecoveredTaskCallbacks(listKind, reload) {
+      const status = document.getElementById(
+        listKind === "watch_later" ? "watchLaterSyncStatus" : "favoritesSyncStatus",
+      );
+      return {
+        onProgress: () => { if (status) status.textContent = "正在同步已恢复的任务…"; },
+        onBackground: () => {
+          if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+        },
+        onPollError: () => {
+          if (status) status.textContent = "同步状态查询超时；连接恢复后会继续查询。";
+        },
+        onTerminal: (task) => {
+          if (status) status.textContent = summarizeDesktopSavedTask(task.items) || "同步已完成";
+          void reload();
+        },
+      };
     }
 
     async function refreshWatchLater() {
-      const data = await requestJson(`${ENDPOINTS.watchLater}?limit=100&offset=0`).catch(() => null);
-      renderSavedList("watchLaterList", "watchLaterEmpty", data?.items, async (bvid) => {
-        await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-        await refreshWatchLater();
-        syncWatchLaterButtons();
-      });
-      updateSavedBadge("watchLaterCountBadge", data?.total);
+      const retained = desktopSavedListStates.watch_later;
+      try {
+        const data = await fetchDesktopSaved("watch_later");
+        retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
+        await desktopSavedTaskRuntimes.watch_later.coordinator.recover(
+          retained.snapshot().items,
+          desktopRecoveredTaskCallbacks("watch_later", refreshWatchLater),
+        );
+        const status = document.getElementById("watchLaterSyncStatus");
+        if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
+      } catch (error) {
+        retained.fail(error);
+        showDesktopSavedLoadError("watch_later", document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
+      }
+      const { items, total } = retained.snapshot();
+      renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
+      bindDesktopSavedBatch("watch_later", items, refreshWatchLater);
+      updateSavedBadge("watchLaterCountBadge", total);
     }
 
     async function refreshFavorites() {
-      const data = await requestJson(`${ENDPOINTS.favorites}?limit=100&offset=0`).catch(() => null);
-      renderSavedList("favoritesList", "favoritesEmpty", data?.items, async (bvid) => {
-        await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-        await refreshFavorites();
-        syncFavoriteButtons();
-      });
-      updateSavedBadge("favoritesCountBadge", data?.total);
+      const retained = desktopSavedListStates.favorite;
+      try {
+        const data = await fetchDesktopSaved("favorite");
+        retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
+        await desktopSavedTaskRuntimes.favorite.coordinator.recover(
+          retained.snapshot().items,
+          desktopRecoveredTaskCallbacks("favorite", refreshFavorites),
+        );
+        const status = document.getElementById("favoritesSyncStatus");
+        if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
+      } catch (error) {
+        retained.fail(error);
+        showDesktopSavedLoadError("favorite", document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
+      }
+      const { items, total } = retained.snapshot();
+      renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);
+      bindDesktopSavedBatch("favorite", items, refreshFavorites);
+      updateSavedBadge("favoritesCountBadge", total);
     }
 
     // Re-sync the pressed state + count badge for all visible ☆/♥ toggles.
     function syncWatchLaterButtons() {
-      requestJson(`${ENDPOINTS.watchLater}?limit=200&offset=0`).then((data) => {
-        const saved = new Set((data?.items || []).map((it) => it.bvid));
+      fetchDesktopSaved("watch_later").then((data) => {
+        const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="watch-later"]').forEach((btn) => {
           const card = btn.closest(".video-card");
-          const bvid = card?.dataset?.bvid;
-          if (!bvid) return;
-          const on = saved.has(bvid);
+          const item = state.videos.find((row) => String(row.bvid || row.content_id) === card?.dataset?.bvid);
+          if (!item) return;
+          const on = saved.has(desktopSavedItem(item).item_key);
           btn.setAttribute("aria-pressed", on ? "true" : "false");
         });
         updateSavedBadge("watchLaterCountBadge", data?.total);
@@ -1951,13 +2197,13 @@
     }
 
     function syncFavoriteButtons() {
-      requestJson(`${ENDPOINTS.favorites}?limit=200&offset=0`).then((data) => {
-        const saved = new Set((data?.items || []).map((it) => it.bvid));
+      fetchDesktopSaved("favorite").then((data) => {
+        const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="favorite"]').forEach((btn) => {
           const card = btn.closest(".video-card");
-          const bvid = card?.dataset?.bvid;
-          if (!bvid) return;
-          const on = saved.has(bvid);
+          const item = state.videos.find((row) => String(row.bvid || row.content_id) === card?.dataset?.bvid);
+          if (!item) return;
+          const on = saved.has(desktopSavedItem(item).item_key);
           btn.setAttribute("aria-pressed", on ? "true" : "false");
         });
         updateSavedBadge("favoritesCountBadge", data?.total);
@@ -2519,7 +2765,7 @@
             <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
             <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
           </div>
-          <p class="status-line"></p>`;
+          <p class="status-line" aria-live="polite"></p>`;
         const reason = card.querySelector(".reason");
         const toggleReason = () => {
           const expanded = reason.classList.toggle("is-expanded");
@@ -2548,24 +2794,22 @@
         // Lazy-load watch-later state
         const wlBtn = card.querySelector('[data-action="watch-later"]');
         if (wlBtn) {
-          const bvid = item.bvid || item.id;
-          watchLaterStatus(bvid).then((res) => {
-            if (res && res.saved) {
-              wlBtn.setAttribute("aria-pressed", "true");
-              wlBtn.title = "\u53D6\u6D88\u7A0D\u540E\u518D\u770B";
-            }
-          }).catch(() => {});
+          const savedItem = desktopSavedItem(item);
+          void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
+            const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
+            wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+            wlBtn.title = saved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
+          });
         }
         // Lazy-load favorite state
         const favBtn = card.querySelector('[data-action="favorite"]');
         if (favBtn) {
-          const bvid = item.bvid || item.id;
-          favoriteStatus(bvid).then((res) => {
-            if (res && res.saved) {
-              favBtn.setAttribute("aria-pressed", "true");
-              favBtn.title = "\u53D6\u6D88\u6536\u85CF";
-            }
-          }).catch(() => {});
+          const savedItem = desktopSavedItem(item);
+          void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
+            const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
+            favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+            favBtn.title = saved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+          });
         }
         return card;
       }));
@@ -2833,21 +3077,23 @@
       if (action === "cancel-comment") { closeCardComposer(card); return; }
       if (action === "watch-later") {
         const btn = card.querySelector('[data-action="watch-later"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(item);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("watch_later", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u7A0D\u540E\u518D\u770B" : "\u53D6\u6D88\u6536\u85CF";
+        if (status) { status.removeAttribute("role"); status.textContent = wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…"; }
         try {
-          const bvid = item.bvid || item.id;
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.watchLater, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("watch_later", savedItem.item_key, {
+            add: () => saveDesktopItem("watch_later", savedItem),
+            remove: () => removeDesktopSavedItem("watch_later", savedItem.item_key)
+          });
+          if (status) status.textContent = wasSaved ? "已从 OpenBiliClaw 本地稍后再看移除；不会删除平台记录。" : "已保存到本地，平台同步状态可在稍后页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -2855,21 +3101,23 @@
       }
       if (action === "favorite") {
         const btn = card.querySelector('[data-action="favorite"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(item);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("favorite", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
         btn.title = wasSaved ? "\u6536\u85CF" : "\u53D6\u6D88\u6536\u85CF";
+        if (status) { status.removeAttribute("role"); status.textContent = wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…"; }
         try {
-          const bvid = item.bvid || item.id;
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.favorites, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("favorite", savedItem.item_key, {
+            add: () => saveDesktopItem("favorite", savedItem),
+            remove: () => removeDesktopSavedItem("favorite", savedItem.item_key)
+          });
+          if (status) status.textContent = wasSaved ? "已从 OpenBiliClaw 本地收藏移除；不会删除平台记录。" : "已保存到本地，平台同步状态可在收藏页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
           btn.title = wasSaved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -4413,20 +4661,23 @@
       if (response === "cancel-comment") { closeDelightComposer(); return; }
       if (response === "watch-later") {
         const btn = document.querySelector('[data-delight="watch-later"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(delight);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("watch_later", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
-        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: !wasSaved });
+        _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), watchLater: !wasSaved });
+        if ($("#delightStatus")) { $("#delightStatus").removeAttribute("role"); $("#delightStatus").textContent = wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…"; }
         try {
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.watchLater}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.watchLater, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("watch_later", savedItem.item_key, {
+            add: () => saveDesktopItem("watch_later", savedItem),
+            remove: () => removeDesktopSavedItem("watch_later", savedItem.item_key)
+          });
+          if ($("#delightStatus")) $("#delightStatus").textContent = wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
-          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), watchLater: wasSaved });
+          _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), watchLater: wasSaved });
+          if ($("#delightStatus")) { $("#delightStatus").setAttribute("role", "alert"); $("#delightStatus").textContent = error?.message || "本地稍后再看操作失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -4434,20 +4685,23 @@
       }
       if (response === "favorite") {
         const btn = document.querySelector('[data-delight="favorite"]');
-        if (!btn || btn.disabled) return;
+        const savedItem = desktopSavedItem(delight);
+        if (!btn || btn.disabled || desktopSavedMutations.isBusy("favorite", savedItem.item_key)) return;
         btn.disabled = true;
-        const wasSaved = btn.getAttribute("aria-pressed") === "true";
+        const wasSaved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
         btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
-        if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: !wasSaved });
+        _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), favorite: !wasSaved });
+        if ($("#delightStatus")) { $("#delightStatus").removeAttribute("role"); $("#delightStatus").textContent = wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…"; }
         try {
-          if (wasSaved) {
-            await requestJson(`${ENDPOINTS.favorites}/${encodeURIComponent(delight.bvid)}`, { method: "DELETE" });
-          } else {
-            await requestJson(ENDPOINTS.favorites, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bvid: delight.bvid }) });
-          }
-        } catch {
+          await desktopSavedMutations.toggle("favorite", savedItem.item_key, {
+            add: () => saveDesktopItem("favorite", savedItem),
+            remove: () => removeDesktopSavedItem("favorite", savedItem.item_key)
+          });
+          if ($("#delightStatus")) $("#delightStatus").textContent = wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。";
+        } catch (error) {
           btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
-          if (delight.bvid) _delightStatusCache.set(delight.bvid, { ...(_delightStatusCache.get(delight.bvid) || {}), favorite: wasSaved });
+          _delightStatusCache.set(savedItem.item_key, { ...(_delightStatusCache.get(savedItem.item_key) || {}), favorite: wasSaved });
+          if ($("#delightStatus")) { $("#delightStatus").setAttribute("role", "alert"); $("#delightStatus").textContent = error?.message || "本地收藏操作失败，请重试。"; }
         } finally {
           btn.disabled = false;
         }
@@ -5328,6 +5582,9 @@
       setInput("storageDbPath", config.storage?.db_path);
       setSelect("networkProxyMode", config.network?.mode || "direct");
       setInput("networkProxy", config.network?.proxy || "");
+      const savedAutoSync = $("#savedAutoSync");
+      if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
+      if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
 
       const llm = config.llm || {};
       const provider = llm.default_provider || llm.provider;
@@ -5457,6 +5714,7 @@
 
     function normalizeDelight(item) {
       if (!item) return null;
+      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
       // 后端 pending-batch 对喜欢过的候选下发 state="liked"，重灌后恢复
       // 「已喜欢」文案，让用户看出这条已经表过态。
       const serverState = String(item.state ?? "");
@@ -5466,20 +5724,23 @@
       // title through the ID fallback (derive from body / placeholder), but
       // keep the friendly delight default when there is genuinely no title.
       const delightBody = decodeHtmlEntities(item.body_text ?? "");
-      const delightCt = String(item.content_type ?? "").trim().toLowerCase();
+      const delightCt = canonical.content_type.toLowerCase();
       const derivedTitle = displayRecommendationTitle(
         decodeHtmlEntities(item.title ?? ""), delightBody, delightCt);
       return {
         type: "delight",
         bvid: String(item.bvid ?? item.content_id ?? ""),
+        item_key: canonical.item_key,
+        content_id: canonical.content_id,
+        content_type: canonical.content_type,
         title: derivedTitle && derivedTitle !== "未命名内容"
           ? derivedTitle
           : "发现了一条你可能会意外喜欢的内容",
         body_text: delightBody,
         reason: decodeHtmlEntities(item.delight_reason ?? item.reason ?? item.delight_hook ?? item.message ?? "这条来自后端高惊喜分候选。"),
         cover_url: normalizeImageUrl(item.cover_url ?? item.cover ?? item.pic ?? item.thumbnail_url ?? item.thumbnail ?? item.image_url),
-        content_url: String(item.content_url ?? ""),
-        source_platform: String(item.source_platform ?? item.platform ?? "bilibili"),
+        content_url: canonical.content_url,
+        source_platform: canonical.source_platform,
         chat_turn_id: String(item.chat_turn_id ?? ""),
         chat_reply: String(item.chat_reply ?? item.reply ?? ""),
         chat_draft: String(item.chat_draft ?? ""),
@@ -5721,9 +5982,9 @@
           btn.disabled = false;
       });
       // Sync ☆ / ♥ pressed state for the current delight.
-      const delightBvid = state.delight.bvid;
-      if (delightBvid && _delightStatusCache.has(delightBvid)) {
-        _syncDelightStatusButtons(delightBvid);
+      const delightKey = desktopSavedItem(state.delight).item_key;
+      if (delightKey && _delightStatusCache.has(delightKey)) {
+        _syncDelightStatusButtons(delightKey);
       } else {
         const wlBtn = document.querySelector('[data-delight="watch-later"]');
         if (wlBtn) wlBtn.setAttribute("aria-pressed", "false");
@@ -5858,29 +6119,39 @@
       _initDelightVisibilityObserver();
       // 批量预取 delight 队列中所有项的稍后再看/收藏状态
       (async () => {
-        const bvids = state.delights.map((d) => String(d.bvid || "")).filter(Boolean);
-        if (!bvids.length) return;
-        const results = await Promise.allSettled(bvids.map((bvid) => watchLaterStatus(bvid).then((r) => ({ bvid, watchLater: r?.saved ?? false, favorite: false }))));
-        const favResults = await Promise.allSettled(bvids.map((bvid) => favoriteStatus(bvid).then((r) => ({ bvid, saved: r?.saved ?? false }))));
-        const favMap = new Map(favResults.filter((r) => r.status === "fulfilled").map((r) => [r.value.bvid, r.value.saved]));
-        for (const result of results) {
-          if (result.status !== "fulfilled") continue;
-          const { bvid, watchLater } = result.value;
-          _delightStatusCache.set(bvid, { watchLater, favorite: favMap.get(bvid) ?? false });
+        const delightItems = state.delights.map(desktopSavedItem).filter((item) => item.item_key);
+        if (!delightItems.length) return;
+        await Promise.allSettled(delightItems.flatMap((item) => [
+          desktopSavedMutations.hydrate("watch_later", item.item_key, () => watchLaterStatus(item)),
+          desktopSavedMutations.hydrate("favorite", item.item_key, () => favoriteStatus(item))
+        ]));
+        for (const item of delightItems) {
+          _delightStatusCache.set(item.item_key, {
+            watchLater: desktopSavedMutations.isSaved("watch_later", item.item_key),
+            favorite: desktopSavedMutations.isSaved("favorite", item.item_key)
+          });
         }
         // 如果当前显示的 delight 缓存已就绪，立即刷新按钮状态
-        const currentBvid = String(state.delight?.bvid || "");
-        if (currentBvid && _delightStatusCache.has(currentBvid)) _syncDelightStatusButtons(currentBvid);
+        const currentKey = state.delight ? desktopSavedItem(state.delight).item_key : "";
+        if (currentKey && _delightStatusCache.has(currentKey)) _syncDelightStatusButtons(currentKey);
       })();
     }
 
-    function _syncDelightStatusButtons(bvid) {
-      const cached = _delightStatusCache.get(bvid);
+    function _syncDelightStatusButtons(itemKey) {
+      const cached = _delightStatusCache.get(itemKey);
       if (!cached) return;
       const wlBtn = document.querySelector('[data-delight="watch-later"]');
-      if (wlBtn) wlBtn.setAttribute("aria-pressed", cached.watchLater ? "true" : "false");
+      if (wlBtn) {
+        wlBtn.setAttribute("aria-pressed", cached.watchLater ? "true" : "false");
+        wlBtn.setAttribute("aria-label", cached.watchLater ? "取消稍后再看" : "稍后再看");
+        wlBtn.title = cached.watchLater ? "取消稍后再看" : "稍后再看";
+      }
       const favBtn = document.querySelector('[data-delight="favorite"]');
-      if (favBtn) favBtn.setAttribute("aria-pressed", cached.favorite ? "true" : "false");
+      if (favBtn) {
+        favBtn.setAttribute("aria-pressed", cached.favorite ? "true" : "false");
+        favBtn.setAttribute("aria-label", cached.favorite ? "取消收藏" : "收藏");
+        favBtn.title = cached.favorite ? "取消收藏" : "收藏";
+      }
     }
 
     function mergeMessages(items) {
@@ -6439,6 +6710,7 @@
           multimodal_image_quality: getIntInput("multimodalImageQuality", 72),
           multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
         },
+        saved_sync: { auto_sync_enabled: Boolean($("#savedAutoSync")?.checked) },
         storage: { db_path: getInput("storageDbPath") },
         network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") },
         logging: {
@@ -7029,6 +7301,19 @@
     safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
     safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     safeBind("#probeNetworkProxy", "click", () => { void runNetworkProxyConfigProbe(); });
+    safeBind("#savedAutoSync", "change", (event) => {
+      const toggle = event.currentTarget;
+      if (toggle.checked && state.config?.saved_sync?.auto_sync_enabled !== true) {
+        const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+        if (!window.confirm(warning)) {
+          toggle.checked = false;
+          if ($("#savedAutoSyncStatus")) $("#savedAutoSyncStatus").textContent = "已取消，自动同步仍为关闭。";
+        } else if ($("#savedAutoSyncStatus")) {
+          $("#savedAutoSyncStatus").textContent = "已确认；保存配置后开启。";
+        }
+      }
+      if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = toggle.checked ? "开启" : "关闭";
+    });
     lanAuthControl = initLanAuthControl();
     bootAutostartControl = initBootAutostartControl();
     Object.values(SOURCE_ENABLE_SELECT_IDS).forEach((id) => {
@@ -7058,6 +7343,7 @@
         submitBtn.disabled = true;
         submitBtn.textContent = "保存中…";
       }
+      $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
       if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
@@ -7078,7 +7364,7 @@
         void refreshUpdateStatus();
       } catch (error) {
         const message = configErrorMessage(error.details) || error.message || "未知错误";
-        if ($("#configStatus")) $("#configStatus").value = `保存失败：\n${message}`;
+        if ($("#configStatus")) { $("#configStatus").setAttribute("role", "alert"); $("#configStatus").value = `保存失败：\n${message}`; }
         showToast("保存失败：请查看配置状态");
       } finally {
         if (submitBtn) {

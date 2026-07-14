@@ -242,7 +242,7 @@ def _probe_card(page: Page, domain: str) -> Any:
 def _open_messages(page: Page, base_url: str) -> None:
     page.goto(f"{base_url}/m/#/chat")
     expect(page.locator(".badge-count")).to_have_attribute("data-count", "2")
-    page.locator(".badge-btn").click()
+    page.get_by_role("button", name="查看消息").click()
     expect(page.locator(".messages-overlay")).to_have_class("messages-overlay open")
 
 
@@ -287,7 +287,7 @@ def test_mobile_probe_stays_busy_when_overlay_is_rebuilt(
     assert stub.post_received[probe_type].wait(timeout=2)
 
     chromium_page.locator(".messages-close").click()
-    chromium_page.locator(".badge-btn").click()
+    chromium_page.get_by_role("button", name="查看消息").click()
     rebuilt = _probe_card(chromium_page, domain)
     expect(rebuilt).to_be_visible()
     _assert_all_probe_actions_disabled(rebuilt, True)
@@ -323,7 +323,7 @@ def test_mobile_probe_failure_restores_rebuilt_card_for_retry(
     assert stub.post_received[probe_type].wait(timeout=2)
 
     chromium_page.locator(".messages-close").click()
-    chromium_page.locator(".badge-btn").click()
+    chromium_page.get_by_role("button", name="查看消息").click()
     rebuilt = _probe_card(chromium_page, domain)
     expect(rebuilt).to_have_attribute("aria-busy", "true")
 

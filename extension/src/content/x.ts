@@ -26,6 +26,8 @@ import type {
   XEventType,
 } from "../main/x-graphql-tap.js";
 import type { BehaviorEvent } from "../shared/types.js";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveX } from "./native-save/x.ts";
 
 // Keep CapturedXRequest referenced so the type import survives tree-shaking
 // (the tap and this file share the same engagement contract).
@@ -33,6 +35,7 @@ export type { CapturedXRequest };
 
 startCollector(twitterAdapter);
 registerE2EExecutor("twitter");
+installNativeSaveExecutor("twitter", saveX);
 
 /** Map an engagement to the canonical x.com tweet URL (best effort). */
 function tweetUrl(engagement: XEngagement): string {

@@ -22,6 +22,9 @@ export interface ExtensionE2ERuntimeEvent {
   actions?: Partial<Record<E2EPlatform, E2EAction[]>>;
   allow_state_changing?: boolean;
   timeout_seconds?: number;
+  native_save_authorization?: unknown;
+  native_save_execution_deadline_ms?: number;
+  native_save_callback_deadline_ms?: number;
 }
 
 export interface E2EActionExecutionResult {
@@ -109,7 +112,17 @@ export function isExtensionE2ERuntimeEvent(value: unknown): value is ExtensionE2
   if (event.type !== "extension_e2e_run") return false;
   if (typeof event.run_id !== "string" || event.run_id.trim() === "") return false;
   if (typeof event.token !== "string" || event.token.trim() === "") return false;
-  if (!Array.isArray(event.platforms) || event.platforms.length === 0) return false;
+  if (!Array.isArray(event.platforms)) return false;
+  if (event.platforms.length === 0 && event.native_save_authorization === undefined) return false;
+  if (event.platforms.length === 0) {
+    if (typeof event.native_save_execution_deadline_ms !== "number" ||
+      !Number.isFinite(event.native_save_execution_deadline_ms) ||
+      typeof event.native_save_callback_deadline_ms !== "number" ||
+      !Number.isFinite(event.native_save_callback_deadline_ms) ||
+      event.native_save_execution_deadline_ms >= event.native_save_callback_deadline_ms) {
+      return false;
+    }
+  }
   if (!event.platforms.every(isE2EPlatform)) return false;
   if (!hasValidActionsMap(event.actions)) return false;
   if (

@@ -6,6 +6,7 @@ import {
 } from "./popup-device-auth.js";
 
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
+export const CONFIG_GET_TIMEOUT_MS = 12_000;
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
 const HEALTH_SUCCESS_CACHE_TTL_MS = 3_000;
 const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
@@ -59,29 +60,42 @@ function withTimeout(signal, timeoutMs) {
   };
 }
 
+function awaitWithAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
 export async function requestJson(path, options = {}) {
-  const backendUrl = await getBackendBaseUrl();
   const { timeoutMs, signal, ...fetchOptions } = options;
-  // Storage/session refresh is outside the request timeout budget.
-  const sessionToken = await ensurePopupSession();
   const timeout = withTimeout(signal, timeoutMs);
-  const requestOptions = { ...fetchOptions };
-  if (timeout.signal) {
-    requestOptions.signal = timeout.signal;
-  }
-  const url = `${backendUrl}${path}`;
   try {
-    const response = await popupAuthenticatedFetch(
-      url,
+    const fetchImpl = globalThis.fetch.bind(globalThis);
+    const backendUrl = await awaitWithAbort(getBackendBaseUrl(), timeout.signal);
+    const sessionToken = await awaitWithAbort(ensurePopupSession({
+      fetchImpl,
+      signal: timeout.signal,
+    }), timeout.signal);
+    const requestOptions = { ...fetchOptions };
+    if (timeout.signal) requestOptions.signal = timeout.signal;
+    const response = await awaitWithAbort(popupAuthenticatedFetch(
+      `${backendUrl}${path}`,
       requestOptions,
-      globalThis.fetch.bind(globalThis),
-      { sessionToken },
-    );
+      fetchImpl,
+      { sessionToken, signal: timeout.signal },
+    ), timeout.signal);
     if (!response.ok) {
       let details = null;
       try {
-        details = await response.json();
-      } catch {
+        details = await awaitWithAbort(response.json(), timeout.signal);
+      } catch (error) {
+        if (timeout.signal?.aborted) throw error;
         details = null;
       }
       const error = new Error(`${path} request failed: ${response.status}`);
@@ -89,7 +103,7 @@ export async function requestJson(path, options = {}) {
       error.details = details;
       throw error;
     }
-    return response.json();
+    return await awaitWithAbort(response.json(), timeout.signal);
   } finally {
     timeout.cleanup();
   }
@@ -588,8 +602,8 @@ export async function respondToDelight(bvid, responseType, title = "", message =
   }
 }
 
-export async function fetchConfig() {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET" });
+export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
+  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }
@@ -618,10 +632,10 @@ export async function probeConfigService(kind, config) {
   });
 }
 
-export async function updateConfig(data) {
+export async function updateConfig(data, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
   return requestJson("/config", {
     method: "PUT",
-    timeoutMs: CONFIG_PUT_TIMEOUT_MS,
+    timeoutMs,
     headers: {
       "Content-Type": "application/json",
     },
@@ -648,6 +662,86 @@ export async function updateRuntimeToggle(name, value) {
 // fetches. A bounded timeout turns "hangs forever, button stuck disabled"
 // into a visible, retryable failure.
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
+const SAVED_READ_TIMEOUT_MS = 10_000;
+
+function savedListPath(listKind) {
+  if (listKind !== "favorite" && listKind !== "watch_later") {
+    throw new TypeError(`Unknown saved list: ${listKind}`);
+  }
+  return `/saved/${listKind}`;
+}
+
+/** Keep platform routing on the backend; clients only normalize identity fields. */
+export function normalizeSavedItemInput(item = {}) {
+  const sourcePlatform = String(item.source_platform || item.platform || "bilibili").trim();
+  const legacyId = String(item.bvid || "").trim();
+  const contentId = String(
+    item.content_id || (legacyId && !legacyId.includes(":") ? legacyId : ""),
+  ).trim();
+  return {
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: String(item.content_url || item.url || "").trim(),
+    content_type: String(
+      item.content_type || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
+    ).trim(),
+    title: String(item.title || "").trim(),
+    author_name: String(item.author_name || item.up_name || item.author || "").trim(),
+    cover_url: String(item.cover_url || "").trim(),
+    note: String(item.note || "").trim(),
+  };
+}
+
+export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(savedListPath(listKind), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(normalizeSavedItemInput(item)),
+    timeoutMs,
+  });
+}
+
+export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_key: String(itemKey || "").trim() }),
+    timeoutMs,
+  });
+}
+
+export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  const payload = await requestJson(
+    `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    { timeoutMs },
+  );
+  return {
+    ...payload,
+    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
+  };
+}
+
+export async function savedItemStatus(listKind, itemKey, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
+  return requestJson(`${savedListPath(listKind)}/status?${query}`, { timeoutMs });
+}
+
+export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
+    }),
+    timeoutMs,
+  });
+}
+
+export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
+    timeoutMs,
+  });
+}
 
 export async function addToWatchLater(bvid) {
   return requestJson("/watch-later", {

@@ -121,6 +121,7 @@ test("popup saved surfaces round-trip through api clients and are wired in the U
 
     const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
     const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+    const popupSavedSync = readFileSync(resolve("popup", "popup-saved-sync.js"), "utf8");
     assert.match(popupHtml, /id="tabWatchLater"/);
     assert.match(popupHtml, /id="viewWatchLater"/);
     assert.match(popupHtml, /id="watchLaterList"/);
@@ -129,13 +130,21 @@ test("popup saved surfaces round-trip through api clients and are wired in the U
     assert.match(popupHtml, /id="favoritesList"/);
     assert.match(popupJs, /function loadWatchLater/);
     assert.match(popupJs, /function loadFavorites/);
-    assert.match(popupJs, /toggleWatchLaterSaved\(item\.bvid\)/);
-    assert.match(popupJs, /toggleFavoriteSaved\(item\.bvid\)/);
+    assert.match(popupJs, /toggleSavedWithFeedback\("稍后再看", item/);
+    assert.match(popupJs, /toggleSavedWithFeedback\("收藏", item/);
     // Saved-card removal must stay optimistic (remove first, restore + 重试 on
     // failure) — the old await-then-remove flow read as "clicking does nothing"
     // whenever the DELETE was slow or failed.
     assert.match(popupJs, /function bindSavedCardRemove/);
     assert.match(popupJs, /remove\.textContent = "重试"/);
+    assert.match(popupSavedSync, /unsupported_content_type/);
+    assert.match(popupSavedSync, /unsupported_adapter_missing/);
+    assert.match(popupSavedSync, /请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试/);
+    assert.match(popupJs, /aria-disabled/);
+    assert.match(popupJs, /sync_status[^\n]*(pending|syncing)/);
+    assert.match(popupHtml, /id="watchLaterSyncAll"/);
+    assert.match(popupHtml, /id="favoritesSyncAll"/);
+    assert.match(popupHtml, /id="cfgSavedAutoSync"[^>]*type="checkbox"/);
   } finally {
     __resetBackendEndpointForTests();
     await new Promise((resolveClose) => server.close(resolveClose));

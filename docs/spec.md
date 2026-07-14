@@ -38,6 +38,7 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 - 记录行为发生时的**完整上下文**：对应的 DOM 页面快照、当前浏览路径、时间戳、平台内容 ID
 - 捕捉用户的**微行为**：鼠标悬停、视频进度条跳转、视频暂停 / 继续、页面导航等
 - 记录用户的**主动反馈**：`dislike` 类动作统一规范成 `feedback` 事件，避免各平台负反馈语义分叉
+- 插件 side panel 与桌面 / 移动 Web 使用同一 platform-neutral 保存契约：卡片先本地保存，保存页显式同步并轮询逐项任务；默认关闭自动同步，首次开启提示将修改对应平台账号；本地删除不删除平台记录
 - 本机调试可通过 `/api/extension/e2e/run` 驱动已安装插件在抖音 / 小红书 / X 真实页面执行白名单 DOM 操作，再由后端校验 `/api/events` 是否自然入库；runner 会把复用 tab 归位到平台入口并在回传结果前 flush 捕捉 buffer，该链路不伪造行为事件，用于验证捕捉层本身。`/api/events` 在画像明确未初始化时会拒收普通行为事件，首轮画像信号只由点击「开始初始化」后的 guided init 来源任务拉取；初始化后 accepted 普通事件会先写入 memory，再进入 `ProfileUpdatePipeline`，随后通过 `request_replenishment(reason="event_ingest")` 排队补货需求。旧版本已经停在 discovery 水位后的普通行为事件由独立 `last_profile_pipeline_event_id` 补喂画像 pipeline，而 `pending_signal_events` 仍只是 search / related_chain refresh 的触发水位，不是画像待处理数。
 
 **B 站数据接口**：
@@ -320,6 +321,24 @@ background ─ background admission (default 3) ──────┘
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
+│  │ /api/saved/* -> membership 先提交 -> native_save_tasks/items 快照 -> router │
+│  │ -> BilibiliNativeSaveAdapter（收藏夹/稍后再看）-> durable task-item poll │
+│  │ 六平台 adapter -> ExtensionNativeSaveBroker -> extension_native_save_jobs -> native_save multiplex │
+│  │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension                │
+│  │ exact OpenBiliClaw / YouTube Watch Later targets -> authenticated safe task-result                 │
+│  │ trusted-local extension E2E exact auth -> single saved sync item -> six-field safe callback        │
+│  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
+│  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
+│  │ NATIVE_SAVE_EXECUTE/RESULT：tab-launch mutex（XHS exact manual 可越过）+ per-task deadline + bounded replay │
+│  │ shared MV3 recovery barrier 在领取任务前清理全部 runner-owned orphan tabs       │
+│  │ final/source URL 与 tab/task/item 严格关联；Reddit/X/YT/XHS/DY/Zhihu 6/6 已接 │
+│  │ （fixture 全覆盖；2026-07-14 六平台 favorite + watch-later/fallback 真实终态均成功）│
+│  │ Zhihu typed ID -> exact identity control/dialog -> OpenBiliClaw checked proof │
+│  │ YT favorite 精确 OpenBiliClaw；重复 exact 行优先 checked/稳定复用；Watch Later 只认 WL │
+│  │ unsupported_content_type 保持 local-only                         │
+│  │ UI: pending + 空 task_id 可手动同步；非空 task_id / syncing 禁重复 │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
 │  │              Skill System (可扩展技能)                 │   │
 │  │  [搜索] [浏览] [评论分析] [UP主追踪] [自定义...]         │   │
 │  └──────────────────────────────────────────────────────┘   │
@@ -377,7 +396,8 @@ background ─ background admission (default 3) ──────┘
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
 │  SQLite: events(inferred_satisfaction) / discovery_candidates     │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
-│          content_cache / recommendations / chat_turns / avoidance_state │
+│          content_cache(item_key) / recommendations(item_key) / chat_turns / avoidance_state │
+│          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```
 

@@ -77,14 +77,19 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 ### `openbiliclaw config-show`
 
 显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
-配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数，以及「开机自启动」配置 / 系统注册状态；v0.3.165+ 还会分开展示海外网络模式（直连 / 跟随系统 / 自定义）与自定义代理地址，方便确认实际路由策略。
+配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 
 ```bash
 $ openbiliclaw config-show
 当前配置概览
 配置项
+  收藏自动同步  关闭
 Provider 概览
 ```
+
+`config-show` 只读取并展示配置，不创建保存任务，也不会执行平台账号写入。当前没有默认执行
+原生保存写入的 CLI smoke；Bilibili `favorite` / `watch_later` 的真实 E2E 通过平台中立
+`/api/saved/*` 明确选择命名 BV ID，并且必须先取得当次用户授权或使用测试账号。
 
 ### `openbiliclaw health-check`
 

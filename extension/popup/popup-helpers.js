@@ -247,19 +247,25 @@ export function getHintBannerState(tone) {
 }
 
 export function normalizeRecommendation(item) {
+  const bvid = normalizeText(item?.bvid);
+  const sourcePlatform = normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili";
+  const contentId = normalizeText(item?.content_id)
+    || (bvid && !bvid.includes(":") ? bvid : "");
   return {
     id: Number(item?.id ?? 0),
-    bvid: normalizeText(item?.bvid),
+    bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
     up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
     presented: Boolean(item?.presented),
-    content_id: normalizeText(item?.content_id) || normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: contentId,
     content_url: normalizeText(item?.content_url) || "",
-    source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",
-    content_type: normalizeText(item?.content_type) || "video",
+    source_platform: sourcePlatform,
+    content_type: normalizeText(item?.content_type)
+      || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
     body_text: normalizeText(item?.body_text),
     published_at: normalizeText(item?.published_at),
     published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
@@ -336,7 +342,7 @@ export function normalizeSavedItem(item) {
     ...item,
     bvid,
     title: normalizeText(item?.title) || bvid,
-    up_name: normalizeText(item?.up_name),
+    up_name: normalizeText(item?.up_name || item?.author_name),
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url),
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",
@@ -347,6 +353,8 @@ export function normalizeDelightCandidate(item) {
   const normalizedState = normalizeText(item?.state) || "pending";
   return {
     bvid: normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: normalizeText(item?.content_id),
     title: normalizeText(item?.title) || DEFAULT_DELIGHT_TITLE,
     delight_reason: normalizeText(item?.delight_reason) || DEFAULT_DELIGHT_REASON,
     delight_score: Number(item?.delight_score ?? 0),
@@ -356,6 +364,8 @@ export function normalizeDelightCandidate(item) {
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "",
     published_at: normalizeText(item?.published_at),
     published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+    content_type: normalizeText(item?.content_type),
+    body_text: normalizeText(item?.body_text),
     state: normalizedState,
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),

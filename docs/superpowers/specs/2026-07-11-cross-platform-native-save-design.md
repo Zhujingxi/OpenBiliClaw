@@ -84,7 +84,7 @@ item_key = canonical_source_platform + ":" + canonical_content_id
 - `POST /api/saved/{list_kind}/sync`：同步指定 `item_keys`；空数组表示同步该列表全部 eligible 项。
 - `GET /api/saved-sync/tasks/{task_id}`：查询批量任务的逐项结果。
 
-`list_kind` 只接受 `favorite` / `watch_later`。现有 `/api/watch-later` 和 `/api/favorites` 继续服务旧客户端，但只承诺 B 站 `bvid` 兼容；新四端实现统一调用 `/api/saved/*`。
+`list_kind` 只接受 `favorite` / `watch_later`。现有 `/api/watch-later` 和 `/api/favorites` 继续服务旧客户端，但只承诺 B 站 `bvid` 兼容；插件、桌面 Web、移动 Web 三个图形化保存界面统一调用 `/api/saved/*`，CLI 只显示配置。
 
 ## Capability Router
 
@@ -108,13 +108,13 @@ watch_later
   -> native favorite, otherwise
 ```
 
-路由结果必须返回真实的 `resolved_action` 和 `resolved_target`。UI 使用该结果显示「B站稍后观看」「YouTube Watch Later」「X Bookmark」「Reddit Saved」或「知乎 OpenBiliClaw 收藏夹」，不能只显示笼统的「平台同步成功」。
+路由结果必须返回真实的 `resolved_action` 和 `resolved_target`。B 站 canonical 文案采用产品已有术语「B站稍后再看」（替代早期设计稿中的「稍后观看」）；UI 使用 adapter 返回值显示真实目标，不能只显示笼统的「平台同步成功」。
 
 ## Platform Mapping
 
 | Platform | Favorite intent | Watch-later intent | Preferred transport |
 | --- | --- | --- | --- |
-| Bilibili | `OpenBiliClaw` 收藏夹 | 官方稍后观看 | backend direct，复用已验证 Cookie / CSRF |
+| Bilibili | `OpenBiliClaw` 收藏夹 | 官方稍后再看 | backend direct，复用已验证 Cookie / CSRF |
 | YouTube | `OpenBiliClaw` 播放列表 | Watch Later | extension logged-in task；官方 Data API 不再支持 Watch Later 写入 |
 | X / Twitter | Bookmark；账号支持且接口稳定时可使用 `OpenBiliClaw` bookmark folder | Bookmark | 官方 OAuth 能力可用时 API-first，否则 extension logged-in task |
 | Reddit | Saved；支持分类时使用 `OpenBiliClaw`，否则默认 Saved | Saved | authenticated API / extension task，按真实凭证能力选择 |

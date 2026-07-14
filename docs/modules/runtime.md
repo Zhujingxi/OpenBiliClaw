@@ -20,6 +20,8 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
+| 扩展原生保存共享 runtime | ✅（6/6 executor + 真实账号验证） | 扩展已定义与后端一致的 `native_save` task/result allow-list、canonical HTTPS URL 规则、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约和 active-tab runner，并统一经过共享 MV3 recovery barrier。一般 runner 与 legacy dispatcher 共用 `globalThis` mutex 保护 tab 创建/加载，加载完成即释放；XHS 手动 native-save 使用 exact tokenized route + identity/control fence，可在没有精确复用页时越过后台 discovery mutex，且 alarm/runtime wake poll single-flight。执行中的任务按 task/tab 独立分桶，仍各自在单一绝对 deadline 内严格校验 final tab 与 sender URL、tab/ID/item/platform。`chrome.storage.session` 可同时记录多个 runner-owned tab，MV3 recovery 只关闭这些 ID；content 用 256 项 bounded outcome-promise cache。YouTube duplicate exact playlist 优先 checked proof，否则稳定复用一个；知乎 typed `question/answer/article` identity 适配 current `Favlists-item`；小红书适配 current `noteContainer/collect-wrapper`。2026-07-14 六个平台 favorite 与 watch-later/fallback 真实终态均为 `synced/already_synced`。 |
+| 扩展原生保存 broker 与 adapter 注册 | ✅（6/6 executor + 真实账号验证） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定实例；local/degraded construction 与 config rebuild 都注册六平台 adapter，service/router 会替换而 broker 不变。wake best-effort 发布 `<slug>_task_available`。broker poll/lease、native task/item heartbeat 与 terminal persistence 使用线程卸载的独立短连接并有界重试 SQLite lock；durable terminal state 在 heartbeat completion race 中优先。开发用 `/api/extension/reload` 返回 `delivered`，可确认至少一个 runtime-stream 订阅者收到热重载事件。 |
 | 统一补货请求入口 | ✅ | `ContinuousRefreshController.request_replenishment(reason, force=False)` 收束补货触发：普通事件和反馈只排队 reason；初始化完成、用户手动刷新或推荐刷新后低库存用 `force=True` 进入手动补货。 |
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；后台定时 refresh 使用约 90% 的可换池低水位，库存只是略低于 `pool_target_count` 时不跑 discovery。注入 `DiscoveryCandidatePipeline` 后，B 站主补货会在现有 `_refresh_lock` 内按 `pending_eval + evaluating` 水位循环生产 raw candidates，直到待评估供给接近目标 batch 或达到预算；小缺口阶段先给 `search + related_chain` 配额，延后 `trending/explore`。统一关键词 planner 开启但 B 站关键词 store 暂空时，本轮只剔除 `search` 子策略，保留其它 B 站策略，避免回落到旧 `discovery.search.queries` LLM 生成。v0.3.149+ 当 `explore_refresh_hours` 到期或距到期不足一个 refresh tick，且 B 站平台族仍有补货空间时，controller 会允许 `KeywordPlanner` 在同一轮 merged keyword LLM 调用里请求 `explore_domains`，成功写入 B 站 `keyword_kind="explore"` query cache 后同步推进 `last_explore_refresh_at`；后续 `ExploreStrategy` 从该 explore 池 claim query。 |
 | 启动优先的原子库存维护 | ✅ | `run_startup_maintenance()` 是每个 controller 幂等的 host 启动钩子：API daemon 的 `run_forever()` 与 OpenClaw direct bootstrap 都先调用它，才允许暴露 LLM operation 或启动后台 loop。钩子调用一次 `Database.maintain_pool_inventory()`，先零 LLM 恢复历史 `suppressed` 结果，再统一其它维护。 |
@@ -67,6 +69,8 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
 | 配置热重载 LLM override | ✅ | `RuntimeContext._rebuild_components()` 从 config 构造 `module_overrides`，同时注入主 `LLMService` 与 `SoulEngine` 内部 service；热重载后的正向兴趣和避雷 speculator tick 都 detached 到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应。 |
 | 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
+| 原生保存 service 热重载 | ✅ | `saved_sync_service` 是可替换组件：每次构造新 `BilibiliAPIClient` 时同步创建 router + 六平台 extension adapters + `BilibiliNativeSaveAdapter` + `SavedSyncService`。重载先取消旧 registry inflight；所有新组件构造成功后才原子发布，任一构造失败保留完整旧组件与稳定 broker。 |
+| 原生保存 local-first 入口 | ✅ | 自动和手动同步都复用 `SavedSyncService.create_sync_task()` / `run_sync_task()`；`POST /api/saved/{list_kind}` 先提交本地 membership。`unsupported_adapter_missing` 可重试，`unsupported_content_type` 仍为终态；已接线的六个平台 executor 都可能因扩展离线进入 `extension_required`。 |
 | 桌面包 SOCKS 代理兼容 | ✅ | 默认运行依赖使用 `httpx[socks]`，PyInstaller spec 显式收集 `socksio`；用户系统配置 `ALL_PROXY` / `HTTPS_PROXY=socks5://...` 时，冻结桌面包创建 OpenAI / 兼容 LLM 客户端不会因缺少可选 SOCKS 运行时依赖而在启动阶段崩溃。 |
 | 运行时图像处理依赖 | ✅ | 默认安装显式携带 `Pillow>=10.0`，因为 `discovery.multimodal` 的封面压缩路径直接 import `PIL`；不再依赖 B 站 SDK 或打包 extra 的传递依赖碰巧提供 Pillow。 |
 | 运行日志降噪 | ✅ | 全局 logging 初始化会把 `httpx` / `httpcore` / `openai` / `openai._base_client` logger 提升到 WARNING，避免文件日志在 DEBUG 模式下被连接细节和完整 LLM 请求体刷屏；业务模块仍按 `logging.file_level` 输出。 |
@@ -77,6 +81,21 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
   root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
 
 ## 公开 API
+
+扩展共享原生保存基础（6/6 executor 已接、fixture 全覆盖，并于 2026-07-14 完成 favorite + watch-later/fallback 真实账号验证）：
+
+```typescript
+isNativeSaveTask(payload)
+sanitizeNativeSaveResult(result)
+runNativeSaveTask(task, platformSlug, authenticatedPostResult)
+installNativeSaveExecutor(platform, executor)
+createXBrowserEnvironment(root?, currentUrl?)
+createYouTubeBrowserEnvironment(root?, currentUrl?)
+createXiaohongshuBrowserEnvironment(root?, currentUrl?)
+createDouyinBrowserEnvironment(root?, currentUrl?)
+```
+
+runner 只通过调用方注入的已认证 closure 回传结果；它自身不创建后端 fetch。busy mutex 只覆盖 tab create/load，加载完成立即释放；每个 executor 仍从调用起使用自己的 absolute deadline，timeout 固定回传 `failed/native_save_timeout`，迟到的 tab-create success 也会被回收。所有 listener/tab/mutex cleanup 独立 guarded。content 的 once fence 仅保证当前 256 项 recent outcome window（含 in-flight）内不重复执行，不是永久 task ledger。
 
 ```python
 from openbiliclaw.runtime.updater import AutoUpdateService
@@ -233,7 +252,7 @@ embedding_progress.reset()
 
 主动探针仲裁规则：
 
-- 每轮 proactive push 最多发布一条 probe；惊喜推荐仍走独立 `delight.candidate` 逻辑。
+- 每轮 proactive push 最多发布一条 probe；惊喜推荐仍走独立 `delight.candidate` 逻辑。单条 pending、批量 rehydrate 与 runtime 事件统一透传 canonical `item_key`、raw `content_id`、`source_platform`、`content_url`、`content_type`。
 - 正向和负向都有候选时，根据上一次成功投递的 `last_probe_kind` 反向优先，形成 `interest -> avoidance -> interest` 的轮转。
 - 发布失败（例如没有订阅者）时不写 `last_probe_kind`，也不消耗 `probed_domains` / `probed_avoidance_domains`。
 - runtime 只会投递 `status="active"` 的正向/负向探针；已经确认、拒绝或过期的旧候选即使仍残留在某次内存快照中，也不会再次进入 `interest.probe` / `avoidance.probe` 事件流。

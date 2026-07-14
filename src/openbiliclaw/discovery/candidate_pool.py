@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.saved_sync.identity import make_item_key
 
 PENDING_EVAL = "pending_eval"
 EVALUATING = "evaluating"
@@ -124,7 +125,12 @@ def candidate_key_for(item: DiscoveredContent) -> str:
     platform = _canonical_platform(item.source_platform or ("bilibili" if item.bvid else ""))
     content_id = str(item.content_id or item.bvid or "").strip()
     if content_id:
-        return f"{platform}:{content_id}"
+        return make_item_key(platform, content_id, item.content_url)
+    if item.content_url:
+        try:
+            return make_item_key(platform, "", item.content_url)
+        except ValueError:
+            pass
     canonical_url = _canonical_url(item.content_url)
     if canonical_url:
         digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()[:24]

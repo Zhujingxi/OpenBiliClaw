@@ -228,6 +228,24 @@ export function normalizeSourcePlatform(item) {
   return explicit || "bilibili";
 }
 
+/** Preserve canonical saved identity without treating UI row IDs or namespaced IDs as content IDs. */
+export function normalizeSavedIdentity(item = {}) {
+  const sourcePlatform = normalizeSourcePlatform(item);
+  const legacyId = normalizeText(item?.bvid);
+  const contentId = normalizeText(
+    item?.content_id || (legacyId && !legacyId.includes(":") ? legacyId : ""),
+  );
+  return {
+    ...item,
+    item_key: normalizeText(item?.item_key) || (contentId ? `${sourcePlatform}:${contentId}` : ""),
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: normalizeText(item?.content_url || item?.url),
+    content_type: normalizeText(item?.content_type)
+      || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
+  };
+}
+
 export function getSourceLabel(source) {
   return SOURCE_LABEL_MAP[source] || source || "Web";
 }
@@ -308,19 +326,25 @@ export function buildRecommendationClickPayload(item, contentUrl = "") {
 // ── Recommendation Normalization ─────────────────────────────
 
 export function normalizeRecommendation(item) {
+  const bvid = normalizeText(item?.bvid);
+  const sourcePlatform = normalizeSourcePlatform(item);
+  const contentId = normalizeText(item?.content_id)
+    || (bvid && !bvid.includes(":") ? bvid : "");
   return {
     id: Number(item?.id ?? 0),
-    bvid: normalizeText(item?.bvid),
+    bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
     up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
     presented: Boolean(item?.presented),
-    content_id: normalizeText(item?.content_id) || normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: contentId,
     content_url: normalizeText(item?.content_url) || "",
-    source_platform: normalizeSourcePlatform(item),
-    content_type: normalizeText(item?.content_type) || "video",
+    source_platform: sourcePlatform,
+    content_type: normalizeText(item?.content_type)
+      || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
     body_text: normalizeText(item?.body_text),
     published_at: normalizeText(item?.published_at),
     published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
@@ -452,6 +476,8 @@ export function getCommentSubmitUiState(state) {
 export function normalizeDelightCandidate(item) {
   return {
     bvid: normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: normalizeText(item?.content_id),
     title: normalizeText(item?.title) || DEFAULT_DELIGHT_TITLE,
     delight_reason: normalizeText(item?.delight_reason) || DEFAULT_DELIGHT_REASON,
     delight_score: Number(item?.delight_score ?? 0),
@@ -461,6 +487,8 @@ export function normalizeDelightCandidate(item) {
     source_platform: normalizeSourcePlatform(item),
     published_at: normalizeText(item?.published_at),
     published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+    content_type: normalizeText(item?.content_type),
+    body_text: normalizeText(item?.body_text),
     state: normalizeText(item?.state) || "pending",
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),

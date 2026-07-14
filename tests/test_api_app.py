@@ -4829,6 +4829,34 @@ class TestBackendAPI:
                 "message": "开始给你补候选了",
             }
 
+    def test_extension_reload_reports_runtime_stream_delivery(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime.events import RuntimeEventHub
+
+        hub = RuntimeEventHub()
+        app = create_app(
+            memory_manager=object(),
+            database=object(),
+            soul_engine=object(),
+            runtime_event_hub=hub,
+        )
+        client = TestClient(app)
+
+        assert client.post("/api/extension/reload").json() == {
+            "ok": True,
+            "delivered": False,
+        }
+        with client.websocket_connect("/api/runtime-stream") as websocket:
+            assert client.post("/api/extension/reload").json() == {
+                "ok": True,
+                "delivered": True,
+            }
+            assert websocket.receive_json() == {
+                "type": "extension_reload",
+                "source": "dev",
+            }
+
     def test_runtime_stream_accepts_and_discards_extension_metadata(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -5410,6 +5438,7 @@ class TestBackendAPI:
                 {
                     "id": 11,
                     "bvid": "BV1NEW",
+                    "item_key": "bilibili:BV1NEW",
                     "title": "新的一批",
                     "up_name": "UPA",
                     "cover_url": "https://i0.hdslb.com/bfs/archive/new-cover.jpg",
@@ -5435,6 +5464,7 @@ class TestBackendAPI:
                 {
                     "id": 12,
                     "bvid": "BV1PLAIN",
+                    "item_key": "bilibili:BV1PLAIN",
                     "title": "朴素对象",
                     "up_name": "UPB",
                     "cover_url": "https://i0.hdslb.com/bfs/archive/plain-cover.jpg",
@@ -5551,6 +5581,7 @@ class TestBackendAPI:
                 {
                     "id": 22,
                     "bvid": "BV1NEXT",
+                    "item_key": "bilibili:BV1NEXT",
                     "title": "下一批 1",
                     "up_name": "UPB",
                     "cover_url": "https://i0.hdslb.com/bfs/archive/next-cover.jpg",

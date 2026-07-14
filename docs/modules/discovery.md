@@ -1084,6 +1084,7 @@ item = DiscoveredContent(
 当前 discovery 结果写入缓存时会稳定填充的字段包括：
 
 - `bvid`
+- `item_key` — 由 `make_item_key(source_platform, content_id, content_url)` 派生的平台 canonical identity；相同裸 `content_id` 在不同平台不会冲突
 - `title`
 - `up_name`
 - `up_mid`
@@ -1103,6 +1104,8 @@ item = DiscoveredContent(
 - `last_scored_at`
 - `body_text` — 纯文字内容主体（推文 / thread 全文或 `note_tweet` 长文）；视频源留空。X 是首个以文字为主的来源，模型为此增设该字段
 - `content_type` — 内容形态，复用候选池既有 shape 字段：`"video"`（默认）/ `"note"`（小红书）/ `"tweet"` / `"thread"`（X）。`to_cache_kwargs()` 透传 `body_text` + `content_type`，并经 `storage/database.py` 的 `_ensure_content_cache_multisource_columns()` / `_ensure_discovery_candidate_columns()` 迁移列；`candidate_pool.discovered_content_to_candidate_write()` 和 discovery 引擎候选 dict 两处都优先取 `item.content_type`（`item.content_type or ("note" if 小红书 else "video")`），保证 X 文字 / thread 候选不被强标成 `video`
+
+缓存写入使用 `content_storage_key()`：B 站继续以 raw BV ID 作为 `content_cache.bvid`，其它平台使用 canonical `item_key`；原始平台 ID 始终保留在 `content_id`。只有 B 站内容会从 raw `content_id/bvid` 生成兼容视频 URL，非 B 站内容以来源提供的 `content_url` 为准。
 
 ## 示例：一轮 discover 之后会发生什么
 
