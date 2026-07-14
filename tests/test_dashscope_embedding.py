@@ -215,14 +215,15 @@ def test_base_url_strips_compatible_mode_suffix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embed_honours_outbound_proxy_mode() -> None:
-    """Pitfall rule 1: the DashScope client must route via [network].mode, not
-    silently inherit HTTP_PROXY. Default mode 'direct' => trust_env=False (no
-    overseas ladder over the CN dashscope.aliyuncs.com call); 'custom' opts in.
+async def test_embed_routes_per_endpoint_domestic_direct() -> None:
+    """Pitfall rule 1 + v0.3.167: the DashScope client routes per endpoint via
+    network.httpx_kwargs_for_endpoint. dashscope.aliyuncs.com is domestic, so it
+    stays direct (trust_env=False, no proxy) even when [network].mode is custom
+    for reaching overseas models — the CN embedding call never tunnels the ladder.
+    A genuinely non-domestic base_url still follows the global mode.
     """
     from openbiliclaw import network
 
-    provider = DashScopeEmbeddingProvider(api_key="sk-test", model="qwen3-vl-embedding")
     payload = {"output": {"embeddings": [{"index": 0, "type": "text", "embedding": [0.1]}]}}
 
     def _make_factory() -> MagicMock:
@@ -232,27 +233,33 @@ async def test_embed_honours_outbound_proxy_mode() -> None:
         mock_client.post = AsyncMock(return_value=_mock_response(payload))
         return MagicMock(return_value=mock_client)
 
+    async def _capture(provider: DashScopeEmbeddingProvider) -> MagicMock:
+        factory = _make_factory()
+        with patch("openbiliclaw.llm.dashscope_provider.httpx.AsyncClient", factory):
+            await provider.embed("hi")
+        return factory
+
+    domestic = DashScopeEmbeddingProvider(api_key="sk-test", model="qwen3-vl-embedding")
+    offshore = DashScopeEmbeddingProvider(
+        api_key="sk-test", model="qwen3-vl-embedding", base_url="https://relay.example.com"
+    )
+
     network.reset_outbound_proxy_for_tests()
     try:
-        # Default (direct) mode: never inherit env proxy, no leaked proxy kwarg.
-        factory = _make_factory()
-        with patch(
-            "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
-            factory,
-        ):
-            await provider.embed("hi")
-        assert factory.call_args.kwargs.get("trust_env") is False
-        assert "proxy" not in factory.call_args.kwargs
+        # Domestic endpoint, direct mode → direct, no proxy.
+        f = await _capture(domestic)
+        assert f.call_args.kwargs.get("trust_env") is False
+        assert "proxy" not in f.call_args.kwargs
 
-        # Custom mode: explicit opt-in proxy is threaded through, still no env.
+        # Domestic endpoint, CUSTOM mode → STILL direct (domestic carve-out).
         network.set_outbound_proxy("http://127.0.0.1:7890")
-        factory = _make_factory()
-        with patch(
-            "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
-            factory,
-        ):
-            await provider.embed("hi")
-        assert factory.call_args.kwargs.get("proxy") == "http://127.0.0.1:7890"
-        assert factory.call_args.kwargs.get("trust_env") is False
+        f = await _capture(domestic)
+        assert f.call_args.kwargs.get("trust_env") is False
+        assert "proxy" not in f.call_args.kwargs
+
+        # Non-domestic base_url, custom mode → follows global mode (proxy applied).
+        f = await _capture(offshore)
+        assert f.call_args.kwargs.get("proxy") == "http://127.0.0.1:7890"
+        assert f.call_args.kwargs.get("trust_env") is False
     finally:
         network.reset_outbound_proxy_for_tests()

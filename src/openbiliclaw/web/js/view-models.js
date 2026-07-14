@@ -356,6 +356,16 @@ export function normalizeRecommendation(item) {
   };
 }
 
+export function reconcileRecommendationReplacement(currentItems, incomingItems) {
+  const current = Array.isArray(currentItems) ? currentItems : [];
+  const incoming = Array.isArray(incomingItems) ? incomingItems : [];
+  const preserved = incoming.length === 0 && current.length > 0;
+  return {
+    items: preserved ? current : incoming,
+    preserved,
+  };
+}
+
 export function formatPublishedTime(item, now = Date.now()) {
   const parsed = Date.parse(String(item?.published_at || ""));
   if (Number.isFinite(parsed)) {

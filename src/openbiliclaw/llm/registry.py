@@ -344,8 +344,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -361,8 +361,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -379,8 +379,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 provider_name="openai_compatible",
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -404,8 +404,8 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url or "https://openrouter.ai/api/v1",
                 http_referer=chat_openrouter.http_referer,
                 x_title=chat_openrouter.x_title,
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url or "https://openrouter.ai/api/v1"),
+                trust_env=_outbound_trust_env(base_url or "https://openrouter.ai/api/v1"),
             ),
             effective_model,
         )
@@ -500,14 +500,24 @@ def summarize_registry(config: Config, registry: LLMRegistry) -> RegistrySummary
     )
 
 
-def _outbound_proxy() -> str:
-    """Overseas-outbound proxy from the process-level source of truth (or "")."""
-    return network.outbound_proxy_url() or ""
+def _outbound_proxy(base_url: str = "") -> str:
+    """Outbound proxy for a provider endpoint from the process-level source of
+    truth (or "").
+
+    Domestic / local endpoints (DeepSeek / SenseNova / 通义 / self-hosted, …)
+    always resolve to direct — the overseas proxy would route a domestic
+    request out and back and time out. See ``network.is_domestic_endpoint``.
+    """
+    return network.proxy_for_endpoint(base_url) or ""
 
 
-def _outbound_trust_env() -> bool:
-    """Whether overseas SDK clients should inherit env/system proxies."""
-    return network.outbound_trust_env()
+def _outbound_trust_env(base_url: str = "") -> bool:
+    """Whether an SDK client for ``base_url`` should inherit env/system proxies.
+
+    Domestic / local endpoints never inherit env proxies; overseas endpoints
+    follow the process-wide ``system`` policy.
+    """
+    return network.trust_env_for_endpoint(base_url)
 
 
 def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
@@ -532,8 +542,8 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),
             api_flavor=config.llm.openai.api_flavor,
-            proxy=_outbound_proxy(),
-            trust_env=_outbound_trust_env(),
+            proxy=_outbound_proxy(config.llm.openai.base_url),
+            trust_env=_outbound_trust_env(config.llm.openai.base_url),
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -543,8 +553,8 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url=config.llm.openai.base_url,
         timeout=float(config.llm.timeout),
         api_flavor=config.llm.openai.api_flavor,
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.openai.base_url),
+        trust_env=_outbound_trust_env(config.llm.openai.base_url),
     )
 
 
@@ -558,8 +568,8 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=config.llm.claude.model or "claude-sonnet-4-20250514",
         timeout=float(config.llm.timeout),
         base_url=config.llm.claude.base_url,
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.claude.base_url),
+        trust_env=_outbound_trust_env(config.llm.claude.base_url),
     )
 
 
@@ -570,13 +580,15 @@ def _maybe_deepseek_provider(
         return overrides["deepseek"]
     if not config.llm.deepseek.api_key.strip():
         return None
+    # DeepSeek's endpoint (api.deepseek.com) is domestic — force direct so a
+    # user's overseas proxy for other models never routes it through the ladder.
     return DeepSeekProvider(
         api_key=config.llm.deepseek.api_key,
         model=config.llm.deepseek.model or "deepseek-v4-flash",
         reasoning_effort=config.llm.deepseek.reasoning_effort,
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy("https://api.deepseek.com"),
+        trust_env=_outbound_trust_env("https://api.deepseek.com"),
     )
 
 
@@ -598,8 +610,8 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         api_key=api_key,
         model=config.llm.gemini.model or "gemini-2.5-flash",
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.gemini.base_url),
+        trust_env=_outbound_trust_env(config.llm.gemini.base_url),
     )
 
 
@@ -696,8 +708,10 @@ def _maybe_openrouter_provider(
         http_referer=config.llm.openrouter.http_referer,
         x_title=config.llm.openrouter.x_title,
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"),
+        trust_env=_outbound_trust_env(
+            config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"
+        ),
     )
 
 
@@ -728,6 +742,6 @@ def _maybe_openai_compatible_provider(
         provider_name="openai_compatible",
         timeout=float(config.llm.timeout),
         api_flavor=cfg.api_flavor,
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(cfg.base_url),
+        trust_env=_outbound_trust_env(cfg.base_url),
     )

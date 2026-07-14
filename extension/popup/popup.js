@@ -31,6 +31,7 @@ import {
   normalizeProfileSummary,
   platformDisplayName,
   probeMessageKey,
+  reconcileRecommendationReplacement,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -6131,10 +6132,16 @@ async function handleManualRefresh() {
       setHint("还没初始化好。去「推荐」页点「开始初始化」，完成后再刷新。", "error");
       return;
     }
+    const replacement = reconcileRecommendationReplacement(
+      state.recommendations,
+      result.items,
+    );
     resetRecommendationAutoLoadIntent();
-    state.recommendations = result.items;
+    state.recommendations = replacement.items;
     state.loadingMore = false;
-    state.hasMoreRecommendations = result.items.length >= 10;
+    state.hasMoreRecommendations = replacement.preserved
+      ? false
+      : result.items.length >= 10;
     state.runtimeStatus = await fetchRuntimeStatus().catch(() => state.runtimeStatus);
     renderPoolStatus(state.runtimeStatus);
     renderRecommendationState(
@@ -6147,6 +6154,7 @@ async function handleManualRefresh() {
     const hint = getManualRefreshResultHint({
       itemCount: result.items.length,
       hadAdvertisedInventory,
+      preservedCurrent: replacement.preserved,
     });
     setHint(hint.message, hint.tone);
     await loadActivityFeed();

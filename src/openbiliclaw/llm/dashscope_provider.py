@@ -172,18 +172,19 @@ class DashScopeEmbeddingProvider(LLMProvider):
         if params:
             body["parameters"] = params
 
-        # Pitfall rule 1 / v0.3.166 outbound routing: an embedding API client
-        # must honour [network].mode like every other outbound provider
-        # (openai / gemini / claude / openrouter) instead of silently
-        # inheriting HTTP_PROXY. Default mode "direct" → trust_env=False, so a
-        # CN user whose env proxy is an overseas ladder never routes the
-        # dashscope.aliyuncs.com call through it; "system"/"custom" still let
-        # dashscope-intl users opt in. Imported per-call to match codex_auth.
-        from openbiliclaw.network import outbound_httpx_kwargs
+        # Pitfall rule 1 / v0.3.166–167 outbound routing: route per endpoint via
+        # network.httpx_kwargs_for_endpoint(base_url). DashScope's
+        # dashscope.aliyuncs.com / dashscope.cn are on the domestic host list, so
+        # they force trust_env=False (direct) even when [network].mode is
+        # system/custom for reaching overseas models — a CN user's env proxy /
+        # overseas ladder never tunnels the domestic embedding call (the exact
+        # regression v0.3.167 fixed for chat gateways). A genuinely non-domestic
+        # base_url still follows the global mode. Imported per-call, like codex_auth.
+        from openbiliclaw.network import httpx_kwargs_for_endpoint
 
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, **outbound_httpx_kwargs()
+                timeout=self._timeout, **httpx_kwargs_for_endpoint(self._base_url)
             ) as client:
                 response = await client.post(
                     url,

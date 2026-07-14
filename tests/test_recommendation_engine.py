@@ -1336,6 +1336,45 @@ async def test_serve_returns_immediately_when_pool_available_count_is_zero() -> 
 
 
 @pytest.mark.asyncio
+async def test_serve_pool_reads_run_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = RecommendationEngine(llm=_DummyLLM(), database=object())  # type: ignore[arg-type]
+    event_loop_thread_id = threading.get_ident()
+    worker_thread_ids: list[int] = []
+    heartbeat_ran = asyncio.Event()
+
+    def readiness() -> dict[str, int]:
+        worker_thread_ids.append(threading.get_ident())
+        return {"available": 1, "raw": 1, "pending": 0}
+
+    def load_candidates(
+        _profile: SoulProfile,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+    ) -> tuple[list[DiscoveredContent], int, int, int, int]:
+        del limit, excluded_bvids
+        worker_thread_ids.append(threading.get_ident())
+        time.sleep(0.08)
+        return [], 0, 0, 0, 0
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_ran.set()
+
+    monkeypatch.setattr(engine, "_pool_readiness_counts", readiness)
+    monkeypatch.setattr(engine, "_load_filtered_serve_candidates", load_candidates)
+    heartbeat_task = asyncio.create_task(heartbeat())
+
+    recommendations = await engine.serve(_build_profile(), limit=1)
+    await heartbeat_task
+
+    assert recommendations == []
+    assert heartbeat_ran.is_set()
+    assert worker_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in worker_thread_ids)
+
+
+@pytest.mark.asyncio
 async def test_append_returns_immediately_when_exclusions_empty_candidates() -> None:
     class ExplodingCurator:
         def build_context(self) -> object:

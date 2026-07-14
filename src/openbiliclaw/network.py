@@ -12,12 +12,45 @@ read this module — that isolation is pinned by
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 
 OutboundProxyMode = Literal["direct", "system", "custom"]
 _VALID_MODES = frozenset({"direct", "system", "custom"})
 _outbound_proxy: str | None = None
 _outbound_mode: OutboundProxyMode = "direct"
+
+# Domestic (mainland-China) LLM gateways must ALWAYS connect directly, even
+# when ``[network].mode`` is ``system`` / ``custom`` for reaching overseas
+# models. A user who turns on a proxy to reach OpenAI must not have their
+# DeepSeek / SenseNova / 通义 / … requests shoved through the same overseas
+# ladder — that routes a domestic request out and back and reliably times
+# out ("商汤请求总是超时"). The ``.cn`` TLD is caught by a wildcard below;
+# this set covers Chinese gateways that live on non-``.cn`` domains.
+_DOMESTIC_HOST_SUFFIXES = frozenset(
+    {
+        "deepseek.com",  # DeepSeek
+        "moonshot.cn",  # Moonshot / Kimi (also .cn wildcard)
+        "bigmodel.cn",  # 智谱 GLM / BigModel
+        "zhipuai.cn",  # 智谱
+        "aliyuncs.com",  # 阿里云 DashScope / 通义千问
+        "dashscope.cn",  # 通义千问
+        "baidubce.com",  # 百度 千帆 / 文心
+        "tencentcloudapi.com",  # 腾讯 混元
+        "hunyuan.cloud.tencent.com",  # 腾讯 混元 OpenAI-compat 网关
+        "volces.com",  # 字节 火山方舟 / 豆包
+        "xf-yun.com",  # 讯飞星火
+        "minimax.chat",  # MiniMax
+        "minimaxi.com",  # MiniMax
+        "lingyiwanwu.com",  # 零一万物 Yi
+        "stepfun.com",  # 阶跃星辰
+        "baichuan-ai.com",  # 百川
+        "siliconflow.com",  # 硅基流动 (also .cn wildcard)
+        "infini-ai.com",  # 无问芯穹
+        "ppinfra.com",  # PPIO 派欧算力
+    }
+)
 
 
 def set_outbound_proxy(url: str, *, mode: str | None = None) -> None:
@@ -90,6 +123,83 @@ def outbound_ytdlp_proxy() -> str | None:
     if _outbound_mode == "system":
         return None
     return _outbound_proxy or ""
+
+
+def _endpoint_host(url: str) -> str:
+    """Extract the lowercase host from a base URL or bare ``host[:port]``."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    # ``urlsplit`` only populates ``netloc`` when a scheme (or leading ``//``)
+    # is present; base_urls like ``api.deepseek.com/v1`` have neither.
+    if "://" not in raw:
+        raw = "//" + raw
+    try:
+        netloc = urlsplit(raw).netloc or ""
+    except ValueError:
+        return ""
+    if "@" in netloc:  # strip userinfo
+        netloc = netloc.rsplit("@", 1)[1]
+    if netloc.startswith("["):  # IPv6 literal, e.g. [::1]:8317
+        end = netloc.find("]")
+        host = netloc[1:end] if end != -1 else netloc[1:]
+    else:
+        host = netloc.split(":", 1)[0]
+    return host.strip().lower().rstrip(".")
+
+
+def is_domestic_endpoint(url: str) -> bool:
+    """Whether ``url`` points at a mainland-China / local endpoint that must
+    bypass the overseas proxy and connect directly.
+
+    Covers loopback / private / link-local addresses (self-hosted gateways),
+    the ``.cn`` TLD, and the known Chinese gateways on non-``.cn`` domains in
+    :data:`_DOMESTIC_HOST_SUFFIXES`.
+    """
+    host = _endpoint_host(url)
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".local") or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        return ip.is_loopback or ip.is_private or ip.is_link_local
+    if host.endswith(".cn"):
+        return True
+    return any(host == suffix or host.endswith("." + suffix) for suffix in _DOMESTIC_HOST_SUFFIXES)
+
+
+def proxy_for_endpoint(base_url: str) -> str | None:
+    """Resolve the proxy URL for a specific endpoint.
+
+    Domestic / local endpoints always return ``None`` (direct); everything
+    else follows the process-wide overseas policy.
+    """
+    if is_domestic_endpoint(base_url):
+        return None
+    return _outbound_proxy
+
+
+def trust_env_for_endpoint(base_url: str) -> bool:
+    """Whether an SDK client for ``base_url`` should inherit env/system proxies.
+
+    Domestic / local endpoints never inherit env proxies (they must stay
+    direct); overseas endpoints follow the process-wide ``system`` policy.
+    """
+    if is_domestic_endpoint(base_url):
+        return False
+    return _outbound_mode == "system"
+
+
+def httpx_kwargs_for_endpoint(base_url: str) -> dict[str, Any]:
+    """Return ``httpx`` client kwargs for a specific endpoint, honoring the
+    domestic-direct carve-out."""
+    if is_domestic_endpoint(base_url):
+        return {"trust_env": False}
+    return outbound_httpx_kwargs()
 
 
 def reset_outbound_proxy_for_tests() -> None:

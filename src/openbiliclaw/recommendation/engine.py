@@ -354,7 +354,7 @@ class RecommendationEngine:
         """
         label = "realtime" if expression_mode == "realtime" else "pool"
         multiplier = 4 if excluded_bvids else 3
-        pool_readiness = self._pool_readiness_counts()
+        pool_readiness = await asyncio.to_thread(self._pool_readiness_counts)
         servable_pool_count = pool_readiness["available"]
         raw_pool_count = pool_readiness["raw"]
         pending_pool_count = pool_readiness["pending"]
@@ -368,24 +368,24 @@ class RecommendationEngine:
             self._last_served_bvids = frozenset()
             return []
 
-        candidates = self._load_pool_candidates(
-            limit=max(limit * multiplier, 40) + len(excluded_bvids)
+        (
+            candidates,
+            loaded_count,
+            after_exclude_count,
+            after_disliked_count,
+            after_viewed_count,
+        ) = await asyncio.to_thread(
+            self._load_filtered_serve_candidates,
+            profile,
+            limit=max(limit * multiplier, 40) + len(excluded_bvids),
+            excluded_bvids=excluded_bvids,
         )
-        loaded_count = len(candidates)
-        candidates = self._apply_platform_floor(candidates)
-        if excluded_bvids:
-            candidates = [c for c in candidates if c.bvid not in excluded_bvids]
-        after_exclude_count = len(candidates)
-        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
-        after_disliked_count = len(candidates)
         if after_disliked_count < after_exclude_count:
             logger.info(
                 "serve(/%s) filtered %d candidate(s) by profile disliked_topics",
                 label,
                 after_exclude_count - after_disliked_count,
             )
-        candidates = self._exclude_recently_viewed(candidates)
-        after_viewed_count = len(candidates)
         if after_viewed_count == 0:
             logger.warning(
                 "serve(/%s) loaded 0 usable candidates from servable=%d "
@@ -439,12 +439,10 @@ class RecommendationEngine:
             ),
         )
 
-        score_override: dict[str, float] | None = None
-        amplification_guard: frozenset[str] = frozenset()
-        if self._curator is not None:
-            context = self._curator.build_context()
-            score_override = self._curator.score_candidates(candidates, context)
-            amplification_guard = context.over_budget_amplification_keys
+        score_override, amplification_guard = await asyncio.to_thread(
+            self._score_candidates_with_curator,
+            candidates,
+        )
 
         # v0.3.44+: pre-fetch embeddings for MMR-based diversification.
         # In v0.3.45+ discovery and classify_pool_backlog warm these into
@@ -519,18 +517,20 @@ class RecommendationEngine:
 
         # Critical-path write: only the insert (we need the IDs for the
         # response). Single transaction, single fsync.
-        ids = self._database.batch_insert_recommendations(
-            [
-                {
-                    "bvid": rec.content.bvid,
-                    "item_key": rec.content.item_key,
-                    "expression": rec.expression,
-                    "topic": rec.topic_label,
-                    "confidence": rec.confidence,
-                    "presented": 0,
-                }
-                for rec in recommendations
-            ]
+        recommendation_rows = [
+            {
+                "bvid": rec.content.bvid,
+                "item_key": rec.content.item_key,
+                "expression": rec.expression,
+                "topic": rec.topic_label,
+                "confidence": rec.confidence,
+                "presented": 0,
+            }
+            for rec in recommendations
+        ]
+        ids = await asyncio.to_thread(
+            self._database.batch_insert_recommendations,
+            recommendation_rows,
         )
         for rec, rec_id in zip(recommendations, ids, strict=True):
             rec.recommendation_id = rec_id
@@ -568,6 +568,13 @@ class RecommendationEngine:
     async def _mark_pool_shown_async(self, bvids: list[str]) -> None:
         """Fire-and-forget pool-marking helper. Never raises."""
         try:
+            # Keep this short UPDATE on the event-loop thread. Unlike the
+            # awaited serve reads/writes above, this task intentionally
+            # outlives ``serve()``; moving it to a worker lets callers close
+            # the shared SQLite connection while the worker is still using
+            # it (and can crash the interpreter inside sqlite3). The costly
+            # mature-database scans remain off-loop, while this bounded write
+            # normally updates only the served batch (10 rows).
             self._database.mark_pool_items_shown(bvids)
             await self._notify_pool_inventory_commit()
         except Exception:
@@ -3022,6 +3029,44 @@ class RecommendationEngine:
             limit=limit, xhs_self_nickname=self._xhs_self_nickname()
         )
         return self._rows_to_discovered(rows)
+
+    def _load_filtered_serve_candidates(
+        self,
+        profile: SoulProfile,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+    ) -> tuple[list[DiscoveredContent], int, int, int, int]:
+        """Load and filter one serve window outside the asyncio event loop."""
+        candidates = self._load_pool_candidates(limit=limit)
+        loaded_count = len(candidates)
+        candidates = self._apply_platform_floor(candidates)
+        if excluded_bvids:
+            candidates = [item for item in candidates if item.bvid not in excluded_bvids]
+        after_exclude_count = len(candidates)
+        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+        after_disliked_count = len(candidates)
+        candidates = self._exclude_recently_viewed(candidates)
+        return (
+            candidates,
+            loaded_count,
+            after_exclude_count,
+            after_disliked_count,
+            len(candidates),
+        )
+
+    def _score_candidates_with_curator(
+        self,
+        candidates: list[DiscoveredContent],
+    ) -> tuple[dict[str, float] | None, frozenset[str]]:
+        """Build curator context and scores outside the asyncio event loop."""
+        if self._curator is None:
+            return None, frozenset()
+        context = self._curator.build_context()
+        return (
+            self._curator.score_candidates(candidates, context),
+            context.over_budget_amplification_keys,
+        )
 
     def _apply_platform_floor(self, candidates: list[DiscoveredContent]) -> list[DiscoveredContent]:
         """Guarantee every stocked platform is represented in the serve window.

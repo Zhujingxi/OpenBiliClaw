@@ -33,6 +33,7 @@ import {
   getPoolStatusSummary,
   getPopupState,
   probeMessageKey,
+  reconcileRecommendationReplacement,
   shouldDisplayProbeFromWebSocket,
   shouldSubmitChatOnEnter,
   shouldHydrateProbe,
@@ -54,6 +55,23 @@ test("platformDisplayName maps known platforms and passes through unknown", () =
   assert.equal(platformDisplayName("reddit"), "Reddit");
   assert.equal(platformDisplayName("newtube"), "newtube");
   assert.equal(platformDisplayName(""), "");
+});
+
+test("empty reshuffle preserves the visible recommendation batch", () => {
+  const current = [{ id: 1, title: "正在看的推荐" }];
+  const preserved = reconcileRecommendationReplacement(current, []);
+  assert.equal(preserved.preserved, true);
+  assert.equal(preserved.items, current);
+
+  const incoming = [{ id: 2, title: "新一批推荐" }];
+  assert.deepEqual(reconcileRecommendationReplacement(current, incoming), {
+    items: incoming,
+    preserved: false,
+  });
+  assert.deepEqual(reconcileRecommendationReplacement([], []), {
+    items: [],
+    preserved: false,
+  });
 });
 
 test("buildVideoUrl builds bilibili video url from bvid", () => {
@@ -1128,10 +1146,33 @@ test("getManualRefreshResultHint explains stale positive pool count after empty 
   assert.deepEqual(
     getManualRefreshResultHint({ itemCount: 0, hadAdvertisedInventory: true }),
     {
-      message: "池子状态刚刚同步，正在整理内容。",
+      message: "库存还在，但这批暂时没有可用新内容，稍后再试。",
       tone: "info",
     },
   );
+  assert.deepEqual(
+    getManualRefreshResultHint({
+      itemCount: 0,
+      hadAdvertisedInventory: true,
+      preservedCurrent: true,
+    }),
+    {
+      message: "这次没换出新内容，当前推荐已保留。",
+      tone: "info",
+    },
+  );
+});
+
+test("popup manual refresh applies the preserved empty replacement", () => {
+  const popupSource = readFileSync(resolve(import.meta.dirname, "../popup/popup.js"), "utf8");
+  const start = popupSource.indexOf("async function handleManualRefresh()");
+  const end = popupSource.indexOf("\nfunction bindTabs()", start);
+  const body = popupSource.slice(start, end);
+
+  assert.match(body, /reconcileRecommendationReplacement\(/);
+  assert.match(body, /state\.recommendations = replacement\.items/);
+  assert.match(body, /preservedCurrent: replacement\.preserved/);
+  assert.doesNotMatch(body, /state\.recommendations = result\.items/);
 });
 
 test("mergeRuntimeStatusEvent updates pool fields from runtime stream payload", () => {

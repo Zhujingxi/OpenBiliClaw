@@ -382,6 +382,44 @@ async def test_account_sync_returns_partial_success_when_one_source_fails() -> N
     assert {event["event_type"] for event in memory.events} == {"view", "follow"}
 
 
+@pytest.mark.asyncio
+async def test_account_sync_records_profile_analysis_error_without_advancing_cursor() -> None:
+    """A chat-LLM failure during analyze_events must be diagnosable, not silent.
+
+    Regression for the guided-init "stuck forever" report: analyze_events was
+    a bare await, so a 404/401/timeout bubbled up with nothing written to the
+    user-visible last_sync_error, and the whole tick was lost with no reason.
+    """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _FailingAnalyzeSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise RuntimeError("model 'llama3' not found")
+
+    memory = _FakeMemoryManager()
+    soul = _FailingAnalyzeSoul(ready=False)
+    client = _FakeClient(
+        history_items=[_history_item("BVERR", 101, "seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    with pytest.raises(RuntimeError):
+        await service.sync_now()
+
+    # Failure reason is now user-visible.
+    assert "画像分析失败" in str(memory.state["last_sync_error"])
+    assert "llama3" in str(memory.state["last_sync_error"])
+    # Cursor / throttle are NOT advanced → next tick retries the same events.
+    assert memory.state["last_history_view_at"] == 0
+    assert memory.state["last_account_sync_at"] == ""
+    # The one-shot bootstrap chance is not burned on an unavailable model.
+    assert soul.bootstrap_calls == []
+    assert soul.ready_checks == 0
+
+
 @dataclass
 class _CookieAwareClient:
     """Client whose ``is_authenticated`` flips False→True after one tick.
