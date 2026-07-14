@@ -40,7 +40,18 @@ _SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
 # embedding service, so saves are validated as blocking (field 2026-07-05:
 # browser page-translation rewrote '奥拉玛' into config via value-less
 # <option> elements).
-_SUPPORTED_EMBEDDING_PROVIDERS = {"", "ollama", "openai", "gemini", "openai_compatible"}
+_SUPPORTED_EMBEDDING_PROVIDERS = {
+    "",
+    "ollama",
+    "openai",
+    "gemini",
+    "openai_compatible",
+    # Alibaba DashScope native multimodal embedding (qwen3-vl). Must stay in
+    # sync with the registry's dedicated embedding providers — otherwise the
+    # backend can build it but config-save validation rejects it (drift caught
+    # by the multimodal cover-embedding E2E, 2026-07-14).
+    "dashscope",
+}
 # Keep in sync with llm/registry.py `build_llm_registry` provider_specs
 # (config cannot import the registry — cycle). Used to validate
 # `[llm].fallback_provider`: an unknown name is silently dropped by the
@@ -1896,7 +1907,7 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     ):
         normalized = str(emb_value or "").strip().lower()
         if normalized not in _SUPPORTED_EMBEDDING_PROVIDERS:
-            supported = '"", "ollama", "openai", "gemini", "openai_compatible"'
+            supported = '"", "ollama", "openai", "gemini", "openai_compatible", "dashscope"'
             issues.append(
                 ConfigIssue(
                     field=f"llm.embedding.{emb_field}",

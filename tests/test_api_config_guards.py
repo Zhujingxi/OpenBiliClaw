@@ -181,6 +181,38 @@ def test_put_config_round_trips_embedding_multimodal_enabled(monkeypatch, tmp_pa
     assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is True
 
 
+def test_put_config_accepts_dashscope_embedding_provider(monkeypatch, tmp_path) -> None:
+    """Regression (found by the multimodal E2E, 2026-07-14): `dashscope` must be
+    an accepted embedding provider at config-save validation, not just in the
+    registry. Otherwise the settings-page dropdown option 400s on save.
+    """
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    response = client.put(
+        "/api/config",
+        json={
+            "llm": {
+                "embedding": {
+                    "provider": "dashscope",
+                    "model": "qwen3-vl-embedding",
+                    "api_key": "sk-dashscope-e2e",
+                    "multimodal_enabled": True,
+                }
+            }
+        },
+    )
+    assert response.status_code == 200, response.json()
+
+    loaded = load_config_from_path(config_path)
+    assert loaded.llm.embedding.provider == "dashscope"
+    assert loaded.llm.embedding.model == "qwen3-vl-embedding"
+    assert loaded.llm.embedding.multimodal_enabled is True
+
+    body = client.get("/api/config").json()["llm"]["embedding"]
+    assert body["provider"] == "dashscope"
+    assert body["multimodal_enabled"] is True
+
+
 def test_put_config_round_trips_embedding_output_dimensionality(monkeypatch, tmp_path) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
 

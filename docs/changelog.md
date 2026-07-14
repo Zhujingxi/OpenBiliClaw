@@ -14,6 +14,7 @@
   - `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API（非 OpenAI `/v1/embeddings`），默认 `qwen3-vl-embedding`，仅 embedding（`complete` 拒绝），`embed()` 文本向量与既有 openai/gemini/ollama 文本消费方无缝接入；出站统一走 `network.outbound_httpx_kwargs()`（默认 direct=`trust_env=False`，遵守铁律 1，避免国内端点被海外代理误接管，附 direct/custom 两模式回归测试）。
   - 可选 `[llm.embedding].multimodal_enabled` + 多模态模型（Gemini `gemini-embedding-2` 族 / qwen3-vl）启用**封面视觉链路**:`EmbeddingService.embed_image()` 打封面 image-only 向量（与文本同空间、空向量不落缓存）；discovery 入池按 `image_embedding_cache_key_for_url` 预热；recommendation `precompute_delight_scores()` 对已达阈值候选按「封面↔兴趣锚点」跨模态余弦给 `delight_score` 一个**有界、只加不减**的加成（`_VISUAL_COVER_BONUS_MAX=0.05`）。默认关闭、纯文本用户打分与旧版逐字节一致、不改变谁成为惊喜候选。
   - **四面契约（铁律 5）**:`dashscope` provider 与「封面视觉加成」开关(`multimodal_enabled`)已接入插件设置页与桌面 Web 设置的 Embedding 段（API `EmbeddingConfigOut` 读写 + 往复测试），不再只能手改 TOML；移动 Web 不含 LLM 配置编辑面故不涉及，CLI `config-show` 随 dataclass 自动展示。
+  - **修复(真实环境 E2E 捕获)**:`config._SUPPORTED_EMBEDDING_PROVIDERS` 校验白名单漏了 `dashscope`，导致后端能构建该 provider、但设置页保存时 `PUT /api/config` 校验 400（“配置校验失败，未写入”）。已补入 `dashscope` 并同步错误提示；新增 `PUT /api/config` 接受 dashscope 的回归测试。这类跨层漂移是单测(只覆盖 registry 构建路径)看不到、必须端到端跑真实 serve-api 才暴露的。
   - ⚠️ 跨模态余弦 floor/ceil 为**保守未标定**初值（铁律 3）：换真实多模态模型后需按日志观测 `max_sim` 分布重标权重；当前小幅、单向、opt-in 设计保证误标也不伤默认推荐质量。
 
 ## v0.3.165 / extension v0.3.165 / desktop v0.3.165：Firefox 签名安装修复（2026-07-14）
