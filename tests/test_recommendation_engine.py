@@ -3720,6 +3720,335 @@ async def test_precompute_delight_scores_reuses_evo_result_without_llm_call() ->
 
 
 @pytest.mark.asyncio
+async def test_precompute_delight_scores_adds_bounded_visual_cover_bonus() -> None:
+    """When image embedding is active, an on-style cover lifts delight_score by
+    a small bounded bonus — reusing the warmed URL-keyed vector (no re-fetch).
+    """
+
+    class _ImageEmb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+        similarity_threshold = 0.82
+
+        def __init__(self) -> None:
+            self.fetched = False
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        def lookup_cached_image(self, cache_key: str) -> list[float]:
+            # Simulate the discovery warmer having already stored the vector:
+            # same direction as the interest anchor → cosine 1.0 → full bonus.
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            self.fetched = True
+            return [1.0, 0.0, 0.0]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1COVER",
+            title="纪录片：一件瓷器的百年旅程",
+            source="search",
+            relevance_score=0.91,
+            cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
+        )
+        emb = _ImageEmb()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+        )
+        try:
+            scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+            assert scored == 1
+            candidate = db.get_delight_candidate(min_delight_score=0.70)
+            assert candidate is not None
+            # 0.91 + full 0.05 bonus, clamped to <= 1.0.
+            assert candidate["delight_score"] == pytest.approx(0.96)
+            # Warm cache hit means the cold fetch/embed path never ran.
+            assert emb.fetched is False
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_scores_no_visual_bonus_when_inactive() -> None:
+    """Cover present but image embedding inactive => delight_score unchanged."""
+
+    class _TextOnlyEmb:
+        multimodal_enabled = False
+        supports_image_embedding = False
+        similarity_threshold = 0.82
+
+        def image_embedding_active(self) -> bool:
+            return False
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            raise AssertionError("embed_image must not run when inactive")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1PLAIN",
+            title="纪录片：一件瓷器的百年旅程",
+            source="search",
+            relevance_score=0.91,
+            cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
+        )
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextOnlyEmb(),  # type: ignore[arg-type]
+        )
+        try:
+            scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+            assert scored == 1
+            candidate = db.get_delight_candidate(min_delight_score=0.70)
+            assert candidate is not None
+            assert candidate["delight_score"] == pytest.approx(0.91)
+        finally:
+            db.close()
+
+
+class _CoverVisualEmb:
+    """Fake multimodal embedding service for serve()/delight cover-visual tests.
+
+    ``embed`` gives every text anchor the same direction; ``lookup_cached``
+    returns [] so MMR is skipped (base tuple ranking is exercised); cover
+    vectors come from a URL-keyed map. ``embed_image`` raises so a test fails
+    loudly if serve() ever tries to fetch a cover on its hot path.
+    """
+
+    multimodal_enabled = True
+    supports_image_embedding = True
+    similarity_threshold = 0.82
+
+    def __init__(self, key_to_vec: dict[str, list[float]], *, active: bool = True) -> None:
+        self._map = key_to_vec
+        self._active = active
+
+    def image_embedding_active(self) -> bool:
+        return self._active
+
+    async def embed(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
+
+    def lookup_cached(self, text: str) -> list[float]:
+        return []
+
+    def lookup_cached_image(self, cache_key: str) -> list[float]:
+        return list(self._map.get(cache_key, []))
+
+    async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+        raise AssertionError("serve() hot path must be lookup-only (no cover fetch)")
+
+
+@pytest.mark.asyncio
+async def test_serve_cover_visual_bonus_reorders_when_active() -> None:
+    """When multimodal embedding is on, an on-style cover's bounded bonus can
+    overtake a slightly-higher-relevance candidate — consistent with delight.
+    Off (default), the ranking is unchanged.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    align_url = "https://i0.hdslb.com/bfs/archive/align.jpg"
+    plain_url = "https://i0.hdslb.com/bfs/archive/plain.jpg"
+    key_map = {
+        image_embedding_cache_key_for_url(align_url): [1.0, 0.0, 0.0],  # cos≈1 → +0.05
+        image_embedding_cache_key_for_url(plain_url): [0.0, 1.0, 0.0],  # cos≈0 → +0.0
+    }
+
+    def _seed(db: Database) -> None:
+        # ALIGN has LOWER base relevance; only the visual bonus can lift it
+        # above PLAIN — so the assertion is robust to timestamp/bvid tiebreaks.
+        _seed_visible(
+            db,
+            "BV1ALIGN",
+            title="对味封面",
+            source="search",
+            relevance_score=0.80,
+            cover_url=align_url,
+        )
+        _seed_visible(
+            db,
+            "BV1PLAIN",
+            title="普通封面",
+            source="search",
+            relevance_score=0.83,
+            cover_url=plain_url,
+        )
+
+    # Active → bonus flips ALIGN above PLAIN.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "a.db")
+        db.initialize()
+        _seed(db)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=True),  # type: ignore[arg-type]
+        )
+        try:
+            recs = await engine.serve(_build_profile(), limit=1)
+        finally:
+            db.close()
+        assert [r.content.bvid for r in recs] == ["BV1ALIGN"]
+
+    # Inactive (text-only / default) → no bonus, higher-relevance PLAIN wins.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "b.db")
+        db.initialize()
+        _seed(db)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=False),  # type: ignore[arg-type]
+        )
+        try:
+            recs = await engine.serve(_build_profile(), limit=1)
+        finally:
+            db.close()
+        assert [r.content.bvid for r in recs] == ["BV1PLAIN"]
+
+
+@pytest.mark.asyncio
+async def test_visual_bonus_map_empty_when_inactive() -> None:
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    url = "https://i0.hdslb.com/bfs/archive/x.jpg"
+    key_map = {image_embedding_cache_key_for_url(url): [1.0, 0.0, 0.0]}
+    cands = [DiscoveredContent(bvid="BVX", title="t", cover_url=url)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "c.db")
+        db.initialize()
+        active = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=True),  # type: ignore[arg-type]
+        )
+        inactive = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=False),  # type: ignore[arg-type]
+        )
+        try:
+            assert (await active._visual_bonus_map(cands, _build_profile())).get("BVX", 0.0) > 0.0
+            assert await inactive._visual_bonus_map(cands, _build_profile()) == {}
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_visual_bonus_map_withheld_when_pool_mostly_unwarmed() -> None:
+    """Fairness guard: right after enabling multimodal on an existing pool, most
+    covers aren't warmed yet. serve() must withhold the bonus for the whole batch
+    (rather than favour the warmed minority) until coverage is sufficient.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    urls = [f"https://i0.hdslb.com/bfs/archive/{i}.jpg" for i in range(3)]
+    cands = [DiscoveredContent(bvid=f"BV{i}", title="t", cover_url=urls[i]) for i in range(3)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "d.db")
+        db.initialize()
+        try:
+            # Only 1/3 warmed → coverage 0.33 < 0.6 → withhold everything.
+            one = {image_embedding_cache_key_for_url(urls[0]): [1.0, 0.0, 0.0]}
+            engine = RecommendationEngine(
+                llm=_DummyLLM(),
+                database=db,
+                embedding_service=_CoverVisualEmb(one, active=True),  # type: ignore[arg-type]
+            )
+            assert await engine._visual_bonus_map(cands, _build_profile()) == {}
+
+            # All 3 warmed → coverage 1.0 → bonus applies.
+            full = {image_embedding_cache_key_for_url(u): [1.0, 0.0, 0.0] for u in urls}
+            engine_full = RecommendationEngine(
+                llm=_DummyLLM(),
+                database=db,
+                embedding_service=_CoverVisualEmb(full, active=True),  # type: ignore[arg-type]
+            )
+            applied = await engine_full._visual_bonus_map(cands, _build_profile())
+            assert len(applied) == 3 and all(v > 0.0 for v in applied.values())
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_pool_covers_backfills_unwarmed_only(monkeypatch) -> None:
+    """Pool cover prewarm embeds old content whose cover was never warmed
+    (multimodal enabled after admission), skips already-warmed and cover-less.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    warm_url = "https://i0.hdslb.com/bfs/archive/warm.jpg"
+    cold_url = "https://i0.hdslb.com/bfs/archive/cold.jpg"
+    warm_key = image_embedding_cache_key_for_url(warm_url)
+
+    class _Emb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+
+        def __init__(self) -> None:
+            self.embedded_keys: list[str] = []
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        def lookup_cached_image(self, key: str) -> list[float]:
+            return [0.1, 0.0] if key == warm_key else []
+
+        async def embed_image(
+            self, image_bytes: bytes, *, mime_type: str = "image/jpeg", cache_key: str = ""
+        ) -> list[float]:
+            self.embedded_keys.append(cache_key)
+            return [0.2, 0.3]
+
+    async def fake_prepare(cover_url, *, max_px, quality, timeout_seconds):
+        return b"jpeg-bytes", "image/jpeg"
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.multimodal.prepare_cover_bytes_for_embedding", fake_prepare
+    )
+
+    emb = _Emb()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "e.db")
+        db.initialize()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+        )
+        cands = [
+            DiscoveredContent(bvid="BVWARM", title="t", cover_url=warm_url),
+            DiscoveredContent(bvid="BVCOLD", title="t", cover_url=cold_url),
+            DiscoveredContent(bvid="BVNONE", title="t", cover_url=""),
+        ]
+        try:
+            warmed = await engine._prewarm_pool_covers(cands)
+        finally:
+            db.close()
+
+    assert warmed == 1  # only the cold-missing cover got embedded
+    assert emb.embedded_keys == [image_embedding_cache_key_for_url(cold_url)]
+
+
+@pytest.mark.asyncio
 async def test_precompute_delight_scores_uses_dynamic_pool_top_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

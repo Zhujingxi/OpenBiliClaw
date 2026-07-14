@@ -6630,6 +6630,7 @@ function bindSettings() {
     gemini: "gemini-embedding-001",
     ollama: "bge-m3",
     openai_compatible: "bge-large-en-v1.5",
+    dashscope: "qwen3-vl-embedding",
   };
   const EMBEDDING_BASE_URL_HINT = {
     "": "留空使用默认",
@@ -6637,6 +6638,7 @@ function bindSettings() {
     gemini: "(Gemini SDK 不需要 base_url)",
     ollama: "http://localhost:11434/v1",
     openai_compatible: "https://api.together.xyz/v1 / http://localhost:8000/v1",
+    dashscope: "留空 = https://dashscope.aliyuncs.com（国际站 dashscope-intl.aliyuncs.com）",
   };
 
   function applyEmbeddingProviderUI() {
@@ -6993,6 +6995,8 @@ function bindSettings() {
     setVal("cfgEmbeddingBaseUrl", cfg.llm?.embedding?.base_url);
     setVal("cfgEmbeddingModel", cfg.llm?.embedding?.model);
     setVal("cfgEmbeddingSimilarity", cfg.llm?.embedding?.similarity_threshold);
+    const embMultimodal = document.getElementById("cfgEmbeddingMultimodalEnabled");
+    if (embMultimodal) embMultimodal.checked = cfg.llm?.embedding?.multimodal_enabled === true;
     applyEmbeddingProviderUI();
 
     // Bilibili
@@ -7195,6 +7199,7 @@ function bindSettings() {
           similarity_threshold: getFloat("cfgEmbeddingSimilarity", 0.82),
           fallback_enabled: Boolean(embeddingFallbackProvider),
           fallback_provider: embeddingFallbackProvider,
+          multimodal_enabled: checked("cfgEmbeddingMultimodalEnabled"),
         },
         soul: {
           provider: getVal("cfgModuleSoulProvider"),

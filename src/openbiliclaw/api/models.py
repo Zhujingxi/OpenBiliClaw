@@ -1562,6 +1562,9 @@ class EmbeddingConfigOut(BaseModel):
     similarity_threshold: float = 0.82
     fallback_enabled: bool = False
     fallback_provider: str = ""
+    # Optional cover image-only embedding (needs a multimodal embedding model
+    # such as gemini-embedding-2 or dashscope qwen3-vl-embedding). Default off.
+    multimodal_enabled: bool = False
 
 
 class ModuleLLMConfigOut(BaseModel):

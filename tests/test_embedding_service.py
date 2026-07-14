@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from openbiliclaw.llm.embedding import EmbeddingCache, EmbeddingService
+from openbiliclaw.llm.embedding import (
+    EmbeddingCache,
+    EmbeddingService,
+    image_embedding_cache_key,
+)
+from openbiliclaw.llm.gemini_provider import GeminiProvider
 
 
 class _FakeEmbedProvider:
@@ -20,6 +25,41 @@ class _FakeEmbedProvider:
         if self._error is not None:
             raise self._error
         return list(self._vector)
+
+
+class _FakeImageEmbedProvider(_FakeEmbedProvider):
+    """Text + image embedding double for multimodal path tests."""
+
+    supports_image_embedding = True
+
+    def __init__(
+        self,
+        *,
+        vector: list[float] | None = None,
+        image_vector: list[float] | None = None,
+        error: Exception | None = None,
+        image_error: Exception | None = None,
+    ) -> None:
+        super().__init__(vector=vector, error=error)
+        self._image_vector = [0.9, 0.1, 0.0] if image_vector is None else image_vector
+        self._image_error = image_error
+        self.image_calls: list[tuple[int, str, str]] = []
+
+    @staticmethod
+    def is_multimodal_embedding_model(model: str) -> bool:
+        return "embedding-2" in (model or "").lower()
+
+    async def embed_image(
+        self,
+        image_bytes: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+        model: str = "",
+    ) -> list[float]:
+        self.image_calls.append((len(image_bytes), mime_type, model))
+        if self._image_error is not None:
+            raise self._image_error
+        return list(self._image_vector)
 
 
 async def test_probe_true_when_provider_returns_vector() -> None:
@@ -109,3 +149,87 @@ def test_embedding_cache_is_thread_safe_across_threads(tmp_path: Path) -> None:
     assert errors == [], f"cache raised across threads: {errors}"
     assert results["get"] == [0.1, 0.2, 0.3]
     assert results["count"] == 1
+
+
+def test_gemini_multimodal_embedding_model_detection() -> None:
+    assert GeminiProvider.is_multimodal_embedding_model("gemini-embedding-2")
+    assert GeminiProvider.is_multimodal_embedding_model("gemini-embedding-2-preview")
+    assert not GeminiProvider.is_multimodal_embedding_model("gemini-embedding-001")
+    assert not GeminiProvider.is_multimodal_embedding_model("bge-m3")
+    assert not GeminiProvider.is_multimodal_embedding_model("")
+
+
+async def test_embed_image_inactive_when_multimodal_disabled() -> None:
+    provider = _FakeImageEmbedProvider()
+    service = EmbeddingService(
+        provider,
+        model="gemini-embedding-2",
+        multimodal_enabled=False,
+    )
+
+    assert service.supports_image_embedding is True
+    assert service.image_embedding_active() is False
+    assert await service.embed_image(b"fake-jpeg-bytes") == []
+    assert provider.image_calls == []
+
+
+async def test_embed_image_inactive_for_text_only_model() -> None:
+    provider = _FakeImageEmbedProvider()
+    service = EmbeddingService(
+        provider,
+        model="gemini-embedding-001",
+        multimodal_enabled=True,
+    )
+
+    assert service.supports_image_embedding is False
+    assert await service.embed_image(b"fake-jpeg-bytes") == []
+    assert provider.image_calls == []
+
+
+async def test_embed_image_caches_and_reuses_vector(tmp_path: Path) -> None:
+    provider = _FakeImageEmbedProvider(image_vector=[0.2, 0.4, 0.6])
+    cache = EmbeddingCache(tmp_path / "embedding-cache.db")
+    cache.initialize()
+    service = EmbeddingService(
+        provider,
+        model="gemini-embedding-2",
+        cache_model="gemini-embedding-2#dim=1024",
+        persistent_cache=cache,
+        multimodal_enabled=True,
+    )
+    image = b"\xff\xd8\xff" + b"cover-bytes-demo"
+
+    first = await service.embed_image(image, mime_type="image/jpeg")
+    second = await service.embed_image(image, mime_type="image/jpeg")
+
+    assert first == [0.2, 0.4, 0.6]
+    assert second == first
+    assert len(provider.image_calls) == 1
+    key = image_embedding_cache_key(image)
+    assert service.lookup_cached_image(key) == first
+    assert cache.get(key, model="gemini-embedding-2#dim=1024") == first
+
+
+async def test_embed_image_skips_cache_on_empty_vector() -> None:
+    provider = _FakeImageEmbedProvider(image_vector=[])
+    service = EmbeddingService(
+        provider,
+        model="gemini-embedding-2",
+        multimodal_enabled=True,
+    )
+    image = b"empty-result"
+
+    assert await service.embed_image(image) == []
+    assert await service.embed_image(image) == []
+    assert len(provider.image_calls) == 2
+
+
+async def test_text_only_provider_has_no_image_support() -> None:
+    provider = _FakeEmbedProvider()
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        multimodal_enabled=True,
+    )
+    assert service.supports_image_embedding is False
+    assert service.image_embedding_active() is False

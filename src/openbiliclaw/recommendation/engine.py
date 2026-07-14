@@ -39,6 +39,35 @@ logger = logging.getLogger(__name__)
 _DEFAULT_EXPRESSION_BATCH_SIZE = 30
 _DEFAULT_EXPRESSION_BATCH_CONCURRENCY = 2
 
+# Cover visual alignment → delight bonus (opt-in, only when
+# [llm.embedding].multimodal_enabled + a multimodal embedding model are active).
+#
+# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Cross-modal image↔text
+# cosine in shared-space embedders (qwen3-vl-embedding / gemini-embedding-2)
+# runs much lower and more model-specific than same-modal text↔text cosine, so
+# the floor/ceil below are conservative guesses, NOT tuned against a deployed
+# model. Deliberately kept small + additive + one-directional so a mis-guess
+# can only slightly re-rank already-qualifying delight candidates, never demote
+# them, and never touches text-only users (bonus is exactly 0 when image embed
+# is inactive). Reopen calibration after choosing a real multimodal model:
+# raise logging to INFO and read the emitted max_sim distribution, then move the
+# floor/ceil so the bonus spreads across the observed range. See CLAUDE.md
+# pitfall rule 3 (document threshold calibration) and the quality-first rule.
+_VISUAL_COVER_BONUS_MAX = 0.05  # hard cap on the additive nudge to delight_score
+_VISUAL_COVER_SIM_FLOOR = 0.15  # cross-modal cosine at/below → zero bonus
+_VISUAL_COVER_SIM_CEIL = 0.45  # cross-modal cosine at/above → full bonus
+_VISUAL_COVER_MAX_ANCHORS = 8  # profile interest anchors compared per run
+# Fairness guard for the serve() hot path: right after a user enables
+# multimodal, pool content admitted BEFORE the switch has no warmed cover
+# vector yet (serve() is lookup-only and never fetches). Applying the bonus to
+# only the warmed subset would systematically favour freshly-discovered items
+# over older ones — not because their covers are better, but because the old
+# ones simply aren't embedded yet. So serve() withholds the bonus for the whole
+# batch until at least this fraction of cover-bearing candidates are warmed; the
+# background pool-cover prewarm backfills the rest within a refresh cycle. Delight
+# is unaffected (it cold-fetches per candidate, so every item gets its true bonus).
+_VISUAL_COVER_MIN_COVERAGE = 0.6
+
 
 @dataclass
 class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
@@ -432,12 +461,19 @@ class RecommendationEngine:
                 _embed_elapsed_ms,
             )
 
+        # Cover-visual bonus (opt-in, multimodal embedding only): nudges the
+        # ranking toward on-style covers, consistent with the delight surface.
+        # Hot-path-safe — lookup-only (never fetches a cover on serve()); empty
+        # map when multimodal is off, so the default feed ranking is unchanged.
+        visual_bonus = await self._visual_bonus_map(candidates, profile)
+
         ranked = await self._select_diversified_batch_async(
             candidates,
             limit=limit,
             score_override=score_override,
             embeddings=embeddings,
             amplification_guard=amplification_guard,
+            relevance_bonus=visual_bonus,
         )
         logger.info(
             "Recommendation picked summary (serve/%s): %s",
@@ -865,6 +901,16 @@ class RecommendationEngine:
                 warmed,
                 len(candidates),
             )
+        # Backfill cover embeddings for the same pool window when multimodal is
+        # active — so enabling it later doesn't leave older pool content without
+        # a cover vector while newly-discovered items get warmed at admission.
+        # No-op (and zero cost) when multimodal is off. Best-effort: a cover
+        # failure must not affect the MMR prewarm return contract above.
+        if self._cover_embedding_active():
+            try:
+                await self._prewarm_pool_covers(candidates)
+            except Exception:
+                logger.debug("Pool cover prewarm raised (ignored)", exc_info=True)
         return warmed
 
     async def precompute_pool_copy(
@@ -1445,6 +1491,13 @@ class RecommendationEngine:
 
         candidates = self._rows_to_discovered(rows)
 
+        # Cover-visual alignment is opt-in (multimodal embedding). Embed the
+        # profile interest anchors ONCE per run — they're identical across all
+        # candidates — so the per-candidate cost is just a cached image lookup
+        # plus cosines. Empty list => bonus stays 0 for every candidate (the
+        # text-only default path is byte-identical to before).
+        visual_anchor_vecs = await self._visual_anchor_vectors(profile)
+
         scored_count = 0
         for candidate in candidates:
             persisted_score = max(0.01, min(1.0, float(candidate.relevance_score or 0.0)))
@@ -1458,23 +1511,237 @@ class RecommendationEngine:
                 scored_count += 1
                 continue
 
+            # Only nudge candidates that ALREADY qualify: visual never changes
+            # who becomes a delight candidate, only their ranking score among
+            # qualifiers, and it can only add (never demote).
+            visual_bonus = await self._visual_cover_bonus(candidate, visual_anchor_vecs)
+            final_score = min(1.0, persisted_score + visual_bonus)
+
             reason = self._evo_delight_reason(candidate)
             hook = self._evo_delight_hook(candidate)
             self._database.update_delight_score(
                 candidate.bvid,
-                delight_score=persisted_score,
+                delight_score=final_score,
                 delight_reason=reason,
                 delight_hook=hook,
             )
             scored_count += 1
             logger.info(
-                "Delight candidate found from Evo result: %s (score=%.3f, hook=%s)",
+                "Delight candidate found from Evo result: %s (score=%.3f, "
+                "visual_bonus=%.3f, hook=%s)",
                 candidate.bvid,
-                persisted_score,
+                final_score,
+                visual_bonus,
                 hook,
             )
 
         return scored_count
+
+    async def _visual_anchor_vectors(self, profile: SoulProfile) -> list[list[float]]:
+        """Embed the profile's top interest names once for cover alignment.
+
+        Returns ``[]`` (disabling the visual bonus) when image embedding is
+        inactive, there's no embedding service, or the profile has no usable
+        interest anchors — so callers can stay on the zero-cost text-only path.
+        """
+        embedding = self._embedding_service
+        if embedding is None:
+            return []
+        active = getattr(embedding, "image_embedding_active", None)
+        if not (callable(active) and active()):
+            return []
+
+        anchors: list[str] = []
+        seen: set[str] = set()
+        for interest in _interests_by_weight(profile)[:_VISUAL_COVER_MAX_ANCHORS]:
+            name = str(getattr(interest, "name", "") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                anchors.append(name)
+        if not anchors:
+            return []
+
+        vectors: list[list[float]] = []
+        for anchor in anchors:
+            try:
+                vec = await embedding.embed(anchor)
+            except Exception:
+                logger.debug("visual anchor embed failed for %r", anchor, exc_info=True)
+                continue
+            if vec:
+                vectors.append(vec)
+        return vectors
+
+    async def _visual_cover_bonus(
+        self,
+        candidate: DiscoveredContent,
+        anchor_vecs: list[list[float]],
+        *,
+        allow_fetch: bool = True,
+    ) -> float:
+        """Bounded additive visual bonus from cover↔interest alignment.
+
+        Reuses the discovery-warmed image vector (URL-keyed) so it's a cache
+        lookup. ``allow_fetch=True`` (delight background path) may pay one cold
+        fetch+embed on a miss; ``allow_fetch=False`` (the latency-sensitive
+        ``serve()`` hot path) must stay lookup-only and contributes 0 on a miss
+        — the warmer fills the cache for the next batch. Returns 0.0 whenever
+        anything is missing/inactive — never raises, never negative. See the
+        ``_VISUAL_COVER_*`` calibration note for why this stays small.
+        """
+        if not anchor_vecs:
+            return 0.0
+        embedding = self._embedding_service
+        if embedding is None:
+            return 0.0
+        embed_image = getattr(embedding, "embed_image", None)
+        if not callable(embed_image):
+            return 0.0
+        cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+        if not cover_url:
+            return 0.0
+
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        cache_key = image_embedding_cache_key_for_url(cover_url)
+        cover_vec: list[float] = []
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if callable(lookup):
+            cover_vec = lookup(cache_key) or []
+        if not cover_vec and allow_fetch:
+            # Cold miss (warmer hasn't run / cache evicted): fetch + embed once.
+            # Only the background path allows this — never on the serve() hot path.
+            try:
+                from openbiliclaw.discovery.multimodal import (
+                    prepare_cover_bytes_for_embedding,
+                )
+
+                prepared = await prepare_cover_bytes_for_embedding(
+                    cover_url, max_px=384, quality=72, timeout_seconds=6
+                )
+                if prepared is None:
+                    return 0.0
+                image_bytes, mime_type = prepared
+                cover_vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=cache_key)
+            except Exception:
+                logger.debug("visual cover embed failed for %s", candidate.bvid, exc_info=True)
+                return 0.0
+        if not cover_vec:
+            return 0.0
+
+        return self._cover_bonus_from_vec(cover_vec, anchor_vecs)
+
+    @staticmethod
+    def _cover_bonus_from_vec(
+        cover_vec: list[float],
+        anchor_vecs: list[list[float]],
+    ) -> float:
+        """Map cover↔anchor cross-modal cosine to the bounded additive bonus."""
+        if not cover_vec or not anchor_vecs:
+            return 0.0
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        max_sim = 0.0
+        for anchor_vec in anchor_vecs:
+            max_sim = max(max_sim, cosine_similarity(cover_vec, anchor_vec))
+        span = _VISUAL_COVER_SIM_CEIL - _VISUAL_COVER_SIM_FLOOR
+        if span <= 0:
+            return 0.0
+        norm = max(0.0, min(1.0, (max_sim - _VISUAL_COVER_SIM_FLOOR) / span))
+        return _VISUAL_COVER_BONUS_MAX * norm
+
+    async def _visual_bonus_map(
+        self,
+        candidates: list[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> dict[str, float]:
+        """Per-candidate cover-visual bonus for the serve() ranking (lookup-only).
+
+        Returns ``{}`` — a no-op that leaves the ranking byte-identical — when
+        multimodal embedding is inactive, the profile has no interest anchors,
+        or too few cover-bearing candidates are warmed yet (fairness guard, see
+        ``_VISUAL_COVER_MIN_COVERAGE``). Never fetches a cover on this hot path:
+        a warm miss contributes no bonus and the pool-cover prewarm backfills it.
+        """
+        anchor_vecs = await self._visual_anchor_vectors(profile)
+        if not anchor_vecs:
+            return {}
+        embedding = self._embedding_service
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if not callable(lookup):
+            return {}
+
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        with_cover = 0
+        warmed = 0
+        bonuses: dict[str, float] = {}
+        for candidate in candidates:
+            bvid = str(getattr(candidate, "bvid", "") or "")
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not bvid or not cover_url:
+                continue
+            with_cover += 1
+            cover_vec = lookup(image_embedding_cache_key_for_url(cover_url)) or []
+            if not cover_vec:
+                continue
+            warmed += 1
+            bonus = self._cover_bonus_from_vec(cover_vec, anchor_vecs)
+            if bonus > 0.0:
+                bonuses[bvid] = bonus
+        # Fairness guard: withhold the bonus for the whole batch until enough
+        # cover-bearing candidates are warmed, so a half-backfilled pool doesn't
+        # tilt the ranking toward freshly-discovered items over older ones.
+        if with_cover == 0 or warmed / with_cover < _VISUAL_COVER_MIN_COVERAGE:
+            return {}
+        return bonuses
+
+    def _cover_embedding_active(self) -> bool:
+        active = getattr(self._embedding_service, "image_embedding_active", None)
+        return bool(callable(active) and active())
+
+    async def _prewarm_pool_covers(self, candidates: list[DiscoveredContent]) -> int:
+        """Backfill cover embeddings for content already in the pool (URL-keyed).
+
+        Companion to discovery's per-admission ``_warm_cover_embeddings``: covers
+        the case where multimodal was enabled AFTER items were pooled, so the
+        lookup-only ``serve()`` path and delight treat old and new content
+        consistently instead of silently favouring freshly-discovered covers.
+        Idempotent (skips already-warmed keys), best-effort, no-op when off.
+        """
+        if not candidates or not self._cover_embedding_active():
+            return 0
+        embed_image = getattr(self._embedding_service, "embed_image", None)
+        lookup = getattr(self._embedding_service, "lookup_cached_image", None)
+        if not callable(embed_image):
+            return 0
+
+        from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        warmed = 0
+        for candidate in candidates:
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not cover_url:
+                continue
+            key = image_embedding_cache_key_for_url(cover_url)
+            if callable(lookup) and lookup(key):
+                continue  # already warm — idempotent
+            try:
+                prepared = await prepare_cover_bytes_for_embedding(
+                    cover_url, max_px=384, quality=72, timeout_seconds=6
+                )
+                if prepared is None:
+                    continue
+                image_bytes, mime_type = prepared
+                vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=key)
+                if vec:
+                    warmed += 1
+            except Exception:
+                logger.debug("pool cover prewarm failed for %s", candidate.bvid, exc_info=True)
+        if warmed:
+            logger.info("Pool cover prewarm: warmed %d cover embedding(s)", warmed)
+        return warmed
 
     @staticmethod
     def _evo_delight_reason(item: DiscoveredContent) -> str:
@@ -1924,10 +2191,17 @@ class RecommendationEngine:
         return self._database.get_recommendation_by_id(recommendation_id)
 
     @staticmethod
-    def _ranking_key(item: DiscoveredContent) -> tuple[int, float, float, int, str]:
+    def _ranking_key(
+        item: DiscoveredContent,
+        bonus: dict[str, float] | None = None,
+    ) -> tuple[int, float, float, int, str]:
+        # ``bonus`` (opt-in cover-visual, default empty) is added to the
+        # relevance term only — tier priority and the timestamp/view/bvid
+        # tiebreakers are untouched, so an empty map is byte-identical ranking.
+        visual = (bonus or {}).get(item.bvid, 0.0)
         return (
             0 if item.candidate_tier == "primary" else 1,
-            -item.relevance_score,
+            -(item.relevance_score + visual),
             -RecommendationEngine._timestamp_score(item.last_scored_at or item.discovered_at),
             -item.view_count,
             item.bvid,
@@ -2068,6 +2342,7 @@ class RecommendationEngine:
         amplification_guard: set[str] | frozenset[str] | None = None,
         mmr_alpha: float = 0.5,
         mmr_beta: float = 0.5,
+        relevance_bonus: dict[str, float] | None = None,
     ) -> list[DiscoveredContent]:
         """Run CPU-heavy ranking in a worker thread to preserve responsiveness."""
         started = time.monotonic()
@@ -2080,6 +2355,7 @@ class RecommendationEngine:
             amplification_guard=amplification_guard,
             mmr_alpha=mmr_alpha,
             mmr_beta=mmr_beta,
+            relevance_bonus=relevance_bonus,
         )
         elapsed = time.monotonic() - started
         if elapsed > 0.05:
@@ -2102,14 +2378,16 @@ class RecommendationEngine:
         amplification_guard: set[str] | frozenset[str] | None = None,
         mmr_alpha: float = 0.5,
         mmr_beta: float = 0.5,
+        relevance_bonus: dict[str, float] | None = None,
     ) -> list[DiscoveredContent]:
+        bonus = relevance_bonus or {}
         if score_override:
             ranked = sorted(
                 candidates,
-                key=lambda item: -score_override.get(item.bvid, 0.0),
+                key=lambda item: -(score_override.get(item.bvid, 0.0) + bonus.get(item.bvid, 0.0)),
             )
         else:
-            ranked = sorted(candidates, key=cls._ranking_key)
+            ranked = sorted(candidates, key=lambda item: cls._ranking_key(item, bonus))
         if limit <= 1 or len(ranked) <= 1:
             return ranked[:limit]
 
@@ -2130,6 +2408,7 @@ class RecommendationEngine:
                 amplification_guard=amplification_guard,
                 alpha=mmr_alpha,
                 beta=mmr_beta,
+                relevance_bonus=relevance_bonus,
             )
 
         def _finalize(items: list[DiscoveredContent]) -> list[DiscoveredContent]:
@@ -2304,6 +2583,7 @@ class RecommendationEngine:
         amplification_guard: set[str] | frozenset[str] | None,
         alpha: float,
         beta: float,
+        relevance_bonus: dict[str, float] | None = None,
     ) -> list[DiscoveredContent]:
         """Greedy Maximum Marginal Relevance pick with existing string caps.
 
@@ -2361,10 +2641,15 @@ class RecommendationEngine:
                 return True
             return style_counts.get(cls._style_token(item), 0) >= per_style_cap
 
+        bonus = relevance_bonus or {}
+
         def _relevance(item: DiscoveredContent) -> float:
-            if score_override:
-                return float(score_override.get(item.bvid, 0.0))
-            return float(item.relevance_score or 0.0)
+            base = (
+                float(score_override.get(item.bvid, 0.0))
+                if score_override
+                else float(item.relevance_score or 0.0)
+            )
+            return base + bonus.get(item.bvid, 0.0)
 
         def _max_cos_to_picked(
             cand: DiscoveredContent,

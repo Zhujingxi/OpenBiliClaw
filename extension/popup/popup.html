@@ -5190,6 +5190,7 @@
             <option value="gemini">Gemini</option>
             <option value="ollama">Ollama (本地)</option>
             <option value="openai_compatible">OpenAI 协议兼容 (Together/vLLM/Azure 等)</option>
+            <option value="dashscope">DashScope 阿里百炼 (qwen3-vl 多模态)</option>
           </select>
         </div>
         <div class="settings-field">
@@ -5223,6 +5224,11 @@
           <label for="cfgEmbeddingSimilarity">相似度阈值 (0~1)</label>
           <input id="cfgEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
         </div>
+        <div class="settings-field-row">
+          <input id="cfgEmbeddingMultimodalEnabled" type="checkbox">
+          <label for="cfgEmbeddingMultimodalEnabled">启用封面视觉加成 (image-only)</label>
+        </div>
+        <p class="settings-hint">需多模态 embedding 模型（Gemini <code>gemini-embedding-2</code> 或 DashScope <code>qwen3-vl-embedding</code>）。开启后封面图会单独编码为向量，为惊喜推荐的“封面对味度”加一点分；纯文本模型（如 bge-m3）自动跳过、零成本。默认关闭。</p>
       </div>
 
       <!-- Module LLM Overrides -->

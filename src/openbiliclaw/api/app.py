@@ -10007,6 +10007,7 @@ def create_app(
                     similarity_threshold=cfg.llm.embedding.similarity_threshold,
                     fallback_enabled=cfg.llm.embedding.fallback_enabled,
                     fallback_provider=cfg.llm.embedding.fallback_provider,
+                    multimodal_enabled=cfg.llm.embedding.multimodal_enabled,
                 ),
                 soul=ModuleLLMConfigOut(
                     provider=cfg.llm.soul.provider,
@@ -10323,6 +10324,8 @@ def create_app(
                 cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
             if "fallback_provider" in emb:
                 cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
+            if "multimodal_enabled" in emb:
+                cfg.llm.embedding.multimodal_enabled = _as_bool(emb["multimodal_enabled"])
         for module_name in ("soul", "discovery", "recommendation", "evaluation"):
             if module_name in llm_data and isinstance(llm_data[module_name], dict):
                 mod_cfg = getattr(cfg.llm, module_name)

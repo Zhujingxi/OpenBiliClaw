@@ -5699,6 +5699,7 @@
       setInput("embeddingBaseUrl", llm.embedding?.base_url);
       setInput("embeddingOutputDimensionality", llm.embedding?.output_dimensionality ?? 1024);
       setInput("embeddingSimilarity", llm.embedding?.similarity_threshold);
+      setSelect("embeddingMultimodalEnabled", llm.embedding?.multimodal_enabled ? "on" : "off");
       if (embeddingFallbackProvider) {
         setInput("embeddingFallbackModel", llm[embeddingFallbackProvider]?.model);
         setInput("embeddingFallbackApiKey", llm[embeddingFallbackProvider]?.api_key);
@@ -6618,7 +6619,8 @@
         fallback_provider: embeddingFallbackProvider,
         model: getInput("embeddingModel"),
         output_dimensionality: Math.max(0, getIntInput("embeddingOutputDimensionality", 1024)),
-        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82)
+        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82),
+        multimodal_enabled: $("#embeddingMultimodalEnabled")?.value === "on"
       };
       if (getInput("embeddingApiKey")) embedding.api_key = getInput("embeddingApiKey");
       if (getInput("embeddingBaseUrl")) embedding.base_url = getInput("embeddingBaseUrl");

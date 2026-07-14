@@ -13,6 +13,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgDataDir",
     "cfgLlmFallbackProvider",
     "cfgEmbeddingFallbackProvider",
+    "cfgEmbeddingMultimodalEnabled",
     "cfgOpenaiAuthMode",
     "cfgDeepseekReasoning",
     "cfgOpenrouterReferer",
@@ -409,6 +410,28 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
   assert.match(
     popupJs,
     /multimodal_image_timeout_seconds: getInt\("cfgMultimodalImageTimeout", 6\)/,
+  );
+});
+
+test("settings page round-trips embedding multimodal cover toggle + dashscope provider", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // DashScope must be selectable as an embedding provider (not TOML-only).
+  assert.match(
+    popupHtml,
+    /<select id="cfgEmbeddingProvider">[\s\S]*<option value="dashscope"/,
+    "dashscope should be an embedding provider option",
+  );
+  // The image-only cover embedding toggle must exist and be wired both ways.
+  assert.match(popupHtml, /id="cfgEmbeddingMultimodalEnabled" type="checkbox"/);
+  assert.match(
+    popupJs,
+    /embMultimodal\.checked = cfg\.llm\?\.embedding\?\.multimodal_enabled === true/,
+  );
+  assert.match(
+    popupJs,
+    /multimodal_enabled: checked\("cfgEmbeddingMultimodalEnabled"\)/,
   );
 });
 
