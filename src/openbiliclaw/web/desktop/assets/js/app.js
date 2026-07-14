@@ -6810,6 +6810,7 @@
       unsupported_install_mode: "当前安装方式不支持自动更新",
       docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
       untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
+      origin_remote_unusable: "无法读取本地 git origin 远端，更新被阻止（按下方最近错误的修复命令处理）",
       branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
       merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
       github_rate_limited: "GitHub API 限流，请稍后再试",
