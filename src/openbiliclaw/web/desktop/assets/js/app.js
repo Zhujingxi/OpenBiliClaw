@@ -2407,7 +2407,8 @@
     }
 
     function renderThemeHueControls() {
-      const hue = state.themeHue || 20;
+      // Number.isFinite so hue 0 (烈焰红) renders as active instead of falling back to 20.
+      const hue = Number.isFinite(state.themeHue) ? state.themeHue : 20;
       document.querySelectorAll("[data-hue]").forEach((button) => {
         const isActive = parseInt(button.dataset.hue, 10) === hue;
         button.classList.toggle("is-active", isActive);
