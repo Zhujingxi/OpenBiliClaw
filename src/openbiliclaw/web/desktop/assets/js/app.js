@@ -508,10 +508,14 @@
     const DESKTOP_EAGER_COVER_COUNT = 4;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
+    const THEME_HUE_STORAGE_KEY = "obc.themeHue";
     const THEME_OPTIONS = ["auto", "light", "dark"];
     const THEME_LABELS = { auto: "跟随系统", light: "浅色", dark: "深色" };
     const THEME_GLYPHS = { auto: "◐", light: "☼", dark: "☾" };
     state.themeMode = THEME_OPTIONS.includes(storageGet(THEME_STORAGE_KEY)) ? storageGet(THEME_STORAGE_KEY) : "auto";
+    const _storedHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10);
+    // Number.isFinite guard so a persisted hue of 0 (烈焰红) survives reload instead of falling back to 20.
+    state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
@@ -659,6 +663,8 @@
       const limit = configuredLimit || storageGet(DELIGHT_QUEUE_LIMIT_KEY) || "20";
       setInput("delightQueueLimit", String(limit));
       applyThemeMode(state.themeMode);
+      applyThemeHue(state.themeHue);
+      renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
@@ -669,9 +675,12 @@
       setInput("delightQueueLimit", String(limit));
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
       storageSet(THEME_STORAGE_KEY, state.themeMode);
+      storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
+      applyThemeHue(state.themeHue);
+      renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
@@ -1994,7 +2003,7 @@
         const url = contentUrl(item);
         const coverContent = `
             ${coverImg(item)}
-            <span class="platform">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
+            <span class="platform" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
           `;
         card.innerHTML = `
           ${url
@@ -2353,6 +2362,21 @@
       renderThemeControls();
     }
 
+    function applyThemeHue(hue = state.themeHue) {
+      state.themeHue = hue;
+      document.documentElement.style.setProperty("--hue-primary", hue);
+    }
+
+    function setThemeHue(hue, { persist = true, toast = false, render = true } = {}) {
+      applyThemeHue(hue);
+      if (render) renderThemeHueControls();
+      if (persist) storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
+      if (toast) {
+        const names = { 20: "暖陶土", 210: "极客蓝", 340: "元气粉", 150: "自然绿", 280: "暗夜紫", 45: "活力橙" };
+        showToast(`主题色相已切换为${names[state.themeHue] || state.themeHue}`);
+      }
+    }
+
     function setThemeMode(mode, { persist = true, toast = false } = {}) {
       applyThemeMode(mode);
       if (persist) storageSet(THEME_STORAGE_KEY, state.themeMode);
@@ -2380,6 +2404,20 @@
         button.setAttribute("aria-checked", isActive ? "true" : "false");
         button.tabIndex = isActive ? 0 : -1;
       });
+    }
+
+    function renderThemeHueControls() {
+      const hue = state.themeHue || 20;
+      document.querySelectorAll("[data-hue]").forEach((button) => {
+        const isActive = parseInt(button.dataset.hue, 10) === hue;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+      const slider = $("#hueSlider");
+      if (slider) slider.value = hue;
+      const hueInput = $("#hueValueInput");
+      if (hueInput) hueInput.value = hue;
     }
 
     function setDismissOnReshuffle(enabled, { persist = true, toast = false } = {}) {
@@ -2725,12 +2763,12 @@
           ${url
             ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
             ${recommendationMediaHtml(item, index)}
-            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
             ${durationBadge}
           </a>`
             : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
             ${recommendationMediaHtml(item, index)}
-            <span class="platform">${escapeHtml(platformName(item.platform))}</span>
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
             ${durationBadge}
           </button>`}
           <div>
@@ -5773,6 +5811,7 @@
       const badge = document.createElement("span");
       badge.className = "platform";
       badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       thumb.append(text, badge);
     }
 
@@ -5789,6 +5828,7 @@
       const badge = document.createElement("span");
       badge.className = "platform";
       badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       thumb.append(badge);
     }
 
@@ -5812,6 +5852,7 @@
       const badge = document.createElement("span");
       badge.className = "platform";
       badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";
@@ -7240,6 +7281,17 @@
     safeBind("#themeToggleBtn", "click", cycleThemeMode);
     document.querySelectorAll("[data-theme-choice]").forEach((button) => {
       button.addEventListener("click", () => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    });
+    document.querySelectorAll("[data-hue]").forEach((button) => {
+      button.addEventListener("click", () => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
+    });
+    safeBind("#hueSlider", "input", (event) => {
+      const val = parseInt(event.target.value, 10);
+      setThemeHue(val);
+    });
+    safeBind("#hueValueInput", "change", (event) => {
+      const val = Math.min(360, Math.max(0, parseInt(event.target.value, 10) || 0));
+      setThemeHue(val);
     });
     ["#dismissOnReshuffleToggle", "#dismissOnReshuffleSetting"].forEach((selector) => {
       safeBind(selector, "change", (event) => {

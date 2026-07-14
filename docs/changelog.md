@@ -58,6 +58,7 @@
 - **移动 / 桌面 Web 已喜欢 Delight 状态一致（issue #104）**：liked 卡片保留结果提示与完整动作组，like 统一为 `aria-pressed=true` 且仅禁用重复提交；本地点击、队列重灌和实时事件会收敛到同一状态，失败点击恢复可重试。
 - **扩展 Delight liked 投影补齐（issue #108）**：side panel 新增独立的结果、动作和 like ARIA 投影，服务端 liked 队列状态不再被本地 pending 覆盖，除重复 like 外的查看、保存、负反馈与聊天动作继续可用。
 - **桌面 Web 探针反馈明确显示主题（issue #109）**：消息抽屉与画像页的 inline 结果和 toast 统一使用同一条安全文案，显示有长度上限的兴趣/避雷主题，不再只提示泛化的“这个方向”。
+- **桌面 Web 主题引擎 oklch 化 + 可调色相（PR #110）**：引入 `--hue-primary` 单一控制点，品牌 / 探针 / 语义色全部经 `oklch()` 从色相派生，新增 `--accent-subtle/light/strong/hover/deep` 五级强调色阶与 `--contrast-strong` 互补聚焦环；设置页新增 12 色块 + 彩虹滑块 + 数值输入的主题色相拾色器，经 `obc.themeHue` localStorage 持久化（页面加载时 inline 脚本恢复，避免闪烁）；所有交互元素统一「hover 强调色发光 / active `scale(0.97)` 加深 / focus-ring 聚焦环」模式，导航图标换为内联 SVG，新增 Bilibili / 小红书精确平台品牌色（经 `data-platform` 定位）。纯桌面 Web 前端改动，扩展 popup 与其它三端不受影响（插件 `web/css/app.css` 为独立文件，本次不同步）。
 
 ## v0.3.163 / extension v0.3.163 / desktop v0.3.163：登录状态诚实同步、Web 库存恢复与冷加载判定（2026-07-11）
 
