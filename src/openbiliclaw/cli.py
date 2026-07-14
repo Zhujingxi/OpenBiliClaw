@@ -22,6 +22,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from openbiliclaw.llm.base import safe_llm_failure_message
+from openbiliclaw.llm.service import _background_admission_bypass
 from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
     _is_default_ollama_endpoint,
@@ -6276,20 +6277,23 @@ async def run_guided_init(
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
     try:
-        await asyncio.wait_for(
-            _run_with_progress(
-                soul_engine.analyze_events(
-                    events,
-                    event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
-                    progress_callback=_stage2_progress,
+        with _background_admission_bypass():
+            await asyncio.wait_for(
+                _run_with_progress(
+                    soul_engine.analyze_events(
+                        events,
+                        event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+                        progress_callback=_stage2_progress,
+                    ),
+                    label="分析偏好（分片批处理）",
+                    eta_seconds=180,
                 ),
-                label="分析偏好（分片批处理）",
-                eta_seconds=180,
-            ),
-            timeout=(
-                profile_analysis_timeout_seconds if profile_analysis_timeout_seconds > 0 else None
-            ),
-        )
+                timeout=(
+                    profile_analysis_timeout_seconds
+                    if profile_analysis_timeout_seconds > 0
+                    else None
+                ),
+            )
     except TimeoutError as exc:
         raise GuidedInitError(
             "analyze_failed",
@@ -6361,10 +6365,14 @@ async def run_guided_init(
     # synthesizes the rich personality_portrait / deep_needs fields.
     draft_profile = _build_draft_profile_for_discover(memory)
 
+    async def _build_initial_profile() -> Any:
+        with _background_admission_bypass():
+            return await soul_engine.build_initial_profile(combined_history)
+
     profile_task = asyncio.create_task(
         asyncio.wait_for(
             _run_with_progress(
-                soul_engine.build_initial_profile(combined_history),
+                _build_initial_profile(),
                 label="生成画像(单次 LLM 综合分析)",
                 eta_seconds=70,
             ),

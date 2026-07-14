@@ -517,10 +517,39 @@ def _patch_run_guided_init_collectors(monkeypatch, engine) -> None:
 
 
 async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monkeypatch) -> None:
+    from contextlib import contextmanager
+    from contextvars import ContextVar
+
     import openbiliclaw.cli as cli
 
-    engine = _StubEngine(chunk_reports=3)
-    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+    scope_active = ContextVar("guided_init_test_scope", default=False)
+    scope_observations: list[tuple[str, bool]] = []
+
+    @contextmanager
+    def _scope():
+        token = scope_active.set(True)
+        try:
+            yield
+        finally:
+            scope_active.reset(token)
+
+    class _ScopedEngine(_StubEngine):
+        async def analyze_events(self, *args, **kwargs):
+            scope_observations.append(("analyze", scope_active.get()))
+            await super().analyze_events(*args, **kwargs)
+
+        async def build_initial_profile(self, *args, **kwargs):
+            scope_observations.append(("profile", scope_active.get()))
+            return await super().build_initial_profile(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_background_admission_bypass", _scope)
+    engine = _ScopedEngine(chunk_reports=3)
+    base_discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    async def discover_backfill(*args, **kwargs):
+        scope_observations.append(("discover", scope_active.get()))
+        return await base_discover_backfill(*args, **kwargs)
+
     coord = _RecordingCoordinator()
 
     await cli.run_guided_init(
@@ -552,6 +581,9 @@ async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monke
     stage2 = [c for c in coord.stage_progress_calls if c["stage"] == 2]
     assert [(c["done"], c["total"]) for c in stage2] == [(1, 3), (2, 3), (3, 3)]
     assert stage2[-1]["note"] == "第 3/3 批"
+    assert ("analyze", True) in scope_observations
+    assert ("profile", True) in scope_observations
+    assert ("discover", False) in scope_observations
 
     # Stages all completed (Task 1 clears any progress residue on stage_done).
     assert coord.done_stages == [1, 2, 3, 4]

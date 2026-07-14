@@ -87,6 +87,8 @@ v0.3.157+：`/api/embedding/repair` 是有界的「诊断 → 修复 → 重新�
 
 超时错误态（v0.3.168+）：三端均优先展示后端 typed detail，而不是短 reason label。`analyze_failed` / `profile_failed` 会在进度区显示具体步骤、6 分钟未返回的含义、常见原因和恢复动作；后台 account-sync 在探针仍失败时虽然 reason 是 `llm_not_ready`，只要 detail 以 `画像分析失败：` 开头也走同一优先级，避免机器码 / 通用门禁提示盖住根因。`partial_success + discovery_timeout/discovery_partial` 在首池等待态显示部分完成 detail；popup 的 `init_completed` 事件同样保留 warning。进度 / 原因节点使用 `aria-live`，硬失败切为 `role=alert` / assertive，普通进度保持 polite，避免每次轮询都强打断读屏。
 
+Issue #113 空库存解环（v0.3.168+）：首次运行时 `soul.preference*` / `soul.profile_build` 等 maintenance 调用可能因 canonical durable inventory 为空而停在后台 admission，但首池又依赖阶段 2/3 先完成。`run_guided_init()` 现在用 task-local `ContextVar` scope 只放行阶段 2 偏好分析和阶段 3 画像任务；同 scope 内的画像辅助调用一并放行，总 provider gate 仍限制并发。并行阶段 4 discovery 在 scope 外创建，普通 account-sync / 画像重建也不受影响；360 秒超时继续兜住 provider 真慢或异常。
+
 ## 测试
 
 - `tests/test_init_coordinator.py` — 协调器生命周期 / 单飞 / 并行 stage / reconcile / 取消 / 接线 / `/api/init-status` 形状 / 门控后台暂停，以及部分成功 reason/detail 的持久化与事件透传。

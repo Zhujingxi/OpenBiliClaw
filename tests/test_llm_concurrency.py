@@ -5,13 +5,14 @@ import logging
 
 import pytest
 
+from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.llm.concurrency import (
     InventoryPriorityState,
     LLMConcurrencyGate,
     LLMTrafficClass,
     background_llm_concurrency,
 )
-from openbiliclaw.llm.service import LLMService
+from openbiliclaw.llm.service import LLMService, _background_admission_bypass
 
 
 async def _wait_until(predicate: object) -> None:
@@ -520,3 +521,36 @@ async def test_bypass_background_still_obeys_total_gate() -> None:
         await waiter
     release.set()
     await task
+
+
+async def test_scoped_bypass_unparks_maintenance_and_resets_after_exit() -> None:
+    gate = LLMConcurrencyGate(1)
+    gate.update_inventory(available=0, target=20)
+
+    class Registry:
+        default_provider = "fake"
+
+        async def complete(self, messages: object, **kwargs: object) -> LLMResponse:
+            return LLMResponse(content='{"ok": true}', provider="fake")
+
+    service = LLMService(registry=Registry(), memory=None, concurrency_gate=gate)  # type: ignore[arg-type]
+    with _background_admission_bypass():
+        async with asyncio.timeout(1):
+            await service.complete_structured_task(
+                system_instruction="Return json.",
+                user_input="init",
+                caller="soul.preference",
+            )
+
+    parked = asyncio.create_task(
+        service.complete_structured_task(
+            system_instruction="Return json.",
+            user_input="background",
+            caller="soul.preference",
+        )
+    )
+    await _wait_until(lambda: gate.status_payload()["llm_maintenance_waiting"] == 1)
+    assert not parked.done()
+    parked.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await parked
