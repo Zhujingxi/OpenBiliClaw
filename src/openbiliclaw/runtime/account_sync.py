@@ -198,7 +198,27 @@ class AccountSyncService:
         if events:
             for event in events:
                 await self.memory_manager.propagate_event(event)
-            await self.soul_engine.analyze_events(events)
+            try:
+                await self.soul_engine.analyze_events(events)
+            except Exception as exc:
+                # A profile-analysis failure here is almost always the chat
+                # LLM being unavailable (a local model never pulled → 404, a
+                # gateway rejecting auth → 401, or a timeout). Historically
+                # this was a bare await: the exception bubbled straight up,
+                # run_forever logged one backend line, but the user-visible
+                # last_sync_error was never written — so guided init just
+                # showed an endless wait with nothing to diagnose (CLAUDE.md
+                # pitfall #7: failures must be diagnosable). Record the reason
+                # in last_sync_error WITHOUT advancing any sync cursor (the
+                # whole tick still rolls back and retries next cycle), then
+                # re-raise so run_forever still classifies/logs it. CancelledError
+                # subclasses BaseException, so hot-reload/restart cancellation
+                # is not swallowed here.
+                logger.warning(
+                    "Profile analysis failed during account sync: %s", exc, exc_info=True
+                )
+                self._persist_profile_analysis_error(str(exc))
+                raise
             await self._auto_bootstrap_soul_profile(len(events))
 
         state["last_account_sync_at"] = self._now().isoformat()
@@ -209,6 +229,23 @@ class AccountSyncService:
             "new_event_count": len(events),
             "errors": errors,
         }
+
+    def _persist_profile_analysis_error(self, message: str) -> None:
+        """Record a profile-analysis failure without advancing any sync cursor.
+
+        Loads a FRESH state so the failing tick's in-flight cursor bumps
+        (history / favorites / following) are not persisted — the tick still
+        rolls back and retries next cycle — while ``last_sync_error`` carries a
+        user-visible reason to ``/api/init-status`` and the account-sync status
+        surface. ``last_account_sync_at`` is deliberately left untouched so the
+        throttle does not lock the retry out for ``sync_interval_hours``.
+        """
+        try:
+            state = self.memory_manager.load_account_sync_state()
+            state["last_sync_error"] = f"画像分析失败：{message}"
+            self.memory_manager.save_account_sync_state(state)
+        except Exception:
+            logger.debug("Failed to persist profile-analysis error", exc_info=True)
 
     def get_runtime_status(self) -> dict[str, object]:
         """Expose lightweight account sync runtime fields."""

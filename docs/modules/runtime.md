@@ -326,6 +326,8 @@ result = await service.sync_now()
 - 收藏夹：使用稳定排序后的 `favorite_signature` 和 `favorite_bvids`，签名变化时只导入新增 bvid。
 - 关注列表：使用 `following_signature` 和 `following_mids`，签名变化时只导入新增 mid。
 
+`analyze_events()` 失败（对话模型不可用：本地模型未拉取 → 404、网关鉴权 → 401、超时）时，`sync_now()` 会把原因写入 `last_sync_error`（`画像分析失败：<原因>`，供 `/api/init-status` 与账号同步状态读取），但**不推进任何游标、不打 `last_account_sync_at` 时间戳**——整个 tick 回滚，下一次 `sync_if_due` tick 重试同一批事件，也不会被 `sync_interval_hours` 节流锁死或消耗一次性的 auto-bootstrap 机会，随后重新抛出交给 `run_forever` 分类记日志。`CancelledError` 继承自 `BaseException`，不会被这里捕获，因此热重载 / 重启打断的取消语义不变。
+
 ### YoutubeDiscoveryProducer
 
 ```python
