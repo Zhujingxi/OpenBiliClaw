@@ -312,6 +312,11 @@ class AccountSyncService:
                         "account sync skipped: no chat LLM provider configured yet "
                         "(retry next cycle)"
                     )
+                elif kind == "model_not_found":
+                    logger.warning(
+                        "account sync deferred: configured chat model not found "
+                        "(pull the local model or fix the model name); retry next cycle"
+                    )
                 elif kind == "rate_limited":
                     logger.warning(
                         "account sync deferred: LLM provider rate-limited/cooling "
