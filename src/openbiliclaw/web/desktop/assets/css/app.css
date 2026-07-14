@@ -418,7 +418,7 @@
     .side-drawer-nav .nav-action:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .nav-glyph { width: 22px; height: 22px; display: inline-grid; place-items: center; border-radius: var(--radius-sm); background: var(--surface-warm); color: var(--fg-2); font-size: 13px; }
     .side-drawer-nav .nav-action .nav-glyph { background: color-mix(in oklab, var(--surface-warm), var(--accent) 10%); color: var(--accent); }
-    .side-drawer-nav .nav-action span:not(.nav-glyph):not(.nav-count-badge) { color: var(--accent-hover); font-weight: 700; }
+    .side-drawer-nav .nav-action span:not(.nav-glyph):not(.nav-count-badge) { color: var(--accent-hover); font-weight: 550; }
     .side-section { display: grid; gap: var(--space-3); padding: var(--space-4) 2px; border-bottom: 1px solid var(--border-soft); }
     .side-section h3 { color: var(--fg); font-size: 16px; letter-spacing: -0.01em; }
     .side-section p { margin: 0; color: var(--muted); }
