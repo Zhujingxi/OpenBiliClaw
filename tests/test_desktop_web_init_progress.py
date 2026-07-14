@@ -113,6 +113,23 @@ def test_setup_wizard_keeps_first_pool_and_embedding_overrides() -> None:
     assert "pull.active && !status?.running" in html
 
 
+def test_timeout_reason_is_actionable_and_announced_across_web_surfaces() -> None:
+    app_js = _app_js()
+    setup_html = _setup_html()
+
+    for source in (app_js, setup_html):
+        assert "initStatusReasonText" in source
+        assert 'detail.startsWith("画像分析失败：")' in source
+        assert '"discovery_timeout"' in source
+        assert 'aria-live="polite"' in source
+        assert '"assertive"' in source
+
+    # Partial success must retain the backend explanation rather than showing
+    # the ordinary indefinite first-pool waiting copy.
+    assert "status?.partial_success ? initStatusReasonText(status)" in app_js
+    assert "renderWaitingForFirstPool(status)" in setup_html
+
+
 def test_desktop_reattaches_init_poll_when_a_run_is_live_at_load() -> None:
     """A page opened/refreshed mid-init must start polling from hydrate.
 

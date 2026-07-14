@@ -59,6 +59,7 @@
     .msg.show { display: block; }
     .msg.ok { background: rgba(54,196,111,.12); color: var(--ok); border: 1px solid rgba(54,196,111,.3); }
     .msg.err { background: rgba(255,107,107,.12); color: var(--err); border: 1px solid rgba(255,107,107,.3); }
+    .msg.warn { background: rgba(244,185,66,.12); color: var(--warn); border: 1px solid rgba(244,185,66,.3); }
     .msg.info { background: rgba(255,122,162,.12); color: var(--accent); border: 1px solid rgba(255,122,162,.28); }
     .check-list { list-style: none; padding: 0; margin: 18px 0; }
     .check-list li { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--panel-2);
@@ -191,10 +192,10 @@
         </ul>
         <div id="initProgress" class="progress" hidden>
           <div class="progress-track"><div class="progress-fill" id="initProgressBar"></div></div>
-          <p class="progress-label" id="initProgressLabel">等待开始</p>
+          <p class="progress-label" id="initProgressLabel" role="status" aria-live="polite" aria-atomic="true">等待开始</p>
           <p class="progress-label stall-hint" id="initStallHint" hidden></p>
         </div>
-        <div class="msg" id="initReason"></div>
+        <div class="msg" id="initReason" role="status" aria-live="polite" aria-atomic="true"></div>
         <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
         <div class="row-actions">
           <button class="ghost" id="backInit">← 上一步</button>
@@ -262,6 +263,10 @@
       already_initialized: "已经初始化过了。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      analyze_failed: "偏好分析未完成。",
+      profile_failed: "画像生成未完成。",
+      discovery_timeout: "画像已生成，但首轮内容池整理超时。",
+      discovery_partial: "画像已生成，但首轮内容池本次未完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -383,6 +388,21 @@
     function describeInitReason(reason) {
       if (!reason || reason === "none") return "";
       return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
+    }
+
+    function initStatusReasonText(status) {
+      const reason = String(status?.reason || "");
+      const detail = String(status?.detail || "").trim();
+      const detailFirst = [
+        "analyze_failed",
+        "profile_failed",
+        "discovery_timeout",
+        "discovery_partial",
+      ];
+      if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
+        return detail;
+      }
+      return describeInitReason(reason) || detail;
     }
 
     function enabledPlatforms(status) {
@@ -571,6 +591,8 @@
       const el = $("#initReason");
       el.className = text ? `msg show ${kind}` : "msg";
       el.textContent = text || "";
+      el.setAttribute("role", kind === "err" ? "alert" : "status");
+      el.setAttribute("aria-live", kind === "err" ? "assertive" : "polite");
     }
 
     async function fetchInitStatus() {
@@ -598,16 +620,24 @@
       }
     }
 
-    function renderWaitingForFirstPool() {
+    function renderWaitingForFirstPool(status = null) {
+      const partial = Boolean(status?.partial_success);
       $("#initSources").style.display = "none";
       $("#initProgress").hidden = false;
       $("#initProgressBar").style.width = "95%";
-      $("#initProgressLabel").textContent = "画像已生成，正在整理首轮内容池…";
+      $("#initProgressLabel").textContent = partial
+        ? "画像已生成，但首轮内容池本次未完成"
+        : "画像已生成，正在整理首轮内容池…";
       $("#initStallHint").hidden = true;
       $("#initStallHint").classList.remove("stale");
       $("#startInit").disabled = true;
       $("#startInit").textContent = "整理首轮内容…";
-      setInitReason("等第一批内容入池可刷后，初始化才会完成。", "info");
+      setInitReason(
+        partial
+          ? initStatusReasonText(status)
+          : "等第一批内容入池可刷后，初始化才会完成。",
+        partial ? "warn" : "info",
+      );
       // Escape hatch: replenishment can be slow (or stuck) — never park the
       // user on a disabled button with no way out of the wizard.
       $("#initEscape").className = "msg show info";
@@ -620,6 +650,12 @@
     function initFailureText(status, failedStage) {
       const base = describeInitReason(status?.reason) || "";
       const detail = String(status?.detail || "").trim();
+      const reason = String(status?.reason || "");
+      if (
+        detail &&
+        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+          detail.startsWith("画像分析失败："))
+      ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)
       // carry their authoritative human message in detail — show it alone
       // instead of "未知初始化状态：code（message）".
@@ -768,7 +804,10 @@
       }
       const view = progressView(status);
       $("#initProgressBar").style.width = `${view.pct}%`;
-      $("#initProgressLabel").textContent = view.label;
+      const progressLabel = $("#initProgressLabel");
+      progressLabel.textContent = view.label;
+      progressLabel.setAttribute("role", view.failed ? "alert" : "status");
+      progressLabel.setAttribute("aria-live", view.failed ? "assertive" : "polite");
       // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
       // keeps writing; amber stall copy after >90s of silence.
       const staleness = stalenessView(status);
@@ -837,7 +876,7 @@
             setStep(3);
             return;
           }
-          renderWaitingForFirstPool();
+          renderWaitingForFirstPool(status);
           scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
           return;
         }
@@ -860,7 +899,7 @@
           setInitReason(
             failedStage
               ? initFailureText(status, failedStage)
-              : describeInitReason(status.reason) || status.detail || "初始化未完成。"
+              : initStatusReasonText(status) || "初始化未完成。"
           );
         }
       } catch {
@@ -918,7 +957,7 @@
           setStep(3);
         } else {
           renderInitProgress(status);
-          renderWaitingForFirstPool();
+          renderWaitingForFirstPool(status);
           connectInitStream();
           scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
         }
@@ -948,7 +987,7 @@
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
         $("#startInit").textContent = "开始初始化";
-        setInitReason(describeInitReason(status.reason) || status.detail || "以下条件未满足，无法开始初始化。");
+        setInitReason(initStatusReasonText(status) || "以下条件未满足，无法开始初始化。");
         return;
       }
 
@@ -1038,7 +1077,7 @@
             return;
           }
           setStep(2);
-          renderWaitingForFirstPool();
+          renderWaitingForFirstPool(status);
           connectInitStream();
           scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
         }

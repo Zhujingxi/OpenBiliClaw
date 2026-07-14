@@ -4,6 +4,13 @@
 
 ---
 
+## v0.3.168（未发布）：初始化任务有界化与网络环境防护（2026-07-14）
+
+- **Issue #113 的 49% 卡死改为有界失败 / 降级完成**：共享 `run_guided_init()` 给阶段 2 偏好分析和阶段 3 画像生成各加 360 秒墙钟上限，超时会取消底层 provider 调用并分别落成 `analyze_failed` / `profile_failed`，把「检查模型地址、网络和代理后重试」直接显示在初始化页；阶段 4 首池补货设 600 秒上限，超时按既有 discovery 部分成功语义结束，不再让整个初始化无限等待。三个 timeout 都是可注入的可选参数，CLI 与 API 默认共用同一上限，取消仍沿既有 `CancelledError` 路径收尾并清理并行 sibling task。
+- **后台画像错误真正进入初始化状态接口**：`AccountSyncService` 的 `analyze_events()` 同样有 360 秒墙钟上限，超时会取消任务、写入安全可操作的 `last_sync_error`，且继续保持「不推进游标 / 不写同步时间 / 下轮可重试」语义。`GET /api/init-status` 现在会读取 `last_account_sync_error` 中的画像分析失败：当前 LLM 探针仍失败时保留 `reason=llm_not_ready` 并用真实错误补充 `detail`；探针已恢复时返回 `reason=analyze_failed`、允许用户立即重试。此前 v0.3.166 虽记录了该字段但状态接口并未消费，文档与实现现已对齐。
+- **超时原因与恢复动作同步到三端**：360 秒硬失败的 `detail` 现在明确写出「AI 服务在 6 分钟内未返回」、Base URL / 模型名 / 网络 / 代理 / 服务过慢等常见原因，以及「到模型设置测试后重试」的下一步；桌面 Web、`/setup/` 和 popup 对 `analyze_failed` / `profile_failed` 及后台 account-sync 的 `llm_not_ready + 画像分析失败 detail` 都优先展示这段人类文案，不再出现 `analyze_failed` 机器码或通用「条件未满足」。600 秒 discovery 超时会以 `reason=discovery_timeout`、`partial_success=true` 和可见 `detail` 持久化并下发，三端说明画像已生成、首池本次未完成、后台会继续补池；`init_completed` 流事件也携带同一原因。错误文本使用 `aria-live`，硬失败切为 assertive 播报，同时保留重试、模型设置 / 上一步及「先进入应用」恢复入口。
+- **不存在的 CA 环境路径不再让所有网络客户端构造即崩溃**：进入 `[network].mode=system` 时会检查 `SSL_CERT_FILE` / `SSL_CERT_DIR` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`；仅删除指向不存在文件或目录的失效覆盖，让 httpx / OpenSSL 回退到默认可信 CA store，同时完整保留 `HTTPS_PROXY` 等代理环境。存在的私有 CA 路径保持不动，TLS 验证从未关闭。
+
 ## v0.3.167 / extension v0.3.167 / desktop v0.3.167：国内大模型网关代理豁免（2026-07-14）
 
 后端源码走 `backend-v0.3.167`，浏览器插件走 `extension-v0.3.167`，桌面安装包走 `desktop-v0.3.167`。

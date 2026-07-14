@@ -33,6 +33,32 @@ from openbiliclaw.runtime.ollama_supervisor import (
 )
 from openbiliclaw.soul.preference_analyzer import DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE
 
+_INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
+_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 360.0
+_INIT_DISCOVERY_TIMEOUT_SECONDS = 600.0
+
+_INIT_PROFILE_ANALYSIS_TIMEOUT_MESSAGE = (
+    "偏好分析等待 AI 服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
+    "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
+)
+_INIT_PROFILE_BUILD_TIMEOUT_MESSAGE = (
+    "画像生成等待 AI 服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
+    "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
+)
+_INIT_DISCOVERY_TIMEOUT_MESSAGE = (
+    "画像已生成，但首轮内容池等待内容发现超过 10 分钟仍未完成，"
+    "本次初始化已按“部分完成”结束，避免继续卡住。"
+    "常见原因是所选内容源未登录或网络不可达，也可能是 AI 评估响应过慢。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+_INIT_DISCOVERY_PARTIAL_MESSAGE = (
+    "画像已生成，但首轮内容发现失败，本次初始化已按“部分完成”结束。"
+    "常见原因是所选内容源暂不可用或 AI 评估失败。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+
 
 def _force_utf8_stdout_on_windows() -> None:
     """Reconfigure stdout/stderr to UTF-8 on Windows.
@@ -5639,6 +5665,8 @@ class InitResult:
     discovered_count: int
     discovery_error: bool
     discover_exc: BaseException | None
+    discovery_reason: str | None = None
+    discovery_detail: str = ""
 
 
 class GuidedInitError(Exception):
@@ -5796,6 +5824,9 @@ async def run_guided_init(
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
     coordinator: Any = None,
     run_id: str | None = None,
+    profile_analysis_timeout_seconds: float = _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS,
+    profile_build_timeout_seconds: float = _INIT_PROFILE_BUILD_TIMEOUT_SECONDS,
+    discovery_timeout_seconds: float = _INIT_DISCOVERY_TIMEOUT_SECONDS,
 ) -> InitResult:
     """Shared async init pipeline (gui-init spec §1).
 
@@ -6245,15 +6276,25 @@ async def run_guided_init(
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
     try:
-        await _run_with_progress(
-            soul_engine.analyze_events(
-                events,
-                event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
-                progress_callback=_stage2_progress,
+        await asyncio.wait_for(
+            _run_with_progress(
+                soul_engine.analyze_events(
+                    events,
+                    event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+                    progress_callback=_stage2_progress,
+                ),
+                label="分析偏好（分片批处理）",
+                eta_seconds=180,
             ),
-            label="分析偏好（分片批处理）",
-            eta_seconds=180,
+            timeout=(
+                profile_analysis_timeout_seconds if profile_analysis_timeout_seconds > 0 else None
+            ),
         )
+    except TimeoutError as exc:
+        raise GuidedInitError(
+            "analyze_failed",
+            _INIT_PROFILE_ANALYSIS_TIMEOUT_MESSAGE,
+        ) from exc
     except Exception as exc:
         # Surface the real LLM cause (SSL / no provider / rate limit / timeout /
         # moderation) so the init page shows *why* stage 2 stalled instead of a
@@ -6321,22 +6362,30 @@ async def run_guided_init(
     draft_profile = _build_draft_profile_for_discover(memory)
 
     profile_task = asyncio.create_task(
-        _run_with_progress(
-            soul_engine.build_initial_profile(combined_history),
-            label="生成画像(单次 LLM 综合分析)",
-            eta_seconds=70,
+        asyncio.wait_for(
+            _run_with_progress(
+                soul_engine.build_initial_profile(combined_history),
+                label="生成画像(单次 LLM 综合分析)",
+                eta_seconds=70,
+            ),
+            timeout=profile_build_timeout_seconds if profile_build_timeout_seconds > 0 else None,
         )
     )
     discover_task = asyncio.create_task(
-        discover_backfill(
-            draft_profile,
-            target_pool_count=target_pool_count,
-            label_suffix=" — 用 P2 草稿画像并发预热",
+        asyncio.wait_for(
+            discover_backfill(
+                draft_profile,
+                target_pool_count=target_pool_count,
+                label_suffix=" — 用 P2 草稿画像并发预热",
+            ),
+            timeout=discovery_timeout_seconds if discovery_timeout_seconds > 0 else None,
         )
     )
     profile_data: Any = None
     discovered_count = 0
     discover_exc: BaseException | None = None
+    discovery_reason: str | None = None
+    discovery_detail = ""
     try:
         # Profile is load-bearing. CancelledError is deliberately NOT caught —
         # it propagates (and the finally tears down the sibling) so the wrapper
@@ -6350,12 +6399,15 @@ async def run_guided_init(
             # failure carries no recognizable LLM signal.
             from openbiliclaw.llm.base import describe_llm_failure
 
-            llm_reason = describe_llm_failure(exc)
-            message = (
-                f"画像生成失败：{llm_reason}"
-                if llm_reason
-                else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
-            )
+            if isinstance(exc, TimeoutError):
+                message = _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE
+            else:
+                llm_reason = describe_llm_failure(exc)
+                message = (
+                    f"画像生成失败：{llm_reason}"
+                    if llm_reason
+                    else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
+                )
             raise GuidedInitError("profile_failed", message) from exc
         await _stage_done(3)
 
@@ -6366,10 +6418,16 @@ async def run_guided_init(
         except Exception as exc:
             discovered_count = 0
             discover_exc = exc
+            if isinstance(exc, TimeoutError):
+                discovery_reason = "discovery_timeout"
+                discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
+            else:
+                discovery_reason = "discovery_partial"
+                discovery_detail = _INIT_DISCOVERY_PARTIAL_MESSAGE
         await _stage_done(
             4,
             status="warning" if discover_exc is not None else "ok",
-            reason="discovery_partial" if discover_exc is not None else None,
+            reason=discovery_reason,
         )
     finally:
         # Guarantee neither parallel task outlives this scope on ANY exit path —
@@ -6408,6 +6466,8 @@ async def run_guided_init(
         discovered_count=discovered_count,
         discovery_error=discover_exc is not None,
         discover_exc=discover_exc,
+        discovery_reason=discovery_reason,
+        discovery_detail=discovery_detail,
     )
 
 
@@ -6723,7 +6783,7 @@ def init(
         _print_status_panel(
             "warning",
             "部分完成",
-            "画像已生成，但 discover 阶段失败，可稍后手动执行 `openbiliclaw discover`。",
+            result.discovery_detail + " 也可稍后手动执行 `openbiliclaw discover`。",
         )
 
     _print_status_panel(

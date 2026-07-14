@@ -48,6 +48,7 @@ import {
   buildInitChecklist,
   describeInitFailure,
   describeInitReason,
+  describeInitStatusReason,
   describeInitStartError,
   embeddingRepairStartAccepted,
   initProgressView,
@@ -1048,10 +1049,15 @@ function _setInitStartButton(label, enabled) {
   }
 }
 
-function _setInitReason(text) {
+function _setInitReason(text, assertive = true) {
   if (elements.initStartReason instanceof HTMLElement) {
     elements.initStartReason.textContent = text || "";
     elements.initStartReason.hidden = !text;
+    elements.initStartReason.setAttribute("role", text && assertive ? "alert" : "status");
+    elements.initStartReason.setAttribute(
+      "aria-live",
+      text && assertive ? "assertive" : "polite",
+    );
   }
 }
 
@@ -1263,9 +1269,16 @@ function renderInitProgress(status) {
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
         ? `初始化未完成：${describeInitFailure(status, progress)}`
+        : progress.partial
+          ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
+      elements.initProgressLabel.setAttribute("role", progress.failed ? "alert" : "status");
+      elements.initProgressLabel.setAttribute(
+        "aria-live",
+        progress.failed ? "assertive" : "polite",
+      );
     }
   }
   // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
@@ -1290,6 +1303,9 @@ function renderInitProgress(status) {
   } else if (progress.failed) {
     _setInitStartButton("重试初始化", true);
     _setInitReason("");
+  } else if (progress.partial) {
+    _setInitStartButton("画像已生成", false);
+    _setInitReason(describeInitStatusReason(status), false);
   } else {
     _setInitStartButton("已初始化", false);
     _setInitReason("");
@@ -1320,7 +1336,12 @@ async function pollInitProgress() {
   clearInitPolling();
   if (status.initialized) {
     state.profileLoaded = false;
-    setHint("初始化完成！正在加载画像和推荐…", "success");
+    setHint(
+      status.partial_success
+        ? describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"
+        : "初始化完成！正在加载画像和推荐…",
+      status.partial_success ? "warning" : "success",
+    );
     scheduleRecommendationsRefresh();
     void loadProfileSummary({ force: true });
   }
@@ -1407,7 +1428,7 @@ async function handleStartInitClick() {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(
-      describeInitReason(status.reason) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
+      describeInitStatusReason(status) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
     );
     return;
   }
@@ -1877,7 +1898,12 @@ function connectRuntimeStream() {
       // Init completed: re-fetch everything including profile
       if (event.type === "init_completed") {
         state.profileLoaded = false;
-        setHint("初始化完成！正在加载画像和推荐…", "success");
+        setHint(
+          event.partial_success
+            ? String(event.detail || "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。")
+            : "初始化完成！正在加载画像和推荐…",
+          event.partial_success ? "warning" : "success",
+        );
         scheduleRecommendationsRefresh();
         void loadProfileSummary({ force: true });
       }

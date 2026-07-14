@@ -411,13 +411,57 @@ async def test_account_sync_records_profile_analysis_error_without_advancing_cur
 
     # Failure reason is now user-visible.
     assert "画像分析失败" in str(memory.state["last_sync_error"])
-    assert "llama3" in str(memory.state["last_sync_error"])
+    assert "找不到所配置的模型" in str(memory.state["last_sync_error"])
+    assert "ollama pull" in str(memory.state["last_sync_error"])
     # Cursor / throttle are NOT advanced → next tick retries the same events.
     assert memory.state["last_history_view_at"] == 0
     assert memory.state["last_account_sync_at"] == ""
     # The one-shot bootstrap chance is not burned on an unavailable model.
     assert soul.bootstrap_calls == []
     assert soul.ready_checks == 0
+
+
+@pytest.mark.asyncio
+async def test_account_sync_bounds_hung_profile_analysis_and_records_reason() -> None:
+    """A provider's 300s retries must not hold account sync indefinitely."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _HangingAnalyzeSoul(_BootstrapSoulEngine):
+        def __init__(self) -> None:
+            super().__init__(ready=False)
+            self.cancelled = False
+
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    memory = _FakeMemoryManager()
+    soul = _HangingAnalyzeSoul()
+    client = _FakeClient(
+        history_items=[_history_item("BVTIMEOUT", 101, "seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=soul,
+        profile_analysis_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(TimeoutError, match="偏好分析等待模型服务超过 6 分钟"):
+        await service.sync_now()
+
+    assert soul.cancelled is True
+    assert "画像分析失败" in str(memory.state["last_sync_error"])
+    assert "超过 6 分钟" in str(memory.state["last_sync_error"])
+    assert "Base URL" in str(memory.state["last_sync_error"])
+    assert "模型名" in str(memory.state["last_sync_error"])
+    assert memory.state["last_history_view_at"] == 0
+    assert memory.state["last_account_sync_at"] == ""
 
 
 @dataclass

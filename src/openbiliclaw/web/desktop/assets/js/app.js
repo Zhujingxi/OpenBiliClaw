@@ -116,6 +116,10 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      analyze_failed: "偏好分析未完成。",
+      profile_failed: "画像生成未完成。",
+      discovery_timeout: "画像已生成，但首轮内容池整理超时。",
+      discovery_partial: "画像已生成，但首轮内容池本次未完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -1161,6 +1165,21 @@
       return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
     }
 
+    function initStatusReasonText(status) {
+      const reason = String(status?.reason || "");
+      const detail = String(status?.detail || "").trim();
+      const detailFirst = new Set([
+        "analyze_failed",
+        "profile_failed",
+        "discovery_timeout",
+        "discovery_partial"
+      ]);
+      // account-sync keeps llm_not_ready while the live probe is still red,
+      // but its detail contains the actual profile-analysis failure.
+      if (detail && (detailFirst.has(reason) || detail.startsWith("画像分析失败："))) return detail;
+      return describeInitReason(reason) || detail;
+    }
+
     function initEnabledPlatforms(status) {
       const platforms = status?.prerequisites?.enabled_platforms;
       return Array.isArray(platforms) ? platforms.map(String) : [];
@@ -1382,6 +1401,12 @@
     function initFailureText(status, progress) {
       const base = describeInitReason(status?.reason) || "";
       const detail = String(status?.detail || "").trim();
+      const reason = String(status?.reason || "");
+      if (
+        detail &&
+        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+          detail.startsWith("画像分析失败："))
+      ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)
       // carry their authoritative human message in detail — show it alone
       // instead of "未知初始化状态：code（message）".
@@ -1496,7 +1521,11 @@
           : "等待开始";
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
       if (progressFill) progressFill.style.width = `${progress.pct}%`;
-      if (progressText) progressText.textContent = progressLabel;
+      if (progressText) {
+        progressText.textContent = progressLabel;
+        progressText.setAttribute("role", progress.failed ? "alert" : "status");
+        progressText.setAttribute("aria-live", progress.failed ? "assertive" : "polite");
+      }
       // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
       // keeps writing; amber stall copy after >90s of silence.
       const stallHint = section.querySelector(".init-stall-hint");
@@ -1538,10 +1567,10 @@
       const alreadyInitialized = Boolean(status?.initialized) && !waitingForFirstPool;
       const showProgress = isRunning || displayProgress.failed || waitingForFirstPool || embeddingPull.active;
       const reason = waitingForFirstPool
-        ? (state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
+        ? (status?.partial_success ? initStatusReasonText(status) : state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
         : displayProgress.failed
           ? (state.initReason || initFailureText(status, displayProgress))
-          : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
+          : (state.initReason || initStatusReasonText(status) || "");
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
@@ -1582,11 +1611,11 @@
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
             <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <p role="${displayProgress.failed ? "alert" : "status"}" aria-live="${displayProgress.failed ? "assertive" : "polite"}" aria-atomic="true">${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
           </div>
           <p class="init-stall-hint${stallText && !staleness.fresh ? " stale" : ""}"${stallText ? "" : " hidden"}>${escapeHtml(stallText)}</p>
           <p class="init-expectation"${expectationText ? "" : " hidden"}>${escapeHtml(expectationText)}</p>
-          <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
+          <p class="init-reason" role="status" aria-live="polite" aria-atomic="true"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
             <button class="small-btn primary" type="button" data-init-action="start"${buttonDisabled ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
             <button class="small-btn" type="button" data-init-action="settings">打开设置</button>
@@ -1648,7 +1677,9 @@
         state.initReason = "";
         if (status?.initialized) {
           if (!(await refreshRuntimeStatusForInitContent())) {
-            state.initReason = INIT_FIRST_POOL_WAIT_TEXT;
+            state.initReason = status?.partial_success
+              ? initStatusReasonText(status)
+              : INIT_FIRST_POOL_WAIT_TEXT;
             renderAll();
             scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
             return;
@@ -1703,7 +1734,9 @@
           state.initReason = "";
           scheduleBackendHydration();
         } else {
-          state.initReason = INIT_FIRST_POOL_WAIT_TEXT;
+          state.initReason = status?.partial_success
+            ? initStatusReasonText(status)
+            : INIT_FIRST_POOL_WAIT_TEXT;
           scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         }
         renderAll();
@@ -1729,7 +1762,7 @@
         return;
       }
       if (!status.can_start) {
-        state.initReason = describeInitReason(status.reason) || status.detail || "以下条件未满足，无法开始初始化。";
+        state.initReason = initStatusReasonText(status) || "以下条件未满足，无法开始初始化。";
         state.initBusy = false;
         renderAll();
         return;
