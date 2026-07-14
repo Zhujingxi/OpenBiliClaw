@@ -732,7 +732,13 @@
     .delight-queue-tools .small-btn.ghost-danger { height: 32px; min-height: 32px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
     .delight-queue-tools .icon-btn { width: 32px; min-width: 32px; padding: 0; }
     .delight-queue-tools .small-btn.ghost-danger { width: auto; padding: 0 11px; font-size: 12px; }
-    .chat-input input, .settings-field input, .settings-field select, .settings-field textarea { border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); padding: 10px var(--space-3); min-width: 0; }
+    .chat-input input, .settings-field input, .settings-field textarea { border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); padding: 10px var(--space-3); min-width: 0; }
+    .settings-field select { border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); color: var(--fg); padding: 10px var(--space-8) 10px var(--space-3); min-width: 0; appearance: none; cursor: pointer; transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2387867f' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; background-size: 14px; }
+    .settings-field select:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    .settings-field select:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+    .settings-field select option { padding: 8px 12px; background: var(--surface); color: var(--fg); }
+    .settings-field select option:hover { background: var(--accent-subtle); color: var(--accent); }
+    .settings-field select option:checked { background: var(--accent-subtle); color: var(--accent); font-weight: 600; }
     .status-line { min-height: 20px; color: var(--muted); font-size: 13px; margin: 0; }
     .status-line:empty { display: none; }
     .status-line.has-feedback-action { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
@@ -1094,8 +1100,9 @@
     .fatal-banner.is-open { display: block; }
     #loadMoreSentinel { height: 1px; max-width: var(--recommendation-grid-max); margin-inline: auto; pointer-events: none; }
     .load-row { display: flex; justify-content: center; margin-top: var(--space-8); }
-    .mobile-menu-btn, .mobile-menu, .mobile-back-btn { display: none; }
-    .mobile-menu.is-open { position: fixed; inset: 0; z-index: 70; display: block; background: var(--bg); }
+    .mobile-menu-btn, .mobile-back-btn { display: none; }
+    .mobile-menu { position: fixed; inset: 0; z-index: 70; background: var(--bg); visibility: hidden; opacity: 0; transform: translateY(-12px); pointer-events: none; transition: visibility 0s linear 200ms, opacity 200ms var(--ease-standard), transform 200ms var(--ease-standard); }
+    .mobile-menu.is-open { visibility: visible; opacity: 1; transform: translateY(0); pointer-events: auto; transition: visibility 0s linear 0s, opacity 200ms var(--ease-standard), transform 200ms var(--ease-standard); }
     .mobile-menu-panel { height: 100%; overflow: auto; padding: var(--space-5); display: grid; align-content: start; gap: var(--space-4); }
     .mobile-menu-head, .mobile-summary-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
     .mobile-menu-head h2 { font-size: clamp(30px, 8vw, 44px); }
