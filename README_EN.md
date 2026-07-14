@@ -189,11 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.166 (2026-07-14)**
+📌 Latest: **v0.3.167 (2026-07-14)**
 
-- **Overseas routing: direct / system / custom proxy** — the `[network]` modes default to direct and are switchable from desktop web and the extension settings, so LLM calls are no longer silently strangled by a stale system proxy.
-- **Init failures now show the real cause** — when profile / preference analysis hits an SSL-cert or proxy-interception error, the init page tells you to disable the proxy / allowlist the endpoint instead of retrying forever (issue #113).
-- **Seven-platform favorites and watch later are live** — every surface saves locally first and auto-sync stays off by default; the real-account regression completed both actions or the documented favorite fallback across all seven platforms as `synced/already_synced`.
+- **Domestic LLM gateways always connect direct** — turn on a proxy for overseas models and your DeepSeek / SenseNova / Qwen / Zhipu (and localhost) gateways are auto-forced direct, ending the "SenseTime always times out" hang; genuinely overseas gateways still use the proxy, no manual switching.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

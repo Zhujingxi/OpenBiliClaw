@@ -4,12 +4,18 @@
 
 ---
 
+## v0.3.167 / extension v0.3.167 / desktop v0.3.167：国内大模型网关代理豁免（2026-07-14）
+
+后端源码走 `backend-v0.3.167`，浏览器插件走 `extension-v0.3.167`，桌面安装包走 `desktop-v0.3.167`。
+
+- **国内大模型网关始终直连，不被海外代理误伤**：为访问墙外模型把 `[network].mode` 切到 `system / custom` 时，DeepSeek / 商汤 SenseNova / 通义千问 / 智谱 / 文心千帆 / 混元 / 火山方舟 / Kimi / MiniMax / 阶跃 / 百川 / 硅基流动 / 无问芯穹 / PPIO 等国内网关，以及 localhost / 内网自建端点（cpa、vLLM 等），会被识别为国内 endpoint 并强制直连——不再把国内请求塞进梯子绕道境外导致「商汤请求总是超时」。识别逻辑覆盖 `.cn` 顶级域、已知国内厂商的非 `.cn` 域名白名单，以及 loopback / 私有 / link-local IP；`registry` 的 `_outbound_proxy(base_url)` / `_outbound_trust_env(base_url)` 改为按 endpoint 粒度裁决，chat + embedding 全部 provider 构造点传入各自 endpoint（DeepSeek 固定 `api.deepseek.com`）。豁免按 endpoint 生效，genuine 墙外网关仍照常走全局代理策略。配置页 LLM 测试同样受益（不再需要为国内模型手动切回 `direct`）。该策略由 `openbiliclaw.network.is_domestic_endpoint` 统一裁决，`tests/test_network_proxy_isolation.py` 新增参数化 + 直连/走代理对照断言钉住行为。
+- **扩展包版本对齐**：extension 随后端升到 0.3.167 重新签名发布，插件市场同步；本次未改扩展逻辑。
+
 ## v0.3.166 / extension v0.3.166 / desktop v0.3.166：海外网络路由加固与初始化错误可诊断（2026-07-14）
 
 后端源码走 `backend-v0.3.166`，浏览器插件走 `extension-v0.3.166`，桌面安装包走 `desktop-v0.3.166`。
 
 - **海外网络路由不再被失效系统代理拖死**：`[network]` 新增 `direct / system / custom` 三模式，默认 `direct` 显式忽略环境 / OS 代理，旧的非空 `proxy` 自动迁移为 `custom`；OpenAI / Claude / Gemini 系 SDK、GitHub 更新、Codex OAuth 与 YouTube 的 yt-dlp / scrapetube / InnerTube / HTML fallback 统一执行同一策略。桌面 Web、扩展设置页和连通性探测同步支持模式选择，Docker 检出或继承代理变量时自动选择 `system`（显式用户选择优先）。
-- **国内大模型网关始终直连，不被海外代理误伤**：为访问墙外模型把 `[network].mode` 切到 `system / custom` 时，DeepSeek / 商汤 SenseNova / 通义千问 / 智谱 / 文心千帆 / 混元 / 火山方舟 / Kimi / MiniMax / 阶跃 / 百川 / 硅基流动 / 无问芯穹 / PPIO 等国内网关，以及 localhost / 内网自建端点（cpa、vLLM 等），会被识别为国内 endpoint 并强制直连——不再把国内请求塞进梯子绕道境外导致「商汤请求总是超时」。识别逻辑覆盖 `.cn` 顶级域、已知国内厂商的非 `.cn` 域名白名单，以及 loopback / 私有 / link-local IP；豁免按 endpoint 粒度生效，genuine 墙外网关仍照常走代理。配置页 LLM 测试同样受益（不再需要为国内模型手动切回 `direct`）。该策略由 `openbiliclaw.network.is_domestic_endpoint` 统一裁决，`tests/test_network_proxy_isolation.py` 钉住行为。
 - **初始化卡在「分析偏好」时报出真实原因（issue #113）**：`describe_llm_failure` / `classify_llm_failure_kind` 新增 SSL 证书校验失败与通用连接失败识别（httpx `ConnectError:[SSL...]`、OpenAI SDK `APIConnectionError:"Connection error."` 均不是 Python `ConnectionError` 子类，此前被漏判成泛化错误）；SSL 失败会给出「本地代理/杀软对 HTTPS 中间人拦截或自签证书，请关闭代理或加直连白名单」的可操作提示，优先级高于「所有 provider 失败」。guided-init Stage 2（`analyze_events`）与 Stage 3 一致包装 LLM 异常为 `GuidedInitError("analyze_failed")`，把原因透传到初始化页，不再静默重试。
 - **桌面版后台自动建画像失败同样可诊断**：`AccountSyncService.sync_now()` 里的 `analyze_events()` 此前是裸 `await`，对话模型不可用（本地模型未拉取 → 404、网关鉴权 → 401、超时）时异常直接冒泡，用户可见的 `last_sync_error` 从不记录，桌面初始化只表现为无限等待——补上 guided-init CLI 路径之外的这条后台链路：失败写入 `画像分析失败：<原因>` 到 `last_sync_error`（供 `/api/init-status` 与账号同步状态读取），且刻意不推进任何游标、不打 `last_account_sync_at` 时间戳，保证整个 tick 回滚、下次 tick 重试、不被 `sync_interval_hours` 节流锁死，也不消耗一次性的 auto-bootstrap 机会；`CancelledError` 不被吞（热重载/重启打断语义不变）。真实 ollama 404 端到端验证通过。
 - **「模型未找到」不再被误判为泛化错误**：`classify_llm_failure_kind` / `classify_llm_unavailability` 新增 `model_not_found` 类别，识别本地 Ollama 模型未拉取（HTTP 404 `not_found_error` / `try pulling it first`）与 OpenAI 兼容端「model does not exist」——区别于 `no_provider`（完全没配 provider）与 `auth_failed`（401）。后台 `account_sync` / 反馈批处理循环因此对该错误只记一行可操作日志（提示拉取模型或改模型名）而非整段 traceback；`describe_llm_failure` 给初始化页返回「先 `ollama pull <模型名>` 或核对模型名」的中文提示。
