@@ -5356,7 +5356,7 @@
       missing: { tone: "warning", label: "需要登录" },
       login_required: { tone: "warning", label: "需要登录" },
       missing_cookie: { tone: "warning", label: "缺少 Cookie" },
-      rate_limited: { tone: "warning", label: "频率受限" },
+      rate_limited: { tone: "pending", label: "频率受限" },
       partial: { tone: "warning", label: "部分可用" },
       stale: { tone: "warning", label: "需要刷新" },
       error: { tone: "danger", label: "检查失败" },

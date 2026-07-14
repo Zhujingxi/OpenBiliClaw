@@ -6878,7 +6878,7 @@ function bindSettings() {
     missing: "#e0a800",
     missing_cookie: "#e0a800",
     login_required: "#e0a800",
-    rate_limited: "#e0a800",
+    rate_limited: "#9aa0a6",
     partial: "#e0a800",
     stale: "#e0a800",
     error: "#e74c3c",

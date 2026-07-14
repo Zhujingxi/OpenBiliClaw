@@ -8503,7 +8503,7 @@ def create_app(
         "ok": "X 来源正常，cookie 有效。",
         "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
         "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": "被限流，正在退避冷却中，稍后会自动重试。",
+        "rate_limited": "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。",
         "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
     }
 
@@ -8687,7 +8687,7 @@ def create_app(
                 tw_state = "missing_cookie"
         tw_detail = _x_state_detail.get(tw_state, f"X 来源状态：{tw_state}。")
         if tw_feed_paused:
-            tw_detail += " For-You 因连续失败已自动暂停。"
+            tw_detail += " 其中 For-You 子流因连续失败已临时熔断，下次抓取成功会自动恢复。"
         twitter = SourceStatusItem(
             enabled=tw_enabled,
             state=tw_state,
