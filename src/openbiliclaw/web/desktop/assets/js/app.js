@@ -1,4 +1,4 @@
-﻿(() => {
+(() => {
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
       ping: "/ping",
@@ -513,7 +513,9 @@
     const THEME_LABELS = { auto: "跟随系统", light: "浅色", dark: "深色" };
     const THEME_GLYPHS = { auto: "◐", light: "☼", dark: "☾" };
     state.themeMode = THEME_OPTIONS.includes(storageGet(THEME_STORAGE_KEY)) ? storageGet(THEME_STORAGE_KEY) : "auto";
-    state.themeHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10) || 20;
+    const _storedHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10);
+    // Number.isFinite guard so a persisted hue of 0 (烈焰红) survives reload instead of falling back to 20.
+    state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
@@ -5546,7 +5548,8 @@
       text.textContent = bodyText;
       const badge = document.createElement("span");
       badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       thumb.append(text, badge);
     }
 
@@ -5562,7 +5565,8 @@
       if (!delight) return;
       const badge = document.createElement("span");
       badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       thumb.append(badge);
     }
 
@@ -5585,7 +5589,8 @@
       // 平台徽章不依赖封面 —— 图片正常加载时也始终标明内容来源。
       const badge = document.createElement("span");
       badge.className = "platform";
-      badge.textContent = platformName(delight.source_platform);      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
+      badge.textContent = platformName(delight.source_platform);
+      badge.dataset.platform = String(delight.source_platform || "bilibili").toLowerCase();
       const image = document.createElement("img");
       if (isCrossOriginBase()) image.crossOrigin = "anonymous";
       image.alt = "";

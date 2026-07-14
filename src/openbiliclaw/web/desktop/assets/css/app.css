@@ -1,4 +1,4 @@
-﻿:root {
+:root {
       color-scheme: light dark;
 
       /* ═══════════════════════════════════════════════
@@ -17,8 +17,7 @@
       --chroma-base: 0.14;
       --chroma-strong: 0.19;
 
-      /* ─── ④ 品牌 / 功能色 ─── */
-      --accent: oklch(var(--light-base) var(--chroma-base) var(--hue-primary));
+      /* ─── ④ 品牌 / 功能色（--accent 见 ⑤ 强调色阶）─── */
       --probe-interest: oklch(var(--light-base) var(--chroma-base) calc(var(--hue-primary) + 30));
       --probe-challenge: oklch(var(--light-base) var(--chroma-base) calc(var(--hue-primary) + 120));
       --probe-avoidance: oklch(var(--light-base) var(--chroma-base) calc(var(--hue-primary) + 210));
@@ -138,7 +137,7 @@
       /* ═══════════════════════════════════════════════
          🏃 动效
          ═══════════════════════════════════════════════ */
-      --motion-fast: 450ms;
+      --motion-fast: 150ms;
       --motion-base: 200ms;
       --ease-standard: cubic-bezier(0.2, 0, 0, 1);
 

@@ -166,7 +166,7 @@ Dark mode 使用两层定义：
 1. **文件二重性**：`desktop/assets/css/app.css`（桌面 Web）和 `web/css/app.css`（插件弹窗）是两个独立文件，互不共享。桌面版 HTML 引用 `/web/assets/css/app.css`，由服务器映射到桌面版。
 2. **hue 持久化**：`obc.themeHue` localStorage → 页面加载时 inline `<script>` 恢复。JS 未完全加载时初始色块可能短暂显示错误 active 态。
 3. **`--elev-ring` 禁用**：所有 hover/active/focus 的 `box-shadow` 均不含 `--elev-ring`（已全局替换）。
-4. **`--motion-fast`**：150ms → 450ms，3× 减速便于调试。交付前确认是否需要恢复。
+4. **`--motion-fast`**：150ms（交互过渡基准；调试期曾临时调至 450ms，交付前已恢复）。
 5. **slider 彩虹渐变**：`--hue-grad` 用于 `::-webkit-slider-runnable-track` 和 `::-moz-range-track`，滑块轨道呈全色环渐变。
 6. **`.probe-btn` 边框**：已从 `border: 1px solid` 改为 `border: 0; box-shadow: 0 0 0 1px` 消除圆角锯齿。
 7. **`hue-swatch` active 态**：使用 `border-color: var(--accent)`，hover/active 统一 pattern。
