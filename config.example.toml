@@ -264,13 +264,14 @@ executable = ""
 # Use headed mode for debugging
 headed = false
 
-# ── 海外出口代理（仅作用于海外客户端）──
+# ── 海外网络路由（仅作用于海外客户端）──
 # 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
 # 的 chat + embedding、YouTube(yt-dlp)、GitHub 自动更新、Codex OAuth。
 # B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
-# 留空 = 不设代理(沿用进程 HTTP(S)_PROXY 环境变量现状)。
+# direct = 忽略环境 / 系统代理；system = 明确继承；custom = 使用下方 proxy。
 # 支持 http:// | https:// | socks5:// | socks5h://,例如 "socks5://127.0.0.1:1080"。
 [network]
+mode = "direct"
 proxy = ""
 
 # ── 通用 Web / 自定义网页源的浏览器配置 ──

@@ -5624,10 +5624,18 @@
           <input id="cfgStorageDbPath" type="text" placeholder="data/openbiliclaw.db">
         </div>
         <div class="settings-field">
-          <label for="cfgNetworkProxy">海外出口代理</label>
+          <label for="cfgNetworkProxyMode">海外网络模式</label>
+          <select id="cfgNetworkProxyMode">
+            <option value="direct">直连（忽略系统代理）</option>
+            <option value="system">跟随系统代理</option>
+            <option value="custom">自定义代理</option>
+          </select>
+        </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxy">自定义代理地址</label>
           <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
         </div>
-        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。支持 http/https/socks5/socks5h，留空表示不使用。</p>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
         <div class="settings-probe-row">
           <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
           <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>

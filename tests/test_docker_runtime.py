@@ -174,9 +174,43 @@ def test_bootstrap_runtime_environment_prepares_runtime_root_and_proxy(tmp_path:
     assert env["HTTP_PROXY"] == expected_proxy
     assert env["HTTPS_PROXY"] == expected_proxy
     assert env["ALL_PROXY"] == expected_proxy
+    assert env["OPENBILICLAW_NETWORK_MODE"] == "system"
     assert (runtime_root / "config.toml").exists()
     assert (runtime_root / "data").is_dir()
     assert (runtime_root / "logs").is_dir()
+
+
+def test_bootstrap_runtime_environment_marks_existing_container_proxy_as_system(
+    tmp_path: Path,
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+    env = {
+        "OPENBILICLAW_PROJECT_ROOT": str(runtime_root),
+        "OPENBILICLAW_CONFIG_TEMPLATE": str(template),
+        "HTTPS_PROXY": "http://proxy.internal:8080",
+    }
+
+    bootstrap_runtime_environment(env, in_container=lambda _env: True)
+
+    assert env["OPENBILICLAW_NETWORK_MODE"] == "system"
+
+
+def test_bootstrap_runtime_environment_preserves_explicit_network_mode(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+    env = {
+        "OPENBILICLAW_PROJECT_ROOT": str(runtime_root),
+        "OPENBILICLAW_CONFIG_TEMPLATE": str(template),
+        "HTTPS_PROXY": "http://proxy.internal:8080",
+        "OPENBILICLAW_NETWORK_MODE": "direct",
+    }
+
+    bootstrap_runtime_environment(env, in_container=lambda _env: True)
+
+    assert env["OPENBILICLAW_NETWORK_MODE"] == "direct"
 
 
 def test_bootstrap_runtime_environment_skips_proxy_outside_container(tmp_path: Path) -> None:

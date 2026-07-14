@@ -66,6 +66,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
 | 配置热重载 LLM override | ✅ | `RuntimeContext._rebuild_components()` 从 config 构造 `module_overrides`，同时注入主 `LLMService` 与 `SoulEngine` 内部 service；热重载后的正向兴趣和避雷 speculator tick 都 detached 到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应。 |
+| 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
 | 桌面包 SOCKS 代理兼容 | ✅ | 默认运行依赖使用 `httpx[socks]`，PyInstaller spec 显式收集 `socksio`；用户系统配置 `ALL_PROXY` / `HTTPS_PROXY=socks5://...` 时，冻结桌面包创建 OpenAI / 兼容 LLM 客户端不会因缺少可选 SOCKS 运行时依赖而在启动阶段崩溃。 |
 | 运行时图像处理依赖 | ✅ | 默认安装显式携带 `Pillow>=10.0`，因为 `discovery.multimodal` 的封面压缩路径直接 import `PIL`；不再依赖 B 站 SDK 或打包 extra 的传递依赖碰巧提供 Pillow。 |
 | 运行日志降噪 | ✅ | 全局 logging 初始化会把 `httpx` / `httpcore` / `openai` / `openai._base_client` logger 提升到 WARNING，避免文件日志在 DEBUG 模式下被连接细节和完整 LLM 请求体刷屏；业务模块仍按 `logging.file_level` 输出。 |

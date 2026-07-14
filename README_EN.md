@@ -189,9 +189,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.165 (2026-07-14)**
+📌 Latest: **v0.3.166 (2026-07-14)**
 
-- **Firefox now has a directly installable XPI** — the Firefox extension moved to a project-owned AMO identity and resumes Mozilla-signed releases for regular Firefox Release and Beta.
+- **Overseas routing: direct / system / custom proxy** — the `[network]` modes default to direct and are switchable from desktop web and the extension settings, so LLM calls are no longer silently strangled by a stale system proxy.
+- **Init failures now show the real cause** — when profile / preference analysis hits an SSL-cert or proxy-interception error, the init page tells you to disable the proxy / allowlist the endpoint instead of retrying forever (issue #113).
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -610,6 +611,8 @@ Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → ba
                                       └failure/timeout: rollback provisional history → safe error / failed turn
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
+
+Overseas traffic: `[network].mode` → direct / system proxy / custom proxy → LLM, YouTube, updater; CN clients remain isolated and direct
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.

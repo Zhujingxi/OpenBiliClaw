@@ -209,9 +209,10 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.165（2026-07-14）**
+📌 最新版本：**v0.3.166（2026-07-14）**
 
-- **Firefox 可直接安装正式 XPI** —— Firefox 扩展迁移到项目自有 AMO 身份并恢复 Mozilla 签名发布，普通 Firefox Release / Beta 可从 Latest Release 直接安装。
+- **海外网络路由可选直连 / 跟随系统 / 自定义代理** —— `[network]` 三模式默认直连，桌面 Web 与扩展设置页可一键切换，AI 服务不再被失效的系统代理静默拖死。
+- **初始化卡住会报出真实原因** —— 画像 / 偏好分析遇到 SSL 证书或代理拦截等网络错误时，初始化页直接提示「关闭代理 / 加直连白名单」，不再无限静默重试（issue #113）。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -613,6 +614,8 @@ Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后
                                       └失败/超时：回滚临时历史 → 安全错因 / failed turn
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
+
+海外请求：设置页 `[network].mode` → 直连 / 系统代理 / 自定义代理 → LLM、YouTube、更新；国内平台保持独立直连
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。

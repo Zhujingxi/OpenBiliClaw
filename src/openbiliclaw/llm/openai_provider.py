@@ -79,6 +79,7 @@ class OpenAIProvider(LLMProvider):
         embedding_output_dimensionality: int = 0,
         api_flavor: str = "",
         proxy: str = "",
+        trust_env: bool = True,
     ) -> None:
         self._model = model
         self._provider_name = provider_name
@@ -90,13 +91,16 @@ class OpenAIProvider(LLMProvider):
         self._token_provider = token_provider
         self._timeout = timeout
         self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))
-        # [network].proxy: overseas outbound only. Non-empty routes the SDK's
-        # httpx client through the proxy; empty leaves construction untouched
-        # (zero-drift — the SDK keeps its default env-inheriting client).
+        # Overseas routing policy: custom injects a proxy, direct injects a
+        # proxy-env-immune client, and system leaves SDK construction untouched.
         self._proxy = proxy.strip()
+        self._trust_env = bool(trust_env and not self._proxy)
         client_kwargs: dict[str, Any] = {}
-        if self._proxy:
-            client_kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
+        if self._proxy or not self._trust_env:
+            httpx_kwargs: dict[str, Any] = {"timeout": timeout, "trust_env": self._trust_env}
+            if self._proxy:
+                httpx_kwargs["proxy"] = self._proxy
+            client_kwargs["http_client"] = httpx.AsyncClient(**httpx_kwargs)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url or None,
@@ -657,6 +661,7 @@ class DeepSeekProvider(OpenAIProvider):
         reasoning_effort: str = "",
         timeout: float = 300.0,
         proxy: str = "",
+        trust_env: bool = True,
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -665,6 +670,7 @@ class DeepSeekProvider(OpenAIProvider):
             provider_name="deepseek",
             timeout=timeout,
             proxy=proxy,
+            trust_env=trust_env,
         )
         self._reasoning_effort = reasoning_effort.strip()
 

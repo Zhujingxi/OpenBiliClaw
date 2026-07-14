@@ -427,6 +427,7 @@ def test_get_config_exposes_douyin_and_x_cookies_like_bilibili(monkeypatch, tmp_
 
 def _proxy_config(proxy: str) -> Config:
     cfg = _base_config()
+    cfg.network.mode = "custom" if proxy else "direct"
     cfg.network.proxy = proxy
     return cfg
 
@@ -436,6 +437,7 @@ def test_get_config_exposes_network_proxy(monkeypatch, tmp_path) -> None:
         monkeypatch, tmp_path, _proxy_config("socks5://127.0.0.1:1080")
     )
     body = client.get("/api/config").json()
+    assert body["network"]["mode"] == "custom"
     assert body["network"]["proxy"] == "socks5://127.0.0.1:1080"
 
 
@@ -459,6 +461,7 @@ def test_put_config_writes_valid_network_proxy(monkeypatch, tmp_path) -> None:
     assert response.status_code == 200
     assert load_config_from_path(config_path).network.proxy == "socks5://127.0.0.1:1080"
     # Hot path updated the process-level source of truth.
+    assert network.outbound_proxy_mode() == "custom"
     assert network.outbound_proxy_url() == "socks5://127.0.0.1:1080"
     network.reset_outbound_proxy_for_tests()
 
@@ -474,6 +477,30 @@ def test_put_config_rejects_invalid_network_proxy(monkeypatch, tmp_path) -> None
     assert config_path.read_text(encoding="utf-8") == before
 
 
+def test_put_config_switches_to_direct_and_ignores_environment_proxy(monkeypatch, tmp_path) -> None:
+    from openbiliclaw import network
+
+    client, _cfg, config_path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("http://127.0.0.1:7897")
+    )
+
+    response = client.put("/api/config", json={"network": {"mode": "direct"}})
+
+    assert response.status_code == 200
+    assert load_config_from_path(config_path).network.mode == "direct"
+    assert network.outbound_httpx_kwargs() == {"trust_env": False}
+
+
+def test_put_config_rejects_custom_mode_without_proxy(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = config_path.read_text(encoding="utf-8")
+
+    response = client.put("/api/config", json={"network": {"mode": "custom", "proxy": ""}})
+
+    assert response.status_code == 400
+    assert config_path.read_text(encoding="utf-8") == before
+
+
 def test_put_config_ignores_masked_proxy_echo(monkeypatch, tmp_path) -> None:
     client, _cfg, config_path = _make_client(
         monkeypatch, tmp_path, _proxy_config("socks5://user:secret@127.0.0.1:1080")
@@ -482,7 +509,4 @@ def test_put_config_ignores_masked_proxy_echo(monkeypatch, tmp_path) -> None:
     response = client.put("/api/config", json={"network": {"proxy": "socks5://***@127.0.0.1:1080"}})
 
     assert response.status_code == 200
-    assert (
-        load_config_from_path(config_path).network.proxy
-        == "socks5://user:secret@127.0.0.1:1080"
-    )
+    assert load_config_from_path(config_path).network.proxy == "socks5://user:secret@127.0.0.1:1080"

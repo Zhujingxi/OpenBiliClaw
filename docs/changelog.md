@@ -4,6 +4,13 @@
 
 ---
 
+## v0.3.166 / extension v0.3.166 / desktop v0.3.166：海外网络路由加固与初始化错误可诊断（2026-07-14）
+
+后端源码走 `backend-v0.3.166`，浏览器插件走 `extension-v0.3.166`，桌面安装包走 `desktop-v0.3.166`。
+
+- **海外网络路由不再被失效系统代理拖死**：`[network]` 新增 `direct / system / custom` 三模式，默认 `direct` 显式忽略环境 / OS 代理，旧的非空 `proxy` 自动迁移为 `custom`；OpenAI / Claude / Gemini 系 SDK、GitHub 更新、Codex OAuth 与 YouTube 的 yt-dlp / scrapetube / InnerTube / HTML fallback 统一执行同一策略。桌面 Web、扩展设置页和连通性探测同步支持模式选择，Docker 检出或继承代理变量时自动选择 `system`（显式用户选择优先）。
+- **初始化卡在「分析偏好」时报出真实原因（issue #113）**：`describe_llm_failure` / `classify_llm_failure_kind` 新增 SSL 证书校验失败与通用连接失败识别（httpx `ConnectError:[SSL...]`、OpenAI SDK `APIConnectionError:"Connection error."` 均不是 Python `ConnectionError` 子类，此前被漏判成泛化错误）；SSL 失败会给出「本地代理/杀软对 HTTPS 中间人拦截或自签证书，请关闭代理或加直连白名单」的可操作提示，优先级高于「所有 provider 失败」。guided-init Stage 2（`analyze_events`）与 Stage 3 一致包装 LLM 异常为 `GuidedInitError("analyze_failed")`，把原因透传到初始化页，不再静默重试。
+
 ## v0.3.165 / extension v0.3.165 / desktop v0.3.165：Firefox 签名安装修复（2026-07-14）
 
 后端源码走 `backend-v0.3.165`，浏览器插件走 `extension-v0.3.165`，桌面安装包走 `desktop-v0.3.165`。

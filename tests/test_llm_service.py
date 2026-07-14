@@ -181,6 +181,11 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
         (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "auth_failed"),
         (ConnectionError("connection reset by peer"), "connection"),
         (OSError("network is unreachable"), "connection"),
+        (
+            LLMProviderError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+            "connection",
+        ),
+        (LLMProviderError("openai_compatible request failed: Connection error."), "connection"),
         (LLMTimeoutError("request timed out"), "timeout"),
         (LLMProviderExecutionError("upstream returned HTTP 503"), "server_error"),
         (LLMResponseError("empty completion"), "invalid_response"),
@@ -294,6 +299,52 @@ def test_describe_llm_failure_timeout_and_empty_response() -> None:
     assert "空响应" in (
         describe_llm_failure(LLMResponseContentError("LLM returned an empty response")) or ""
     )
+
+
+def test_describe_llm_failure_ssl_certificate_chain() -> None:
+    # Issue #113: a local proxy / antivirus MITMs HTTPS, so the openai_compatible
+    # provider's request dies with an SSL cert-verify failure. httpx raises
+    # ConnectError, the SDK wraps it as a connection error, and analyze_events
+    # surfaces it as "All providers failed". Guided init must show the proxy /
+    # cert hint, not a generic "稍后重试".
+    try:
+        try:
+            raise RuntimeError(
+                "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                "unable to get local issuer certificate (_ssl.c:1010)"
+            )
+        except RuntimeError as ssl_err:
+            raise LLMProviderError(
+                "openai_compatible request failed: Connection error."
+            ) from ssl_err
+    except LLMProviderError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "SSL" in reason
+    assert "代理" in reason
+
+
+def test_describe_llm_failure_connection_error() -> None:
+    # OpenAI SDK's APIConnectionError stringifies as "Connection error." with no
+    # SSL / errno detail; still must map to the network-failure copy.
+    reason = describe_llm_failure(
+        LLMProviderError("openai_compatible request failed: Connection error.")
+    )
+    assert reason is not None
+    assert "无法连接" in reason
+
+
+def test_describe_llm_failure_ssl_wins_over_no_provider() -> None:
+    # SSL cause is more actionable than the coarse "all providers failed" wrapper.
+    try:
+        try:
+            raise RuntimeError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        except RuntimeError as ssl_err:
+            raise LLMFallbackError("No provider was available to process the request.") from ssl_err
+    except LLMFallbackError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "SSL" in reason
 
 
 @pytest.mark.parametrize(

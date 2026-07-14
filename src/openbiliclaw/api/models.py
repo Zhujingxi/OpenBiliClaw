@@ -1127,8 +1127,9 @@ class BilibiliConfigOut(BaseModel):
 
 
 class NetworkConfigOut(BaseModel):
-    """Overseas-outbound proxy. Any URL userinfo is masked in responses."""
+    """Overseas routing policy. Any proxy URL userinfo is masked in responses."""
 
+    mode: str = "direct"
     proxy: str = ""
 
 

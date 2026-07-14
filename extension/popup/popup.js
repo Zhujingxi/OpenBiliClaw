@@ -6805,6 +6805,7 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
     setVal("cfgNetworkProxy", cfg.network?.proxy || "");
 
     // Scheduler
@@ -7071,6 +7072,7 @@ function bindSettings() {
         db_path: getVal("cfgStorageDbPath"),
       },
       network: {
+        mode: getVal("cfgNetworkProxyMode"),
         proxy: getVal("cfgNetworkProxy"),
       },
       logging: {
@@ -7187,7 +7189,8 @@ function bindSettings() {
     renderProbePending(statusEl, "代理");
     try {
       const proxy = getVal("cfgNetworkProxy");
-      const result = await probeConfigService("network_proxy", { network: { proxy } });
+      const mode = getVal("cfgNetworkProxyMode");
+      const result = await probeConfigService("network_proxy", { network: { mode, proxy } });
       renderProbeResult(statusEl, result);
     } catch (err) {
       renderProbeResult(statusEl, {

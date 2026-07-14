@@ -389,13 +389,15 @@ class NetworkConfig:
     by tests/test_network_proxy_isolation.py. This is deliberately distinct
     from ``[bilibili].proxy`` (which routes B站 requests and is rarely set).
 
-    Empty (default) means "no explicit proxy": overseas SDK clients keep their
-    current behavior of inheriting HTTP(S)_PROXY env, so Docker proxy discovery
-    is unaffected. Accepted schemes: http / https / socks5 / socks5h.
+    ``mode`` is one of ``direct`` (default; ignore env/system proxies),
+    ``system`` (inherit HTTP(S)_PROXY / OS settings), or ``custom`` (use
+    ``proxy`` explicitly). Accepted proxy schemes: http / https / socks5 /
+    socks5h.
 
     See docs/plans/2026-07-11-network-proxy-config-spec.md.
     """
 
+    mode: str = "direct"
     proxy: str = ""
 
 
@@ -954,6 +956,15 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
 # http/https cover CONNECT proxies. Anything else (ftp, socks4, bare host) is a
 # user error we reject at save time rather than silently ignore (pitfall rule 7).
 _OUTBOUND_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+_OUTBOUND_PROXY_MODES = frozenset({"direct", "system", "custom"})
+
+
+def normalize_outbound_proxy_mode(value: str) -> str:
+    """Normalize an overseas routing mode, or raise a user-facing error."""
+    mode = value.strip().lower()
+    if mode not in _OUTBOUND_PROXY_MODES:
+        raise ValueError("网络代理模式仅支持 direct / system / custom")
+    return mode
 
 
 def normalize_outbound_proxy(value: str) -> str:
@@ -971,13 +982,12 @@ def normalize_outbound_proxy(value: str) -> str:
     scheme = parsed.scheme.lower()
     if scheme not in _OUTBOUND_PROXY_SCHEMES:
         raise ValueError(
-            f"代理协议不支持:{parsed.scheme or '(缺少协议)'};"
-            "仅支持 http / https / socks5 / socks5h"
+            f"代理协议不支持:{parsed.scheme or '(缺少协议)'};仅支持 http / https / socks5 / socks5h"
         )
     if not parsed.hostname:
         raise ValueError("代理地址缺少主机名,请填写形如 socks5://127.0.0.1:1080 的地址")
     # Preserve userinfo/host/port/path verbatim; only the scheme is lowercased.
-    return f"{scheme}{text[len(parsed.scheme):]}"
+    return f"{scheme}{text[len(parsed.scheme) :]}"
 
 
 def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
@@ -996,7 +1006,22 @@ def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
     except ValueError as exc:
         logger.warning("config: [network].proxy 非法已忽略(%s):%s", proxy_raw, exc)
         proxy = ""
-    return NetworkConfig(proxy=proxy)
+    mode_present = "mode" in network_raw
+    mode_raw = str(network_raw.get("mode", "") or "")
+    if not mode_present:
+        # Backward-compatible migration: legacy non-empty [network].proxy was
+        # explicitly configured by the user and therefore remains custom.
+        mode = "custom" if proxy else "direct"
+    else:
+        try:
+            mode = normalize_outbound_proxy_mode(mode_raw)
+        except ValueError as exc:
+            logger.warning("config: [network].mode 非法已回退 direct(%s):%s", mode_raw, exc)
+            mode = "direct"
+    if mode == "custom" and not proxy:
+        logger.warning("config: [network].mode=custom 但 proxy 为空,已回退 direct")
+        mode = "direct"
+    return NetworkConfig(mode=mode, proxy=proxy)
 
 
 def _build_config(raw: dict[str, Any]) -> Config:
@@ -2491,10 +2516,13 @@ def _render_config_toml(
             f"headed = {_toml_bool(config.bilibili.browser_headed)}",
             "",
             "[network]",
-            "# Outbound proxy for OVERSEAS clients only: LLM SDKs, YouTube,",
+            "# Overseas routing mode: direct (ignore env proxy), system (inherit",
+            "# HTTP(S)_PROXY / OS proxy), custom (use proxy below). Applies to",
+            "# LLM SDKs, YouTube,",
             "# the GitHub updater, Codex OAuth. B站/抖音/Ollama 等国内直连请求",
-            "# 始终直连,不受此项影响。留空 = 不设代理(沿用进程 env 现状)。",
+            "# 始终直连,不受此项影响。",
             "# 支持 http:// | https:// | socks5:// | socks5h://",
+            f"mode = {_toml_string(config.network.mode)}",
             f"proxy = {_toml_string(config.network.proxy)}",
             "",
             "[sources.browser]",

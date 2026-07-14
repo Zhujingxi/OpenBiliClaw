@@ -87,12 +87,35 @@ _LLM_QUOTA_MARKERS = (
 )
 
 _LLM_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded")
+# SSL / certificate verification failures. Kept distinct from the generic
+# connection markers because the actionable cause differs: a cert-verify
+# failure on an otherwise-reachable host almost always means a local proxy /
+# antivirus / firewall is doing HTTPS interception (or the endpoint uses a
+# self-signed cert), so the user-facing hint points at the proxy, not the
+# network. httpx raises ``ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED]`` and
+# the OpenAI SDK wraps it as ``APIConnectionError`` — neither subclasses
+# Python's ``ConnectionError``, so we sniff the message.
+_LLM_SSL_MARKERS = (
+    "ssl:",
+    "certificate verify failed",
+    "certificate_verify_failed",
+    "unable to get local issuer",
+    "self-signed certificate",
+    "self signed certificate",
+    "sslcertverificationerror",
+    "ssl handshake",
+)
 _LLM_CONNECTION_MARKERS = (
     "connection reset",
     "connection refused",
+    "connection error",
+    "connection aborted",
     "network is unreachable",
     "name resolution",
     "temporary failure in name resolution",
+    "failed to establish a new connection",
+    "max retries exceeded",
+    "getaddrinfo failed",
 )
 _LLM_SERVER_ERROR_MARKERS = (
     "http 500",
@@ -157,6 +180,7 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
             isinstance(current, ConnectionError)
             or network_errno
             or any(marker in message for marker in _LLM_CONNECTION_MARKERS)
+            or any(marker in message for marker in _LLM_SSL_MARKERS)
         ):
             connection = True
         if any(marker in message for marker in _LLM_SERVER_ERROR_MARKERS):
@@ -204,6 +228,7 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     current: BaseException | None = exc
     moderation = auth_failed = rate_limited = False
     timed_out = no_provider = empty_response = False
+    ssl_failed = connect_failed = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
@@ -217,6 +242,24 @@ def describe_llm_failure(exc: BaseException) -> str | None:
             rate_limited = True
         if isinstance(current, LLMTimeoutError | TimeoutError) or "timed out" in message:
             timed_out = True
+        if any(marker in message for marker in _LLM_SSL_MARKERS):
+            ssl_failed = True
+        network_errno = isinstance(current, OSError) and current.errno in {
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTDOWN,
+            errno.EHOSTUNREACH,
+            errno.ETIMEDOUT,
+        }
+        if (
+            isinstance(current, ConnectionError)
+            or network_errno
+            or any(marker in message for marker in _LLM_CONNECTION_MARKERS)
+        ):
+            connect_failed = True
         if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
             "no provider was available" in message
         ):
@@ -241,6 +284,17 @@ def describe_llm_failure(exc: BaseException) -> str | None:
         )
     if timed_out:
         return "AI 服务响应超时；请检查网络连通性或稍后重试。"
+    if ssl_failed:
+        return (
+            "无法与 AI 服务建立安全连接（SSL 证书验证失败）。"
+            "常见原因是本地代理 / 杀毒 / 防火墙对 HTTPS 做了中间人拦截，"
+            "或接口地址使用了自签证书。请关闭代理（或把该接口地址加入直连白名单）后重试。"
+        )
+    if connect_failed:
+        return (
+            "无法连接到 AI 服务（网络连接失败）。"
+            "请检查网络、接口地址是否正确，以及代理 / 防火墙设置后重试。"
+        )
     if no_provider:
         return (
             "没有可用的 AI 服务：主 Provider 与备用 Provider 都调用失败，"

@@ -1,5 +1,7 @@
 # Network Outbound-Proxy Config — Implementation Plan
 
+> 2026-07-14 follow-up：原计划的“空值零漂移”已被用户真实日志推翻。当前实现新增 direct/system/custom 模式并覆盖 yt-dlp、scrapetube、InnerTube / HTML fallback；legacy 非空 proxy 保持 custom，详见 `docs/modules/config.md` 与当前回归测试。
+
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-11-network-proxy-config-spec.md`](./2026-07-11-network-proxy-config-spec.md)
 > **Status:** r1 — awaiting adversarial review

@@ -74,6 +74,7 @@ result = await producer.produce_if_due(limit=20)
 
 行为说明：
 
+- v0.3.165+：steady-state 的 yt-dlp、scrapetube search/channel、InnerTube POST 和公开页面 HTML fallback 全部读取同一 `[network].mode`。`direct` 强制忽略环境代理，`system` 明确继承，`custom` 使用指定 URL；插件登录态初始化任务不受该后端出口配置影响。
 - runtime 构造时会注入共享 `DiscoveryCandidatePipeline`；producer 对每个 strategy 拉到的 raw items 调 `enqueue_candidates(..., source_context="youtube")`，再 `drain_pending()`。
 - 未注入 candidate pipeline 的旧调用方仍可用直接 discovery fallback。
 - 返回 payload 的 `discovered` 是本轮入队或 drain 处理过的候选量，不等同于已经可立即推荐的 `pool_available_count`。

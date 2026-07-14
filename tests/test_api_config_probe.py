@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
@@ -11,8 +12,6 @@ from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS, LLMProvider
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 
 def test_config_probe_models_accept_llm_request() -> None:
@@ -290,9 +289,7 @@ class _FakeProxyClient:
         return _FakeProxyResponse(int(self._behavior))
 
 
-def _patch_proxy_client(
-    monkeypatch: pytest.MonkeyPatch, behavior: object
-) -> dict[str, Any]:
+def _patch_proxy_client(monkeypatch: pytest.MonkeyPatch, behavior: object) -> dict[str, Any]:
     import httpx
 
     recorder: dict[str, Any] = {}
@@ -324,6 +321,30 @@ def test_probe_network_proxy_ok_on_204(
     # Probe must use the candidate proxy and never inherit process env.
     assert recorder["proxy"] == "socks5://127.0.0.1:1080"
     assert recorder["trust_env"] is False
+
+
+@pytest.mark.parametrize(
+    ("mode", "trust_env"),
+    [("direct", False), ("system", True)],
+)
+def test_probe_network_mode_uses_runtime_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mode: str,
+    trust_env: bool,
+) -> None:
+    recorder = _patch_proxy_client(monkeypatch, 204)
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+
+    response = client.post(
+        "/api/config/probe-service",
+        json={"kind": "network_proxy", "config": {"network": {"mode": mode, "proxy": ""}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert recorder["trust_env"] is trust_env
+    assert "proxy" not in recorder
 
 
 def test_probe_network_proxy_unreachable(

@@ -2740,9 +2740,7 @@ class TestNetworkProxyConfig:
             ("   ", ""),
         ],
     )
-    def test_normalize_outbound_proxy_accepts_and_normalizes(
-        self, raw: str, expected: str
-    ) -> None:
+    def test_normalize_outbound_proxy_accepts_and_normalizes(self, raw: str, expected: str) -> None:
         assert normalize_outbound_proxy(raw) == expected
 
     @pytest.mark.parametrize(
@@ -2762,6 +2760,7 @@ class TestNetworkProxyConfig:
 
     def test_network_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
         config = Config()
+        config.network.mode = "custom"
         config.network.proxy = "socks5://127.0.0.1:1080"
 
         target = tmp_path / "config.toml"
@@ -2770,7 +2769,9 @@ class TestNetworkProxyConfig:
         loaded = load_config(target)
 
         assert "[network]" in rendered
+        assert 'mode = "custom"' in rendered
         assert 'proxy = "socks5://127.0.0.1:1080"' in rendered
+        assert loaded.network.mode == "custom"
         assert loaded.network.proxy == "socks5://127.0.0.1:1080"
 
     def test_network_section_appears_in_rendered_toml(self) -> None:
@@ -2779,7 +2780,38 @@ class TestNetworkProxyConfig:
 
     def test_build_config_normalizes_network_proxy(self) -> None:
         config = _build_config({"network": {"proxy": "SOCKS5://127.0.0.1:1080"}})
+        assert config.network.mode == "custom"
         assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    @pytest.mark.parametrize("mode", ["direct", "system", "custom"])
+    def test_build_config_accepts_network_proxy_modes(self, mode: str) -> None:
+        proxy = "socks5://127.0.0.1:1080" if mode == "custom" else ""
+        config = _build_config({"network": {"mode": mode, "proxy": proxy}})
+        assert config.network.mode == mode
+
+    def test_build_config_defaults_missing_network_mode_to_direct(self) -> None:
+        config = _build_config({"network": {}})
+        assert config.network.mode == "direct"
+
+    def test_build_config_migrates_legacy_nonempty_proxy_to_custom(self) -> None:
+        config = _build_config({"network": {"proxy": "http://127.0.0.1:7897"}})
+        assert config.network.mode == "custom"
+
+    def test_build_config_clamps_custom_without_proxy_to_direct(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"mode": "custom", "proxy": ""}})
+        assert config.network.mode == "direct"
+        assert "custom" in caplog.text
+
+    def test_build_config_clamps_unknown_mode_to_direct(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"mode": "auto"}})
+        assert config.network.mode == "direct"
+        assert "mode" in caplog.text.lower()
 
     def test_build_config_drops_invalid_network_proxy_with_warning(
         self, caplog: pytest.LogCaptureFixture
@@ -2793,7 +2825,17 @@ class TestNetworkProxyConfig:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         config_path = tmp_path / "config.toml"
-        config_path.write_text("[general]\nlanguage = \"zh\"\n", encoding="utf-8")
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
         monkeypatch.setenv("OPENBILICLAW_NETWORK_PROXY", "socks5://127.0.0.1:1080")
         config = load_config(config_path)
+        assert config.network.mode == "custom"
         assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_env_override_can_explicitly_select_system_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "system")
+        config = load_config(config_path)
+        assert config.network.mode == "system"

@@ -1,13 +1,9 @@
-"""Process-level single source of truth for the overseas-outbound proxy.
+"""Process-level single source of truth for overseas network routing.
 
-``[network].proxy`` (see :class:`openbiliclaw.config.NetworkConfig`) governs
-whether overseas clients — the LLM SDKs, YouTube, the GitHub updater, and Codex
-OAuth — route through a proxy. Those construction points do not all hold a
-``Config`` reference, so instead of threading the value through every call site
-we mirror the resolved value here once. ``set_outbound_proxy`` is invoked at the
-three config-application points (``create_app``, CLI entry, ``update_config``
-hot reload); every consumer reads :func:`outbound_httpx_kwargs` /
-:func:`outbound_proxy_url`.
+``[network].mode`` selects ``direct`` (ignore env/system proxies), ``system``
+(inherit them), or ``custom`` (use ``[network].proxy`` explicitly). Those
+construction points do not all hold a ``Config`` reference, so the resolved
+policy is mirrored here once and consumed by every supported HTTP stack.
 
 CN-direct clients (bilibili / douyin / ollama / CN-CDN image cache) MUST NOT
 read this module — that isolation is pinned by
@@ -16,15 +12,35 @@ read this module — that isolation is pinned by
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, cast
 
+OutboundProxyMode = Literal["direct", "system", "custom"]
+_VALID_MODES = frozenset({"direct", "system", "custom"})
 _outbound_proxy: str | None = None
+_outbound_mode: OutboundProxyMode = "direct"
 
 
-def set_outbound_proxy(url: str) -> None:
-    """Set the process-wide overseas proxy. Empty / whitespace disables it."""
-    global _outbound_proxy
-    _outbound_proxy = url.strip() or None
+def set_outbound_proxy(url: str, *, mode: str | None = None) -> None:
+    """Set the process-wide overseas routing policy.
+
+    ``mode=None`` preserves the original helper's call contract: a non-empty
+    URL means ``custom`` and an empty URL means ``direct``. Config-aware call
+    sites always pass the explicit mode.
+    """
+    global _outbound_mode, _outbound_proxy
+    normalized_url = url.strip()
+    resolved_mode = (mode or ("custom" if normalized_url else "direct")).strip().lower()
+    if resolved_mode not in _VALID_MODES:
+        raise ValueError(f"unsupported outbound proxy mode: {resolved_mode}")
+    if resolved_mode == "custom" and not normalized_url:
+        raise ValueError("custom outbound proxy mode requires a proxy URL")
+    _outbound_mode = cast("OutboundProxyMode", resolved_mode)
+    _outbound_proxy = normalized_url if resolved_mode == "custom" else None
+
+
+def outbound_proxy_mode() -> OutboundProxyMode:
+    """Return the active routing mode."""
+    return _outbound_mode
 
 
 def outbound_proxy_url() -> str | None:
@@ -33,17 +49,51 @@ def outbound_proxy_url() -> str | None:
 
 
 def outbound_httpx_kwargs() -> dict[str, Any]:
-    """Return ``{"proxy": url}`` when set, else ``{}``.
+    """Return explicit kwargs for an ``httpx`` client construction."""
+    return httpx_kwargs_for(_outbound_mode, _outbound_proxy or "")
 
-    Spreading ``{}`` at a client construction point leaves it byte-equivalent
-    to the pre-feature call (invariant: empty-value zero drift).
+
+def httpx_kwargs_for(mode: str, proxy: str = "") -> dict[str, Any]:
+    """Resolve ``httpx`` kwargs for a routing policy without mutating globals."""
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in _VALID_MODES:
+        raise ValueError(f"unsupported outbound proxy mode: {normalized_mode}")
+    normalized_proxy = proxy.strip()
+    if normalized_mode == "system":
+        return {"trust_env": True}
+    if normalized_mode == "custom":
+        if not normalized_proxy:
+            raise ValueError("custom outbound proxy mode requires a proxy URL")
+        return {"proxy": normalized_proxy, "trust_env": False}
+    return {"trust_env": False}
+
+
+def outbound_trust_env() -> bool:
+    """Whether SDK-owned clients should inherit environment proxy settings."""
+    return _outbound_mode == "system"
+
+
+def outbound_requests_proxies() -> dict[str, str] | None:
+    """Return a ``requests``/scrapetube proxy mapping for the active mode.
+
+    Empty per-scheme values deliberately override ``requests`` environment
+    proxies. ``None`` is reserved for explicit ``system`` inheritance.
     """
-    if _outbound_proxy is None:
-        return {}
-    return {"proxy": _outbound_proxy}
+    if _outbound_mode == "system":
+        return None
+    value = _outbound_proxy or ""
+    return {"http": value, "https": value}
+
+
+def outbound_ytdlp_proxy() -> str | None:
+    """Return yt-dlp's proxy option (``""`` means force direct)."""
+    if _outbound_mode == "system":
+        return None
+    return _outbound_proxy or ""
 
 
 def reset_outbound_proxy_for_tests() -> None:
     """Reset global state. Test-only; not part of the runtime contract."""
-    global _outbound_proxy
+    global _outbound_mode, _outbound_proxy
+    _outbound_mode = "direct"
     _outbound_proxy = None

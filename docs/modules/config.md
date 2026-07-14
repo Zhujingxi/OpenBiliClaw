@@ -333,19 +333,20 @@ model    = "deepseek-v4-flash"
 > 如果 `bilibili.cookie` 留空，CLI 命令和本地 API 服务会自动回退到 `auth login` 保存的 `data/bilibili_cookie.json`。
 > 只有在你想显式覆盖本地登录态时，才需要把 cookie 直接写进 `config.toml`。
 
-### `[network]` (v0.3.164+)
+### `[network]` (v0.3.164+，v0.3.165 路由模式补强)
 
-海外出口代理。仅作用于**海外客户端**：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp）、GitHub 自动更新、Codex OAuth 令牌刷新。
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、GitHub 自动更新、Codex OAuth 令牌刷新。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `proxy` | string | `""` | 海外出口代理 URL。留空 = 不设代理（沿用进程 `HTTP(S)_PROXY` 环境变量现状，不影响 Docker 代理探测）。支持 `http://` / `https://` / `socks5://` / `socks5h://`，如 `"socks5://127.0.0.1:1080"` |
+| `mode` | string | `"direct"` | `direct` 显式忽略环境 / 系统代理；`system` 明确继承 `HTTP(S)_PROXY` / OS 代理；`custom` 只使用下方 `proxy` |
+| `proxy` | string | `""` | `custom` 模式的代理 URL。支持 `http://` / `https://` / `socks5://` / `socks5h://`，如 `"socks5://127.0.0.1:1080"` |
 
 > 与 `[bilibili].proxy` 的区别：`[network].proxy` 是「海外出口」，`[bilibili].proxy` 是「B站专用」，两者语义相反、互不影响。
 >
 > **国内直连隔离**：B站 / 抖音 / Ollama / 国内 CDN 图片缓存等所有 `trust_env=False` 客户端**永远不使用**此代理（继承代理曾触发 B站 风控，`df626f3f`）。该隔离由 `tests/test_network_proxy_isolation.py` 守卫测试钉死。
 >
-> 保存时白名单校验协议与主机；非法值经 `PUT /api/config` 返回 400，不落盘；`config.toml` 手改成非法值时加载会 WARNING 并按空值处理。桌面 Web「设置-通用」与扩展 popup「后端设置-通用」都提供输入框和「测试代理」连通性探测；CLI 用 `config-show` / 直接编辑 `config.toml`；移动 Web 无设置页。
+> 旧配置只有非空 `proxy` 而没有 `mode` 时自动迁移为 `custom`；空旧配置迁移为 `direct`。保存时校验模式、协议与主机，`custom` 缺地址或非法值经 `PUT /api/config` 返回 400、不落盘。桌面 Web 与扩展 popup 都提供模式选择、地址输入和按当前模式真实探测；CLI `config-show` 分别显示模式与地址；移动 Web 无设置页。
 
 ### `[sources.browser]`
 

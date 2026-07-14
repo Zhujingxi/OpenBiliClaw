@@ -195,6 +195,7 @@ async def _run_init_heartbeat(
         except Exception:
             logger.warning("init heartbeat touch failed for run %s", run_id, exc_info=True)
 
+
 # /api/health embedding readiness: cache the raw live-probe outcome so Docker
 # healthchecks and popup re-polls don't hit the embedding provider on every
 # call. Success caches for 30s; failure/timeout for 8s so a freshly-fixed or
@@ -1068,7 +1069,11 @@ def create_app(
     # getattr-guarded so a partial config object never hard-crashes app boot.
     from openbiliclaw.network import set_outbound_proxy
 
-    set_outbound_proxy(getattr(getattr(config, "network", None), "proxy", "") or "")
+    network_config = getattr(config, "network", None)
+    set_outbound_proxy(
+        getattr(network_config, "proxy", "") or "",
+        mode=getattr(network_config, "mode", "direct") or "direct",
+    )
 
     # Auto-generate the session signing secret on first enable so login state
     # survives restarts (see docs/plans/2026-05-30-web-password-auth-design.md).
@@ -9319,6 +9324,7 @@ def create_app(
                 browser_headed=cfg.bilibili.browser_headed,
             ),
             network=NetworkConfigOut(
+                mode=cfg.network.mode,
                 proxy=_mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
             ),
             sources=SourcesConfigOut(
@@ -9766,39 +9772,26 @@ def create_app(
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
-    async def _probe_network_proxy(proxy_raw: str) -> ConfigServiceProbeResponse:
-        """Probe the submitted overseas-outbound proxy without saving config.
+    async def _probe_network_proxy(mode: str, proxy: str) -> ConfigServiceProbeResponse:
+        """Probe the submitted overseas routing policy without saving config.
 
-        Fetches a tiny always-204 endpoint through the candidate proxy with an
-        explicit ``trust_env=False`` (so the probe reflects THIS proxy, not the
-        process env). Classifies failures so the UI can tell "proxy unreachable"
-        from "upstream rejected" from "timeout" (pitfall rule 7 / invariant 4).
+        Fetches a tiny always-204 endpoint using the same explicit direct,
+        system-inherited, or custom-proxy policy used by runtime clients.
         """
         import httpx
 
-        from openbiliclaw.config import normalize_outbound_proxy
+        from openbiliclaw.network import httpx_kwargs_for
 
-        # Reject a malformed value with 400 before spending a network round-trip.
-        proxy = normalize_outbound_proxy(proxy_raw)
-        if not proxy:
-            return ConfigServiceProbeResponse(
-                ok=False,
-                kind="network_proxy",
-                error="empty",
-                message="未填写代理地址。",
-            )
         started = time.perf_counter()
         try:
-            async with httpx.AsyncClient(
-                proxy=proxy, trust_env=False, timeout=5.0
-            ) as client:
+            async with httpx.AsyncClient(timeout=5.0, **httpx_kwargs_for(mode, proxy)) as client:
                 resp = await client.get("https://www.gstatic.com/generate_204")
             latency_ms = int((time.perf_counter() - started) * 1000)
             if resp.status_code in (200, 204):
                 return ConfigServiceProbeResponse(
                     ok=True,
                     kind="network_proxy",
-                    message="代理连通正常。",
+                    message="海外网络连通正常。",
                     latency_ms=latency_ms,
                 )
             return ConfigServiceProbeResponse(
@@ -9820,21 +9813,21 @@ def create_app(
                 ok=False,
                 kind="network_proxy",
                 error="proxy_unreachable",
-                message="无法连接到代理，请检查地址 / 端口是否正确且代理在运行。",
+                message="无法建立连接，请检查网络、系统代理或自定义代理是否可用。",
             )
         except (httpx.TimeoutException, TimeoutError):
             return ConfigServiceProbeResponse(
                 ok=False,
                 kind="network_proxy",
                 error="timeout",
-                message="经代理访问超时（5 秒），请检查代理线路。",
+                message="海外网络访问超时（5 秒），请检查当前路由模式。",
             )
         except Exception as exc:  # noqa: BLE001 — surface a safe, classified failure
             return ConfigServiceProbeResponse(
                 ok=False,
                 kind="network_proxy",
                 error="failed",
-                message=f"代理探测失败:{type(exc).__name__}。",
+                message=f"海外网络探测失败:{type(exc).__name__}。",
             )
 
     @app.post("/api/config/probe-service", response_model=ConfigServiceProbeResponse)
@@ -9842,19 +9835,32 @@ def create_app(
         """Probe submitted LLM / embedding / proxy settings without saving config.toml."""
         from copy import deepcopy
 
-        from openbiliclaw.config import load_config, normalize_outbound_proxy
+        from openbiliclaw.config import (
+            load_config,
+            normalize_outbound_proxy,
+            normalize_outbound_proxy_mode,
+        )
 
         update = payload.config if isinstance(payload.config, dict) else {}
         if payload.kind == "network_proxy":
             network_data = update.get("network")
             proxy_raw = ""
+            mode_raw = ""
             if isinstance(network_data, dict):
                 proxy_raw = str(network_data.get("proxy", ""))
+                mode_raw = str(network_data.get("mode", ""))
             try:
-                normalize_outbound_proxy(proxy_raw)
+                proxy = normalize_outbound_proxy(proxy_raw)
+                mode = (
+                    normalize_outbound_proxy_mode(mode_raw)
+                    if mode_raw.strip()
+                    else ("custom" if proxy else "direct")
+                )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            return await _probe_network_proxy(proxy_raw)
+            if mode == "custom" and not proxy:
+                raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
+            return await _probe_network_proxy(mode, proxy)
 
         cfg = deepcopy(load_config())
         llm_data = update.get("llm")
@@ -9896,6 +9902,7 @@ def create_app(
             _normalize_scheduler_int,
             load_config,
             normalize_outbound_proxy,
+            normalize_outbound_proxy_mode,
             save_config,
         )
 
@@ -10386,18 +10393,29 @@ def create_app(
                 if key in ldata:
                     setattr(cfg.logging, key, int(ldata[key]))
 
-        # Apply network (overseas outbound proxy) updates
+        # Apply the overseas routing policy. Proxy-only payloads from older UI
+        # versions retain their historical meaning: non-empty = custom, empty = direct.
         if "network" in update:
             ndata = update["network"]
-            if isinstance(ndata, dict) and "proxy" in ndata:
-                raw_proxy = str(ndata["proxy"])
-                # A masked GET echo (socks5://***@host) must never overwrite the
-                # stored credentialed URL; an empty value legitimately clears it.
-                if not _is_masked_proxy_echo(raw_proxy):
+            if isinstance(ndata, dict):
+                mode_supplied = "mode" in ndata
+                if mode_supplied:
                     try:
-                        cfg.network.proxy = normalize_outbound_proxy(raw_proxy)
+                        cfg.network.mode = normalize_outbound_proxy_mode(str(ndata["mode"]))
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc)) from exc
+                if "proxy" in ndata:
+                    raw_proxy = str(ndata["proxy"])
+                    # A masked GET echo must never overwrite stored credentials.
+                    if not _is_masked_proxy_echo(raw_proxy):
+                        try:
+                            cfg.network.proxy = normalize_outbound_proxy(raw_proxy)
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if not mode_supplied:
+                            cfg.network.mode = "custom" if cfg.network.proxy else "direct"
+                if cfg.network.mode == "custom" and not cfg.network.proxy:
+                    raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
@@ -10457,7 +10475,7 @@ def create_app(
             # new proxy. CN-direct clients never read this value.
             from openbiliclaw.network import set_outbound_proxy
 
-            set_outbound_proxy(cfg.network.proxy)
+            set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)
 
             if bool(getattr(ctx, "degraded", False)):
                 return ConfigUpdateResponse(

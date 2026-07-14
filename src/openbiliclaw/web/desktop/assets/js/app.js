@@ -5326,6 +5326,7 @@
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
+      setSelect("networkProxyMode", config.network?.mode || "direct");
       setInput("networkProxy", config.network?.proxy || "");
 
       const llm = config.llm || {};
@@ -6439,7 +6440,7 @@
           multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
         },
         storage: { db_path: getInput("storageDbPath") },
-        network: { proxy: getInput("networkProxy") },
+        network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") },
         logging: {
           level: getInput("logLevel") || "INFO",
           file_level: getInput("logFileLevel") || "DEBUG",
@@ -6798,7 +6799,7 @@
       if (button) button.disabled = true;
       renderProbePending(statusEl, "代理");
       try {
-        const result = await probeConfigService("network_proxy", { network: { proxy: getInput("networkProxy") } });
+        const result = await probeConfigService("network_proxy", { network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") } });
         renderProbeResult(statusEl, result);
       } catch (error) {
         renderProbeResult(statusEl, {

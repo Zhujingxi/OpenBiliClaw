@@ -338,6 +338,7 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
                 proxy=_outbound_proxy(),
+                trust_env=_outbound_trust_env(),
             ),
             effective_model,
         )
@@ -354,6 +355,7 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
                 proxy=_outbound_proxy(),
+                trust_env=_outbound_trust_env(),
             ),
             effective_model,
         )
@@ -371,6 +373,7 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url,
                 provider_name="openai_compatible",
                 proxy=_outbound_proxy(),
+                trust_env=_outbound_trust_env(),
             ),
             effective_model,
         )
@@ -395,6 +398,7 @@ def _build_dedicated_embedding_provider(
                 http_referer=chat_openrouter.http_referer,
                 x_title=chat_openrouter.x_title,
                 proxy=_outbound_proxy(),
+                trust_env=_outbound_trust_env(),
             ),
             effective_model,
         )
@@ -461,6 +465,11 @@ def _outbound_proxy() -> str:
     return network.outbound_proxy_url() or ""
 
 
+def _outbound_trust_env() -> bool:
+    """Whether overseas SDK clients should inherit env/system proxies."""
+    return network.outbound_trust_env()
+
+
 def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
     if "openai" in overrides:
         return overrides["openai"]
@@ -484,6 +493,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             timeout=float(config.llm.timeout),
             api_flavor=config.llm.openai.api_flavor,
             proxy=_outbound_proxy(),
+            trust_env=_outbound_trust_env(),
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -494,6 +504,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         timeout=float(config.llm.timeout),
         api_flavor=config.llm.openai.api_flavor,
         proxy=_outbound_proxy(),
+        trust_env=_outbound_trust_env(),
     )
 
 
@@ -508,6 +519,7 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         timeout=float(config.llm.timeout),
         base_url=config.llm.claude.base_url,
         proxy=_outbound_proxy(),
+        trust_env=_outbound_trust_env(),
     )
 
 
@@ -524,6 +536,7 @@ def _maybe_deepseek_provider(
         reasoning_effort=config.llm.deepseek.reasoning_effort,
         timeout=float(config.llm.timeout),
         proxy=_outbound_proxy(),
+        trust_env=_outbound_trust_env(),
     )
 
 
@@ -546,6 +559,7 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=config.llm.gemini.model or "gemini-2.5-flash",
         timeout=float(config.llm.timeout),
         proxy=_outbound_proxy(),
+        trust_env=_outbound_trust_env(),
     )
 
 
@@ -643,6 +657,7 @@ def _maybe_openrouter_provider(
         x_title=config.llm.openrouter.x_title,
         timeout=float(config.llm.timeout),
         proxy=_outbound_proxy(),
+        trust_env=_outbound_trust_env(),
     )
 
 
@@ -674,4 +689,5 @@ def _maybe_openai_compatible_provider(
         timeout=float(config.llm.timeout),
         api_flavor=cfg.api_flavor,
         proxy=_outbound_proxy(),
+        trust_env=_outbound_trust_env(),
     )

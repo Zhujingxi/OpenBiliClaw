@@ -36,10 +36,62 @@ def test_ytdlp_options_includes_proxy_when_set() -> None:
     assert _ytdlp_options(playlistend=7)["playlistend"] == 7
 
 
-def test_ytdlp_options_omits_proxy_when_unset() -> None:
+def test_ytdlp_options_forces_direct_when_mode_is_direct() -> None:
     from openbiliclaw.youtube.client import _ytdlp_options
 
+    assert _ytdlp_options()["proxy"] == ""
+
+
+def test_ytdlp_options_omits_proxy_only_in_system_mode() -> None:
+    from openbiliclaw.youtube.client import _ytdlp_options
+
+    network.set_outbound_proxy("", mode="system")
     assert "proxy" not in _ytdlp_options()
+
+
+def test_scrapetube_search_receives_direct_proxy_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    from openbiliclaw.youtube import client as yt_client
+
+    captured: dict[str, Any] = {}
+    fake = types.ModuleType("scrapetube")
+
+    def _search(*_args: object, **kwargs: Any) -> list[dict[str, str]]:
+        captured.update(kwargs)
+        return [{"videoId": "v1"}]
+
+    fake.get_search = _search  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scrapetube", fake)
+
+    assert yt_client._scrapetube_search("test", 1) == [{"videoId": "v1"}]
+    assert captured["proxies"] == {"http": "", "https": ""}
+
+
+def test_scrapetube_channel_receives_custom_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    import types
+
+    from openbiliclaw.youtube import client as yt_client
+
+    captured: dict[str, Any] = {}
+    fake = types.ModuleType("scrapetube")
+
+    def _channel(*_args: object, **kwargs: Any) -> list[dict[str, str]]:
+        captured.update(kwargs)
+        return [{"videoId": "v2"}]
+
+    fake.get_channel = _channel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "scrapetube", fake)
+    network.set_outbound_proxy(_PROXY, mode="custom")
+
+    assert yt_client._scrapetube_channel("UC123", 1) == [{"videoId": "v2"}]
+    assert captured["proxies"] == {"http": _PROXY, "https": _PROXY}
 
 
 # ── Codex OAuth token refresh ───────────────────────────────────────────────
@@ -99,6 +151,27 @@ async def test_codex_refresh_no_proxy_when_unset(monkeypatch: pytest.MonkeyPatch
         await codex_auth.refresh_codex_token(creds)
 
     assert "proxy" not in recorder
+    assert recorder["trust_env"] is False
+
+
+async def test_codex_refresh_inherits_environment_only_in_system_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import codex_auth
+
+    recorder: dict[str, Any] = {}
+    monkeypatch.setattr(
+        codex_auth.httpx,
+        "AsyncClient",
+        lambda **kw: _RecordingClient(recorder, **kw),
+    )
+    network.set_outbound_proxy("", mode="system")
+
+    creds = codex_auth.CodexCredentials("access", "refresh", 9999999999)
+    with pytest.raises(_StubError):
+        await codex_auth.refresh_codex_token(creds)
+
+    assert recorder["trust_env"] is True
 
 
 # ── GitHub updater tag check ────────────────────────────────────────────────

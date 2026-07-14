@@ -966,7 +966,8 @@ def _sync_outbound_proxy() -> None:
 
     # Config resolution must never block a command from starting.
     with contextlib.suppress(Exception):
-        set_outbound_proxy(load_config().network.proxy)
+        network = load_config().network
+        set_outbound_proxy(network.proxy, mode=network.mode)
 
 
 def _print_config_guidance(messages: list[str]) -> None:
@@ -6243,15 +6244,32 @@ async def run_guided_init(
 
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
-    await _run_with_progress(
-        soul_engine.analyze_events(
-            events,
-            event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
-            progress_callback=_stage2_progress,
-        ),
-        label="分析偏好（分片批处理）",
-        eta_seconds=180,
-    )
+    try:
+        await _run_with_progress(
+            soul_engine.analyze_events(
+                events,
+                event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+                progress_callback=_stage2_progress,
+            ),
+            label="分析偏好（分片批处理）",
+            eta_seconds=180,
+        )
+    except Exception as exc:
+        # Surface the real LLM cause (SSL / no provider / rate limit / timeout /
+        # moderation) so the init page shows *why* stage 2 stalled instead of a
+        # generic crash. Mirrors the stage-3 (build_initial_profile) handling —
+        # this stage is equally LLM-heavy and was the silent-retry sink behind
+        # "卡在分析偏好" reports (issue #113). CancelledError is NOT caught: it
+        # propagates so the wrapper records `cancelled`, never `completed`.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        llm_reason = describe_llm_failure(exc)
+        message = (
+            f"偏好分析失败：{llm_reason}"
+            if llm_reason
+            else "偏好分析阶段出错。可稍后手动重试 `openbiliclaw init`。"
+        )
+        raise GuidedInitError("analyze_failed", message) from exc
     await _stage_done(2)
 
     # ── Stage 3 + 4: build profile ‖ discovery backfill (parallel) ──
@@ -9994,7 +10012,13 @@ def config_show() -> None:
             ),
         ),
         ("开机自启动", _format_autostart_config_status(cfg)),
-        ("海外出口代理", cfg.network.proxy or "未设置（海外请求走进程 env / 直连）"),
+        (
+            "海外网络模式",
+            {"direct": "直连", "system": "跟随系统代理", "custom": "自定义代理"}.get(
+                cfg.network.mode, cfg.network.mode
+            ),
+        ),
+        ("海外自定义代理", cfg.network.proxy or "未设置"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

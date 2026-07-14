@@ -1372,9 +1372,7 @@ async def test_openai_provider_default_flavor_still_uses_chat_completions(
     assert response.content == "chat-path"
 
 
-# ── [network].proxy → overseas SDK client wiring ────────────────────────────
-# Providers must route through the proxy when one is set, and stay byte-equivalent
-# to the pre-feature construction when it is empty (zero-drift invariant).
+# ── [network] routing policy → overseas SDK client wiring ───────────────────
 
 
 def test_openai_provider_injects_proxy_into_http_client(
@@ -1398,6 +1396,7 @@ def test_openai_provider_injects_proxy_into_http_client(
 
     assert provider._proxy == "socks5://127.0.0.1:1080"
     assert httpx_kwargs.get("proxy") == "socks5://127.0.0.1:1080"
+    assert httpx_kwargs.get("trust_env") is False
     assert sdk_kwargs.get("http_client") is sentinel
 
 
@@ -1424,6 +1423,21 @@ def test_openai_provider_empty_proxy_is_zero_drift(
     assert "http_client" not in sdk_kwargs
 
 
+def test_openai_provider_direct_mode_disables_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import openai_provider as mod
+
+    httpx_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **_kw: None)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda **kw: httpx_kwargs.update(kw))
+
+    OpenAIProvider(api_key="k", trust_env=False)
+
+    assert httpx_kwargs["trust_env"] is False
+    assert "proxy" not in httpx_kwargs
+
+
 def test_claude_provider_injects_proxy_into_http_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1440,6 +1454,7 @@ def test_claude_provider_injects_proxy_into_http_client(
 
     assert provider._proxy == "http://127.0.0.1:7890"
     assert httpx_kwargs.get("proxy") == "http://127.0.0.1:7890"
+    assert httpx_kwargs.get("trust_env") is False
     assert sdk_kwargs.get("http_client") is sentinel
 
 
@@ -1469,8 +1484,9 @@ def test_gemini_provider_injects_proxy_into_http_options(
 
     http_options = sdk_kwargs.get("http_options")
     assert isinstance(http_options, dict)
-    assert http_options.get("client_args") == {"proxy": "socks5://127.0.0.1:1080"}
-    assert http_options.get("async_client_args") == {"proxy": "socks5://127.0.0.1:1080"}
+    expected = {"proxy": "socks5://127.0.0.1:1080", "trust_env": False}
+    assert http_options.get("client_args") == expected
+    assert http_options.get("async_client_args") == expected
     assert provider._proxy == "socks5://127.0.0.1:1080"
 
 

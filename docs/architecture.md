@@ -21,6 +21,8 @@ background ─ background admission (default 3) ──────┘
 4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源；`sources.platforms` 注册表统一七个平台族的别名、strategy 与 URL host 身份
 5. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
+海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> LLM SDK / YouTube / updater / Codex OAuth`。`direct` 默认注入 `trust_env=False`，`system` 才继承环境 / OS 代理，`custom` 注入指定 URL；B站 / 抖音 / Ollama / 国内 CDN 客户端不读取该边界。
+
 详见 [项目 Spec](spec.md) 中的架构图。模块级可视化图放在 `docs/diagrams/`：
 
 - [Soul 模块架构与流程图](diagrams/soul-architecture.html)

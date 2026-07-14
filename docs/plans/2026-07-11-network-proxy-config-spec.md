@@ -1,5 +1,7 @@
 # Network Outbound-Proxy Config Spec — WebUI 可配置的海外出口代理(issue #89)
 
+> 2026-07-14 follow-up：生产日志证明“空值零漂移”会继承已经失效的系统代理，且 YouTube 的 scrapetube / InnerTube / HTML fallback 未覆盖。现行实现已升级为 `[network].mode = direct | system | custom`：默认 direct 显式忽略环境代理，system 才保留旧继承语义，legacy 非空 proxy 自动迁移 custom；本文件下文保留原始 issue #89 决策背景，现行契约以 `docs/modules/config.md` 为准。
+
 **Created:** 2026-07-11
 **Scope:** 新增 `[network].proxy` 配置(http/https/socks5/socks5h),作用于**海外出口客户端**
 (OpenAI/Claude/Gemini/DeepSeek/OpenRouter/openai_compatible 的 chat+embedding SDK、Codex OAuth

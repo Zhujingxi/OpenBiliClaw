@@ -1724,6 +1724,7 @@ def test_overseas_factories_read_proxy_from_helper(_reset_outbound_proxy: object
         provider = factory(config, {})
         assert provider is not None
         assert getattr(provider, "_proxy", "") == "socks5://127.0.0.1:1080", factory.__name__
+        assert getattr(provider, "_trust_env", True) is False, factory.__name__
 
 
 def test_ollama_factory_never_reads_proxy(_reset_outbound_proxy: object) -> None:
@@ -1742,3 +1743,17 @@ def test_overseas_factories_no_proxy_when_helper_unset(_reset_outbound_proxy: ob
     provider = _maybe_openai_provider(_overseas_config(), {})
     assert provider is not None
     assert getattr(provider, "_proxy", "") == ""
+    assert getattr(provider, "_trust_env", True) is False
+
+
+def test_overseas_factories_inherit_environment_only_in_system_mode(
+    _reset_outbound_proxy: object,
+) -> None:
+    from openbiliclaw import network
+    from openbiliclaw.llm.registry import _maybe_openai_provider
+
+    network.set_outbound_proxy("", mode="system")
+    provider = _maybe_openai_provider(_overseas_config(), {})
+
+    assert provider is not None
+    assert getattr(provider, "_trust_env", False) is True

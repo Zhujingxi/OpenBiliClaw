@@ -68,6 +68,7 @@ class GeminiProvider(LLMProvider):
         base_url: str = "",
         embedding_output_dimensionality: int | None = None,
         proxy: str = "",
+        trust_env: bool = True,
     ) -> None:
         if not gemini_sdk_available():
             _raise_missing_sdk()
@@ -82,13 +83,15 @@ class GeminiProvider(LLMProvider):
         normalized_base_url = (base_url or "").strip()
         if normalized_base_url:
             http_options["base_url"] = normalized_base_url.rstrip("/") + "/"
-        # [network].proxy: overseas outbound only. google-genai passes
-        # client_args / async_client_args straight to its underlying (async)
-        # httpx client. Empty keeps http_options untouched (zero-drift).
+        # google-genai passes these args to its underlying httpx clients.
         self._proxy = proxy.strip()
-        if self._proxy:
-            http_options["client_args"] = {"proxy": self._proxy}
-            http_options["async_client_args"] = {"proxy": self._proxy}
+        self._trust_env = bool(trust_env and not self._proxy)
+        if self._proxy or not self._trust_env:
+            transport_args: dict[str, Any] = {"trust_env": self._trust_env}
+            if self._proxy:
+                transport_args["proxy"] = self._proxy
+            http_options["client_args"] = dict(transport_args)
+            http_options["async_client_args"] = dict(transport_args)
         self._client = genai.Client(
             api_key=api_key,
             http_options=http_options,

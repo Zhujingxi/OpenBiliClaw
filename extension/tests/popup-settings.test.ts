@@ -507,16 +507,18 @@ test("settings general tab exposes and wires the network proxy field (aligned wi
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   // Field + probe control + copy stating CN requests stay direct.
+  assert.match(popupHtml, /id="cfgNetworkProxyMode"/);
   assert.match(popupHtml, /id="cfgNetworkProxy"/);
   assert.match(popupHtml, /id="cfgProbeNetworkProxy"/);
   assert.match(popupHtml, /id="cfgProbeNetworkProxyStatus"/);
   assert.match(popupHtml, /海外/);
   assert.match(popupHtml, /国内请求始终直连/);
 
-  // Restore from config.network.proxy, collect into payload.network, probe wired.
+  // Restore mode + proxy, collect both into payload.network, probe wired.
+  assert.match(popupJs, /setVal\("cfgNetworkProxyMode", cfg\.network\?\.mode \|\| "direct"\)/);
   assert.match(popupJs, /setVal\("cfgNetworkProxy", cfg\.network\?\.proxy \|\| ""\)/);
-  assert.match(popupJs, /network:\s*\{\s*proxy: getVal\("cfgNetworkProxy"\),/);
-  assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ proxy \} \}\)/);
+  assert.match(popupJs, /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/);
+  assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ mode, proxy \} \}\)/);
   assert.match(popupJs, /function runNetworkProxyConfigProbe/);
 });
 

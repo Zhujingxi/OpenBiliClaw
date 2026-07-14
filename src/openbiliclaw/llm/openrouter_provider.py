@@ -27,6 +27,7 @@ class OpenRouterProvider(OpenAIProvider):
         x_title: str = "",
         timeout: float = 300.0,
         proxy: str = "",
+        trust_env: bool = True,
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -35,6 +36,7 @@ class OpenRouterProvider(OpenAIProvider):
             provider_name="openrouter",
             timeout=timeout,
             proxy=proxy,
+            trust_env=trust_env,
         )
         self._http_referer = http_referer
         self._x_title = x_title

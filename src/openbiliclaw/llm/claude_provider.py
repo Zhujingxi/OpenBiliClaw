@@ -37,16 +37,19 @@ class ClaudeProvider(LLMProvider):
         timeout: float = 300.0,
         base_url: str = "",
         proxy: str = "",
+        trust_env: bool = True,
     ) -> None:
         self._model = model
         self.base_url = base_url.strip()
-        # [network].proxy: overseas outbound only. Non-empty routes the SDK's
-        # httpx client through the proxy; empty keeps the default client
-        # (zero-drift).
+        # Overseas routing policy mirrors OpenAIProvider.
         self._proxy = proxy.strip()
+        self._trust_env = bool(trust_env and not self._proxy)
         client_kwargs: dict[str, Any] = {}
-        if self._proxy:
-            client_kwargs["http_client"] = httpx.AsyncClient(proxy=self._proxy, timeout=timeout)
+        if self._proxy or not self._trust_env:
+            httpx_kwargs: dict[str, Any] = {"timeout": timeout, "trust_env": self._trust_env}
+            if self._proxy:
+                httpx_kwargs["proxy"] = self._proxy
+            client_kwargs["http_client"] = httpx.AsyncClient(**httpx_kwargs)
         # Empty base_url → SDK default (https://api.anthropic.com). A custom
         # value points at any Anthropic-protocol gateway serving /v1/messages
         # (third-party relays, LiteLLM, etc.) — see issue #72.
