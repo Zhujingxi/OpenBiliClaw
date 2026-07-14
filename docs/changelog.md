@@ -2709,7 +2709,7 @@ v0.3.44 的 MMR 多样化把候选 embedding 拉到 serve() 热路径，靠 `_me
   1. 单文件超过 `unmanaged_truncate_mb` MB → 直接 `truncate` 为 0(留一行 marker)。专治 `backend-restart.log` 这类被脚本无限 append 但项目代码控制不到的文件
   2. mtime 超过 `unmanaged_max_age_days` 天 → 直接删除
   3. 整个 logs/ 目录(含 managed)总大小超过 `aggregate_budget_mb` MB → 按 mtime 从最旧的 *unmanaged* 文件开始删,直到回到预算内。**Managed 文件(`<filename>` + `<filename>.N`)永远不被这个 pass 删**(rotation 自己管)
-  
+
   每个 truncate / delete 都打 INFO 日志,daemon 启动时 tail 一眼能看到清了什么
 - **`openbiliclaw logs-prune` CLI**(默认 dry-run)—— 手动触发兜底清理,可临时用更激进 / 更保守的阈值。`--apply` 才真改文件。Rich 表格按 traffic-light 色显示 keep / truncate / delete (age) / delete (budget) 四种 plan
 - 4 个新单测覆盖 truncate / age delete / aggregate budget eviction / sweep_unmanaged=False 跳过
@@ -4464,7 +4464,7 @@ AI agent（Claude / Codex / Cursor / OpenClaw）跑一句话装机时会读这�
 
 ### 4.1 事件层 — `memory/m41-event-layer`
 
-- `Database` 新增 `query_events()` 和 `count_events_by_type()` 
+- `Database` 新增 `query_events()` 和 `count_events_by_type()`
 - `MemoryManager.propagate_event()` 从 stub 改为 SQLite 持久化
 - 事件类型枚举：`view`, `search`, `favorite`, `like`, `comment`, `click`, `feedback`
 - 新增 `MemoryManager.query_events()` 和 `get_event_stats()` 委托方法

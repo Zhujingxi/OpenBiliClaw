@@ -2281,6 +2281,60 @@
       document.getElementById("mobileMenu")?.classList.remove("is-open");
     }
 
+    function enhanceSelects() {
+      document.querySelectorAll(".settings-field select").forEach((nativeSelect) => {
+        if (nativeSelect.dataset.customEnhanced) return;
+        nativeSelect.dataset.customEnhanced = "1";
+        const wrapper = document.createElement("div");
+        wrapper.className = "custom-select";
+        nativeSelect.parentNode.insertBefore(wrapper, nativeSelect);
+        wrapper.appendChild(nativeSelect);
+        const trigger = document.createElement("button");
+        trigger.className = "custom-select-trigger";
+        trigger.type = "button";
+        trigger.textContent = nativeSelect.options[nativeSelect.selectedIndex]?.textContent || "";
+        wrapper.appendChild(trigger);
+        const dropdown = document.createElement("div");
+        dropdown.className = "custom-select-dropdown";
+        wrapper.appendChild(dropdown);
+        function buildOptions() {
+          dropdown.innerHTML = "";
+          Array.from(nativeSelect.options).forEach((opt) => {
+            const btn = document.createElement("button");
+            btn.className = "custom-select-option";
+            btn.type = "button";
+            btn.textContent = opt.textContent;
+            btn.dataset.value = opt.value;
+            if (opt.selected) btn.classList.add("is-selected");
+            btn.addEventListener("click", (e) => {
+              e.stopPropagation();
+              nativeSelect.value = opt.value;
+              nativeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+              wrapper.classList.remove("is-open");
+              trigger.textContent = opt.textContent;
+              dropdown.querySelectorAll(".custom-select-option").forEach((b) => b.classList.remove("is-selected"));
+              btn.classList.add("is-selected");
+            });
+            dropdown.appendChild(btn);
+          });
+        }
+        buildOptions();
+        nativeSelect.addEventListener("change", () => {
+          trigger.textContent = nativeSelect.options[nativeSelect.selectedIndex]?.textContent || "";
+          dropdown.querySelectorAll(".custom-select-option").forEach((b) => b.classList.toggle("is-selected", b.dataset.value === nativeSelect.value));
+        });
+        trigger.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const wasOpen = wrapper.classList.contains("is-open");
+          document.querySelectorAll(".custom-select.is-open").forEach((el) => el.classList.remove("is-open"));
+          if (!wasOpen) wrapper.classList.add("is-open");
+        });
+      });
+      document.addEventListener("click", () => {
+        document.querySelectorAll(".custom-select.is-open").forEach((el) => el.classList.remove("is-open"));
+      });
+    }
+
     function openMobilePanel(id, options = {}) {
       closeMobileMenu();
       if (id === "messagesDrawer") {
@@ -7452,6 +7506,7 @@
 
     restoreBackendEndpoint();
     restoreFrontendSettings();
+    enhanceSelects();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
     toastManager.init();

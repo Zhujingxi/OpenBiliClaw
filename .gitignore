@@ -79,5 +79,8 @@ output/
 # Logs
 *.log
 logs/
+
+# Local research / reasoning tooling
+.reasonix/
 extension/dist-firefox/
 backend.err
