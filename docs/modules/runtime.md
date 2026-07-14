@@ -48,7 +48,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 桌面 Web 动效与布局稳定 | ✅ | 根滚动启用 `scrollbar-gutter: stable`，避免内容变长时顶栏横向抖动；消息 / 活动 / 手机二维码抽屉关闭进入 `.is-closing` 退出动画，快速开关会取消未完成 close；六个主分区切换使用短 `page-enter` 淡入。新增动效统一受 `prefers-reduced-motion: reduce` 保护。 |
 | 桌面 Web 暗色模式 | ✅ | `/web` 支持 `auto` / `light` / `dark` 三态主题，顶栏按钮和设置页分段控件共享 `obc.theme` 本地键；`auto` 不写 `data-theme`，交给 `prefers-color-scheme`，手动浅色 / 深色写入 `:root[data-theme=...]`。暗色实现只覆盖 CSS token（暖暗背景、前景、边框、语义色、overlay、shadow），不为单个组件分叉硬编码颜色；`<meta name="color-scheme" content="light dark">` 让原生控件和滚动条跟随主题。 |
 | 推荐/惊喜发布时间出口 | ✅ | `RecommendationOut`、`PendingDelightOut`、推荐列表/换批、pending delight 单条/批量、手动 delight 与 proactive runtime 事件均增量返回 `published_at` / `published_label`（默认空字符串）。API 不把发现时间或推荐生成时间改写为发布时间；桌面 Web 与移动 Web 精确时间优先、相对标签兜底、缺失隐藏，精确时间按本地时区显示并提供完整时间 tooltip。 |
-| 桌面 Web 滚动自动加载 | ✅ | 首页推荐列表底部 sentinel 通过 `IntersectionObserver` 触发 `/api/recommendations/append`，默认开启并保留手动“继续追加”按钮。自动触发必须满足单飞、距上次自动加载至少 8 秒、首页可见、列表非空、加载按钮可见且 `state.runtimeStatus.pool_available_count > 0`；候选池见底时自动续页暂停但手动按钮仍可用。设置页开关写入 `openbiliclaw.webui.autoLoadOnScroll`，关闭后 observer 断开。 |
+| 桌面 Web 滚动自动加载 | ✅ | 首页推荐列表底部 sentinel 通过 `IntersectionObserver` 触发 `/api/recommendations/append`，默认开启并保留手动“继续追加”按钮。触发判定收敛在 `autoLoadBlockReason`（`shouldAutoLoadMore` 为其布尔包装）：需满足单飞、首页可见、列表有非骨架卡、加载按钮可见、`pool_available_count > 0`，最后才校验距上次自动加载至少 8 秒。候选池见底时自动续页暂停但手动按钮仍可用。**冷却自愈（issue #115）**：当唯一拦路项是冷却且哨兵仍在视口（用户停在底部、无更多滚动/相交事件）时，`armAutoLoadCooldownRecheck` 安排一次冷却到点后的一次性复查，避免停在底部时明明有货却卡到手动滚动/点按钮才继续；页面被新内容撑高、哨兵移出视口后自然停下。设置页开关写入 `openbiliclaw.webui.autoLoadOnScroll`，关闭或重建 observer 时断开并 `clearAutoLoadCooldownRecheck`。 |
 | 桌面 Web 画像编辑即时反馈 | ✅ | 画像编辑的 chip 删除和添加按钮在请求 `/api/profile/edit` 前立即禁用并标记 `.is-pending`，让慢后端下也有置灰反馈；`state.profileEditState` 仍只接受服务端响应，成功 / 失败都通过重新渲染清除 pending 或恢复 chip，避免为低频编辑面引入复杂乐观回滚。 |
 | 桌面 Web 可撤销即时反馈 | ✅ | 普通推荐卡和正向/避雷探针的非聊天动作先更新本地 UI，再由共享 pending-action coordinator 保留 10 秒提交屏障；点击撤销会取消定时器且不发 API 写请求，提交失败恢复原状态，`pagehide` 会以 keepalive 立即结清未提交动作。探针聊天和推荐评论需要服务端回复或文本语义，保持直接提交，不伪装成可撤销动作。 |
 | 桌面 Web 探针反馈文案 | ✅ | 消息抽屉与画像页的正向/避雷探针共用一个 domain-aware feedback helper；inline 结果与 toast 使用同一条文本，明确显示经折叠空白且最长 24 字符的探针主题（超长以省略号收束），并通过 `textContent` / `showToast(text)` 写入，避免把主题插入 HTML。 |
@@ -77,6 +77,10 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 
 - 桌面侧栏是 flex 行内项：按钮的 `aria-expanded` 与侧栏的 `aria-hidden` 同步，内容宽度随
   312px 侧栏平滑让渡。Delight 以主内容实际 inline-size 响应，而非只看 viewport。
+- Delight 的响应式布局用 `.delight` 网格的 `grid-template-areas`（thumb/body/actions/status）分级：
+  宽栏操作行贴正文列下方；`@container desktop-main` ≤940px 时缩略图与正文仍并排、操作行下沉为跨整卡
+  宽度独立一行（去看看/聊一聊靠右、反馈图标靠左，issue #115 修复标题与按钮被裁）；≤560px 整卡竖直堆叠，
+  ≤430px 保留窄屏内联输入框。操作行与状态行是 `.delight` 直接子节点，能脱离正文列约束跨整卡展开。
 - Delight 拖拽 10px 才进入拖动态，50px 才切换卡片；滚动自动加载仍使用 50px
   root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
 

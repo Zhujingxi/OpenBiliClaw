@@ -83,5 +83,6 @@ def test_intersect_handler_tracks_sentinel_visibility() -> None:
 
 def test_should_auto_load_ignores_skeleton_cards() -> None:
     app_js = _read(APP_JS)
-    body = _function_body(app_js, "shouldAutoLoadMore")
+    # 判定逻辑集中在 autoLoadBlockReason，shouldAutoLoadMore 只是布尔包装。
+    body = _function_body(app_js, "autoLoadBlockReason")
     assert ".video-card:not(.is-skeleton)" in body

@@ -532,6 +532,7 @@
     const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
     let autoLoadCheckRaf = 0;
+    let autoLoadCooldownTimer = 0;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
@@ -2517,6 +2518,7 @@
         autoLoadObserver.disconnect();
         autoLoadObserver = null;
       }
+      clearAutoLoadCooldownRecheck();
       sentinelInView = false;
       if (!state.autoLoadOnScroll) return;
       const sentinel = $("#loadMoreSentinel");
@@ -2539,22 +2541,54 @@
       scheduleAutoLoadCheck();
     }
 
-    function shouldAutoLoadMore(now) {
-      if (!state.autoLoadOnScroll) return false;
-      if (appendMoreInFlight) return false;
-      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return false;
-      if (!(state.runtimeStatus?.pool_available_count > 0)) return false;
+    // Returns the reason auto-load is currently blocked, or "" when a load
+    // should proceed. The cooldown is evaluated LAST so a "cooldown" reason
+    // guarantees every other precondition (pool available, button shown, cards
+    // present, on home) is already satisfied — the caller uses that to re-arm.
+    function autoLoadBlockReason(now) {
+      if (!state.autoLoadOnScroll) return "disabled";
+      if (appendMoreInFlight) return "in-flight";
+      if (!(state.runtimeStatus?.pool_available_count > 0)) return "pool-empty";
       const homePage = $("#homePage");
-      if (!homePage || homePage.hidden) return false;
+      if (!homePage || homePage.hidden) return "not-home";
       const loadMore = $("#loadMoreBtn");
-      if (!loadMore || loadMore.hidden) return false;
-      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return false;
-      return true;
+      if (!loadMore || loadMore.hidden) return "no-button";
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return "no-cards";
+      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return "cooldown";
+      return "";
+    }
+
+    function shouldAutoLoadMore(now) {
+      return autoLoadBlockReason(now) === "";
+    }
+
+    // When the only thing standing between us and a load is the cooldown, and the
+    // sentinel is still in view (user parked at the bottom with no further scroll
+    // or intersection events to re-invoke us), schedule a one-shot re-check for
+    // when the cooldown lapses so loading resumes without needing a manual nudge.
+    function armAutoLoadCooldownRecheck(now) {
+      if (autoLoadCooldownTimer) return;
+      const wait = AUTO_LOAD_COOLDOWN_MS - (now - lastAutoLoadAt);
+      if (wait <= 0) return;
+      autoLoadCooldownTimer = setTimeout(() => {
+        autoLoadCooldownTimer = 0;
+        scheduleAutoLoadCheck();
+      }, wait + 50);
+    }
+
+    function clearAutoLoadCooldownRecheck() {
+      if (!autoLoadCooldownTimer) return;
+      clearTimeout(autoLoadCooldownTimer);
+      autoLoadCooldownTimer = 0;
     }
 
     async function autoLoadMoreIfNeeded() {
       const now = Date.now();
-      if (!shouldAutoLoadMore(now)) return;
+      const blockReason = autoLoadBlockReason(now);
+      if (blockReason) {
+        if (blockReason === "cooldown" && sentinelInView) armAutoLoadCooldownRecheck(now);
+        return;
+      }
       lastAutoLoadAt = now;
       const button = $("#loadMoreBtn");
       const previousText = button?.textContent || "加载更多推荐";
