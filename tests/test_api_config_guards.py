@@ -164,6 +164,23 @@ def test_put_config_round_trips_explicit_fallback_providers(monkeypatch, tmp_pat
     assert body["llm"]["embedding"]["fallback_provider"] == "ollama"
 
 
+def test_put_config_round_trips_embedding_multimodal_enabled(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    # Default off, and GET echoes it so the settings page can render the toggle.
+    assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is False
+
+    response = client.put(
+        "/api/config",
+        json={"llm": {"embedding": {"multimodal_enabled": True}}},
+    )
+    assert response.status_code == 200
+
+    loaded = load_config_from_path(config_path)
+    assert loaded.llm.embedding.multimodal_enabled is True
+    assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is True
+
+
 def test_put_config_round_trips_embedding_output_dimensionality(monkeypatch, tmp_path) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
 
