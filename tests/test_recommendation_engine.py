@@ -3681,6 +3681,109 @@ async def test_precompute_delight_scores_reuses_evo_result_without_llm_call() ->
 
 
 @pytest.mark.asyncio
+async def test_precompute_delight_scores_adds_bounded_visual_cover_bonus() -> None:
+    """When image embedding is active, an on-style cover lifts delight_score by
+    a small bounded bonus — reusing the warmed URL-keyed vector (no re-fetch).
+    """
+
+    class _ImageEmb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+        similarity_threshold = 0.82
+
+        def __init__(self) -> None:
+            self.fetched = False
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        def lookup_cached_image(self, cache_key: str) -> list[float]:
+            # Simulate the discovery warmer having already stored the vector:
+            # same direction as the interest anchor → cosine 1.0 → full bonus.
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            self.fetched = True
+            return [1.0, 0.0, 0.0]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1COVER",
+            title="纪录片：一件瓷器的百年旅程",
+            source="search",
+            relevance_score=0.91,
+            cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
+        )
+        emb = _ImageEmb()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+        )
+        try:
+            scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+            assert scored == 1
+            candidate = db.get_delight_candidate(min_delight_score=0.70)
+            assert candidate is not None
+            # 0.91 + full 0.05 bonus, clamped to <= 1.0.
+            assert candidate["delight_score"] == pytest.approx(0.96)
+            # Warm cache hit means the cold fetch/embed path never ran.
+            assert emb.fetched is False
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_scores_no_visual_bonus_when_inactive() -> None:
+    """Cover present but image embedding inactive => delight_score unchanged."""
+
+    class _TextOnlyEmb:
+        multimodal_enabled = False
+        supports_image_embedding = False
+        similarity_threshold = 0.82
+
+        def image_embedding_active(self) -> bool:
+            return False
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            raise AssertionError("embed_image must not run when inactive")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1PLAIN",
+            title="纪录片：一件瓷器的百年旅程",
+            source="search",
+            relevance_score=0.91,
+            cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
+        )
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextOnlyEmb(),  # type: ignore[arg-type]
+        )
+        try:
+            scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+            assert scored == 1
+            candidate = db.get_delight_candidate(min_delight_score=0.70)
+            assert candidate is not None
+            assert candidate["delight_score"] == pytest.approx(0.91)
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
 async def test_precompute_delight_scores_uses_dynamic_pool_top_boundary() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

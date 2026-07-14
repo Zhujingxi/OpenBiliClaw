@@ -56,9 +56,13 @@ class GeminiProvider(LLMProvider):
     """Gemini provider using the official Gemini Developer API client."""
 
     supports_embedding = True
+    # Class can implement image embed; actual readiness depends on the
+    # embedding model name (gemini-embedding-2 family only).
+    supports_image_embedding = True
 
     _MAX_RETRIES = 3
     _BASE_RETRY_DELAY = 0.25
+    _MULTIMODAL_EMBEDDING_MARKERS = ("gemini-embedding-2",)
 
     def __init__(
         self,
@@ -226,27 +230,79 @@ class GeminiProvider(LLMProvider):
             return False
         return isinstance(exc, (LLMProviderError, LLMTimeoutError))
 
-    async def embed(self, text: str, *, model: str = "gemini-embedding-001") -> list[float]:
-        """Get text embedding using Gemini's embedding model.
+    @classmethod
+    def is_multimodal_embedding_model(cls, model: str) -> bool:
+        """Return whether *model* maps text and images into one space."""
+        name = (model or "").strip().lower()
+        if not name:
+            return False
+        return any(marker in name for marker in cls._MULTIMODAL_EMBEDDING_MARKERS)
 
-        Args:
-            text: Text to embed.
-            model: Embedding model name (default: text-embedding-004).
-
-        Returns:
-            Embedding vector (768-dim for text-embedding-004).
-        """
+    def _embed_content_config(self) -> Any:
         if types is None:
             _raise_missing_sdk()
         config_kwargs: dict[str, Any] = {"task_type": "SEMANTIC_SIMILARITY"}
         if self._embedding_output_dimensionality is not None:
             config_kwargs["output_dimensionality"] = self._embedding_output_dimensionality
+        return types.EmbedContentConfig(**config_kwargs)
+
+    @staticmethod
+    def _embedding_values(response: Any) -> list[float]:
+        embeddings = getattr(response, "embeddings", None) or []
+        if not embeddings:
+            return []
+        values = getattr(embeddings[0], "values", None)
+        if values is None:
+            return []
+        return list(values)
+
+    async def embed(self, text: str, *, model: str = "gemini-embedding-001") -> list[float]:
+        """Get text embedding using Gemini's embedding model.
+
+        Args:
+            text: Text to embed.
+            model: Embedding model name (default: gemini-embedding-001).
+
+        Returns:
+            Embedding vector (dimension depends on model / config).
+        """
+        if types is None:
+            _raise_missing_sdk()
         response = await self._client.aio.models.embed_content(
             model=model,
             contents=text,
-            config=types.EmbedContentConfig(**config_kwargs),
+            config=self._embed_content_config(),
         )
-        return list(response.embeddings[0].values)
+        return self._embedding_values(response)
+
+    async def embed_image(
+        self,
+        image_bytes: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+        model: str = "gemini-embedding-2",
+    ) -> list[float]:
+        """Get image-only embedding (Gemini Embedding 2 multimodal space).
+
+        Requires a multimodal embedding model. Returns ``[]`` when the
+        model is text-only so callers can degrade without raising.
+        """
+        if types is None:
+            _raise_missing_sdk()
+        if not self.is_multimodal_embedding_model(model):
+            return []
+        if not image_bytes:
+            return []
+        part = types.Part.from_bytes(
+            data=image_bytes,
+            mime_type=(mime_type or "image/jpeg").strip() or "image/jpeg",
+        )
+        response = await self._client.aio.models.embed_content(
+            model=model,
+            contents=part,
+            config=self._embed_content_config(),
+        )
+        return self._embedding_values(response)
 
     def _render_messages(self, messages: list[dict[str, str]]) -> str:
         chunks: list[str] = []

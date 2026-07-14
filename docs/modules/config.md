@@ -203,14 +203,30 @@ Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、rec
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `provider` | string | `""` | 留空 = 不启用 embedding；不会跟随 `[llm].default_provider`。可填 `"openai"` / `"gemini"` / `"ollama"` / `"openai_compatible"` / `"openrouter"`。Claude / DeepSeek 没有 embedding 接口；OpenRouter 走 per-route 路由，必须显式配 `model`（如 `google/gemini-embedding-2-preview`） |
-| `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3`。`openrouter` / `openai_compatible` 无安全默认，需要显式指定 |
+| `provider` | string | `""` | 留空 = 不启用 embedding；不会跟随 `[llm].default_provider`。可填 `"openai"` / `"gemini"` / `"ollama"` / `"openai_compatible"` / `"openrouter"` / **`"dashscope"`**（阿里百炼多模态向量）。Claude / DeepSeek 没有 embedding 接口；OpenRouter 走 per-route 路由，必须显式配 `model`（如 `google/gemini-embedding-2-preview`） |
+| `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3` / **`dashscope → qwen3-vl-embedding`**。`openrouter` / `openai_compatible` 无安全默认，需要显式指定 |
 | `api_key` | string | `""` | v0.3.32+ embedding 专属 API Key。默认不会借用 `[llm.<provider>].api_key`；只有 `fallback_enabled=true` 时才允许旧配置借用 chat-side 凭据并打一条 WARNING。Ollama 不需要 |
 | `base_url` | string | `""` | v0.3.32+ embedding 专属 base URL。留空使用 provider 默认值（OpenAI → `api.openai.com/v1`、Ollama → `localhost:11434/v1`、Gemini → 官方 API）；Gemini 可填代理地址 |
 | `output_dimensionality` | int | `1024` | embedding 目标向量维度。默认 1024，与本地 Ollama `bge-m3` 对齐；Gemini 会传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时会传 `dimensions`。Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传参数，也不会把 cache 标成伪维度。设为 `0` 表示使用 provider 原生默认维度 |
 | `similarity_threshold` | float | `0.82` | 余弦相似度阈值，超过即视为"同主题" |
 | `fallback_enabled` | bool | `false` | 旧兼容开关；插件设置页选择 `fallback_provider` 时会同步写成 `true`，用于允许借用对应 chat provider 凭据 |
 | `fallback_provider` | string | `""` | 第二个 embedding 备选 Provider。留空 = 不 fallback；可填 `openai` / `gemini` / `ollama` / `openai_compatible`，不会再自动走 `ollama → gemini → openai` 链 |
+| `multimodal_enabled` | bool | `false` | 是否启用**封面图单独** embedding（image-only 向量，与文本同一模型空间）。默认关闭。开启后仍需当前 `model` 支持图像（如 `gemini-embedding-2`，或 `dashscope` + `qwen3-vl-embedding`）；本地 `ollama` + `bge-m3` 等纯文本模型会自动跳过，不报错。与 `[discovery].multimodal_evaluation_enabled`（vision LLM 评估）相互独立 |
+
+#### DashScope / Qwen 多模态 embedding 示例
+
+```toml
+[llm.embedding]
+provider = "dashscope"
+model = "qwen3-vl-embedding"
+api_key = "sk-..."          # 或环境变量 DASHSCOPE_API_KEY
+base_url = ""               # 默认 https://dashscope.aliyuncs.com；国际站可填 https://dashscope-intl.aliyuncs.com
+output_dimensionality = 1024  # qwen3-vl-embedding 支持 2560/2048/1536/1024/768/512/256
+similarity_threshold = 0.82
+multimodal_enabled = true   # 封面 image-only 向量；与文本同一空间
+```
+
+说明：DashScope 多模态向量走**原生** `.../multimodal-embedding/multimodal-embedding` 接口，**不是** `compatible-mode/v1/embeddings`。聊天若要用通义，继续用 `[llm.openai_compatible]` + `compatible-mode/v1`；embedding 与 chat 凭据可共用同一把 `sk-` Key，但配置段彼此独立。
 
 #### 配置页服务探测 API（v0.3.114+）
 

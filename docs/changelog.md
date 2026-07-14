@@ -10,6 +10,10 @@
 
 - **海外网络路由不再被失效系统代理拖死**：`[network]` 新增 `direct / system / custom` 三模式，默认 `direct` 显式忽略环境 / OS 代理，旧的非空 `proxy` 自动迁移为 `custom`；OpenAI / Claude / Gemini 系 SDK、GitHub 更新、Codex OAuth 与 YouTube 的 yt-dlp / scrapetube / InnerTube / HTML fallback 统一执行同一策略。桌面 Web、扩展设置页和连通性探测同步支持模式选择，Docker 检出或继承代理变量时自动选择 `system`（显式用户选择优先）。
 - **初始化卡在「分析偏好」时报出真实原因（issue #113）**：`describe_llm_failure` / `classify_llm_failure_kind` 新增 SSL 证书校验失败与通用连接失败识别（httpx `ConnectError:[SSL...]`、OpenAI SDK `APIConnectionError:"Connection error."` 均不是 Python `ConnectionError` 子类，此前被漏判成泛化错误）；SSL 失败会给出「本地代理/杀软对 HTTPS 中间人拦截或自签证书，请关闭代理或加直连白名单」的可操作提示，优先级高于「所有 provider 失败」。guided-init Stage 2（`analyze_events`）与 Stage 3 一致包装 LLM 异常为 `GuidedInitError("analyze_failed")`，把原因透传到初始化页，不再静默重试。
+- **新增多模态封面 embedding 链路 + DashScope（阿里百炼）provider（重做 #100）**：
+  - `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API（非 OpenAI `/v1/embeddings`），默认 `qwen3-vl-embedding`，仅 embedding（`complete` 拒绝），`embed()` 文本向量与既有 openai/gemini/ollama 文本消费方无缝接入；出站统一走 `network.outbound_httpx_kwargs()`（默认 direct=`trust_env=False`，遵守铁律 1，避免国内端点被海外代理误接管，附 direct/custom 两模式回归测试）。
+  - 可选 `[llm.embedding].multimodal_enabled` + 多模态模型（Gemini `gemini-embedding-2` 族 / qwen3-vl）启用**封面视觉链路**:`EmbeddingService.embed_image()` 打封面 image-only 向量（与文本同空间、空向量不落缓存）；discovery 入池按 `image_embedding_cache_key_for_url` 预热；recommendation `precompute_delight_scores()` 对已达阈值候选按「封面↔兴趣锚点」跨模态余弦给 `delight_score` 一个**有界、只加不减**的加成（`_VISUAL_COVER_BONUS_MAX=0.05`）。默认关闭、纯文本用户打分与旧版逐字节一致、不改变谁成为惊喜候选。
+  - ⚠️ 跨模态余弦 floor/ceil 为**保守未标定**初值（铁律 3）：换真实多模态模型后需按日志观测 `max_sim` 分布重标权重；当前小幅、单向、opt-in 设计保证误标也不伤默认推荐质量。
 
 ## v0.3.165 / extension v0.3.165 / desktop v0.3.165：Firefox 签名安装修复（2026-07-14）
 

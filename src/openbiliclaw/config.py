@@ -318,6 +318,11 @@ class EmbeddingConfig:
     similarity_threshold: float = 0.82
     fallback_enabled: bool = False
     fallback_provider: str = ""
+    # Optional cover image embedding (image-only vectors in the same space
+    # as text). Requires a multimodal embedding model such as
+    # gemini-embedding-2 or dashscope qwen3-vl-embedding. Default off so
+    # local bge-m3 / text-only paths pay zero extra cost.
+    multimodal_enabled: bool = False
 
 
 @dataclass
@@ -1079,6 +1084,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     "similarity_threshold",
                     "fallback_enabled",
                     "fallback_provider",
+                    "multimodal_enabled",
                 )
             }
         ),
@@ -2498,6 +2504,7 @@ def _render_config_toml(
             f"similarity_threshold = {config.llm.embedding.similarity_threshold}",
             f"fallback_enabled = {_toml_bool(config.llm.embedding.fallback_enabled)}",
             f"fallback_provider = {_toml_string(config.llm.embedding.fallback_provider)}",
+            f"multimodal_enabled = {_toml_bool(config.llm.embedding.multimodal_enabled)}",
             "",
             "# Per-module LLM overrides (empty = use global default)",
             "[llm.soul]",

@@ -11,6 +11,7 @@ from openbiliclaw import network
 
 from .base import LLMProvider, LLMProviderError, LLMRegistry
 from .claude_provider import ClaudeProvider
+from .dashscope_provider import DashScopeEmbeddingProvider
 from .gemini_provider import GeminiProvider, gemini_sdk_available
 from .ollama_provider import OllamaProvider
 from .openai_provider import DeepSeekProvider, OpenAIProvider
@@ -136,6 +137,10 @@ _EMBEDDING_CAPABLE_PROVIDERS: tuple[str, ...] = (
     # users must opt in by setting ``[llm.embedding].provider =
     # "openrouter"`` with an explicit ``model``.
     "openrouter",
+    # Alibaba DashScope multimodal embedding (Qwen3-VL / Tongyi vision).
+    # Native API — not OpenAI /v1/embeddings. Opt-in via
+    # ``[llm.embedding].provider = "dashscope"``.
+    "dashscope",
 )
 _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
     "gemini": "gemini-embedding-001",
@@ -144,6 +149,7 @@ _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
     # No safe default for openai_compatible — depends entirely on the
     # upstream service. Users must specify an explicit model.
     "openai_compatible": "text-embedding-3-small",
+    "dashscope": "qwen3-vl-embedding",
 }
 # Module-level set so the back-compat WARNING fires once per provider per
 # process (not once per build_embedding_service call — runtime_context
@@ -243,6 +249,7 @@ def build_embedding_service(
             cache_model=cache_model,
             similarity_threshold=emb_cfg.similarity_threshold,
             persistent_cache=l2_cache,
+            multimodal_enabled=bool(getattr(emb_cfg, "multimodal_enabled", False)),
         )
     except Exception:
         return None
@@ -403,7 +410,33 @@ def _build_dedicated_embedding_provider(
             effective_model,
         )
 
+    if candidate == "dashscope":
+        if not api_key:
+            api_key = _dashscope_env_api_key()
+        if not api_key:
+            return None
+        return (
+            DashScopeEmbeddingProvider(
+                api_key=api_key,
+                model=effective_model,
+                base_url=base_url,
+                embedding_output_dimensionality=output_dimensionality,
+            ),
+            effective_model,
+        )
+
     return None
+
+
+def _dashscope_env_api_key() -> str:
+    """Optional DASHSCOPE_API_KEY / ALIBABA_CLOUD env fallback."""
+    import os
+
+    for name in ("DASHSCOPE_API_KEY", "DASHSCOPE_API_KEY_CN"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _embedding_output_dimensionality(emb_cfg: Any) -> int:
@@ -433,6 +466,13 @@ def _embedding_provider_honors_output_dimensionality(
         return True
     if provider_name == "openai":
         return model.startswith("text-embedding-3-")
+    if provider_name == "dashscope":
+        # qwen3-vl-embedding accepts dimension=; older tongyi fixed-dim
+        # models ignore it — only claim honor when we actually pass it.
+        name = (model or "").lower()
+        return "qwen3-vl-embedding" in name or (
+            "tongyi-embedding-vision" in name and "2026-03-06" in name
+        )
     return False
 
 

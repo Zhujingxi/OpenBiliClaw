@@ -220,6 +220,16 @@ similarity_threshold = 0.82
 # 插件设置页会在你选择备选 provider 时同步打开 fallback_enabled，以允许借用对应 chat-side 凭据。
 fallback_enabled = false
 fallback_provider = ""
+# Optional cover image embedding (image-only vectors, same space as text).
+# Requires a multimodal embedding model, e.g.:
+#   provider = "gemini"    model = "gemini-embedding-2"
+#   provider = "dashscope" model = "qwen3-vl-embedding"  # 阿里百炼原生多模态向量
+#     api_key = "sk-..."   # or env DASHSCOPE_API_KEY
+#     base_url = ""        # default https://dashscope.aliyuncs.com
+#     # output_dimensionality = 1024  # qwen3-vl: 2560/2048/1536/1024/768/512/256
+# Default off — local ollama/bge-m3 and text-only remote models skip images.
+# Independent of [discovery].multimodal_evaluation_enabled (vision LLM eval).
+multimodal_enabled = false
 
 # Per-module LLM overrides — set provider/model to use a different LLM
 # for specific modules. Leave empty to inherit from [llm] defaults.

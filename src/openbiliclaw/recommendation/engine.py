@@ -39,6 +39,25 @@ logger = logging.getLogger(__name__)
 _DEFAULT_EXPRESSION_BATCH_SIZE = 30
 _DEFAULT_EXPRESSION_BATCH_CONCURRENCY = 2
 
+# Cover visual alignment → delight bonus (opt-in, only when
+# [llm.embedding].multimodal_enabled + a multimodal embedding model are active).
+#
+# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Cross-modal image↔text
+# cosine in shared-space embedders (qwen3-vl-embedding / gemini-embedding-2)
+# runs much lower and more model-specific than same-modal text↔text cosine, so
+# the floor/ceil below are conservative guesses, NOT tuned against a deployed
+# model. Deliberately kept small + additive + one-directional so a mis-guess
+# can only slightly re-rank already-qualifying delight candidates, never demote
+# them, and never touches text-only users (bonus is exactly 0 when image embed
+# is inactive). Reopen calibration after choosing a real multimodal model:
+# raise logging to INFO and read the emitted max_sim distribution, then move the
+# floor/ceil so the bonus spreads across the observed range. See CLAUDE.md
+# pitfall rule 3 (document threshold calibration) and the quality-first rule.
+_VISUAL_COVER_BONUS_MAX = 0.05  # hard cap on the additive nudge to delight_score
+_VISUAL_COVER_SIM_FLOOR = 0.15  # cross-modal cosine at/below → zero bonus
+_VISUAL_COVER_SIM_CEIL = 0.45  # cross-modal cosine at/above → full bonus
+_VISUAL_COVER_MAX_ANCHORS = 8  # profile interest anchors compared per run
+
 
 @dataclass
 class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
@@ -1438,6 +1457,13 @@ class RecommendationEngine:
 
         candidates = self._rows_to_discovered(rows)
 
+        # Cover-visual alignment is opt-in (multimodal embedding). Embed the
+        # profile interest anchors ONCE per run — they're identical across all
+        # candidates — so the per-candidate cost is just a cached image lookup
+        # plus cosines. Empty list => bonus stays 0 for every candidate (the
+        # text-only default path is byte-identical to before).
+        visual_anchor_vecs = await self._visual_anchor_vectors(profile)
+
         scored_count = 0
         for candidate in candidates:
             persisted_score = max(0.01, min(1.0, float(candidate.relevance_score or 0.0)))
@@ -1451,23 +1477,130 @@ class RecommendationEngine:
                 scored_count += 1
                 continue
 
+            # Only nudge candidates that ALREADY qualify: visual never changes
+            # who becomes a delight candidate, only their ranking score among
+            # qualifiers, and it can only add (never demote).
+            visual_bonus = await self._visual_cover_bonus(candidate, visual_anchor_vecs)
+            final_score = min(1.0, persisted_score + visual_bonus)
+
             reason = self._evo_delight_reason(candidate)
             hook = self._evo_delight_hook(candidate)
             self._database.update_delight_score(
                 candidate.bvid,
-                delight_score=persisted_score,
+                delight_score=final_score,
                 delight_reason=reason,
                 delight_hook=hook,
             )
             scored_count += 1
             logger.info(
-                "Delight candidate found from Evo result: %s (score=%.3f, hook=%s)",
+                "Delight candidate found from Evo result: %s (score=%.3f, "
+                "visual_bonus=%.3f, hook=%s)",
                 candidate.bvid,
-                persisted_score,
+                final_score,
+                visual_bonus,
                 hook,
             )
 
         return scored_count
+
+    async def _visual_anchor_vectors(self, profile: SoulProfile) -> list[list[float]]:
+        """Embed the profile's top interest names once for cover alignment.
+
+        Returns ``[]`` (disabling the visual bonus) when image embedding is
+        inactive, there's no embedding service, or the profile has no usable
+        interest anchors — so callers can stay on the zero-cost text-only path.
+        """
+        embedding = self._embedding_service
+        if embedding is None:
+            return []
+        active = getattr(embedding, "image_embedding_active", None)
+        if not (callable(active) and active()):
+            return []
+
+        anchors: list[str] = []
+        seen: set[str] = set()
+        for interest in _interests_by_weight(profile)[:_VISUAL_COVER_MAX_ANCHORS]:
+            name = str(getattr(interest, "name", "") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                anchors.append(name)
+        if not anchors:
+            return []
+
+        vectors: list[list[float]] = []
+        for anchor in anchors:
+            try:
+                vec = await embedding.embed(anchor)
+            except Exception:
+                logger.debug("visual anchor embed failed for %r", anchor, exc_info=True)
+                continue
+            if vec:
+                vectors.append(vec)
+        return vectors
+
+    async def _visual_cover_bonus(
+        self,
+        candidate: DiscoveredContent,
+        anchor_vecs: list[list[float]],
+    ) -> float:
+        """Bounded additive delight bonus from cover↔interest visual alignment.
+
+        Reuses the discovery-warmed image vector (URL-keyed) so the hot path
+        is a cache lookup; only a cold miss pays a fetch + embed. Returns 0.0
+        whenever anything is missing/inactive — never raises, never negative.
+        See the ``_VISUAL_COVER_*`` calibration note for why this stays small.
+        """
+        if not anchor_vecs:
+            return 0.0
+        embedding = self._embedding_service
+        if embedding is None:
+            return 0.0
+        embed_image = getattr(embedding, "embed_image", None)
+        if not callable(embed_image):
+            return 0.0
+        cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+        if not cover_url:
+            return 0.0
+
+        from openbiliclaw.llm.embedding import (
+            cosine_similarity,
+            image_embedding_cache_key_for_url,
+        )
+
+        cache_key = image_embedding_cache_key_for_url(cover_url)
+        cover_vec: list[float] = []
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if callable(lookup):
+            cover_vec = lookup(cache_key) or []
+        if not cover_vec:
+            # Cold miss (warmer hasn't run / cache evicted): fetch + embed once.
+            try:
+                from openbiliclaw.discovery.multimodal import (
+                    prepare_cover_bytes_for_embedding,
+                )
+
+                prepared = await prepare_cover_bytes_for_embedding(
+                    cover_url, max_px=384, quality=72, timeout_seconds=6
+                )
+                if prepared is None:
+                    return 0.0
+                image_bytes, mime_type = prepared
+                cover_vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=cache_key)
+            except Exception:
+                logger.debug("visual cover embed failed for %s", candidate.bvid, exc_info=True)
+                return 0.0
+        if not cover_vec:
+            return 0.0
+
+        max_sim = 0.0
+        for anchor_vec in anchor_vecs:
+            max_sim = max(max_sim, cosine_similarity(cover_vec, anchor_vec))
+
+        span = _VISUAL_COVER_SIM_CEIL - _VISUAL_COVER_SIM_FLOOR
+        if span <= 0:
+            return 0.0
+        norm = max(0.0, min(1.0, (max_sim - _VISUAL_COVER_SIM_FLOOR) / span))
+        return _VISUAL_COVER_BONUS_MAX * norm
 
     @staticmethod
     def _evo_delight_reason(item: DiscoveredContent) -> str:
