@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -2929,6 +2930,33 @@ async def test_refresh_if_needed_skips_when_pool_at_cap() -> None:
 
     assert result == {"refreshed": False, "strategies": [], "reason": "pool_at_cap"}
     assert discovery.calls == []
+
+
+async def test_refresh_if_needed_runs_pool_maintenance_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([], pool_count=30),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        pool_target_count=30,
+    )
+    event_loop_thread_id = threading.get_ident()
+    maintenance_thread_ids: list[int] = []
+
+    def maintenance() -> bool:
+        maintenance_thread_ids.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr(controller, "_enforce_pool_cap", maintenance)
+
+    result = await controller.refresh_if_needed()
+
+    assert result == {"refreshed": False, "strategies": [], "reason": "pool_at_cap"}
+    assert maintenance_thread_ids
+    assert maintenance_thread_ids[0] != event_loop_thread_id
 
 
 async def test_force_refresh_skips_when_pool_at_cap() -> None:

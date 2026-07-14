@@ -57,6 +57,15 @@ class MobileWebStub:
         self.delight_response_status = 200
         self.delight_posts: list[dict[str, Any]] = []
         self.delight_post_received = threading.Event()
+        self.recommendations: list[dict[str, Any]] = []
+        self.reshuffle_posts = 0
+        self.runtime_status: dict[str, Any] = {
+            "initialized": True,
+            "pool_available_count": 0,
+            "pool_size": 0,
+            "pool_refresh_state": "idle",
+            "unread_count": 2,
+        }
         self.lock = threading.Lock()
 
     def release(self, probe_type: str, *, status: int) -> None:
@@ -110,18 +119,13 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
             if path == "/api/health":
                 return _json_response(self, {"ok": True})
             if path == "/api/recommendations":
-                return _json_response(self, {"items": []})
+                with state.lock:
+                    recommendations = list(state.recommendations)
+                return _json_response(self, {"items": recommendations})
             if path == "/api/runtime-status":
-                return _json_response(
-                    self,
-                    {
-                        "initialized": True,
-                        "pool_available_count": 0,
-                        "pool_size": 0,
-                        "pool_refresh_state": "idle",
-                        "unread_count": 2,
-                    },
-                )
+                with state.lock:
+                    runtime_status = dict(state.runtime_status)
+                return _json_response(self, runtime_status)
             if path == "/api/activity-feed":
                 return _json_response(self, {"items": [], "has_more": False})
             if path == "/api/notifications/pending":
@@ -161,6 +165,10 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
                         state.delight["response_message"] = "好，这类多来点。"
                 state.delight_post_received.set()
                 return _json_response(self, {"ok": status < 400}, status)
+            if path == "/api/recommendations/reshuffle":
+                with state.lock:
+                    state.reshuffle_posts += 1
+                return _json_response(self, {"items": []})
             probe_type = {
                 "/api/interest-probes/respond": "interest.probe",
                 "/api/avoidance-probes/respond": "avoidance.probe",
@@ -264,6 +272,52 @@ def _assert_liked_delight(page: Page) -> None:
     expect(like).to_be_disabled()
     for action in ("view", "watch-later", "favorite", "reject", "chat"):
         expect(page.locator(f'[data-delight-action="{action}"]')).to_be_enabled()
+
+
+def test_mobile_empty_reshuffle_preserves_visible_recommendations(
+    mobile_web_server: tuple[str, MobileWebStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = mobile_web_server
+    stub.recommendations = [
+        {
+            "id": 1,
+            "bvid": "BV1KEEP1",
+            "title": "正在看的推荐一",
+            "up_name": "UP 甲",
+            "expression": "第一条推荐理由。",
+            "topic_label": "主题一",
+            "source_platform": "bilibili",
+        },
+        {
+            "id": 2,
+            "bvid": "BV1KEEP2",
+            "title": "正在看的推荐二",
+            "up_name": "UP 乙",
+            "expression": "第二条推荐理由。",
+            "topic_label": "主题二",
+            "source_platform": "bilibili",
+        },
+    ]
+    stub.runtime_status = {
+        **stub.runtime_status,
+        "initialized": True,
+        "pool_available_count": 12,
+    }
+
+    chromium_page.goto(f"{base_url}/m/#/recommend")
+    cards = chromium_page.locator(".card")
+    expect(cards).to_have_count(2)
+    titles_before = cards.locator(".card-title").all_inner_texts()
+
+    chromium_page.locator(".recommend-refresh-btn").click()
+
+    expect(chromium_page.locator(".recommend-action-note")).to_have_text(
+        "这次暂时没换出新内容，已保留当前推荐。"
+    )
+    expect(cards).to_have_count(2)
+    assert cards.locator(".card-title").all_inner_texts() == titles_before
+    assert stub.reshuffle_posts == 1
 
 
 @pytest.mark.parametrize(

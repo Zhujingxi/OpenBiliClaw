@@ -41,10 +41,13 @@ def test_mobile_recovery_is_bounded_and_reconnectable() -> None:
     assert "scheduleRuntimeStatusRecovery" in recommend_js
 
 
-def test_mobile_manual_reshuffle_clears_failed_recovery_state() -> None:
+def test_mobile_manual_reshuffle_preserves_cards_on_empty_and_clears_failed_recovery() -> None:
     recommend_js = Path("src/openbiliclaw/web/js/views/recommend.js").read_text()
 
-    assert "applyRecommendationSnapshot(result.items || [], { replace: true })" in recommend_js
+    assert "reconcileRecommendationReplacement(" in recommend_js
+    assert 'recommendationActionMessage = "这次暂时没换出新内容，已保留当前推荐。"' in recommend_js
+    assert 'clearRecommendationRecovery("ready")' in recommend_js
+    assert "applyRecommendationSnapshot(replacement.items, { replace: true })" in recommend_js
 
 
 def test_mobile_late_runtime_timeout_does_not_override_stream_recovery() -> None:

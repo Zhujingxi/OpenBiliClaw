@@ -28,6 +28,7 @@ import {
   getRecommendationCoverPreloadUrls,
   getRecommendationImageLoadingAttrs,
   normalizeRecommendation,
+  reconcileRecommendationReplacement,
   recommendationStats,
   normalizeRuntimeStatus,
   mergeRuntimeStatusEvent,
@@ -85,6 +86,7 @@ let runtimeStatusRecoveryInFlight = false;
 let recommendationRecoveryPending = false;
 let runtimeStatusRecoveryPending = false;
 let runtimeStatusGeneration = 0;
+let recommendationActionMessage = "";
 
 // Delight auto-advance
 let _delightAutoTimer = null;
@@ -253,6 +255,13 @@ function renderRecommendationHeader() {
   refreshBtn.addEventListener("click", handleReshuffle);
   top.appendChild(refreshBtn);
   header.appendChild(top);
+
+  if (recommendationActionMessage) {
+    const notice = document.createElement("div");
+    notice.className = "recommend-action-note";
+    notice.textContent = recommendationActionMessage;
+    header.appendChild(notice);
+  }
 
   if (headerState.poolChips.length > 0) {
     const grid = document.createElement("div");
@@ -1440,7 +1449,21 @@ async function handleReshuffle() {
   render();
   try {
     const result = await reshuffleRecommendations();
-    applyRecommendationSnapshot(result.items || [], { replace: true });
+    const replacement = reconcileRecommendationReplacement(
+      state.recommendations,
+      result.items || [],
+    );
+    if (replacement.preserved) {
+      recommendationActionMessage = "这次暂时没换出新内容，已保留当前推荐。";
+      clearRecommendationRecovery("ready");
+    } else {
+      recommendationActionMessage = "";
+      applyRecommendationSnapshot(replacement.items, { replace: true });
+    }
+    const requestGeneration = runtimeStatusGeneration;
+    void fetchRuntimeStatus()
+      .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
+      .catch(() => {});
   } catch { /* ignore */ }
   loading = false;
   render();
@@ -1449,6 +1472,7 @@ async function handleReshuffle() {
 async function handleAppend() {
   if (loading) return;
   loading = true;
+  let clearedActionMessage = false;
 
   // Disable the button inline instead of full re-render.
   const loadMoreRow = $root.querySelector(".load-more-row");
@@ -1461,6 +1485,10 @@ async function handleAppend() {
     const result = await appendRecommendations(existing);
     const newItems = (result.items || []).map(normalizeRecommendation);
     autoAppendExhausted = newItems.length === 0;
+    if (newItems.length > 0 && recommendationActionMessage) {
+      recommendationActionMessage = "";
+      clearedActionMessage = true;
+    }
     await warmRecommendationCovers(newItems, { limit: newItems.length, waitForDecode: true });
     patchState({ recommendations: [...state.recommendations, ...newItems] });
 
@@ -1477,6 +1505,7 @@ async function handleAppend() {
   }
 
   loading = false;
+  if (clearedActionMessage) rerenderHeaderOnly();
   // Restore button state.
   if (appendBtnEl) {
     appendBtnEl.disabled = false;
@@ -1625,6 +1654,7 @@ function applyRecommendationSnapshot(recs, { replace = false } = {}) {
   const normalizedRecs = recs.map(normalizeRecommendation);
   if (normalizedRecs.length > 0) {
     recommendationLoadState = "ready";
+    recommendationActionMessage = "";
   } else {
     recommendationLoadState = "empty-success";
   }

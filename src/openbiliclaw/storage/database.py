@@ -6334,10 +6334,20 @@ class Database:
                 )
 
     def _ensure_recommendation_read_indexes(self) -> None:
-        """Create indexes used by recommendation and activity-feed reads."""
+        """Create indexes used by recommendation and activity-feed reads.
+
+        Pool readiness and maintenance repeatedly exclude rows already present
+        in ``recommendations`` by BVID.  Without the BVID index, each
+        ``NOT EXISTS`` probe scans the full recommendation history and can hold
+        the API event loop for tens of seconds on a mature database.
+        """
         self.conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_recommendations_created_id
                 ON recommendations (created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_bvid
+                ON recommendations (bvid);
+            CREATE INDEX IF NOT EXISTS idx_events_type_id
+                ON events (event_type, id DESC);
             CREATE INDEX IF NOT EXISTS idx_content_cache_content_id
                 ON content_cache (content_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key

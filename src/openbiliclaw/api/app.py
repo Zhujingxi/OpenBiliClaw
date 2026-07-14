@@ -5022,11 +5022,12 @@ def create_app(
         publish = getattr(event_hub, "publish", None)
         if not callable(publish):
             return
+        pool_status = await asyncio.to_thread(_runtime_pool_status_payload)
         event = {
             "type": "refresh.pool_updated",
             "phase": "done",
             "message": message,
-            **_runtime_pool_status_payload(),
+            **pool_status,
         }
         with suppress(Exception):
             result = publish(event)
@@ -5121,7 +5122,7 @@ def create_app(
     ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if _pool_available_count() == 0:
+        if await asyncio.to_thread(_pool_available_count) == 0:
             await _trigger_replenishment_if_needed(force=True)
             return RecommendationReshuffleResponse(items=[])
         try:
@@ -5150,7 +5151,7 @@ def create_app(
     ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if _pool_available_count() == 0:
+        if await asyncio.to_thread(_pool_available_count) == 0:
             await _trigger_replenishment_if_needed(force=True)
             return RecommendationReshuffleResponse(items=[])
         try:
@@ -5193,7 +5194,7 @@ def create_app(
                 pending_signal_events=0,
                 unread_count=0,
             )
-        payload = dict(get_runtime_status())
+        payload = dict(await asyncio.to_thread(get_runtime_status))
         get_account_sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
         if callable(get_account_sync_status):
             payload.update(get_account_sync_status())
