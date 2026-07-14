@@ -9,12 +9,19 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
-from openbiliclaw.llm.base import classify_llm_unavailability
+from openbiliclaw.llm.base import classify_llm_unavailability, safe_llm_failure_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
+_PROFILE_ANALYSIS_TIMEOUT_MESSAGE = (
+    "AI 偏好分析等待模型服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
+    "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后重试。"
+)
 
 
 class SupportsAccountSyncState(Protocol):
@@ -71,6 +78,7 @@ class AccountSyncService:
     following_page_size: int = 100
     check_interval_seconds: int = 300
     llm_work_allowed: Callable[[], bool] | None = None
+    profile_analysis_timeout_seconds: float = DEFAULT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
     _auto_bootstrap_attempted: bool = False
     # v0.3.57+: tracks the cookie-not-ready → ready transition so
     # ``sync_if_due`` only emits the "auth ready" INFO log once per
@@ -199,7 +207,21 @@ class AccountSyncService:
             for event in events:
                 await self.memory_manager.propagate_event(event)
             try:
-                await self.soul_engine.analyze_events(events)
+                timeout = (
+                    self.profile_analysis_timeout_seconds
+                    if self.profile_analysis_timeout_seconds > 0
+                    else None
+                )
+                async with asyncio.timeout(timeout):
+                    await self.soul_engine.analyze_events(events)
+            except TimeoutError as exc:
+                timeout_error = TimeoutError(_PROFILE_ANALYSIS_TIMEOUT_MESSAGE)
+                logger.warning(
+                    "Profile analysis timed out during account sync after %.1fs",
+                    self.profile_analysis_timeout_seconds,
+                )
+                self._persist_profile_analysis_error(str(timeout_error))
+                raise timeout_error from exc
             except Exception as exc:
                 # A profile-analysis failure here is almost always the chat
                 # LLM being unavailable (a local model never pulled → 404, a
@@ -217,7 +239,7 @@ class AccountSyncService:
                 logger.warning(
                     "Profile analysis failed during account sync: %s", exc, exc_info=True
                 )
-                self._persist_profile_analysis_error(str(exc))
+                self._persist_profile_analysis_error(safe_llm_failure_message(exc))
                 raise
             await self._auto_bootstrap_soul_profile(len(events))
 

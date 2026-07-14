@@ -62,7 +62,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 开机自启动管理 | ✅ | `runtime.autostart` 提供 macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart 三套当前用户作用域 manager；`/api/autostart-status`、`/api/autostart/apply`、`openbiliclaw autostart` 和插件设置页共用 env / shadow guard 与方向化 enable/disable 事务。 |
 | Ollama 启动预检与生命周期 | ✅ | `runtime.ollama_supervisor` 统一提供 `ollama_required()`、endpoint 归一化、loopback 判定和 `_ollama_is_running()` / `_ollama_start_serve_background()`；`start` 仅在默认 `localhost:11434` 需要本机 Ollama 时尝试后台拉起，远端 / 自定义端口不强行 `serve`。托管启动会给子进程默认传入 `OLLAMA_KEEP_ALIVE=24h`（若用户已设置则保留用户值），减少 `bge-m3` / `llama-server` 在 UI 请求间隔中卸载再冷启动。Windows 模型路径编码故障自愈使用 `ollama_models_relocation_candidate()` 选 `%PROGRAMDATA%\OpenBiliClaw\ollama-models`（路径含非 ASCII 时放弃自动迁移），目录存在即视作 `managed_models_dir()` 持久迁移标记；后续托管启动用 `env.setdefault("OLLAMA_MODELS", managed_models_dir)`，显式用户环境变量优先。`restart_managed_ollama_with_models_dir()` 只重启本进程管理的 Ollama；若检测到外部启动的 daemon（运行中但没有 `_managed_proc`）则返回 `external_ollama`，避免杀掉用户自己开的官方 App / 服务。`_ollama_start_serve_background()` 现在记录**亲手拉起**的 `Popen` 句柄（复用外部已运行实例时句柄留空），`stop_managed_ollama()` 据此在退出时停掉整棵进程树（Windows `taskkill /T`、类 Unix 进程组 `SIGTERM`），对外部托管的 Ollama 一律不动 —— 桌面托盘「退出」经此调用，clean quit 不再遗留孤儿 `ollama serve` / `llama-server` runner。macOS 桌面包构建必须使用官方 `Ollama.app/Contents/Resources/ollama`，并同时打入同目录 `llama-server`、`llama-*`、`lib*.dylib`、`lib*.so` 和 `mlx_metal_*`；如果只发现 Homebrew 风格单独主程序或缺关键动态库，打包会失败，避免随包 daemon `/api/version` 正常但真实 embedding 500。 |
 | Embedding 初始化进度单例 | ✅ | `runtime.embedding_progress` 是进程全局、线程安全的无依赖状态源，供桌面包首启自动拉取、guided init 自动拉取、API 一键修复和 Ollama supervisor 共享。各生产路径调用 `mark_pull_running()` / `report_pull()` / `mark_pull_done()`，`/api/init-status` 再把它合并到 `embedding_check="repairing"`、`embedding_repair_*` 和 `embedding_pull_status`；`_ollama_start_serve_background()` 同步报告 `ollama_phase` 为 `starting` / `ready` / `down`。`reset()` 仅供测试隔离进程级状态。 |
-| 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。 |
+| 账号同步 | ✅ | `AccountSyncService` 同步 B 站账号历史、收藏和关注等信号；历史按 `view_at + 同秒 bvid 集合` 增量导入，收藏 / 关注只把新增 ID 转成画像事件，避免重放旧信号。画像分析默认受 360 秒墙钟上限保护，超时会取消并记录可见原因，不会把账号同步循环永久占住；文案明确模型服务 6 分钟未返回、Base URL / 模型名 / 网络 / 代理 / 响应过慢等常见原因，并经 `/api/init-status.detail` 同步给三端。 |
 | 多源 bootstrap 去重 | ✅ | `/api/sources/{xhs,dy,yt}/task-result` 会用 `source_bootstrap_state.json` 过滤跨任务旧 identity key；任务结果仍完整保留，只有新增项进入 memory / profile pipeline。 |
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
@@ -335,6 +335,7 @@ service = AccountSyncService(
     memory_manager=memory,
     bilibili_client=bilibili_client,
     soul_engine=soul_engine,
+    profile_analysis_timeout_seconds=360.0,
 )
 result = await service.sync_now()
 ```
@@ -345,7 +346,7 @@ result = await service.sync_now()
 - 收藏夹：使用稳定排序后的 `favorite_signature` 和 `favorite_bvids`，签名变化时只导入新增 bvid。
 - 关注列表：使用 `following_signature` 和 `following_mids`，签名变化时只导入新增 mid。
 
-`analyze_events()` 失败（对话模型不可用：本地模型未拉取 → 404、网关鉴权 → 401、超时）时，`sync_now()` 会把原因写入 `last_sync_error`（`画像分析失败：<原因>`，供 `/api/init-status` 与账号同步状态读取），但**不推进任何游标、不打 `last_account_sync_at` 时间戳**——整个 tick 回滚，下一次 `sync_if_due` tick 重试同一批事件，也不会被 `sync_interval_hours` 节流锁死或消耗一次性的 auto-bootstrap 机会，随后重新抛出交给 `run_forever` 分类记日志。`CancelledError` 继承自 `BaseException`，不会被这里捕获，因此热重载 / 重启打断的取消语义不变。
+`analyze_events()` 失败（对话模型不可用：本地模型未拉取 → 404、网关鉴权 → 401、超时）时，`sync_now()` 会把原因写入 `last_sync_error`（`画像分析失败：<原因>`，供 `/api/init-status` 与账号同步状态读取），但**不推进任何游标、不打 `last_account_sync_at` 时间戳**——整个 tick 回滚，下一次 `sync_if_due` tick 重试同一批事件，也不会被 `sync_interval_hours` 节流锁死或消耗一次性的 auto-bootstrap 机会，随后重新抛出交给 `run_forever` 分类记日志。Issue #113 收口后，`profile_analysis_timeout_seconds` 默认 360 秒（受控调用可传 `<=0` 关闭），到期会取消 Soul/provider coroutine，并写入固定的安全排查文案：模型服务在 6 分钟内没有结果，常见原因是 Base URL / 模型名 / 网络 / 代理配置或服务响应过慢，下一步到模型设置测试后重试；`GET /api/init-status` 已真正消费这条错误，三端会优先显示 detail，不再只在 runtime status 中存在。外部 `CancelledError` 继承自 `BaseException`，不会被失败捕获，因此热重载 / 重启打断的取消语义不变。
 
 ### YoutubeDiscoveryProducer
 

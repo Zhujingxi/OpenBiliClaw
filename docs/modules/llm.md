@@ -69,6 +69,7 @@
 | v0.3.162+ 托管 Ollama 生命周期自愈 | ✅ | `runtime/ollama_supervisor.py` 记录托管 daemon 的完整启动规格并新增 watchdog；`with-embedding` 私有 11435 daemon 纳入一键修复与崩溃自动拉起（详见下方[托管 Ollama 生命周期](#托管-ollama-生命周期v03162)） |
 | v0.3.165 海外网络三模式 | ✅ | `OpenAIProvider` / `ClaudeProvider` / `GeminiProvider`（含 DeepSeek / OpenRouter 子类与 embedding 实例）同时接收 `proxy` 与 `trust_env`。registry 统一读取 `[network].mode`：`direct` 注入忽略环境代理的 SDK transport，`system` 保留 SDK 环境继承，`custom` 注入指定代理并强制 `trust_env=False`。**Ollama 工厂不读该策略**——本地 / CN 直连由 `tests/test_network_proxy_isolation.py` 守卫 |
 | v0.3.166 国内网关代理豁免 | ✅ | registry 的 `_outbound_proxy(base_url)` / `_outbound_trust_env(base_url)` 改为按 endpoint 粒度裁决，委托 `network.is_domestic_endpoint()`。国内大模型网关（DeepSeek `api.deepseek.com`、商汤 `.cn`、通义 `aliyuncs.com`、智谱 / 文心 / 混元 / 火山 / Kimi / MiniMax / 阶跃 / 百川 / 硅基流动 / 无问芯穹 / PPIO 等）与 localhost / 内网自建端点，即使 `[network].mode` 为 `system` / `custom` 也强制直连（`proxy=""`、`trust_env=False`），避免把国内请求绕道境外梯子导致超时；识别覆盖 `.cn` 顶级域 + 非 `.cn` 厂商域名白名单 + loopback / 私有 / link-local IP。豁免按 endpoint 生效，墙外网关仍走全局代理策略。DeepSeek 子类以固定 `https://api.deepseek.com` 参与裁决 |
+| Issue #113 CA 环境防护 | ✅ | `network.set_outbound_proxy(..., mode="system")` 在任何继承环境的 SDK 客户端构造前检查 `SSL_CERT_FILE` / `SSL_CERT_DIR` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`。只移除指向不存在目标的失效覆盖，让 httpx / OpenSSL 回退到默认可信 CA store；有效私有 CA、`HTTPS_PROXY` 等代理变量和 TLS 验证均保持不变，避免 Windows 遗留 CA 路径导致所有客户端在发请求前直接 `FileNotFoundError`。 |
 
 ## 公开 API
 

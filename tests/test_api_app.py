@@ -12323,6 +12323,34 @@ class TestGuidedInitEndpoints:
         assert body["can_start"] is False
         assert body["reason"] == "already_initialized"
 
+    def test_init_status_surfaces_discovery_timeout_as_partial_completion(
+        self, tmp_path: Path
+    ) -> None:
+        """An initialized profile must not hide why the first pool is empty."""
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True)
+        app, _ = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
+        coord = app.state.runtime_context.init_coordinator
+        assert coord.try_start("run-discovery-timeout") is True
+        detail = "画像已生成，但首轮内容池等待内容发现超过 10 分钟仍未完成；系统会在后台继续补池。"
+        asyncio.run(
+            coord.complete(
+                "run-discovery-timeout",
+                partial_success=True,
+                reason="discovery_timeout",
+                detail=detail,
+            )
+        )
+
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+
+        assert body["initialized"] is True
+        assert body["partial_success"] is True
+        assert body["reason"] == "discovery_timeout"
+        assert body["detail"] == detail
+
     def test_init_status_skips_live_probes_when_already_initialized(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
@@ -12381,6 +12409,34 @@ class TestGuidedInitEndpoints:
         body = resp.json()
         assert body["can_start"] is False
         assert body["reason"] == "llm_not_ready"
+
+    @pytest.mark.parametrize(
+        ("chat_ready", "expected_reason", "expected_can_start"),
+        [(True, "analyze_failed", True), (False, "llm_not_ready", False)],
+    )
+    def test_init_status_surfaces_background_profile_analysis_error(
+        self,
+        tmp_path: Path,
+        chat_ready: bool,
+        expected_reason: str,
+        expected_can_start: bool,
+    ) -> None:
+        """The account-sync error recorded for issue #113 must reach the UI."""
+        from fastapi.testclient import TestClient
+
+        detail = "画像分析失败：AI 偏好分析超时，已自动停止本次任务。"
+        prereqs = _FakeInitPrereqs(bili="ok", chat=chat_ready, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.runtime_context.account_sync_service = SimpleNamespace(
+            get_runtime_status=lambda: {"last_account_sync_error": detail}
+        )
+
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+
+        assert body["reason"] == expected_reason
+        assert body["can_start"] is expected_can_start
+        assert body["detail"] == detail
 
     def test_init_status_configured_embedding_hard_gates_can_start(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

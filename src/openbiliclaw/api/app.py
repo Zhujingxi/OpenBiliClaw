@@ -2517,6 +2517,21 @@ def create_app(
         # and E2 disagree and a client could offer "start" that E2 rejects.
         can_start = trusted and supported and hard_ok and not running and not initialized
 
+        # Account sync may be the first owner that tries to build preferences
+        # after desktop startup. It persists a safe, user-facing failure, but
+        # init-status historically never read it despite being the page's
+        # authoritative source — so the UI still sat at 49% with no reason.
+        account_profile_error = ""
+        if not initialized and not running:
+            sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
+            if callable(sync_status):
+                with suppress(Exception):
+                    raw_status = sync_status()
+                    if isinstance(raw_status, dict):
+                        candidate = str(raw_status.get("last_account_sync_error", "")).strip()
+                        if candidate.startswith("画像分析失败："):
+                            account_profile_error = candidate[:500]
+
         embedding_check, embedding_detail = await _diagnose_embedding(bool(embedding))
         pull_progress = _embedding_pull_progress_view()
         pull_status = str(pull_progress.get("status_text") or "")
@@ -2526,7 +2541,18 @@ def create_app(
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
-            reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
+            if bool(run["partial_success"]):
+                # Profile creation succeeded but the first discovery pass did
+                # not. Preserve the terminal cause written by complete() so
+                # setup / desktop / popup can explain the degraded result and
+                # offer a safe way forward instead of appearing stuck at 95%.
+                reason = str(run.get("reason") or "discovery_partial")
+                detail = str(
+                    run.get("detail")
+                    or "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。"
+                )
+            else:
+                reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
         elif not trusted:
             # trusted participates in can_start but had no reason branch, so
             # remote/paired-mobile viewers got can_start=false with
@@ -2535,7 +2561,8 @@ def create_app(
             # All clients already map local_only to "只能在本机发起初始化。".
             reason, detail = "local_only", "只能在本机发起初始化"
         elif not chat:
-            reason, detail = "llm_not_ready", "AI 服务还没配好或当前不可用"
+            reason = "llm_not_ready"
+            detail = account_profile_error or "AI 服务还没配好或当前不可用"
         elif embedding_required and not embedding:
             reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
@@ -2550,6 +2577,11 @@ def create_app(
             # message) so an internal_error is diagnosable from the UI.
             reason = run.get("reason") or str(run.get("status"))
             detail = str(run.get("detail") or "")
+        elif account_profile_error:
+            # The current probe is healthy again, so retry is allowed, but the
+            # previous background analysis failure still explains why no
+            # profile exists yet.
+            reason, detail = "analyze_failed", account_profile_error
         else:
             reason, detail = "none", ""
 
@@ -2714,7 +2746,12 @@ def create_app(
                 coordinator=coord,
                 run_id=run_id,
             )
-            await coord.complete(run_id, partial_success=result.discovery_error)
+            await coord.complete(
+                run_id,
+                partial_success=result.discovery_error,
+                reason=getattr(result, "discovery_reason", None),
+                detail=getattr(result, "discovery_detail", None),
+            )
         except asyncio.CancelledError:
             # Cancel was requested via /api/init/cancel — shield the terminal
             # write so the cancelled status still lands before we propagate.

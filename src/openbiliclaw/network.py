@@ -13,6 +13,8 @@ read this module — that isolation is pinned by
 from __future__ import annotations
 
 import ipaddress
+import logging
+import os
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
@@ -20,6 +22,13 @@ OutboundProxyMode = Literal["direct", "system", "custom"]
 _VALID_MODES = frozenset({"direct", "system", "custom"})
 _outbound_proxy: str | None = None
 _outbound_mode: OutboundProxyMode = "direct"
+logger = logging.getLogger(__name__)
+
+# httpx/OpenSSL consumes the SSL_* pair while requests also honors the two
+# bundle aliases. A deleted path makes trust_env=True clients fail during
+# construction, before a request can be diagnosed or routed through a proxy.
+_CA_FILE_ENV_VARS = ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
+_CA_DIR_ENV_VARS = ("SSL_CERT_DIR",)
 
 # Domestic (mainland-China) LLM gateways must ALWAYS connect directly, even
 # when ``[network].mode`` is ``system`` / ``custom`` for reaching overseas
@@ -67,8 +76,40 @@ def set_outbound_proxy(url: str, *, mode: str | None = None) -> None:
         raise ValueError(f"unsupported outbound proxy mode: {resolved_mode}")
     if resolved_mode == "custom" and not normalized_url:
         raise ValueError("custom outbound proxy mode requires a proxy URL")
+    if resolved_mode == "system":
+        _drop_invalid_ca_environment()
     _outbound_mode = cast("OutboundProxyMode", resolved_mode)
     _outbound_proxy = normalized_url if resolved_mode == "custom" else None
+
+
+def _drop_invalid_ca_environment() -> None:
+    """Ignore only CA overrides whose filesystem targets do not exist.
+
+    ``system`` mode intentionally inherits proxy and certificate environment
+    settings. A stale CA path is different from a valid private CA: OpenSSL
+    cannot use it and httpx raises ``FileNotFoundError`` while constructing the
+    client. Removing only nonexistent overrides preserves proxy inheritance and
+    falls back to the normal verified CA store; TLS verification is never
+    disabled and existing custom CA files/directories are left untouched.
+    """
+    for variable in _CA_FILE_ENV_VARS:
+        value = os.environ.get(variable, "").strip()
+        if value and not os.path.isfile(value):
+            os.environ.pop(variable, None)
+            logger.warning(
+                "Ignoring invalid %s path %r; using the default verified CA store.",
+                variable,
+                value,
+            )
+    for variable in _CA_DIR_ENV_VARS:
+        value = os.environ.get(variable, "").strip()
+        if value and not os.path.isdir(value):
+            os.environ.pop(variable, None)
+            logger.warning(
+                "Ignoring invalid %s path %r; using the default verified CA store.",
+                variable,
+                value,
+            )
 
 
 def outbound_proxy_mode() -> OutboundProxyMode:
