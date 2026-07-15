@@ -436,7 +436,15 @@ def test_recommend_reports_clear_config_error(
 def test_config_show_displays_registered_providers(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
-    from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
+    from openbiliclaw.model_config import (
+        ChatConnection,
+        ChatRouteConfig,
+        CredentialConfig,
+        EmbeddingModelSettings,
+        EmbeddingProviderConfig,
+        EmbeddingRouteConfig,
+        ModelConfig,
+    )
 
     cfg = config_module.Config(
         models=ModelConfig(
@@ -447,15 +455,40 @@ def test_config_show_displays_registered_providers(
                         name="Claude",
                         type="anthropic_compatible",
                         model="claude-sonnet",
+                        preset="anthropic",
+                        base_url="https://api.anthropic.com",
+                        credential=CredentialConfig(
+                            source="inline",
+                            value="test-secret-config-show-never-print",
+                        ),
                     ),
                     ChatConnection(
                         id="ollama-fallback",
                         name="Ollama",
                         type="ollama",
                         model="llama3",
+                        base_url="http://127.0.0.1:11434/v1",
                     ),
                 ),
-            )
+            ),
+            embedding=EmbeddingRouteConfig(
+                enabled=True,
+                settings=EmbeddingModelSettings(
+                    model="shared-embedding",
+                    output_dimensionality=768,
+                    similarity_threshold=0.75,
+                ),
+                providers=(
+                    EmbeddingProviderConfig(
+                        id="embedding-env",
+                        name="Embedding Env",
+                        type="openai_compatible",
+                        preset="custom",
+                        base_url="https://embedding.example.test/v1",
+                        credential=CredentialConfig(source="env", value="EMBEDDING_API_KEY"),
+                    ),
+                ),
+            ),
         )
     )
     monkeypatch.setattr(
@@ -473,6 +506,12 @@ def test_config_show_displays_registered_providers(
     assert "Ollama" in result.stdout
     assert "Primary" in result.stdout
     assert "Fallback 1" in result.stdout
+    assert "credential=inline" in result.stdout
+    assert "credential=none" in result.stdout
+    assert "shared-embedding" in result.stdout
+    assert "embedding-env" in result.stdout
+    assert "credential=env:EMBEDDING_API_KEY" in result.stdout
+    assert "test-secret-config-show-never-print" not in result.stdout
 
 
 def test_config_show_displays_runtime_pause_fields(
@@ -2816,6 +2855,8 @@ def test_init_reports_authentication_failure(
 def test_init_guides_missing_runtime_config_interactively(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
+    from openbiliclaw import cli_models as cli_models_module
+
     class FakeAuthManager:
         async def get_status(self) -> AuthStatus:
             return AuthStatus(
@@ -2831,39 +2872,24 @@ def test_init_guides_missing_runtime_config_interactively(
         async def get_user_history(self, max_items: int = 100) -> list[dict[str, object]]:
             return []
 
-    captured: dict[str, object] = {}
-    config_errors = iter(["llm.openai.api_key", None])
-
-    def fake_save_runtime_config(
-        provider: str,
-        *,
-        api_key: str = "",
-        base_url: str = "",
-        model: str = "",
-    ) -> None:
-        captured["provider"] = provider
-        captured["api_key"] = api_key
-        captured["base_url"] = base_url
-        captured["model"] = model
+    guided_calls: list[str] = []
 
     def fake_load_runtime_config_error(*, render: bool = True) -> str | None:
-        return next(config_errors)
+        return "models.chat.connections[0].credential"
 
     monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True, raising=False)
     monkeypatch.setattr(
         cli_module, "_maybe_setup_password_in_init", lambda **_: None, raising=False
     )
     monkeypatch.setattr(
-        cli_module,
-        "_save_runtime_provider_config",
-        fake_save_runtime_config,
-        raising=False,
+        cli_models_module,
+        "guided_chat_editor",
+        lambda: guided_calls.append("chat"),
     )
     monkeypatch.setattr(
-        cli_module,
-        "_save_embedding_config",
-        lambda **_: None,
-        raising=False,
+        cli_models_module,
+        "guided_embedding_editor",
+        lambda: guided_calls.append("embedding"),
     )
     monkeypatch.setattr(
         cli_module,
@@ -2885,23 +2911,11 @@ def test_init_guides_missing_runtime_config_interactively(
         raising=False,
     )
 
-    # Wizard + source-prompt inputs:
-    #   1. menu choice: "gemini"
-    #   2. API key
-    #   3. model (accept default)
-    #   4. embedding choice "3" (disable embedding; avoids host-dependent Ollama prompts)
-    #   5. "n" — skip module overrides
-    #   6. "y" — allow LAN access
-    #   7-9. "" — accept Bili history/favorite/follow init limits
-    #   10+. "n" — skip optional source prompts (xhs / douyin / youtube / X / zhihu / reddit)
+    # Native model editors are injected above, so only the ordinary init source
+    # prompts remain: allow LAN, accept Bili limits, skip optional sources.
     wizard_input = (
         "\n".join(
             [
-                "gemini",
-                "gemini-key",
-                "",
-                "3",
-                "n",
                 "y",
                 "",
                 "",
@@ -2919,10 +2933,10 @@ def test_init_guides_missing_runtime_config_interactively(
     result = runner.invoke(app, ["init"], input=wizard_input)
 
     assert result.exit_code == 1
-    assert captured["provider"] == "gemini"
-    assert captured["api_key"] == "gemini-key"
+    assert guided_calls == ["chat", "embedding"]
     assert "初始化前配置引导" in result.stdout
-    assert "DeepSeek" in result.stdout  # menu now leads with DeepSeek (v0.3.20+)
+    assert "按连接类型配置 Chat 与 Embedding" in result.stdout
+    assert "module override" not in result.stdout.lower()
     assert "历史为空" in result.stdout
 
 
@@ -4743,7 +4757,7 @@ def test_init_reports_partial_success_when_discovery_fails(
 
 
 # ---------------------------------------------------------------------------
-# Local Ollama embedding wizard helpers
+# Local Ollama compatibility helpers used by desktop packaging
 # ---------------------------------------------------------------------------
 
 
@@ -4830,71 +4844,9 @@ def test_ollama_has_model_matches_tagged_and_untagged(
     assert cli_module._ollama_has_model("nomic-embed-text") is False
 
 
-def test_save_embedding_config_writes_to_toml(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Verify the wizard's persistence helper writes both provider and model
-    to [llm.embedding] in config.toml. Round-trips: start from a default
-    config, run the helper, reload, assert the embedding section persisted."""
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    initial = Config(llm=LLMConfig(default_provider="gemini"))
-    save_config(initial, config_path)
-
-    # Redirect _project_root() to tmp_path. monkeypatch.chdir alone is
-    # NOT enough — _project_root() checks the package install dir first
-    # and would happily clobber the developer's real config.toml.
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    cli_module._save_embedding_config(provider="ollama", model="bge-m3")
-
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.embedding.provider == "ollama"
-    assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://127.0.0.1:11434/v1"
-
-
-def test_save_embedding_config_custom_openai_compat(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Phase 3 option 3: a vLLM-style OpenAI-compatible embedding gateway.
-
-    The wizard collects provider="openai" plus a custom base_url / api_key /
-    model, and the helper has to write all four into config.toml: the
-    embedding section gets provider+model, and the [llm.openai] block gets
-    base_url+api_key so the LLM registry can resolve the endpoint.
-    """
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    save_config(Config(llm=LLMConfig(default_provider="claude")), config_path)
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    cli_module._save_embedding_config(
-        provider="openai",
-        model="bge-m3",
-        base_url="http://localhost:8000/v1",
-        api_key="sk-local",
-    )
-
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.embedding.provider == "openai"
-    assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://localhost:8000/v1"
-    assert reloaded.llm.embedding.api_key == "sk-local"
+def test_legacy_model_setup_writers_are_removed() -> None:
+    assert not hasattr(cli_module, "_save_embedding_config")
+    assert not hasattr(cli_module, "_save_runtime_provider_config")
 
 
 def test_build_recommendation_engine_uses_bundle_service(
@@ -4922,61 +4874,6 @@ def test_build_recommendation_engine_uses_bundle_service(
     assert engine._llm is shared_service
 
 
-def test_save_runtime_provider_config_persists_triplet(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Phase 2: full triplet (api_key, base_url, model) round-trips,
-    and empty values do not clobber existing config (so a user pressing
-    Enter at the prompt accepts the saved value rather than blanking it).
-    """
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        LLMProviderConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    save_config(
-        Config(
-            llm=LLMConfig(
-                default_provider="claude",
-                openai=LLMProviderConfig(
-                    api_key="sk-old",
-                    base_url="https://old.example.com/v1",
-                    model="gpt-old",
-                ),
-            )
-        ),
-        config_path,
-    )
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    # Write triplet — should switch default provider and overwrite all three.
-    cli_module._save_runtime_provider_config(
-        "openai",
-        api_key="sk-new",
-        base_url="https://new.example.com/v1",
-        model="gpt-4o-mini",
-    )
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.default_provider == "openai"
-    assert reloaded.llm.openai.api_key == "sk-new"
-    assert reloaded.llm.openai.base_url == "https://new.example.com/v1"
-    assert reloaded.llm.openai.model == "gpt-4o-mini"
-
-    # Now an "accept defaults" follow-up: empty params must NOT blank the
-    # values written above.
-    cli_module._save_runtime_provider_config("openai", api_key="", base_url="", model="")
-    reloaded2, _ = load_config_with_diagnostics()
-    assert reloaded2.llm.openai.api_key == "sk-new"
-    assert reloaded2.llm.openai.base_url == "https://new.example.com/v1"
-    assert reloaded2.llm.openai.model == "gpt-4o-mini"
-
-
-# ---------------------------------------------------------------------------
 # Douyin bootstrap CLI helpers (Task 6 of douyin import plan)
 # ---------------------------------------------------------------------------
 

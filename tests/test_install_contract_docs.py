@@ -147,22 +147,22 @@ def test_agent_install_llm_menu_numbering_matches_current_options() -> None:
     assert "#### Option 2 (OpenAI 官方 / Gemini / Claude / OpenRouter)" not in doc
 
 
-def test_cli_module_docs_show_current_init_llm_menu() -> None:
+def test_cli_module_docs_show_native_model_editor_while_bootstrap_keeps_its_menu() -> None:
     doc = _read("docs/modules/cli.md")
     bootstrap = _read("scripts/agent_bootstrap.py")
 
-    assert "1   DeepSeek 官方 ★默认推荐" in doc
-    assert "2   ★ 第二推荐 — 中转站 / OpenAI 协议兼容服务" in doc
-    assert "3   OpenAI 官方" in doc
-    assert "Tip:不确定就选 1 (DeepSeek)" in doc
-    assert "请输入序号或名称（默认 1=DeepSeek） [1]:" in doc
-    assert "1   本地 Ollama bge-m3 ★默认推荐" in doc
-    assert "3   暂不启用 embedding" in doc
-    assert "不会跟随主 LLM" in doc
-    assert "| 1 | 本地 Ollama，自动探测 + 拉取 `bge-m3` |" in doc
-    assert "Ollama 排第一" not in doc
-    assert "1) 跟随你刚才选的 LLM" not in doc
-    assert "跟随主 provider（默认）" not in doc
+    assert "Available chat connection types:" in doc
+    assert "openai_compatible: OpenAI-compatible (api_protocol)" in doc
+    assert "anthropic_compatible: Anthropic-compatible (api_protocol)" in doc
+    assert "codex_oauth: Codex OAuth (oauth)" in doc
+    assert "共享 model/维度/阈值/多模态只配置一次" in doc
+    assert "不再写 legacy `[llm]`" in doc
+    assert "1   DeepSeek 官方 ★默认推荐" not in doc
+
+    # Agent/bootstrap and installer cutover belongs to Task 14; Task 13 only
+    # removes the parallel menu from the native terminal CLI setup path.
+    assert "HUMAN_LLM_MENU" in bootstrap
+    assert "DeepSeek 官方 ★默认推荐" in bootstrap
     assert "User picked OpenAI 官方 (option 2 in agent-install.md)" not in bootstrap
 
 

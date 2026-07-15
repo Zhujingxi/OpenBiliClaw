@@ -376,8 +376,9 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│ 模型配置 API + 事务型有序 Chat/Embedding route + 三端编辑器（阶段 9–12）│
+│ 模型配置 API + 事务型有序 Chat/Embedding route + 四端编辑器（阶段 9–13）│
 │ Desktop：ordered list + inspector；Extension/Mobile：sequential list→detail │
+│ CLI：models list/add/edit/remove/move/probe → ModelConfigService │
 │ Chat/Embedding/Runtime tabs；descriptor fields；Embedding 共享设置 │
 │ GET/PUT model-config → strict secret-safe schema ────────┐    │
 │ descriptors + exact probe → safe probe/circuit summary ─┤    │
@@ -402,7 +403,7 @@ background ─ background admission (default 3) ──────┘
 │                                   └→ fixed PNG exact probe + shared cache namespace │
 │ probe: gate/init → path-lock init/revision/credential capture → network unlocked → revision recheck │
 │ RuntimeModelBundle → 全 consumer 原子发布并激活对应后台任务        │
-│ 普通保存保留 raw；桌面/插件/移动端模型保存独立权威；CLI 后续迁移 │
+│ 普通保存保留 raw；四端共用原生 schema；CLI 显式 DTO→domain、revision rebase │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
