@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createDialogFocusController } from "../../src/openbiliclaw/web/js/saved-sync-runtime.js";
+import {
+  hydrateModelConfig,
+  mapServerFieldErrors,
+} from "../../src/openbiliclaw/web/shared/model-config-state.js";
 
 let controller = {};
 let controllerLoadError = null;
@@ -59,12 +63,14 @@ function numericState(overrides = {}) {
 function loadRecoveryHarness(createRecovery) {
   const visible = {
     locked: true,
+    busy: false,
     retry: false,
     status: "",
     tone: "",
   };
   const recovery = createRecovery({
     setLocked(value) { visible.locked = value; },
+    setBusy(value) { visible.busy = value; },
     setRetryVisible(value) { visible.retry = value; },
     onLoading() {
       visible.status = "loading";
@@ -85,6 +91,75 @@ function loadRecoveryHarness(createRecovery) {
   });
   return { visible, recovery };
 }
+
+test("stable error IDs and fields are read only from own mapped properties", () => {
+  const readFieldError = requiredExport("readOwnMobileModelFieldError");
+  const mapped = mapServerFieldErrors(hydrateModelConfig({}), [{
+    connection_id: "constructor",
+    path: "models.chat.connections.0.name",
+    code: "invalid_name",
+    message: "Use a distinct connection name.",
+    source: "models",
+  }]);
+
+  assert.equal(
+    readFieldError(mapped.fieldErrors.byConnection, "constructor", "name")?.message,
+    "Use a distinct connection name.",
+  );
+  assert.equal(readFieldError({}, "constructor", "name"), null);
+  assert.equal(
+    readFieldError(mapped.fieldErrors.byConnection, "constructor", "constructor"),
+    null,
+  );
+  assert.equal(readFieldError(mapped.fieldErrors.byConnection, "__proto__", "name"), null);
+});
+
+test("load recovery separates locked controls from transient busy state", () => {
+  const createRecovery = requiredExport("createMobileModelLoadRecoveryController");
+  const { visible, recovery } = loadRecoveryHarness(createRecovery);
+
+  recovery.beginEntry();
+  assert.deepEqual(visible, {
+    locked: true,
+    busy: true,
+    retry: false,
+    status: "loading",
+    tone: "",
+  });
+
+  recovery.settleEntry({ ready: false, loading: false });
+  assert.deepEqual(visible, {
+    locked: true,
+    busy: false,
+    retry: true,
+    status: "incomplete-retry",
+    tone: "error",
+  });
+
+  recovery.beginEntry();
+  assert.equal(visible.busy, true, "retry must become busy synchronously");
+  recovery.onReadinessChange({ ready: true, loading: false });
+  assert.deepEqual(visible, {
+    locked: false,
+    busy: false,
+    retry: false,
+    status: "synchronized",
+    tone: "",
+  });
+
+  recovery.beginEntry();
+  recovery.failEntry(new Error("descriptor unavailable"), {
+    ready: false,
+    loading: false,
+  });
+  assert.deepEqual(visible, {
+    locked: true,
+    busy: false,
+    retry: true,
+    status: "descriptor unavailable",
+    tone: "error",
+  });
+});
 
 test("Saved Sync reload before first Models still loads descriptors and unlocks the editor", async () => {
   const createCoordinator = requiredExport("createMobileModelResourceCoordinator");
@@ -261,6 +336,7 @@ test("a rejected winning reload leaves stale full-load completion visibly retrya
   assert.equal(visibleRevision, "", "stale A must never become visible");
   assert.deepEqual(visible, {
     locked: true,
+    busy: false,
     retry: true,
     status: "incomplete-retry",
     tone: "error",
@@ -273,6 +349,7 @@ test("a rejected winning reload leaves stale full-load completion visibly retrya
   assert.equal(visibleRevision, "retry-C");
   assert.deepEqual(visible, {
     locked: false,
+    busy: false,
     retry: false,
     status: "synchronized",
     tone: "",
@@ -315,6 +392,7 @@ test("a late winning reload clears an interim retry state and unlocks only when 
   assert.equal(visibleRevision, "winning-B");
   assert.deepEqual(visible, {
     locked: false,
+    busy: false,
     retry: false,
     status: "synchronized",
     tone: "",

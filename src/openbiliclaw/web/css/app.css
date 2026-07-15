@@ -2291,12 +2291,14 @@ body {
 .mobile-model-probe-row span { min-height: 18px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .mobile-model-probe-row span[data-tone="success"], #mobileModelSaveStatus[data-tone="success"] { color: var(--success); }
 .mobile-model-probe-row span[data-tone="error"], #mobileModelSaveStatus[data-tone="error"] { color: var(--danger); }
+.mobile-model-load-feedback { display: grid; gap: 8px; margin-bottom: 12px; }
+.mobile-model-load-feedback span { min-height: 18px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
+.mobile-model-load-feedback button { justify-self: start; }
 .mobile-model-danger { width: 100%; margin-top: 16px; color: var(--danger); }
 .mobile-model-runtime { display: grid; gap: 8px; }
 .mobile-model-runtime-summary { display: grid; gap: 8px; margin-top: 12px; }
 .mobile-model-runtime-summary > div { display: flex; flex-direction: column; gap: 3px; padding: 10px; border-radius: 10px; background: var(--surface-strong); font-size: 11px; }
 .mobile-model-save-bar { position: sticky; bottom: 0; display: grid; gap: 8px; margin-top: 14px; padding: 12px 0 0; background: linear-gradient(180deg, transparent, var(--surface-strong) 18%); }
-.mobile-model-save-bar span { min-height: 18px; color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .mobile-model-save-bar button { background: var(--brand); color: #fff; border-radius: 10px; font-weight: 750; }
 .mobile-model-field-error { color: var(--danger); font-size: 11px; }
 

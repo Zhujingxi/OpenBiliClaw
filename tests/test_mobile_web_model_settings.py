@@ -269,6 +269,52 @@ def test_settled_incomplete_mobile_load_uses_the_recovery_controller() -> None:
     assert "modelLoadRetry.hidden = false" in model
 
 
+def test_mobile_field_errors_use_own_property_reads_for_stable_ids_and_fields() -> None:
+    model = _read(MODEL_PATH)
+    controller = _read(CONTROLLER_PATH)
+    field_error = model.split("function fieldError(recordId, field)", 1)[1].split(
+        "function errorMarkup", 1
+    )[0]
+
+    assert "export function readOwnMobileModelFieldError" in controller
+    assert "Object.hasOwn(byConnection, recordId)" in controller
+    assert "Object.hasOwn(fields, field)" in controller
+    assert model.count("readOwnMobileModelFieldError(") >= 2
+    assert ".byConnection?.[recordId]?.[field]" not in field_error
+
+
+def test_mobile_model_feedback_stays_accessible_while_lock_and_busy_are_independent() -> None:
+    model = _read(MODEL_PATH)
+    boundary_index = model.index('id="mobileModelEditorBoundary"')
+    status_index = model.index('id="mobileModelSaveStatus"')
+    retry_index = model.index('id="mobileModelLoadRetry"')
+    locked = model.split("function setModelEditorLocked(locked)", 1)[1].split(
+        "function setModelEditorBusy", 1
+    )[0]
+    busy = model.split("function setModelEditorBusy(busy)", 1)[1].split(
+        "function setModelStatus", 1
+    )[0]
+    recovery = model.split("createMobileModelLoadRecoveryController({", 1)[1].split(
+        "const modelResources", 1
+    )[0]
+
+    assert status_index < boundary_index
+    assert retry_index < boundary_index
+    assert 'aria-live="polite"' in model[status_index : status_index + 120]
+    assert 'id="mobileModelSaveButton"' in model[boundary_index:]
+    assert "aria-busy" not in locked
+    assert 'boundary.setAttribute("aria-busy", busy ? "true" : "false")' in busy
+    assert "setBusy: (busy)" in recovery
+    assert "if (!disposed) setModelEditorBusy(busy)" in recovery
+    assert "setModelEditorLocked(true);\n  setModelEditorBusy(false);" in model
+
+    save = model.split("async function saveModels()", 1)[1].split(
+        "async function fetchModelSnapshot", 1
+    )[0]
+    assert "setModelEditorBusy(true)" in save
+    assert "setModelEditorBusy(false)" in save
+
+
 def test_late_get_remote_reload_and_dirty_navigation_never_overwrite_the_draft() -> None:
     model = _read(MODEL_PATH)
 

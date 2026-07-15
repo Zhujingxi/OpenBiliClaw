@@ -71,10 +71,10 @@
    - 连接类型完全由 descriptor 分组、搜索、preset 与字段定义驱动；credentials 使用 `keep / set / env / clear` 显式动作
    - Embedding 的 model、维度、相似度阈值和多模态开关是 route 共享设置；Runtime 编辑 Chat concurrency 与 timeout
    - 保存使用 revisioned `PUT /api/model-config`，失败保留草稿，`409` 与字段错误就地展示；精确 probe 绑定 revision、route kind、稳定 ID 与 draft fingerprint
-   - snapshot 与 descriptor 分别维护 readiness 与 latest-request gate；Saved Sync 先收到 `config_reloaded` 仍会在首次进入 Models 补载 descriptor，descriptor 失败可由显式按钮或重新进入 Models 单独重试；旧 snapshot 被较新 reload 取代后，即使 reload 失败或仍未结束，完整加载一旦 settled-not-ready 就显示重试并保持锁定，迟到的胜出 reload 或后续重试可自动恢复；两项都 ready 前锁定编辑器
+   - snapshot 与 descriptor 分别维护 readiness 与 latest-request gate；Saved Sync 先收到 `config_reloaded` 仍会在首次进入 Models 补载 descriptor，descriptor 失败可由显式按钮或重新进入 Models 单独重试；旧 snapshot 被较新 reload 取代后，即使 reload 失败或仍未结束，完整加载一旦 settled-not-ready 就显示重试并保持锁定，迟到的胜出 reload 或后续重试可自动恢复；两项都 ready 前锁定编辑器。锁定/inert 与 `aria-busy` 分开：首次/在途加载和重试为 busy，settled-not-ready/error 仍锁定但 busy=false，ready 后解锁且 busy=false；实时状态与重试入口位于 inert 边界之外，销毁后的 readiness 通知不再写 DOM
    - model / preset / credential / Embedding 共享设置变更同步刷新列表、probe health 与错误投影；单纯 Back 导航保留仍有效的服务端字段错误
    - 保存与 exact probe 前统一校验 Runtime concurrency 为 1–16 的整数、timeout 为至少 10 秒的整数、每个 Chat `num_ctx`/Embedding 输出维度为非负整数、相似度阈值为 0–1 的有限数值；空输入保持为空，非法值保留草稿、字段/摘要提示且不序列化请求，显式 `0` 仍是后三项的合法下界
-   - 数值错误随每次草稿 mutation 与权威 hydration 重新推导；Pydantic `422 detail` 不回显 input/msg，只映射安全路径、固定消息和当前稳定 ID，prototype-like ID 也只作为 own property 存储
+   - 数值错误随每次草稿 mutation 与权威 hydration 重新推导；Pydantic `422 detail` 不回显 input/msg，只映射安全路径、固定消息和当前稳定 ID；prototype-like ID/字段既只作为 own property 存储，读取时也逐级检查 own property，因此 `constructor` 连接的真实 `name` 错误可显示，缺失项不会回落到对象原型
    - 关闭设置或从 Models 切到 Saved Sync 时仅在模型草稿 dirty 时确认；关闭、列表/详情返回都恢复合理焦点，shell 重绘替换 opener 后按稳定 ID 聚焦当前 live 设置按钮
    - 移动端不提供一键本地 Ollama，避免把窄屏编辑器变成隐式覆盖入口
 

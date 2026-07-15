@@ -14,6 +14,7 @@ import {
   createMobileModelResourceCoordinator,
   normalizeMobileModelValidationDetails,
   parseMobileModelNumericDraft,
+  readOwnMobileModelFieldError,
   validateMobileModelNumbers,
 } from "../mobile-model-settings-controller.js";
 import {
@@ -119,8 +120,11 @@ export async function openMobileSettings(opener) {
 
     <section class="mobile-settings-panel" data-mobile-settings-panel="models" hidden>
       <h3 class="mobile-settings-panel-title" tabindex="-1">Models</h3>
-      <button id="mobileModelLoadRetry" class="mobile-model-load-retry btn btn-outline"
-        type="button" hidden>重试加载 Models</button>
+      <div class="mobile-model-load-feedback">
+        <span id="mobileModelSaveStatus" aria-live="polite">选择 Models 后加载配置。</span>
+        <button id="mobileModelLoadRetry" class="mobile-model-load-retry btn btn-outline"
+          type="button" hidden>重试加载 Models</button>
+      </div>
       <fieldset id="mobileModelEditorBoundary" class="mobile-model-editor-boundary"
         aria-label="模型路由编辑器" aria-busy="false">
         <div class="mobile-model-route-tabs" role="tablist" aria-label="模型类型">
@@ -255,7 +259,6 @@ export async function openMobileSettings(opener) {
         </section>
 
         <div class="mobile-model-save-bar">
-          <span id="mobileModelSaveStatus" aria-live="polite">选择 Models 后加载配置。</span>
           <button id="mobileModelSaveButton" type="button">保存模型路由</button>
         </div>
       </fieldset>
@@ -284,6 +287,9 @@ export async function openMobileSettings(opener) {
   const modelLoadRecovery = createMobileModelLoadRecoveryController({
     setLocked: (locked) => {
       if (!disposed) setModelEditorLocked(locked);
+    },
+    setBusy: (busy) => {
+      if (!disposed) setModelEditorBusy(busy);
     },
     setRetryVisible: (visible) => {
       if (disposed) return;
@@ -471,8 +477,13 @@ export async function openMobileSettings(opener) {
     const editorLocked = Boolean(locked || modelOperations.saveInFlight);
     boundary.disabled = editorLocked;
     boundary.inert = editorLocked;
-    boundary.setAttribute("aria-busy", editorLocked ? "true" : "false");
     syncOperationControls();
+  }
+
+  function setModelEditorBusy(busy) {
+    const boundary = byId("mobileModelEditorBoundary");
+    if (!boundary) return;
+    boundary.setAttribute("aria-busy", busy ? "true" : "false");
   }
 
   function setModelStatus(message, tone = "") {
@@ -508,8 +519,15 @@ export async function openMobileSettings(opener) {
   }
 
   function fieldError(recordId, field) {
-    return numericFieldErrors.byConnection?.[recordId]?.[field]
-      || state?.fieldErrors?.byConnection?.[recordId]?.[field]
+    return readOwnMobileModelFieldError(
+      numericFieldErrors.byConnection,
+      recordId,
+      field,
+    ) || readOwnMobileModelFieldError(
+      state?.fieldErrors?.byConnection,
+      recordId,
+      field,
+    )
       || null;
   }
 
@@ -1332,6 +1350,7 @@ export async function openMobileSettings(opener) {
     if (!save) return;
     modelResources.invalidateSnapshotRequests();
     setModelEditorLocked(true);
+    setModelEditorBusy(true);
     byId("mobileModelSaveButton").textContent = "保存中…";
     if (save.invalidatedProbe) {
       renderProbeStatus(selectedRecord(state, state.activeRoute));
@@ -1368,6 +1387,7 @@ export async function openMobileSettings(opener) {
       if (modelOperations.finishSave(save.generation)) {
         if (!disposed) {
           byId("mobileModelSaveButton").textContent = "保存模型路由";
+          setModelEditorBusy(false);
           setModelEditorLocked(false);
         }
       }
@@ -1657,6 +1677,7 @@ export async function openMobileSettings(opener) {
   });
 
   setModelEditorLocked(true);
+  setModelEditorBusy(false);
   focusController = createDialogFocusController({
     dialog: overlay,
     opener,

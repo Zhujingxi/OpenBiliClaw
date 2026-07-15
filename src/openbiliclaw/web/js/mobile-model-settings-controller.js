@@ -127,8 +127,11 @@ export function createMobileModelResourceCoordinator(options = {}) {
  */
 export function createMobileModelLoadRecoveryController(options = {}) {
   function onReadinessChange(readiness) {
-    options.setLocked?.(!readiness?.ready);
-    if (!readiness?.ready) return readiness;
+    const loading = Boolean(readiness?.loading);
+    const ready = Boolean(readiness?.ready) && !loading;
+    options.setLocked?.(!ready);
+    options.setBusy?.(loading);
+    if (!ready) return readiness;
     options.setRetryVisible?.(false);
     options.onReady?.(readiness);
     return readiness;
@@ -137,11 +140,14 @@ export function createMobileModelLoadRecoveryController(options = {}) {
   return {
     onReadinessChange,
     beginEntry() {
+      options.setLocked?.(true);
+      options.setBusy?.(true);
       options.setRetryVisible?.(false);
       options.onLoading?.();
     },
     settleEntry(readiness) {
       onReadinessChange(readiness);
+      options.setBusy?.(false);
       if (!readiness?.ready) {
         options.setRetryVisible?.(true);
         options.onRecoverableIncomplete?.(readiness);
@@ -150,11 +156,24 @@ export function createMobileModelLoadRecoveryController(options = {}) {
     },
     failEntry(error, readiness) {
       onReadinessChange(readiness);
+      options.setBusy?.(false);
       options.setRetryVisible?.(true);
       options.onError?.(error, readiness);
       return readiness;
     },
   };
+}
+
+/** Read a stable-ID field error without consulting object prototypes. */
+export function readOwnMobileModelFieldError(byConnection, recordId, field) {
+  if (
+    !byConnection
+    || typeof byConnection !== "object"
+    || !Object.hasOwn(byConnection, recordId)
+  ) return null;
+  const fields = byConnection[recordId];
+  if (!fields || typeof fields !== "object" || !Object.hasOwn(fields, field)) return null;
+  return fields[field] || null;
 }
 
 /**
