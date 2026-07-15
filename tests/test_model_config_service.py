@@ -319,6 +319,161 @@ async def test_save_rejects_every_unsafe_native_endpoint_before_build_or_write(
 
 
 @pytest.mark.parametrize(
+    ("case", "expected_path"),
+    [
+        ("chat-openai", "models.chat.connections[0].base_url"),
+        ("embedding-openai", "models.embedding.providers[0].base_url"),
+    ],
+)
+def test_read_rejects_unsafe_persisted_endpoint_shadowed_by_safe_local_array(
+    tmp_path: Path,
+    case: str,
+    expected_path: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    endpoint = "https://base-user:base-password@gateway.example.test/v1?base-query-secret=value"
+    _write_native(path, _models_with_endpoint_case(case, endpoint))
+    _write_native(
+        local_path,
+        _models_with_endpoint_case(case, _safe_endpoint_for_case(case)),
+    )
+    service = ModelConfigService(path, FakeCoordinator())
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        service.read()
+
+    assert [error.path for error in raised.value.errors] == [expected_path]
+    assert raised.value.errors[0].code == "invalid_endpoint"
+    _assert_exception_chain_omits(
+        raised.value,
+        endpoint,
+        "base-user",
+        "base-password",
+        "base-query-secret",
+        "test-token-endpoint",
+    )
+
+
+@pytest.mark.parametrize("case", ["chat-openai", "embedding-openai"])
+async def test_save_rejects_unsafe_persisted_endpoint_after_local_split(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    endpoint = "https://base-user:base-password@gateway.example.test/v1?base-query-secret=value"
+    _write_native(path, _models_with_endpoint_case(case, endpoint))
+    _write_native(
+        local_path,
+        _models_with_endpoint_case(case, _safe_endpoint_for_case(case)),
+    )
+    state = storage_module.read_disk_state(path, local_path, {})
+    coordinator = FakeCoordinator()
+    service = ModelConfigService(path, coordinator)
+    monkeypatch.setattr(service, "_read_state", lambda: state)
+    writes: list[bytes] = []
+    real_atomic_write = service_module._atomic_write
+
+    def tracked_atomic_write(target: Path, payload: bytes, mode: int) -> None:
+        writes.append(payload)
+        real_atomic_write(target, payload, mode)
+
+    monkeypatch.setattr(service_module, "_atomic_write", tracked_atomic_write)
+    before = path.read_bytes()
+    before_runtime = coordinator.current_model_candidate
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        await service.save(ModelConfigSaveRequest(revision=state.revision, models=state.models))
+
+    assert any(error.code == "invalid_endpoint" for error in raised.value.errors)
+    assert coordinator.build_calls == 0
+    assert coordinator.swap_calls == 0
+    assert coordinator.current_model_candidate is before_runtime
+    assert writes == []
+    assert path.read_bytes() == before
+    _assert_exception_chain_omits(
+        raised.value,
+        endpoint,
+        "base-user",
+        "base-password",
+        "base-query-secret",
+        "test-token-endpoint",
+    )
+
+
+async def test_rebase_rejects_unsafe_persisted_endpoint_before_render_or_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    safe = _models_with_endpoint_case(
+        "chat-openai",
+        _safe_endpoint_for_case("chat-openai"),
+    )
+    _write_native(path, safe)
+    _write_native(local_path, safe)
+    initial = storage_module.read_disk_state(path, local_path, {})
+    endpoint = "https://base-user:base-password@gateway.example.test/v1?base-query-secret=value"
+    _write_native(path, _models_with_endpoint_case("chat-openai", endpoint))
+    latest = storage_module.read_disk_state(path, local_path, {})
+    latest = replace(latest, authority_fingerprint=initial.authority_fingerprint)
+    states = iter((initial, latest))
+    coordinator = FakeCoordinator()
+    service = ModelConfigService(path, coordinator)
+    monkeypatch.setattr(service, "_read_state", lambda: next(states))
+    writes: list[bytes] = []
+    real_atomic_write = service_module._atomic_write
+
+    def tracked_atomic_write(target: Path, payload: bytes, mode: int) -> None:
+        writes.append(payload)
+        real_atomic_write(target, payload, mode)
+
+    monkeypatch.setattr(service_module, "_atomic_write", tracked_atomic_write)
+    before = path.read_bytes()
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        await service.save(ModelConfigSaveRequest(revision=initial.revision, models=initial.models))
+
+    assert coordinator.build_calls == 1
+    assert coordinator.swap_calls == 0
+    assert writes == []
+    assert path.read_bytes() == before
+    _assert_exception_chain_omits(
+        raised.value,
+        endpoint,
+        "base-user",
+        "base-password",
+        "base-query-secret",
+        "test-token-endpoint",
+    )
+
+
+async def test_persisted_endpoint_check_allows_credential_supplied_by_local_array(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    _write_native(path, _models(credential=CredentialConfig()))
+    _write_native(local_path, _models())
+    coordinator = FakeCoordinator()
+    service = ModelConfigService(path, coordinator)
+
+    snapshot = service.read()
+    result = await service.save(ModelConfigSaveRequest(revision=snapshot.revision))
+
+    assert result.ok is True
+    assert coordinator.build_calls == 1
+    assert coordinator.swap_calls == 1
+    persisted = tomllib.loads(path.read_text(encoding="utf-8"))["models"]
+    base_connection = persisted["chat"]["connections"][0]
+    assert "api_key" not in base_connection
+    assert "api_key_env" not in base_connection
+
+
+@pytest.mark.parametrize(
     ("action", "value", "expected_source"),
     [
         ("keep", None, "inline"),

@@ -210,3 +210,30 @@ git diff --check
 ```bash
 git commit -m "fix: harden transactional model config saves"
 ```
+
+---
+
+### Task 6: Persisted endpoint validation under local array shadowing
+
+**Files:**
+- Modify: `src/openbiliclaw/model_config/service.py`
+- Test: `tests/test_model_config_service.py`
+- Modify: `docs/modules/config.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/changelog.md`
+- Modify: `.superpowers/sdd/task-7-report.md` (ignored report)
+
+**Interfaces:**
+- Reads: endpoint-only validation independently covers `DiskState.persisted_models` and effective `DiskState.models` before public projection.
+- Saves: endpoint-only validation covers `persisted` after both the initial split and canonical rebase, while effective models still receive full validation.
+- Preserves: base records may rely on a valid local layer for credentials or other full-validation fields; only unsafe base endpoints fail independently.
+
+- [x] **Step 1: Reproduce safe-local-array shadowing of unsafe base Chat and Embedding endpoints**
+
+- [x] **Step 2: Add a split-save defense regression that bypasses the read guard and proves no build/write/swap**
+
+- [x] **Step 3: Add endpoint-only persisted checks at read, initial split, and rebase boundaries; keep effective full validation**
+
+- [x] **Step 4: Pin the valid base-missing-credential/local-supplied-credential case**
+
+- [x] **Step 5: Run focused and full verification, update the ignored report, and create a new non-amended commit**

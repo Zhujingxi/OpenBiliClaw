@@ -466,27 +466,35 @@ def _validate_candidate(models: ModelConfig) -> None:
         raise ModelConfigValidationError(tuple(_field_error(issue) for issue in issues))
 
 
-def _validate_public_endpoints(models: ModelConfig) -> None:
+def _validate_public_endpoints(*candidates: ModelConfig) -> None:
+    """Validate endpoint-only policy across persistence and effective views."""
     errors: list[ModelConfigFieldError] = []
-    records: tuple[tuple[RouteRecord, str], ...] = tuple(
-        (record, f"models.chat.connections[{index}]")
-        for index, record in enumerate(models.chat.connections)
-    ) + tuple(
-        (record, f"models.embedding.providers[{index}]")
-        for index, record in enumerate(models.embedding.providers)
-    )
-    for record, path in records:
-        try:
-            validated_native_base_url(record.base_url)
-        except InvalidModelEndpointError:
-            errors.append(
-                ModelConfigFieldError(
-                    path=f"{path}.base_url",
-                    code="invalid_endpoint",
-                    message="Base URL must be a safe HTTP or HTTPS endpoint.",
-                    connection_id=record.id.strip() or None,
+    seen: set[tuple[str, str | None]] = set()
+    for models in candidates:
+        records: tuple[tuple[RouteRecord, str], ...] = tuple(
+            (record, f"models.chat.connections[{index}]")
+            for index, record in enumerate(models.chat.connections)
+        ) + tuple(
+            (record, f"models.embedding.providers[{index}]")
+            for index, record in enumerate(models.embedding.providers)
+        )
+        for record, path in records:
+            try:
+                validated_native_base_url(record.base_url)
+            except InvalidModelEndpointError:
+                connection_id = record.id.strip() or None
+                key = (path, connection_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                errors.append(
+                    ModelConfigFieldError(
+                        path=f"{path}.base_url",
+                        code="invalid_endpoint",
+                        message="Base URL must be a safe HTTP or HTTPS endpoint.",
+                        connection_id=connection_id,
+                    )
                 )
-            )
     if errors:
         raise ModelConfigValidationError(tuple(errors))
 
@@ -540,7 +548,7 @@ class ModelConfigService:
                 exc.message,
                 source=exc.source,
             ) from None
-        _validate_public_endpoints(state.models)
+        _validate_public_endpoints(state.persisted_models, state.models)
         return state
 
     @staticmethod
@@ -634,6 +642,7 @@ class ModelConfigService:
                 request.migration_resolutions,
             )
             persisted, effective = self._split_local_candidate(state, requested)
+            _validate_public_endpoints(persisted, effective)
             _validate_candidate(effective)
             revision = compute_model_revision(effective)
             try:
@@ -667,6 +676,7 @@ class ModelConfigService:
                         )
 
                     persisted, effective = self._split_local_candidate(latest, requested)
+                    _validate_public_endpoints(persisted, effective)
                     _validate_candidate(effective)
                     rebased_revision = compute_model_revision(effective)
                     if rebased_revision != revision:
