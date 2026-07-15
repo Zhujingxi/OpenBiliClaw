@@ -16,6 +16,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 LLM_CONNECTIVITY_PROBE_MAX_TOKENS = 4096
+# Balanced default for provider-native reasoning controls.  Channel-facing
+# callers still pass ``""`` explicitly through LLMService; each adapter then
+# disables reasoning or selects the cheapest supported approximation.
+DEFAULT_REASONING_EFFORT = "medium"
 
 
 class LLMProviderError(Exception):
@@ -409,12 +413,11 @@ class LLMProvider(ABC):
             max_tokens: Maximum tokens in response.
             json_mode: Whether to request structured JSON output.
             reasoning_effort: Per-call override for the provider's
-                ``reasoning_effort`` setting (currently honoured by
-                DeepSeek; ignored by other providers). ``None`` means
-                "use the provider's configured default";
-                ``""`` means "explicitly disable thinking for this
-                call" (used by structured tasks like discovery's
-                ``_evaluate_batch`` that don't benefit from reasoning).
+                reasoning control. ``None`` means "use the provider's
+                configured default" (``medium`` for adapters with a portable
+                effort control); ``""`` requests no reasoning for this call.
+                Providers whose models cannot fully disable thinking use the
+                lowest supported level instead.
             model: Optional per-call model override. Empty/whitespace
                 values fall back to the provider's configured default
                 without mutating provider state.
@@ -438,6 +441,12 @@ class LLMProvider(ABC):
             resp = await self.complete(
                 [{"role": "user", "content": "hi"}],
                 max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                # A connectivity probe only needs one visible response.
+                # Letting DeepSeek inherit reasoning_effort="max" turns
+                # this tiny probe into a 32K-token thinking request, which
+                # commonly exceeds the guided-init timeout and falsely marks
+                # a healthy provider unavailable.
+                reasoning_effort="",
             )
             return bool(resp.content)
         except Exception:
@@ -462,8 +471,8 @@ class LLMRegistry:
         # consulted and has been removed; empty provider = fallback off).
         self.fallback_provider: str = ""
         # Names of providers that should NOT appear in the chat-completion
-        # fallback chain — typically an Ollama instance registered solely
-        # for embedding (see register(..., chat_capable=False)).
+        # fallback chain — for example a legacy/injected Ollama instance
+        # registered solely for embedding diagnostics.
         self._chat_disabled: set[str] = set()
 
     def register(
@@ -479,21 +488,13 @@ class LLMRegistry:
             provider: LLM provider instance.
             default: Whether to set as default provider.
             chat_capable: When False, the provider is registered for
-                non-chat use (typically Ollama for embedding-only) and
-                will NOT appear in the chat-completion fallback chain.
-                Default True for backward compat — every other call site
-                wants chat capability.
+                non-chat use and will NOT appear in the chat-completion
+                fallback chain. Default True for backward compatibility.
 
-                Why this matters: if the user only set
-                ``[llm.embedding] provider = "ollama"`` and never
-                configured ``[llm.ollama] model``, the embedding service
-                still needs Ollama to be in the registry — but the
-                model on disk is ``bge-m3``, which can't serve
-                ``/api/chat`` requests. Without this flag, when the
-                primary cloud provider hits a transient error, the
-                fallback chain happily picks Ollama, gets a 404 from
-                ``/api/chat``, and the user sees
-                ``All providers failed (openai, ollama)``.
+                Modern embedding builds a dedicated provider outside this
+                registry. The flag remains a defensive boundary for legacy
+                or injected non-chat providers: a local ``bge-m3`` instance
+                must never receive ``/api/chat`` fallback requests.
         """
         self._providers[provider.name] = provider
         if not chat_capable:
@@ -649,9 +650,14 @@ class LLMRegistry:
             raise
 
     async def health_check_all(self) -> dict[str, HealthCheckResult]:
-        """Run health checks for all registered providers."""
+        """Run health checks for all registered chat-capable providers."""
         results: dict[str, HealthCheckResult] = {}
         for provider_name in self.available_providers:
+            # ``health_check`` is a real chat completion. Never send one to
+            # an embedding-only registration: that used to probe an implicit
+            # ``llama3`` model and produced recurring Ollama 404s.
+            if not self.is_chat_capable(provider_name):
+                continue
             provider = self.get(provider_name)
             try:
                 available = await provider.health_check()

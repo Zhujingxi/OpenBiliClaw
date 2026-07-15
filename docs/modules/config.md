@@ -103,7 +103,7 @@ auto_sync_enabled = false
 | `concurrency` | int | `4` | 单 runtime 的 LLM provider 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。API/OpenClaw/CLI composition 内所有服务共享同一 gate；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16`，显式正数旧值不会被覆盖 |
 | `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider。（v0.3.156+ 移除了从未被读取的 `fallback_enabled` 布尔开关：非空 provider 即启用；存量 config.toml 里的旧 key 会被忽略） |
 
-> **`fallback_provider` 保存校验（v0.3.155+）：** 非空时 `_collect_config_issues` 会按 blocking 级拦下所有「永远不会生效」的死状态——未知 provider 名（含浏览器网页翻译写坏的值，提示关闭网页翻译重选）、与 `default_provider` 同名（同名备选永远不会触发）、以及凭据不足以完成注册：`openai` / `claude` / `gemini` / `deepseek` / `openrouter` / `openai_compatible` 缺 `api_key`（gemini 可用 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 环境变量豁免，openai 在 `auth_mode = "codex_oauth"` 时豁免）、`openai_compatible` 额外缺 `base_url`、`ollama` 的 `[llm.ollama]` 既无 `model` 也无 `base_url`。校验独立于默认 provider 检查——默认 provider 本身写坏也不会遮蔽备选问题；`PUT /api/config` 遇到 blocking issue 返回 400 且不写盘。绕过保存校验（环境变量覆盖 / 手改 config.toml）时，`build_llm_registry` 仍会对死状态按具体原因打一次 WARNING 兜底。
+> **`fallback_provider` 保存校验（v0.3.155+）：** 非空时 `_collect_config_issues` 会按 blocking 级拦下所有「永远不会生效」的死状态——未知 provider 名（含浏览器网页翻译写坏的值，提示关闭网页翻译重选）、与 `default_provider` 同名（同名备选永远不会触发）、以及凭据不足以完成注册：`openai` / `claude` / `gemini` / `deepseek` / `openrouter` / `openai_compatible` 缺 `api_key`（gemini 可用 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 环境变量豁免，openai 在 `auth_mode = "codex_oauth"` 时豁免）、`openai_compatible` 额外缺 `base_url`、`ollama` 缺 `[llm.ollama].model`。Ollama 的 `base_url` 只能定位服务，不能替代模型名；系统不会再隐式补 `llama3`。校验独立于默认 provider 检查——默认 provider 本身写坏也不会遮蔽备选问题；`PUT /api/config` 遇到 blocking issue 返回 400 且不写盘。绕过保存校验（环境变量覆盖 / 手改 config.toml）时，`build_llm_registry` 仍会对死状态按具体原因打一次 WARNING 兜底。
 
 ### `[llm.openai]`
 
@@ -114,6 +114,7 @@ auto_sync_enabled = false
 | `base_url` | string | `""` | 留空使用 OpenAI 官方 `https://api.openai.com/v1`；指向任何 OpenAI 兼容服务的 `/v1` 端点：Azure OpenAI / vLLM / LMStudio / OneAPI / Cloudflare AI Gateway / 自建 LLM 网关 |
 | `auth_mode` | string | `""` | 认证模式：`""` / `"api_key"` 使用 `api_key`；`"codex_oauth"` 使用 `openbiliclaw login codex` 导入的 Codex CLI ChatGPT OAuth 凭据 |
 | `api_flavor` | string | `""` | API 端点协议（issue #72）：`""` / `"chat_completions"` 走 `/v1/chat/completions`（默认）；`"responses"` 走 `/v1/responses`——部分第三方网关的 GPT 模型只开放这个端点。非法值会被 `_collect_config_issues` 以 blocking 级拦下 |
+| `reasoning_effort` | string | `"medium"` | 仅 OpenAI 官方 endpoint 的 GPT-5 / o-series 生效；Chat Completions 映射到 `reasoning_effort`，Responses 映射到 `reasoning.effort`。普通 GPT-4、自定义 Base URL 与泛兼容网关不发送，避免未知后端 400 |
 
 > **「openai」是协议家族，不是厂商。** v0.3.5 起 `init` 向导会显式说明这一点。任何兼容 `POST /v1/chat/completions` 的服务都填到这一段，区别只在 `base_url`。
 > 例如：
@@ -130,6 +131,7 @@ auto_sync_enabled = false
 | `api_key` | string | `""` | Anthropic API Key（default_provider=claude 时必填） |
 | `model` | string | `"claude-sonnet-4-6"` | 模型名称 |
 | `base_url` | string | `""` | 留空 = Anthropic 官方 `https://api.anthropic.com`；使用第三方中转 / 网关时填其地址（需实现 Anthropic 协议 `/v1/messages`，issue #72） |
+| `reasoning_effort` | string | `"medium"` | Claude Sonnet 4.6+、Opus 4.5+ 等已确认型号映射到 `output_config.effort`；旧型号不发送。空渠道调用在支持型号上映射为最低安全档 `low` |
 
 ### `[llm.gemini]`
 
@@ -137,6 +139,7 @@ auto_sync_enabled = false
 |----|------|--------|------|
 | `api_key` | string | `""` | Gemini API Key（default_provider=gemini 时，若未填写则回退读取 `GOOGLE_API_KEY` / `GEMINI_API_KEY`） |
 | `model` | string | `"gemini-2.5-flash"` | Gemini 模型名称 |
+| `reasoning_effort` | string | `"medium"` | Gemini 3 映射 `thinkingLevel`；Gemini 2.5 以当前输出上限的 50% budget 近似中档。空渠道调用在 2.5 Flash 关闭 thinking，在不能关闭的 2.5 Pro / Gemini 3 降到最低合法档 |
 
 > Gemini provider 按官方 quickstart 走 `google-genai` SDK 的 Gemini Developer API，不是 Vertex AI。
 
@@ -146,8 +149,8 @@ auto_sync_enabled = false
 |----|------|--------|------|
 | `api_key` | string | `""` | DeepSeek API Key |
 | `model` | string | `"deepseek-v4-flash"` | 模型名称（可选 `deepseek-v4-pro`；旧 `deepseek-chat` / `deepseek-reasoner` 将于 2026/07/24 弃用） |
-| `base_url` | string | `"https://api.deepseek.com"` | API 地址 |
-| `reasoning_effort` | string | `"max"` | DeepSeek v4 thinking 模式：`""` 关闭，`"high"` / `"max"` 开启。插件 / PC Web 设置页选择空值会显式写入 `reasoning_effort = ""`，不会回落到默认 `"max"` |
+| `base_url` | string | `"https://api.deepseek.com"` | API 地址；可填 DeepSeek-compatible 中转 / 私有网关，registry 会把该值实际传给 SDK，并按这个 endpoint 决定直连或使用 `[network]` 代理 |
+| `reasoning_effort` | string | `"medium"` | 深度任务默认均衡档；DeepSeek 官方会把 portable `low/medium` 映射为 native `high`，`xhigh/max` 映射为 `max`。渠道型 discovery / recommendation / sources 调用仍按单次 `""` 真正关闭 thinking；手动设 `""` 可全局关闭 |
 
 ### `[llm.ollama]`
 
@@ -158,6 +161,8 @@ auto_sync_enabled = false
 | `num_ctx` | int | `0` | 上下文窗口 (tokens)。`0` = 用 Ollama 服务端默认值（通常 4096），走 `/v1` 兼容层。`>0`（推荐 `8192`）时聊天改走原生 `/api/chat` 端点并传 `options.num_ctx`——`/v1` 兼容层会静默丢弃 `num_ctx`，大批量 prompt 超 4096 即被截断、本地小模型输出无法解析的 JSON。仅 Ollama 生效 |
 
 > Ollama 不需要 API Key，适合本地开发测试。
+
+> **聊天模型必须明确填写：** `model` 为空时 Ollama 不会进入 chat registry，即使 `base_url` 非空、`default_provider/fallback_provider = "ollama"` 也不会猜模型或回退到 `llama3`。只使用 Ollama `bge-m3` 做 embedding 时保持 chat `model` 为空即可；embedding 会走独立 provider，不会触发聊天探针。
 >
 > **`num_ctx` 为何重要：** Ollama 的 OpenAI 兼容 `/v1` 端点不接受 `num_ctx`，模型按服务端默认上下文（多为 4096）加载。发现循环里 discovery 批量评估 / 推荐文案批量生成等 prompt 很容易超 4096，被静默截断后小模型（如 `qwen:7b`）就会吐出非法 JSON、或为整批视频生成同一句重复文案。设 `num_ctx = 8192` 后，OpenBiliClaw 改用原生 `/api/chat` 端点（已实测 `context_length` 真正变为 8192）即可规避。
 
@@ -170,6 +175,7 @@ auto_sync_enabled = false
 | `base_url` | string | `"https://openrouter.ai/api/v1"` | OpenRouter API 地址 |
 | `http_referer` | string | `""` | 可选的 `HTTP-Referer` 请求头 |
 | `x_title` | string | `"OpenBiliClaw"` | 可选的 `X-Title` 请求头 |
+| `reasoning_effort` | string | `"medium"` | 通过 OpenRouter `reasoning.effort` 统一映射目标厂商；空渠道调用不发送（adapter 没有 per-model mandatory metadata，不能安全地对强制推理模型发 `none`） |
 
 > `http_referer` 和 `x_title` 都是可选项；留空时不会阻止请求发送。
 

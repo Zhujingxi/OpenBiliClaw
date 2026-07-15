@@ -5,13 +5,56 @@ from pathlib import Path
 import pytest
 
 
+def test_profile_analysis_default_budget_scales_with_chunk_count() -> None:
+    import openbiliclaw.cli as cli
+
+    assert cli._profile_analysis_timeout_seconds(event_count=0, requested=None) == 600
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=400, requested=None, concurrency=1) == 900
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=None, concurrency=1)
+        == 2100
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=None, concurrency=2)
+        == 1200
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=None, concurrency=3)
+        == 900
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=12.5, concurrency=1)
+        == 12.5
+    )
+    assert cli._profile_analysis_timeout_seconds(event_count=1100, requested=0) is None
+
+
+def test_profile_analysis_concurrency_reads_soul_llm_service() -> None:
+    import openbiliclaw.cli as cli
+
+    class Service:
+        concurrency = 3
+
+    class Analyzer:
+        registry = Service()
+
+    class Engine:
+        _preference_analyzer = Analyzer()
+
+    assert cli._profile_analysis_concurrency(Engine()) == 3
+    assert cli._profile_analysis_concurrency(object()) == 1
+
+
 def test_setup_wizard_static_contract_uses_guided_init_endpoint() -> None:
     """Static guard: setup must reference guided init and not the legacy poke."""
     html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
     assert 'data-panel="3"' in html
-    assert "GET /api/init-status" in html or 'fetch("/api/init-status"' in html
-    assert 'fetch("/api/init"' in html
+    assert 'fetchWithTimeout("/api/init-status"' in html
+    assert 'fetchWithTimeout("/api/init"' in html
+    assert 'fetchWithTimeout("/api/init/cancel"' in html
     assert "init_progress" in html
     assert "/api/init-completed" not in html
 
@@ -368,7 +411,11 @@ def test_init_stage_out_accepts_and_omits_progress_fields() -> None:
 def test_init_status_out_has_last_activity_default() -> None:
     from openbiliclaw.api.models import InitStatusOut
 
-    assert InitStatusOut().last_activity == ""
+    status = InitStatusOut()
+    assert status.last_activity == ""
+    assert status.last_heartbeat_at == ""
+    assert status.last_progress_at == ""
+    assert status.progress_sequence == 0
 
 
 def test_heartbeat_interval_bounds_last_activity_freshness() -> None:
@@ -434,6 +481,9 @@ def test_init_status_endpoint_surfaces_last_activity(tmp_path) -> None:
         body = client.get("/api/init-status").json()
     assert "last_activity" in body
     assert isinstance(body["last_activity"], str)
+    assert "last_heartbeat_at" in body
+    assert "last_progress_at" in body
+    assert "progress_sequence" in body
 
 
 # ── init-progress-visibility Phase 1: run_guided_init producer wiring ─────────
@@ -457,10 +507,29 @@ class _RecordingCoordinator:
         self.events.append(("done", n))
 
     async def stage_progress(
-        self, run_id: str, stage: int, *, done: int, total: int, note=None
+        self,
+        run_id: str,
+        stage: int,
+        *,
+        done: int,
+        total: int,
+        note=None,
+        mode="determinate",
+        elapsed_seconds=None,
+        max_seconds=None,
+        substantive=True,
     ) -> None:
         self.stage_progress_calls.append(
-            {"stage": stage, "done": done, "total": total, "note": note}
+            {
+                "stage": stage,
+                "done": done,
+                "total": total,
+                "note": note,
+                "mode": mode,
+                "elapsed_seconds": elapsed_seconds,
+                "max_seconds": max_seconds,
+                "substantive": substantive,
+            }
         )
 
     def register_enqueued_task(self, run_id: str, task_id: str) -> None:
@@ -590,8 +659,16 @@ async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monke
     ]
 
     stage2 = [c for c in coord.stage_progress_calls if c["stage"] == 2]
-    assert [(c["done"], c["total"]) for c in stage2] == [(1, 3), (2, 3), (3, 3)]
+    assert [(c["done"], c["total"]) for c in stage2] == [
+        (0, 1),
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert stage2[0]["note"] == "已完成 0/1 批 · AI 开始处理（并发上限 1）"
     assert stage2[-1]["note"] == "第 3/3 批"
+    assert stage2[0]["elapsed_seconds"] == 0
+    assert all(call["max_seconds"] == 600 for call in stage2)
     assert ("analyze", True) in scope_observations
     assert ("profile", True) in scope_observations
     assert ("discover", False) in scope_observations
@@ -676,7 +753,7 @@ async def test_run_guided_init_bounds_hung_preference_analysis(monkeypatch) -> N
         )
 
     assert excinfo.value.reason == "analyze_failed"
-    assert "超过 6 分钟" in excinfo.value.message
+    assert "本轮 1 分钟上限" in excinfo.value.message
     assert "Base URL" in excinfo.value.message
     assert "模型名" in excinfo.value.message
     assert "重试初始化" in excinfo.value.message
@@ -684,6 +761,68 @@ async def test_run_guided_init_bounds_hung_preference_analysis(monkeypatch) -> N
     assert engine.discover_profiles == []
     assert coord.started_stages == [1, 2]
     assert coord.done_stages == [1]
+
+
+async def test_run_guided_init_bounds_stage1_and_stops_extension_worker(monkeypatch) -> None:
+    import threading
+
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine()
+    _patch_run_guided_init_collectors(monkeypatch, engine)
+    cancel_seen = threading.Event()
+
+    def _blocking_collector(
+        task_id,
+        *,
+        max_wait_seconds=None,
+        cancel_event=None,
+    ):
+        assert task_id == "xhs-timeout"
+        assert cancel_event is not None
+        cancel_event.wait(2)
+        if cancel_event.is_set():
+            cancel_seen.set()
+        return [], {}, "timeout"
+
+    monkeypatch.setattr(cli, "_enqueue_xhs_bootstrap_task", lambda **kwargs: "xhs-timeout")
+    monkeypatch.setattr(cli, "_kick_task_dispatcher", lambda source: None)
+    monkeypatch.setattr(cli, "_collect_xhs_bootstrap_events", _blocking_collector)
+
+    class _RichCoordinator(_RecordingCoordinator):
+        async def stage_progress(self, run_id, stage, **kwargs):
+            self.stage_progress_calls.append({"stage": stage, **kwargs})
+
+    coord = _RichCoordinator()
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=None,
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=False,
+            include_xhs=True,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=lambda *args, **kwargs: None,
+            coordinator=coord,
+            run_id="run-collection-timeout",
+            collection_timeout_seconds=0.03,
+        )
+
+    assert excinfo.value.reason == "collection_timeout"
+    assert "总等待上限" in excinfo.value.message
+    assert cancel_seen.wait(1), "blocking extension collector did not receive cancellation"
+    countdowns = [
+        call
+        for call in coord.stage_progress_calls
+        if call["stage"] == 1 and call.get("mode") == "indeterminate"
+    ]
+    assert countdowns
+    assert countdowns[-1]["substantive"] is False
+    assert "阶段剩余最多" in countdowns[-1]["note"]
 
 
 async def test_run_guided_init_bounds_hung_profile_build(monkeypatch) -> None:

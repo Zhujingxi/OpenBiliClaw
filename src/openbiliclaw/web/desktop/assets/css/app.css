@@ -974,6 +974,8 @@
     .init-progress { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); }
     .init-progress-track { height: 8px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-warm); }
     .init-progress-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--success)); transition: width var(--motion-base) var(--ease-standard); }
+    .init-progress-fill.indeterminate { background-size: 220% 100%; animation: init-progress-shimmer 1.35s linear infinite; }
+    @keyframes init-progress-shimmer { to { background-position: -220% 0; } }
     .init-progress p, .init-reason { margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.5; }
     .init-reason { padding: 10px var(--space-3); border: 1px solid color-mix(in oklab, var(--danger), var(--border) 65%); border-radius: var(--radius-md); background: color-mix(in oklab, var(--danger), var(--surface) 92%); color: var(--danger); }
     /* Liveness / expectation lines (init-progress Phase 2): quiet while fresh,
@@ -981,6 +983,7 @@
     .init-stall-hint, .init-expectation { margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.5; }
     .init-stall-hint.stale { color: var(--warn-fg); }
     .init-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+    @media (prefers-reduced-motion: reduce) { .init-progress-fill.indeterminate { animation: none; } }
     .inline-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); grid-column: 1 / -1; }
     .inline-row .settings-field { min-width: 0; }
     [data-od-id="profile-rail"] .eyebrow { margin: 0 0 var(--space-2); }

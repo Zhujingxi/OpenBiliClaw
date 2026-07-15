@@ -684,23 +684,76 @@ test("20-step simulated status sequence is non-decreasing and ends at 100", () =
   assert.equal(prev, 100);
 });
 
-test("stalenessView flips to the stall copy after 90s without backend activity", () => {
+test("stalenessView distinguishes a live backend from stalled substantive work", () => {
   resetInitProgressViewState();
   const t0 = 5_000_000;
-  const status = (activity: string, sequence: number) =>
-    runningStage2Status({ run_id: "run-stale", last_activity: activity, sequence });
+  const status = (heartbeat: string, sequence: number, progressSequence = 4) =>
+    runningStage2Status({
+      run_id: "run-stale",
+      last_activity: heartbeat,
+      last_heartbeat_at: heartbeat,
+      last_progress_at: "2026-07-10 08:00:00",
+      progress_sequence: progressSequence,
+      sequence,
+    });
   const fresh = stalenessView(status("2026-07-10 08:00:00", 7), t0);
   assert.equal(fresh.fresh, true);
-  assert.ok(fresh.text.includes("进行中"));
-  // Same activity marker 91s later → stalled, amber copy.
-  const stalled = stalenessView(status("2026-07-10 08:00:00", 7), t0 + 91_000);
+  assert.ok(fresh.text.includes("后端在线"));
+  // Heartbeat advances, but progress_sequence does not: connected yet stalled.
+  const stalled = stalenessView(status("2026-07-10 08:01:31", 10), t0 + 91_000);
   assert.equal(stalled.fresh, false);
   assert.ok(stalled.staleSeconds > INIT_STALL_THRESHOLD_SECONDS);
-  assert.ok(stalled.text.includes("没有新进展"));
+  assert.ok(stalled.text.includes("后端在线"));
+  assert.ok(stalled.text.includes("没有完成新的工作单元"));
   assert.ok(stalled.text.includes("取消"));
-  // Backend writes again (heartbeat) → fresh again.
-  const revived = stalenessView(status("2026-07-10 08:01:35", 8), t0 + 95_000);
+  // A substantive milestone advances independently and clears the warning.
+  const revived = stalenessView(status("2026-07-10 08:01:35", 11, 11), t0 + 95_000);
   assert.equal(revived.fresh, true);
+});
+
+test("stalenessView reports a missing backend heartbeat separately", () => {
+  resetInitProgressViewState();
+  const status = runningStage2Status({
+    run_id: "run-heartbeat-stale",
+    last_activity: "2026-07-10 08:00:00",
+    last_heartbeat_at: "2026-07-10 08:00:00",
+    last_progress_at: "2026-07-10 08:00:00",
+    progress_sequence: 3,
+    sequence: 3,
+  });
+  stalenessView(status, 7_000_000);
+  const stalled = stalenessView(status, 7_091_000);
+  assert.equal(stalled.fresh, false);
+  assert.ok(stalled.text.includes("没有心跳"));
+  assert.ok(stalled.text.includes("连接可能中断"));
+});
+
+test("indeterminate stage progress exposes mode without inventing item percentage", () => {
+  resetInitProgressViewState();
+  const status = runningStage2Status({
+    run_id: "run-indeterminate",
+    stages: [
+      { n: 1, label: "拉取数据", status: "ok", reason: null },
+      {
+        n: 2,
+        label: "分析偏好",
+        status: "running",
+        reason: null,
+        eta_seconds: 180,
+        progress: {
+          done: 0,
+          total: 0,
+          mode: "indeterminate",
+          elapsed_seconds: 40,
+          max_seconds: 360,
+          note: "AI 正在处理",
+        },
+      },
+    ],
+  });
+  const view = initProgressView(status, 8_000_000);
+  assert.equal(view.indeterminate, true);
+  assert.ok(view.stageLabel.includes("AI 正在处理"));
 });
 
 test("stalenessView stays fresh on old backends without last_activity", () => {
@@ -724,10 +777,21 @@ test("stageEtaText rounds up to half minutes and expectation copy exists", () =>
   assert.equal(stageEtaText({ eta_seconds: 180 }), "本阶段通常约 3 分钟");
   assert.equal(stageEtaText({ eta_seconds: 70 }), "本阶段通常约 1.5 分钟");
   assert.equal(stageEtaText({ eta_seconds: 120 }), "本阶段通常约 2 分钟");
+  assert.equal(
+    stageEtaText({
+      eta_seconds: 180,
+      progress: { elapsed_seconds: 181, max_seconds: 900 },
+    }),
+    "已超常见用时；本轮上限 15 分钟",
+  );
+  assert.equal(
+    stageEtaText({ eta_seconds: 180, progress: { elapsed_seconds: 181 } }),
+    "已超常见用时；AI 或平台仍可能在处理",
+  );
   assert.equal(stageEtaText({}), "");
   assert.equal(stageEtaText(null), "");
   assert.ok(INIT_EXPECTATION_HINT.includes("严格按顺序生成"));
-  assert.ok(INIT_EXPECTATION_HINT.includes("4–10 分钟"));
+  assert.ok(INIT_EXPECTATION_HINT.includes("4–20 分钟"));
   assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
 });
 

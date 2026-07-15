@@ -37,11 +37,14 @@ class OllamaProvider(OpenAIProvider):
     def __init__(
         self,
         api_key: str = "ollama",
-        model: str = "llama3",
+        model: str = "",
         base_url: str = "http://127.0.0.1:11434/v1",
         timeout: float = 300.0,
         num_ctx: int = 0,
     ) -> None:
+        model = model.strip()
+        if not model:
+            raise ValueError("Ollama chat model must be explicitly configured.")
         super().__init__(
             api_key=api_key,
             model=model,

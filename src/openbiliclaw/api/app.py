@@ -199,21 +199,20 @@ logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
-# Guided-init liveness heartbeat period (init-progress spec Phase 0). A stage-2
-# LLM call can block for minutes with no status write of its own, so a periodic
-# coordinator.touch() keeps ``last_activity`` fresh. Kept ≤30s so any hang under
-# ~65s still lands ≥2 touches — the GUI stall indicator (90s = 3× this) then
-# only fires when work has genuinely stopped. Changing this MUST re-tune the
-# front-end 90s stall threshold in lock-step.
+# Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
+# provider call, so ``touch()`` proves that the wrapper/event loop still owns the
+# run. It deliberately does not advance the separate useful-progress clock.
 _INIT_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 async def _run_init_heartbeat(
     coordinator: Any, run_id: str, *, interval: float = _INIT_HEARTBEAT_INTERVAL_SECONDS
 ) -> None:
-    """Periodically bump init_runs.updated_at so ``last_activity`` stays fresh
-    during long, silent stages. ``touch()`` publishes no SSE event (invariant
-    5). A touch failure must not kill init, so it's swallowed at WARNING."""
+    """Refresh the init owner lease during long, silent stages.
+
+    ``touch()`` publishes no SSE event and does not claim useful progress. A
+    heartbeat failure must not kill init, so it is swallowed at WARNING.
+    """
     while True:
         await asyncio.sleep(interval)
         try:
@@ -2278,6 +2277,21 @@ def create_app(
         base_url, _ = _embedding_ollama_target()
         return is_loopback(base_url)
 
+    def _peek_embedding_ready(*, strict: bool = False) -> bool:
+        """Read the last embedding outcome without starting provider I/O.
+
+        Guided init already performs a strict pre-flight probe. While that run
+        owns the LLM/embedding budget, status polling must remain observational
+        and must not contend with or bill another provider request.
+        """
+        soul_engine = getattr(ctx, "soul_engine", None)
+        service = getattr(soul_engine, "_embedding_service", None)
+        if service is None:
+            return False
+        if not callable(getattr(service, "probe", None)):
+            return True
+        return _embedding_probe_result(_embedding_probe_outcome, strict=strict)
+
     async def _diagnose_embedding(ready: bool) -> tuple[str, str]:
         """Classify why embedding is not ready (``("ok", "")`` when it is).
 
@@ -2355,6 +2369,21 @@ def create_app(
             _embedding_diag_value = diag
             _embedding_diag_checked_at = time.monotonic()
             return diag
+
+    def _peek_embedding_diagnosis(ready: bool) -> tuple[str, str]:
+        """Return a non-I/O embedding diagnosis while guided init is active."""
+        if ready:
+            return ("ok", "")
+        pull_progress = _embedding_pull_progress_view()
+        if pull_progress["running"]:
+            return ("repairing", str(pull_progress["status_text"] or _repair_progress_detail()))
+        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
+        provider = str(getattr(emb, "provider", "") or "").strip()
+        if not provider:
+            return ("disabled", "")
+        if _embedding_diag_checked_at != float("-inf"):
+            return _embedding_diag_value
+        return ("checking", "初始化正在使用 AI 服务，完成后会自动重新检测向量服务。")
 
     async def _health_embedding_ready(*, strict: bool = False) -> bool:
         """Interpret the cached live embedding probe for health or strict init.
@@ -2477,20 +2506,53 @@ def create_app(
 
         coord = ctx.init_coordinator
         prereqs = ctx.init_prereqs
+        # A task can finish after its terminal DB write fails. Reconcile that
+        # orphan before reporting status so retry/cancel is never blocked by a
+        # logical ``running`` row with no owner.
+        await coord.reconcile_orphaned_run()
         run = coord.get_status()
         initialized = bool(_health_profile_ready())
         running = bool(run["running"])
-        if initialized and not running:
+        terminal = run.get("status") in ("failed", "cancelled")
+        embedding_required = _embedding_required_for_init()
+        has_cached_readiness = getattr(prereqs, "has_cached_readiness", None)
+        terminal_cache_ready = bool(
+            terminal
+            and callable(has_cached_readiness)
+            and has_cached_readiness()
+            and (not embedding_required or _embedding_ready_checked_at != float("-inf"))
+        )
+        if running:
+            # Status polling is strictly observational while init owns the
+            # expensive providers. Pre-flight already established readiness;
+            # cached values are enough for a disabled checklist.
+            bili = prereqs.peek_bilibili()
+            chat = prereqs.peek_chat()
+            embedding = _peek_embedding_ready(strict=True)
+        elif initialized:
             # Steady state: once a profile exists the checklist is
             # informational only (can_start is false regardless, and POST
             # /api/init revalidates live before any force rebuild). Skip the
             # real chat/Bilibili probes so an open polling page — /setup/ or
             # the desktop web waiting for the first pool — no longer burns a
-            # billable LLM ping per TTL window. Embedding stays live: it is
-            # the same TTL-cached probe /api/health already exercises.
+            # billable LLM ping per TTL window. Embedding is cache-only here
+            # too: immediately after init, background prewarm can occupy its
+            # provider semaphore for minutes, and a live status probe then
+            # makes the completed page look frozen. /api/health remains the
+            # dedicated live readiness surface; POST /api/init revalidates a
+            # force rebuild before reserving a new run.
             bili = prereqs.peek_bilibili()
             chat = prereqs.peek_chat()
-            embedding = await _health_embedding_ready(strict=True)
+            embedding = _peek_embedding_ready(strict=True)
+        elif terminal_cache_ready:
+            # The just-finished run already passed a strict pre-flight. Return
+            # its terminal state immediately so cancel/failure feedback is not
+            # hidden behind a second 30s cold-model probe. After a process
+            # restart these in-memory caches are absent and the live branch
+            # below still refreshes the checklist normally.
+            bili = prereqs.peek_bilibili()
+            chat = prereqs.peek_chat()
+            embedding = _peek_embedding_ready(strict=True)
         else:
             # Probe the three services concurrently — each is a real (now
             # strict) request with a generous cold-load timeout, so running
@@ -2510,7 +2572,6 @@ def create_app(
         # which only POST /api/init sees. ``bilibili_logged_in`` stays in the
         # prerequisites payload so clients gate the start button themselves
         # when B站 is among the checked sources; POST revalidates regardless.
-        embedding_required = _embedding_required_for_init()
         hard_ok = chat and (embedding or not embedding_required)
         # Mirror POST /api/init's guards: an already-initialized profile blocks
         # a (non-force) start, so can_start must reflect that too — otherwise E1
@@ -2532,7 +2593,11 @@ def create_app(
                         if candidate.startswith("画像分析失败："):
                             account_profile_error = candidate[:500]
 
-        embedding_check, embedding_detail = await _diagnose_embedding(bool(embedding))
+        embedding_check, embedding_detail = (
+            _peek_embedding_diagnosis(bool(embedding))
+            if running or terminal_cache_ready or initialized
+            else await _diagnose_embedding(bool(embedding))
+        )
         pull_progress = _embedding_pull_progress_view()
         pull_status = str(pull_progress.get("status_text") or "")
 
@@ -2560,6 +2625,14 @@ def create_app(
             # while the checklist showed all-green (field report 2026-07-05).
             # All clients already map local_only to "只能在本机发起初始化。".
             reason, detail = "local_only", "只能在本机发起初始化"
+        elif run.get("status") in ("failed", "cancelled"):
+            # The terminal run is the authoritative explanation of what just
+            # happened.  A follow-up readiness probe can independently fail
+            # (for example a cold local model timing out), but must not replace
+            # a precise persisted "analysis exceeded six minutes" error with
+            # the generic "AI service unavailable" banner.
+            reason = run.get("reason") or str(run.get("status"))
+            detail = str(run.get("detail") or "")
         elif not chat:
             reason = "llm_not_ready"
             detail = account_profile_error or "AI 服务还没配好或当前不可用"
@@ -2569,14 +2642,6 @@ def create_app(
             # Informational (does not flip can_start): blocks only if the
             # client keeps bilibili selected, which the UI enforces.
             reason, detail = "bilibili_not_logged_in", "还没检测到 B站 登录"
-        elif run.get("status") in ("failed", "cancelled"):
-            # Prereqs are fine and nothing is running, but the last run ended
-            # badly — surface why so the UI can show it (can_start stays true so
-            # the user can retry) (gui-init review). ``detail`` carries the
-            # stored failure specifics (exception summary / GuidedInitError
-            # message) so an internal_error is diagnosable from the UI.
-            reason = run.get("reason") or str(run.get("status"))
-            detail = str(run.get("detail") or "")
         elif account_profile_error:
             # The current probe is healthy again, so retry is allowed, but the
             # previous background analysis failure still explains why no
@@ -2615,6 +2680,9 @@ def create_app(
             reason=reason,
             detail=detail,
             last_activity=str(run.get("last_activity") or ""),
+            last_heartbeat_at=str(run.get("last_heartbeat_at") or ""),
+            last_progress_at=str(run.get("last_progress_at") or ""),
+            progress_sequence=int(run.get("progress_sequence") or 0),
         )
 
     def _init_runtime_supported() -> tuple[bool, str]:
@@ -2805,6 +2873,11 @@ def create_app(
         selected_sources = {str(s) for s in raw_sources} if isinstance(raw_sources, list) else None
 
         coord = ctx.init_coordinator
+
+        # Release a previous ownerless active row before source persistence or
+        # the single-flight CAS. Fresh ``starting`` rows retain their 120s
+        # lease, so concurrent starts are rejected rather than stolen.
+        await coord.reconcile_orphaned_run()
 
         supported, detail = _init_runtime_supported()
         if not supported:
@@ -3242,6 +3315,7 @@ def create_app(
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
         coord = ctx.init_coordinator
+        await coord.reconcile_orphaned_run()
         run = ctx.database.get_latest_init_run() if ctx.database is not None else None
         if run is None or not coord.init_active():
             return JSONResponse({"error": "not_running"}, status_code=409)

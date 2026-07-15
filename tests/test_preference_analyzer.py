@@ -12,6 +12,9 @@ from openbiliclaw.llm.service import LLMServiceError
 from openbiliclaw.soul.preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
     MAX_CONCURRENT_PREFERENCE_CHUNKS,
+    PREFERENCE_CHUNK_MAX_TOKENS,
+    PREFERENCE_REASONING_FALLBACK_MAX_TOKENS,
+    PreferenceAnalysisError,
     PreferenceAnalyzer,
 )
 
@@ -70,6 +73,7 @@ class CacheFlagStructuredService:
         temperature: float = 0.7,
         max_tokens: int = 4096,
         caller: str = "",
+        reasoning_effort: str | None = None,
         inject_core_memory: bool = True,
     ) -> LLMResponse:
         self.calls.append(
@@ -77,6 +81,8 @@ class CacheFlagStructuredService:
                 "system_instruction": system_instruction,
                 "user_input": user_input,
                 "inject_core_memory": inject_core_memory,
+                "max_tokens": max_tokens,
+                "reasoning_effort": reasoning_effort,
             }
         )
         return LLMResponse(
@@ -191,6 +197,11 @@ async def test_chunked_preference_analysis_disables_core_memory_injection() -> N
 
     assert len(service.calls) == 2
     assert [call["inject_core_memory"] for call in service.calls] == [False, False]
+    assert [call["max_tokens"] for call in service.calls] == [
+        PREFERENCE_CHUNK_MAX_TOKENS,
+        PREFERENCE_CHUNK_MAX_TOKENS,
+    ]
+    assert [call["reasoning_effort"] for call in service.calls] == ["", ""]
 
 
 @pytest.mark.asyncio
@@ -950,6 +961,181 @@ async def test_chunked_analysis_batches_initial_chunk_fanout() -> None:
     assert preference["interests"][0]["name"] == "科技"
     assert len(service.calls) == 20
     assert service.max_active_calls <= 16
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_respects_configured_llm_concurrency() -> None:
+    service = ConcurrentChunkStructuredService()
+    service.concurrency = 2
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": f"事件 {idx}"} for idx in range(8)],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert service.max_active_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_recursive_recovery_does_not_expand_fanout() -> None:
+    class SplitUntilSingleService(FakeStructuredService):
+        concurrency = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_calls = 0
+            self.max_active_calls = 0
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            self.active_calls += 1
+            self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            try:
+                await asyncio.sleep(0.005)
+                if str(kwargs["user_input"]).count('"event_type"') > 1:
+                    return LLMResponse(content="not json", provider="openai")
+                return LLMResponse(content='{"interests": []}', provider="openai")
+            finally:
+                self.active_calls -= 1
+
+    service = SplitUntilSingleService()
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": f"事件 {idx}"} for idx in range(8)],
+        existing_preference={},
+        event_chunk_size=4,
+    )
+
+    assert service.max_active_calls == 2
+    assert len(service.calls) == 14
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_retries_transient_rate_limit(monkeypatch) -> None:
+    from openbiliclaw.soul import preference_analyzer as module
+
+    class RateLimitedOnceService(FakeStructuredService):
+        concurrency = 1
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise LLMServiceError("openai_compatible rate limit exceeded")
+            return LLMResponse(content='{"interests": []}', provider="openai")
+
+    monkeypatch.setattr(module, "PREFERENCE_RATE_LIMIT_RETRY_SECONDS", 0)
+    service = RateLimitedOnceService()
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": "事件"}],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert len(service.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_does_not_retry_exhausted_balance(monkeypatch) -> None:
+    from openbiliclaw.soul import preference_analyzer as module
+
+    class ExhaustedBalanceService(FakeStructuredService):
+        concurrency = 1
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            raise LLMServiceError("HTTP 402: insufficient balance")
+
+    monkeypatch.setattr(module, "PREFERENCE_RATE_LIMIT_RETRY_SECONDS", 0)
+    service = ExhaustedBalanceService()
+
+    with pytest.raises(PreferenceAnalysisError, match="insufficient balance"):
+        await PreferenceAnalyzer(service).analyze_events(
+            events=[{"event_type": "view", "title": "事件"}],
+            existing_preference={},
+            event_chunk_size=1,
+        )
+
+    assert len(service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_retries_reasoning_only_length_once_with_larger_budget() -> None:
+    class ReasoningExhaustedOnceService(FakeStructuredService):
+        concurrency = 1
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.max_token_calls: list[int] = []
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            self.max_token_calls.append(int(kwargs["max_tokens"]))
+            if len(self.calls) == 1:
+                raise LLMServiceError(
+                    "All providers failed. Last error: openai_compatible returned reasoning "
+                    "but no final content (finish_reason=length); disable thinking/reasoning "
+                    "or increase max_tokens"
+                )
+            return LLMResponse(content='{"interests": []}', provider="openai")
+
+    service = ReasoningExhaustedOnceService()
+
+    await PreferenceAnalyzer(service).analyze_events(
+        events=[{"event_type": "view", "title": "事件"}],
+        existing_preference={},
+        event_chunk_size=1,
+    )
+
+    assert service.max_token_calls == [
+        PREFERENCE_CHUNK_MAX_TOKENS,
+        PREFERENCE_REASONING_FALLBACK_MAX_TOKENS,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chunked_analysis_cancels_and_drains_sibling_after_hard_failure() -> None:
+    class FailAndBlockService(FakeStructuredService):
+        concurrency = 2
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.active_calls = 0
+            self.both_started = asyncio.Event()
+            self.sibling_cancelled = False
+
+        async def complete_structured_task(self, **kwargs) -> LLMResponse:
+            self.calls.append(kwargs)
+            self.active_calls += 1
+            if self.active_calls == 2:
+                self.both_started.set()
+            try:
+                if "失败事件" in str(kwargs["user_input"]):
+                    await self.both_started.wait()
+                    raise LLMServiceError("hard provider failure")
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.sibling_cancelled = True
+                    raise
+            finally:
+                self.active_calls -= 1
+
+    service = FailAndBlockService()
+
+    with pytest.raises(PreferenceAnalysisError, match="hard provider failure"):
+        await PreferenceAnalyzer(service).analyze_events(
+            events=[
+                {"event_type": "view", "title": "失败事件"},
+                {"event_type": "view", "title": "等待事件"},
+            ],
+            existing_preference={},
+            event_chunk_size=1,
+        )
+
+    assert service.sibling_cancelled is True
+    assert service.active_calls == 0
 
 
 @pytest.mark.asyncio

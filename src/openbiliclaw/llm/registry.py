@@ -61,10 +61,10 @@ def build_llm_registry(
     for _name, provider in provider_specs:
         if provider is None:
             continue
-        # Ollama gets a special chat-capability check: the registry needs
-        # it for embedding even when the user never configured a chat
-        # model, but in that case it MUST stay out of the chat fallback
-        # chain (see _ollama_is_chat_capable + base.py:_fallback_order).
+        # Production Ollama registration already requires an explicit chat
+        # model. Keep the capability check as a defensive boundary for
+        # provider_overrides / legacy integrations that inject a non-chat
+        # Ollama instance into this registry.
         chat_capable = True
         if _name == "ollama" and not _ollama_is_chat_capable(config):
             chat_capable = False
@@ -83,10 +83,15 @@ def build_llm_registry(
         raise RegistryBuildError("No LLM providers are available from the current configuration.")
 
     configured_default = config.llm.default_provider
+    chat_providers = [
+        name for name in registry.available_providers if registry.is_chat_capable(name)
+    ]
+    if not chat_providers:
+        raise RegistryBuildError(
+            "No chat-capable LLM providers are available from the current configuration."
+        )
     effective_default = (
-        configured_default
-        if configured_default in registry.available_providers
-        else registry.available_providers[0]
+        configured_default if configured_default in chat_providers else chat_providers[0]
     )
     registry._default = effective_default
 
@@ -107,7 +112,7 @@ def build_llm_registry(
         elif fallback not in registry.available_providers:
             logger.warning(
                 "llm.fallback_provider=%r is not registered (likely missing "
-                "credentials such as api_key / base_url) — the fallback will "
+                "credentials such as api_key / base_url / model) — the fallback will "
                 "never be used.",
                 fallback,
             )
@@ -544,6 +549,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             api_flavor=config.llm.openai.api_flavor,
             proxy=_outbound_proxy(config.llm.openai.base_url),
             trust_env=_outbound_trust_env(config.llm.openai.base_url),
+            reasoning_effort=config.llm.openai.reasoning_effort,
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -555,6 +561,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         api_flavor=config.llm.openai.api_flavor,
         proxy=_outbound_proxy(config.llm.openai.base_url),
         trust_env=_outbound_trust_env(config.llm.openai.base_url),
+        reasoning_effort=config.llm.openai.reasoning_effort,
     )
 
 
@@ -570,6 +577,7 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url=config.llm.claude.base_url,
         proxy=_outbound_proxy(config.llm.claude.base_url),
         trust_env=_outbound_trust_env(config.llm.claude.base_url),
+        reasoning_effort=config.llm.claude.reasoning_effort,
     )
 
 
@@ -580,15 +588,15 @@ def _maybe_deepseek_provider(
         return overrides["deepseek"]
     if not config.llm.deepseek.api_key.strip():
         return None
-    # DeepSeek's endpoint (api.deepseek.com) is domestic — force direct so a
-    # user's overseas proxy for other models never routes it through the ladder.
+    base_url = config.llm.deepseek.base_url.strip() or "https://api.deepseek.com"
     return DeepSeekProvider(
         api_key=config.llm.deepseek.api_key,
         model=config.llm.deepseek.model or "deepseek-v4-flash",
+        base_url=base_url,
         reasoning_effort=config.llm.deepseek.reasoning_effort,
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy("https://api.deepseek.com"),
-        trust_env=_outbound_trust_env("https://api.deepseek.com"),
+        proxy=_outbound_proxy(base_url),
+        trust_env=_outbound_trust_env(base_url),
     )
 
 
@@ -612,13 +620,13 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         timeout=float(config.llm.timeout),
         proxy=_outbound_proxy(config.llm.gemini.base_url),
         trust_env=_outbound_trust_env(config.llm.gemini.base_url),
+        reasoning_effort=config.llm.gemini.reasoning_effort,
     )
 
 
 def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
-    # Keep the "model or base_url required" registration condition in sync
-    # with config.py `_collect_config_issues` (the `[llm].fallback_provider`
-    # ollama check — config cannot import the registry, cycle).
+    # Keep the explicit-model requirement in sync with config.py
+    # `_collect_config_issues` (config cannot import the registry, cycle).
     if "ollama" in overrides:
         return overrides["ollama"]
 
@@ -631,7 +639,12 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
     # longer need the old ``embedding_wants_ollama`` auto-register hack:
     # the chat registry stays clean, and Ollama is only registered here
     # when the user actually wants chat completions through it.
-    if not model and not raw_base_url:
+    # A URL only identifies an Ollama server; it says nothing about which
+    # chat model exists there. Historically this path substituted ``llama3``
+    # for an empty model, so an embedding-only desktop config repeatedly
+    # probed a model the user never selected. Chat now requires an explicit
+    # model; embedding builds its own provider above.
+    if not model:
         return None
     base_url = raw_base_url or "http://127.0.0.1:11434/v1"
     # Normalise: Ollama's OpenAI-compat shim lives at `/v1/...`. Older
@@ -643,7 +656,7 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url = base_url.rstrip("/") + "/v1"
     return OllamaProvider(
         api_key=config.llm.ollama.api_key or "ollama",
-        model=model or "llama3",
+        model=model,
         base_url=base_url,
         timeout=float(config.llm.timeout),
         num_ctx=int(config.llm.ollama.num_ctx),
@@ -651,47 +664,13 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
 
 
 def _ollama_is_chat_capable(config: Config) -> bool:
-    """Decide whether the registered Ollama instance can serve chat
-    completions, or only embedding requests.
+    """Return whether Ollama has an explicitly configured chat model.
 
-    The user opts in to chat capability by any of:
-      * setting ``[llm.ollama] model`` (their explicit chat model), or
-      * picking ``ollama`` as ``[llm].default_provider``, or
-      * naming ``ollama`` as ``[llm].fallback_provider`` — an explicit
-        request to use local Ollama as the chat fallback, or
-      * using it in any per-module override.
-
-    If none of those are true and we only registered Ollama because the
-    embedding section pointed there, treat it as embedding-only. The
-    fallback chain will skip it for chat completions, avoiding the
-    "All providers failed (..., ollama). Last error: ollama request
-    failed: 404" path when the only model on disk is bge-m3.
-
-    Note: when chat capability comes *solely* from ``fallback_provider``
-    (no explicit ``[llm.ollama] model``), the provider is built with the
-    ``llama3`` default — so the user must have a chat model pulled
-    locally for the fallback to actually serve requests. That's the
-    user's stated intent though, so a 404 at fallback time is a louder,
-    more honest failure than silently dropping Ollama from the chain.
-
-    Keep in sync with config.py `_collect_config_issues` (the
-    `[llm].fallback_provider` ollama check replicates the minimal
-    registration/chat-capability condition — config cannot import the
-    registry, cycle).
+    Naming Ollama as a default, fallback, or module provider is not enough:
+    unlike remote providers, its server URL cannot identify a model and the
+    runtime must never invent one. Keep this rule in sync with config.py.
     """
-    if config.llm.ollama.model.strip():
-        return True
-    if config.llm.default_provider.strip().lower() == "ollama":
-        return True
-    if config.llm.fallback_provider.strip().lower() == "ollama":
-        return True
-    for module in ("soul", "discovery", "recommendation", "evaluation"):
-        module_cfg = getattr(config.llm, module, None)
-        if module_cfg is None:
-            continue
-        if str(getattr(module_cfg, "provider", "")).strip().lower() == "ollama":
-            return True
-    return False
+    return bool(config.llm.ollama.model.strip())
 
 
 def _maybe_openrouter_provider(
@@ -712,6 +691,7 @@ def _maybe_openrouter_provider(
         trust_env=_outbound_trust_env(
             config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"
         ),
+        reasoning_effort=config.llm.openrouter.reasoning_effort,
     )
 
 

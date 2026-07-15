@@ -26,6 +26,7 @@ const REASON_TEXT = {
   internal_error: "初始化过程中出错了，请稍后重试。",
   interrupted: "上次初始化被打断（后端重启），可重试。",
   cancelled: "初始化已取消。",
+  collection_timeout: "数据采集达到总等待上限，已停止继续等待平台或扩展。",
   none: "",
 };
 
@@ -328,7 +329,7 @@ const STAGE_FRACTION_FALLBACK = 0.5;
 export const INIT_STALL_THRESHOLD_SECONDS = 90;
 // Expectation copy shared by the idle checklist and the start-button area.
 export const INIT_EXPECTATION_HINT =
-  "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–10 分钟；多平台采集或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+  "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
 
 // Per-run client view state: elapsed-based pseudo-progress anchors (first
 // client observation of each running stage) + the monotonic pct clamp + the
@@ -339,7 +340,14 @@ const _runViewState = new Map();
 function _viewState(runId) {
   let st = _runViewState.get(runId);
   if (!st) {
-    st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
+    st = {
+      stageStartMs: new Map(),
+      maxPct: 0,
+      lastHeartbeatMark: null,
+      lastHeartbeatChangeMs: 0,
+      lastProgressMark: null,
+      lastProgressChangeMs: 0,
+    };
     _runViewState.set(runId, st);
     if (_runViewState.size > 8) {
       const oldest = _runViewState.keys().next().value;
@@ -363,6 +371,21 @@ export function resetInitProgressViewState() {
 // only the stateless paths apply.
 function _runningStageFraction(stage, st, nowMs) {
   const prog = stage && stage.progress;
+  if (prog && prog.mode === "indeterminate") {
+    const eta = Number((stage && stage.eta_seconds) || 0);
+    if (eta > 0 && st) {
+      let startMs = st.stageStartMs.get(stage.n);
+      if (startMs === undefined) {
+        startMs = nowMs;
+        st.stageStartMs.set(stage.n, startMs);
+      }
+      return Math.min(
+        STAGE_FRACTION_CAP,
+        1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta),
+      );
+    }
+    return STAGE_FRACTION_FALLBACK;
+  }
   const progTotal = prog ? Number(prog.total || 0) : 0;
   if (progTotal > 0) {
     const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
@@ -381,47 +404,79 @@ function _runningStageFraction(stage, st, nowMs) {
   return STAGE_FRACTION_FALLBACK;
 }
 
-// "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise).
-// X rounds UP to the nearest half minute so the copy never under-promises.
+// Show the calibrated duration before it elapses; afterwards stop repeating an
+// already-broken estimate and surface the real hard ceiling instead.
 export function stageEtaText(stage) {
   const eta = Number((stage && stage.eta_seconds) || 0);
   if (eta <= 0) {
     return "";
   }
+  const progress = stage && stage.progress;
+  const elapsed = Number((progress && progress.elapsed_seconds) || 0);
+  if (elapsed > eta) {
+    const maxSeconds = Number((progress && progress.max_seconds) || 0);
+    if (maxSeconds > 0) {
+      return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
+    }
+    return "已超常见用时；AI 或平台仍可能在处理";
+  }
   const halfMinutes = Math.ceil(eta / 30) / 2;
   return `本阶段通常约 ${halfMinutes} 分钟`;
 }
 
-// Liveness indicator for an in-flight run, driven by ``last_activity`` (the
-// backend bumps it on every status write incl. the 30s heartbeat). Staleness
-// is measured from the CLIENT time the (sequence, last_activity) marker last
-// changed — immune to client/server clock skew. Old backends without
-// last_activity get no stall detection (they also have no heartbeat, so a
-// silent-but-healthy stage 2 would false-alarm).
+// Track backend heartbeat and substantive progress separately. The heartbeat
+// proves the worker is connected; progress_sequence only advances at real
+// milestones, so a live-but-stalled provider call is no longer hidden.
 export function stalenessView(status, nowMs = Date.now()) {
   if (!status || !status.running) {
     return { fresh: true, staleSeconds: 0, text: "" };
   }
   const runId = status.run_id ? String(status.run_id) : "";
-  if (!runId || !status.last_activity) {
-    return { fresh: true, staleSeconds: 0, text: "● 进行中" };
+  const heartbeatAt = status.last_heartbeat_at || status.last_activity;
+  const progressAt = status.last_progress_at || status.last_activity;
+  if (!runId || !heartbeatAt) {
+    return { fresh: true, staleSeconds: 0, text: "● 后端已接单 · 正在建立进度" };
   }
   const st = _viewState(runId);
-  const mark = `${status.sequence ?? ""}|${status.last_activity}`;
-  if (st.lastMark !== mark) {
-    st.lastMark = mark;
-    st.lastChangeMs = nowMs;
+  const heartbeatMark = `${status.sequence ?? ""}|${heartbeatAt}`;
+  if (st.lastHeartbeatMark !== heartbeatMark) {
+    st.lastHeartbeatMark = heartbeatMark;
+    st.lastHeartbeatChangeMs = nowMs;
   }
-  const staleSeconds = Math.max(0, Math.round((nowMs - st.lastChangeMs) / 1000));
-  if (staleSeconds > INIT_STALL_THRESHOLD_SECONDS) {
-    const minutes = Math.max(1, Math.round(staleSeconds / 60));
+  const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
+  if (st.lastProgressMark !== progressMark) {
+    st.lastProgressMark = progressMark;
+    st.lastProgressChangeMs = nowMs;
+  }
+  const heartbeatStale = Math.max(
+    0,
+    Math.round((nowMs - st.lastHeartbeatChangeMs) / 1000),
+  );
+  const progressStale = Math.max(
+    0,
+    Math.round((nowMs - st.lastProgressChangeMs) / 1000),
+  );
+  if (heartbeatStale > INIT_STALL_THRESHOLD_SECONDS) {
+    const minutes = Math.max(1, Math.round(heartbeatStale / 60));
     return {
       fresh: false,
-      staleSeconds,
-      text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，或取消后重试。`,
+      staleSeconds: heartbeatStale,
+      text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`,
     };
   }
-  return { fresh: true, staleSeconds, text: "● 进行中" };
+  if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+    const minutes = Math.max(1, Math.round(progressStale / 60));
+    return {
+      fresh: false,
+      staleSeconds: progressStale,
+      text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`,
+    };
+  }
+  return {
+    fresh: true,
+    staleSeconds: progressStale,
+    text: "● 后端在线 · 正在处理",
+  };
 }
 
 // Progress view for the in-flight init: percentage, current stage label, and
@@ -439,6 +494,9 @@ export function initProgressView(status, nowMs = Date.now()) {
   const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
   const current = (status && status.current_stage) || 0;
   const currentStage = stages.find((s) => s.n === current);
+  const indeterminate = Boolean(
+    running && currentStage && currentStage.progress?.mode === "indeterminate",
+  );
   let stageLabel = currentStage
     ? `${currentStage.n}/${total} ${currentStage.label}`
     : "";
@@ -468,6 +526,7 @@ export function initProgressView(status, nowMs = Date.now()) {
     stageLabel,
     etaText: running ? stageEtaText(currentStage) : "",
     pct,
+    indeterminate,
     failed: Boolean(failedStage),
     failedReason: failedStage ? failedStage.reason || "" : "",
     partial: Boolean(status && status.partial_success),

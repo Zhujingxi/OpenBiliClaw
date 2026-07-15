@@ -339,6 +339,30 @@ def test_detect_missing_secrets_flags_openai_compatible_connection_fields(
     ]
 
 
+def test_detect_missing_secrets_flags_ollama_without_chat_model(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        "\n".join(
+            [
+                "[llm]",
+                'default_provider = "ollama"',
+                "",
+                "[llm.ollama]",
+                'base_url = "http://localhost:11434/v1"',
+                'model = ""',
+                "",
+                "[bilibili]",
+                'cookie = "SESSDATA=test"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    status = bootstrap.detect_missing_secrets(tmp_path)
+
+    assert status["missing"] == ["llm.ollama.model"]
+
+
 def test_reuse_config_secrets_copies_openai_compatible_connection(
     tmp_path: Path,
 ) -> None:

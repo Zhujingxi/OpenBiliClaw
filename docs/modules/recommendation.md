@@ -21,7 +21,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | 6.1 推荐排序 | ✅ | 从 `content_cache` 选未推荐内容、按分数排序、以 canonical `item_key` 写入推荐历史 |
-| 6.2 朋友式推荐表达 | ✅ | 用 LLM 生成朋友式推荐理由和个性化 topic，并在 CLI 中真实展示 |
+| 6.2 朋友式推荐表达 | ✅ | 用 LLM 生成朋友式推荐理由和个性化 topic，并在 CLI 中真实展示；`recommendation.*` 的分类和短文案调用在未显式指定时统一用 `reasoning_effort=""`，避免 DeepSeek thinking 拉长文案回填 |
 | 6.3 推荐持久化 | ✅ | 推荐记录已补齐展示状态、结构化反馈字段和反馈更新时间 |
 | 候选排序统一 | ✅ | freshly discovered 与 cache backfill 现在共享同一套 tier / relevance / recency 排序口径 |
 | 9.1 反馈处理 | ✅ | CLI、本地 API、插件 popup 与移动 Web 已统一写回推荐反馈与 `feedback` 事件；推荐点击会携带 `content_id / content_url / source_platform`，跨源内容不会被记成 B 站点击；推荐反馈事件同样保留候选真实 `source_platform`，旧记录缺来源时兼容回退 `bilibili` |

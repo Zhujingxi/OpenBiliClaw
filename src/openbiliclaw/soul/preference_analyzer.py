@@ -14,8 +14,8 @@ from openbiliclaw.llm.json_utils import (
     parse_llm_json_tolerant,
 )
 from openbiliclaw.llm.prompts import build_preference_analysis_prompt
-from openbiliclaw.llm.service import LLMServiceError
-from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.llm.service import LLMServiceError, is_llm_rate_limit_error
+from openbiliclaw.llm.task_options import call_accepts_keyword, without_core_memory_kwargs
 from openbiliclaw.soul.event_filters import filter_events_by_satisfaction
 from openbiliclaw.soul.taxonomy import SupportsEmbed, resolve_category
 
@@ -38,6 +38,20 @@ logger = logging.getLogger(__name__)
 _DISLIKED_TOPICS_STORE_CAP = 128
 
 DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE = 200
+# A partial chunk only returns at most 25 interests, three observations and two
+# hypotheses. Giving every local-model chunk the global 16K structured-output
+# ceiling can turn a malformed/non-terminating JSON response into many minutes
+# of needless generation. Four thousand tokens comfortably fit this bounded
+# schema; the unchunked path and final profile keep the larger shared budget.
+PREFERENCE_CHUNK_MAX_TOKENS = 4096
+# Some OpenAI-compatible reasoning models ignore the per-call request to turn
+# thinking off and can spend the entire 4K chunk budget before emitting JSON.
+# Retry that specific, observable finish_reason=length failure once with the
+# normal structured-output ceiling; all other malformed output keeps the 4K
+# guard that protects local models from unbounded generation.
+PREFERENCE_REASONING_FALLBACK_MAX_TOKENS = DEFAULT_STRUCTURED_MAX_TOKENS
+PREFERENCE_RATE_LIMIT_MAX_RETRIES = 2
+PREFERENCE_RATE_LIMIT_RETRY_SECONDS = 65.0
 MAX_CONCURRENT_PREFERENCE_CHUNKS = 16
 INIT_COGNITION_CONTEXT_KEY = "_init_cognition_context"
 _INIT_AWARENESS_CANDIDATES_CAP = 12
@@ -282,6 +296,7 @@ class PreferenceAnalyzer:
         user_input: str,
         max_tokens: int,
         caller: str,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         """Run preference extraction without dynamic core-memory system suffixes."""
         kwargs: dict[str, Any] = {
@@ -292,6 +307,8 @@ class PreferenceAnalyzer:
         }
         complete = cast("Any", self.registry.complete_structured_task)
         kwargs.update(without_core_memory_kwargs(complete))
+        if reasoning_effort is not None and call_accepts_keyword(complete, "reasoning_effort"):
+            kwargs["reasoning_effort"] = reasoning_effort
         return cast("LLMResponse", await complete(**kwargs))
 
     def _prompt_char_count(self, messages: list[dict[str, str]]) -> int:
@@ -425,15 +442,76 @@ class PreferenceAnalyzer:
                 events=chunk,
                 existing_preference={},
             )
-            try:
-                response = await self._complete_cacheable_preference_task(
-                    system_instruction=messages[0]["content"],
-                    user_input=messages[1]["content"],
-                    max_tokens=DEFAULT_STRUCTURED_MAX_TOKENS,
-                    caller="soul.preference.chunk",
-                )
-            except (LLMProviderError, LLMServiceError) as exc:
-                raise PreferenceAnalysisError(str(exc)) from exc
+            response: LLMResponse | None = None
+            max_tokens = PREFERENCE_CHUNK_MAX_TOKENS
+            rate_limit_retries = 0
+            reasoning_budget_retried = False
+            while True:
+                try:
+                    response = await self._complete_cacheable_preference_task(
+                        system_instruction=messages[0]["content"],
+                        user_input=messages[1]["content"],
+                        max_tokens=max_tokens,
+                        caller="soul.preference.chunk",
+                        # Preference extraction is a bounded JSON classify task;
+                        # provider reasoning can add thousands of invisible
+                        # tokens, latency and TPM pressure without improving the
+                        # schema. Final profile prose keeps provider defaults.
+                        reasoning_effort="",
+                    )
+                    break
+                except (LLMProviderError, LLMServiceError) as exc:
+                    message = str(exc).lower()
+                    reasoning_exhausted = (
+                        "returned reasoning but no final content" in message
+                        and "finish_reason=length" in message
+                    )
+                    if (
+                        reasoning_exhausted
+                        and not reasoning_budget_retried
+                        and max_tokens < PREFERENCE_REASONING_FALLBACK_MAX_TOKENS
+                    ):
+                        reasoning_budget_retried = True
+                        max_tokens = PREFERENCE_REASONING_FALLBACK_MAX_TOKENS
+                        logger.warning(
+                            "preference chunk reasoning exhausted %d-token budget; "
+                            "retrying once with %d tokens",
+                            PREFERENCE_CHUNK_MAX_TOKENS,
+                            max_tokens,
+                        )
+                        continue
+                    non_retryable_quota = any(
+                        marker in message
+                        for marker in (
+                            "402",
+                            "payment required",
+                            "insufficient_quota",
+                            "insufficient balance",
+                            "quota exceeded",
+                            "out of credit",
+                            "credit exhausted",
+                            "余额不足",
+                            "账户余额",
+                        )
+                    )
+                    if (
+                        is_llm_rate_limit_error(exc)
+                        and not non_retryable_quota
+                        and rate_limit_retries < PREFERENCE_RATE_LIMIT_MAX_RETRIES
+                    ):
+                        delay = PREFERENCE_RATE_LIMIT_RETRY_SECONDS
+                        rate_limit_retries += 1
+                        logger.warning(
+                            "preference chunk rate-limited; retrying in %.0fs (%d/%d)",
+                            delay,
+                            rate_limit_retries,
+                            PREFERENCE_RATE_LIMIT_MAX_RETRIES,
+                        )
+                        await _asyncio.sleep(delay)
+                        continue
+                    raise PreferenceAnalysisError(str(exc)) from exc
+            if response is None:  # pragma: no cover - loop always returns or raises
+                raise PreferenceAnalysisError("preference chunk returned no response")
             raw = self._parse_response(response.content, log_error=False)
             return raw, await self._normalize_and_resolve(raw)
 
@@ -491,10 +569,12 @@ class PreferenceAnalyzer:
                     return []
                 return [await _run_chunk_once([compact])]
             midpoint = max(1, len(chunk) // 2)
-            left, right = await _asyncio.gather(
-                _run_chunk_resilient(chunk[:midpoint]),
-                _run_chunk_resilient(chunk[midpoint:]),
-            )
+            # Recovery must not fan out again underneath the bounded top-level
+            # scheduler. Concurrent recursive halves used to queue 4/8/… calls
+            # behind LLMService.concurrency; one 429 then released the whole
+            # queue into the provider cooldown and produced a retry storm.
+            left = await _run_chunk_resilient(chunk[:midpoint])
+            right = await _run_chunk_resilient(chunk[midpoint:])
             return [*left, *right]
 
         async def _run_chunk_resilient(
@@ -589,17 +669,42 @@ class PreferenceAnalyzer:
             await self._emit_progress(progress_callback, done_chunks, total_chunks)
             return result
 
+        configured_concurrency = getattr(self.registry, "concurrency", None)
+        try:
+            configured_chunk_limit = (
+                int(configured_concurrency)
+                if configured_concurrency is not None
+                else MAX_CONCURRENT_PREFERENCE_CHUNKS
+            )
+        except (TypeError, ValueError):
+            configured_chunk_limit = MAX_CONCURRENT_PREFERENCE_CHUNKS
+        chunk_limit = max(1, min(MAX_CONCURRENT_PREFERENCE_CHUNKS, configured_chunk_limit))
+        logger.info(
+            "preference chunk fanout bounded at %d (configured LLM concurrency=%r)",
+            chunk_limit,
+            configured_concurrency,
+        )
         outcome_groups: list[list[tuple[dict[str, object], dict[str, object]]]] = []
-        for batch_start in range(0, len(chunks), MAX_CONCURRENT_PREFERENCE_CHUNKS):
+        for batch_start in range(0, len(chunks), chunk_limit):
             batch = list(
                 enumerate(
-                    chunks[batch_start : batch_start + MAX_CONCURRENT_PREFERENCE_CHUNKS],
+                    chunks[batch_start : batch_start + chunk_limit],
                     start=batch_start + 1,
                 )
             )
-            outcome_groups.extend(
-                await _asyncio.gather(*(_run_and_report(idx, chunk) for idx, chunk in batch))
-            )
+            tasks = [_asyncio.create_task(_run_and_report(idx, chunk)) for idx, chunk in batch]
+            try:
+                outcome_groups.extend(await _asyncio.gather(*tasks))
+            except BaseException:
+                # asyncio.gather propagates the first exception but deliberately
+                # leaves siblings running. An init terminal must be a real task
+                # boundary: cancel and drain the rest before the coordinator
+                # releases its run lock and restarts background work.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await _asyncio.gather(*tasks, return_exceptions=True)
+                raise
         outcomes = [item for group in outcome_groups for item in group]
 
         # Fold each chunk's normalized preference into the running merge

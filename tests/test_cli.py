@@ -3488,7 +3488,9 @@ def test_init_includes_xhs_bootstrap_events(
         raising=False,
     )
 
-    result = runner.invoke(app, ["init"])
+    # Selection is opt-in: unselected collectors must not run or consume their
+    # wait budget. Explicitly select XHS so this test exercises its pipeline.
+    result = runner.invoke(app, ["init", "--yes-xhs"])
 
     assert result.exit_code == 0
     assert "小红书" in result.stdout

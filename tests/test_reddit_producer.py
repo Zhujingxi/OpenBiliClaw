@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import subprocess
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -163,6 +166,48 @@ items:
     assert pipeline.enqueued[0].source_platform == "reddit"
     assert pipeline.enqueued[0].source_strategy == "reddit-search"
     assert calls[1][:4] == ["opencli", "reddit", "search", "local agents"]
+
+
+@pytest.mark.asyncio
+async def test_reddit_command_backend_does_not_block_event_loop() -> None:
+    """A slow rdt/opencli process must not freeze API and WebSocket polling."""
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+
+    def runner(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if args[:3] == ["opencli", "daemon", "status"]:
+            probe_started.set()
+            assert release_probe.wait(timeout=2.0)
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="Daemon: running\nExtension: connected\n",
+            )
+        return subprocess.CompletedProcess(args, 0, stdout="items: []\n")
+
+    producer = RedditDiscoveryProducer(
+        soul_engine=_FakeSoulEngine(),
+        backend="opencli",
+        sources=("search",),
+        which=lambda name: f"/usr/bin/{name}",
+        runner=runner,
+    )
+
+    task = asyncio.create_task(producer.produce_if_due(limit=1))
+    started_at = time.monotonic()
+    while not probe_started.is_set() and time.monotonic() - started_at < 1.0:
+        await asyncio.sleep(0.01)
+    assert probe_started.is_set()
+
+    # If the synchronous command leaked onto this loop, execution cannot reach
+    # here until its two-second wait expires.  A worker-thread probe reaches
+    # here promptly while the command is still deliberately blocked.
+    assert time.monotonic() - started_at < 0.5
+    assert task.done() is False
+    release_probe.set()
+    result = await asyncio.wait_for(task, timeout=1.0)
+    assert result["reason"] == "empty"
 
 
 @pytest.mark.asyncio

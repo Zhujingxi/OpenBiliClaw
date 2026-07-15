@@ -16,6 +16,8 @@
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，避免 pool readiness / maintenance 的推荐历史排除和最近已看读取反复全表扫描。 |
+| 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
+| 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、近期已看、self-XHS 与 delight guards。 |
 | 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
 | 扩展原生保存 job ledger 与旧状态迁移 | ✅ | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；task URL 只允许平台 HTTPS host 与默认端口，输出移除 fragment/非导航 query（YouTube 仅保留身份参数 `v`；小红书仅保留打开公开笔记所需的单值非空 `xsec_token/xsec_source`，其它 key 仍剥离）。partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。命名迁移只把六个 canonical 平台的旧 `unsupported`/空 error code 改为 `unsupported_adapter_missing`，绝不改 Bilibili、未知平台或 `unsupported_content_type`。 |
@@ -38,6 +40,21 @@
 | 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
 
 ## 公开 API
+
+### Guided Init 状态与事件
+
+```python
+db.insert_events_batch(events)
+run = db.get_latest_init_run()
+db.update_init_run(
+    run_id,
+    sequence=next_sequence,
+    progress_sequence=next_progress_sequence,
+    progress_at=now,
+)
+```
+
+`insert_events_batch()` 使用独立连接 + 单事务，避免共享连接跨 `to_thread`；`update_init_run()` 只接受白名单字段。heartbeat 写只更新 `sequence/updated_at`，substantive 写才更新 progress 字段，这一语义由 `InitCoordinator` 统一维护。
 
 ### Source Families
 

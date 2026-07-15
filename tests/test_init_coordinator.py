@@ -136,29 +136,58 @@ async def test_fail_without_detail_keeps_empty_detail(tmp_path: Path) -> None:
     assert coord.get_status()["detail"] == ""
 
 
-async def test_parallel_stage_3_4_no_sequence_loss(tmp_path: Path) -> None:
+@pytest.mark.parametrize("terminal", ["failed", "cancelled"])
+async def test_terminal_current_stage_is_the_actual_stop_point(
+    tmp_path: Path, terminal: str
+) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-terminal")
+    await coord.mark_running("run-terminal")
+    await coord.stage_started("run-terminal", 1)
+    await coord.stage_done("run-terminal", 1)
+    await coord.stage_started("run-terminal", 2)
+
+    if terminal == "failed":
+        await coord.fail("run-terminal", "analyze_failed")
+    else:
+        await coord.cancel("run-terminal")
+
+    status = coord.get_status()
+    assert status["current_stage"] == 2
+    assert [stage["status"] for stage in status["stages"]] == [
+        "ok",
+        terminal,
+        terminal,
+        terminal,
+    ]
+
+
+async def test_stage_4_cannot_start_before_full_profile_is_committed(tmp_path: Path) -> None:
     coord, db, _ = _coord(tmp_path)
     coord.try_start("run-1")
     await coord.mark_running("run-1")
-    # Stages 3 and 4 run concurrently (P3/P4 parallel) — the write lock must
-    # keep both stage statuses and serialize sequence without a lost update.
-    await asyncio.gather(
-        coord.stage_started("run-1", 3),
-        coord.stage_started("run-1", 4),
-    )
+    await coord.stage_started("run-1", 3)
+    with pytest.raises(RuntimeError, match="full profile stage"):
+        await coord.stage_started("run-1", 4)
+
+    # The rejected transition is side-effect free. Once stage 3's committed
+    # barrier is recorded, stage 4 may start normally.
+    assert db.get_latest_init_run()["sequence"] == 2
+    await coord.stage_done("run-1", 3)
+    await coord.stage_started("run-1", 4)
     status = coord.get_status()
     by_n = {s["n"]: s["status"] for s in status["stages"]}
-    assert by_n[3] == "running" and by_n[4] == "running"
-    assert status["current_stage"] == 3  # lowest still-running
-    run = db.get_latest_init_run()
-    assert run["sequence"] == 3  # mark_running + 2 stage_started, no loss
+    assert by_n[3] == "ok" and by_n[4] == "running"
+    assert status["current_stage"] == 4
 
 
 def test_bootstrap_task_ownership(tmp_path: Path) -> None:
     coord, _, _ = _coord(tmp_path)
     coord.try_start("run-1")
+    coord.register_enqueued_task("stale-run", "task-stale")
     coord.register_enqueued_task("run-1", "task-abc")
     assert coord.is_owned_bootstrap_task("task-abc") is True
+    assert coord.is_owned_bootstrap_task("task-stale") is False
     assert coord.is_owned_bootstrap_task("task-other") is False
 
 
@@ -182,6 +211,61 @@ async def test_cancel_current_run_cancels_task(tmp_path: Path) -> None:
     assert await coord.cancel_current_run("run-1") is True
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_cancel_current_run_rejects_stale_run_id(tmp_path: Path) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-current")
+
+    async def _long() -> None:
+        await asyncio.sleep(60)
+
+    task = asyncio.create_task(_long())
+    coord.attach_task("run-current", task)
+    try:
+        assert await coord.cancel_current_run("run-stale") is False
+        assert not task.done()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_late_status_write_cannot_touch_newer_run(tmp_path: Path) -> None:
+    coord, db, hub = _coord(tmp_path)
+    coord.try_start("run-old")
+    await coord.fail("run-old", "cancelled")
+    assert coord.try_start("run-new") is True
+    new_before = db.get_latest_init_run()
+    events_before = list(hub.events)
+
+    await coord.touch("run-old")
+    await coord.stage_started("run-old", 1)
+
+    new_after = db.get_latest_init_run()
+    assert new_after["run_id"] == "run-new"
+    assert new_after["sequence"] == new_before["sequence"]
+    assert new_after["stages_json"] == new_before["stages_json"]
+    assert hub.events == events_before
+
+
+async def test_late_status_writes_cannot_mutate_same_terminal_run(tmp_path: Path) -> None:
+    coord, db, hub = _coord(tmp_path)
+    coord.try_start("run-terminal")
+    await coord.mark_running("run-terminal")
+    await coord.stage_started("run-terminal", 2)
+    await coord.stage_progress("run-terminal", 2, done=4, total=6, note="第 4/6 批")
+    await coord.fail("run-terminal", "analyze_failed", detail="chunk 6 failed")
+    terminal_before = dict(db.get_latest_init_run())
+    events_before = list(hub.events)
+
+    await coord.touch("run-terminal")
+    await coord.stage_progress("run-terminal", 2, done=5, total=6, note="迟到 sibling")
+    await coord.stage_done("run-terminal", 2)
+    await coord.complete("run-terminal")
+
+    assert db.get_latest_init_run() == terminal_before
+    assert hub.events == events_before
 
 
 def test_get_status_idle_when_empty(tmp_path: Path) -> None:
@@ -215,10 +299,11 @@ async def test_stage_progress_persists_and_emits(tmp_path: Path) -> None:
     await coord.stage_progress("run-1", 2, done=1, total=8, note="第 1/8 批")
 
     stages = {s["n"]: s for s in coord.get_status()["stages"]}
-    assert stages[2]["progress"] == {"done": 1, "total": 8, "note": "第 1/8 批"}
+    expected = {"done": 1, "total": 8, "note": "第 1/8 批", "mode": "determinate"}
+    assert stages[2]["progress"] == expected
     # An init_progress event was published carrying the progress payload.
     prog_events = [e for e in hub.events if e.get("type") == "init_progress"]
-    assert prog_events[-1]["progress"] == {"done": 1, "total": 8, "note": "第 1/8 批"}
+    assert prog_events[-1]["progress"] == expected
 
 
 async def test_stage_progress_clamps_done_into_range(tmp_path: Path) -> None:
@@ -247,6 +332,30 @@ async def test_stage_progress_ignores_nonpositive_total(tmp_path: Path) -> None:
     assert stages[2].get("progress") in (None, {})
 
 
+async def test_indeterminate_stage_progress_accepts_zero_total(tmp_path: Path) -> None:
+    coord, _, _ = _coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.stage_started("run-1", 3)
+    await coord.stage_progress(
+        "run-1",
+        3,
+        mode="indeterminate",
+        elapsed_seconds=40,
+        max_seconds=360,
+        note="AI 正在综合画像",
+        substantive=False,
+    )
+    progress = {s["n"]: s for s in coord.get_status()["stages"]}[3]["progress"]
+    assert progress == {
+        "done": 0,
+        "total": 0,
+        "note": "AI 正在综合画像",
+        "mode": "indeterminate",
+        "elapsed_seconds": 40,
+        "max_seconds": 360,
+    }
+
+
 async def test_stage_done_clears_progress(tmp_path: Path) -> None:
     coord, _, _ = _coord(tmp_path)
     coord.try_start("run-1")
@@ -262,10 +371,16 @@ async def test_touch_bumps_sequence_without_publishing_event(tmp_path: Path) -> 
     coord, db, hub = _coord(tmp_path)
     coord.try_start("run-1")
     await coord.mark_running("run-1")
-    seq_before = db.get_latest_init_run()["sequence"]
+    row_before = db.get_latest_init_run()
+    seq_before = row_before["sequence"]
+    progress_seq_before = row_before["progress_sequence"]
+    progress_at_before = row_before["progress_at"]
     events_before = len(hub.events)
     await coord.touch("run-1")
     assert db.get_latest_init_run()["sequence"] == seq_before + 1
+    row_after = db.get_latest_init_run()
+    assert row_after["progress_sequence"] == progress_seq_before
+    assert row_after["progress_at"] == progress_at_before
     # Invariant 5: touch must NOT publish an init_progress (or any) event.
     assert len(hub.events) == events_before
 
@@ -274,7 +389,52 @@ async def test_get_status_exposes_last_activity(tmp_path: Path) -> None:
     coord, _, _ = _coord(tmp_path)
     coord.try_start("run-1")
     await coord.mark_running("run-1")
-    assert coord.get_status()["last_activity"] != ""
+    status = coord.get_status()
+    assert status["last_activity"] != ""
+    assert status["last_heartbeat_at"] == status["last_activity"]
+    assert status["last_progress_at"] != ""
+    assert status["progress_sequence"] > 0
+
+
+async def test_finished_owner_without_terminal_write_is_reconciled(tmp_path: Path) -> None:
+    coord, db, hub = _coord(tmp_path)
+    coord.try_start("run-orphan")
+    await coord.mark_running("run-orphan")
+
+    async def _returns_without_terminal_write() -> None:
+        return None
+
+    task = asyncio.create_task(_returns_without_terminal_write())
+    coord.attach_task("run-orphan", task)
+    await task
+    # Done callback schedules the lease audit on the same loop.
+    for _ in range(5):
+        await asyncio.sleep(0)
+        if db.get_latest_init_run()["status"] == "failed":
+            break
+
+    run = db.get_latest_init_run()
+    assert run["status"] == "failed"
+    assert run["error_reason"] == "interrupted"
+    assert "自动释放运行锁" in run["error_detail"]
+    assert coord.init_active() is False
+    assert hub.events[-1]["type"] == "init_failed"
+
+
+async def test_expired_starting_lease_without_task_is_reconciled(tmp_path: Path) -> None:
+    coord, db, _ = _coord(tmp_path)
+    coord.try_start("run-abandoned")
+    db.conn.execute(
+        "UPDATE init_runs SET updated_at = '2000-01-01 00:00:00' WHERE run_id = ?",
+        ("run-abandoned",),
+    )
+    db.conn.commit()
+
+    assert await coord.reconcile_orphaned_run(max_heartbeat_age_seconds=1) is True
+    run = db.get_latest_init_run()
+    assert run["status"] == "failed"
+    assert run["error_reason"] == "interrupted"
+    assert coord.try_start("run-after-abandoned") is True
 
 
 async def test_interleaved_stage_progress_and_touch_sequence_monotonic(tmp_path: Path) -> None:
@@ -409,4 +569,21 @@ def test_background_llm_work_paused_during_init(tmp_path: Path) -> None:
     # Idle baseline is whatever presence/scheduler gating decides; the contract
     # under test is the init short-circuit forcing False.
     ctx.init_coordinator.try_start("r1")
+    assert ctx.background_llm_work_allowed() is False
+
+
+def test_background_llm_work_paused_before_first_profile(tmp_path: Path) -> None:
+    """Daemon account-sync must not pre-empt guided init on a fresh install."""
+    from types import SimpleNamespace
+
+    from openbiliclaw.api.runtime_context import RuntimeContext
+
+    db = Database(tmp_path / "pre-profile.db")
+    db.initialize()
+    ctx = RuntimeContext(
+        database=db,
+        soul_engine=SimpleNamespace(is_profile_ready=lambda: False),
+    )
+
+    assert ctx.init_coordinator.init_active() is False
     assert ctx.background_llm_work_allowed() is False

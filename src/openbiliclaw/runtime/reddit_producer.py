@@ -76,7 +76,13 @@ class RedditDiscoveryProducer:
         if _is_extension_backend(self.backend):
             return await self._produce_with_extension(limit=limit)
 
-        status = probe_reddit_command_backend(
+        # Command-backed probes may spawn ``rdt`` / ``opencli`` and wait for
+        # their network round-trip.  Running them on the API event loop makes
+        # every HTTP/WebSocket request pause for the command timeout (15s in a
+        # real post-init run).  Keep the whole synchronous adapter boundary in
+        # a worker thread, not only the eventual discovery command.
+        status = await asyncio.to_thread(
+            probe_reddit_command_backend,
             self.backend,
             which=self.which if self.which is not None else None,
             runner=self.runner,
@@ -158,10 +164,14 @@ class RedditDiscoveryProducer:
                         subreddit=command_input if source in {"hot", "subreddit"} else "",
                         limit=command_limit,
                     )
-                    rows = run_reddit_command(
+                    rows = await asyncio.to_thread(
+                        run_reddit_command,
                         args,
                         runner=self.runner,
-                        timeout=max(15.0, float(self.request_interval_seconds) * command_limit),
+                        timeout=max(
+                            15.0,
+                            float(self.request_interval_seconds) * command_limit,
+                        ),
                     )
                     for row in rows:
                         row.setdefault("source_strategy", strategy)

@@ -202,10 +202,14 @@ class ExtensionNativeSaveBroker:
                         self._database.mark_unclaimed_extension_native_save_job_extension_required,
                         job_id,
                     )
-                    terminal = await asyncio.to_thread(
-                        self._database.get_extension_native_save_job,
-                        job_id,
-                    ) if marked else None
+                    terminal = (
+                        await asyncio.to_thread(
+                            self._database.get_extension_native_save_job,
+                            job_id,
+                        )
+                        if marked
+                        else None
+                    )
                 except Exception as exc:
                     if _is_transient_sqlite_lock(exc):
                         await asyncio.sleep(self._poll_interval_seconds)
