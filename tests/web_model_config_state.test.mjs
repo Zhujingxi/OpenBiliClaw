@@ -349,6 +349,45 @@ test("server field errors map by connection ID instead of array position", () =>
   assert.equal(state.fieldErrors.global[0].message, "Timeout is too small.");
 });
 
+test("server field errors cannot prototype-pollute through IDs or paths", () => {
+  const previousPrototypeError = Object.prototype.num_ctx;
+  const previousConstructorError = Object.constructor_error;
+  try {
+    const state = mapServerFieldErrors(hydrateModelConfig(snapshot()), [
+      {
+        connection_id: "__proto__",
+        path: "models.chat.connections.0.num_ctx",
+        code: "invalid",
+        message: "Invalid context window.",
+      },
+      {
+        connection_id: "constructor",
+        path: "models.chat.connections.1.constructor_error",
+        code: "invalid",
+        message: "Invalid field.",
+      },
+    ]);
+
+    assert.equal(Object.hasOwn(state.fieldErrors.byConnection, "__proto__"), true);
+    assert.equal(Object.hasOwn(state.fieldErrors.byConnection, "constructor"), true);
+    assert.equal(
+      state.fieldErrors.byConnection.__proto__.num_ctx.message,
+      "Invalid context window.",
+    );
+    assert.equal(
+      state.fieldErrors.byConnection.constructor.constructor_error.message,
+      "Invalid field.",
+    );
+    assert.equal(Object.prototype.num_ctx, previousPrototypeError);
+    assert.equal(Object.constructor_error, previousConstructorError);
+  } finally {
+    if (previousPrototypeError === undefined) delete Object.prototype.num_ctx;
+    else Object.prototype.num_ctx = previousPrototypeError;
+    if (previousConstructorError === undefined) delete Object.constructor_error;
+    else Object.constructor_error = previousConstructorError;
+  }
+});
+
 test("remote revision auto-hydrates only while clean", () => {
   const clean = hydrateModelConfig(snapshot(["a"], "revision-a"));
   const remote = snapshot(["remote"], "revision-b");

@@ -9,8 +9,12 @@ import {
 import { createDialogFocusController } from "../saved-sync-runtime.js";
 import {
   createExactDraftRenderCoordinator,
+  createMobileModelLoadRecoveryController,
+  createMobileModelNumericValidationController,
   createMobileModelResourceCoordinator,
-  guardMobileModelRuntime,
+  normalizeMobileModelValidationDetails,
+  parseMobileModelNumericDraft,
+  validateMobileModelNumbers,
 } from "../mobile-model-settings-controller.js";
 import {
   MAX_ROUTE_ITEMS,
@@ -156,12 +160,17 @@ export async function openMobileSettings(opener) {
             <label class="mobile-model-field">
               <span>输出维度</span>
               <input id="mobileModelEmbeddingDimension" type="number" min="0" step="1"
-                inputmode="numeric">
+                inputmode="numeric" aria-describedby="mobileModelEmbeddingDimensionError">
+              <span id="mobileModelEmbeddingDimensionError" class="mobile-model-field-error"
+                role="alert" hidden></span>
             </label>
             <label class="mobile-model-field">
               <span>相似度阈值</span>
               <input id="mobileModelEmbeddingSimilarity" type="number" min="0" max="1"
-                step="0.01" inputmode="decimal">
+                step="0.01" inputmode="decimal"
+                aria-describedby="mobileModelEmbeddingSimilarityError">
+              <span id="mobileModelEmbeddingSimilarityError" class="mobile-model-field-error"
+                role="alert" hidden></span>
             </label>
             <label class="mobile-model-toggle">
               <input id="mobileModelEmbeddingMultimodal" type="checkbox">
@@ -268,9 +277,30 @@ export async function openMobileSettings(opener) {
   let state = null;
   let connectionTypes = { connection_types: [], groups: [] };
   let routeView = "list";
-  let runtimeFieldErrors = {};
+  let numericFieldErrors = validateMobileModelNumbers(null);
+  let numericValidation = null;
   let disposed = false;
   const modelOperations = createModelOperationGate();
+  const modelLoadRecovery = createMobileModelLoadRecoveryController({
+    setLocked: (locked) => {
+      if (!disposed) setModelEditorLocked(locked);
+    },
+    setRetryVisible: (visible) => {
+      if (disposed) return;
+      if (visible) modelLoadRetry.hidden = false;
+      else modelLoadRetry.hidden = true;
+    },
+    onLoading: () => setModelStatus("正在读取模型配置与连接类型…"),
+    onReady: () => renderReadyModelStatus(),
+    onRecoverableIncomplete: () => setModelStatus(
+      "模型配置未完整加载；编辑器仍锁定，请重试。",
+      "error",
+    ),
+    onError: (error) => setModelStatus(
+      error?.message || "无法读取模型配置。",
+      "error",
+    ),
+  });
   const modelResources = createMobileModelResourceCoordinator({
     snapshotRequest: () => fetchModelConfig(),
     descriptorRequest: () => fetchModelConnectionTypes(),
@@ -290,6 +320,7 @@ export async function openMobileSettings(opener) {
       else state = retainSelection(hydrateModelConfig(snapshot), state);
       state.activeRoute ||= "chat";
       if (!remote) routeView = "list";
+      if (numericValidation) numericValidation.afterAuthoritativeHydration();
       render({ preserveStatus: true });
     },
     installDescriptors: (descriptors) => {
@@ -297,9 +328,7 @@ export async function openMobileSettings(opener) {
       connectionTypes = descriptors;
       if (state && !modelOperations.saveInFlight) render({ preserveStatus: true });
     },
-    onReadinessChange: (readiness) => {
-      if (!disposed) setModelEditorLocked(!readiness.ready);
-    },
+    onReadinessChange: modelLoadRecovery.onReadinessChange,
   });
   const exactDraftRenderer = createExactDraftRenderCoordinator({
     clearInlineErrors: () => {
@@ -320,6 +349,15 @@ export async function openMobileSettings(opener) {
       const record = selectedRecord(state, state.activeRoute);
       if (record) renderCredential(record, descriptorFor(record.type));
     },
+  });
+  numericValidation = createMobileModelNumericValidationController({
+    getState: () => state,
+    renderErrors: (errors) => {
+      numericFieldErrors = errors;
+      renderNumericFieldErrors();
+      renderErrorSummary();
+    },
+    focusFirstError: focusFirstNumericError,
   });
 
   function setSavedStatus(message, alert = false) {
@@ -446,12 +484,42 @@ export async function openMobileSettings(opener) {
     else delete status.dataset.tone;
   }
 
+  function renderReadyModelStatus() {
+    if (!state) return;
+    if (state.remoteUpdate) {
+      setModelStatus("远端已有更新；本地未保存草稿仍保留。");
+    } else if (state.dirty) {
+      setModelStatus("模型配置已读取；本地草稿尚未保存。");
+    } else {
+      setModelStatus(`模型配置已同步 · ${state.revision.slice(0, 12)}`);
+    }
+  }
+
+  function numericPathError(path) {
+    return numericFieldErrors.byPath?.[path] || null;
+  }
+
+  function serverPathError(path) {
+    return state?.fieldErrors?.global?.find((error) => error.path === path) || null;
+  }
+
+  function displayedPathError(path) {
+    return numericPathError(path) || serverPathError(path);
+  }
+
   function fieldError(recordId, field) {
-    return state?.fieldErrors?.byConnection?.[recordId]?.[field] || null;
+    return numericFieldErrors.byConnection?.[recordId]?.[field]
+      || state?.fieldErrors?.byConnection?.[recordId]?.[field]
+      || null;
   }
 
   function errorMarkup(recordId, field) {
     const error = fieldError(recordId, field);
+    if (field === "num_ctx") {
+      return `<span id="mobileModelSelectedNumCtxError"
+          class="mobile-model-field-error" data-mobile-model-num-ctx-error="${escapeHtml(recordId)}"
+          role="alert"${error ? "" : " hidden"}>${escapeHtml(error?.message || "")}</span>`;
+    }
     return error
       ? `<span class="mobile-model-field-error" data-mobile-model-inline-error
           role="alert">${escapeHtml(error.message)}</span>`
@@ -516,7 +584,13 @@ export async function openMobileSettings(opener) {
         error,
       })),
     );
+    const numericErrors = Object.values(numericFieldErrors.byPath || {});
     const rows = [
+      ...numericErrors.map((error) => (
+        error.connectionId
+          ? `${escapeHtml(error.connectionId)}: ${escapeHtml(error.message)}`
+          : `${escapeHtml(error.path)}: ${escapeHtml(error.message)}`
+      )),
       ...global.map((error) => escapeHtml(error.message)),
       ...connectionErrors.map(
         ({ connectionId, error }) => (
@@ -527,6 +601,34 @@ export async function openMobileSettings(opener) {
     // API validation entries are keyed by connection_id before the shared reducer maps them.
     host.hidden = rows.length === 0;
     host.innerHTML = rows.length ? `<ul><li>${rows.join("</li><li>")}</li></ul>` : "";
+  }
+
+  function setFieldErrorHost(host, error) {
+    if (!host) return;
+    host.textContent = error?.message || "";
+    host.hidden = !error;
+  }
+
+  function renderNumericFieldErrors() {
+    setFieldErrorHost(
+      byId("mobileModelChatConcurrencyError"),
+      displayedPathError("models.chat.concurrency"),
+    );
+    setFieldErrorHost(
+      byId("mobileModelChatTimeoutError"),
+      displayedPathError("models.chat.timeout_seconds"),
+    );
+    setFieldErrorHost(
+      byId("mobileModelEmbeddingDimensionError"),
+      displayedPathError("models.embedding.settings.output_dimensionality"),
+    );
+    setFieldErrorHost(
+      byId("mobileModelEmbeddingSimilarityError"),
+      displayedPathError("models.embedding.settings.similarity_threshold"),
+    );
+    card.querySelectorAll("[data-mobile-model-num-ctx-error]").forEach((host) => {
+      setFieldErrorHost(host, fieldError(host.dataset.mobileModelNumCtxError, "num_ctx"));
+    });
   }
 
   function renderEmbeddingSettings() {
@@ -554,6 +656,7 @@ export async function openMobileSettings(opener) {
     byId("mobileModelEmbeddingMultimodal").disabled = Boolean(
       modelControlLocked("models.embedding.settings.multimodal_enabled"),
     );
+    renderNumericFieldErrors();
   }
 
   function renderRouteList() {
@@ -701,11 +804,17 @@ export async function openMobileSettings(opener) {
         </select>${help}${errorMarkup(record.id, field.name)}</label>`;
     }
     const type = field.input_type === "number" ? "number" : "text";
+    const numericAttributes = field.name === "num_ctx"
+      ? ' min="0" step="1" inputmode="numeric"'
+      : "";
+    const describedBy = field.name === "num_ctx"
+      ? ' aria-describedby="mobileModelSelectedNumCtxError"'
+      : "";
     return `<label class="mobile-model-field"><span>${escapeHtml(field.label)}</span>
       <input type="${type}" data-model-field="${escapeHtml(field.name)}"
         value="${escapeHtml(record[field.name] ?? "")}"
         placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"
-        ${required}${disabled}>
+        ${required}${disabled}${numericAttributes}${describedBy}>
       ${help}${errorMarkup(record.id, field.name)}</label>`;
   }
 
@@ -829,20 +938,6 @@ export async function openMobileSettings(opener) {
     renderProbeStatus(record);
   }
 
-  function renderRuntimeFieldErrors(errors = runtimeFieldErrors) {
-    runtimeFieldErrors = { ...errors };
-    for (const [id, field] of [
-      ["mobileModelChatConcurrencyError", "concurrency"],
-      ["mobileModelChatTimeoutError", "timeout_seconds"],
-    ]) {
-      const host = byId(id);
-      if (!host) continue;
-      const message = runtimeFieldErrors[field] || "";
-      host.textContent = message;
-      host.hidden = !message;
-    }
-  }
-
   function renderRuntime() {
     if (state.activeRoute !== "runtime") return;
     byId("mobileModelChatConcurrency").value = String(state.models.chat.concurrency);
@@ -864,7 +959,7 @@ export async function openMobileSettings(opener) {
         ${state.models.embedding.enabled ? "enabled" : "disabled"}</strong></div>
       <div><span>Current health</span><strong>
         ${healthy} passed probes · ${open} open circuits</strong></div>`;
-    renderRuntimeFieldErrors();
+    renderNumericFieldErrors();
   }
 
   function migrationResolution(action) {
@@ -928,6 +1023,24 @@ export async function openMobileSettings(opener) {
     });
   }
 
+  function focusFirstNumericError(error) {
+    if (!state || !error) return;
+    state.activeRoute = error.route;
+    routeView = error.connectionId ? "detail" : "list";
+    if (error.connectionId) {
+      state = selectRouteItem(state, "chat", error.connectionId);
+    }
+    render({ preserveStatus: true });
+    const selector = {
+      concurrency: "#mobileModelChatConcurrency",
+      timeout_seconds: "#mobileModelChatTimeout",
+      num_ctx: '[data-model-field="num_ctx"]',
+      output_dimensionality: "#mobileModelEmbeddingDimension",
+      similarity_threshold: "#mobileModelEmbeddingSimilarity",
+    }[error.field];
+    window.requestAnimationFrame(() => card.querySelector(selector)?.focus());
+  }
+
   function focusDetailControl(id = "mobileModelInspectorBack") {
     window.requestAnimationFrame(() => byId(id)?.focus());
   }
@@ -955,6 +1068,7 @@ export async function openMobileSettings(opener) {
       record.id,
       selectedIndex() + delta,
     );
+    numericValidation.afterDraftMutation();
     render();
     focusDetailControl(delta < 0 ? "mobileModelMoveUp" : "mobileModelMoveDown");
   }
@@ -999,6 +1113,7 @@ export async function openMobileSettings(opener) {
     try {
       state = appendRouteItem(state, state.activeRoute, record);
       if (preset) state = applyPreset(state, state.activeRoute, id, preset);
+      numericValidation.afterDraftMutation();
       routeView = "detail";
       render();
       focusDetailControl();
@@ -1013,6 +1128,7 @@ export async function openMobileSettings(opener) {
     if (!record || !window.confirm(`移除 ${record.name || record.id}？`)) return;
     try {
       state = removeRouteItem(state, state.activeRoute, record.id);
+      numericValidation.afterDraftMutation();
       routeView = "list";
       render();
       focusSelectedRouteControl();
@@ -1050,6 +1166,7 @@ export async function openMobileSettings(opener) {
     if (preset) {
       state = applyPreset(state, state.activeRoute, record.id, preset, { previousPreset });
     }
+    numericValidation.afterDraftMutation();
     render();
     focusSelectedTypeOption();
   }
@@ -1059,7 +1176,7 @@ export async function openMobileSettings(opener) {
     const record = selectedRecord(state, state.activeRoute);
     if (!record) return;
     let value = target.value;
-    if (target.type === "number") value = Number(target.value);
+    if (target.type === "number") value = parseMobileModelNumericDraft(target.value);
     if (field === "preset") {
       const descriptor = descriptorFor(record.type);
       const preset = presetFor(descriptor, value);
@@ -1086,12 +1203,14 @@ export async function openMobileSettings(opener) {
         }
         state = result.state;
       }
+      numericValidation.afterDraftMutation();
       exactDraftRenderer.afterDraftMutation({ rebuildInspector: true });
     } else {
       state = updateRouteField(state, state.activeRoute, record.id, field, value);
       if (field === "name") {
         byId("mobileModelInspectorTitle").textContent = value || "连接详情";
       }
+      numericValidation.afterDraftMutation();
       exactDraftRenderer.afterDraftMutation();
     }
     setModelStatus("有未保存的模型更改。");
@@ -1108,6 +1227,7 @@ export async function openMobileSettings(opener) {
       "credential",
       { action, value },
     );
+    numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation({ rerenderCredential: rerender });
     setModelStatus("有未保存的模型更改。");
   }
@@ -1122,6 +1242,10 @@ export async function openMobileSettings(opener) {
 
   async function probeSelected() {
     if (!state || modelOperations.saveInFlight || modelOperations.probeInFlight) return;
+    if (!numericValidation.runProbeIfValid(state)) {
+      setModelStatus("请先修正标记的模型数值字段，再探测精确草稿。", "error");
+      return;
+    }
     const kind = state.activeRoute;
     const record = selectedRecord(state, kind);
     if (!record || kind === "runtime") return;
@@ -1198,24 +1322,13 @@ export async function openMobileSettings(opener) {
 
   async function saveModels() {
     if (!state) return;
-    const runtimeValid = guardMobileModelRuntime(
-      state.models.chat,
-      renderRuntimeFieldErrors,
-    );
-    if (!runtimeValid) {
-      state.activeRoute = "runtime";
-      routeView = "list";
-      render({ preserveStatus: true });
-      setModelStatus("请修正标记的 Runtime 字段；当前草稿尚未丢失。", "error");
-      window.requestAnimationFrame(() => {
-        const target = runtimeFieldErrors.concurrency
-          ? byId("mobileModelChatConcurrency")
-          : byId("mobileModelChatTimeout");
-        target?.focus();
-      });
+    let save = null;
+    if (!numericValidation.runSaveIfValid(state, () => {
+      save = modelOperations.beginSave();
+    })) {
+      setModelStatus("请修正标记的模型数值字段；当前草稿尚未丢失。", "error");
       return;
     }
-    const save = modelOperations.beginSave();
     if (!save) return;
     modelResources.invalidateSnapshotRequests();
     setModelEditorLocked(true);
@@ -1228,6 +1341,7 @@ export async function openMobileSettings(opener) {
       const result = await updateModelConfig(toModelConfigPayload(state));
       if (disposed) return;
       state = retainSelection(hydrateModelConfig(result.snapshot), state);
+      numericValidation.afterAuthoritativeHydration();
       render({ preserveStatus: true });
       setModelStatus("模型 route 已保存并热重载。", "success");
     } catch (error) {
@@ -1238,6 +1352,13 @@ export async function openMobileSettings(opener) {
         setModelStatus("保存被拒绝：远端已有更新，当前安全草稿仍保留。", "error");
       } else if (Array.isArray(error.details?.errors)) {
         state = mapServerFieldErrors(state, error.details.errors);
+        render({ preserveStatus: true });
+        setModelStatus("请修正标记的模型字段；当前草稿尚未丢失。", "error");
+      } else if (Array.isArray(error.details?.detail)) {
+        state = mapServerFieldErrors(
+          state,
+          normalizeMobileModelValidationDetails(error.details.detail, state),
+        );
         render({ preserveStatus: true });
         setModelStatus("请修正标记的模型字段；当前草稿尚未丢失。", "error");
       } else {
@@ -1260,25 +1381,14 @@ export async function openMobileSettings(opener) {
   }
 
   async function loadModelSettings() {
-    modelLoadRetry.hidden = true;
-    setModelStatus("正在读取模型配置与连接类型…");
+    modelLoadRecovery.beginEntry();
     try {
       const readiness = await modelResources.enterModels();
       if (disposed) return readiness;
-      if (readiness.ready && state) {
-        modelLoadRetry.hidden = true;
-        setModelStatus(`模型配置已同步 · ${state.revision.slice(0, 12)}`);
-      } else if (state?.remoteUpdate) {
-        setModelStatus("远端已有更新；本地未保存草稿仍保留。");
-      } else if (state?.dirty) {
-        setModelStatus("模型配置已读取；本地草稿尚未保存。");
-      }
-      return readiness;
+      return modelLoadRecovery.settleEntry(readiness);
     } catch (error) {
       if (disposed) return modelResources.readiness();
-      modelLoadRetry.hidden = false;
-      setModelStatus(error.message || "无法读取模型配置。", "error");
-      return modelResources.readiness();
+      return modelLoadRecovery.failEntry(error, modelResources.readiness());
     }
   }
 
@@ -1392,6 +1502,7 @@ export async function openMobileSettings(opener) {
     if (modelMutationBlocked() || !state?.remoteUpdate) return;
     if (!window.confirm("放弃当前草稿并加载远端模型配置？")) return;
     state = retainSelection(hydrateModelConfig(state.remoteUpdate.snapshot), state);
+    numericValidation.afterAuthoritativeHydration();
     routeView = "list";
     render();
   });
@@ -1446,10 +1557,12 @@ export async function openMobileSettings(opener) {
       state = updateRouteSetting(state, "embedding", "enabled", false);
       state.models.embedding.providers = [];
       state.selected.embedding = "";
+      numericValidation.afterDraftMutation();
       render();
       return;
     }
     state = updateRouteSetting(state, "embedding", "enabled", event.target.checked);
+    numericValidation.afterDraftMutation();
     if (
       event.target.checked
       && state.models.embedding.providers.length === 0
@@ -1477,8 +1590,11 @@ export async function openMobileSettings(opener) {
   ]) {
     byId(id).addEventListener("input", (event) => {
       if (modelMutationBlocked() || modelControlLocked(path)) return;
-      const value = kind === "number" ? Number(event.target.value) : event.target.value;
+      const value = kind === "number"
+        ? parseMobileModelNumericDraft(event.target.value)
+        : event.target.value;
       state = updateRouteSetting(state, "embedding", field, value);
+      numericValidation.afterDraftMutation();
       exactDraftRenderer.afterDraftMutation();
       setModelStatus("有未保存的模型更改。");
     });
@@ -1494,6 +1610,7 @@ export async function openMobileSettings(opener) {
       "multimodal_enabled",
       event.target.checked,
     );
+    numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
     setModelStatus("有未保存的模型更改。");
   });
@@ -1503,10 +1620,9 @@ export async function openMobileSettings(opener) {
       state,
       "chat",
       "concurrency",
-      Number(event.target.value),
+      parseMobileModelNumericDraft(event.target.value),
     );
-    delete runtimeFieldErrors.concurrency;
-    renderRuntimeFieldErrors();
+    numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
     setModelStatus("有未保存的模型更改。");
   });
@@ -1519,10 +1635,9 @@ export async function openMobileSettings(opener) {
       state,
       "chat",
       "timeout_seconds",
-      Number(event.target.value),
+      parseMobileModelNumericDraft(event.target.value),
     );
-    delete runtimeFieldErrors.timeout_seconds;
-    renderRuntimeFieldErrors();
+    numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
     setModelStatus("有未保存的模型更改。");
   });
@@ -1535,6 +1650,7 @@ export async function openMobileSettings(opener) {
       button.dataset.migrationId,
       migrationResolution(button.dataset.migrationAction),
     );
+    numericValidation.afterDraftMutation();
     exactDraftRenderer.afterDraftMutation();
     renderMigration();
     setModelStatus("迁移选择尚未保存。");

@@ -295,6 +295,18 @@ function emptyFieldErrors() {
   return { byConnection: {}, global: [] };
 }
 
+function ownFieldErrorBucket(container, key) {
+  if (!Object.hasOwn(container, key)) {
+    Object.defineProperty(container, key, {
+      value: {},
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+  }
+  return container[key];
+}
+
 function touchedKey(kind, id, field) {
   return `${kind}:${id}:${field}`;
 }
@@ -649,8 +661,13 @@ export function mapServerFieldErrors(state, errors) {
       continue;
     }
     const field = fieldFromPath(error.path);
-    next.fieldErrors.byConnection[id] ||= {};
-    next.fieldErrors.byConnection[id][field] = error;
+    const fields = ownFieldErrorBucket(next.fieldErrors.byConnection, id);
+    Object.defineProperty(fields, field, {
+      value: error,
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
   }
   return next;
 }

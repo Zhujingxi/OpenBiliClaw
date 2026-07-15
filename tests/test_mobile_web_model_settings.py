@@ -200,6 +200,8 @@ def test_exact_probe_is_revisioned_generation_guarded_and_fingerprinted() -> Non
     ):
         assert marker in probe
     assert "record.probe =" not in probe
+    assert probe.index("numericValidation.runProbeIfValid") < probe.index("createProbeSignature")
+    assert probe.index("numericValidation.runProbeIfValid") < probe.index("toModelConfigPayload")
 
 
 def test_revisioned_save_locks_the_editor_and_keeps_safe_failure_drafts() -> None:
@@ -248,6 +250,23 @@ def test_latest_snapshot_and_descriptor_ownership_are_rechecked_after_settle() -
     assert "snapshotReady" in controller
     assert "descriptorsReady" in controller
     assert "preserveStatus" in model
+
+
+def test_settled_incomplete_mobile_load_uses_the_recovery_controller() -> None:
+    model = _read(MODEL_PATH)
+    controller = _read(CONTROLLER_PATH)
+    load = model.split("async function loadModelSettings()", 1)[1].split(
+        "function confirmLeave", 1
+    )[0]
+
+    assert "createMobileModelLoadRecoveryController" in controller
+    assert "createMobileModelLoadRecoveryController" in model
+    assert "modelLoadRecovery.beginEntry()" in load
+    assert "modelLoadRecovery.settleEntry(readiness)" in load
+    assert "modelLoadRecovery.failEntry(error" in load
+    assert "onReadinessChange: modelLoadRecovery.onReadinessChange" in model
+    assert "onRecoverableIncomplete" in model
+    assert "modelLoadRetry.hidden = false" in model
 
 
 def test_late_get_remote_reload_and_dirty_navigation_never_overwrite_the_draft() -> None:
@@ -327,9 +346,62 @@ def test_live_handlers_delegate_to_the_tested_mobile_controller_seams() -> None:
             0
         ]
     )
-    assert save.index("guardMobileModelRuntime") < save.index("updateModelConfig")
+    assert save.index("numericValidation.runSaveIfValid") < save.index("updateModelConfig")
     assert "exactDraftRenderer.afterDraftMutation()" in migration_handler
     assert "resolveOpener" in model
+
+
+def test_mobile_numeric_preflight_and_error_lifecycle_use_production_seams() -> None:
+    model = _read(MODEL_PATH)
+    controller = _read(CONTROLLER_PATH)
+    save = model.split("async function saveModels()", 1)[1].split(
+        "async function fetchModelSnapshot", 1
+    )[0]
+
+    for export in (
+        "createMobileModelNumericValidationController",
+        "normalizeMobileModelValidationDetails",
+        "parseMobileModelNumericDraft",
+        "validateMobileModelNumbers",
+    ):
+        assert f"export function {export}" in controller
+        assert export in model
+    assert save.index("numericValidation.runSaveIfValid") < save.index(
+        "updateModelConfig(toModelConfigPayload(state))"
+    )
+    assert "numericValidation.afterDraftMutation()" in model
+    assert model.count("numericValidation.afterAuthoritativeHydration()") >= 3
+    assert "normalizeMobileModelValidationDetails(error.details.detail, state)" in save
+    assert 'id="mobileModelEmbeddingDimensionError"' in model
+    assert 'id="mobileModelEmbeddingSimilarityError"' in model
+    assert 'aria-describedby="mobileModelEmbeddingDimensionError"' in model
+    assert 'aria-describedby="mobileModelEmbeddingSimilarityError"' in model
+    assert "data-mobile-model-num-ctx-error" in model
+    assert "mobileModelSelectedNumCtxError" in model
+    assert 'field.name === "num_ctx"' in model
+    assert 'min="0" step="1" inputmode="numeric"' in model
+    assert "parseMobileModelNumericDraft(event.target.value)" in model
+    assert "runtimeFieldErrors" not in model
+
+
+def test_every_error_clearing_mobile_mutation_repaints_numeric_error_hosts() -> None:
+    model = _read(MODEL_PATH)
+    segments = (
+        model.split("function moveSelected(delta)", 1)[1].split("function selectRecord", 1)[0],
+        model.split("function updateCredential(", 1)[1].split("function probeRequestVisible", 1)[0],
+        model.split('byId("mobileModelEmbeddingEnabled").addEventListener', 1)[1].split(
+            "for (const [id, field, kind, path]", 1
+        )[0],
+        model.split('byId("mobileModelEmbeddingMultimodal").addEventListener', 1)[1].split(
+            'byId("mobileModelChatConcurrency")', 1
+        )[0],
+        model.split('byId("mobileModelMigrationPanel").addEventListener', 1)[1].split(
+            "focusController =", 1
+        )[0],
+    )
+
+    for segment in segments:
+        assert "numericValidation.afterDraftMutation()" in segment
 
 
 def test_opener_list_and_detail_focus_are_restored_with_semantic_controls() -> None:
