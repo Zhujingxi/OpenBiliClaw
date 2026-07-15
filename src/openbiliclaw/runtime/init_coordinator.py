@@ -273,14 +273,33 @@ class InitCoordinator:
         """
         await self._write(run_id)
 
-    async def complete(self, run_id: str, *, partial_success: bool = False) -> None:
+    async def complete(
+        self,
+        run_id: str,
+        *,
+        partial_success: bool = False,
+        reason: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Finish a run, retaining a diagnosable partial-success reason.
+
+        A discovery timeout is deliberately not a hard failure once the profile
+        exists. ``reason`` / ``detail`` let status consumers explain that
+        degraded terminal state instead of presenting it as a silent success.
+        """
         await self._write(
             run_id,
             status="completed",
             partial_success=partial_success,
+            error_reason=reason,
+            error_detail=detail,
             finished=True,
             event_type="init_completed",
-            event_extra={"partial_success": partial_success},
+            event_extra={
+                "partial_success": partial_success,
+                "reason": reason or "none",
+                "detail": detail or "",
+            },
         )
 
     async def fail(self, run_id: str, reason: str, detail: str | None = None) -> None:

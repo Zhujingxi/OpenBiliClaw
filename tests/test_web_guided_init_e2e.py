@@ -14,6 +14,15 @@ pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).resolve().parents[1]
 
+ANALYZE_TIMEOUT_DETAIL = (
+    "偏好分析等待 AI 服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "常见原因是 Base URL、模型名或代理配置错误。请到模型设置测试 AI 服务后重试初始化。"
+)
+DISCOVERY_TIMEOUT_DETAIL = (
+    "画像已生成，但首轮内容池等待内容发现超过 10 分钟仍未完成，本次初始化为部分完成。"
+    "系统会在后台继续补池；请检查平台登录与网络/代理。"
+)
+
 
 def _status(
     *,
@@ -22,6 +31,8 @@ def _status(
     current_stage: int = 0,
     can_start: bool = True,
     reason: str = "none",
+    detail: str = "",
+    partial_success: bool = False,
     enabled_platforms: list[str] | None = None,
     stages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -39,7 +50,7 @@ def _status(
             {"n": 3, "label": "生成画像", "status": "pending", "reason": None},
             {"n": 4, "label": "发现内容池", "status": "pending", "reason": None},
         ],
-        "partial_success": False,
+        "partial_success": partial_success,
         "can_start": can_start,
         "can_manage": True,
         "prerequisites": {
@@ -50,7 +61,7 @@ def _status(
             "enabled_platforms": enabled_platforms or ["bilibili", "youtube"],
         },
         "reason": reason,
-        "detail": "",
+        "detail": detail,
     }
 
 
@@ -108,6 +119,39 @@ class GuidedInitStub:
                 {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
                 {"n": 3, "label": "生成画像", "status": "ok", "reason": None},
                 {"n": 4, "label": "发现内容池", "status": "ok", "reason": None},
+            ],
+        )
+
+    def set_analyze_timeout(self) -> None:
+        self.current_status = _status(
+            can_start=True,
+            reason="analyze_failed",
+            detail=ANALYZE_TIMEOUT_DETAIL,
+            stages=[
+                {"n": 1, "label": "拉取数据", "status": "ok", "reason": None},
+                {"n": 2, "label": "分析偏好", "status": "failed", "reason": "analyze_failed"},
+                {"n": 3, "label": "生成画像", "status": "failed", "reason": "analyze_failed"},
+                {"n": 4, "label": "发现内容池", "status": "failed", "reason": "analyze_failed"},
+            ],
+        )
+
+    def set_discovery_timeout(self) -> None:
+        self.current_status = _status(
+            initialized=True,
+            can_start=False,
+            reason="discovery_timeout",
+            detail=DISCOVERY_TIMEOUT_DETAIL,
+            partial_success=True,
+            stages=[
+                {"n": 1, "label": "拉取数据", "status": "ok", "reason": None},
+                {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
+                {"n": 3, "label": "生成画像", "status": "ok", "reason": None},
+                {
+                    "n": 4,
+                    "label": "发现内容池",
+                    "status": "warning",
+                    "reason": "discovery_timeout",
+                },
             ],
         )
 
@@ -385,7 +429,7 @@ def test_setup_wizard_e2e_waits_for_first_pool_before_finishing(
         "() => document.querySelector('#initProgress')?.hidden === false"
     )
 
-    stub.set_initialized()
+    stub.set_discovery_timeout()
     stub.runtime_status.update({"initialized": True, "pool_available_count": 0})
     chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
     chromium_page.wait_for_timeout(100)
@@ -397,6 +441,9 @@ def test_setup_wizard_e2e_waits_for_first_pool_before_finishing(
         "el => !el.classList.contains('active')"
     )
     assert "首轮内容" in chromium_page.locator("#initProgressLabel").inner_text()
+    assert "超过 10 分钟" in chromium_page.locator("#initReason").inner_text()
+    assert "后台继续补池" in chromium_page.locator("#initReason").inner_text()
+    assert chromium_page.locator("#initReason").get_attribute("role") == "status"
 
     stub.runtime_status.update({"pool_available_count": 12, "last_replenished_count": 12})
     chromium_page.evaluate(
@@ -490,7 +537,7 @@ def test_desktop_web_e2e_waits_for_pool_before_init_completed_state(
     chromium_page.locator('[data-init-action="start"]').click()
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
 
-    stub.set_initialized()
+    stub.set_discovery_timeout()
     stub.runtime_status.update({"initialized": True, "pool_available_count": 0})
     chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
     chromium_page.wait_for_timeout(100)
@@ -498,6 +545,8 @@ def test_desktop_web_e2e_waits_for_pool_before_init_completed_state(
     assert chromium_page.locator('.init-onboarding[data-init-phase="completed"]').count() == 0
     assert chromium_page.locator(".init-onboarding").is_visible()
     assert "首轮内容" in chromium_page.locator(".init-progress").inner_text()
+    assert "超过 10 分钟" in chromium_page.locator(".init-reason").inner_text()
+    assert "后台继续补池" in chromium_page.locator(".init-reason").inner_text()
 
     stub.runtime_status.update({"pool_available_count": 12, "last_replenished_count": 12})
     chromium_page.evaluate(
@@ -508,6 +557,51 @@ def test_desktop_web_e2e_waits_for_pool_before_init_completed_state(
     )
     chromium_page.wait_for_function("() => document.querySelector('.init-onboarding') === null")
     assert chromium_page.locator("#loadMoreBtn").is_visible()
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_surfaces_timeout_cause_and_recovery_actions(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
+
+    if surface == "setup":
+        chromium_page.goto(f"{base_url}/setup/")
+        chromium_page.locator("#provider").select_option("ollama")
+        chromium_page.locator("#saveLlm").click()
+        chromium_page.wait_for_selector('[data-panel="1"].active')
+        chromium_page.locator("#next1").click()
+        chromium_page.wait_for_selector('[data-panel="2"].active')
+        chromium_page.locator("#startInit").click()
+        label = chromium_page.locator("#initProgressLabel")
+        retry = chromium_page.locator("#startInit")
+    else:
+        chromium_page.goto(f"{base_url}/web/")
+        chromium_page.wait_for_selector(".init-onboarding", state="attached")
+        chromium_page.locator('[data-init-action="start"]').click()
+        label = chromium_page.locator(".init-progress p")
+        retry = chromium_page.locator('[data-init-action="start"]')
+
+    chromium_page.wait_for_function("() => window.__obcInitPosted === true")
+    stub.set_analyze_timeout()
+    chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_failed" })""")
+    chromium_page.wait_for_function(
+        "() => document.body.innerText.includes('超过 6 分钟') && "
+        "document.body.innerText.includes('Base URL')"
+    )
+
+    text = label.inner_text()
+    assert "偏好分析" in text
+    assert "超过 6 分钟" in text
+    assert "Base URL" in text
+    assert "模型设置" in text
+    assert label.get_attribute("role") == "alert"
+    assert retry.inner_text() == "重试初始化"
+    if surface == "desktop":
+        assert chromium_page.locator('[data-init-action="settings"]').is_visible()
 
 
 def test_desktop_web_e2e_matches_popup_when_runtime_has_post_init_signals(

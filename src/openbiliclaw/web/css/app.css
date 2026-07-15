@@ -374,6 +374,17 @@ body {
   font-weight: 700;
 }
 
+.recommend-action-note {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid rgba(177, 207, 242, 0.6);
+  border-radius: 10px;
+  background: rgba(245, 249, 255, 0.9);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .recommend-pool-grid {
   display: flex;
   gap: 6px;

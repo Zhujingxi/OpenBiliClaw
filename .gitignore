@@ -84,3 +84,6 @@ logs/
 .reasonix/
 extension/dist-firefox/
 backend.err
+
+# Playwright CLI local cache (tool artifact)
+.playwright-cli/

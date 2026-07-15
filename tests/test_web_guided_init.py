@@ -1,5 +1,8 @@
+import asyncio
 import re
 from pathlib import Path
+
+import pytest
 
 
 def test_setup_wizard_static_contract_uses_guided_init_endpoint() -> None:
@@ -57,6 +60,19 @@ def test_unknown_init_reasons_remain_diagnosable() -> None:
     assert "未知初始化状态" in app_js
     assert re.search(r"INIT_REASON_TEXT\[reason\]\s*\|\|\s*`未知初始化状态", setup_html)
     assert re.search(r"INIT_REASON_TEXT\[reason\]\s*\|\|\s*`未知初始化状态", app_js)
+
+
+def test_typed_timeout_reasons_prefer_backend_detail_in_web_surfaces() -> None:
+    """Timeout details contain the cause/action; a short map label must not hide them."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    for source in (setup_html, app_js):
+        assert "analyze_failed" in source
+        assert "profile_failed" in source
+        assert "discovery_timeout" in source
+        assert "detailFirst" in source
+        assert "initStatusReasonText(status)" in source
 
 
 def test_web_surfaces_no_longer_block_reddit_only_init() -> None:
@@ -216,7 +232,7 @@ def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> 
     assert "renderInitProgress(status)" in guard
     assert "connectInitStream()" in guard
     assert "if (status.initialized)" in guard
-    assert "renderWaitingForFirstPool()" in guard
+    assert "renderWaitingForFirstPool(status)" in guard
 
 
 def test_setup_wizard_allows_saved_api_key_to_be_reused_without_reentry() -> None:
@@ -236,7 +252,9 @@ def test_setup_wizard_first_pool_wait_has_web_escape_hatch() -> None:
 
     assert 'id="initEscape"' in setup_html
     assert '<a href="/web">' in setup_html
-    waiting = setup_html.split("function renderWaitingForFirstPool()", 1)[1].split("\n    }", 1)[0]
+    waiting = setup_html.split("function renderWaitingForFirstPool(status = null)", 1)[1].split(
+        "\n    }", 1
+    )[0]
     assert '$("#initEscape").className = "msg show info";' in waiting
 
 
@@ -567,3 +585,128 @@ async def test_run_guided_init_cli_path_uses_console_progress_callback(monkeypat
     )
     assert engine.received_callback is not None
     await engine.received_callback(1, 2)  # prints without error
+
+
+async def test_run_guided_init_bounds_hung_preference_analysis(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    class _HangingAnalyzeEngine(_StubEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled = False
+
+        async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    engine = _HangingAnalyzeEngine()
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+    coord = _RecordingCoordinator()
+
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=object(),
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=True,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=discover_backfill,
+            coordinator=coord,
+            run_id="run-timeout",
+            profile_analysis_timeout_seconds=0.01,
+        )
+
+    assert excinfo.value.reason == "analyze_failed"
+    assert "超过 6 分钟" in excinfo.value.message
+    assert "Base URL" in excinfo.value.message
+    assert "模型名" in excinfo.value.message
+    assert "重试初始化" in excinfo.value.message
+    assert engine.cancelled is True
+    assert coord.started_stages == [1, 2]
+    assert coord.done_stages == [1]
+
+
+async def test_run_guided_init_bounds_hung_profile_build(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    class _HangingProfileEngine(_StubEngine):
+        def __init__(self) -> None:
+            super().__init__(chunk_reports=0)
+            self.cancelled = False
+
+        async def build_initial_profile(self, history):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    engine = _HangingProfileEngine()
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=object(),
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=True,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=discover_backfill,
+            profile_build_timeout_seconds=0.01,
+        )
+
+    assert excinfo.value.reason == "profile_failed"
+    assert "超过 6 分钟" in excinfo.value.message
+    assert "Base URL" in excinfo.value.message
+    assert "模型名" in excinfo.value.message
+    assert "重试初始化" in excinfo.value.message
+    assert engine.cancelled is True
+
+
+async def test_run_guided_init_treats_hung_discovery_as_partial_success(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine(chunk_reports=0)
+    _patch_run_guided_init_collectors(monkeypatch, engine)
+    discovery_cancelled = False
+
+    async def _hanging_discovery(profile, *, target_pool_count, label_suffix=""):
+        nonlocal discovery_cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            discovery_cancelled = True
+
+    result = await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        target_pool_count=0,
+        discover_backfill=_hanging_discovery,
+        discovery_timeout_seconds=0.01,
+    )
+
+    assert result.discovery_error is True
+    assert isinstance(result.discover_exc, TimeoutError)
+    assert result.discovery_reason == "discovery_timeout"
+    assert "超过 10 分钟" in result.discovery_detail
+    assert "部分完成" in result.discovery_detail
+    assert "后台继续补池" in result.discovery_detail
+    assert discovery_cancelled is True

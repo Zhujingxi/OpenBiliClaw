@@ -61,7 +61,8 @@ def test_autoload_guards_cooldown_pool_page_grid_and_button_state() -> None:
     assert cooldown is not None, "autoload cooldown constant not found"
     assert int(cooldown.group("value")) >= 8000
 
-    guard = _function_body(js, "shouldAutoLoadMore")
+    # 判定逻辑集中在 autoLoadBlockReason；shouldAutoLoadMore 只是它的布尔包装。
+    guard = _function_body(js, "autoLoadBlockReason")
     assert "state.autoLoadOnScroll" in guard
     assert "appendMoreInFlight" in guard
     assert "now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS" in guard
@@ -71,6 +72,28 @@ def test_autoload_guards_cooldown_pool_page_grid_and_button_state() -> None:
     # 骨架占位卡不算真实内容，不能触发自动加载（issue #81 skeleton cards）。
     assert 'grid.querySelector(".video-card:not(.is-skeleton)")' in guard
     assert "loadMore.hidden" in guard
+    # shouldAutoLoadMore 仍是对外布尔入口，委托给 autoLoadBlockReason。
+    boolean_wrapper = _function_body(js, "shouldAutoLoadMore")
+    assert 'autoLoadBlockReason(now) === ""' in boolean_wrapper
+
+
+def test_autoload_resumes_after_cooldown_when_parked_at_bottom() -> None:
+    """Issue #115: 停在底部、冷却期挡下的自动加载要能在冷却结束后自愈，
+    不能一直卡到用户重新滚动或手点按钮才继续。"""
+    js = APP_JS.read_text(encoding="utf-8")
+    auto_load = _function_body(js, "autoLoadMoreIfNeeded")
+    rearm = _function_body(js, "armAutoLoadCooldownRecheck")
+    sync_observer = _function_body(js, "syncAutoLoadObserver")
+
+    # 冷却是唯一拦路项且哨兵仍在视口时，安排一次一次性复查。
+    assert 'blockReason === "cooldown" && sentinelInView' in auto_load
+    assert "armAutoLoadCooldownRecheck(now)" in auto_load
+    # 复查计时器在冷却剩余时间后触发，去抖避免重复排程。
+    assert "if (autoLoadCooldownTimer) return;" in rearm
+    assert "AUTO_LOAD_COOLDOWN_MS - (now - lastAutoLoadAt)" in rearm
+    assert "scheduleAutoLoadCheck();" in rearm
+    # 关闭开关 / 重建观察器时清理待触发的复查计时器。
+    assert "clearAutoLoadCooldownRecheck();" in sync_observer
 
 
 def test_autoload_rechecks_after_scroll_render_and_runtime_status() -> None:

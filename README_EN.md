@@ -189,11 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.166 (2026-07-14)**
+📌 Latest: **v0.3.168 (2026-07-14)**
 
-- **Overseas routing: direct / system / custom proxy** — the `[network]` modes default to direct and are switchable from desktop web and the extension settings, so LLM calls are no longer silently strangled by a stale system proxy.
-- **Init failures now show the real cause** — when profile / preference analysis hits an SSL-cert or proxy-interception error, the init page tells you to disable the proxy / allowlist the endpoint instead of retrying forever (issue #113).
-- **Seven-platform favorites and watch later are live** — every surface saves locally first and auto-sync stays off by default; the real-account regression completed both actions or the documented favorite fallback across all seven platforms as `synced/already_synced`.
+- **Initialization no longer hangs forever at 49%** — profile timeouts now show the real cause and recovery action, pool timeouts enter the app and continue filling in the background, and stale CA paths no longer break every network client.
+- **DashScope multimodal cover embeddings** — optionally use Alibaba Bailian or Gemini cover semantics for a bounded visual boost in regular and delight recommendations; rankings remain unchanged while disabled.
+- **One-line installs reliably update old checkouts** — regenerated dirty lockfiles are safely restored before fast-forwarding, while genuine local edits get a prominent warning and an optional stash-preserving update path.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -738,6 +738,7 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 - Thanks to [@tangle111-design](https://github.com/tangle111-design) for exploring `style_key` viewing modes, recommendation tone, Bilibili initialization, and LLM / profile workflow improvements in [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69). The relevant ideas have been reviewed, split up, and selectively merged into main.
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for polishing desktop web interactions — side-drawer collapse animation, a delight-card drag dead zone, and a stacked toast notification system — in [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102). Merged into main.
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for the desktop web theme-engine rework to oklch in [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) — a single `--hue-primary` control point with a 12-hue tunable color picker, a five-step accent ramp, and unified interaction states. Merged into main.
+- Thanks to [@wuwafly3](https://github.com/wuwafly3) for contributing the DashScope (Alibaba Model Studio) multimodal embedding provider and the image-only cover-embedding design in [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100). The capability was reviewed, fixed (network routing / save-time validation), and reworked into the live cover-visual pipeline (consumed consistently by both delight and the normal feed) before merging into main (see [#116](https://github.com/whiteguo233/OpenBiliClaw/pull/116)).
 
 ## ⭐ Star History
 

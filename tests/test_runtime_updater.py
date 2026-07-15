@@ -1182,6 +1182,104 @@ async def test_request_apply_credentialed_remote_redacts_token_in_last_error(
     assert "github.com/whiteguo233/OpenBiliClaw" in last_error
 
 
+@pytest.mark.asyncio
+async def test_request_apply_origin_exists_without_url_suggests_set_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Origin section present but url-less — the exact reported contradiction.
+
+    ``git config --get remote.origin.url`` returns empty while ``git remote add
+    origin`` answers "already exists", so the old "运行:git remote add origin"
+    hint was a dead end. The ``git remote get-url origin`` probe (exit 0, empty)
+    marks origin-exists-but-blank, so the fix must be ``set-url``, never ``add``.
+    """
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["state"] == "blocked"
+    assert payload["reason"] == "origin_remote_unusable"
+    last_error = service.get_update_status()["last_error"]
+    assert "remote set-url origin" in last_error
+    assert "remote add origin" not in last_error
+
+
+@pytest.mark.asyncio
+async def test_request_apply_no_origin_remote_suggests_remote_add(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Genuinely no origin — get-url errors "No such remote" → suggest add."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 1, "", "")
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 2, "", "error: No such remote 'origin'")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "origin_remote_unusable"
+    last_error = service.get_update_status()["last_error"]
+    assert "remote add origin" in last_error
+    assert "set-url" not in last_error
+
+
+@pytest.mark.asyncio
+async def test_request_apply_dubious_ownership_points_at_safe_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Windows dubious ownership: config read fails with a git *fatal*, not a
+    missing remote. Surface safe.directory, never the wrong "remote add" hint."""
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService(enabled=False)
+
+    fatal = (
+        f"fatal: detected dubious ownership in repository at '{tmp_path}'\n"
+        f"To add an exception for this directory, call:\n"
+        f"\tgit config --global --add safe.directory {tmp_path}"
+    )
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 128, "", fatal)
+        if command == ["git", "remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 128, "", fatal)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+
+    assert status_code == 409
+    assert payload["reason"] == "origin_remote_unusable"
+    last_error = service.get_update_status()["last_error"]
+    assert "safe.directory" in last_error
+    assert "remote add origin" not in last_error
+
+
 def test_detect_install_mode_docker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -161,12 +161,17 @@ class TestDatabase:
                 str(row["name"])
                 for row in db.conn.execute("PRAGMA index_list(recommendations)").fetchall()
             }
+            event_indexes = {
+                str(row["name"]) for row in db.conn.execute("PRAGMA index_list(events)").fetchall()
+            }
             content_indexes = {
                 str(row["name"])
                 for row in db.conn.execute("PRAGMA index_list(content_cache)").fetchall()
             }
 
             assert "idx_recommendations_created_id" in recommendation_indexes
+            assert "idx_recommendations_bvid" in recommendation_indexes
+            assert "idx_events_type_id" in event_indexes
             assert "idx_content_cache_content_id" in content_indexes
 
             db.close()

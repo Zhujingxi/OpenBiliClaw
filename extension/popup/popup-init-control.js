@@ -19,6 +19,10 @@ const REASON_TEXT = {
   already_initialized: "已经初始化过了；如需重建，请到设置页。",
   local_only: "只能在本机发起初始化。",
   no_sources_selected: "至少勾选一个数据来源。",
+  analyze_failed: "偏好分析未完成。",
+  profile_failed: "画像生成未完成。",
+  discovery_timeout: "画像已生成，但首轮内容池整理超时。",
+  discovery_partial: "画像已生成，但首轮内容池本次未完成。",
   internal_error: "初始化过程中出错了，请稍后重试。",
   interrupted: "上次初始化被打断（后端重启），可重试。",
   cancelled: "初始化已取消。",
@@ -33,6 +37,25 @@ export function describeInitReason(reason) {
   return REASON_TEXT[reason] || "";
 }
 
+// Authoritative status explanation for pre-init and partial-success states.
+// Typed backend details carry the concrete cause + recovery action and should
+// win over a short reason-code label. account-sync keeps llm_not_ready while
+// its live probe is red, so recognise its prefixed analysis detail as well.
+export function describeInitStatusReason(status) {
+  const reason = String((status && status.reason) || "");
+  const detail = String((status && status.detail) || "").trim();
+  const detailFirst = [
+    "analyze_failed",
+    "profile_failed",
+    "discovery_timeout",
+    "discovery_partial",
+  ];
+  if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
+    return detail;
+  }
+  return describeInitReason(reason) || detail;
+}
+
 // Human text for a failed/cancelled run. ``status.detail`` carries the
 // backend's stored failure specifics (exception summary / GuidedInitError
 // message, v0.3.156+) — append it so an internal_error is diagnosable from
@@ -40,6 +63,15 @@ export function describeInitReason(reason) {
 export function describeInitFailure(status, progress = null) {
   const base = describeInitReason(status && status.reason) || "";
   const detail = String((status && status.detail) || "").trim();
+  const reason = String((status && status.reason) || "");
+  if (
+    detail &&
+    (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(
+      reason,
+    ) || detail.startsWith("画像分析失败："))
+  ) {
+    return detail;
+  }
   if (base && detail) {
     return `${base}（${detail}）`;
   }
@@ -249,7 +281,13 @@ export function initStartButtonState(status, selected = null) {
     return { enabled: false, label: "初始化进行中…", reason: "" };
   }
   if (status.initialized) {
-    return { enabled: false, label: "已初始化", reason: "如需重建画像，请到设置页。" };
+    return {
+      enabled: false,
+      label: status.partial_success ? "画像已生成" : "已初始化",
+      reason: status.partial_success
+        ? describeInitStatusReason(status)
+        : "如需重建画像，请到设置页。",
+    };
   }
   if (Array.isArray(selected) && selected.length === 0) {
     return { enabled: false, label: "开始初始化", reason: REASON_TEXT.no_sources_selected };
@@ -261,7 +299,7 @@ export function initStartButtonState(status, selected = null) {
     return { enabled: true, label: "开始初始化", reason: "" };
   }
   const reason =
-    describeInitReason(status.reason) ||
+    describeInitStatusReason(status) ||
     (hardPrereqsSatisfied(status, selected) ? "暂时无法开始,请稍后重试。" : "请先满足上面的必需条件。");
   return { enabled: false, label: "开始初始化", reason };
 }

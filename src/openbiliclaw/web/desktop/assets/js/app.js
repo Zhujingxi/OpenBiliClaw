@@ -116,6 +116,10 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      analyze_failed: "偏好分析未完成。",
+      profile_failed: "画像生成未完成。",
+      discovery_timeout: "画像已生成，但首轮内容池整理超时。",
+      discovery_partial: "画像已生成，但首轮内容池本次未完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -534,6 +538,7 @@
     const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
     let autoLoadCheckRaf = 0;
+    let autoLoadCooldownTimer = 0;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
@@ -1195,6 +1200,21 @@
       return INIT_REASON_TEXT[reason] || `未知初始化状态：${reason}`;
     }
 
+    function initStatusReasonText(status) {
+      const reason = String(status?.reason || "");
+      const detail = String(status?.detail || "").trim();
+      const detailFirst = new Set([
+        "analyze_failed",
+        "profile_failed",
+        "discovery_timeout",
+        "discovery_partial"
+      ]);
+      // account-sync keeps llm_not_ready while the live probe is still red,
+      // but its detail contains the actual profile-analysis failure.
+      if (detail && (detailFirst.has(reason) || detail.startsWith("画像分析失败："))) return detail;
+      return describeInitReason(reason) || detail;
+    }
+
     function initEnabledPlatforms(status) {
       const platforms = status?.prerequisites?.enabled_platforms;
       return Array.isArray(platforms) ? platforms.map(String) : [];
@@ -1416,6 +1436,12 @@
     function initFailureText(status, progress) {
       const base = describeInitReason(status?.reason) || "";
       const detail = String(status?.detail || "").trim();
+      const reason = String(status?.reason || "");
+      if (
+        detail &&
+        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+          detail.startsWith("画像分析失败："))
+      ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)
       // carry their authoritative human message in detail — show it alone
       // instead of "未知初始化状态：code（message）".
@@ -1530,7 +1556,11 @@
           : "等待开始";
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
       if (progressFill) progressFill.style.width = `${progress.pct}%`;
-      if (progressText) progressText.textContent = progressLabel;
+      if (progressText) {
+        progressText.textContent = progressLabel;
+        progressText.setAttribute("role", progress.failed ? "alert" : "status");
+        progressText.setAttribute("aria-live", progress.failed ? "assertive" : "polite");
+      }
       // Liveness line: "● 进行中 (+ typical stage duration)" while the backend
       // keeps writing; amber stall copy after >90s of silence.
       const stallHint = section.querySelector(".init-stall-hint");
@@ -1572,10 +1602,10 @@
       const alreadyInitialized = Boolean(status?.initialized) && !waitingForFirstPool;
       const showProgress = isRunning || displayProgress.failed || waitingForFirstPool || embeddingPull.active;
       const reason = waitingForFirstPool
-        ? (state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
+        ? (status?.partial_success ? initStatusReasonText(status) : state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
         : displayProgress.failed
           ? (state.initReason || initFailureText(status, displayProgress))
-          : (state.initReason || describeInitReason(status?.reason) || status?.detail || "");
+          : (state.initReason || initStatusReasonText(status) || "");
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
@@ -1616,11 +1646,11 @@
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
             <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p>${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <p role="${displayProgress.failed ? "alert" : "status"}" aria-live="${displayProgress.failed ? "assertive" : "polite"}" aria-atomic="true">${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
           </div>
           <p class="init-stall-hint${stallText && !staleness.fresh ? " stale" : ""}"${stallText ? "" : " hidden"}>${escapeHtml(stallText)}</p>
           <p class="init-expectation"${expectationText ? "" : " hidden"}>${escapeHtml(expectationText)}</p>
-          <p class="init-reason"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
+          <p class="init-reason" role="status" aria-live="polite" aria-atomic="true"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
             <button class="small-btn primary" type="button" data-init-action="start"${buttonDisabled ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
             <button class="small-btn" type="button" data-init-action="settings">打开设置</button>
@@ -1682,7 +1712,9 @@
         state.initReason = "";
         if (status?.initialized) {
           if (!(await refreshRuntimeStatusForInitContent())) {
-            state.initReason = INIT_FIRST_POOL_WAIT_TEXT;
+            state.initReason = status?.partial_success
+              ? initStatusReasonText(status)
+              : INIT_FIRST_POOL_WAIT_TEXT;
             renderAll();
             scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
             return;
@@ -1737,7 +1769,9 @@
           state.initReason = "";
           scheduleBackendHydration();
         } else {
-          state.initReason = INIT_FIRST_POOL_WAIT_TEXT;
+          state.initReason = status?.partial_success
+            ? initStatusReasonText(status)
+            : INIT_FIRST_POOL_WAIT_TEXT;
           scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         }
         renderAll();
@@ -1763,7 +1797,7 @@
         return;
       }
       if (!status.can_start) {
-        state.initReason = describeInitReason(status.reason) || status.detail || "以下条件未满足，无法开始初始化。";
+        state.initReason = initStatusReasonText(status) || "以下条件未满足，无法开始初始化。";
         state.initBusy = false;
         renderAll();
         return;
@@ -2608,6 +2642,7 @@
         autoLoadObserver.disconnect();
         autoLoadObserver = null;
       }
+      clearAutoLoadCooldownRecheck();
       sentinelInView = false;
       if (!state.autoLoadOnScroll) return;
       const sentinel = $("#loadMoreSentinel");
@@ -2630,22 +2665,54 @@
       scheduleAutoLoadCheck();
     }
 
-    function shouldAutoLoadMore(now) {
-      if (!state.autoLoadOnScroll) return false;
-      if (appendMoreInFlight) return false;
-      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return false;
-      if (!(state.runtimeStatus?.pool_available_count > 0)) return false;
+    // Returns the reason auto-load is currently blocked, or "" when a load
+    // should proceed. The cooldown is evaluated LAST so a "cooldown" reason
+    // guarantees every other precondition (pool available, button shown, cards
+    // present, on home) is already satisfied — the caller uses that to re-arm.
+    function autoLoadBlockReason(now) {
+      if (!state.autoLoadOnScroll) return "disabled";
+      if (appendMoreInFlight) return "in-flight";
+      if (!(state.runtimeStatus?.pool_available_count > 0)) return "pool-empty";
       const homePage = $("#homePage");
-      if (!homePage || homePage.hidden) return false;
+      if (!homePage || homePage.hidden) return "not-home";
       const loadMore = $("#loadMoreBtn");
-      if (!loadMore || loadMore.hidden) return false;
-      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return false;
-      return true;
+      if (!loadMore || loadMore.hidden) return "no-button";
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return "no-cards";
+      if (now - lastAutoLoadAt < AUTO_LOAD_COOLDOWN_MS) return "cooldown";
+      return "";
+    }
+
+    function shouldAutoLoadMore(now) {
+      return autoLoadBlockReason(now) === "";
+    }
+
+    // When the only thing standing between us and a load is the cooldown, and the
+    // sentinel is still in view (user parked at the bottom with no further scroll
+    // or intersection events to re-invoke us), schedule a one-shot re-check for
+    // when the cooldown lapses so loading resumes without needing a manual nudge.
+    function armAutoLoadCooldownRecheck(now) {
+      if (autoLoadCooldownTimer) return;
+      const wait = AUTO_LOAD_COOLDOWN_MS - (now - lastAutoLoadAt);
+      if (wait <= 0) return;
+      autoLoadCooldownTimer = setTimeout(() => {
+        autoLoadCooldownTimer = 0;
+        scheduleAutoLoadCheck();
+      }, wait + 50);
+    }
+
+    function clearAutoLoadCooldownRecheck() {
+      if (!autoLoadCooldownTimer) return;
+      clearTimeout(autoLoadCooldownTimer);
+      autoLoadCooldownTimer = 0;
     }
 
     async function autoLoadMoreIfNeeded() {
       const now = Date.now();
-      if (!shouldAutoLoadMore(now)) return;
+      const blockReason = autoLoadBlockReason(now);
+      if (blockReason) {
+        if (blockReason === "cooldown" && sentinelInView) armAutoLoadCooldownRecheck(now);
+        return;
+      }
       lastAutoLoadAt = now;
       const button = $("#loadMoreBtn");
       const previousText = button?.textContent || "加载更多推荐";
@@ -5413,7 +5480,7 @@
       missing: { tone: "warning", label: "需要登录" },
       login_required: { tone: "warning", label: "需要登录" },
       missing_cookie: { tone: "warning", label: "缺少 Cookie" },
-      rate_limited: { tone: "warning", label: "频率受限" },
+      rate_limited: { tone: "pending", label: "频率受限" },
       partial: { tone: "warning", label: "部分可用" },
       stale: { tone: "warning", label: "需要刷新" },
       error: { tone: "danger", label: "检查失败" },
@@ -5790,6 +5857,7 @@
       setInput("embeddingBaseUrl", llm.embedding?.base_url);
       setInput("embeddingOutputDimensionality", llm.embedding?.output_dimensionality ?? 1024);
       setInput("embeddingSimilarity", llm.embedding?.similarity_threshold);
+      setSelect("embeddingMultimodalEnabled", llm.embedding?.multimodal_enabled ? "on" : "off");
       if (embeddingFallbackProvider) {
         setInput("embeddingFallbackModel", llm[embeddingFallbackProvider]?.model);
         setInput("embeddingFallbackApiKey", llm[embeddingFallbackProvider]?.api_key);
@@ -6709,7 +6777,8 @@
         fallback_provider: embeddingFallbackProvider,
         model: getInput("embeddingModel"),
         output_dimensionality: Math.max(0, getIntInput("embeddingOutputDimensionality", 1024)),
-        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82)
+        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82),
+        multimodal_enabled: $("#embeddingMultimodalEnabled")?.value === "on"
       };
       if (getInput("embeddingApiKey")) embedding.api_key = getInput("embeddingApiKey");
       if (getInput("embeddingBaseUrl")) embedding.base_url = getInput("embeddingBaseUrl");
@@ -6899,6 +6968,7 @@
       unsupported_install_mode: "当前安装方式不支持自动更新",
       docker_install_mode: "Docker 安装通过拉取新镜像升级，无法就地自更新",
       untrusted_remote: "git 远端不在允许列表，更新被阻止（可在后端日志查看实际远端地址）",
+      origin_remote_unusable: "无法读取本地 git origin 远端，更新被阻止（按下方最近错误的修复命令处理）",
       branch_not_fast_forwardable: "本地代码与发布版本分叉，无法快进更新",
       merge_or_rebase_in_progress: "代码目录正在合并 / 变基，更新暂缓",
       github_rate_limited: "GitHub API 限流，请稍后再试",

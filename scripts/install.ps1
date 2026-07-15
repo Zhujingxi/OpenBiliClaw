@@ -264,8 +264,59 @@ function Ensure-Checkout {
                 $behind = (git rev-list --count "$local..$remote" 2>$null).Trim()
                 $dirty  = git status --porcelain 2>$null
                 if ($dirty) {
-                    Log-Warn "⚠ Existing checkout is $behind commits behind origin/$Branch but has local changes — skipping auto-update."
-                    Log-Warn "  Manual update: cd $InstallDir; git stash; git pull; git stash pop"
+                    # `uv sync` / `npm ci` during install rewrite uv.lock and
+                    # extension/package-lock.json, leaving the tree "dirty" and
+                    # permanently blocking auto-update — users got stranded on
+                    # weeks-old code (e.g. v0.3.89) without noticing. If the ONLY
+                    # dirty paths are these regenerated lockfiles, discard them
+                    # (the dependency step rebuilds them) and update anyway.
+                    $nonLock = git status --porcelain 2>$null |
+                        Where-Object { $_ -notmatch '\s(uv\.lock|extension/package-lock\.json)$' }
+                    if (-not $nonLock) {
+                        Log-Info 'Local changes are only regenerated lockfiles (uv.lock / package-lock.json) — resetting and updating…'
+                        # Reset each present lockfile independently: a single
+                        # `git checkout -- a b` aborts if any pathspec is missing
+                        # (older checkouts lack package-lock.json).
+                        foreach ($lf in @('uv.lock', 'extension/package-lock.json')) {
+                            git cat-file -e "HEAD:$lf" 2>$null
+                            if ($LASTEXITCODE -eq 0) { git checkout HEAD -- $lf 2>$null | Out-Null }
+                        }
+                        git pull --ff-only --quiet origin $Branch
+                        if ($LASTEXITCODE -eq 0) {
+                            Log-OK "✓ Updated to $((git rev-parse --short HEAD).Trim())"
+                        } else {
+                            Log-Warn 'git pull failed after resetting lockfiles; keeping current checkout.'
+                        }
+                        return
+                    }
+                    # Genuine local edits: make the stale-version risk impossible
+                    # to miss (a quiet one-line skip is why people ran old code).
+                    $curLine = git show 'HEAD:pyproject.toml' 2>$null | Select-String '^version = "(.*)"' | Select-Object -First 1
+                    $newLine = git show ("origin/{0}:pyproject.toml" -f $Branch) 2>$null | Select-String '^version = "(.*)"' | Select-Object -First 1
+                    $curVer = if ($curLine) { $curLine.Matches.Groups[1].Value } else { '?' }
+                    $newVer = if ($newLine) { $newLine.Matches.Groups[1].Value } else { '?' }
+                    Log-Warn '──────────────────────────────────────────────────────────────'
+                    Log-Warn "⚠  NOT updated: checkout is $behind commits behind origin/$Branch and has local edits."
+                    Log-Warn "   Version v$curVer -> latest v$newVer; continuing will run OLD code."
+                    Log-Warn '   Locally modified files:'
+                    git status --porcelain 2>$null | ForEach-Object { Log-Warn "     $_" }
+                    Log-Warn "   Update (keep your edits): cd $InstallDir; git stash; git pull --ff-only; git stash pop"
+                    Log-Warn "   Or let the installer do it (auto git stash first): `$env:FORCE_UPDATE='1'; then rerun the install command"
+                    Log-Warn '──────────────────────────────────────────────────────────────'
+                    if ($env:FORCE_UPDATE -eq '1') {
+                        Log-Info 'FORCE_UPDATE=1 -> stashing local changes and updating…'
+                        git stash push -u -m 'install.ps1 auto-stash before update' 2>$null | Out-Null
+                        git pull --ff-only --quiet origin $Branch
+                        if ($LASTEXITCODE -eq 0) {
+                            Log-OK "✓ Updated to $((git rev-parse --short HEAD).Trim())"
+                            git stash pop 2>$null | Out-Null
+                            if ($LASTEXITCODE -ne 0) {
+                                Log-Warn "  Your edits are saved in git stash but auto-restore hit a conflict — run 'cd $InstallDir; git stash pop' to resolve."
+                            }
+                        } else {
+                            Log-Warn "Auto-update failed; checkout unchanged (edits preserved in git stash — 'git stash pop' to restore)."
+                        }
+                    }
                     return
                 }
                 Log-Info "Updating existing checkout: $behind commits behind origin/$Branch — pulling…"

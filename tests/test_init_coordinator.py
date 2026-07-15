@@ -72,6 +72,27 @@ async def test_lifecycle_emits_progress_then_completed(tmp_path: Path) -> None:
     assert any(e["type"] == "init_progress" for e in hub.events)
 
 
+async def test_partial_completion_persists_reason_and_emits_detail(tmp_path: Path) -> None:
+    coord, db, hub = _coord(tmp_path)
+    coord.try_start("run-partial")
+
+    await coord.complete(
+        "run-partial",
+        partial_success=True,
+        reason="discovery_timeout",
+        detail="首轮内容池等待超过上限，系统会在后台继续补齐。",
+    )
+
+    run = db.get_latest_init_run()
+    assert run["status"] == "completed"
+    assert run["partial_success"] == 1
+    assert run["error_reason"] == "discovery_timeout"
+    assert "后台继续补齐" in run["error_detail"]
+    assert hub.events[-1]["partial_success"] is True
+    assert hub.events[-1]["reason"] == "discovery_timeout"
+    assert "后台继续补齐" in hub.events[-1]["detail"]
+
+
 async def test_fail_marks_failed_with_reason(tmp_path: Path) -> None:
     coord, db, hub = _coord(tmp_path)
     coord.try_start("run-1")

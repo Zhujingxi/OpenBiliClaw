@@ -9,12 +9,19 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
-from openbiliclaw.llm.base import classify_llm_unavailability
+from openbiliclaw.llm.base import classify_llm_unavailability, safe_llm_failure_message
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
+_PROFILE_ANALYSIS_TIMEOUT_MESSAGE = (
+    "AI 偏好分析等待模型服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
+    "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后重试。"
+)
 
 
 class SupportsAccountSyncState(Protocol):
@@ -71,6 +78,7 @@ class AccountSyncService:
     following_page_size: int = 100
     check_interval_seconds: int = 300
     llm_work_allowed: Callable[[], bool] | None = None
+    profile_analysis_timeout_seconds: float = DEFAULT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
     _auto_bootstrap_attempted: bool = False
     # v0.3.57+: tracks the cookie-not-ready → ready transition so
     # ``sync_if_due`` only emits the "auth ready" INFO log once per
@@ -198,7 +206,41 @@ class AccountSyncService:
         if events:
             for event in events:
                 await self.memory_manager.propagate_event(event)
-            await self.soul_engine.analyze_events(events)
+            try:
+                timeout = (
+                    self.profile_analysis_timeout_seconds
+                    if self.profile_analysis_timeout_seconds > 0
+                    else None
+                )
+                async with asyncio.timeout(timeout):
+                    await self.soul_engine.analyze_events(events)
+            except TimeoutError as exc:
+                timeout_error = TimeoutError(_PROFILE_ANALYSIS_TIMEOUT_MESSAGE)
+                logger.warning(
+                    "Profile analysis timed out during account sync after %.1fs",
+                    self.profile_analysis_timeout_seconds,
+                )
+                self._persist_profile_analysis_error(str(timeout_error))
+                raise timeout_error from exc
+            except Exception as exc:
+                # A profile-analysis failure here is almost always the chat
+                # LLM being unavailable (a local model never pulled → 404, a
+                # gateway rejecting auth → 401, or a timeout). Historically
+                # this was a bare await: the exception bubbled straight up,
+                # run_forever logged one backend line, but the user-visible
+                # last_sync_error was never written — so guided init just
+                # showed an endless wait with nothing to diagnose (CLAUDE.md
+                # pitfall #7: failures must be diagnosable). Record the reason
+                # in last_sync_error WITHOUT advancing any sync cursor (the
+                # whole tick still rolls back and retries next cycle), then
+                # re-raise so run_forever still classifies/logs it. CancelledError
+                # subclasses BaseException, so hot-reload/restart cancellation
+                # is not swallowed here.
+                logger.warning(
+                    "Profile analysis failed during account sync: %s", exc, exc_info=True
+                )
+                self._persist_profile_analysis_error(safe_llm_failure_message(exc))
+                raise
             await self._auto_bootstrap_soul_profile(len(events))
 
         state["last_account_sync_at"] = self._now().isoformat()
@@ -209,6 +251,23 @@ class AccountSyncService:
             "new_event_count": len(events),
             "errors": errors,
         }
+
+    def _persist_profile_analysis_error(self, message: str) -> None:
+        """Record a profile-analysis failure without advancing any sync cursor.
+
+        Loads a FRESH state so the failing tick's in-flight cursor bumps
+        (history / favorites / following) are not persisted — the tick still
+        rolls back and retries next cycle — while ``last_sync_error`` carries a
+        user-visible reason to ``/api/init-status`` and the account-sync status
+        surface. ``last_account_sync_at`` is deliberately left untouched so the
+        throttle does not lock the retry out for ``sync_interval_hours``.
+        """
+        try:
+            state = self.memory_manager.load_account_sync_state()
+            state["last_sync_error"] = f"画像分析失败：{message}"
+            self.memory_manager.save_account_sync_state(state)
+        except Exception:
+            logger.debug("Failed to persist profile-analysis error", exc_info=True)
 
     def get_runtime_status(self) -> dict[str, object]:
         """Expose lightweight account sync runtime fields."""
@@ -274,6 +333,11 @@ class AccountSyncService:
                     logger.info(
                         "account sync skipped: no chat LLM provider configured yet "
                         "(retry next cycle)"
+                    )
+                elif kind == "model_not_found":
+                    logger.warning(
+                        "account sync deferred: configured chat model not found "
+                        "(pull the local model or fix the model name); retry next cycle"
                     )
                 elif kind == "rate_limited":
                     logger.warning(

@@ -839,16 +839,7 @@ class AutoUpdateService:
         remote = await self._run_git(["config", "--get", "remote.origin.url"], root)
         remote_url = remote.stdout.strip() if remote.returncode == 0 else ""
         if not remote_url:
-            logger.warning(
-                "Auto-update apply refused: no 'origin' remote configured in %s (git stderr: %s)",
-                root,
-                remote.stderr.strip() or "<empty>",
-            )
-            self._guard_detail = (
-                f"未配置 origin 远端({root});"
-                f"运行:git -C {root} remote add origin {DEFAULT_ALLOWED_REMOTES[0]}"
-            )
-            return "untrusted_remote"
+            return await self._refuse_unreadable_origin(root, remote)
         redacted = _redact_remote_url(remote_url)
         if _remote_has_credentials(remote_url):
             logger.warning("Auto-update apply refused: remote URL embeds credentials")
@@ -924,6 +915,76 @@ class AutoUpdateService:
             )
             return "branch_not_fast_forwardable"
         return ""
+
+    async def _refuse_unreadable_origin(
+        self,
+        root: Path,
+        config_result: subprocess.CompletedProcess[str],
+    ) -> str:
+        """Classify an empty ``remote.origin.url`` read and emit the right fix.
+
+        ``git config --get remote.origin.url`` comes back empty for several very
+        different reasons, and the old blanket "运行:git remote add origin"
+        advice was actively wrong for most of them: an install whose origin
+        already exists — just url-less, holding multiple urls, or blocked by
+        Windows *dubious ownership* — hits "error: remote origin already exists"
+        when it follows that hint. That is the exact contradiction users report:
+        the status card says 未配置 origin 远端, yet ``git remote add origin``
+        answers "already exists". Probe ``git remote get-url origin`` to tell the
+        cases apart and write the remediation that actually applies. Always
+        reported as ``origin_remote_unusable`` — distinct from
+        ``untrusted_remote``, which is a *readable* remote rejected by the
+        allowlist / credential check.
+        """
+        fix_url = DEFAULT_ALLOWED_REMOTES[0]
+        probe = await self._run_git(["remote", "get-url", "origin"], root)
+        config_err = config_result.stderr.strip()
+        probe_err = probe.stderr.strip()
+
+        if "dubious ownership" in f"{config_err}\n{probe_err}".lower():
+            # Windows secondary drives / service accounts: the repo dir is owned
+            # by a different account than the backend process, so git refuses to
+            # open it at all. The origin remote itself is fine — safe.directory
+            # is the fix, and it must run as whatever account launches the
+            # backend (the user's own shell reads the repo without complaint,
+            # which is why manual `git remote add` there says "already exists").
+            self._guard_detail = (
+                f"git 拒绝读取仓库({root}):检测到 dubious ownership"
+                f"(仓库属主与运行后端的账户不一致,Windows 副盘/服务账户常见);"
+                f"以运行后端的账户执行:git config --global --add safe.directory {root}"
+            )
+        elif probe.returncode != 0 and "no such remote" in probe_err.lower():
+            # Genuinely no origin remote — the only case where "remote add" fits.
+            self._guard_detail = (
+                f"未配置 origin 远端({root});运行:git -C {root} remote add origin {fix_url}"
+            )
+        elif probe.returncode != 0 and (config_err or probe_err):
+            # Any other git failure reading the repo (lock, corrupt config, git
+            # missing on the backend's PATH, …): surface the real error instead
+            # of a misleading "remote add" hint the user can't act on.
+            git_err = (config_err or probe_err).splitlines()[0].strip()
+            self._guard_detail = (
+                f"git 无法读取 origin 远端({root}):{git_err};请查看后端日志的完整 git 报错后修复"
+            )
+        else:
+            # origin exists but its url is blank / can't be resolved (the
+            # "already exists" trap): set-url overwrites it, remote add is
+            # refused. This is what reproduces the reported card contradiction.
+            self._guard_detail = (
+                f"origin 远端已存在但地址无法解析({root});"
+                f"运行:git -C {root} remote set-url origin {fix_url}"
+            )
+
+        logger.warning(
+            "Auto-update apply refused: remote.origin.url unreadable in %s "
+            "(config rc=%s stderr=%s; get-url rc=%s stderr=%s)",
+            root,
+            config_result.returncode,
+            config_err or "<empty>",
+            probe.returncode,
+            probe_err or "<empty>",
+        )
+        return "origin_remote_unusable"
 
     async def _apply_update_to_tag(self, tag: str) -> None:
         """Fast-forward to *tag*, reinstall dependencies, and restart."""

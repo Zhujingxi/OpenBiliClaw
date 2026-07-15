@@ -147,6 +147,7 @@ class TestMobileWebViewModels:
               "normalizeActivityFeed", "getActivityCardState",
               "getPoolStatusSummary", "normalizeRuntimeStatus", "mergeRuntimeStatusEvent",
               "getReadyRecommendationHint",
+              "reconcileRecommendationReplacement",
               "getRecommendationCoverPreloadUrls", "getRecommendationImageLoadingAttrs",
               "shouldAutoAppendRecommendations",
               "formatRelativeTimestamp", "formatPublishedTime", "getPublishedTimeDisplay",
@@ -157,6 +158,31 @@ class TestMobileWebViewModels:
             for (const name of required) {
                 assert.equal(typeof vm[name], "function", `missing export: ${name}`);
             }
+        """)
+        )
+
+    def test_empty_replacement_preserves_visible_recommendations(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              reconcileRecommendationReplacement,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const current = [{ id: 1, title: "正在看的推荐" }];
+            const preserved = reconcileRecommendationReplacement(current, []);
+            assert.equal(preserved.preserved, true);
+            assert.equal(preserved.items, current);
+
+            const incoming = [{ id: 2, title: "新一批推荐" }];
+            assert.deepEqual(
+              reconcileRecommendationReplacement(current, incoming),
+              { items: incoming, preserved: false },
+            );
+            assert.deepEqual(
+              reconcileRecommendationReplacement([], []),
+              { items: [], preserved: false },
+            );
         """)
         )
 

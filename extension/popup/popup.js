@@ -31,6 +31,7 @@ import {
   normalizeProfileSummary,
   platformDisplayName,
   probeMessageKey,
+  reconcileRecommendationReplacement,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -47,6 +48,7 @@ import {
   buildInitChecklist,
   describeInitFailure,
   describeInitReason,
+  describeInitStatusReason,
   describeInitStartError,
   embeddingRepairStartAccepted,
   initProgressView,
@@ -1047,10 +1049,15 @@ function _setInitStartButton(label, enabled) {
   }
 }
 
-function _setInitReason(text) {
+function _setInitReason(text, assertive = true) {
   if (elements.initStartReason instanceof HTMLElement) {
     elements.initStartReason.textContent = text || "";
     elements.initStartReason.hidden = !text;
+    elements.initStartReason.setAttribute("role", text && assertive ? "alert" : "status");
+    elements.initStartReason.setAttribute(
+      "aria-live",
+      text && assertive ? "assertive" : "polite",
+    );
   }
 }
 
@@ -1262,9 +1269,16 @@ function renderInitProgress(status) {
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
         ? `初始化未完成：${describeInitFailure(status, progress)}`
+        : progress.partial
+          ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
+      elements.initProgressLabel.setAttribute("role", progress.failed ? "alert" : "status");
+      elements.initProgressLabel.setAttribute(
+        "aria-live",
+        progress.failed ? "assertive" : "polite",
+      );
     }
   }
   // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
@@ -1289,6 +1303,9 @@ function renderInitProgress(status) {
   } else if (progress.failed) {
     _setInitStartButton("重试初始化", true);
     _setInitReason("");
+  } else if (progress.partial) {
+    _setInitStartButton("画像已生成", false);
+    _setInitReason(describeInitStatusReason(status), false);
   } else {
     _setInitStartButton("已初始化", false);
     _setInitReason("");
@@ -1319,7 +1336,12 @@ async function pollInitProgress() {
   clearInitPolling();
   if (status.initialized) {
     state.profileLoaded = false;
-    setHint("初始化完成！正在加载画像和推荐…", "success");
+    setHint(
+      status.partial_success
+        ? describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"
+        : "初始化完成！正在加载画像和推荐…",
+      status.partial_success ? "warning" : "success",
+    );
     scheduleRecommendationsRefresh();
     void loadProfileSummary({ force: true });
   }
@@ -1406,7 +1428,7 @@ async function handleStartInitClick() {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(
-      describeInitReason(status.reason) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
+      describeInitStatusReason(status) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
     );
     return;
   }
@@ -1876,7 +1898,12 @@ function connectRuntimeStream() {
       // Init completed: re-fetch everything including profile
       if (event.type === "init_completed") {
         state.profileLoaded = false;
-        setHint("初始化完成！正在加载画像和推荐…", "success");
+        setHint(
+          event.partial_success
+            ? String(event.detail || "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。")
+            : "初始化完成！正在加载画像和推荐…",
+          event.partial_success ? "warning" : "success",
+        );
         scheduleRecommendationsRefresh();
         void loadProfileSummary({ force: true });
       }
@@ -6131,10 +6158,16 @@ async function handleManualRefresh() {
       setHint("还没初始化好。去「推荐」页点「开始初始化」，完成后再刷新。", "error");
       return;
     }
+    const replacement = reconcileRecommendationReplacement(
+      state.recommendations,
+      result.items,
+    );
     resetRecommendationAutoLoadIntent();
-    state.recommendations = result.items;
+    state.recommendations = replacement.items;
     state.loadingMore = false;
-    state.hasMoreRecommendations = result.items.length >= 10;
+    state.hasMoreRecommendations = replacement.preserved
+      ? false
+      : result.items.length >= 10;
     state.runtimeStatus = await fetchRuntimeStatus().catch(() => state.runtimeStatus);
     renderPoolStatus(state.runtimeStatus);
     renderRecommendationState(
@@ -6147,6 +6180,7 @@ async function handleManualRefresh() {
     const hint = getManualRefreshResultHint({
       itemCount: result.items.length,
       hadAdvertisedInventory,
+      preservedCurrent: replacement.preserved,
     });
     setHint(hint.message, hint.tone);
     await loadActivityFeed();
@@ -6596,6 +6630,7 @@ function bindSettings() {
     gemini: "gemini-embedding-001",
     ollama: "bge-m3",
     openai_compatible: "bge-large-en-v1.5",
+    dashscope: "qwen3-vl-embedding",
   };
   const EMBEDDING_BASE_URL_HINT = {
     "": "留空使用默认",
@@ -6603,6 +6638,7 @@ function bindSettings() {
     gemini: "(Gemini SDK 不需要 base_url)",
     ollama: "http://localhost:11434/v1",
     openai_compatible: "https://api.together.xyz/v1 / http://localhost:8000/v1",
+    dashscope: "留空 = https://dashscope.aliyuncs.com（国际站 dashscope-intl.aliyuncs.com）",
   };
 
   function applyEmbeddingProviderUI() {
@@ -6842,7 +6878,7 @@ function bindSettings() {
     missing: "#e0a800",
     missing_cookie: "#e0a800",
     login_required: "#e0a800",
-    rate_limited: "#e0a800",
+    rate_limited: "#9aa0a6",
     partial: "#e0a800",
     stale: "#e0a800",
     error: "#e74c3c",
@@ -6959,6 +6995,8 @@ function bindSettings() {
     setVal("cfgEmbeddingBaseUrl", cfg.llm?.embedding?.base_url);
     setVal("cfgEmbeddingModel", cfg.llm?.embedding?.model);
     setVal("cfgEmbeddingSimilarity", cfg.llm?.embedding?.similarity_threshold);
+    const embMultimodal = document.getElementById("cfgEmbeddingMultimodalEnabled");
+    if (embMultimodal) embMultimodal.checked = cfg.llm?.embedding?.multimodal_enabled === true;
     applyEmbeddingProviderUI();
 
     // Bilibili
@@ -7161,6 +7199,7 @@ function bindSettings() {
           similarity_threshold: getFloat("cfgEmbeddingSimilarity", 0.82),
           fallback_enabled: Boolean(embeddingFallbackProvider),
           fallback_provider: embeddingFallbackProvider,
+          multimodal_enabled: checked("cfgEmbeddingMultimodalEnabled"),
         },
         soul: {
           provider: getVal("cfgModuleSoulProvider"),

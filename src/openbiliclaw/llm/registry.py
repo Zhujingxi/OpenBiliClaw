@@ -11,6 +11,7 @@ from openbiliclaw import network
 
 from .base import LLMProvider, LLMProviderError, LLMRegistry
 from .claude_provider import ClaudeProvider
+from .dashscope_provider import DashScopeEmbeddingProvider
 from .gemini_provider import GeminiProvider, gemini_sdk_available
 from .ollama_provider import OllamaProvider
 from .openai_provider import DeepSeekProvider, OpenAIProvider
@@ -136,6 +137,10 @@ _EMBEDDING_CAPABLE_PROVIDERS: tuple[str, ...] = (
     # users must opt in by setting ``[llm.embedding].provider =
     # "openrouter"`` with an explicit ``model``.
     "openrouter",
+    # Alibaba DashScope multimodal embedding (Qwen3-VL / Tongyi vision).
+    # Native API — not OpenAI /v1/embeddings. Opt-in via
+    # ``[llm.embedding].provider = "dashscope"``.
+    "dashscope",
 )
 _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
     "gemini": "gemini-embedding-001",
@@ -144,6 +149,7 @@ _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
     # No safe default for openai_compatible — depends entirely on the
     # upstream service. Users must specify an explicit model.
     "openai_compatible": "text-embedding-3-small",
+    "dashscope": "qwen3-vl-embedding",
 }
 # Module-level set so the back-compat WARNING fires once per provider per
 # process (not once per build_embedding_service call — runtime_context
@@ -243,6 +249,7 @@ def build_embedding_service(
             cache_model=cache_model,
             similarity_threshold=emb_cfg.similarity_threshold,
             persistent_cache=l2_cache,
+            multimodal_enabled=bool(getattr(emb_cfg, "multimodal_enabled", False)),
         )
     except Exception:
         return None
@@ -337,8 +344,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -354,8 +361,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -372,8 +379,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 provider_name="openai_compatible",
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -397,13 +404,39 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url or "https://openrouter.ai/api/v1",
                 http_referer=chat_openrouter.http_referer,
                 x_title=chat_openrouter.x_title,
-                proxy=_outbound_proxy(),
-                trust_env=_outbound_trust_env(),
+                proxy=_outbound_proxy(base_url or "https://openrouter.ai/api/v1"),
+                trust_env=_outbound_trust_env(base_url or "https://openrouter.ai/api/v1"),
+            ),
+            effective_model,
+        )
+
+    if candidate == "dashscope":
+        if not api_key:
+            api_key = _dashscope_env_api_key()
+        if not api_key:
+            return None
+        return (
+            DashScopeEmbeddingProvider(
+                api_key=api_key,
+                model=effective_model,
+                base_url=base_url,
+                embedding_output_dimensionality=output_dimensionality,
             ),
             effective_model,
         )
 
     return None
+
+
+def _dashscope_env_api_key() -> str:
+    """Optional DASHSCOPE_API_KEY / ALIBABA_CLOUD env fallback."""
+    import os
+
+    for name in ("DASHSCOPE_API_KEY", "DASHSCOPE_API_KEY_CN"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _embedding_output_dimensionality(emb_cfg: Any) -> int:
@@ -433,6 +466,13 @@ def _embedding_provider_honors_output_dimensionality(
         return True
     if provider_name == "openai":
         return model.startswith("text-embedding-3-")
+    if provider_name == "dashscope":
+        # qwen3-vl-embedding accepts dimension=; older tongyi fixed-dim
+        # models ignore it — only claim honor when we actually pass it.
+        name = (model or "").lower()
+        return "qwen3-vl-embedding" in name or (
+            "tongyi-embedding-vision" in name and "2026-03-06" in name
+        )
     return False
 
 
@@ -460,14 +500,24 @@ def summarize_registry(config: Config, registry: LLMRegistry) -> RegistrySummary
     )
 
 
-def _outbound_proxy() -> str:
-    """Overseas-outbound proxy from the process-level source of truth (or "")."""
-    return network.outbound_proxy_url() or ""
+def _outbound_proxy(base_url: str = "") -> str:
+    """Outbound proxy for a provider endpoint from the process-level source of
+    truth (or "").
+
+    Domestic / local endpoints (DeepSeek / SenseNova / 通义 / self-hosted, …)
+    always resolve to direct — the overseas proxy would route a domestic
+    request out and back and time out. See ``network.is_domestic_endpoint``.
+    """
+    return network.proxy_for_endpoint(base_url) or ""
 
 
-def _outbound_trust_env() -> bool:
-    """Whether overseas SDK clients should inherit env/system proxies."""
-    return network.outbound_trust_env()
+def _outbound_trust_env(base_url: str = "") -> bool:
+    """Whether an SDK client for ``base_url`` should inherit env/system proxies.
+
+    Domestic / local endpoints never inherit env proxies; overseas endpoints
+    follow the process-wide ``system`` policy.
+    """
+    return network.trust_env_for_endpoint(base_url)
 
 
 def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
@@ -492,8 +542,8 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),
             api_flavor=config.llm.openai.api_flavor,
-            proxy=_outbound_proxy(),
-            trust_env=_outbound_trust_env(),
+            proxy=_outbound_proxy(config.llm.openai.base_url),
+            trust_env=_outbound_trust_env(config.llm.openai.base_url),
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -503,8 +553,8 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url=config.llm.openai.base_url,
         timeout=float(config.llm.timeout),
         api_flavor=config.llm.openai.api_flavor,
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.openai.base_url),
+        trust_env=_outbound_trust_env(config.llm.openai.base_url),
     )
 
 
@@ -518,8 +568,8 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=config.llm.claude.model or "claude-sonnet-4-20250514",
         timeout=float(config.llm.timeout),
         base_url=config.llm.claude.base_url,
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.claude.base_url),
+        trust_env=_outbound_trust_env(config.llm.claude.base_url),
     )
 
 
@@ -530,13 +580,15 @@ def _maybe_deepseek_provider(
         return overrides["deepseek"]
     if not config.llm.deepseek.api_key.strip():
         return None
+    # DeepSeek's endpoint (api.deepseek.com) is domestic — force direct so a
+    # user's overseas proxy for other models never routes it through the ladder.
     return DeepSeekProvider(
         api_key=config.llm.deepseek.api_key,
         model=config.llm.deepseek.model or "deepseek-v4-flash",
         reasoning_effort=config.llm.deepseek.reasoning_effort,
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy("https://api.deepseek.com"),
+        trust_env=_outbound_trust_env("https://api.deepseek.com"),
     )
 
 
@@ -558,8 +610,8 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         api_key=api_key,
         model=config.llm.gemini.model or "gemini-2.5-flash",
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.gemini.base_url),
+        trust_env=_outbound_trust_env(config.llm.gemini.base_url),
     )
 
 
@@ -656,8 +708,10 @@ def _maybe_openrouter_provider(
         http_referer=config.llm.openrouter.http_referer,
         x_title=config.llm.openrouter.x_title,
         timeout=float(config.llm.timeout),
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"),
+        trust_env=_outbound_trust_env(
+            config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"
+        ),
     )
 
 
@@ -688,6 +742,6 @@ def _maybe_openai_compatible_provider(
         provider_name="openai_compatible",
         timeout=float(config.llm.timeout),
         api_flavor=cfg.api_flavor,
-        proxy=_outbound_proxy(),
-        trust_env=_outbound_trust_env(),
+        proxy=_outbound_proxy(cfg.base_url),
+        trust_env=_outbound_trust_env(cfg.base_url),
     )

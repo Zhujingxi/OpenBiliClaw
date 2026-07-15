@@ -85,3 +85,82 @@ def test_ollama_factory_provider_has_no_outbound_proxy() -> None:
     # OllamaProvider subclasses OpenAIProvider; an empty _proxy means its
     # AsyncOpenAI client was built without an injected proxied http_client.
     assert getattr(provider, "_proxy", "") == ""
+
+
+# ── Domestic-endpoint carve-out ──────────────────────────────────────────
+# Chinese LLM gateways must connect DIRECT even when an overseas proxy is set,
+# else a user's proxy-for-OpenAI routes their DeepSeek / SenseNova / 通义
+# requests through the ladder and they time out ("商汤请求总是超时").
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://api.deepseek.com", True),
+        ("https://api.sensenova.cn/v1", True),
+        ("https://open.bigmodel.cn/api/paas/v4", True),
+        ("https://dashscope.aliyuncs.com/compatible-mode/v1", True),
+        ("https://qianfan.baidubce.com/v2", True),
+        ("https://ark.cn-beijing.volces.com/api/v3", True),
+        ("https://api.siliconflow.cn/v1", True),
+        ("api.moonshot.cn/v1", True),  # scheme-less base_url
+        ("http://127.0.0.1:8317/v1", True),  # local gateway (cpa)
+        ("http://localhost:11434/v1", True),
+        ("http://192.168.1.50:8000/v1", True),  # LAN self-hosted vLLM
+        ("https://api.openai.com/v1", False),
+        ("https://openrouter.ai/api/v1", False),
+        ("https://generativelanguage.googleapis.com", False),
+        ("https://api.groq.com/openai/v1", False),
+        ("", False),
+    ],
+)
+def test_is_domestic_endpoint(url: str, expected: bool) -> None:
+    assert network.is_domestic_endpoint(url) is expected
+
+
+def _openai_compatible_provider(base_url: str) -> Any:
+    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+    from openbiliclaw.llm.registry import _maybe_openai_compatible_provider
+
+    config = Config(
+        llm=LLMConfig(
+            openai_compatible=LLMProviderConfig(api_key="sk-x", base_url=base_url, model="m")
+        )
+    )
+    return _maybe_openai_compatible_provider(config, {})
+
+
+def test_domestic_openai_compatible_forced_direct_under_custom_proxy() -> None:
+    """SenseNova (via openai_compatible) stays direct even with a custom proxy."""
+    provider = _openai_compatible_provider("https://api.sensenova.cn/v1")
+    assert provider is not None
+    assert getattr(provider, "_proxy", "") == ""
+    assert getattr(provider, "_trust_env", None) is False
+
+
+def test_overseas_openai_compatible_still_uses_custom_proxy() -> None:
+    """The carve-out is scoped: a genuinely-overseas gateway keeps the proxy."""
+    provider = _openai_compatible_provider("https://api.groq.com/openai/v1")
+    assert provider is not None
+    assert getattr(provider, "_proxy", "") == _GUARD_PROXY
+
+
+def test_deepseek_provider_forced_direct_under_custom_proxy() -> None:
+    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+    from openbiliclaw.llm.registry import _maybe_deepseek_provider
+
+    config = Config(llm=LLMConfig(deepseek=LLMProviderConfig(api_key="sk-x")))
+    provider = _maybe_deepseek_provider(config, {})
+    assert provider is not None
+    assert getattr(provider, "_proxy", "") == ""
+
+
+def test_domestic_endpoint_ignores_system_mode() -> None:
+    """In ``system`` mode a domestic endpoint must NOT inherit env proxies."""
+    network.reset_outbound_proxy_for_tests()
+    network.set_outbound_proxy("", mode="system")
+    try:
+        assert network.trust_env_for_endpoint("https://api.sensenova.cn/v1") is False
+        assert network.trust_env_for_endpoint("https://api.openai.com/v1") is True
+    finally:
+        network.reset_outbound_proxy_for_tests()

@@ -604,7 +604,7 @@ class ContinuousRefreshController:
             if not self._is_initialized():
                 return _result({"refreshed": False, "strategies": [], "reason": "not_initialized"})
 
-            pool_at_cap = self._enforce_pool_cap()
+            pool_at_cap = await self._enforce_pool_cap_async()
             await self._publish_pool_status_if_changed()
             if pool_at_cap:
                 return _result({"refreshed": False, "strategies": [], "reason": "pool_at_cap"})
@@ -721,7 +721,7 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return _result({"refreshed": False, "strategies": [], "reason": "not_initialized"})
 
-        pool_at_cap = self._enforce_pool_cap()
+        pool_at_cap = await self._enforce_pool_cap_async()
         await self._publish_pool_status_if_changed()
         if pool_at_cap:
             return _result({"refreshed": False, "strategies": [], "reason": "pool_at_cap"})
@@ -802,6 +802,17 @@ class ContinuousRefreshController:
         self._last_pool_maintenance_succeeded = True
         self._update_llm_inventory_state(result.available_after)
         return result.at_target
+
+    async def _enforce_pool_cap_async(self) -> bool:
+        """Run SQLite-heavy pool maintenance without blocking the API loop.
+
+        ``maintain_pool_inventory`` intentionally owns one atomic write
+        transaction and performs several ranked pool scans.  Mature databases
+        can make that work noticeable even with the supporting indexes, so all
+        async refresh paths dispatch it to a worker thread.  Startup maintenance
+        remains synchronous because the API is not accepting traffic yet.
+        """
+        return await asyncio.to_thread(self._enforce_pool_cap)
 
     def run_startup_maintenance(self) -> None:
         """Run the host's pre-service pool repair at most once per controller."""
@@ -2293,7 +2304,7 @@ class ContinuousRefreshController:
             # re-fetches. No separately committed destructive pass belongs
             # in this refresh plan.
             try:
-                self._enforce_pool_cap()
+                await self._enforce_pool_cap_async()
             except Exception:
                 logger.exception("post-refresh enforce_pool_cap failed")
 

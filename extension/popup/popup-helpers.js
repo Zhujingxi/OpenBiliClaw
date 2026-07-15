@@ -279,6 +279,16 @@ export function normalizeRecommendation(item) {
   };
 }
 
+export function reconcileRecommendationReplacement(currentItems, incomingItems) {
+  const current = Array.isArray(currentItems) ? currentItems : [];
+  const incoming = Array.isArray(incomingItems) ? incomingItems : [];
+  const preserved = incoming.length === 0 && current.length > 0;
+  return {
+    items: preserved ? current : incoming,
+    preserved,
+  };
+}
+
 export function formatPublishedTime(item, now = Date.now()) {
   const parsed = Date.parse(String(item?.published_at || ""));
   if (Number.isFinite(parsed)) {
@@ -991,7 +1001,11 @@ export function getReadyRecommendationHint(status) {
   };
 }
 
-export function getManualRefreshResultHint({ itemCount = 0, hadAdvertisedInventory = false } = {}) {
+export function getManualRefreshResultHint({
+  itemCount = 0,
+  hadAdvertisedInventory = false,
+  preservedCurrent = false,
+} = {}) {
   const count = Number(itemCount || 0);
   if (count > 0) {
     return {
@@ -999,9 +1013,15 @@ export function getManualRefreshResultHint({ itemCount = 0, hadAdvertisedInvento
       tone: "success",
     };
   }
+  if (preservedCurrent) {
+    return {
+      message: "这次没换出新内容，当前推荐已保留。",
+      tone: "info",
+    };
+  }
   if (hadAdvertisedInventory) {
     return {
-      message: "池子状态刚刚同步，正在整理内容。",
+      message: "库存还在，但这批暂时没有可用新内容，稍后再试。",
       tone: "info",
     };
   }

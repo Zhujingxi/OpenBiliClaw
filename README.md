@@ -209,11 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.166（2026-07-14）**
+📌 最新版本：**v0.3.168（2026-07-14）**
 
-- **海外网络路由可选直连 / 跟随系统 / 自定义代理** —— `[network]` 三模式默认直连，桌面 Web 与扩展设置页可一键切换，AI 服务不再被失效的系统代理静默拖死。
-- **初始化卡住会报出真实原因** —— 画像 / 偏好分析遇到 SSL 证书或代理拦截等网络错误时，初始化页直接提示「关闭代理 / 加直连白名单」，不再无限静默重试（issue #113）。
-- **七平台收藏 / 稍后再看真实闭环** —— 三端本地优先、自动同步默认关闭；B站与六个扩展平台的收藏和稍后再看/收藏回退已完成真实账号验证，终态均为 `synced/already_synced`。
+- **初始化不再无限卡在 49%** —— 画像阶段超时会显示真实原因和恢复动作，推荐池超时则先进入应用并在后台继续补齐；失效 CA 路径也不会再拖垮所有网络请求。
+- **新增 DashScope 多模态封面 embedding** —— 可选用阿里百炼或 Gemini 读取封面视觉语义，为普通推荐和惊喜推荐增加有界视觉加成，默认关闭时排序不变。
+- **一句话安装能够可靠升级旧版本** —— 只有可再生 lockfile 变脏时会自动还原并快进，真实本地改动会醒目提示并支持安全 stash 后升级。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -749,6 +749,7 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 - 感谢 [@tangle111-design](https://github.com/tangle111-design) 在 [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69) 贡献 `style_key` 观看模式、推荐语气、B 站初始化和 LLM / 画像流程方面的功能探索；相关思路已拆分评审并选择性合入主线。
 - 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102) 贡献桌面 Web 侧栏折叠动画、delight 卡片拖拽死区、栈式 toast 通知等交互细节打磨，已合入主线。
 - 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) 贡献桌面 Web 主题引擎 oklch 化重构，引入 `--hue-primary` 单一控制点与 12 色相可调拾色器、五级强调色阶与统一交互态，已合入主线。
+- 感谢 [@wuwafly3](https://github.com/wuwafly3) 在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 贡献 DashScope（阿里百炼）多模态 embedding provider 与「封面 image-only 向量」的设计与实现；相关能力经评审、修复（网络路由 / 保存校验）并重做为线上封面视觉链路（惊喜与正常推荐一致消费）后合入主线（见 [#116](https://github.com/whiteguo233/OpenBiliClaw/pull/116)）。
 
 ## ⭐ Star History
 

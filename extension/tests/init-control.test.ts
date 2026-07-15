@@ -5,6 +5,7 @@ import {
   buildInitChecklist,
   describeInitFailure,
   describeInitReason,
+  describeInitStatusReason,
   describeInitStartError,
   embeddingPullProgressView,
   embeddingRepairAction,
@@ -316,6 +317,34 @@ test("failure text appends backend detail so internal_error is diagnosable", () 
   // interrupted / cancelled now map to human copy instead of raw codes.
   assert.ok(describeInitReason("interrupted").includes("打断"));
   assert.ok(describeInitReason("cancelled").includes("取消"));
+});
+
+test("timeout and account-sync details explain cause and recovery without machine codes", () => {
+  const timeoutDetail =
+    "偏好分析等待 AI 服务超过 6 分钟仍未返回结果。请到模型设置测试 AI 服务后重试初始化。";
+  const hardFailure = statusWith({ reason: "analyze_failed", detail: timeoutDetail });
+  assert.equal(describeInitFailure(hardFailure), timeoutDetail);
+  assert.equal(describeInitStatusReason(hardFailure), timeoutDetail);
+  assert.ok(!describeInitFailure(hardFailure).includes("analyze_failed"));
+
+  const accountDetail =
+    "画像分析失败：AI 偏好分析等待模型服务超过 6 分钟仍未返回结果，请检查 Base URL。";
+  const accountFailure = statusWith({ reason: "llm_not_ready", detail: accountDetail });
+  assert.equal(describeInitStatusReason(accountFailure), accountDetail);
+  assert.equal(initStartButtonState(accountFailure).reason, accountDetail);
+
+  const partialDetail =
+    "画像已生成，但首轮内容池等待超过 10 分钟；系统会在后台继续补池。";
+  const partial = statusWith({
+    initialized: true,
+    partial_success: true,
+    reason: "discovery_timeout",
+    detail: partialDetail,
+  });
+  const partialButton = initStartButtonState(partial);
+  assert.equal(describeInitStatusReason(partial), partialDetail);
+  assert.equal(partialButton.label, "画像已生成");
+  assert.equal(partialButton.reason, partialDetail);
 });
 
 // ── Per-run platform source selection ──────────────────────────────────────

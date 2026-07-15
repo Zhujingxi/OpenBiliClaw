@@ -1401,6 +1401,7 @@ def test_save_config_round_trips_embedding_credentials(tmp_path: Path) -> None:
     config.llm.embedding.similarity_threshold = 0.91
     config.llm.embedding.fallback_enabled = True
     config.llm.embedding.fallback_provider = "openai_compatible"
+    config.llm.embedding.multimodal_enabled = True
 
     save_config(config, config_path)
     loaded = load_config(config_path)
@@ -1413,6 +1414,12 @@ def test_save_config_round_trips_embedding_credentials(tmp_path: Path) -> None:
     assert loaded.llm.embedding.similarity_threshold == 0.91
     assert loaded.llm.embedding.fallback_enabled is True
     assert loaded.llm.embedding.fallback_provider == "openai_compatible"
+    assert loaded.llm.embedding.multimodal_enabled is True
+
+
+def test_embedding_multimodal_enabled_defaults_false() -> None:
+    config = Config()
+    assert config.llm.embedding.multimodal_enabled is False
 
 
 def test_load_config_accepts_legacy_embedding_section_without_api_key(

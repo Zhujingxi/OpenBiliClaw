@@ -2517,6 +2517,21 @@ def create_app(
         # and E2 disagree and a client could offer "start" that E2 rejects.
         can_start = trusted and supported and hard_ok and not running and not initialized
 
+        # Account sync may be the first owner that tries to build preferences
+        # after desktop startup. It persists a safe, user-facing failure, but
+        # init-status historically never read it despite being the page's
+        # authoritative source — so the UI still sat at 49% with no reason.
+        account_profile_error = ""
+        if not initialized and not running:
+            sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
+            if callable(sync_status):
+                with suppress(Exception):
+                    raw_status = sync_status()
+                    if isinstance(raw_status, dict):
+                        candidate = str(raw_status.get("last_account_sync_error", "")).strip()
+                        if candidate.startswith("画像分析失败："):
+                            account_profile_error = candidate[:500]
+
         embedding_check, embedding_detail = await _diagnose_embedding(bool(embedding))
         pull_progress = _embedding_pull_progress_view()
         pull_status = str(pull_progress.get("status_text") or "")
@@ -2526,7 +2541,18 @@ def create_app(
         elif running:
             reason, detail = "already_running", "初始化进行中"
         elif initialized:
-            reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
+            if bool(run["partial_success"]):
+                # Profile creation succeeded but the first discovery pass did
+                # not. Preserve the terminal cause written by complete() so
+                # setup / desktop / popup can explain the degraded result and
+                # offer a safe way forward instead of appearing stuck at 95%.
+                reason = str(run.get("reason") or "discovery_partial")
+                detail = str(
+                    run.get("detail")
+                    or "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。"
+                )
+            else:
+                reason, detail = "already_initialized", "已经初始化过了；如需重建请用 force"
         elif not trusted:
             # trusted participates in can_start but had no reason branch, so
             # remote/paired-mobile viewers got can_start=false with
@@ -2535,7 +2561,8 @@ def create_app(
             # All clients already map local_only to "只能在本机发起初始化。".
             reason, detail = "local_only", "只能在本机发起初始化"
         elif not chat:
-            reason, detail = "llm_not_ready", "AI 服务还没配好或当前不可用"
+            reason = "llm_not_ready"
+            detail = account_profile_error or "AI 服务还没配好或当前不可用"
         elif embedding_required and not embedding:
             reason, detail = "embedding_not_ready", "向量模型还没就绪"
         elif bili != "ok":
@@ -2550,6 +2577,11 @@ def create_app(
             # message) so an internal_error is diagnosable from the UI.
             reason = run.get("reason") or str(run.get("status"))
             detail = str(run.get("detail") or "")
+        elif account_profile_error:
+            # The current probe is healthy again, so retry is allowed, but the
+            # previous background analysis failure still explains why no
+            # profile exists yet.
+            reason, detail = "analyze_failed", account_profile_error
         else:
             reason, detail = "none", ""
 
@@ -2714,7 +2746,12 @@ def create_app(
                 coordinator=coord,
                 run_id=run_id,
             )
-            await coord.complete(run_id, partial_success=result.discovery_error)
+            await coord.complete(
+                run_id,
+                partial_success=result.discovery_error,
+                reason=getattr(result, "discovery_reason", None),
+                detail=getattr(result, "discovery_detail", None),
+            )
         except asyncio.CancelledError:
             # Cancel was requested via /api/init/cancel — shield the terminal
             # write so the cancelled status still lands before we propagate.
@@ -4457,8 +4494,10 @@ def create_app(
         return int(ctx.database.count_watch_later())
 
     def _safe_native_status(value: object) -> NativeSaveStatus:
-        if isinstance(value, str) and value in NATIVE_SAVE_STATUSES:
-            return cast("NativeSaveStatus", value)
+        if isinstance(value, str):
+            for status in NATIVE_SAVE_STATUSES:
+                if value == status:
+                    return status
         return "failed"
 
     def _safe_result_text(value: object, *, limit: int = 512) -> str:
@@ -5022,11 +5061,12 @@ def create_app(
         publish = getattr(event_hub, "publish", None)
         if not callable(publish):
             return
+        pool_status = await asyncio.to_thread(_runtime_pool_status_payload)
         event = {
             "type": "refresh.pool_updated",
             "phase": "done",
             "message": message,
-            **_runtime_pool_status_payload(),
+            **pool_status,
         }
         with suppress(Exception):
             result = publish(event)
@@ -5121,7 +5161,7 @@ def create_app(
     ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if _pool_available_count() == 0:
+        if await asyncio.to_thread(_pool_available_count) == 0:
             await _trigger_replenishment_if_needed(force=True)
             return RecommendationReshuffleResponse(items=[])
         try:
@@ -5150,7 +5190,7 @@ def create_app(
     ) -> RecommendationReshuffleResponse:
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if _pool_available_count() == 0:
+        if await asyncio.to_thread(_pool_available_count) == 0:
             await _trigger_replenishment_if_needed(force=True)
             return RecommendationReshuffleResponse(items=[])
         try:
@@ -5193,7 +5233,7 @@ def create_app(
                 pending_signal_events=0,
                 unread_count=0,
             )
-        payload = dict(get_runtime_status())
+        payload = dict(await asyncio.to_thread(get_runtime_status))
         get_account_sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
         if callable(get_account_sync_status):
             payload.update(get_account_sync_status())
@@ -8463,7 +8503,7 @@ def create_app(
         "ok": "X 来源正常，cookie 有效。",
         "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
         "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": "被限流，正在退避冷却中，稍后会自动重试。",
+        "rate_limited": "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。",
         "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
     }
 
@@ -8647,7 +8687,7 @@ def create_app(
                 tw_state = "missing_cookie"
         tw_detail = _x_state_detail.get(tw_state, f"X 来源状态：{tw_state}。")
         if tw_feed_paused:
-            tw_detail += " For-You 因连续失败已自动暂停。"
+            tw_detail += " 其中 For-You 子流因连续失败已临时熔断，下次抓取成功会自动恢复。"
         twitter = SourceStatusItem(
             enabled=tw_enabled,
             state=tw_state,
@@ -9967,6 +10007,7 @@ def create_app(
                     similarity_threshold=cfg.llm.embedding.similarity_threshold,
                     fallback_enabled=cfg.llm.embedding.fallback_enabled,
                     fallback_provider=cfg.llm.embedding.fallback_provider,
+                    multimodal_enabled=cfg.llm.embedding.multimodal_enabled,
                 ),
                 soul=ModuleLLMConfigOut(
                     provider=cfg.llm.soul.provider,
@@ -10283,6 +10324,8 @@ def create_app(
                 cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
             if "fallback_provider" in emb:
                 cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
+            if "multimodal_enabled" in emb:
+                cfg.llm.embedding.multimodal_enabled = _as_bool(emb["multimodal_enabled"])
         for module_name in ("soul", "discovery", "recommendation", "evaluation"):
             if module_name in llm_data and isinstance(llm_data[module_name], dict):
                 mod_cfg = getattr(cfg.llm, module_name)

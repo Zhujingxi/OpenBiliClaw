@@ -142,8 +142,9 @@
               <p id="delightReason">你最近的轨迹同时出现了宏观债务、地方财政和长叙事内容，这条把它们咬合得很清楚。</p>
               <div class="delight-chat-turns" id="delightTurns" hidden></div>
             </div>
-            <div class="delight-actions" aria-label="惊喜推荐操作">
-              <div class="delight-main-actions" aria-label="打开或讨论这条推荐">
+          </div>
+          <div class="delight-actions" aria-label="惊喜推荐操作">
+            <div class="delight-main-actions" aria-label="打开或讨论这条推荐">
                 <button class="small-btn" data-delight="view" type="button">去看看</button>
                 <div class="comment-field"><input id="delightCommentInput" placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
                 <button class="small-btn composer-cancel" data-delight="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
@@ -170,9 +171,8 @@
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>
                 </button>
               </div>
-            </div>
-            <p class="status-line" id="delightStatus" aria-live="polite"></p>
           </div>
+          <p class="status-line" id="delightStatus" aria-live="polite"></p>
         </section>
 
         <section data-od-id="recommendations">
@@ -325,12 +325,13 @@
           </div>
 
           <div class="settings-subpanel is-active" data-model-settings-group="embedding" data-model-settings-panel="default">
-            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider" translate="no"><option value="">跟随默认</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option></select></label>
+            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider" translate="no"><option value="">跟随默认</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option><option value="dashscope">dashscope (qwen3-vl)</option></select></label>
             <label class="settings-field"><span>Embedding 模型</span><input id="embeddingModel" value="bge-m3"></label>
             <label class="settings-field"><span>Embedding API Key</span><input id="embeddingApiKey" autocomplete="off"></label>
             <label class="settings-field"><span>Embedding Base URL</span><input id="embeddingBaseUrl"></label>
             <label class="settings-field"><span>Embedding 维度</span><input id="embeddingOutputDimensionality" type="number" min="0" step="1" inputmode="numeric" placeholder="1024"></label>
             <label class="settings-field"><span>相似度阈值</span><input id="embeddingSimilarity" inputmode="decimal" placeholder="0.82"></label>
+            <label class="settings-field"><span>封面视觉加成 (需多模态模型)</span><select id="embeddingMultimodalEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>
             <div class="settings-probe-row">
               <button class="pill-btn" id="probeEmbedding" type="button">测试 Embedding</button>
               <span class="settings-probe-status" id="probeEmbeddingStatus" aria-live="polite"></span>

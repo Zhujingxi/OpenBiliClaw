@@ -1714,10 +1714,11 @@ def test_overseas_factories_read_proxy_from_helper(_reset_outbound_proxy: object
     network.set_outbound_proxy("socks5://127.0.0.1:1080")
     config = _overseas_config()
 
+    # DeepSeek is a DOMESTIC endpoint (api.deepseek.com) — it is deliberately
+    # excluded here and must stay direct even with an overseas proxy set.
     for factory in (
         _maybe_openai_provider,
         _maybe_claude_provider,
-        _maybe_deepseek_provider,
         _maybe_openrouter_provider,
         _maybe_openai_compatible_provider,
     ):
@@ -1725,6 +1726,12 @@ def test_overseas_factories_read_proxy_from_helper(_reset_outbound_proxy: object
         assert provider is not None
         assert getattr(provider, "_proxy", "") == "socks5://127.0.0.1:1080", factory.__name__
         assert getattr(provider, "_trust_env", True) is False, factory.__name__
+
+    # DeepSeek must NOT inherit the overseas proxy (domestic carve-out).
+    deepseek = _maybe_deepseek_provider(config, {})
+    assert deepseek is not None
+    assert getattr(deepseek, "_proxy", "") == ""
+    assert getattr(deepseek, "_trust_env", True) is False
 
 
 def test_ollama_factory_never_reads_proxy(_reset_outbound_proxy: object) -> None:
