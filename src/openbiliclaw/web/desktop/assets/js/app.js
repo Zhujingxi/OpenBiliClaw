@@ -519,6 +519,21 @@
     const _storedHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10);
     // Number.isFinite guard so a persisted hue of 0 (烈焰红) survives reload instead of falling back to 20.
     state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
+    const ACCENT_STORAGE_KEY = "obc.accentStyle";
+    const ACCENT_OPTIONS = ["modern", "classic"];
+    const THEME_NOTICE_DISMISSED_KEY = "obc.noticeDismissed";
+    // 8 秒覆盖约 55 个中文字的阅读与按钮扫视；hover / focus 会暂停。
+    // 校准：2026-07-15 桌面端人工走查，兼顾可读性与不长期遮挡内容。
+    const THEME_NOTICE_DURATION_MS = 8000;
+    // 迁移：已有自定义色相的老用户默认 modern，保留色相；新用户默认 classic
+    const _hasCustomHue = storageGet(THEME_HUE_STORAGE_KEY) !== "";
+    const _storedAccent = storageGet(ACCENT_STORAGE_KEY);
+    state.accentStyle = ACCENT_OPTIONS.includes(_storedAccent)
+      ? _storedAccent
+      : _hasCustomHue ? "modern" : "classic";
+    if (!ACCENT_OPTIONS.includes(_storedAccent)) {
+      storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+    }
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
@@ -668,6 +683,7 @@
       setInput("delightQueueLimit", String(limit));
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
+      applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
@@ -680,15 +696,17 @@
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
       storageSet(THEME_STORAGE_KEY, state.themeMode);
       storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
+      storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
+      applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
-      return { delightQueueLimit: limit, themeMode: state.themeMode, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
+      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -1148,6 +1166,46 @@
         item.timer = setTimeout(() => this.dismiss(item.el), Math.max(item.remaining, 2000));
       }
     };
+
+    function setupThemeNotice() {
+      if (state.accentStyle !== "classic" || storageGet(THEME_NOTICE_DISMISSED_KEY) === "1") return;
+      const notice = $("#themeNotice");
+      const dismissButton = $("#themeNoticeDismiss");
+      const settingsButton = $("#themeNoticeSettings");
+      if (!notice || !dismissButton || !settingsButton || notice.dataset.bound === "1") return;
+      notice.dataset.bound = "1";
+      let timer = 0;
+
+      const clearTimer = () => {
+        if (timer) window.clearTimeout(timer);
+        timer = 0;
+      };
+      const dismiss = () => {
+        clearTimer();
+        storageSet(THEME_NOTICE_DISMISSED_KEY, "1");
+        notice.classList.remove("is-visible");
+        window.setTimeout(() => { notice.hidden = true; }, 200);
+      };
+      const scheduleDismiss = () => {
+        clearTimer();
+        timer = window.setTimeout(dismiss, THEME_NOTICE_DURATION_MS);
+      };
+
+      dismissButton.addEventListener("click", dismiss);
+      settingsButton.addEventListener("click", () => {
+        dismiss();
+        openSettingsPage("frontend");
+      });
+      notice.addEventListener("mouseenter", clearTimer);
+      notice.addEventListener("mouseleave", scheduleDismiss);
+      notice.addEventListener("focusin", clearTimer);
+      notice.addEventListener("focusout", (event) => {
+        if (!notice.contains(event.relatedTarget)) scheduleDismiss();
+      });
+      notice.hidden = false;
+      window.requestAnimationFrame(() => notice.classList.add("is-visible"));
+      scheduleDismiss();
+    }
     function showToast(message) { toastManager.showToast(message); }
     window.showToast = showToast;// 用于终端测试ToastNotice
 
@@ -2381,6 +2439,63 @@
       setThemeMode(THEME_OPTIONS[(index + 1) % THEME_OPTIONS.length], { toast: true });
     }
 
+    function bindRovingChoiceGroup(selector, onChoose) {
+      const buttons = Array.from(document.querySelectorAll(selector));
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => onChoose(button));
+        button.addEventListener("keydown", (event) => {
+          if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+          const enabled = buttons.filter((candidate) => !candidate.disabled);
+          if (!enabled.length) return;
+          const current = Math.max(0, enabled.indexOf(button));
+          let next = current;
+          if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = enabled.length - 1;
+          else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + enabled.length) % enabled.length;
+          else next = (current + 1) % enabled.length;
+          event.preventDefault();
+          enabled[next].focus();
+          enabled[next].click();
+        });
+      });
+    }
+
+    function applyAccentStyle(style = state.accentStyle) {
+      state.accentStyle = ACCENT_OPTIONS.includes(style) ? style : "classic";
+      if (state.accentStyle === "classic") {
+        document.documentElement.dataset.accent = "classic";
+      } else {
+        document.documentElement.removeAttribute("data-accent");
+      }
+      renderThemeAccentControls();
+    }
+
+    function setAccentStyle(style, { persist = true, toast = false } = {}) {
+      applyAccentStyle(style);
+      if (persist) storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+      if (toast) showToast(state.accentStyle === "classic" ? "已切换为经典配色，使用固定色板" : "已切换为动态主题色，可自定义色相");
+    }
+
+    function renderThemeAccentControls() {
+      document.querySelectorAll("[data-accent-choice]").forEach((button) => {
+        const isActive = button.dataset.accentChoice === state.accentStyle;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+      const hueSection = document.querySelector(".settings-hue-field");
+      if (!hueSection) return;
+      const isClassic = state.accentStyle === "classic";
+      hueSection.classList.toggle("is-disabled", isClassic);
+      hueSection.querySelectorAll("button, input").forEach((el) => {
+        if (el.matches("[data-accent-choice]")) return;
+        el.disabled = isClassic;
+        el.setAttribute("aria-disabled", isClassic ? "true" : "false");
+      });
+      const hint = hueSection.querySelector(".settings-hue-hint");
+      if (hint) hint.hidden = !isClassic;
+    }
+
     function renderThemeControls() {
       const mode = normalizeThemeMode(state.themeMode);
       const label = THEME_LABELS[mode];
@@ -2402,11 +2517,13 @@
     function renderThemeHueControls() {
       // Number.isFinite so hue 0 (烈焰红) renders as active instead of falling back to 20.
       const hue = Number.isFinite(state.themeHue) ? state.themeHue : 20;
-      document.querySelectorAll("[data-hue]").forEach((button) => {
+      const buttons = Array.from(document.querySelectorAll("[data-hue]"));
+      const activeIndex = buttons.findIndex((button) => parseInt(button.dataset.hue, 10) === hue);
+      buttons.forEach((button, index) => {
         const isActive = parseInt(button.dataset.hue, 10) === hue;
         button.classList.toggle("is-active", isActive);
         button.setAttribute("aria-checked", isActive ? "true" : "false");
-        button.tabIndex = isActive ? 0 : -1;
+        button.tabIndex = isActive || (activeIndex < 0 && index === 0) ? 0 : -1;
       });
       const slider = $("#hueSlider");
       if (slider) slider.value = hue;
@@ -7312,12 +7429,9 @@
     syncTopbarHeight();
     window.addEventListener("resize", syncTopbarHeight);
     safeBind("#themeToggleBtn", "click", cycleThemeMode);
-    document.querySelectorAll("[data-theme-choice]").forEach((button) => {
-      button.addEventListener("click", () => setThemeMode(button.dataset.themeChoice, { toast: true }));
-    });
-    document.querySelectorAll("[data-hue]").forEach((button) => {
-      button.addEventListener("click", () => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
-    });
+    bindRovingChoiceGroup("[data-theme-choice]", (button) => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    bindRovingChoiceGroup("[data-hue]", (button) => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
+    bindRovingChoiceGroup("[data-accent-choice]", (button) => setAccentStyle(button.dataset.accentChoice, { toast: true }));
     safeBind("#hueSlider", "input", (event) => {
       const val = parseInt(event.target.value, 10);
       setThemeHue(val);
@@ -7487,6 +7601,7 @@
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
     toastManager.init();
+    setupThemeNotice();
     try {
       renderAll();
     } catch (error) {

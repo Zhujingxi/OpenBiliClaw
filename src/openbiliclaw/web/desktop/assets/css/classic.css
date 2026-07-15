@@ -1,0 +1,405 @@
+/* ═══════════════════════════════════════════════════
+   🏺 经典配色 — 还原 Pre-ThemePR 静态色板
+   ═══════════════════════════════════════════════════
+   通过覆写 CSS 变量将现代主题色（动态 oklch）还原为
+   Pre-ThemePR 的陶土色板（浅色模式略微加深以满足文字对比度）。
+   ─ 非主要按钮 hover/active → 中性
+   ─ 主要按钮（.primary）hover/active → accent 阶
+   ─ 辉光 → none
+   未来抛弃经典主题时只需删除此文件及对应 <link>。
+   ═══════════════════════════════════════════════════ */
+
+/* ═══════════════════════════════════════════════════
+   🌞 浅色 — 变量覆写
+   ═══════════════════════════════════════════════════ */
+:root[data-accent="classic"] {
+  /* 强调色阶：#b4583a 保留经典陶土观感，并让浅色文字达到 WCAG AA。 */
+  --accent: #b4583a;
+  --accent-subtle: color-mix(in oklab, #b4583a, #faf9f5 85%);
+  --accent-light: color-mix(in oklab, #b4583a, #faf9f5 60%);
+  --accent-strong: color-mix(in oklab, #b4583a, black 14%);
+  --accent-hover: color-mix(in oklab, #b4583a, black 8%);
+  --accent-deep: color-mix(in oklab, #b4583a, black 20%);
+  --accent-active: color-mix(in oklab, #b4583a, black 14%);
+  --accent-on: #faf9f5;
+  --badge-on: #ffffff;
+
+  /* 对比色 / 聚焦环 — pre-ThemePR 蓝 */
+  --contrast-strong: #3898ec;
+  --focus-ring: 0 0 0 3px rgba(56, 152, 236, 0.3);
+
+  /* 语义色 */
+  --success: #17a34a;
+  --warn: #eab308;
+  --danger: #b53333;
+  --warn-fg: #8a5a00;
+
+  /* 品牌色 */
+  --auth-brand: #fb7299;
+  --auth-error: #ef4444;
+  --auth-submit-on: #ffffff;
+  --auth-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+
+  /* 阴影 */
+  --elev-raised: rgba(0, 0, 0, 0.05) 0px 4px 24px;
+  --elev-flat: none;
+  --message-shadow: rgba(20, 20, 19, 0.045) 0 10px 28px;
+
+  /* 探测色 */
+  --probe-interest: #f3b15f;
+  --probe-challenge: #6d28d9;
+  --probe-challenge-surface: #8b5cf6;
+  --probe-challenge-border: #7c3aed;
+  --probe-avoidance: #1d4ed8;
+  --probe-avoidance-surface: #60a5fa;
+  --probe-avoidance-border: #2563eb;
+  --source-pending: #3898ec;
+  --source-pending-fg: #246aa6;
+  --star-active: #e8a33d;
+  --platform-zhihu: #0f88eb;
+  --platform-reddit: #ff4500;
+
+  /* ═══ 交互状态变量 ═══ */
+  /* 非主要按钮 → 中性 */
+  --accent-hover-bg: var(--surface-warm);
+  --accent-hover-fg: var(--fg);
+  --accent-hover-border: var(--border-soft);
+  --accent-active-bg: var(--surface-warm);
+  --accent-active-fg: var(--fg);
+  --accent-active-border: var(--border-soft);
+  --accent-glow: none;
+  --accent-glow-soft: none;
+  --accent-focus-ring: var(--focus-ring);
+  --accent-focus-soft: var(--focus-ring);
+}
+
+/* ═══════════════════════════════════════════════════
+   🌙 显式暗色 — 变量覆写
+   ═══════════════════════════════════════════════════ */
+:root[data-accent="classic"][data-theme="dark"] {
+  --accent: #c96442;
+  --accent-subtle: color-mix(in oklab, #c96442, #1a1915 70%);
+  --accent-light: color-mix(in oklab, #c96442, #1a1915 40%);
+  --accent-strong: color-mix(in oklab, #c96442, white 14%);
+  --accent-hover: color-mix(in oklab, #c96442, white 8%);
+  --accent-deep: color-mix(in oklab, #c96442, white 20%);
+  --accent-active: color-mix(in oklab, #c96442, white 14%);
+  --accent-on: #1a1915;
+  --badge-on: #1a1915;
+  --bg: #1a1915;
+  --overlay: rgba(12, 11, 9, 0.78);
+  --contrast-strong: #70bdfb;
+  --focus-ring: 0 0 0 3px rgba(112, 189, 251, 0.36);
+  --auth-brand: #ff91ad;
+  --auth-error: #ff8173;
+  --auth-submit-on: #1a1915;
+  --success: #55d07a;
+  --warn: #f2c75b;
+  --danger: #ff8173;
+  --warn-fg: #f4ca72;
+  --probe-interest: #f2b46f;
+  --probe-challenge: #c4a7ff;
+  --probe-challenge-surface: #a78bfa;
+  --probe-challenge-border: #8b6fe8;
+  --probe-avoidance: #8fc5ff;
+  --probe-avoidance-surface: #66b5ff;
+  --probe-avoidance-border: #4b91d6;
+  --source-pending: #70bdfb;
+  --source-pending-fg: #a9d8ff;
+  --star-active: #f2bf5b;
+  --platform-zhihu: #70bdfb;
+  --platform-reddit: #ff8a5c;
+
+  /* ═══ 交互状态变量 ═══ */
+  --accent-hover-bg: var(--surface-warm);
+  --accent-hover-fg: var(--fg);
+  --accent-hover-border: var(--border-soft);
+  --accent-active-bg: var(--surface-warm);
+  --accent-active-fg: var(--fg);
+  --accent-active-border: var(--border-soft);
+  --accent-glow: none;
+  --accent-glow-soft: none;
+  --accent-focus-ring: var(--focus-ring);
+  --accent-focus-soft: var(--focus-ring);
+}
+
+/* ═══════════════════════════════════════════════════
+   🌙 自动暗色（跟随系统）— 变量覆写
+   ═══════════════════════════════════════════════════ */
+@media (prefers-color-scheme: dark) {
+  :root[data-accent="classic"]:not([data-theme="light"]) {
+    --accent: #c96442;
+    --accent-subtle: color-mix(in oklab, #c96442, #1a1915 70%);
+    --accent-light: color-mix(in oklab, #c96442, #1a1915 40%);
+    --accent-strong: color-mix(in oklab, #c96442, white 14%);
+    --accent-hover: color-mix(in oklab, #c96442, white 8%);
+    --accent-deep: color-mix(in oklab, #c96442, white 20%);
+    --accent-active: color-mix(in oklab, #c96442, white 14%);
+    --accent-on: #1a1915;
+    --badge-on: #1a1915;
+    --bg: #1a1915;
+    --overlay: rgba(12, 11, 9, 0.78);
+    --contrast-strong: #70bdfb;
+    --focus-ring: 0 0 0 3px rgba(112, 189, 251, 0.36);
+    --auth-brand: #ff91ad;
+    --auth-error: #ff8173;
+    --auth-submit-on: #1a1915;
+    --success: #55d07a;
+    --warn: #f2c75b;
+    --danger: #ff8173;
+    --warn-fg: #f4ca72;
+    --probe-interest: #f2b46f;
+    --probe-challenge: #c4a7ff;
+    --probe-challenge-surface: #a78bfa;
+    --probe-challenge-border: #8b6fe8;
+    --probe-avoidance: #8fc5ff;
+    --probe-avoidance-surface: #66b5ff;
+    --probe-avoidance-border: #4b91d6;
+    --source-pending: #70bdfb;
+    --source-pending-fg: #a9d8ff;
+    --star-active: #f2bf5b;
+    --platform-zhihu: #70bdfb;
+    --platform-reddit: #ff8a5c;
+
+    /* ═══ 交互状态变量 ═══ */
+    --accent-hover-bg: var(--surface-warm);
+    --accent-hover-fg: var(--fg);
+    --accent-hover-border: var(--border-soft);
+    --accent-active-bg: var(--surface-warm);
+    --accent-active-fg: var(--fg);
+    --accent-active-border: var(--border-soft);
+    --accent-glow: none;
+    --accent-glow-soft: none;
+    --accent-focus-ring: var(--focus-ring);
+    --accent-focus-soft: var(--focus-ring);
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   元素级覆盖 — 按 Pre-ThemePR 还原交互行为
+   ═══════════════════════════════════════════════════ */
+
+/* ── .delight / .video-card hover 阴影 ── */
+:root[data-accent="classic"] .delight:hover,
+:root[data-accent="classic"] .video-card:hover {
+  box-shadow: var(--elev-raised);
+  border-color: var(--border-soft);
+}
+
+/* ── .delight .thumb:focus-visible — 内含硬编码阴影 ── */
+:root[data-accent="classic"] .delight .thumb:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* ── .pill-btn.dark hover/active — 使用 --fg-2 ── */
+:root[data-accent="classic"] .pill-btn.dark:hover,
+:root[data-accent="classic"] .pill-btn.dark:active {
+  background: var(--fg-2);
+  border-color: var(--fg-2);
+  color: var(--surface);
+  box-shadow: var(--elev-ring);
+}
+
+/* ── .edit-reset-btn:hover — 文字色 ── */
+:root[data-accent="classic"] .edit-reset-btn:hover {
+  color: var(--fg-2);
+}
+
+/* ── 主要按钮（.primary）hover/active → 使用 accent 阶 ── */
+
+/* .small-btn.primary */
+:root[data-accent="classic"] .small-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+:root[data-accent="classic"] .small-btn.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .small-btn.primary:active {
+  background: var(--accent-active);
+  border-color: var(--accent-active);
+  transform: scale(0.97);
+  box-shadow: var(--elev-ring);
+}
+
+/* .pill-btn.primary */
+:root[data-accent="classic"] .pill-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+:root[data-accent="classic"] .pill-btn.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .pill-btn.primary:active {
+  background: var(--accent-active);
+  border-color: var(--accent-active);
+  transform: scale(0.97);
+  box-shadow: var(--elev-ring);
+}
+
+/* .delight-main-actions button.small-btn (主要操作按钮) */
+:root[data-accent="classic"] .delight-main-actions button.small-btn {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+:root[data-accent="classic"] .delight-main-actions button.small-btn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .delight-main-actions button.small-btn:active {
+  background: var(--accent-active);
+  border-color: var(--accent-active);
+  transform: scale(0.97);
+}
+
+/* .video-card .small-btn (视频卡上的主要按钮) */
+:root[data-accent="classic"] .video-card .small-btn {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+:root[data-accent="classic"] .video-card .small-btn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+:root[data-accent="classic"] .video-card .small-btn:active {
+  background: var(--accent-active);
+  transform: scale(0.97);
+}
+
+/* .message-item .inline-chat-send (发送按钮) */
+:root[data-accent="classic"] .message-item .inline-chat-send {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+:root[data-accent="classic"] .message-item .inline-chat-send:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  box-shadow: var(--elev-ring);
+}
+
+/* .message-primary-actions .small-btn (消息页主要按钮) */
+:root[data-accent="classic"] .message-primary-actions .small-btn {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+:root[data-accent="classic"] .message-primary-actions .small-btn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+:root[data-accent="classic"] .message-primary-actions .small-btn.secondary:hover {
+  background: var(--surface-warm);
+  color: var(--fg);
+  border-color: var(--border-soft);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .message-primary-actions .small-btn.secondary:active {
+  background: var(--surface-warm);
+  color: var(--fg);
+  border-color: var(--border-soft);
+  transform: scale(0.97);
+  box-shadow: var(--elev-ring);
+}
+
+/* ── input / search / focus ── */
+:root[data-accent="classic"] input:focus-visible,
+:root[data-accent="classic"] textarea:focus-visible,
+:root[data-accent="classic"] select:focus-visible {
+  border-color: var(--contrast-strong);
+  box-shadow: var(--focus-ring);
+}
+:root[data-accent="classic"] .search:focus-within {
+  border-color: var(--contrast-strong);
+  box-shadow: var(--focus-ring);
+}
+:root[data-accent="classic"] .message-chat-view .chat-input:focus-within,
+:root[data-accent="classic"] .chat-page .chat-input:focus-within {
+  border: 1px solid var(--contrast-strong);
+  box-shadow: var(--focus-ring);
+}
+
+/* ── .gh-star hover/active ── */
+:root[data-accent="classic"] .gh-star {
+  border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 45%);
+}
+:root[data-accent="classic"] .gh-star:hover {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--surface), var(--accent) 7%);
+  color: var(--fg);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .gh-star:active {
+  background: color-mix(in oklab, var(--surface), var(--accent) 12%);
+  color: var(--fg);
+  transform: scale(0.97);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .gh-star-left { background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"] .gh-star-left:hover,
+:root[data-accent="classic"] .gh-star-left:active { background: var(--fg-2); color: var(--surface); }
+
+/* ── .side-drawer ── */
+:root[data-accent="classic"] button.side-drawer-btn {
+  background: var(--surface);
+  border-color: var(--border-soft);
+  color: var(--fg-2);
+}
+:root[data-accent="classic"] button.side-drawer-btn:hover {
+  background: var(--surface-warm);
+  color: var(--fg);
+  border-color: var(--border-soft);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] button.side-drawer-btn:active {
+  background: var(--surface-warm);
+  color: var(--fg);
+  border-color: var(--border-soft);
+  transform: scale(0.97);
+  box-shadow: var(--elev-ring);
+}
+:root[data-accent="classic"] .side-drawer-nav .nav-action:hover {
+  background: color-mix(in oklab, var(--surface-warm), var(--accent) 6%);
+  color: var(--fg);
+  box-shadow: none;
+}
+:root[data-accent="classic"] .side-drawer-nav .nav-action:active {
+  background: color-mix(in oklab, var(--surface-warm), var(--accent) 10%);
+  transform: scale(0.97);
+}
+
+/* ── 暗色覆盖 ── */
+:root[data-accent="classic"][data-theme="dark"] .search button { background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .search button:hover,
+:root[data-accent="classic"][data-theme="dark"] .search button:active { background: var(--fg-2); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .top-mobile-btn { border-color: var(--fg); background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .top-mobile-btn:hover { background: var(--fg-2); border-color: var(--fg-2); }
+:root[data-accent="classic"][data-theme="dark"] .pill-btn.dark { background: var(--fg); color: var(--surface); border-color: var(--fg); }
+:root[data-accent="classic"][data-theme="dark"] .pill-btn.dark:hover { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .pill-btn.dark:active { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .gh-star-left { background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .gh-star-left:hover,
+:root[data-accent="classic"][data-theme="dark"] .gh-star-left:active { background: var(--fg-2); }
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent="classic"]:not([data-theme="light"]) .search button { background: var(--fg); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .search button:hover,
+  :root[data-accent="classic"]:not([data-theme="light"]) .search button:active { background: var(--fg-2); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .top-mobile-btn { border-color: var(--fg); background: var(--fg); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .top-mobile-btn:hover { background: var(--fg-2); border-color: var(--fg-2); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .pill-btn.dark { background: var(--fg); color: var(--surface); border-color: var(--fg); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .pill-btn.dark:hover { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .pill-btn.dark:active { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .gh-star-left { background: var(--fg); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .gh-star-left:hover,
+  :root[data-accent="classic"]:not([data-theme="light"]) .gh-star-left:active { background: var(--fg-2); }
+}

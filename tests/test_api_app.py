@@ -939,6 +939,7 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.headers.get("cache-control") == "no-store"
         assert 'href="/web/assets/css/app.css?v=' in response.text
+        assert 'href="/web/assets/css/classic.css?v=' in response.text
         assert 'src="/web/assets/js/app.js?v=' in response.text
 
     def test_mobile_web_index_exposes_home_screen_metadata(self) -> None:
