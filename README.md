@@ -580,14 +580,18 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 ## 🏛️ 架构概览
 
 ```text
-interactive ─────────────────────────────────────────┐
+interactive（对话 / 配置探测）───────────────────────┐
                                                     ├─ runtime total gate (default 4) ─ provider
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
+             │  ├─ 低库存 supply 含探索词 / 来源抽取
              │  └─ while queued: guarantee 2, may borrow all 3
              │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
+
+引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
+                                                     └→ 终态后再调度可选探针
 ```
 
 ```
@@ -604,6 +608,7 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · 已看身份                     │

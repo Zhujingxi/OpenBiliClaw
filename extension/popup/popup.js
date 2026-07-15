@@ -5846,7 +5846,7 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "点「开始初始化」，会先检查前置条件，通过后就在这里一步步建好画像和首轮内容池。",
+      "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
     setHint("先完成初始化，把画像和候选池攒起来。");
     renderInitPanelIdle();

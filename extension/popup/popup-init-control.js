@@ -328,7 +328,7 @@ const STAGE_FRACTION_FALLBACK = 0.5;
 export const INIT_STALL_THRESHOLD_SECONDS = 90;
 // Expectation copy shared by the idle checklist and the start-button area.
 export const INIT_EXPECTATION_HINT =
-  "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
+  "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–10 分钟；多平台采集或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
 
 // Per-run client view state: elapsed-based pseudo-progress anchors (first
 // client observation of each running stage) + the monotonic pct clamp + the

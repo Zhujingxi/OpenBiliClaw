@@ -356,52 +356,12 @@ class SoulEngine:
             _time.monotonic() - t0,
         )
 
-        # Trigger speculator immediately after init to seed speculative interests
-        try:
-            load_runtime_state = getattr(self._memory, "load_discovery_runtime_state", None)
-
-            def _load_runtime_history(key: str) -> object:
-                if not callable(load_runtime_state):
-                    return []
-                runtime_state = load_runtime_state()
-                if not isinstance(runtime_state, dict):
-                    return []
-                return runtime_state.get(key, [])
-
-            feedback_history = _load_runtime_history("probe_feedback_history")
-            avoidance_feedback_history = _load_runtime_history("avoidance_probe_feedback_history")
-            try:
-                await self._speculator.force_tick(
-                    profile,
-                    feedback_history=feedback_history,
-                    feedback_history_loader=lambda: _load_runtime_history("probe_feedback_history"),
-                )
-            except TypeError:
-                try:
-                    await self._speculator.force_tick(
-                        profile,
-                        feedback_history=feedback_history,
-                    )
-                except TypeError:
-                    await self._speculator.force_tick(profile)
-            try:
-                await self._avoidance_speculator.force_tick(
-                    profile,
-                    feedback_history=avoidance_feedback_history,
-                    feedback_history_loader=lambda: _load_runtime_history(
-                        "avoidance_probe_feedback_history"
-                    ),
-                )
-            except TypeError:
-                try:
-                    await self._avoidance_speculator.force_tick(
-                        profile,
-                        feedback_history=avoidance_feedback_history,
-                    )
-                except TypeError:
-                    await self._avoidance_speculator.force_tick(profile)
-        except Exception:
-            logger.debug("Speculator force_tick after init failed", exc_info=True)
+        # This return is the strict profile-commit barrier for guided init.
+        # Initial interest/avoidance probes are intentionally scheduled by
+        # RuntimeContext.restart_background_tasks *after* the first serviceable
+        # content pool is attempted. Keeping them out of this method prevents a
+        # non-essential maintenance task from extending or deadlocking the
+        # load-bearing profile stage.
 
         return profile
 

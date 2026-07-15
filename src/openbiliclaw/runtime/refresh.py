@@ -34,7 +34,7 @@ from openbiliclaw.soul.speculator import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
     from openbiliclaw.storage.database import PoolMaintenanceResult
@@ -43,6 +43,21 @@ logger = logging.getLogger(__name__)
 
 _MAX_DISCOVERY_BACKFILL_PER_REFRESH = 60
 _DEFAULT_CANDIDATE_EVAL_BATCH_SIZE = 45
+
+
+class InitialPoolUnavailableError(RuntimeError):
+    """Initial discovery finished without producing a serviceable pool row."""
+
+    def __init__(self, *, discovered_count: int, pending_count: int = 0) -> None:
+        self.discovered_count = max(0, int(discovered_count))
+        self.pending_count = max(0, int(pending_count))
+        super().__init__(
+            "initial discovery produced "
+            f"{self.discovered_count} candidate(s), but none became serviceable "
+            f"after recommendation-copy generation (pending={self.pending_count})"
+        )
+
+
 _DISCOVERY_REPLENISH_LOW_WATERMARK_RATIO = 0.90
 _BILIBILI_EXPENSIVE_DISCOVERY_GAP_RATIO = 0.20
 _BILIBILI_EXPENSIVE_DISCOVERY_MIN_GAP = 20
@@ -252,6 +267,13 @@ class SupportsRecommendationEngine(Protocol):
     ) -> list[Any]: ...
 
     async def precompute_pool_copy(
+        self,
+        *,
+        profile: Any,
+        limit: int,
+    ) -> int: ...
+
+    async def drain_pending_expression_copy(
         self,
         *,
         profile: Any,
@@ -627,6 +649,7 @@ class ContinuousRefreshController:
         target_pool_count: int,
         *,
         fully_parallel: bool = True,
+        progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
     ) -> int:
         """Backfill the initial discovery pool for guided init.
 
@@ -635,19 +658,40 @@ class ContinuousRefreshController:
         CLI's staged ``_INIT_DISCOVERY_PLAN`` backfill, but against this
         controller's live ``discovery_engine``/``database``. Cooperative
         cancel: ``async with`` releases the lock on ``CancelledError``.
-        Returns the total number of items discovered.
+        Discovery alone is not a completion boundary: rows also need
+        classification and recommendation copy before ``serve()`` can return
+        them.  This method therefore holds the refresh lock through the first
+        synchronous expression-copy drain and only succeeds once at least one
+        canonical pool row is serviceable. Returns the total number of items
+        discovered.
         """
+
+        async def _report(done: int, total: int, note: str) -> None:
+            if progress_callback is None:
+                return
+            result = progress_callback(done, total, note)
+            if inspect.isawaitable(result):
+                await result
+
+        target = max(0, int(target_pool_count))
+        if target == 0:
+            await _report(4, 4, "已跳过首轮内容池构建")
+            return 0
+
         discovered_count = 0
         async with self._refresh_lock:
+            copy_error: BaseException | None = None
             for strategies in _INIT_DISCOVERY_PLAN:
                 current = self.database.count_pool_candidates()
-                if current >= target_pool_count:
+                self._update_llm_inventory_state(current)
+                if current >= target:
                     break
-                request_limit = max(20, target_pool_count - current)
+                await _report(0, 4, "正在基于完整画像生成发现方向并抓取候选")
+                request_limit = max(20, target - current)
                 pool_snapshot = self._build_init_pool_snapshot(
                     profile,
                     current_pool_count=current,
-                    target_pool_count=target_pool_count,
+                    target_pool_count=target,
                 )
                 discovered = await self.discovery_engine.discover(
                     profile,
@@ -657,6 +701,63 @@ class ContinuousRefreshController:
                     pool_snapshot=pool_snapshot,
                 )
                 discovered_count += len(discovered)
+                current = self.database.count_pool_candidates()
+                self._update_llm_inventory_state(current)
+                await _report(
+                    2,
+                    4,
+                    f"已发现 {discovered_count} 条候选，正在生成首轮推荐文案",
+                )
+
+                if current < target:
+                    try:
+                        copied = await self.recommendation_engine.drain_pending_expression_copy(
+                            profile=profile,
+                            limit=max(1, target),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        copy_error = exc
+                        copied = max(0, int(getattr(exc, "completed", 0) or 0))
+                    current = self.database.count_pool_candidates()
+                    self._update_llm_inventory_state(current)
+                    await _report(
+                        3,
+                        4,
+                        f"已生成 {copied} 条推荐文案，正在验证首轮内容可用性",
+                    )
+
+                if current >= target:
+                    break
+
+            available = self.database.count_pool_candidates()
+            self._update_llm_inventory_state(available)
+            if available <= 0:
+                pending = 0
+                count_readiness = getattr(self.database, "count_pool_readiness", None)
+                if callable(count_readiness):
+                    with suppress(Exception):
+                        readiness = count_readiness(xhs_self_nickname=self._xhs_self_nickname())
+                        if isinstance(readiness, dict):
+                            pending = int(readiness.get("pending", 0) or 0)
+                if copy_error is not None:
+                    logger.warning(
+                        "guided-init expression copy failed before first pool row was ready: %s",
+                        copy_error,
+                    )
+                raise InitialPoolUnavailableError(
+                    discovered_count=discovered_count,
+                    pending_count=pending,
+                ) from copy_error
+
+            if copy_error is not None:
+                logger.warning(
+                    "guided-init expression copy partially failed after %d row(s) became ready: %s",
+                    available,
+                    copy_error,
+                )
+            await _report(4, 4, f"首轮内容池已就绪（{available} 条可直接浏览）")
         return discovered_count
 
     def _build_init_pool_snapshot(

@@ -185,7 +185,7 @@
       <!-- Step 2: 初始化 -->
       <section class="panel" data-panel="2">
         <h2>初始化画像和推荐池</h2>
-        <p class="sub">和浏览器插件里的「开始初始化」走同一套流程：先检查 AI 服务和所选平台登录，再拉取数据、生成画像、补齐首轮内容池。B 站默认勾选但可取消，至少保留一个来源。</p>
+        <p class="sub">和浏览器插件里的「开始初始化」走同一套流程：先检查 AI 服务和所选平台登录，再依次拉取数据、分析偏好、保存完整画像，最后严格基于这份画像生成首轮可用推荐。B 站默认勾选但可取消，至少保留一个来源。</p>
         <div id="initSources" class="init-sources"></div>
         <ul id="initChecklist" class="init-checks">
           <li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态。</li>
@@ -196,7 +196,6 @@
           <p class="progress-label stall-hint" id="initStallHint" hidden></p>
         </div>
         <div class="msg" id="initReason" role="status" aria-live="polite" aria-atomic="true"></div>
-        <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
         <div class="row-actions">
           <button class="ghost" id="backInit">← 上一步</button>
           <button class="primary" id="startInit">开始初始化</button>
@@ -205,13 +204,13 @@
 
       <!-- Step 3: 完成 -->
       <section class="panel" data-panel="3">
-        <h2>就绪 🎉</h2>
-        <p class="sub">基础配置和首轮初始化已完成,本地引擎可以开始为你工作了。</p>
+        <h2 id="doneTitle">就绪 🎉</h2>
+        <p class="sub" id="doneSummary">基础配置和首轮初始化已完成，本地引擎可以开始为你工作了。</p>
         <ul class="check-list">
           <li><span class="tick">✓</span><div><b>AI 大脑</b><br><span class="hint" id="doneLlm">已连接</span></div></li>
           <li><span class="tick">✓</span><div><b>本地语义引擎</b><br><span class="hint">Ollama bge-m3 已随包就绪,推荐去重 / 多样性已开启</span></div></li>
           <li id="biliDone" class="pending"><span class="tick">…</span><div><b>平台账号</b><br><span class="hint" id="doneBili">B 站可稍后连接；Reddit 等来源按初始化勾选项检查</span></div></li>
-          <li><span class="tick">✓</span><div><b>首轮初始化</b><br><span class="hint">画像和推荐池已就绪</span></div></li>
+          <li id="initDoneRow"><span class="tick">✓</span><div><b>首轮初始化</b><br><span class="hint" id="doneInit">完整画像和首轮可用推荐均已就绪</span></div></li>
         </ul>
         <div class="row-actions">
           <button class="ghost" id="back2">← 上一步</button>
@@ -601,46 +600,19 @@
       return await r.json();
     }
 
-    async function fetchRuntimeStatus() {
-      const r = await fetch("/api/runtime-status");
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return await r.json();
-    }
-
-    function runtimeHasFirstPool(runtime) {
-      return Number(runtime?.pool_available_count ?? runtime?.pool_available ?? runtime?.available_count ?? 0) > 0
-        || Number(runtime?.recommendation_count ?? 0) > 0;
-    }
-
-    async function firstInitPoolReady() {
-      try {
-        return runtimeHasFirstPool(await fetchRuntimeStatus());
-      } catch {
-        return false;
-      }
-    }
-
-    function renderWaitingForFirstPool(status = null) {
+    function showInitCompletion(status = null) {
       const partial = Boolean(status?.partial_success);
-      $("#initSources").style.display = "none";
-      $("#initProgress").hidden = false;
-      $("#initProgressBar").style.width = "95%";
-      $("#initProgressLabel").textContent = partial
-        ? "画像已生成，但首轮内容池本次未完成"
-        : "画像已生成，正在整理首轮内容池…";
-      $("#initStallHint").hidden = true;
-      $("#initStallHint").classList.remove("stale");
-      $("#startInit").disabled = true;
-      $("#startInit").textContent = "整理首轮内容…";
-      setInitReason(
-        partial
-          ? initStatusReasonText(status)
-          : "等第一批内容入池可刷后，初始化才会完成。",
-        partial ? "warn" : "info",
-      );
-      // Escape hatch: replenishment can be slow (or stuck) — never park the
-      // user on a disabled button with no way out of the wizard.
-      $("#initEscape").className = "msg show info";
+      $("#doneTitle").textContent = partial ? "画像已就绪" : "就绪 🎉";
+      $("#doneSummary").textContent = partial
+        ? "完整画像已经保存；首轮可用推荐本次未能完成，后台会继续补齐，你现在可以先进入应用。"
+        : "基础配置、完整画像和首轮可用推荐均已完成，本地引擎可以开始为你工作了。";
+      $("#doneInit").textContent = partial
+        ? initStatusReasonText(status) || "完整画像已就绪，首轮推荐将在后台继续补齐"
+        : "完整画像和首轮可用推荐均已就绪";
+      const row = $("#initDoneRow");
+      row.classList.toggle("pending", partial);
+      row.querySelector(".tick").textContent = partial ? "…" : "✓";
+      setStep(3);
     }
 
     // Human text for a failed/cancelled run. ``status.detail`` carries the
@@ -674,7 +646,7 @@
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–10 分钟；多平台采集或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
@@ -790,7 +762,6 @@
 
     function renderInitProgress(status) {
       $("#initSources").style.display = "none";
-      $("#initEscape").className = "msg";
       $("#initProgress").hidden = false;
       // The transient "正在检查 AI 服务…" row is only meaningful between the
       // start click and the run launch — once a run is rendering (running or
@@ -827,7 +798,6 @@
     function renderInitIdle() {
       clearInitPoll();
       renderInitSources();
-      $("#initEscape").className = "msg";
       $("#initSources").style.display = "";
       $("#initChecklist").innerHTML =
         '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>' +
@@ -871,13 +841,8 @@
         const status = await fetchInitStatus();
         renderInitProgress(status);
         if (status.initialized) {
-          if (await firstInitPoolReady()) {
-            clearInitPoll();
-            setStep(3);
-            return;
-          }
-          renderWaitingForFirstPool(status);
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+          clearInitPoll();
+          showInitCompletion(status);
           return;
         }
         if (status.running) {
@@ -953,14 +918,7 @@
       }
 
       if (status.initialized) {
-        if (await firstInitPoolReady()) {
-          setStep(3);
-        } else {
-          renderInitProgress(status);
-          renderWaitingForFirstPool(status);
-          connectInitStream();
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
-        }
+        showInitCompletion(status);
         return;
       }
       if (status.running) {
@@ -1072,14 +1030,8 @@
           return;
         }
         if (status.initialized) {
-          if (await firstInitPoolReady()) {
-            setStep(3);
-            return;
-          }
-          setStep(2);
-          renderWaitingForFirstPool(status);
-          connectInitStream();
-          scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+          showInitCompletion(status);
+          return;
         }
       } catch {}
     })();

@@ -395,8 +395,10 @@ async def test_refill_queue_cancellation_at_every_position_leaks_nothing(
 def test_inventory_state_drives_dynamic_supply_classification() -> None:
     gate = LLMConcurrencyGate(4)
     supply_callers = [
+        "discovery.explore.queries",
         "discovery.keyword_planner",
         "discovery.search.queries",
+        "sources.zhihu.extract",
         "sources.xhs.keyword_gen",
         "runtime.bilibili_extension_search.queries",
     ]
@@ -483,10 +485,31 @@ def test_current_background_callers_are_classified(caller: str) -> None:
 
 @pytest.mark.parametrize(
     "caller",
-    ["soul.dialogue", "soul.dialogue.tools", "soul.dialogue.tool_followup", "api.sentiment"],
+    [
+        "api.config_probe",
+        "soul.dialogue",
+        "soul.dialogue.tools",
+        "soul.dialogue.tool_followup",
+        "api.sentiment",
+    ],
 )
 def test_confirmed_interactive_callers(caller: str) -> None:
     assert LLMConcurrencyGate(4).classify(caller) is LLMTrafficClass.INTERACTIVE
+
+
+@pytest.mark.parametrize(
+    "caller",
+    ["discovery.explore.queries", "sources.zhihu.extract"],
+)
+async def test_empty_inventory_admits_load_bearing_supply_callers(caller: str) -> None:
+    gate = LLMConcurrencyGate(1)
+    gate.update_inventory(available=0, target=20)
+
+    async with asyncio.timeout(1):
+        await _acquire_once(gate, caller)
+
+    assert gate.classify(caller) is LLMTrafficClass.REFILL_SUPPLY
+    assert gate.status_payload()["llm_background_active"] == 0
 
 
 async def test_unknown_caller_warns_once_and_remains_background_limited(

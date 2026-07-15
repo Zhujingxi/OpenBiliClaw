@@ -31,8 +31,8 @@ function statusWith(overrides: Record<string, unknown> = {}): Record<string, unk
     stages: [
       { n: 1, label: "拉取数据", status: "pending", reason: null },
       { n: 2, label: "分析偏好", status: "pending", reason: null },
-      { n: 3, label: "生成画像", status: "pending", reason: null },
-      { n: 4, label: "发现内容池", status: "pending", reason: null },
+      { n: 3, label: "生成并保存完整画像", status: "pending", reason: null },
+      { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
     partial_success: false,
     can_start: false,
@@ -226,21 +226,21 @@ test("start button reflects running and already-initialized states", () => {
   assert.equal(done.label, "已初始化");
 });
 
-test("progress view advances mid-stage and reports parallel stage 3/4", () => {
+test("progress view advances through the sequential full-profile stage", () => {
   const status = statusWith({
     running: true,
     current_stage: 3,
     stages: [
       { n: 1, label: "拉取数据", status: "ok", reason: null },
       { n: 2, label: "分析偏好", status: "ok", reason: null },
-      { n: 3, label: "生成画像", status: "running", reason: null },
-      { n: 4, label: "发现内容池", status: "running", reason: null },
+      { n: 3, label: "生成并保存完整画像", status: "running", reason: null },
+      { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
   });
   const view = initProgressView(status);
   assert.equal(view.active, true);
   assert.equal(view.doneCount, 2);
-  assert.ok(view.stageLabel.includes("生成画像"));
+  assert.ok(view.stageLabel.includes("生成并保存完整画像"));
   // 2 done + 0.5 in-flight over 4 → ~63%.
   assert.ok(view.pct > 50 && view.pct < 75);
   assert.equal(view.failed, false);
@@ -252,8 +252,8 @@ test("progress view reports completion and failure terminals", () => {
     stages: [
       { n: 1, label: "拉取数据", status: "ok", reason: null },
       { n: 2, label: "分析偏好", status: "ok", reason: null },
-      { n: 3, label: "生成画像", status: "ok", reason: null },
-      { n: 4, label: "发现内容池", status: "ok", reason: null },
+      { n: 3, label: "生成并保存完整画像", status: "ok", reason: null },
+      { n: 4, label: "生成首轮可用推荐", status: "ok", reason: null },
     ],
   });
   assert.equal(initProgressView(ok).pct, 100);
@@ -264,8 +264,8 @@ test("progress view reports completion and failure terminals", () => {
     stages: [
       { n: 1, label: "拉取数据", status: "ok", reason: null },
       { n: 2, label: "分析偏好", status: "failed", reason: "llm_not_ready" },
-      { n: 3, label: "生成画像", status: "pending", reason: null },
-      { n: 4, label: "发现内容池", status: "pending", reason: null },
+      { n: 3, label: "生成并保存完整画像", status: "pending", reason: null },
+      { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
   });
   assert.equal(initProgressView(failed).failed, true);
@@ -536,8 +536,8 @@ function runningStage2Status(overrides: Record<string, unknown> = {}): Record<st
     stages: [
       { n: 1, label: "拉取数据", status: "ok", reason: null },
       { n: 2, label: "分析偏好", status: "running", reason: null },
-      { n: 3, label: "生成画像", status: "pending", reason: null },
-      { n: 4, label: "发现内容池", status: "pending", reason: null },
+      { n: 3, label: "生成并保存完整画像", status: "pending", reason: null },
+      { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
     ...overrides,
   });
@@ -549,8 +549,8 @@ function stage2With(progress: unknown, eta: number | null, runId: string) {
     stages: [
       { n: 1, label: "拉取数据", status: "ok", reason: null, eta_seconds: 90 },
       { n: 2, label: "分析偏好", status: "running", reason: null, progress, eta_seconds: eta },
-      { n: 3, label: "生成画像", status: "pending", reason: null, eta_seconds: 70 },
-      { n: 4, label: "发现内容池", status: "pending", reason: null, eta_seconds: 120 },
+      { n: 3, label: "生成并保存完整画像", status: "pending", reason: null, eta_seconds: 70 },
+      { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null, eta_seconds: 300 },
     ],
   });
 }
@@ -597,8 +597,8 @@ test("legacy status without new fields keeps the historic static ticks", () => {
     stages: [
       { n: 1, label: "拉取数据", status: "ok", reason: null },
       { n: 2, label: "分析偏好", status: "running", reason: null },
-      { n: 3, label: "生成画像", status: "pending", reason: null },
-      { n: 4, label: "发现内容池", status: "pending", reason: null },
+      { n: 3, label: "生成并保存完整画像", status: "pending", reason: null },
+      { n: 4, label: "生成首轮可用推荐", status: "pending", reason: null },
     ],
   });
   assert.equal(initProgressView(legacy).pct, 38);
@@ -639,7 +639,7 @@ test("20-step simulated status sequence is non-decreasing and ends at 100", () =
     if (eta !== null) s.eta_seconds = eta;
     return s;
   };
-  const L = ["拉取数据", "分析偏好", "生成画像", "发现内容池"];
+  const L = ["拉取数据", "分析偏好", "生成并保存完整画像", "生成首轮可用推荐"];
   const seq: Array<Record<string, unknown>> = [
     // stage 1 running, per-source progress
     mk([S(1, L[0], "running", { done: 0, total: 2, note: "正在采集 B 站" }, 90), S(2, L[1], "pending"), S(3, L[2], "pending"), S(4, L[3], "pending")], { current_stage: 1 }),
@@ -726,7 +726,8 @@ test("stageEtaText rounds up to half minutes and expectation copy exists", () =>
   assert.equal(stageEtaText({ eta_seconds: 120 }), "本阶段通常约 2 分钟");
   assert.equal(stageEtaText({}), "");
   assert.equal(stageEtaText(null), "");
-  assert.ok(INIT_EXPECTATION_HINT.includes("2–5 分钟"));
+  assert.ok(INIT_EXPECTATION_HINT.includes("严格按顺序生成"));
+  assert.ok(INIT_EXPECTATION_HINT.includes("4–10 分钟"));
   assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
 });
 

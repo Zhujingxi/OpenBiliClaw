@@ -232,7 +232,7 @@ def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> 
     assert "renderInitProgress(status)" in guard
     assert "connectInitStream()" in guard
     assert "if (status.initialized)" in guard
-    assert "renderWaitingForFirstPool(status)" in guard
+    assert "showInitCompletion(status)" in guard
 
 
 def test_setup_wizard_allows_saved_api_key_to_be_reused_without_reentry() -> None:
@@ -245,17 +245,15 @@ def test_setup_wizard_allows_saved_api_key_to_be_reused_without_reentry() -> Non
     assert "已保存，留空则沿用当前 Key" in setup_html
 
 
-def test_setup_wizard_first_pool_wait_has_web_escape_hatch() -> None:
-    """The 95% waiting state must never park the user on a disabled button with
-    no way out of the wizard."""
+def test_setup_wizard_terminal_partial_success_allows_entry_without_second_wait() -> None:
+    """A completed partial run must not create a frontend-owned 95% wait."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
-    assert 'id="initEscape"' in setup_html
-    assert '<a href="/web">' in setup_html
-    waiting = setup_html.split("function renderWaitingForFirstPool(status = null)", 1)[1].split(
-        "\n    }", 1
-    )[0]
-    assert '$("#initEscape").className = "msg show info";' in waiting
+    assert "function showInitCompletion(status = null)" in setup_html
+    assert "你现在可以先进入应用" in setup_html
+    assert "setStep(3);" in setup_html
+    assert "renderWaitingForFirstPool" not in setup_html
+    assert '"95%"' not in setup_html
 
 
 def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
@@ -448,12 +446,15 @@ class _RecordingCoordinator:
         self.stage_progress_calls: list[dict] = []
         self.started_stages: list[int] = []
         self.done_stages: list[int] = []
+        self.events: list[tuple[str, int]] = []
 
     async def stage_started(self, run_id: str, n: int) -> None:
         self.started_stages.append(n)
+        self.events.append(("started", n))
 
     async def stage_done(self, run_id: str, n: int, *, status: str = "ok", reason=None) -> None:
         self.done_stages.append(n)
+        self.events.append(("done", n))
 
     async def stage_progress(
         self, run_id: str, stage: int, *, done: int, total: int, note=None
@@ -470,6 +471,8 @@ class _StubEngine:
     def __init__(self, chunk_reports: int = 3) -> None:
         self.chunk_reports = chunk_reports
         self.received_callback = None
+        self.profile = object()
+        self.discover_profiles: list[object] = []
 
     async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
         self.received_callback = progress_callback
@@ -478,7 +481,7 @@ class _StubEngine:
                 await progress_callback(i, self.chunk_reports)
 
     async def build_initial_profile(self, history):
-        return object()
+        return self.profile
 
 
 class _StubMemory:
@@ -495,7 +498,16 @@ def _patch_run_guided_init_collectors(monkeypatch, engine) -> None:
     async def _rwp(coro, **kwargs):
         return await coro
 
-    async def _discover_backfill(profile, *, target_pool_count, label_suffix=""):
+    async def _discover_backfill(
+        profile,
+        *,
+        target_pool_count,
+        label_suffix="",
+        progress_callback=None,
+    ):
+        engine.discover_profiles.append(profile)
+        if progress_callback is not None:
+            await progress_callback(4, 4, "首轮内容池已就绪（测试）")
         return 0
 
     monkeypatch.setattr(cli, "_fetch_bilibili_init_data", _fetch_bili)
@@ -509,7 +521,6 @@ def _patch_run_guided_init_collectors(monkeypatch, engine) -> None:
     monkeypatch.setattr(cli, "_collect_reddit_bootstrap_events", lambda tid: ([], {}, "timeout"))
     monkeypatch.setattr(cli, "_enqueue_reddit_bootstrap_task", lambda kick=True: "task-r")
     monkeypatch.setattr(cli, "_kick_task_dispatcher", lambda source: None)
-    monkeypatch.setattr(cli, "_build_draft_profile_for_discover", lambda memory: object())
     monkeypatch.setattr(cli, "_run_with_progress", _rwp)
     monkeypatch.setattr(cli, "_print_section_title", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_maybe_update_init_source_shares", lambda *a, **k: None)
@@ -575,7 +586,7 @@ async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monke
     # Two selected sources: B站 then Reddit — note switches, done increments 0→1.
     assert [(c["done"], c["total"], c["note"]) for c in stage1] == [
         (0, 2, "正在采集 B 站"),
-        (1, 2, "正在采集 Reddit"),
+        (1, 2, "正在采集 Reddit · 扩展未响应会在约 3 分钟后自动跳过"),
     ]
 
     stage2 = [c for c in coord.stage_progress_calls if c["stage"] == 2]
@@ -584,6 +595,15 @@ async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monke
     assert ("analyze", True) in scope_observations
     assert ("profile", True) in scope_observations
     assert ("discover", False) in scope_observations
+    assert engine.discover_profiles == [engine.profile]
+    assert coord.events.index(("done", 3)) < coord.events.index(("started", 4))
+
+    stage3 = [c for c in coord.stage_progress_calls if c["stage"] == 3]
+    assert stage3[0]["note"] == "正在综合偏好、历史与认知线索"
+    assert stage3[-1]["note"] == "完整画像已保存，下一步将严格基于它生成内容"
+    stage4 = [c for c in coord.stage_progress_calls if c["stage"] == 4]
+    assert stage4[0]["note"] == "完整画像已就绪，准备发现候选内容"
+    assert "可直接浏览" in stage4[-1]["note"]
 
     # Stages all completed (Task 1 clears any progress residue on stage_done).
     assert coord.done_stages == [1, 2, 3, 4]
@@ -661,6 +681,7 @@ async def test_run_guided_init_bounds_hung_preference_analysis(monkeypatch) -> N
     assert "模型名" in excinfo.value.message
     assert "重试初始化" in excinfo.value.message
     assert engine.cancelled is True
+    assert engine.discover_profiles == []
     assert coord.started_stages == [1, 2]
     assert coord.done_stages == [1]
 
@@ -704,6 +725,7 @@ async def test_run_guided_init_bounds_hung_profile_build(monkeypatch) -> None:
     assert "模型名" in excinfo.value.message
     assert "重试初始化" in excinfo.value.message
     assert engine.cancelled is True
+    assert engine.discover_profiles == []
 
 
 async def test_run_guided_init_treats_hung_discovery_as_partial_success(monkeypatch) -> None:

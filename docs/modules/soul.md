@@ -374,6 +374,7 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
    - `life_stage`
    - `deep_needs`
 6. `ProfileBuilder` 校验字段完整性和画像长度，成功后才写入 `soul.json`。
+7. `build_initial_profile()` 在 `soul.json` 写入完成后立即返回；这个返回点是 guided init 阶段 3 的严格提交屏障。正向兴趣猜测和避雷探针不属于“画像已生成”的必要条件，不再在本方法内同步 `force_tick()`，而由 init wrapper 完成或部分完成后恢复的 `RuntimeContext.restart_background_tasks()` one-shot 调度。因此阶段 4 的内容发现只能读取已经校验、持久化的完整画像，探针失败或维护流量被空库存暂停也不会反向拖住初始化画像。
 
 小红书 bootstrap signals 的来源是浏览器插件在小红书页面中解析出的 notes，不是后端爬虫，也不是 Chrome 浏览器历史。scope 映射为：
 

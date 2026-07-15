@@ -133,7 +133,10 @@ async def test_analyze_events_updates_preference_layer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_initial_profile_reads_preference_and_saves_soul(tmp_path: Path) -> None:
+async def test_build_initial_profile_reads_preference_and_saves_soul(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()
     memory.get_layer("preference").data.update(
@@ -160,6 +163,20 @@ async def test_build_initial_profile_reads_preference_and_saves_soul(tmp_path: P
         )
     )
     engine = SoulEngine(llm=registry, memory=memory)
+    probe_calls: list[str] = []
+
+    async def _record_interest_probe(*_args: object, **_kwargs: object) -> None:
+        probe_calls.append("interest")
+
+    async def _record_avoidance_probe(*_args: object, **_kwargs: object) -> None:
+        probe_calls.append("avoidance")
+
+    monkeypatch.setattr(engine._speculator, "force_tick", _record_interest_probe)
+    monkeypatch.setattr(
+        engine._avoidance_speculator,
+        "force_tick",
+        _record_avoidance_probe,
+    )
 
     profile = await engine.build_initial_profile(
         history=[
@@ -177,6 +194,9 @@ async def test_build_initial_profile_reads_preference_and_saves_soul(tmp_path: P
     assert saved["surface"]["cognitive_style"] == ["会先看结构", "偏好把问题讲透"]
     assert saved["interest"]["likes"][0]["domain"] == "知识"
     assert saved["interest"]["likes"][0]["specifics"][0]["name"] == "科技"
+    # Profile persistence is the strict init barrier. RuntimeContext schedules
+    # optional probes only after guided init leaves the load-bearing stages.
+    assert probe_calls == []
 
 
 @pytest.mark.asyncio

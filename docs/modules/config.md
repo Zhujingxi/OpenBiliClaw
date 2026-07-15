@@ -739,7 +739,7 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 - DeepSeek `reasoning_effort` 是例外：空字符串是有效配置值，表示关闭 thinking，会被 `/api/config` 保存并热重载。
 - `saved_sync.auto_sync_enabled` 只接受 JSON 布尔值；省略整个段表示“不更新”，但段或字段显式传 `null`、字符串或数字等非布尔输入都由 Pydantic 返回 422，不做 truthy / null 转换。
 - 需要真正清空 API Key 时，调用方必须传 `reset_fields`。当前允许值为 `llm.openai.api_key`、`llm.claude.api_key`、`llm.gemini.api_key`、`llm.deepseek.api_key`、`llm.openrouter.api_key`、`llm.openai_compatible.api_key`、`llm.embedding.api_key`；未知字段返回 400。
-- 安装包 `/setup/` 第一页保存 LLM 配置时会传请求级字段 `suppress_background_llm_work=true`。该字段不写入 `config.toml`，只表示本次保存后热重载组件但暂停 refresh / account-sync 等 LLM 后台循环与 post-reload 探针 / 预热；用户在第二页点击「开始初始化」后才由 guided init 真正生成画像和兴趣探针，init 结束后恢复后台循环。普通设置页保存不传该字段，仍保持原有热重载和后台续跑行为。
+- 安装包 `/setup/` 第一页保存 LLM 配置时会传请求级字段 `suppress_background_llm_work=true`。该字段不写入 `config.toml`，只表示本次保存后热重载组件但暂停 refresh / account-sync 等 LLM 后台循环与 post-reload 探针 / 预热；用户在第二页点击「开始初始化」后，guided init 先严格生成完整画像和首轮可用推荐，init 终态后恢复后台循环并调度兴趣 / 避雷探针。普通设置页保存不传该字段，仍保持原有热重载和后台续跑行为。
 - 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
 - 写盘前会生成 `config.toml.bak`。正常模式下热重载失败会尝试恢复备份，并在响应里设置 `rollback_applied=true`；如果备份恢复也失败，接口返回 500 和人工恢复提示。
 

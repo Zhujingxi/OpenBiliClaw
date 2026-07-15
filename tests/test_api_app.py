@@ -105,7 +105,7 @@ def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_pa
 
         async def complete_provider(self, *args: object, **kwargs: object) -> LLMResponse:
             assert gate.status_payload()["llm_total_active"] == 1
-            assert gate.status_payload()["llm_background_active"] == 1
+            assert gate.status_payload()["llm_background_active"] == 0
             return LLMResponse(content="OK", provider="deepseek")
 
     monkeypatch.setattr(
@@ -13812,7 +13812,7 @@ class TestLlmFallbackConfigValidationAndProbe:
                 assert runtime_gate is not None
                 status = runtime_gate.status_payload()
                 assert status["llm_total_active"] == 1
-                assert status["llm_background_active"] == 1
+                assert status["llm_background_active"] == 0
                 calls.append((provider_name, kwargs.get("model")))
                 return LLMResponse(
                     content="OK",
@@ -13827,6 +13827,9 @@ class TestLlmFallbackConfigValidationAndProbe:
         cfg = self._base_config()
         client, config_path = self._client(monkeypatch, tmp_path, cfg)
         runtime_gate = client.app.state.runtime_context.llm_concurrency_gate
+        # A probe is a recovery/control-plane action. It must remain admitted
+        # when init has no serviceable inventory yet.
+        runtime_gate.update_inventory(available=0, target=20)
         before = config_path.read_bytes()
 
         response = client.post(
@@ -13844,7 +13847,7 @@ class TestLlmFallbackConfigValidationAndProbe:
         assert body["provider"] == "deepseek"
         # Exact single-provider probe — never the fallback chain.
         assert [provider for provider, _model in calls] == ["deepseek"]
-        assert runtime_gate.classify("api.config_probe") is LLMTrafficClass.MAINTENANCE
+        assert runtime_gate.classify("api.config_probe") is LLMTrafficClass.INTERACTIVE
         assert runtime_gate.status_payload()["llm_total_active"] == 0
         assert config_path.read_bytes() == before
 

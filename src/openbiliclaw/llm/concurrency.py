@@ -277,6 +277,11 @@ class RefillAdmissionSemaphore:
 
 
 _INTERACTIVE_CALLERS = {
+    # Configuration probes are control-plane requests initiated by a user.
+    # They must stay usable while the canonical recommendation pool is empty;
+    # otherwise the recovery action for a broken init waits on the very pool
+    # that the broken configuration prevented us from building.
+    "api.config_probe",
     "soul.dialogue",
     "soul.dialogue.tools",
     "soul.dialogue.tool_followup",
@@ -293,6 +298,7 @@ _EVALUATION_CALLERS = {
 }
 _SUPPLY_PREFIXES = (
     "discovery.douyin.keyword_gen",
+    "discovery.explore.queries",
     "discovery.keyword_inspiration",
     "discovery.keyword_planner",
     "discovery.search.queries",
@@ -308,7 +314,7 @@ _KNOWN_MAINTENANCE_PREFIXES = (
     "soul.",
     "sources.",
 )
-_MAINTENANCE_CALLERS = {"api.config_probe"}
+_MAINTENANCE_CALLERS: set[str] = set()
 
 
 class LLMConcurrencyGate:
@@ -360,6 +366,12 @@ class LLMConcurrencyGate:
                 return LLMTrafficClass.REFILL_SUPPLY
             return LLMTrafficClass.MAINTENANCE
         if tag.startswith("sources.") and tag.endswith(".extract"):
+            # Source extraction is part of the durable supply path.  Parking it
+            # as maintenance while the pool is empty creates the same cycle as
+            # a parked query generator: admission waits for inventory, while
+            # inventory waits for extraction to finish.
+            if self.inventory_priority_state is not InventoryPriorityState.HEALTHY:
+                return LLMTrafficClass.REFILL_SUPPLY
             return LLMTrafficClass.MAINTENANCE
         if tag in _MAINTENANCE_CALLERS or any(
             tag.startswith(prefix) for prefix in _KNOWN_MAINTENANCE_PREFIXES
