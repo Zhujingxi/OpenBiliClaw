@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 
-from .base import LLMFallbackError, LLMProviderError, classify_llm_failure_kind
+from .base import (
+    LLMFallbackError,
+    LLMProviderError,
+    classify_llm_failure_kind,
+    is_provider_scoped_failure,
+)
 from .embedding import _coerce_embedding_vector
 from .route import CircuitTable
 
@@ -252,9 +257,22 @@ class OrderedEmbeddingRoute:
             )
             if image_vector is None:
                 raise EmbeddingRouteExhaustedError(attempts)
+            if self.settings.output_dimensionality == 0 and len(image_vector) != len(text_vector):
+                attempts.append(EmbeddingRouteAttempt.safe(provider, position, "config_error"))
+                self.circuits.record_failure(
+                    provider.name,
+                    self.revision,
+                    "config_error",
+                    LLMProviderError("embedding probe vector dimension mismatch"),
+                )
+                raise EmbeddingRouteExhaustedError(attempts)
             image_probe_performed = True
 
-        self.circuits.record_success(provider.name, self.revision)
+        self.circuits.record_success(
+            provider.name,
+            self.revision,
+            clear_permanent=True,
+        )
         return EmbeddingProbeResult(
             provider_id=provider.name,
             observed_dimension=len(text_vector),
@@ -281,7 +299,10 @@ class OrderedEmbeddingRoute:
                     mime_type=mime_type,
                 )
         except Exception as exc:
-            failure_kind = self._provider_failure_kind(exc)
+            classified_kind = classify_llm_failure_kind(exc)
+            if not is_provider_scoped_failure(exc, classified_kind):
+                raise
+            failure_kind = self._provider_failure_kind(classified_kind)
             attempts.append(EmbeddingRouteAttempt.safe(provider, position, failure_kind))
             self.circuits.record_failure(
                 provider.name,
@@ -342,8 +363,7 @@ class OrderedEmbeddingRoute:
         return True
 
     @staticmethod
-    def _provider_failure_kind(exc: BaseException) -> EmbeddingFailureKind:
-        kind = classify_llm_failure_kind(exc)
+    def _provider_failure_kind(kind: str | None) -> EmbeddingFailureKind:
         if kind in _CLASSIFIED_FAILURE_KINDS:
             return cast("EmbeddingFailureKind", kind)
         return "provider_error"

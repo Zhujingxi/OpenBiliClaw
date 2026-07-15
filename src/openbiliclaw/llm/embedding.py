@@ -25,6 +25,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol
 
+from openbiliclaw.llm.base import is_provider_scoped_failure
 from openbiliclaw.model_config import EmbeddingModelSettings
 
 logger = logging.getLogger(__name__)
@@ -378,7 +379,9 @@ class EmbeddingService:
         async with self._provider_semaphore:
             try:
                 vector = await self._provider.embed(key, model=self._model)
-            except Exception:
+            except Exception as exc:
+                if not is_provider_scoped_failure(exc):
+                    raise
                 self._mark_unavailable("All configured embedding providers are unavailable.")
                 return []
 
@@ -439,7 +442,9 @@ class EmbeddingService:
                     mime_type=mime_type or "image/jpeg",
                     model=self._model,
                 )
-            except Exception:
+            except Exception as exc:
+                if not is_provider_scoped_failure(exc):
+                    raise
                 self._mark_unavailable("All configured embedding providers are unavailable.")
                 return []
 
@@ -466,7 +471,9 @@ class EmbeddingService:
         async with self._provider_semaphore:
             try:
                 vector = await self._provider.embed(self._PROBE_TEXT, model=self._model)
-            except Exception:
+            except Exception as exc:
+                if not is_provider_scoped_failure(exc):
+                    raise
                 logger.debug("Embedding readiness probe failed")
                 return False
         return bool(self._validate_vector(vector))

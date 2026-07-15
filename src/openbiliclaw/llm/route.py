@@ -248,8 +248,17 @@ class CircuitTable:
                 return
         self._states[key] = candidate
 
-    def record_success(self, connection_id: str, revision: str) -> None:
-        """Close only the successful connection revision's circuit."""
+    def record_success(
+        self,
+        connection_id: str,
+        revision: str,
+        *,
+        clear_permanent: bool = False,
+    ) -> None:
+        """Close transient state; exact probes may also close permanent state."""
+        state = self.state_for(connection_id, revision)
+        if state is not None and state.permanent and not clear_permanent:
+            return
         self._states.pop((connection_id, revision), None)
 
 
@@ -315,6 +324,7 @@ class OrderedLLMRoute:
                 json_mode=json_mode,
                 reasoning_effort=reasoning_effort,
                 model=model,
+                clear_permanent_on_success=False,
             )
             if response is not None:
                 return response
@@ -358,6 +368,7 @@ class OrderedLLMRoute:
             json_mode=json_mode,
             reasoning_effort=reasoning_effort,
             model=model,
+            clear_permanent_on_success=True,
         )
         if response is None:
             raise LLMRouteExhaustedError(attempts)
@@ -376,6 +387,7 @@ class OrderedLLMRoute:
         json_mode: bool,
         reasoning_effort: str | None,
         model: str | None,
+        clear_permanent_on_success: bool,
     ) -> LLMResponse | None:
         try:
             async with asyncio.timeout(remaining):
@@ -395,7 +407,11 @@ class OrderedLLMRoute:
             attempts.append(RouteAttempt.safe(connection, position, kind))
             self.circuits.record_failure(connection.id, self.revision, kind, exc)
             return None
-        self.circuits.record_success(connection.id, self.revision)
+        self.circuits.record_success(
+            connection.id,
+            self.revision,
+            clear_permanent=clear_permanent_on_success,
+        )
         return replace(
             response,
             connection_id=connection.id,

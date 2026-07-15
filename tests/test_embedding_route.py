@@ -6,6 +6,7 @@ local Ollama daemon, or credential store.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import math
 from dataclasses import dataclass, field, replace
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from openbiliclaw.llm.base import LLMProviderError
 from openbiliclaw.llm.embedding import EmbeddingCache, EmbeddingService
 from openbiliclaw.llm.embedding_route import (
     FIXED_IMAGE_PROBE_PNG,
@@ -280,6 +282,41 @@ async def test_dimension_mismatch_opens_permanent_revision_scoped_config_circuit
     assert circuits.state_for("same-id", "new-revision") is None
 
 
+async def test_inflight_normal_success_cannot_clear_concurrent_config_circuit() -> None:
+    settings = _settings(dims=2)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class ConcurrentAdapter(_FakeEmbeddingAdapter):
+        async def embed(self, text: str) -> list[float]:
+            self.calls.append(_Call(self.name, "text", self.settings, text))
+            if text == "slow valid":
+                started.set()
+                await release.wait()
+                return [1.0, 0.0]
+            return [1.0]
+
+    provider = ConcurrentAdapter("same-id", settings, outcomes=[])
+    circuits = CircuitTable()
+    route = OrderedEmbeddingRoute(
+        (provider,),
+        settings=settings,
+        revision="r1",
+        circuits=circuits,
+    )
+
+    slow_success = asyncio.create_task(route.embed("slow valid"))
+    await started.wait()
+    with pytest.raises(EmbeddingRouteExhaustedError):
+        await route.embed("dimension mismatch")
+    permanent = circuits.state_for("same-id", "r1")
+    assert permanent is not None and permanent.permanent
+
+    release.set()
+    assert await slow_success == [1.0, 0.0]
+    assert circuits.state_for("same-id", "r1") is permanent
+
+
 async def test_enabled_multimodal_route_skips_provider_without_image_capability() -> None:
     settings = _settings(multimodal=True)
     text_only = _adapter("text-only", settings, [1.0, 0.0])
@@ -398,13 +435,13 @@ async def test_exact_probe_bypasses_config_circuit_calls_only_target_and_uses_fi
         "target",
         "other-revision",
         "config_error",
-        RuntimeError("fixed test failure"),
+        LLMProviderError("fixed test failure"),
     )
     circuits.record_failure(
         "fallback",
         "r1",
         "config_error",
-        RuntimeError("fixed test failure"),
+        LLMProviderError("fixed test failure"),
     )
     target_other_revision = circuits.state_for("target", "other-revision")
     fallback_same_revision = circuits.state_for("fallback", "r1")
@@ -443,6 +480,52 @@ async def test_probe_accepts_native_dimension_zero_and_reports_observed_dimensio
     assert result.image_probe_performed is False
 
 
+async def test_multimodal_native_dimension_probe_rejects_text_image_length_mismatch() -> None:
+    settings = _settings(dims=0, multimodal=True)
+    provider = _adapter(
+        "native-mismatch",
+        settings,
+        [0.1, 0.2, 0.3],
+        images=([0.4, 0.6],),
+        supports_image=True,
+    )
+    circuits = CircuitTable()
+    route = OrderedEmbeddingRoute(
+        (provider,),
+        settings=settings,
+        revision="r1",
+        circuits=circuits,
+    )
+
+    with pytest.raises(EmbeddingRouteExhaustedError) as captured:
+        await route.probe_provider("native-mismatch")
+
+    assert [attempt.failure_kind for attempt in captured.value.attempts] == ["config_error"]
+    state = circuits.state_for("native-mismatch", "r1")
+    assert state is not None
+    assert state.failure_kind == "config_error"
+    assert state.permanent is True
+    assert [call.operation for call in provider.calls] == ["text", "image"]
+
+
+async def test_multimodal_native_dimension_probe_accepts_matching_lengths() -> None:
+    settings = _settings(dims=0, multimodal=True)
+    provider = _adapter(
+        "native-match",
+        settings,
+        [0.1, 0.2, 0.3],
+        images=([0.4, 0.5, 0.6],),
+        supports_image=True,
+    )
+    route = OrderedEmbeddingRoute((provider,), settings=settings, revision="r1")
+
+    result = await route.probe_provider("native-match")
+
+    assert result.observed_dimension == 3
+    assert result.image_probe_performed is True
+    assert route.circuits.state_for("native-match", "r1") is None
+
+
 async def test_failed_exact_probe_does_not_weaken_permanent_config_circuit() -> None:
     settings = _settings()
     target = _adapter(
@@ -470,10 +553,44 @@ async def test_failed_exact_probe_does_not_weaken_permanent_config_circuit() -> 
     assert circuits.state_for("target", "r1") is before
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        asyncio.CancelledError(),
+        ValueError("request schema is invalid"),
+        TypeError("programming error"),
+        RuntimeError("internal invariant failed"),
+    ],
+)
+async def test_non_provider_failures_propagate_without_fallback_or_circuit(
+    error: BaseException,
+) -> None:
+    settings = _settings()
+    first = _adapter("first", settings, error)
+    fallback = _adapter("fallback", settings, [0.0, 1.0])
+    circuits = CircuitTable()
+    route = OrderedEmbeddingRoute(
+        (first, fallback),
+        settings=settings,
+        revision="r1",
+        circuits=circuits,
+    )
+
+    with pytest.raises(
+        type(error),
+        match=None if isinstance(error, asyncio.CancelledError) else str(error),
+    ):
+        await route.embed("private request")
+
+    assert len(first.calls) == 1
+    assert fallback.calls == []
+    assert circuits.state_for("first", "r1") is None
+
+
 async def test_all_provider_failure_is_structured_and_secret_safe() -> None:
     sentinel = "Bearer sensitive-upstream-body"
     settings = _settings()
-    first = _adapter("first", settings, RuntimeError(sentinel))
+    first = _adapter("first", settings, LLMProviderError(sentinel))
     second = _adapter("second", settings, [])
     route = OrderedEmbeddingRoute((first, second), settings=settings, revision="r1")
 

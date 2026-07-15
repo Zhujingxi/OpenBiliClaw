@@ -1,7 +1,11 @@
 """Tests for embedding cache and service helpers."""
 
+import asyncio
 from pathlib import Path
 
+import pytest
+
+from openbiliclaw.llm.base import LLMProviderError
 from openbiliclaw.llm.embedding import (
     EmbeddingCache,
     EmbeddingService,
@@ -16,7 +20,7 @@ class _FakeEmbedProvider:
     """Minimal ``SupportsEmbed`` double with controllable behaviour."""
 
     def __init__(
-        self, *, vector: list[float] | None = None, error: Exception | None = None
+        self, *, vector: list[float] | None = None, error: BaseException | None = None
     ) -> None:
         self._vector = [0.1, 0.2, 0.3] if vector is None else vector
         self._error = error
@@ -39,8 +43,8 @@ class _FakeImageEmbedProvider(_FakeEmbedProvider):
         *,
         vector: list[float] | None = None,
         image_vector: list[float] | None = None,
-        error: Exception | None = None,
-        image_error: Exception | None = None,
+        error: BaseException | None = None,
+        image_error: BaseException | None = None,
     ) -> None:
         super().__init__(vector=vector, error=error)
         self._image_vector = [0.9, 0.1, 0.0] if image_vector is None else image_vector
@@ -81,10 +85,32 @@ async def test_probe_false_when_provider_returns_empty() -> None:
 
 
 async def test_probe_false_when_provider_raises() -> None:
-    provider = _FakeEmbedProvider(error=RuntimeError("404 Not Found"))
+    provider = _FakeEmbedProvider(error=LLMProviderError("configured model not found"))
     service = EmbeddingService(provider, model="bge-m3")
 
     assert await service.probe() is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        asyncio.CancelledError(),
+        ValueError("request schema is invalid"),
+        TypeError("programming error"),
+        RuntimeError("internal invariant failed"),
+    ],
+)
+async def test_probe_propagates_non_provider_failures(error: BaseException) -> None:
+    provider = _FakeEmbedProvider(error=error)
+    service = EmbeddingService(provider, model="bge-m3")
+
+    with pytest.raises(
+        type(error),
+        match=None if isinstance(error, asyncio.CancelledError) else str(error),
+    ):
+        await service.probe()
+
+    assert service.last_unavailable_reason == ""
 
 
 async def test_probe_bypasses_cache_and_hits_provider_each_call() -> None:
@@ -226,6 +252,39 @@ async def test_embed_image_skips_cache_on_empty_vector() -> None:
     assert len(provider.image_calls) == 2
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        asyncio.CancelledError(),
+        ValueError("request schema is invalid"),
+        TypeError("programming error"),
+        RuntimeError("internal invariant failed"),
+    ],
+)
+async def test_embed_image_propagates_non_provider_failures_without_cache_or_masking(
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    provider = _FakeImageEmbedProvider(image_error=error)
+    cache = EmbeddingCache(tmp_path / "embedding-cache.db")
+    cache.initialize()
+    service = EmbeddingService(
+        provider,
+        model="gemini-embedding-2",
+        persistent_cache=cache,
+        multimodal_enabled=True,
+    )
+
+    with pytest.raises(
+        type(error),
+        match=None if isinstance(error, asyncio.CancelledError) else str(error),
+    ):
+        await service.embed_image(b"private image")
+
+    assert cache.count() == 0
+    assert service.last_unavailable_reason == ""
+
+
 async def test_text_only_provider_has_no_image_support() -> None:
     provider = _FakeEmbedProvider()
     service = EmbeddingService(
@@ -255,7 +314,7 @@ async def test_ordered_route_failure_degrades_safely_and_never_caches_invalid_ve
 
         async def embed(self, text: str) -> list[float]:
             self.calls += 1
-            raise RuntimeError(sentinel)
+            raise LLMProviderError(sentinel)
 
     adapter = FailingAdapter()
     route = OrderedEmbeddingRoute((adapter,), settings=settings, revision="r1")
@@ -268,6 +327,34 @@ async def test_ordered_route_failure_degrades_safely_and_never_caches_invalid_ve
     assert adapter.calls == 2
     assert cache.count() == 0
     assert sentinel not in service.last_unavailable_reason
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        asyncio.CancelledError(),
+        ValueError("request schema is invalid"),
+        TypeError("programming error"),
+        RuntimeError("internal invariant failed"),
+    ],
+)
+async def test_embed_propagates_non_provider_failures_without_cache_or_masking(
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    provider = _FakeEmbedProvider(error=error)
+    cache = EmbeddingCache(tmp_path / "embedding-cache.db")
+    cache.initialize()
+    service = EmbeddingService(provider, model="bge-m3", persistent_cache=cache)
+
+    with pytest.raises(
+        type(error),
+        match=None if isinstance(error, asyncio.CancelledError) else str(error),
+    ):
+        await service.embed("private text")
+
+    assert cache.count() == 0
+    assert service.last_unavailable_reason == ""
 
 
 async def test_ordered_route_settings_are_the_only_service_model_space_source() -> None:

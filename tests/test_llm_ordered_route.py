@@ -423,6 +423,73 @@ def test_permanent_circuit_stays_open_until_revision_change_or_success(kind: str
     assert state.failure_kind == kind
 
 
+def test_ordinary_success_clears_transient_but_requires_authority_for_permanent() -> None:
+    table = CircuitTable(clock=FakeClock())
+    table.record_failure(
+        "shared-id",
+        "revision-a",
+        "timeout",
+        LLMTimeoutError("request timed out"),
+    )
+
+    table.record_success("shared-id", "revision-a")
+
+    assert table.state_for("shared-id", "revision-a") is None
+
+    table.record_failure(
+        "shared-id",
+        "revision-a",
+        "config_error",
+        LLMProviderError("embedding vector dimension mismatch"),
+    )
+    permanent = table.state_for("shared-id", "revision-a")
+    assert permanent is not None and permanent.permanent
+
+    table.record_success("shared-id", "revision-a")
+    assert table.state_for("shared-id", "revision-a") is permanent
+
+    table.record_success("shared-id", "revision-a", clear_permanent=True)
+    assert table.state_for("shared-id", "revision-a") is None
+
+
+@pytest.mark.asyncio
+async def test_inflight_chat_success_cannot_clear_concurrent_permanent_circuit() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    call_log: list[str] = []
+
+    class DelayedSuccessAdapter(FakeAdapter):
+        async def complete(self, *args: Any, **kwargs: Any) -> LLMResponse:
+            call_log.append(self.connection_id)
+            started.set()
+            await release.wait()
+            return LLMResponse(content="ok", provider="upstream")
+
+    adapter = DelayedSuccessAdapter("chat-a", [], call_log)
+    circuits = CircuitTable()
+    route = OrderedLLMRoute(
+        (_connection("chat-a", adapter),),
+        revision="revision-a",
+        timeout_seconds=30,
+        circuits=circuits,
+    )
+
+    slow_success = asyncio.create_task(route.complete([{"role": "user", "content": "slow"}]))
+    await started.wait()
+    circuits.record_failure(
+        "chat-a",
+        "revision-a",
+        "auth_failed",
+        LLMProviderError("authentication failed"),
+    )
+    permanent = circuits.state_for("chat-a", "revision-a")
+    assert permanent is not None and permanent.permanent
+
+    release.set()
+    assert (await slow_success).content == "ok"
+    assert circuits.state_for("chat-a", "revision-a") is permanent
+
+
 @pytest.mark.asyncio
 async def test_shared_circuit_table_isolates_interleaved_route_revisions() -> None:
     clock = FakeClock()

@@ -353,6 +353,37 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
     return None
 
 
+def is_provider_scoped_failure(
+    exc: BaseException,
+    failure_kind: str | None = None,
+) -> bool:
+    """Return whether an embedding boundary may safely degrade or fallback.
+
+    Typed provider failures are deliberate adapter-boundary outcomes. Untyped
+    exceptions are accepted only when both their concrete transport type and
+    shared classifier identify a supported provider/transport category, so a
+    request ``ValueError`` or internal ``RuntimeError`` cannot be masked by
+    message text alone.
+    """
+    if isinstance(exc, LLMProviderError):
+        return True
+    kind = failure_kind if failure_kind is not None else classify_llm_failure_kind(exc)
+    return bool(
+        kind
+        in {
+            "rate_limited",
+            "auth_failed",
+            "model_not_found",
+            "timeout",
+            "connection",
+            "server_error",
+            "invalid_response",
+            "moderation",
+        }
+        and isinstance(exc, (TimeoutError, ConnectionError, OSError))
+    )
+
+
 def describe_llm_failure(exc: BaseException) -> str | None:
     """Translate an LLM exception chain into a short, human-readable Chinese
     reason suitable for page-side display during guided init.
