@@ -19,6 +19,19 @@ cp config.example.toml config.toml
 
 CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露异常，方便开发和部署排查。
 
+## 模型连接领域契约
+
+`openbiliclaw.model_config` 提供配置重构使用的标准库领域层。该层当前只定义内存契约；本阶段尚未接管 TOML 解析、`[llm]` 兼容读取、运行时 Provider 构建或配置 API，现有运行入口仍按下文的 `[llm]` 配置工作。
+
+- `ModelConfig` 固定使用 `schema_version=1`，包含一个 Chat route 和一个 Embedding route；所有领域 dataclass 均为不可变值。
+- Chat route 使用 `tuple` 保存 1–10 个等价结构的 `ChatConnection`。第 0 项派生为 `primary`，后续项依次派生为 `fallback_1`…`fallback_9`；连接记录不存储 role、priority 或 `fallback_enabled`。
+- Embedding route 关闭时 Provider 列表为空；开启时使用 1–10 个有序 `EmbeddingProviderConfig`。`model`、`output_dimensionality`、`similarity_threshold` 与 `multimodal_enabled` 只存在于共享的 `EmbeddingModelSettings`，Provider 记录没有 model 槽位。
+- `connection_type_registry()` 返回代码内定义的只读注册表。类型按 `api_protocol`、`local_runtime`、`oauth` 分组，并声明 Chat / Embedding capability、字段描述、preset、默认值和帮助文案；`public_descriptors()` 只输出 JSON-safe 数据，不暴露 Python 类名、callable 或凭据。
+- `validate_model_config()` 返回带 `path`、`code`、`message`、`severity` 和可选 `connection_id` 的 `ModelConfigIssue`，统一检查数量、全局唯一 ID、类型 / preset capability、类型专属字段及 credential source。
+- `default_model_config()` 提供一个无内置密钥、可编辑的 DeepSeek Chat 起始连接，并保持 Embedding 关闭。`CredentialConfig.value` 不参与 `repr`，公开输出不得对内部 `ModelConfig` 直接使用 `dataclasses.asdict()`。
+
+首批内置 connection type 为 `openai_compatible`、`anthropic_compatible`、`gemini_api`、`dashscope_api`、`ollama` 与 `codex_oauth`。OpenAI / DeepSeek / OpenRouter / custom 是 `openai_compatible` preset；Anthropic / custom 是 `anthropic_compatible` preset。`dashscope_api` 仅支持 Embedding，DeepSeek 与 OpenRouter preset 仅支持 Chat。
+
 ## 配置段落
 
 插件、桌面 Web 和移动 Web 的「保存时自动同步到对应平台」都从 API 读取，默认关闭。插件与移动 Web 的配置 GET/PUT 使用 AbortController 有界 timeout；插件的同一 deadline 从后端地址解析开始，覆盖初次设备会话交换、401 强制换票、受保护请求与响应解析，认证 fetch 接收同一 AbortSignal。移动 Web 使用模态设置对话框：Escape 可关闭、Tab 焦点留在对话框内，关闭后回到原设置按钮；配置 GET 超时或失败时保存与开关保持禁用，用户必须通过「重试加载」成功取得当前值后才能写回，避免用默认 false 覆盖未知远端状态。
