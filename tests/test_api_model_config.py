@@ -1473,6 +1473,96 @@ def test_exact_chat_probe_uses_only_draft_and_does_not_persist_or_fallback(
     assert config_path.read_bytes() == before
 
 
+def test_exact_new_codex_oauth_probe_keep_imports_reference_without_leaking_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[ChatConnection] = []
+    imported_token = "oauth-probe-secret-token"
+
+    async def probe(self: object, draft: object, settings: object = None) -> object:
+        del self, settings
+        calls.append(cast("ChatConnection", draft))
+        return ModelConfigProbeResult(
+            ok=True,
+            connection_id="new-codex-probe",
+            capability="chat",
+        )
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.runtime_context.RuntimeContext.probe_model_draft",
+        probe,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.llm.connection_factory.load_codex_access_token",
+        lambda: imported_token,
+    )
+    client, config_path = _make_client(monkeypatch, tmp_path)
+    current = client.get("/api/model-config").json()
+    before = config_path.read_bytes()
+    draft = ChatConnection(
+        id="new-codex-probe",
+        name="Unsaved Codex OAuth",
+        type="codex_oauth",
+        model="gpt-5-codex",
+        credential=CredentialConfig(source="oauth", value="codex"),
+    )
+
+    response = client.post(
+        "/api/model-config/probe",
+        json={
+            "kind": "chat",
+            "revision": current["revision"],
+            "connection": _chat_payload(draft, action="keep"),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(calls) == 1
+    assert calls[0].credential == CredentialConfig(source="oauth", value="codex")
+    assert imported_token not in response.text
+    assert "credential" not in response.json()
+    assert config_path.read_bytes() == before
+
+
+def test_exact_new_non_oauth_probe_keep_still_requires_an_explicit_credential_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    async def probe(self: object, draft: object, settings: object = None) -> object:
+        del self, draft, settings
+        nonlocal calls
+        calls += 1
+        raise AssertionError("invalid draft must not reach the network probe")
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.runtime_context.RuntimeContext.probe_model_draft",
+        probe,
+    )
+    client, _config_path = _make_client(monkeypatch, tmp_path)
+    current = client.get("/api/model-config").json()
+    draft = replace(
+        _native_models().chat.connections[0],
+        id="new-api-key-probe",
+    )
+
+    response = client.post(
+        "/api/model-config/probe",
+        json={
+            "kind": "chat",
+            "revision": current["revision"],
+            "connection": _chat_payload(draft, action="keep"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "validation_failed"
+    assert [error["code"] for error in response.json()["errors"]] == ["credential_action_required"]
+    assert calls == 0
+
+
 def test_exact_embedding_probe_passes_shared_settings_and_never_persists(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

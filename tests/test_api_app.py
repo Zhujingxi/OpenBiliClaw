@@ -1072,6 +1072,16 @@ class TestBackendAPI:
         assert 'src="/web/assets/js/app.js?v=' in response.text
         assert 'src="/web/assets/js/model-settings.js?v=' in response.text
 
+        version = response.text.split('src="/web/assets/js/model-settings.js?v=', 1)[1].split(
+            '"', 1
+        )[0]
+        model_settings = client.get(f"/web/assets/js/model-settings.js?v={version}")
+        assert model_settings.status_code == 200
+        assert "import.meta.url" in model_settings.text
+        assert 'searchParams.get("v")' in model_settings.text
+        assert 'searchParams.set("v"' in model_settings.text
+        assert "await import(" in model_settings.text
+
         shared = client.get("/web/shared/model-config-state.js")
         assert shared.status_code == 200
         assert "export function hydrateModelConfig" in shared.text

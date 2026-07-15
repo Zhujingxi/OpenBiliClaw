@@ -64,6 +64,7 @@ from openbiliclaw.model_config.service import (
     ModelConfigValidationError,
     ModelRuntimeCoordinator,
     PublicCredentialStatus,
+    imported_credential_reference,
 )
 
 if TYPE_CHECKING:
@@ -778,7 +779,10 @@ def install_model_config_routes(
             action = _credential_action(payload.provider.credential)
             current_ids = {item.id for item in snapshot.models.embedding.providers}
             settings = _settings_from_input(payload.settings)
-        if action.action == "keep" and draft.id not in current_ids:
+        imported_keep = (
+            payload.kind == "chat" and imported_credential_reference(draft.type) is not None
+        )
+        if action.action == "keep" and draft.id not in current_ids and not imported_keep:
             return JSONResponse(
                 status_code=400,
                 content={

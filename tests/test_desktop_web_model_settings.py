@@ -13,6 +13,7 @@ CSS = (DESKTOP / "assets/css/app.css").read_text(encoding="utf-8")
 MODEL_JS_PATH = DESKTOP / "assets/js/model-settings.js"
 SHARED_STATE_PATH = ROOT / "src/openbiliclaw/web/shared/model-config-state.js"
 API_APP = (ROOT / "src/openbiliclaw/api/app.py").read_text(encoding="utf-8")
+EXTENSION_DOC = (ROOT / "docs/modules/extension.md").read_text(encoding="utf-8")
 
 
 def test_model_page_has_three_route_tabs_and_list_inspector_landmarks() -> None:
@@ -41,6 +42,10 @@ def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
     assert "descriptor.fields" in model_js
     assert "preset_definitions" in model_js
     assert "group.category" in model_js
+    assert "function moveTypeOptionFocus" in model_js
+    for key in ("ArrowUp", "ArrowDown", "Home", "End"):
+        assert key in model_js.split("function moveTypeOptionFocus", 1)[1]
+    assert 'addEventListener("keydown", moveTypeOptionFocus)' in model_js
     assert ".model-connection-type-groups" in CSS
     assert "grid-template-columns: 1fr" in CSS
 
@@ -89,6 +94,18 @@ def test_narrow_model_layout_switches_from_list_to_detail() -> None:
     assert "data-model-view" in INDEX
 
 
+def test_narrow_detail_moves_focus_and_back_restores_the_selected_row_control() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+
+    assert 'matchMedia("(max-width: 820px)")' in model_js
+    assert "function focusNarrowDetail" in model_js
+    assert 'byId("modelInspectorBack")?.focus()' in model_js
+    assert "function focusSelectedRouteControl" in model_js
+    assert "[data-model-select=" in model_js
+    assert "focusSelectedRouteControl();" in model_js
+    assert 'byId("modelRouteListPane").focus' not in model_js
+
+
 def test_model_and_general_saves_have_separate_owners() -> None:
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
     build_update = APP_JS.split("function buildConfigUpdate()", 1)[1].split(
@@ -123,9 +140,66 @@ def test_model_editor_owns_dirty_remote_probe_error_and_migration_lifecycle() ->
         assert marker in model_js
 
 
+def test_probe_revision_conflict_renders_the_replaced_or_retained_state_completely() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    probe = model_js.split("async function probeSelected()", 1)[1].split(
+        "function retainSelection", 1
+    )[0]
+    conflict = probe.split("if (error.status === 409 && error.details?.latest)", 1)[1]
+
+    assert "state = receiveRemoteSnapshot(state, error.details.latest);" in conflict
+    assert "render();" in conflict.split("}", 1)[0]
+    assert "renderRemoteUpdate();" not in conflict.split("}", 1)[0]
+
+
+def test_local_model_overrides_are_visible_and_lock_only_shadowed_controls() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+
+    assert 'id="modelOverrideNotice"' in INDEX
+    assert "function renderOverrides" in model_js
+    assert "state.overrideLocks" in model_js
+    assert "override.source" in model_js
+    assert "override.path" in model_js
+    assert "function routeLocked" in model_js
+    assert "function modelControlLocked" in model_js
+    for path in (
+        "models.chat.connections",
+        "models.chat.concurrency",
+        "models.chat.timeout_seconds",
+        "models.embedding.enabled",
+        "models.embedding.settings.model",
+        "models.embedding.settings.output_dimensionality",
+        "models.embedding.settings.similarity_threshold",
+        "models.embedding.settings.multimodal_enabled",
+        "models.embedding.providers",
+    ):
+        assert path in model_js
+    assert "routeLocked(state.activeRoute)" in model_js
+    assert "modelControlLocked(" in model_js
+    assert ".disabled = Boolean(" in model_js
+    assert "disabledMarkup" in model_js
+
+
 def test_model_modules_are_loaded_and_cache_busted_by_the_backend() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+
     assert 'type="module" src="/web/assets/js/model-settings.js"' in INDEX
-    assert 'from "/web/shared/model-config-state.js"' in MODEL_JS_PATH.read_text(encoding="utf-8")
+    assert "import.meta.url" in model_js
+    assert 'searchParams.get("v")' in model_js
+    assert 'searchParams.set("v"' in model_js
+    assert "await import(" in model_js
+    assert 'from "/web/shared/model-config-state.js"' not in model_js
     assert '"assets/js/model-settings.js"' in API_APP
     assert '"shared/model-config-state.js"' in API_APP
     assert re.search(r'app\.mount\(\s*"/web/shared"', API_APP)
+
+
+def test_extension_documentation_separates_legacy_popup_from_native_desktop_editor() -> None:
+    stale_desktop_claim = (
+        "桌面 Web（`/web`）设置页 `src/openbiliclaw/web/desktop/` 的可配置面"
+        "与插件 side panel 拉齐：模型 tab 补 `llm.concurrency`"
+    )
+
+    assert "插件 side panel 仍展示 legacy 默认/备选 Provider" in EXTENSION_DOC
+    assert "桌面 Web 已改用 `/api/model-config`" in EXTENSION_DOC
+    assert stale_desktop_claim not in EXTENSION_DOC

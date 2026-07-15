@@ -19,10 +19,62 @@ const CHAT_FIELDS = [
   "num_ctx",
 ];
 const EMBEDDING_FIELDS = ["preset", "base_url", "credential"];
+const PROBE_FINGERPRINT_FIELDS = new Set([
+  "name",
+  "type",
+  "model",
+  "preset",
+  "base_url",
+  "credential",
+  "api_mode",
+  "reasoning_effort",
+  "http_referer",
+  "x_title",
+  "num_ctx",
+]);
+const OVERRIDE_CONTROL_PATHS = [
+  "models.chat.connections",
+  "models.chat.concurrency",
+  "models.chat.timeout_seconds",
+  "models.embedding.enabled",
+  "models.embedding.settings.model",
+  "models.embedding.settings.output_dimensionality",
+  "models.embedding.settings.similarity_threshold",
+  "models.embedding.settings.multimodal_enabled",
+  "models.embedding.providers",
+];
 
 function clone(value) {
   if (typeof structuredClone === "function") return structuredClone(value);
   return JSON.parse(JSON.stringify(value));
+}
+
+function valuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function normalizeOverridePath(path) {
+  return String(path || "")
+    .replace(/\[(\d+)\]/g, ".$1")
+    .replace(/^\.+|\.+$/g, "");
+}
+
+function buildOverrideLocks(overrides) {
+  const entries = (Array.isArray(overrides) ? overrides : []).map((override) => ({
+    path: String(override?.path || ""),
+    source: String(override?.source || ""),
+  }));
+  return Object.fromEntries(OVERRIDE_CONTROL_PATHS.map((path) => {
+    const normalizedPath = normalizeOverridePath(path);
+    const lock = entries.find((override) => {
+      const overridePath = normalizeOverridePath(override.path);
+      return overridePath && (
+        normalizedPath === overridePath
+        || normalizedPath.startsWith(`${overridePath}.`)
+      );
+    });
+    return [path, lock ? clone(lock) : null];
+  }));
 }
 
 function routeKey(kind) {
@@ -127,6 +179,7 @@ export function hydrateModelConfig(snapshot) {
   const providers = Array.isArray(embedding.providers)
     ? embedding.providers.map((item) => hydrateRecord(item, "embedding"))
     : [];
+  const overrides = clone(Array.isArray(source.overrides) ? source.overrides : []);
   return {
     revision: String(source.revision || ""),
     source: String(source.source || ""),
@@ -154,7 +207,8 @@ export function hydrateModelConfig(snapshot) {
       },
     },
     migration: clone(source.migration || { state: "none", confirmed: true, issues: [] }),
-    overrides: clone(Array.isArray(source.overrides) ? source.overrides : []),
+    overrides,
+    overrideLocks: buildOverrideLocks(overrides),
     selected: {
       chat: connections[0]?.id || "",
       embedding: providers[0]?.id || "",
@@ -227,19 +281,24 @@ export function moveRouteItem(state, kind, id, targetIndex) {
 export function updateRouteField(state, kind, id, field, value) {
   const next = clone(state);
   const index = findIndex(next, kind, id);
+  const item = next.models[kind][routeKey(kind)][index];
   if (field === "id") throw new Error("Stable connection IDs cannot be edited.");
+  const previousValue = item[field] === undefined ? undefined : clone(item[field]);
   if (field === "credential") {
     const action = String(value?.action || "keep");
     if (!["keep", "set", "clear", "env"].includes(action)) {
       throw new Error(`Unknown credential action: ${action}`);
     }
-    next.models[kind][routeKey(kind)][index].credential = {
-      ...next.models[kind][routeKey(kind)][index].credential,
+    item.credential = {
+      ...item.credential,
       action,
       value: ["set", "env"].includes(action) ? String(value?.value || "") : "",
     };
   } else {
-    next.models[kind][routeKey(kind)][index][field] = value;
+    item[field] = value;
+  }
+  if (PROBE_FINGERPRINT_FIELDS.has(field) && !valuesEqual(previousValue, item[field])) {
+    item.probe = null;
   }
   next.touched[touchedKey(kind, id, field)] = true;
   return markChanged(next);
@@ -248,7 +307,11 @@ export function updateRouteField(state, kind, id, field, value) {
 export function updateRouteSetting(state, kind, field, value) {
   const next = clone(state);
   if (kind === "embedding" && field in next.models.embedding.settings) {
+    const changed = !valuesEqual(next.models.embedding.settings[field], value);
     next.models.embedding.settings[field] = value;
+    if (changed) {
+      for (const provider of next.models.embedding.providers) provider.probe = null;
+    }
   } else {
     next.models[kind][field] = value;
   }
@@ -271,6 +334,7 @@ export function applyPreset(state, kind, id, presetDefinition, options = {}) {
       && (isBlank || matchesPreviousDefault)
     ) item[field] = value;
   }
+  item.probe = null;
   next.touched[touchedKey(kind, id, "preset")] = true;
   return markChanged(next);
 }
@@ -390,8 +454,14 @@ export function changeConnectionType(state, kind, id, descriptor, options = {}) 
   }
   candidate.type = String(descriptor?.id || "");
   const presets = (descriptor?.preset_definitions || descriptor?.presets || [])
+    .filter((preset) => (
+      typeof preset === "string"
+      || !preset.capabilities?.length
+      || preset.capabilities.includes(kind)
+    ))
     .map((preset) => (typeof preset === "string" ? preset : preset.id));
   if (!presets.includes(candidate.preset)) candidate.preset = presets[0] || "";
+  candidate.probe = null;
   next.touched[touchedKey(kind, id, "type")] = true;
   return { state: markChanged(next), incompatibleFields, changed: true };
 }
@@ -451,6 +521,21 @@ export function receiveRemoteSnapshot(state, snapshot) {
 export function setMigrationResolution(state, issueId, resolution) {
   const next = clone(state);
   next.migration_resolutions[String(issueId)] = clone(resolution);
+  const issueOrder = (next.migration?.issues || []).map((issue) => String(issue.id));
+  for (const id of Object.keys(next.migration_resolutions)) {
+    if (!issueOrder.includes(id)) issueOrder.push(id);
+  }
+  let position = next.models.chat.connections.length + 1;
+  for (const id of issueOrder) {
+    const selected = next.migration_resolutions[id];
+    if (!selected) continue;
+    if (selected.action === "add_to_chat_route") {
+      selected.position = position;
+      position += 1;
+    } else {
+      delete selected.position;
+    }
+  }
   return markChanged(next);
 }
 

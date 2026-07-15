@@ -1,4 +1,8 @@
-import {
+const sharedStateUrl = new URL("/web/shared/model-config-state.js", import.meta.url);
+const sharedStateVersion = new URL(import.meta.url).searchParams.get("v");
+if (sharedStateVersion) sharedStateUrl.searchParams.set("v", sharedStateVersion);
+
+const {
   appendRouteItem,
   applyPreset,
   changeConnectionType,
@@ -14,7 +18,7 @@ import {
   toModelConfigPayload,
   updateRouteField,
   updateRouteSetting,
-} from "/web/shared/model-config-state.js";
+} = await import(sharedStateUrl.href);
 
 const MODEL_CONFIG_API = "/api/model-config";
 const CONNECTION_TYPES_API = "/api/model-connection-types";
@@ -25,12 +29,17 @@ const CATEGORY_LABELS = {
   local_runtime: "Local runtimes",
   oauth: "OAuth connections",
 };
+const ROUTE_OVERRIDE_PATHS = {
+  chat: "models.chat.connections",
+  embedding: "models.embedding.providers",
+};
 
 let state = null;
 let connectionTypes = { connection_types: [], groups: [] };
 let draggedId = "";
 
 const byId = (id) => document.getElementById(id);
+const disabledMarkup = (disabled) => (disabled ? ' disabled aria-disabled="true"' : "");
 const escapeHtml = (value) => String(value ?? "").replace(
   /[&<>'"]/g,
   (character) => ({
@@ -41,6 +50,17 @@ const escapeHtml = (value) => String(value ?? "").replace(
     '"': "&quot;",
   })[character],
 );
+
+function modelControlLocked(path) {
+  if (!state) return null;
+  return state.overrideLocks?.[path] || null;
+}
+
+function routeLocked(kind) {
+  return kind === "chat" || kind === "embedding"
+    ? modelControlLocked(ROUTE_OVERRIDE_PATHS[kind])
+    : null;
+}
 
 function modelApiPath(url) {
   return url.startsWith("/api/") ? url.slice(4) : url;
@@ -156,6 +176,17 @@ function renderRemoteUpdate() {
   byId("modelRemoteBanner").hidden = !state.remoteUpdate;
 }
 
+function renderOverrides() {
+  const host = byId("modelOverrideNotice");
+  const overrides = state.overrides || [];
+  host.hidden = overrides.length === 0;
+  host.innerHTML = overrides.length ? `
+    <strong>只读模型覆盖</strong>
+    <p>以下字段由高优先级配置提供；对应编辑器已锁定，其余基础配置仍可保存。</p>
+    <ul>${overrides.map((override) => `
+      <li><code>${escapeHtml(override.path)}</code><span>${escapeHtml(override.source)}</span></li>`).join("")}</ul>` : "";
+}
+
 function renderErrorSummary() {
   const summary = byId("modelErrorSummary");
   const global = state.fieldErrors?.global || [];
@@ -170,25 +201,41 @@ function renderErrorSummary() {
 function renderEmbeddingSettings() {
   if (state.activeRoute !== "embedding") return;
   byId("modelEmbeddingEnabled").checked = state.models.embedding.enabled;
+  byId("modelEmbeddingEnabled").disabled = Boolean(
+    modelControlLocked("models.embedding.enabled"),
+  );
   byId("modelEmbeddingModel").value = state.models.embedding.settings.model;
+  byId("modelEmbeddingModel").disabled = Boolean(
+    modelControlLocked("models.embedding.settings.model"),
+  );
   byId("modelEmbeddingDimension").value = String(
     state.models.embedding.settings.output_dimensionality,
+  );
+  byId("modelEmbeddingDimension").disabled = Boolean(
+    modelControlLocked("models.embedding.settings.output_dimensionality"),
   );
   byId("modelEmbeddingSimilarity").value = String(
     state.models.embedding.settings.similarity_threshold,
   );
+  byId("modelEmbeddingSimilarity").disabled = Boolean(
+    modelControlLocked("models.embedding.settings.similarity_threshold"),
+  );
   byId("modelEmbeddingMultimodal").checked = state.models.embedding.settings.multimodal_enabled;
+  byId("modelEmbeddingMultimodal").disabled = Boolean(
+    modelControlLocked("models.embedding.settings.multimodal_enabled"),
+  );
 }
 
 function renderRouteList() {
   if (state.activeRoute === "runtime") return;
   const kind = state.activeRoute;
   const items = activeItems();
+  const locked = routeLocked(kind);
   byId("modelRouteTitle").textContent = kind === "chat" ? "Chat connections" : "Embedding providers";
   byId("modelRouteHelp").textContent = kind === "chat"
     ? "第 1 项是 Primary，其余项按顺序作为 fallback；最多 10 项。"
     : "所有 Provider 按此顺序 fallback，并共享上方唯一模型设置；最多 10 项。";
-  byId("modelAddConnection").disabled = items.length >= 10 || (
+  byId("modelAddConnection").disabled = Boolean(locked) || items.length >= 10 || (
     kind === "embedding" && !state.models.embedding.enabled
   );
   byId("modelRouteList").innerHTML = items.map((record, index) => {
@@ -198,8 +245,8 @@ function renderRouteList() {
     const model = kind === "chat" ? record.model : state.models.embedding.settings.model;
     const selected = state.selected[kind] === record.id;
     return `
-      <div class="model-route-row${selected ? " is-selected" : ""}" draggable="true" data-model-record-id="${escapeHtml(record.id)}" tabindex="${selected ? "0" : "-1"}" aria-current="${selected ? "true" : "false"}">
-        <span class="model-route-drag-handle" aria-label="Drag to reorder" title="Drag to reorder">⋮⋮</span>
+      <div class="model-route-row${selected ? " is-selected" : ""}" draggable="${locked ? "false" : "true"}" data-model-record-id="${escapeHtml(record.id)}" tabindex="${selected ? "0" : "-1"}" aria-current="${selected ? "true" : "false"}">
+        <span class="model-route-drag-handle" aria-label="Drag to reorder" title="${locked ? "Order is provided by a read-only override" : "Drag to reorder"}" aria-disabled="${locked ? "true" : "false"}">⋮⋮</span>
         <button class="model-route-row-copy" type="button" data-model-select="${escapeHtml(record.id)}">
           <strong>${escapeHtml(derivedRole(index))} · ${escapeHtml(record.name || "Unnamed connection")}</strong>
           <span>${escapeHtml(descriptor?.label || record.type)}${preset ? ` / ${escapeHtml(preset.label)}` : ""} · ${escapeHtml(model || "No model")}</span>
@@ -212,6 +259,7 @@ function renderRouteList() {
 function renderConnectionTypes() {
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
+  const locked = Boolean(routeLocked(state.activeRoute));
   const query = String(byId("modelTypeSearch")?.value || "").trim().toLowerCase();
   const host = byId("modelConnectionTypeGroups");
   const blocks = [];
@@ -231,13 +279,32 @@ function renderConnectionTypes() {
       <section class="model-type-group" data-model-type-category="${escapeHtml(group.category)}">
         <p class="model-type-group-title">${escapeHtml(CATEGORY_LABELS[group.category] || group.category)}</p>
         ${matches.map((descriptor) => `
-          <button class="model-type-option" type="button" role="option" data-model-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record.type ? "true" : "false"}">
+          <button class="model-type-option" type="button" role="option" tabindex="-1" data-model-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record.type ? "true" : "false"}"${disabledMarkup(locked)}>
             <span><strong>${escapeHtml(descriptor.label)}</strong><small>${escapeHtml(descriptor.help)}</small></span>
             <small>${escapeHtml(descriptor.category === "oauth" ? "OAuth" : descriptor.id)}</small>
           </button>`).join("")}
       </section>`);
   }
   host.innerHTML = blocks.join("") || '<p class="model-empty-types">没有匹配的连接类型。</p>';
+  const options = [...host.querySelectorAll('[role="option"]:not(:disabled)')];
+  const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
+  const roving = selected || options[0];
+  if (roving) roving.tabIndex = 0;
+}
+
+function moveTypeOptionFocus(event) {
+  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  const options = [...event.currentTarget.querySelectorAll('[role="option"]:not(:disabled)')];
+  if (!options.length) return;
+  const current = event.target.closest('[role="option"]');
+  let index = Math.max(0, options.indexOf(current));
+  if (event.key === "Home") index = 0;
+  else if (event.key === "End") index = options.length - 1;
+  else if (event.key === "ArrowUp") index = Math.max(0, index - 1);
+  else index = Math.min(options.length - 1, index + 1);
+  event.preventDefault();
+  for (const option of options) option.tabIndex = option === options[index] ? 0 : -1;
+  options[index].focus();
 }
 
 function renderDescriptorField(record, descriptor, field) {
@@ -245,23 +312,24 @@ function renderDescriptorField(record, descriptor, field) {
   if (field.capabilities?.length && !field.capabilities.includes(state.activeRoute)) return "";
   if (field.presets?.length && !field.presets.includes(record.preset)) return "";
   const required = field.required ? " required" : "";
+  const disabled = disabledMarkup(Boolean(routeLocked(state.activeRoute)));
   const help = field.help ? `<small>${escapeHtml(field.help)}</small>` : "";
   if (field.name === "preset") {
     const presets = (descriptor.preset_definitions || []).filter(
       (preset) => preset.capabilities?.includes(state.activeRoute),
     );
     return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-      <select data-model-field="preset"${required}>${presets.map((preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === record.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`).join("")}</select>
+      <select data-model-field="preset"${required}${disabled}>${presets.map((preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === record.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`).join("")}</select>
       ${help}${errorMarkup(record.id, "preset")}</label>`;
   }
   if (field.input_type === "select") {
     return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-      <select data-model-field="${escapeHtml(field.name)}"${required}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(choice)}</option>`).join("")}</select>
+      <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(choice)}</option>`).join("")}</select>
       ${help}${errorMarkup(record.id, field.name)}</label>`;
   }
   const type = field.input_type === "number" ? "number" : "text";
   return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-    <input type="${type}" data-model-field="${escapeHtml(field.name)}" value="${escapeHtml(record[field.name] ?? "")}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}>
+    <input type="${type}" data-model-field="${escapeHtml(field.name)}" value="${escapeHtml(record[field.name] ?? "")}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>
     ${help}${errorMarkup(record.id, field.name)}</label>`;
 }
 
@@ -276,6 +344,7 @@ function renderCredential(record, descriptor) {
   host.hidden = false;
   const credential = record.credential;
   const status = credential.status || {};
+  const disabled = disabledMarkup(Boolean(routeLocked(state.activeRoute)));
   if (descriptor.category === "oauth") {
     const importedReference = status.credential_ref || definition.choices?.[0] || descriptor.label;
     host.innerHTML = `
@@ -298,8 +367,8 @@ function renderCredential(record, descriptor) {
   host.innerHTML = `
     <strong>Credential source</strong>
     <p class="settings-note-inline">${escapeHtml(sourceLabel)}</p>
-    <div class="model-credential-actions">${actions.map(([action, label]) => `<button class="model-credential-action" type="button" data-model-credential-action="${action}" aria-pressed="${credential.action === action ? "true" : "false"}">${label}</button>`).join("")}</div>
-    ${needsValue ? `<label class="settings-field"><span>${credential.action === "env" ? "Environment variable name" : "New API key"}</span><input id="modelCredentialValue" type="${credential.action === "set" ? "password" : "text"}" value="${escapeHtml(credential.value || "")}" autocomplete="new-password"></label>` : ""}
+    <div class="model-credential-actions">${actions.map(([action, label]) => `<button class="model-credential-action" type="button" data-model-credential-action="${action}" aria-pressed="${credential.action === action ? "true" : "false"}"${disabled}>${label}</button>`).join("")}</div>
+    ${needsValue ? `<label class="settings-field"><span>${credential.action === "env" ? "Environment variable name" : "New API key"}</span><input id="modelCredentialValue" type="${credential.action === "set" ? "password" : "text"}" value="${escapeHtml(credential.value || "")}" autocomplete="new-password"${disabled}></label>` : ""}
     ${errorMarkup(record.id, "credential")}`;
 }
 
@@ -312,16 +381,18 @@ function renderInspector() {
   if (!record) return;
   const index = selectedIndex();
   const descriptor = descriptorFor(record.type);
+  const locked = Boolean(routeLocked(kind));
   byId("modelInspectorRole").textContent = derivedRole(index);
   byId("modelInspectorTitle").textContent = record.name || "连接详情";
-  byId("modelMoveUp").disabled = index <= 0;
-  byId("modelMoveDown").disabled = index < 0 || index >= activeItems().length - 1;
-  byId("modelRemoveConnection").disabled = (
+  byId("modelMoveUp").disabled = locked || index <= 0;
+  byId("modelMoveDown").disabled = locked || index < 0 || index >= activeItems().length - 1;
+  byId("modelRemoveConnection").disabled = locked || (
     (kind === "chat" && activeItems().length <= 1)
     || (kind === "embedding" && state.models.embedding.enabled && activeItems().length <= 1)
   );
+  byId("modelTypeSearch").disabled = locked;
   byId("modelInspectorFields").innerHTML = `
-    <label class="settings-field full"><span>连接名称</span><input data-model-field="name" value="${escapeHtml(record.name)}" autocomplete="off" required>${errorMarkup(record.id, "name")}</label>
+    <label class="settings-field full"><span>连接名称</span><input data-model-field="name" value="${escapeHtml(record.name)}" autocomplete="off" required${disabledMarkup(locked)}>${errorMarkup(record.id, "name")}</label>
     <label class="settings-field full"><span>Stable ID</span><input value="${escapeHtml(record.id)}" readonly aria-readonly="true"><small>排序或改名不会改变此 ID。</small>${errorMarkup(record.id, "id")}</label>`;
   const descriptorFields = descriptor ? descriptor.fields : [];
   byId("modelDescriptorFields").innerHTML = descriptorFields
@@ -350,7 +421,13 @@ function renderProbeStatus(record) {
 function renderRuntime() {
   if (state.activeRoute !== "runtime") return;
   byId("modelChatConcurrency").value = String(state.models.chat.concurrency);
+  byId("modelChatConcurrency").disabled = Boolean(
+    modelControlLocked("models.chat.concurrency"),
+  );
   byId("modelChatTimeout").value = String(state.models.chat.timeout_seconds);
+  byId("modelChatTimeout").disabled = Boolean(
+    modelControlLocked("models.chat.timeout_seconds"),
+  );
   const all = [...state.models.chat.connections, ...state.models.embedding.providers];
   const open = all.filter((record) => record.circuit?.state === "open").length;
   const healthy = all.filter((record) => record.probe?.ok === true).length;
@@ -362,7 +439,7 @@ function renderRuntime() {
 
 function migrationResolution(action) {
   if (action === "add_to_chat_route") {
-    return { action, position: Math.min(10, state.models.chat.connections.length + 1) };
+    return { action };
   }
   if (action === "apply_shared_embedding_settings") {
     return { action, embedding_settings: { ...state.models.embedding.settings } };
@@ -390,6 +467,7 @@ function render() {
   if (!state) return;
   renderTabs();
   renderRemoteUpdate();
+  renderOverrides();
   renderErrorSummary();
   renderMigration();
   renderEmbeddingSettings();
@@ -407,7 +485,21 @@ function focusMovedRow(id) {
   });
 }
 
+function focusNarrowDetail() {
+  if (!window.matchMedia("(max-width: 820px)").matches) return;
+  window.requestAnimationFrame(() => byId("modelInspectorBack")?.focus());
+}
+
+function focusSelectedRouteControl() {
+  const record = selectedRecord(state, state.activeRoute);
+  if (!record) return;
+  window.requestAnimationFrame(() => {
+    document.querySelector(`[data-model-select="${CSS.escape(record.id)}"]`)?.focus();
+  });
+}
+
 function moveSelected(delta) {
+  if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
   const target = selectedIndex() + delta;
@@ -421,9 +513,11 @@ function selectRecord(id, openDetail = true) {
   byId("modelRouteLayout").classList.toggle("is-detail", openDetail);
   renderRouteList();
   renderInspector();
+  if (openDetail) focusNarrowDetail();
 }
 
 function addConnection() {
+  if (routeLocked(state.activeRoute)) return;
   const descriptor = descriptorsFor(state.activeRoute)[0];
   if (!descriptor) return;
   const preset = descriptor.preset_definitions?.find(
@@ -451,12 +545,14 @@ function addConnection() {
     if (preset) state = applyPreset(state, state.activeRoute, id, preset);
     byId("modelRouteLayout").classList.add("is-detail");
     render();
+    focusNarrowDetail();
   } catch (error) {
     setStatus(error.message, "error");
   }
 }
 
 function removeSelected() {
+  if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record || !window.confirm(`移除 ${record.name || record.id}？`)) return;
   try {
@@ -469,6 +565,7 @@ function removeSelected() {
 }
 
 function changeType(typeId) {
+  if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   const descriptor = descriptorFor(typeId);
   if (!record || !descriptor || record.type === typeId) return;
@@ -498,6 +595,7 @@ function changeType(typeId) {
 }
 
 function updateField(field, target) {
+  if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
   let value = target.value;
@@ -535,6 +633,7 @@ function updateField(field, target) {
 }
 
 function updateCredential(action, value = "", rerender = true) {
+  if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
   state = updateRouteField(state, state.activeRoute, record.id, "credential", { action, value });
@@ -580,7 +679,7 @@ async function probeSelected() {
   } catch (error) {
     if (error.status === 409 && error.details?.latest) {
       state = receiveRemoteSnapshot(state, error.details.latest);
-      renderRemoteUpdate();
+      render();
     }
     status.textContent = error.details?.error || error.message || "Probe failed";
     status.dataset.tone = "error";
@@ -674,7 +773,7 @@ function bindEvents() {
   byId("modelMoveDown").addEventListener("click", () => moveSelected(1));
   byId("modelInspectorBack").addEventListener("click", () => {
     byId("modelRouteLayout").classList.remove("is-detail");
-    byId("modelRouteListPane").focus?.();
+    focusSelectedRouteControl();
   });
   byId("modelSaveButton").addEventListener("click", () => void saveModels());
   byId("modelProbeButton").addEventListener("click", () => void probeSelected());
@@ -688,6 +787,7 @@ function bindEvents() {
     const button = event.target.closest("[data-model-type]");
     if (button) changeType(button.dataset.modelType);
   });
+  byId("modelConnectionTypeGroups").addEventListener("keydown", moveTypeOptionFocus);
   byId("modelInspectorFields").addEventListener("input", (event) => {
     const field = event.target.dataset.modelField;
     if (field) updateField(field, event.target);
@@ -717,13 +817,17 @@ function bindEvents() {
   byId("modelRouteList").addEventListener("keydown", (event) => {
     const row = event.target.closest("[data-model-record-id]");
     if (!row || !event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    if (routeLocked(state.activeRoute)) return;
     event.preventDefault();
     selectRecord(row.dataset.modelRecordId, false);
     moveSelected(event.key === "ArrowUp" ? -1 : 1);
   });
   byId("modelRouteList").addEventListener("dragstart", (event) => {
     const row = event.target.closest("[data-model-record-id]");
-    if (!row) return;
+    if (!row || routeLocked(state.activeRoute)) {
+      event.preventDefault();
+      return;
+    }
     draggedId = row.dataset.modelRecordId;
     row.classList.add("is-dragging");
     event.dataTransfer.effectAllowed = "move";
@@ -731,6 +835,7 @@ function bindEvents() {
   byId("modelRouteList").addEventListener("dragover", (event) => event.preventDefault());
   byId("modelRouteList").addEventListener("drop", (event) => {
     event.preventDefault();
+    if (routeLocked(state.activeRoute)) return;
     const target = event.target.closest("[data-model-record-id]");
     if (!target || !draggedId) return;
     const targetIndex = activeItems().findIndex((item) => item.id === target.dataset.modelRecordId);
@@ -745,7 +850,12 @@ function bindEvents() {
     document.querySelectorAll(".model-route-row.is-dragging").forEach((row) => row.classList.remove("is-dragging"));
   });
   byId("modelEmbeddingEnabled").addEventListener("change", (event) => {
-    if (!event.target.checked && state.models.embedding.providers.length) {
+    if (modelControlLocked("models.embedding.enabled")) {
+      renderEmbeddingSettings();
+      return;
+    }
+    const providersLocked = Boolean(routeLocked("embedding"));
+    if (!event.target.checked && state.models.embedding.providers.length && !providersLocked) {
       if (!window.confirm("停用 Embedding 会清空当前 Provider route。继续吗？")) {
         event.target.checked = true;
         return;
@@ -755,30 +865,38 @@ function bindEvents() {
       state.selected.embedding = "";
     } else {
       state = updateRouteSetting(state, "embedding", "enabled", event.target.checked);
-      if (event.target.checked && state.models.embedding.providers.length === 0) addConnection();
+      if (
+        event.target.checked
+        && state.models.embedding.providers.length === 0
+        && !providersLocked
+      ) addConnection();
     }
     render();
   });
-  for (const [id, field, kind] of [
-    ["modelEmbeddingModel", "model", "text"],
-    ["modelEmbeddingDimension", "output_dimensionality", "number"],
-    ["modelEmbeddingSimilarity", "similarity_threshold", "number"],
+  for (const [id, field, kind, path] of [
+    ["modelEmbeddingModel", "model", "text", "models.embedding.settings.model"],
+    ["modelEmbeddingDimension", "output_dimensionality", "number", "models.embedding.settings.output_dimensionality"],
+    ["modelEmbeddingSimilarity", "similarity_threshold", "number", "models.embedding.settings.similarity_threshold"],
   ]) {
     byId(id).addEventListener("input", (event) => {
+      if (modelControlLocked(path)) return;
       const value = kind === "number" ? Number(event.target.value) : event.target.value;
       state = updateRouteSetting(state, "embedding", field, value);
       setStatus("有未保存的模型更改。");
     });
   }
   byId("modelEmbeddingMultimodal").addEventListener("change", (event) => {
+    if (modelControlLocked("models.embedding.settings.multimodal_enabled")) return;
     state = updateRouteSetting(state, "embedding", "multimodal_enabled", event.target.checked);
     setStatus("有未保存的模型更改。");
   });
   byId("modelChatConcurrency").addEventListener("input", (event) => {
+    if (modelControlLocked("models.chat.concurrency")) return;
     state = updateRouteSetting(state, "chat", "concurrency", Number(event.target.value));
     setStatus("有未保存的模型更改。");
   });
   byId("modelChatTimeout").addEventListener("input", (event) => {
+    if (modelControlLocked("models.chat.timeout_seconds")) return;
     state = updateRouteSetting(state, "chat", "timeout_seconds", Number(event.target.value));
     setStatus("有未保存的模型更改。");
   });

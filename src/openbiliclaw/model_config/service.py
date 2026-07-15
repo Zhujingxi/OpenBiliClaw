@@ -428,6 +428,20 @@ def _valid_env_name(value: str) -> bool:
     return all(char.isascii() and (char.isalnum() or char == "_") for char in value)
 
 
+def imported_credential_reference(connection_type: str) -> CredentialConfig | None:
+    """Return the descriptor-backed credential imported without a write action."""
+    definition = connection_type_registry().get(connection_type)
+    if definition is None or definition.id != "codex_oauth" or definition.category != "oauth":
+        return None
+    credential = next(
+        (field for field in definition.fields if field.name == "credential"),
+        None,
+    )
+    if credential is None or credential.choices != ("codex",):
+        return None
+    return CredentialConfig(source="oauth", value=credential.choices[0])
+
+
 def _apply_credential_actions(
     candidate: ModelConfig,
     persisted: ModelConfig,
@@ -456,8 +470,9 @@ def _apply_credential_actions(
         connection_type: str,
     ) -> CredentialConfig:
         action = actions.get(connection_id)
-        if connection_type == "codex_oauth" and (action is None or action.action == "keep"):
-            return CredentialConfig(source="oauth", value="codex")
+        imported = imported_credential_reference(connection_type)
+        if imported is not None and (action is None or action.action == "keep"):
+            return imported
         if action is None or action.action == "keep":
             previous = persisted_credentials.get(connection_id)
             if previous is not None:

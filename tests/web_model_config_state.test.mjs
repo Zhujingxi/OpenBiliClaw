@@ -15,6 +15,7 @@ import {
   setMigrationResolution,
   toModelConfigPayload,
   updateRouteField,
+  updateRouteSetting,
 } from "../src/openbiliclaw/web/shared/model-config-state.js";
 
 function connection(id, overrides = {}) {
@@ -80,6 +81,18 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
     overrides: [],
   };
 }
+
+const CHAT_DESCRIPTOR_FIELDS = [
+  "model",
+  "preset",
+  "base_url",
+  "credential",
+  "api_mode",
+  "reasoning_effort",
+  "http_referer",
+  "x_title",
+  "num_ctx",
+].map((name) => ({ name, capabilities: ["chat"], presets: [] }));
 
 test("reorder changes order only and keeps credential actions", () => {
   const before = hydrateModelConfig(snapshot());
@@ -378,4 +391,199 @@ test("payload conversion is revisioned, strips health metadata, and never copies
     action: "accept_global_route",
   });
   assert.equal(JSON.stringify(hydrateModelConfig(source)).includes("must-not-survive"), false);
+});
+
+test("record fingerprint edits invalidate only that record's exact probe", () => {
+  const identityChanges = [
+    ["name", "Renamed connection"],
+    ["type", "anthropic_compatible"],
+    ["model", "changed-model"],
+    ["preset", "openai"],
+    ["base_url", "https://changed.example.test/v1"],
+    ["credential", { action: "set", value: "new-secret" }],
+    ["api_mode", "responses"],
+    ["reasoning_effort", "high"],
+    ["http_referer", "https://changed.example.test"],
+    ["x_title", "Changed title"],
+    ["num_ctx", 8192],
+  ];
+
+  for (const [field, value] of identityChanges) {
+    const source = snapshot(["a", "b"]);
+    source.models.chat.connections[0].probe = { ok: true, connection_id: "a" };
+    source.models.chat.connections[1].probe = { ok: true, connection_id: "b" };
+    const changed = updateRouteField(hydrateModelConfig(source), "chat", "a", field, value);
+
+    assert.equal(changed.models.chat.connections[0].probe, null, field);
+    assert.deepEqual(
+      changed.models.chat.connections[1].probe,
+      { ok: true, connection_id: "b" },
+      field,
+    );
+  }
+
+  const embeddingSource = snapshot();
+  embeddingSource.models.embedding.providers = [
+    provider("embedding-a", { probe: { ok: true, connection_id: "embedding-a" } }),
+    provider("embedding-b", { probe: { ok: true, connection_id: "embedding-b" } }),
+  ];
+  const embeddingChanged = updateRouteField(
+    hydrateModelConfig(embeddingSource),
+    "embedding",
+    "embedding-a",
+    "base_url",
+    "https://changed.example.test/v1",
+  );
+  assert.equal(embeddingChanged.models.embedding.providers[0].probe, null);
+  assert.equal(embeddingChanged.models.embedding.providers[1].probe.ok, true);
+});
+
+test("preset and connection-type transitions invalidate the selected exact probe", () => {
+  const source = snapshot(["a"]);
+  source.models.chat.connections[0].probe = { ok: true, connection_id: "a" };
+  const before = hydrateModelConfig(source);
+
+  const presetChanged = applyPreset(before, "chat", "a", {
+    id: "openai",
+    capabilities: ["chat"],
+    defaults: { api_mode: "responses" },
+  });
+  assert.equal(presetChanged.models.chat.connections[0].probe, null);
+
+  const descriptor = {
+    id: "anthropic_compatible",
+    category: "api_protocol",
+    fields: CHAT_DESCRIPTOR_FIELDS,
+    preset_definitions: [
+      { id: "anthropic", capabilities: ["chat"], defaults: {} },
+    ],
+  };
+  const typeChanged = changeConnectionType(before, "chat", "a", descriptor, {
+    confirmed: true,
+    previousDescriptor: { category: "api_protocol" },
+  });
+  assert.equal(typeChanged.state.models.chat.connections[0].probe, null);
+});
+
+test("shared embedding setting edits invalidate every provider probe", () => {
+  const changes = [
+    ["model", "shared-model-v2"],
+    ["output_dimensionality", 768],
+    ["similarity_threshold", 0.73],
+    ["multimodal_enabled", true],
+  ];
+  for (const [field, value] of changes) {
+    const source = snapshot();
+    source.models.embedding.providers = [
+      provider("embedding-a", { probe: { ok: true, connection_id: "embedding-a" } }),
+      provider("embedding-b", { probe: { ok: true, connection_id: "embedding-b" } }),
+    ];
+    const changed = updateRouteSetting(hydrateModelConfig(source), "embedding", field, value);
+    assert.deepEqual(
+      changed.models.embedding.providers.map((item) => item.probe),
+      [null, null],
+      field,
+    );
+  }
+});
+
+test("selection, reorder, route policy, and embedding enabled retain exact probes", () => {
+  const source = snapshot(["a", "b"]);
+  source.models.chat.connections[0].probe = { ok: true, connection_id: "a" };
+  source.models.embedding.providers[0].probe = {
+    ok: true,
+    connection_id: "embedding-a",
+  };
+  let state = hydrateModelConfig(source);
+  state = selectRouteItem(state, "chat", "b");
+  state = moveRouteItem(state, "chat", "a", 1);
+  for (const [field, value] of [["concurrency", 7], ["timeout_seconds", 480]]) {
+    state = updateRouteSetting(state, "chat", field, value);
+  }
+  state = updateRouteSetting(state, "embedding", "enabled", false);
+
+  assert.deepEqual(
+    state.models.chat.connections.find((item) => item.id === "a").probe,
+    { ok: true, connection_id: "a" },
+  );
+  assert.deepEqual(
+    state.models.embedding.providers[0].probe,
+    { ok: true, connection_id: "embedding-a" },
+  );
+});
+
+test("migration chat additions receive unique append positions and reindex in issue order", () => {
+  const source = snapshot(["a", "b", "c"]);
+  source.migration = {
+    state: "pending",
+    confirmed: false,
+    issues: [
+      { id: "first", allowed_actions: ["add_to_chat_route", "discard"] },
+      { id: "second", allowed_actions: ["add_to_chat_route", "discard"] },
+      { id: "third", allowed_actions: ["add_to_chat_route", "discard"] },
+    ],
+  };
+  let state = hydrateModelConfig(source);
+  state = setMigrationResolution(state, "first", { action: "add_to_chat_route" });
+  state = setMigrationResolution(state, "second", { action: "add_to_chat_route" });
+  assert.equal(state.migration_resolutions.first.position, 4);
+  assert.equal(state.migration_resolutions.second.position, 5);
+
+  state = setMigrationResolution(state, "first", { action: "discard" });
+  assert.equal("position" in state.migration_resolutions.first, false);
+  assert.equal(state.migration_resolutions.second.position, 4);
+
+  state = setMigrationResolution(state, "first", { action: "add_to_chat_route" });
+  assert.equal(state.migration_resolutions.first.position, 4);
+  assert.equal(state.migration_resolutions.second.position, 5);
+});
+
+test("hydration derives editable control locks from local override ancestors", () => {
+  const source = snapshot();
+  source.overrides = [
+    { path: "models.chat.connections", source: "config.local.toml" },
+    { path: "models.chat.concurrency", source: "config.local.toml" },
+    { path: "models.embedding.enabled", source: "config.local.toml" },
+    { path: "models.embedding.settings", source: "config.local.toml" },
+  ];
+
+  const state = hydrateModelConfig(source);
+  assert.equal(
+    state.overrideLocks["models.chat.connections"].source,
+    "config.local.toml",
+  );
+  assert.equal(state.overrideLocks["models.chat.timeout_seconds"], null);
+  assert.equal(state.overrideLocks["models.embedding.providers"], null);
+  for (const field of [
+    "model",
+    "output_dimensionality",
+    "similarity_threshold",
+    "multimodal_enabled",
+  ]) {
+    assert.equal(
+      state.overrideLocks[`models.embedding.settings.${field}`].path,
+      "models.embedding.settings",
+    );
+  }
+});
+
+test("connection type chooses the first preset compatible with the active route", () => {
+  const descriptor = {
+    id: "mixed_protocol",
+    category: "api_protocol",
+    fields: CHAT_DESCRIPTOR_FIELDS,
+    preset_definitions: [
+      { id: "embedding-first", capabilities: ["embedding"], defaults: {} },
+      { id: "chat-second", capabilities: ["chat"], defaults: {} },
+    ],
+  };
+  const changed = changeConnectionType(
+    hydrateModelConfig(snapshot(["a"])),
+    "chat",
+    "a",
+    descriptor,
+    { confirmed: true, previousDescriptor: { category: "api_protocol" } },
+  );
+
+  assert.equal(changed.state.models.chat.connections[0].preset, "chat-second");
 });
