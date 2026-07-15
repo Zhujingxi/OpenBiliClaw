@@ -21,7 +21,7 @@ from openbiliclaw.integrations.openclaw.operations import OpenClawAdapter
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 from openbiliclaw.llm.registry import build_llm_registry
-from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+from openbiliclaw.llm.service import LLMService
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.soul.profile import InterestTag, OnionProfile, PreferenceLayer, SoulProfile
@@ -387,13 +387,11 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
     gate.update_inventory(available=0, target=8)
     metrics = _LiveMetrics(gate)
     monitored_registry = _MonitoredRegistry(registry, metrics)
-    overrides = module_overrides_from_config(config)
     service = LLMService(
         registry=monitored_registry,
         memory=memory,
         concurrency=4,
         concurrency_gate=gate,
-        module_overrides=overrides,
     )
     profile = _profile()
 
@@ -534,14 +532,12 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
         memory=memory,
         concurrency=4,
         concurrency_gate=gate,
-        module_overrides=overrides,
     )
     interactive = LLMService(
         registry=monitored_registry,
         memory=memory,
         concurrency=4,
         concurrency_gate=gate,
-        module_overrides=overrides,
     )
     background_tasks = [
         asyncio.create_task(

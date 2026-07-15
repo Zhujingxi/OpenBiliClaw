@@ -123,6 +123,20 @@ class TestConfigDefaults:
         assert config.llm.concurrency == 3
         assert background_llm_concurrency(config.llm.concurrency) == 2
 
+    def test_runtime_concurrency_uses_models_when_legacy_value_conflicts(self) -> None:
+        from dataclasses import replace
+
+        from openbiliclaw.config import llm_concurrency_from_config
+
+        config = Config()
+        config.models = replace(
+            config.models,
+            chat=replace(config.models.chat, concurrency=7),
+        )
+        config.llm.concurrency = 2
+
+        assert llm_concurrency_from_config(config) == 7
+
     def test_saved_sync_defaults_off_and_round_trips(self, tmp_path: Path) -> None:
         config = Config()
         assert config.saved_sync.auto_sync_enabled is False

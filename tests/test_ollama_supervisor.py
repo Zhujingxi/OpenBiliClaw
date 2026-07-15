@@ -1,11 +1,58 @@
 """Tests for shared Ollama runtime supervision helpers."""
 
 import os
+from dataclasses import replace
 
 import httpx
 import pytest
 
 from openbiliclaw.config import Config
+from openbiliclaw.model_config import (
+    ChatConnection,
+    ChatRouteConfig,
+    EmbeddingModelSettings,
+    EmbeddingProviderConfig,
+    EmbeddingRouteConfig,
+)
+
+
+def _with_ollama_chat(cfg: Config, *, base_url: str = "http://127.0.0.1:11434/v1") -> None:
+    cfg.models = replace(
+        cfg.models,
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="ollama-chat",
+                    name="Ollama Chat",
+                    type="ollama",
+                    model="llama3",
+                    base_url=base_url,
+                ),
+            ),
+        ),
+    )
+
+
+def _with_ollama_embedding(
+    cfg: Config,
+    *,
+    base_url: str = "http://127.0.0.1:11434/v1",
+) -> None:
+    cfg.models = replace(
+        cfg.models,
+        embedding=EmbeddingRouteConfig(
+            enabled=True,
+            settings=EmbeddingModelSettings(model="bge-m3"),
+            providers=(
+                EmbeddingProviderConfig(
+                    id="ollama-embedding",
+                    name="Ollama Embedding",
+                    type="ollama",
+                    base_url=base_url,
+                ),
+            ),
+        ),
+    )
 
 
 def test_ollama_required_detects_chat_and_embedding_routes() -> None:
@@ -14,23 +61,11 @@ def test_ollama_required_detects_chat_and_embedding_routes() -> None:
     cfg = Config()
     assert ollama_required(cfg) is False
 
-    cfg.llm.default_provider = "ollama"
+    _with_ollama_chat(cfg)
     assert ollama_required(cfg) is True
 
     cfg = Config()
-    cfg.llm.fallback_provider = " ollama "
-    assert ollama_required(cfg) is True
-
-    cfg = Config()
-    cfg.llm.discovery.provider = "OLLAMA"
-    assert ollama_required(cfg) is True
-
-    cfg = Config()
-    cfg.llm.embedding.provider = "ollama"
-    assert ollama_required(cfg) is True
-
-    cfg = Config()
-    cfg.llm.embedding.fallback_provider = "ollama"
+    _with_ollama_embedding(cfg)
     assert ollama_required(cfg) is True
 
 
@@ -54,8 +89,7 @@ def test_effective_ollama_endpoint_strips_v1_suffix_for_chat() -> None:
     from openbiliclaw.runtime.ollama_supervisor import effective_ollama_endpoint
 
     cfg = Config()
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.base_url = "http://localhost:11434/v1/"
+    _with_ollama_chat(cfg, base_url="http://localhost:11434/v1/")
 
     assert effective_ollama_endpoint(cfg) == "http://localhost:11434"
 
@@ -64,8 +98,7 @@ def test_effective_ollama_endpoint_uses_embedding_base_url() -> None:
     from openbiliclaw.runtime.ollama_supervisor import effective_ollama_endpoint
 
     cfg = Config()
-    cfg.llm.embedding.provider = "ollama"
-    cfg.llm.embedding.base_url = "http://127.0.0.1:11434/v1/"
+    _with_ollama_embedding(cfg, base_url="http://127.0.0.1:11434/v1/")
 
     assert effective_ollama_endpoint(cfg) == "http://127.0.0.1:11434"
 
@@ -79,8 +112,7 @@ def test_ollama_probe_uses_root_api_version_after_v1_endpoint(
     )
 
     cfg = Config()
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.base_url = "http://localhost:11434/v1"
+    _with_ollama_chat(cfg, base_url="http://localhost:11434/v1")
     endpoint = effective_ollama_endpoint(cfg)
     seen_urls: list[str] = []
 

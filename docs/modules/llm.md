@@ -37,11 +37,11 @@
 | v0.3.150+ DeepSeek thinking 显式关闭 | ✅ | `DeepSeekProvider.complete(..., reasoning_effort="")` 会向 DeepSeek 请求体写入 `thinking={"type":"disabled"}`。DeepSeek v4 默认开启 thinking，单纯省略字段并不会关闭 reasoning；配置页 LLM 探测和短结构化任务因此能真正避免 thinking 先耗尽输出预算后返回空 `content` |
 | v0.3.150+ reasoning-only 诊断 | ✅ | OpenAI-compatible / DeepSeek / OpenRouter / Ollama native 返回 HTTP 200 且含 `reasoning_content` / `reasoning` / `thinking`、但最终 `content` 为空时，仍判为不可用，但错误会明确提示 `returned reasoning but no final content` 并带 `finish_reason`，避免和完全空响应混淆 |
 | v0.3.117+ reasoning-first 探活 | ✅ | `LLMProvider.health_check()` 与配置页 LLM 测试探针统一使用 `max_tokens=4096`，避免 SenseNova 等 OpenAI-compatible reasoning-first 模型先产出 `message.reasoning`、尚未到 `message.content` 就被截断，从而误报空响应 |
-| 全局 route 取代模块选择 | ✅ | `LLMService` 所有调用路径只委托同一个 `complete()`；旧 `ModuleOverride` / `module_overrides_from_config()` 仅保留为 Task 8 构造器兼容数据，传入值不影响路由，Task 8 完成 runtime composition 后删除 |
+| 全局 route 取代模块选择 | ✅ | `LLMService` 所有调用路径只委托同一个 `complete()`；`ModuleOverride`、`module_overrides_from_config()` 与相关构造参数已删除。caller 只参与并发准入和 usage 归属，不会选择 connection 或 model |
 | v0.3.75 Provider per-call model | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible 的 `complete(..., model=...)` 支持单次模型覆盖，不修改 provider 实例默认 `_model` |
 | 体验优化：B站动态语气 | ✅ | 推荐、画像总结和聊天 prompt 统一接入 `ToneProfile`，在“老B友”基础上按用户画像微调语气 |
 | v0.3.0 Ollama embedding 兜底 | ✅ | `OllamaProvider.embed()` 走原生 `/api/embeddings`，配合 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需要额外的 embedding API Key |
-| v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；legacy `build_embedding_service` 继续按 provider 选择默认 model。注入原生 route 时，Service 从其共享 settings 派生 model、维度、阈值、多模态开关与 cache namespace，拒绝缓存空、非数值、非有限或维度不符的向量；只对已识别 Provider/transport 失败降级，取消、调用方、能力 checker 和未知编程错误传播；完整 production composition 留给 Task 8 |
+| v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；生产 bundle 从原生 route 的共享 settings 派生 model、维度、阈值、多模态开关与 cache namespace，拒绝缓存空、非数值、非有限或维度不符的向量；只对已识别 Provider/transport 失败降级，取消、调用方、能力 checker 和未知编程错误传播。legacy builder 仅供尚未迁移的编辑/兼容边界使用 |
 | 可选封面 image-only embedding | ✅ | `[llm.embedding].multimodal_enabled` + 多模态 embedding 模型（`gemini-embedding-2` 族，或 `dashscope` + `qwen3-vl-embedding` 等）时，`EmbeddingService.embed_image()` 把压缩封面打成向量，与文本同 `model`/维度空间；discovery 入池按封面 URL 派生键（`image_embedding_cache_key_for_url`）预热，Delight 线上 `precompute_delight_scores` 消费（见 [recommendation 模块](recommendation.md) 封面视觉加成）。默认关闭；provider/model 不支持图像或开关关闭时自动 no-op（纯文本模型零成本、打分与旧版逐字节一致） |
 | DashScope 多模态 embedding | ✅ | `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API；`embed`/`embed_image` 独立向量（不 `enable_fusion`）；默认 `qwen3-vl-embedding`；`output_dimensionality` 对 qwen3-vl 透传 `dimension`；embedding-only（`complete` 拒绝） |
 | v0.3.113 Embedding 目标维度 | ✅ | `[llm.embedding].output_dimensionality` 默认 1024，与 Ollama `bge-m3` 对齐；Gemini 传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时传 `dimensions`，Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传。L2 cache 仅在 provider 确认支持目标维度时按 `model#dim=N` 签名隔离，同一文本的不同维度向量不会互相覆盖，也不会把未生效的兼容后端标成伪维度 |
@@ -128,7 +128,7 @@ assert embedding.settings is settings
 
 `AdapterRuntimeOptions` 是 frozen、secret-safe 的构造参数，仅包含 timeout、可选的精确环境映射和可选 Codex token loader；传入的 environment 会在构造时复制成只读快照，后续修改调用方 dict 不会改变 credential resolution，映射和值也不进入 repr。proxy / `trust_env` 不对调用方开放，Factory 始终按最终 endpoint 调用 `openbiliclaw.network.proxy_for_endpoint()` / `trust_env_for_endpoint()`，Ollama 则固定直连。Credential 在构造期一次解析：`inline` 使用存储值，`env` 只读取记录指定的变量名，`oauth` 只接受 `credential_ref=codex`，`none` 只接受 descriptor 没有 credential 字段的本地类型。Codex OAuth 在调用 token loader 前要求 endpoint 精确等于 `https://api.openai.com/v1`（空值会规范成该地址）；显式端口、额外 path、query、fragment 或 userinfo 均失败关闭。OpenAI / Anthropic custom endpoint 先经过同一个 HTTP(S) validator：拒绝无 host、userinfo、query/fragment（含空 delimiter）、控制字符、反斜线、外层空白和非法 host/port，再调用 network policy 或 SDK；合法 custom path/port 原样保留。
 
-OpenAI / DeepSeek / OpenRouter / custom Chat 记录都精确构造 `OpenAIProtocolProvider`；其 `OpenAIProtocolOptions` 为 frozen dataclass，headers 映射也做只读冻结，preset、reasoning effort 与 attribution headers 不进入 repr，因此不同连接或并发调用之间不会串用或意外展示这些 hook。Protocol adapter 只在 SDK catch 边界把原始 400 解析成私有布尔信号，在不保留原文的前提下继续支持 Responses temperature 降级和 Chat / Responses JSON format 兼容降级；无关 400 不重试、不触发降级，原生 `openai.APITimeoutError` 与 built-in/httpx timeout 一样映射为可重试 `LLMTimeoutError`。Anthropic 官方 / custom 都精确构造 `AnthropicCompatibleProvider` 并透传已校验的 custom base URL；timeout 与 5xx/connection 属于可重试 transient，429、401/403 和其他 4xx 直接返回固定 ID 文本，终态异常不保留可能含密钥的上游 cause/context，usage total 会计入 cache read/create token。Gemini 与新 OpenAI protocol adapter 的未知 SDK/transport 异常同样只产生固定 ID 文本并切断 secret-bearing chain。Gemini 仍使用原生 `google-genai`，Ollama 保留 native `num_ctx` 路径。现有 `OpenAIProvider` / `DeepSeekProvider` / `OpenRouterProvider` / `ClaudeProvider` 构造 API 与 legacy registry composition 仍保留到 Task 8；其模块覆盖值已经不再参与 `LLMService` 选择。
+OpenAI / DeepSeek / OpenRouter / custom Chat 记录都精确构造 `OpenAIProtocolProvider`；其 `OpenAIProtocolOptions` 为 frozen dataclass，headers 映射也做只读冻结，preset、reasoning effort 与 attribution headers 不进入 repr，因此不同连接或并发调用之间不会串用或意外展示这些 hook。Protocol adapter 只在 SDK catch 边界把原始 400 解析成私有布尔信号，在不保留原文的前提下继续支持 Responses temperature 降级和 Chat / Responses JSON format 兼容降级；无关 400 不重试、不触发降级，原生 `openai.APITimeoutError` 与 built-in/httpx timeout 一样映射为可重试 `LLMTimeoutError`。Anthropic 官方 / custom 都精确构造 `AnthropicCompatibleProvider` 并透传已校验的 custom base URL；timeout 与 5xx/connection 属于可重试 transient，429、401/403 和其他 4xx 直接返回固定 ID 文本，终态异常不保留可能含密钥的上游 cause/context，usage total 会计入 cache read/create token。Gemini 与新 OpenAI protocol adapter 的未知 SDK/transport 异常同样只产生固定 ID 文本并切断 secret-bearing chain。Gemini 仍使用原生 `google-genai`，Ollama 保留 native `num_ctx` 路径。旧 Provider 类和 registry builder 仍作为兼容 API 保留，但 production runtime、CLI 与 OpenClaw 只使用 connection-record factory 和 ordered route。
 
 ### Ordered Chat route
 
@@ -276,7 +276,7 @@ token = await get_valid_codex_token()
 
 Codex OAuth 是实验路径：OpenAI 官方 API 认证仍以 Platform API key 为准；该模块只复用本机 Codex CLI 凭据，不自建 OAuth PKCE 浏览器流程，也不会把 token 打印到 CLI 输出。
 
-### Legacy Registry（Task 8 composition 兼容）
+### Legacy Registry（编辑入口与兼容 API）
 
 ```python
 from openbiliclaw.llm import build_llm_registry
@@ -436,11 +436,11 @@ stats = cache.stats()
 
 当 refill waiter 存在时，新 maintenance 最多一个；没有 runnable refill 时 maintenance 可借用所有空闲后台槽，保持 work-conserving。`empty` 只 park 新 maintenance，绝不会取消或抢占已经进入 provider 的 maintenance。状态输出同时包含 refill/maintenance active、waiting、priority-active 与 inventory state。
 
-#### 全局路由与 staged runtime cutover
+#### 全局路由与 runtime bundle
 
 `LLMService` 不再包含 caller-prefix / module bucket 选择逻辑。`soul.*`、`discovery.*`、`recommendation.*`、`eval.*` 等 caller 全部调用注入对象的同一个 `complete()`；caller 继续参与 concurrency priority 与 usage ledger，不改变 connection、model 或 fallback 顺序。
 
-阶段 5/6 已提供原生 `OrderedLLMRoute`、`OrderedEmbeddingRoute` 与 `build_ordered_embedding_service()` 构造核心。未修改的 `RuntimeContext`、CLI 与 Soul 构造器仍暂时保留 `ModuleOverride`、`module_overrides_from_config()`、`LLMService.module_overrides` 和 legacy `build_embedding_service()` 形状。解析出的 legacy module 数据只用于构造兼容，不被 `LLMService` 读取。完整 composition 改为从 `Config.models` 构造两条 route、删除旧参数以及切换配置探测/API/UI 属于 Task 8；在此之前 production runtime 的公开行为保持兼容。
+`build_runtime_model_bundle()` 从 `Config.models` 一次性构造 `OrderedLLMRoute`、有序 Embedding service、`UsageRecorder` 与 `LLMService`。API runtime、CLI 和 OpenClaw 都复用这条 composition；Soul、Discovery、Recommendation 与 Dialogue 共享同一 Chat route 和稳定 gate。旧 module override DTO/parser/参数已从生产构造器删除；legacy registry/builder 只服务尚未迁移的编辑入口和兼容 API，不参与 production route。
 
 ### 异常体系
 
@@ -556,7 +556,7 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 ## 设计决策
 
 1. **retry 策略**：传输 / provider 临时错误走 3 次重试 + 线性退避（0.25s × attempt）；通用 OpenAI-compatible 的 `LLMResponseError` 默认不重试。DeepSeek 例外：线上观测到它会偶发 HTTP 200 但 `content=""`，因此 `DeepSeekProvider` 对空内容额外重试一次。`reasoning_effort=""` 会显式发送 `thinking={"type":"disabled"}`，避免 DeepSeek v4 省略字段时默认开启 thinking。HTTP 400 会记录 provider response body 摘要，避免只看到 `Error code: 400`
-2. **fallback 顺序**：原生 Chat / Embedding route 分别严格使用 `models.chat.connections` / `models.embedding.providers` 数组顺序并允许最多十条同类 connection；Provider 自身 retry 总在跨 Provider fallback 之前完成。Embedding Provider 共用一个 settings 对象与 Provider-order-invariant cache namespace。legacy runtime 在 Task 8 composition cutover 前仍使用既有显式主备构造路径。
+2. **fallback 顺序**：生产 Chat / Embedding route 分别严格使用 `models.chat.connections` / `models.embedding.providers` 数组顺序并允许最多十条同类 connection；Provider 自身 retry 总在跨 Provider fallback 之前完成。Embedding Provider 共用一个 settings 对象与 Provider-order-invariant cache namespace。
    - **备选何时触发**：`LLMRegistry.complete()` 链上遇到 provider 级失败时——`LLMProviderError` / `LLMTimeoutError` / `LLMRateLimitError`（限流同时触发 60s cooldown），以及 v0.3.156+ 的 `LLMResponseError`（空 / 坏 content——劣质网关最常见的死法是 HTTP 200 但内容为空，provider 内部自重试一次后换备选再试；此前该类错误直接上抛、备选永远不接管）。单 provider 链耗尽后统一抛 `LLMFallbackError`（原始错误在 `__cause__`）。
    - **备选何时刻意不触发**：legacy `complete_provider()` 仅为配置探测等精确调用保留，跨 provider 兜底会违背探测目标；模块 caller 已不再进入此路径。备选与默认 provider 同名、未注册（缺凭据）或非 chat-capable 时被 `_fallback_order()` 静默丢弃——运行时静默丢弃是正确行为（不能每次补全都刷日志），死状态的可见性由两处兜底：`_collect_config_issues` 在保存 / 加载时以 blocking issue 拦截（见 [配置参考](config.md)），`build_llm_registry` 在构建时对「同名 / 未注册 / 非 chat-capable」按具体原因打一次 WARNING（v0.3.155+，覆盖 env 覆盖与手改 config.toml 绕过保存校验的场景）。
    - **开关语义（v0.3.156+）**：`[llm].fallback_provider` 非空即启用，留空即关闭——旧的 `[llm].fallback_enabled` 布尔字段从未被回退链读取，已彻底移除（config 加载忽略存量 key，PUT /api/config 忽略旧客户端仍发送的该字段，GET 不再回显）。embedding 侧的 `[llm.embedding].fallback_enabled` 仍然有效（借用 chat-side 凭据的旧兼容开关）。
@@ -570,6 +570,6 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 9. **Prompt 风格集中收口**：推荐、画像和聊天的“老B友”语气由共享 `ToneProfile` 驱动，不允许各模块各自发散成不同人格
 10. **Prompt-cache 约定**：高频结构化 builder 的 system prompt 必须保持静态；user prompt 按“tone / 画像 / 长期偏好 / 来源上下文 / 本批内容或历史”从稳定到易变排序，并使用确定性 JSON。使用完整 `profile_summary` 的高频链路优先经 `profile_prompt_layers()` 分层渲染，稳定层放前、recent 层放后；调用方不得再把同一份动态画像通过 core memory 追加进 system prompt，便于 DeepSeek / Claude / OpenAI / Gemini 的 provider-side prompt cache 复用前缀
 11. **结构化输出只在 helper 处放宽**：业务模块不再各自手写 JSON 截取逻辑；容错集中在 `json_utils.py`，模块侧用 predicate 收紧语义，避免一个 provider 的异常 shape 修复污染其他任务。
-12. **caller 不选择模型连接**：所有 `LLMService` 路径共享同一全局 route；模块 caller 只用于并发和 usage。legacy 模块覆盖形状在 Task 8 删除前可被旧构造器传入，但运行时忽略其 provider / model 值。
+12. **caller 不选择模型连接**：所有 `LLMService` 路径共享同一全局 route；模块 caller 只用于并发和 usage。模块覆盖构造参数已删除。
 13. **Codex OAuth 只做认证层**：legacy `auth_mode="codex_oauth"` 不注册新 provider，而是给现有 `OpenAIProvider` 注入动态 token provider。connection-record factory 则只接受 `codex_oauth + credential_ref="codex"`，并在 token lookup 前验证精确官方 endpoint。两条路径都不会把 token 发送给 OpenAI-compatible 代理。
 14. **失败分类先于批响应解析**：共享 classifier 保持 rate-limit / no-provider / auth / invalid-response 的特定语义优先级，并额外识别连接失败与 HTTP 500/502/503/504；调用方只把 provider transient 交给协调器退避，不把 JSON shape 错误误判成网络失败。

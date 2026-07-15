@@ -2,15 +2,11 @@
 
 每个 **API daemon** runtime generation 只拥有一个 expression copy coordinator：8 条立即、尾批固定 3 秒、单轮最多 60，零进展退避 15 秒，60 秒仅作 safety wake。停止 generation 会取消 collector、gate waiter 与运行中的 provider callback；状态接口暴露 pending/state/deadline/last completed/error。OpenClaw direct composition 不启动 daemon loop，故不创建该 coordinator；它在 inline admission 后同步 drain 最多 4 条 durable copy，且不在同一交互请求内做 split retry：有效 subset 立即入 canonical pool，剩余行保持 pending 供下次请求处理，返回前没有遗留 provider/copy task。参数来自 2026-07-12 生产日志校准。
 
-> API runtime 启动时创建一套共享 LLM gate 并注入主服务、Soul 与 refresh；在任何 provider 工作可启动前用 canonical database available 初始化 `healthy/refill/empty`，后续 controller readiness、原子维护、推荐池状态与候选 snapshot 持续同步。runtime status 暴露 total/background 以及 refill/maintenance active、waiting 和 inventory state。
+> API runtime 启动时从 `Config.models` 构造一个不可变 `RuntimeModelBundle(revision, models, chat_route, llm_service, embedding_service)`。完整 Chat/Embedding adapter、服务与所有 downstream consumer 都先在锁外构造；成功后才在同一个短、无 `await` 的 publication section 中切换 bundle 与 consumer graph。
 
-gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一对象上调整 total/background，因此旧 HTTP/对话学习调用与新服务仍竞争同一个真实总上限。
+`RuntimeContext` 只维护一个 current bundle 和一个 swap lock。新调用在 publication 后取得新 bundle；已经捕获旧 service/route 的在途调用继续安全完成。失败的 adapter/consumer 构造、gate 校验或配置事务不会发布部分 graph；rollback 恢复之前 bundle 及 Soul/Dialogue/Discovery/Recommendation/controller 等精确对象身份。
 
-`create_app()` 的显式依赖注入路径会先核对 Soul 内部 service 与 runtime controller 的 gate：单侧提供时采用该对象并补齐另一侧，两侧同对象时直接采用，两侧不同则立即抛出清晰错误；旧测试 double 都未暴露 gate 时才按配置创建一套新的共享对象。采用外部 gate 时不会先按配置静默改写其容量，后续正常热重载仍在该对象上显式 reconfigure。
-
-同一核对还覆盖显式 `dialogue` 的 declared/service gate、recommendation service，以及 runtime controller / account-sync 内可见的 Soul、recommendation、discovery service；任何非空身份冲突都在写回前失败。真实 `SocraticDialogue` 的显式 service 与 `_build_service()` fallback 最终都引用 context gate；没有相关属性的旧 double 继续兼容。
-
-实现读取真实引擎字段：Soul / Dialogue / Discovery 为 `_llm_service`，Recommendation 为 `_llm`，AccountSync 为 `soul_engine`；参数化结构测试会在这些类改名但注入审计未同步时失败。
+gate 属于 `RuntimeContext` 的稳定部分，容量只读取 `models.chat.concurrency`，并且只在 candidate 已完整构造、publication 即将成功时原地更新。旧、新 route 因此始终竞争同一个真实总上限；失败 candidate 不会提前改变容量或 inventory state。
 
 ## 概述
 
@@ -26,7 +22,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 后台刷新控制 | ✅ | `ContinuousRefreshController` 按 scheduler 配置补充候选池，并通过 source policy 计算各平台有效配比；后台定时 refresh 使用约 90% 的可换池低水位，库存只是略低于 `pool_target_count` 时不跑 discovery。async refresh / force-refresh / post-refresh 的 SQLite 原子库存维护统一经 `_enforce_pool_cap_async()` 放入 worker thread，维护再慢也不阻塞 API ping / runtime stream；启动前维护仍同步完成。注入 `DiscoveryCandidatePipeline` 后，B 站主补货会在现有 `_refresh_lock` 内按 `pending_eval + evaluating` 水位循环生产 raw candidates，直到待评估供给接近目标 batch 或达到预算；小缺口阶段先给 `search + related_chain` 配额，延后 `trending/explore`。统一关键词 planner 开启但 B 站关键词 store 暂空时，本轮只剔除 `search` 子策略，保留其它 B 站策略，避免回落到旧 `discovery.search.queries` LLM 生成。v0.3.149+ 当 `explore_refresh_hours` 到期或距到期不足一个 refresh tick，且 B 站平台族仍有补货空间时，controller 会允许 `KeywordPlanner` 在同一轮 merged keyword LLM 调用里请求 `explore_domains`，成功写入 B 站 `keyword_kind="explore"` query cache 后同步推进 `last_explore_refresh_at`；后续 `ExploreStrategy` 从该 explore 池 claim query。 |
 | 启动优先的原子库存维护 | ✅ | `run_startup_maintenance()` 是每个 controller 幂等的 host 启动钩子：API daemon 的 `run_forever()` 与 OpenClaw direct bootstrap 都先调用它，才允许暴露 LLM operation 或启动后台 loop。钩子调用一次 `Database.maintain_pool_inventory()`，先零 LLM 恢复历史 `suppressed` 结果，再统一其它维护。 |
 | Canonical 库存驱动的补货 admission | ✅ | `ContinuousRefreshController._pool_readiness_counts()`、原子维护结果、文案完成后的池状态和 API/OpenClaw candidate snapshot 都把 durable available 同步到共享 gate。低库存且 refill 排队时新 admission 保证两个 refill 后台槽并可借满三个；无 refill 时 maintenance 借用空槽；库存为零只 park 新 maintenance，不抢占已在 provider 中的请求。 |
-| 连续候选评估协调器 | ✅ | API daemon 的 `CandidateEvalCoordinator` 是 live runtime 内唯一 claim owner：配置与构造器均硬限制为最多 3 个、每批最多 30 条，即最多 90 条 raw 在途；任一 worker 完成即补位。主协调任务串行持久化 token-owned 评分，再按 copy-aware headroom admission。B 站 refresh、抖音、YouTube、知乎、X 和 Reddit 都通过共享 `DiscoveryCandidatePipeline` enqueue；其单次 `on_candidates_enqueued` 回调立即唤醒协调器，managed refresh / producer 绝不再同步 `drain_pending()` 另领 claim。OpenClaw direct adapter 不启动 daemon loop，因此不挂接 dormant candidate / expression coordinator；其 `recommend(refresh_if_needed=True)` 的 controller refresh 专用首轮 source/evaluation wave 固定为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），随后请求再补下一批。其 `on_candidates_admitted` callback 在 admission 的 DB commit 后 await `expression-copy(limit=4, max_extra_requests=0)`：首 batch 的有效 subset 先成为 canonical available，剩余行 durable pending 给下一请求，避免在 45 秒交互窗口内递归拆分。pipeline 把 callback ownership 作为 receipt 随 drain result 返回，controller 只有没有 owner 时才做 refresh 收尾 copy，故同一 admission 不会重复回调。独立/CLI 与 API daemon 保留原兼容路径（包括默认 split retry 与 API 的 60 条 copy drain）。projected 只等于 `available + admitted_pending_copy + evaluated_pending_admission`，raw pending/evaluating 不计入；超出 headroom 的达标结果保留为 durable `evaluated`。有效 worker 为 `min(candidate_eval_concurrency, max(1, llm.concurrency-1))`，60 秒仅作 API coordinator 的 safety wake。 |
+| 连续候选评估协调器 | ✅ | API daemon 的 `CandidateEvalCoordinator` 是 live runtime 内唯一 claim owner：配置与构造器均硬限制为最多 3 个、每批最多 30 条，即最多 90 条 raw 在途；任一 worker 完成即补位。主协调任务串行持久化 token-owned 评分，再按 copy-aware headroom admission。B 站 refresh、抖音、YouTube、知乎、X 和 Reddit 都通过共享 `DiscoveryCandidatePipeline` enqueue；其单次 `on_candidates_enqueued` 回调立即唤醒协调器，managed refresh / producer 绝不再同步 `drain_pending()` 另领 claim。OpenClaw direct adapter 不启动 daemon loop，因此不挂接 dormant candidate / expression coordinator；其 `recommend(refresh_if_needed=True)` 的 controller refresh 专用首轮 source/evaluation wave 固定为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），随后请求再补下一批。其 `on_candidates_admitted` callback 在 admission 的 DB commit 后 await `expression-copy(limit=4, max_extra_requests=0)`：首 batch 的有效 subset 先成为 canonical available，剩余行 durable pending 给下一请求，避免在 45 秒交互窗口内递归拆分。pipeline 把 callback ownership 作为 receipt 随 drain result 返回，controller 只有没有 owner 时才做 refresh 收尾 copy，故同一 admission 不会重复回调。独立/CLI 与 API daemon 保留原兼容路径（包括默认 split retry 与 API 的 60 条 copy drain）。projected 只等于 `available + admitted_pending_copy + evaluated_pending_admission`，raw pending/evaluating 不计入；超出 headroom 的达标结果保留为 durable `evaluated`。有效 worker 为 `min(candidate_eval_concurrency, max(1, models.chat.concurrency-1))`，60 秒仅作 API coordinator 的 safety wake。 |
 | B 站扩展搜索兜底 producer | ✅ | `BilibiliExtensionSearchProducer` 在 B 站平台族低于 quota、`BilibiliAPIClient.search_cooldown_remaining()>0`、扩展 presence 在线且候选池未满时入队 `bili_tasks(type="search")`；扩展回传后仍进入 `DiscoveryCandidatePipeline` 统一评估。兜底关键词生成 prompt 已携带结构化画像，调用 `LLMService` 时会在支持路径上关闭额外 core memory 注入；统一关键词 planner 会把画像按 core / life / interests / style / recent 分层渲染，保护 prompt-cache 前缀。 |
 | 候选池文案预计算状态同步 | ✅ | 独立 `_loop_pool_precompute()` 将 fresh 候选补齐 `pool_expression` / `pool_topic_label` 后，会同步更新 `last_replenished_count` 并推送 `refresh.pool_updated`；推荐文案 batch 默认 30 条、2 个 worker 并发生成，但仍受 `_expression_lock` 串行化多入口，避免重复消费同一批候选。推荐消费的 `pool_status='shown'` 仍在 detached event-loop task 中同步提交这个有界小批量 UPDATE，以保护响应时延并避免共享 SQLite 连接与未完成 worker 的关闭竞态；只有 durable write 成功后才调用 `RuntimeContext` 生命周期内唯一的 post-commit callback。该 callback 每次动态读取当前 controller/target，再通知 API 的稳定 event subscriber，因此多次热重载后旧 engine 的迟到任务也不会写回旧 target，新的 engine 仍会发布最终 `refresh.pool_updated`；写或 subscriber 失败均不阻断推荐响应。 |
 | 候选池真实可换计数 | ✅ | `pool_available_count` 现在只表示后端当前可立即 `serve()` 的候选，并按默认每 `topic_group` 最多 3 条的候选窗口计数；runtime status / runtime stream 另带 `pool_raw_count`、`pool_pending_count`、`pool_pending_eval_count`、`pool_evaluated_pending_count` 区分素材库存、待评估和已评估待入池内容。API 的 runtime status 组装和推荐消费后的 pool snapshot 会通过 worker thread 读取这些 SQLite 计数，成熟库查询不会同步阻塞事件循环。 |
@@ -67,8 +63,8 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
-| 模型候选 staging 与事务恢复钩子（阶段 7） | ✅（生产 composition 待 Task 8） | `RuntimeContext.build_model_candidate()` 在写盘前构造完整 Chat adapter route 与共享设置 Embedding service，但不改变当前指针；全部已填写的原生 endpoint 会在 credential、proxy 与 SDK callback 前经共享 secret-safe validator。candidate build 完成后，`ModelConfigService` 才进入与普通配置 API 共用的 canonical path boundary，重读/rebase 或报告模型 authority conflict；该所有权覆盖 `swap_model_candidate()` / `restore_model_candidate()` 和 rollback，让旧请求继续持有旧 route 且普通写者不能插入半事务。`probe_model_draft()` 只探测指定 ID：预期 Provider/transport 失败返回固定、脱敏结果，程序错误与取消继续传播。swap 失败或取消会先恢复旧配置字节与旧对象，再返回错误或继续传播取消。 |
-| 配置热重载 LLM override | ✅ | `RuntimeContext._rebuild_components()` 从 config 构造 `module_overrides`，同时注入主 `LLMService` 与 `SoulEngine` 内部 service；热重载后的正向兴趣和避雷 speculator tick 都 detached 到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应。 |
+| 不可变模型 bundle 与事务恢复 | ✅ | `RuntimeContext.build_model_candidate()` 从 `Config.models` 构造完整 `RuntimeModelBundle` 和全部 consumer，不改变 live pointer；`swap_model_candidate()` 原子发布并只在成功后发送带 revision 的 `config_reloaded`，`restore_model_candidate()` 恢复精确旧身份且不发送成功事件。旧在途调用保留旧 route，新调用读取新 bundle。 |
+| 全局 ordered route 热重载 | ✅ | runtime、Soul、Dialogue、Discovery、Recommendation、health/Ollama 与 OpenClaw 都使用同一个全局 ordered route；模块 override 已删除。热重载后的正向兴趣和避雷 speculator tick 仍 detached 到 `BackgroundTaskRegistry`，不阻塞配置响应。 |
 | 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
 | 原生保存 service 热重载 | ✅ | `saved_sync_service` 是可替换组件：每次构造新 `BilibiliAPIClient` 时同步创建 router + 六平台 extension adapters + `BilibiliNativeSaveAdapter` + `SavedSyncService`。重载先取消旧 registry inflight；所有新组件构造成功后才原子发布，任一构造失败保留完整旧组件与稳定 broker。 |
 | 原生保存 local-first 入口 | ✅ | 自动和手动同步都复用 `SavedSyncService.create_sync_task()` / `run_sync_task()`；`POST /api/saved/{list_kind}` 先提交本地 membership。`unsupported_adapter_missing` 可重试，`unsupported_content_type` 仍为终态；已接线的六个平台 executor 都可能因扩展离线进入 `extension_required`。 |
@@ -87,19 +83,27 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 
 ## 公开 API
 
-阶段 7 的模型 runtime coordinator 边界：
+模型 runtime bundle 与 coordinator 边界：
 
 ```python
+bundle = build_runtime_model_bundle(
+    config.models,
+    revision,
+    memory=memory_manager,
+    usage_sink=database,
+    concurrency_gate=runtime_gate,
+)
 candidate = await context.build_model_candidate(models, revision)
 previous = await context.swap_model_candidate(candidate)
 await context.restore_model_candidate(previous)
 result = await context.probe_model_draft(connection_or_provider, embedding_settings)
 ```
 
-- `build_model_candidate()` 构造全部 adapter、`OrderedLLMRoute` 与 ordered Embedding service，不交换生产引用，也不发起探测请求。
-- `current_model_candidate` 返回新请求将取得的不可变候选身份；`swap_model_candidate()` 与 `restore_model_candidate()` 在同一个短异步锁内替换指针。
+- `build_runtime_model_bundle()` 构造全部 adapter、`OrderedLLMRoute`、ordered Embedding service、usage recorder 与主 `LLMService`；任一构造失败时不返回部分 bundle。
+- `build_model_candidate()` 进一步 staging 全部依赖 consumer，不交换生产引用，也不发起探测请求。
+- `current_model_candidate` 返回新请求将取得的不可变 bundle 身份；`swap_model_candidate()` 与 `restore_model_candidate()` 在同一个短异步锁内替换指针及完整 consumer graph。
 - `probe_model_draft()` 构造只含目标记录的 route，Chat 使用 exact connection 调用，Embedding 使用 exact provider 与共享 settings；不遍历 fallback、不落盘。adapter/route 归一化的 `LLMProviderError` 转成不含上游详情的 `ModelConfigProbeResult`，未知程序错误不被伪装成探测失败。
-- 这些钩子当前只服务 `ModelConfigService` 的可构造性、交换与回滚契约；Task 8 才会把现有 production consumer 从 legacy registry 全面接到该 candidate bundle。
+- successful swap 才发布 `{"type": "config_reloaded", "revision": ...}`；restore/rollback 不发布成功事件。
 
 扩展共享原生保存基础（6/6 executor 已接、fixture 全覆盖，并于 2026-07-14 完成 favorite + watch-later/fallback 真实账号验证）：
 
@@ -493,11 +497,11 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 原生模型配置使用阶段 7 的 model-scoped 串行锁与全配置 canonical path boundary：首次读取后执行 revision guard、credential merge、migration resolution、validation，并在 canonical boundary 外构造 candidate；提交前再与 auth admin、guided-init source opt-in、autostart apply、`PUT /api/config` 共用同一路径事务，立即重读 base/local。普通字段并发变化会从最新原字节 rebase，模型 authority 的来源、内容或 local provenance 变化会 conflict。bounded 同步 disk gate 从不跨 `await`，异步所有权则持续覆盖 legacy backup、原子替换、短锁 pointer swap 和 rollback；另一 task 的同步 writer 在 swap 窗口快速失败。swap 异常或 `CancelledError` 都会先按事务前快照恢复文件与 `current_model_candidate`；取消随后原样传播。该流程仍使用独立 pre-model-refactor backup，不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild，也尚未由 API 路由暴露。协调范围仅限当前进程且没有跨进程文件锁：即时重读只能发现读取前已可见的外部变化，外部 writer 仍可在重读到替换之间的窄窗口竞争。
 
-热重载成功后，所有可替换 LLM 入口都会拿到同一份 `module_overrides_from_config(config)`。稳定 gate 的 proposed target/inventory 直到全部新组件构造成功并完成 atomic swap 后才更新；晚期构造失败保留旧 target/state，不会让仍在运行的旧 runtime 提前进入新配置的 refill 模式：
+热重载成功后，所有可替换 LLM 入口都会拿到同一 `RuntimeModelBundle.chat_route`。稳定 gate 的 proposed target/inventory 直到全部新组件构造成功并进入 atomic publication 后才更新；晚期构造失败保留旧 target/state，不会让仍在运行的旧 runtime 提前进入新配置的 refill 模式：
 
 - 主 runtime 的 discovery / recommendation / XHS producer 共用 `ctx.llm_service`。
-- SoulEngine 内部的 preference / awareness / insight / profile_builder / speculator / dialogue_insight 使用同一份 override。
-- SocraticDialogue fallback 若未显式注入 `llm_service`，会继承 `SoulEngine._module_overrides` 再构造 `LLMService`。
+- SoulEngine 内部的 preference / awareness / insight / profile_builder / speculator / dialogue_insight 使用同一 ordered route、usage recorder 与 gate。
+- SocraticDialogue 使用 bundle 的 `LLMService`；fallback 也从 SoulEngine 当前 route 构造，不再存在模块专属 Provider/model。
 
 `restart_background_tasks()` 在启动后置 one-shot 时通过 `_safe_post_reload_speculate()` 分别调度正向兴趣 speculator 和避雷 speculator，不会 await 两者的 `force_tick()`。正向路径读取 `probe_feedback_history`，避雷路径读取 `avoidance_probe_feedback_history`，让热重载后的首次生成继续避开近期已否认方向。这保证 popup 保存配置的 HTTP 响应不被一次画像猜测卡住；调度本身写 debug 日志，helper 内部吞掉异常，下一轮正常调度仍会继续。
 

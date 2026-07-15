@@ -604,19 +604,20 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型连接 + 事务型有序 Chat / Embedding route（阶段 7）   │
+│ 模型连接 + 事务型有序 Chat / Embedding route（阶段 8）   │
 │ native/legacy + base/local → ModelConfigService path lock │
 │ safe endpoint → 脱敏 snapshot；credential + local fence  │
-│ 完整 candidate build → canonical writer 即时重读/rebase/conflict │
-│ legacy backup → temp/fsync/replace → RuntimeContext swap  │
-│ 失败/取消恢复旧字节与精确对象身份；Task 8 前仍不切生产入口 │
+│ 完整 bundle/consumer build → canonical writer 即时重读/rebase/conflict │
+│ legacy backup → temp/fsync/replace → RuntimeContext 原子发布 │
+│ 失败/取消恢复旧字节、稳定 gate 与精确 consumer 身份       │
 │ Chat 记录 → ID adapter → OrderedLLMRoute（全局原序）      │
 │ 总 deadline · revision circuit · exact probe · 安全 attempt │
 │ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │
 │ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
-│ 进程内 writer 协调；无跨进程文件锁；Task 8 仍负责 composition │
+│ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
+│ 进程内 writer 协调；无跨进程文件锁；模型编辑 UI/CLI 后续迁移 │
 ├────────────────────────────────────────────────┤
-│ LLMService 全路径 → 同一 route；caller 仅并发/usage    │
+│ LLMService 全路径 → 同一 route；caller 仅并发/usage；成本按 connection 归因 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · 已看身份                     │

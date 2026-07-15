@@ -24,10 +24,8 @@ from openbiliclaw.llm.service import (
     LLMProviderExecutionError,
     LLMResponseContentError,
     LLMService,
-    ModuleOverride,
     PrioritySemaphore,
     is_llm_rate_limit_error,
-    module_overrides_from_config,
 )
 from openbiliclaw.memory.manager import MemoryManager
 
@@ -640,20 +638,6 @@ def test_resolve_priority_longest_prefix_wins() -> None:
     assert LLMService._resolve_priority("") == LLMService._DEFAULT_PRIORITY
 
 
-def test_module_overrides_from_config_retains_deprecated_constructor_data() -> None:
-    from openbiliclaw.config import Config
-
-    config = Config()
-    config.llm.soul.provider = " Claude "
-    config.llm.soul.model = " claude-sonnet "
-    config.llm.discovery.model = " gpt-4o-mini "
-
-    assert module_overrides_from_config(config) == {
-        "soul": ModuleOverride(provider="claude", model="claude-sonnet"),
-        "discovery": ModuleOverride(model="gpt-4o-mini"),
-    }
-
-
 @pytest.mark.asyncio
 async def test_all_former_module_callers_use_the_same_global_route() -> None:
     registry = FakeRegistry(
@@ -664,12 +648,6 @@ async def test_all_former_module_callers_use_the_same_global_route() -> None:
     service = LLMService(
         registry=registry,
         memory=memory,  # type: ignore[arg-type]
-        module_overrides={
-            "soul": ModuleOverride(provider="claude", model="claude-sonnet"),
-            "discovery": ModuleOverride(provider="deepseek", model="deepseek-chat"),
-            "recommendation": ModuleOverride(provider="claude", model="claude-rec"),
-            "evaluation": ModuleOverride(provider="deepseek", model="deepseek-eval"),
-        },
     )
 
     callers = (
@@ -701,7 +679,6 @@ async def test_normal_structured_multimodal_and_tool_paths_share_global_complete
     service = LLMService(
         registry=registry,
         memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
-        module_overrides={"soul": ModuleOverride(provider="claude")},
     )
 
     await service.complete_with_core_memory(
@@ -744,7 +721,6 @@ def test_supports_image_input_uses_global_primary_connection_not_caller_override
     service = LLMService(
         registry=registry,
         memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
-        module_overrides={"soul": ModuleOverride(provider="claude")},
     )
 
     assert service.supports_image_input("soul.profile_builder")

@@ -20,6 +20,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 |------|------|------|
 | `config-show` | 显示当前配置和可用 Provider | ✅ |
 | `health-check` | 检查 LLM Provider 可用性 | ✅ |
+| `cost` | 按 ordered connection、Provider、日期或 caller 汇总本机 LLM token 与估算成本 | ✅ |
 | `auth login` | 设置并验证 B 站 Cookie | ✅ |
 | `auth status` | 查看认证状态 | ✅ |
 | `login codex` | 导入 / 查看 / 删除 Codex CLI 的 ChatGPT OAuth 凭据（实验） | ✅ |
@@ -76,7 +77,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 
 ### `openbiliclaw config-show`
 
-显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
+显示当前加载的原生 `Config.models`、ordered Chat connection 列表和共享设置 Embedding route。primary 与 fallback 使用同一种 connection 记录结构，仅由列表位置决定优先级。
 配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 
 ```bash
@@ -93,7 +94,7 @@ Provider 概览
 
 ### `openbiliclaw health-check`
 
-逐个检查已注册 Provider 的连通性。
+逐个检查原生 ordered Chat connection 的连通性；展示稳定 connection ID，探测不会改变 route 顺序。
 
 ```bash
 $ openbiliclaw health-check
@@ -103,6 +104,18 @@ Provider 健康检查
   ollama: 不可用
     原因: connection refused
 ```
+
+### `openbiliclaw cost`
+
+按连接、Provider/model、日期与 caller 汇总本机 `llm_usage`。默认显示全部视图；`--by connection` 可直接确认 primary/fallback 的真实调用量和成本，`--by provider` 保留原有汇总兼容性。
+
+```bash
+openbiliclaw cost --days 7
+openbiliclaw cost --days 30 --by connection
+openbiliclaw cost --by caller
+```
+
+连接视图展示 route position、稳定 connection ID、type/preset、model、调用数与估算成本。升级前的历史行显示为 `(legacy)`，不会被错误归入当前 primary。
 
 ### `openbiliclaw auth login`
 

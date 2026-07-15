@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openbiliclaw.llm.base import LLMResponse
-from openbiliclaw.llm.service import LLMResponseContentError, ModuleOverride
+from openbiliclaw.llm.service import LLMResponseContentError
 from openbiliclaw.soul.dialogue import DialogueTurn, SocraticDialogue
 
 
@@ -318,12 +318,11 @@ def test_dialogue_reuses_soul_engine_service_identity() -> None:
     assert dialogue._build_service() is shared_service
 
 
-def test_dialogue_fallback_service_inherits_soul_engine_module_overrides() -> None:
-    overrides = {"soul": ModuleOverride(provider="claude", model="claude-sonnet")}
+def test_dialogue_fallback_service_uses_supplied_global_route() -> None:
     registry = SimpleNamespace(default_provider="openai")
-    soul_engine = SimpleNamespace(_memory=object(), _module_overrides=overrides)
+    soul_engine = SimpleNamespace(_memory=object())
     dialogue = SocraticDialogue(llm=registry, soul_engine=soul_engine)  # type: ignore[arg-type]
 
     service = dialogue._build_service()
 
-    assert service.module_overrides == overrides
+    assert service.registry is registry

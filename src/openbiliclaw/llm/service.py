@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 from openbiliclaw.soul.profile import SoulProfile, preference_layer_from_dict
@@ -21,7 +21,7 @@ from .prompts import build_socratic_dialogue_prompt
 DEFAULT_LLM_CONCURRENCY = DEFAULT_TOTAL_LLM_CONCURRENCY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator
 
     from openbiliclaw.memory.manager import MemoryManager
 
@@ -95,42 +95,6 @@ def is_llm_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
-@dataclass(frozen=True)
-class ModuleOverride:
-    """Deprecated input shape retained until Task 8 removes old constructors.
-
-    Values of this type are ignored. All callers use the same global route.
-    """
-
-    provider: str = ""
-    model: str = ""
-
-
-_MODULE_OVERRIDE_BUCKETS = ("soul", "discovery", "recommendation", "evaluation")
-
-
-def module_overrides_from_config(config: object) -> dict[str, ModuleOverride]:
-    """Parse deprecated inputs retained for unmodified Task 8 constructors.
-
-    The returned values are compatibility data only: ``LLMService`` never uses
-    them to select a connection. Task 8 removes this parser and its callers.
-    """
-    llm_config = getattr(config, "llm", None)
-    if llm_config is None:
-        return {}
-
-    overrides: dict[str, ModuleOverride] = {}
-    for bucket in _MODULE_OVERRIDE_BUCKETS:
-        raw = getattr(llm_config, bucket, None)
-        if raw is None:
-            continue
-        provider = str(getattr(raw, "provider", "") or "").strip().lower()
-        model = str(getattr(raw, "model", "") or "").strip()
-        if provider or model:
-            overrides[bucket] = ModuleOverride(provider=provider, model=model)
-    return overrides
-
-
 def _coerce_concurrency(value: object) -> int:
     """Return a positive LLM concurrency value, falling back to the default."""
     return coerce_total_concurrency(value)
@@ -166,10 +130,6 @@ class LLMService:
     # preserves prior behaviour for tests / standalone callers that
     # don't care about cost tracking.
     usage_recorder: object | None = None
-    # Deprecated/no-op compatibility input. RuntimeContext, CLI, and Soul
-    # constructors drop it in Task 8; retaining the field now keeps Task 5 from
-    # expanding into that later runtime-composition cutover.
-    module_overrides: Mapping[str, ModuleOverride] = field(default_factory=dict, repr=False)
     concurrency: int = DEFAULT_LLM_CONCURRENCY
     concurrency_gate: LLMConcurrencyGate | None = None
 

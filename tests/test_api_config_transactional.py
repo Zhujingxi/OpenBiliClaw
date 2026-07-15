@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import httpx
@@ -9,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
-from openbiliclaw.api.runtime_context import RuntimeContext
+from openbiliclaw.api.runtime_context import RuntimeContext, RuntimeModelBundle
 from openbiliclaw.config import (
     Config,
     LLMConfig,
@@ -21,6 +22,7 @@ from openbiliclaw.config import (
 from openbiliclaw.config_write import coordinated_config_write
 from openbiliclaw.llm import connection_factory
 from openbiliclaw.llm.base import LLMProviderError
+from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 from openbiliclaw.logging_setup import configure_logging
 from openbiliclaw.model_config import (
     ChatConnection,
@@ -67,7 +69,8 @@ def test_put_config_rejects_unbuildable_candidate_before_writing(
     assert body["reloaded"] is False
     assert body["rollback_applied"] is False
     assert any(
-        issue["severity"] == "blocking" and issue["field"] in {"llm", "llm.openai.api_key"}
+        issue["severity"] == "blocking"
+        and issue["field"] in {"models", "llm", "llm.openai.api_key"}
         for issue in body["config"]["issues"]
     )
     assert config_path.read_bytes() == before
@@ -239,8 +242,19 @@ async def test_put_config_waits_on_the_canonical_path_write_boundary(
 
 async def test_runtime_model_candidate_swap_is_staged_and_identity_preserving() -> None:
     context = RuntimeContext()
-    first = object()
-    second = object()
+    models = ModelConfig()
+    gate = LLMConcurrencyGate(models.chat.concurrency)
+
+    def bundle(revision: str) -> RuntimeModelBundle:
+        return RuntimeModelBundle(
+            revision=revision,
+            models=models,
+            chat_route=object(),
+            llm_service=SimpleNamespace(concurrency_gate=gate),
+        )
+
+    first = bundle("first")
+    second = bundle("second")
 
     initial = await context.swap_model_candidate(first)
     held_by_in_flight_request = context.current_model_candidate

@@ -67,29 +67,25 @@ def test_probe_llm_applies_unsaved_provider_payload_without_writing(
 ) -> None:
     calls: list[tuple[str, str | None, dict[str, Any]]] = []
 
-    class FakeRegistry:
-        available_providers = ["openai", "deepseek"]
-        default_provider = "deepseek"
+    class FakeAdapter:
+        def __init__(self, connection: Any) -> None:
+            self.connection = connection
 
-        def is_chat_capable(self, name: str) -> bool:
-            return name == "deepseek"
-
-        async def complete_provider(
+        async def complete(
             self,
-            provider_name: str,
             messages: list[dict[str, str]],  # noqa: ARG002
             **kwargs: Any,
         ) -> LLMResponse:
-            calls.append((provider_name, kwargs.get("model"), kwargs))
+            calls.append((self.connection.type, self.connection.model, kwargs))
             return LLMResponse(
                 content="OK",
-                provider=provider_name,
-                model=str(kwargs.get("model") or ""),
+                provider=self.connection.type,
+                model=self.connection.model,
             )
 
     monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_llm_registry",
-        lambda probe_cfg: FakeRegistry(),
+        "openbiliclaw.llm.connection_factory.build_chat_adapter",
+        lambda connection, _options: FakeAdapter(connection),
     )
     client, config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
     before = config_path.read_bytes()
@@ -110,10 +106,10 @@ def test_probe_llm_applies_unsaved_provider_payload_without_writing(
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["provider"] == "deepseek"
+    assert body["provider"] == "openai_compatible"
     assert body["model"] == "deepseek-chat"
     assert [(provider, model) for provider, model, _kwargs in calls] == [
-        ("deepseek", "deepseek-chat")
+        ("openai_compatible", "deepseek-chat")
     ]
     assert calls[0][2]["max_tokens"] == LLM_CONNECTIVITY_PROBE_MAX_TOKENS
     assert config_path.read_bytes() == before
@@ -124,16 +120,11 @@ def test_probe_llm_returns_inline_failure_for_unregistered_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class FakeRegistry:
-        available_providers = ["openai"]
-        default_provider = "openai"
-
-        def is_chat_capable(self, name: str) -> bool:  # noqa: ARG002
-            return False
-
     monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_llm_registry",
-        lambda probe_cfg: FakeRegistry(),
+        "openbiliclaw.llm.connection_factory.build_chat_adapter",
+        lambda _connection, _options: (_ for _ in ()).throw(
+            LLMProviderError("Connection type is not registered.")
+        ),
     )
     client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
 
@@ -145,7 +136,7 @@ def test_probe_llm_returns_inline_failure_for_unregistered_provider(
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is False
-    assert body["provider"] == "deepseek"
+    assert body["provider"] == "openai_compatible"
     assert "not registered" in body["error"]
 
 
@@ -153,19 +144,13 @@ def test_probe_llm_returns_inline_failure_when_provider_raises(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    class FakeRegistry:
-        available_providers = ["deepseek"]
-        default_provider = "deepseek"
-
-        def is_chat_capable(self, name: str) -> bool:
-            return name == "deepseek"
-
-        async def complete_provider(self, *_args: object, **_kwargs: object) -> LLMResponse:
+    class FailingAdapter:
+        async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
             raise LLMProviderError("bad key")
 
     monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_llm_registry",
-        lambda probe_cfg: FakeRegistry(),
+        "openbiliclaw.llm.connection_factory.build_chat_adapter",
+        lambda _connection, _options: FailingAdapter(),
     )
     client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
 
@@ -189,8 +174,8 @@ def test_probe_embedding_returns_success_when_service_probe_passes(
             return True
 
     monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_embedding_service",
-        lambda cfg, registry: FakeEmbeddingService(),
+        "openbiliclaw.llm.registry.build_ordered_embedding_service",
+        lambda route_config, *, revision, runtime_options: FakeEmbeddingService(),
     )
     client, config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
     before = config_path.read_bytes()
@@ -215,7 +200,7 @@ def test_probe_embedding_returns_success_when_service_probe_passes(
     body = response.json()
     assert body["ok"] is True
     assert body["kind"] == "embedding"
-    assert body["provider"] == "openai"
+    assert body["provider"] == "openai_compatible"
     assert config_path.read_bytes() == before
 
 
@@ -245,8 +230,8 @@ def test_probe_embedding_returns_failure_when_service_probe_fails(
             return False
 
     monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_embedding_service",
-        lambda cfg, registry: FakeEmbeddingService(),
+        "openbiliclaw.llm.registry.build_ordered_embedding_service",
+        lambda route_config, *, revision, runtime_options: FakeEmbeddingService(),
     )
     client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
 

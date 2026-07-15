@@ -13,7 +13,7 @@ from openbiliclaw.config import (
 )
 from openbiliclaw.llm.base import LLMResponse, LLMTimeoutError
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
-from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+from openbiliclaw.llm.service import LLMService
 
 from . import test_refill_real_provider_integration as live_refill
 from .test_refill_real_provider_integration import _LiveMetrics, _MonitoredRegistry
@@ -24,9 +24,9 @@ def test_live_summary_has_no_fabricated_metric_literals() -> None:
     assert '"peak_total=4 peak_background=3 max_copy_batch=8 transient_retries=0"' not in source
 
 
-def test_every_live_service_receives_normal_module_overrides() -> None:
+def test_every_live_service_uses_global_route() -> None:
     source = Path("tests/test_refill_real_provider_integration.py").read_text(encoding="utf-8")
-    assert source.count("module_overrides=overrides") == 3
+    assert source.count("LLMService(") == 3
 
 
 def test_deterministic_uses_real_service_and_isolated_user_scenarios() -> None:
@@ -220,7 +220,7 @@ def test_openclaw_live_config_disables_embedding_and_ollama_without_mutating_inp
     assert "ollama" not in registry.available_providers
 
 
-def test_live_refill_provider_override_sets_global_route_and_module_data_is_noop(
+def test_live_refill_provider_selection_sets_one_global_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded = Config(
@@ -242,22 +242,12 @@ def test_live_refill_provider_override_sets_global_route_and_module_data_is_noop
     monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
     monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
 
-    config, registry = live_refill._load_live_config_and_registry()
-    overrides = module_overrides_from_config(config)
-    service = LLMService(registry=registry, memory=None, module_overrides=overrides)  # type: ignore[arg-type]
+    _config, registry = live_refill._load_live_config_and_registry()
+    service = LLMService(registry=registry, memory=None)  # type: ignore[arg-type]
 
     assert loaded.llm.evaluation.provider == "ollama"
-    assert set(overrides) == {"soul", "discovery", "recommendation", "evaluation"}
-    assert {name: override.provider for name, override in overrides.items()} == {
-        "soul": "openai_compatible",
-        "discovery": "openai_compatible",
-        "recommendation": "openai_compatible",
-        "evaluation": "openai_compatible",
-    }
-    assert all(override.model == "" for override in overrides.values())
     assert registry.default_provider == "openai_compatible"
-    assert service.module_overrides == overrides
-    assert not hasattr(service, "_resolve_module_override")
+    assert service.registry is registry
 
 
 def test_live_refill_fails_when_explicit_provider_is_not_registered(

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.models import RedditSourceConfigOut
 from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
 from openbiliclaw.storage.database import Database
 
@@ -28,6 +29,22 @@ def _make_database(tmp_path: Path) -> Database:
     db = Database(tmp_path / "reddit-api.db")
     db.initialize()
     return db
+
+
+def _use_native_ollama(config: Config) -> None:
+    config.models = ModelConfig(
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="ollama-main",
+                    name="Ollama",
+                    type="ollama",
+                    model="llama3",
+                    base_url="http://127.0.0.1:11434/v1",
+                ),
+            )
+        )
+    )
 
 
 def test_reddit_api_schema_defaults_match_rdt_discovery_defaults() -> None:
@@ -181,6 +198,7 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
             ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
         )
     )
+    _use_native_ollama(cfg)
     cfg.sources.reddit.enabled = True
     cfg.sources.reddit.backend = "extension"
     save_config(cfg, project_root / "config.toml")
@@ -224,6 +242,7 @@ def test_reddit_source_status_uses_local_rdt_credential_without_command_probe(
             ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
         )
     )
+    _use_native_ollama(cfg)
     cfg.sources.reddit.enabled = True
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
@@ -261,6 +280,7 @@ def test_put_config_preserves_reddit_extension_backend(
             ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
         )
     )
+    _use_native_ollama(cfg)
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)

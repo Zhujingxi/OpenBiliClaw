@@ -14,7 +14,6 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 from rich.console import Console
 
-from openbiliclaw.llm.registry import _ollama_is_chat_capable
 from openbiliclaw.runtime import embedding_progress
 
 if TYPE_CHECKING:
@@ -57,17 +56,27 @@ class _ManagedDaemon:
 _managed_daemon: _ManagedDaemon | None = None
 
 
-def _embedding_wants_ollama(config: Config) -> bool:
-    embedding = config.llm.embedding
-    return (
-        str(embedding.provider).strip().lower() == "ollama"
-        or str(embedding.fallback_provider).strip().lower() == "ollama"
+def _ollama_chat_connections(config: Config) -> tuple[object, ...]:
+    return tuple(
+        connection
+        for connection in config.models.chat.connections
+        if connection.type.strip().lower() == "ollama"
+    )
+
+
+def _ollama_embedding_providers(config: Config) -> tuple[object, ...]:
+    if not config.models.embedding.enabled:
+        return ()
+    return tuple(
+        provider
+        for provider in config.models.embedding.providers
+        if provider.type.strip().lower() == "ollama"
     )
 
 
 def ollama_required(config: Config) -> bool:
     """Return whether chat or embedding routing may call Ollama."""
-    return _ollama_is_chat_capable(config) or _embedding_wants_ollama(config)
+    return bool(_ollama_chat_connections(config) or _ollama_embedding_providers(config))
 
 
 def _strip_openai_v1_suffix(url: str) -> str:
@@ -89,16 +98,14 @@ def effective_ollama_endpoint(config: Config) -> str:
     Chat and embedding providers use OpenAI-compatible ``/v1`` URLs in config, but
     Ollama's health API lives at daemon root ``/api/version``.
     """
-    if _ollama_is_chat_capable(config):
-        base_url = config.llm.ollama.base_url.strip() or f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
-    elif _embedding_wants_ollama(config):
-        base_url = (
-            config.llm.embedding.base_url.strip()
-            or config.llm.ollama.base_url.strip()
-            or f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
-        )
-    else:
-        base_url = config.llm.ollama.base_url.strip() or f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
+    chat_connections = _ollama_chat_connections(config)
+    embedding_providers = _ollama_embedding_providers(config)
+    selected = chat_connections[0] if chat_connections else None
+    if selected is None and embedding_providers:
+        selected = embedding_providers[0]
+    base_url = str(getattr(selected, "base_url", "") or "").strip()
+    if not base_url:
+        base_url = f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
     return _strip_openai_v1_suffix(base_url)
 
 

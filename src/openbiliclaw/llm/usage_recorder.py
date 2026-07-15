@@ -26,7 +26,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Protocol
 
-from openbiliclaw.llm.pricing import estimate_cost
+from openbiliclaw.llm.pricing import PRICING, estimate_cost
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.base import LLMResponse
@@ -52,6 +52,10 @@ class _UsageSink(Protocol):
         *,
         provider: str,
         model: str,
+        connection_id: str = "",
+        connection_type: str = "",
+        preset: str = "",
+        route_position: int = 0,
         prompt_tokens: int,
         completion_tokens: int,
         estimated_cost_cny: float,
@@ -95,6 +99,10 @@ class UsageRecorder:
         usage = getattr(response, "usage", None) or {}
         provider = str(getattr(response, "provider", "") or "").strip().lower()
         model = str(getattr(response, "model", "") or "").strip()
+        connection_id = str(getattr(response, "connection_id", "") or "").strip()
+        connection_type = str(getattr(response, "connection_type", "") or "").strip().lower()
+        preset = str(getattr(response, "preset", "") or "").strip().lower()
+        route_position = max(0, int(getattr(response, "route_position", 0) or 0))
 
         prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
         completion_tokens = int(usage.get("completion_tokens", 0) or 0)
@@ -106,7 +114,7 @@ class UsageRecorder:
 
         try:
             cost = estimate_cost(
-                provider,
+                _pricing_provider(provider, connection_type, preset),
                 model,
                 prompt_tokens,
                 completion_tokens,
@@ -160,6 +168,10 @@ class UsageRecorder:
             self._sink.insert_llm_usage(
                 provider=provider or "unknown",
                 model=model or "",
+                connection_id=connection_id,
+                connection_type=connection_type,
+                preset=preset,
+                route_position=route_position,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_input_tokens=cached_tokens,
@@ -171,3 +183,19 @@ class UsageRecorder:
             # Never block the LLM hot path on billing-table writes.
             # Worst case: a partial row is missed; ledger drifts ~0.1%.
             logger.debug("UsageRecorder.record failed", exc_info=True)
+
+
+_CONNECTION_TYPE_PRICING_ALIASES = {
+    "anthropic_compatible": "claude",
+    "codex_oauth": "openai",
+    "gemini_api": "gemini",
+}
+
+
+def _pricing_provider(provider: str, connection_type: str, preset: str) -> str:
+    """Choose a price table from explicit route identity, never display labels."""
+    if preset in PRICING:
+        return preset
+    if connection_type:
+        return _CONNECTION_TYPE_PRICING_ALIASES.get(connection_type, connection_type)
+    return provider

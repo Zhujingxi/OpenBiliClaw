@@ -328,24 +328,55 @@ class LLMConcurrencyGate:
 
     def update_inventory(self, *, available: int, target: int) -> None:
         """Update refill admission from a canonical durable inventory snapshot."""
+        self._background.update_inventory(self._inventory_state_for(available, target))
+
+    @staticmethod
+    def _inventory_state_for(available: int, target: int) -> InventoryPriorityState:
+        """Validate a durable inventory snapshot before mutating gate state."""
         normalized_available = max(0, int(available))
         normalized_target = max(0, int(target))
         if normalized_target <= 0 or normalized_available >= normalized_target:
-            state = InventoryPriorityState.HEALTHY
-        elif normalized_available == 0:
-            state = InventoryPriorityState.EMPTY
-        else:
-            state = InventoryPriorityState.REFILL
-        self._background.update_inventory(state)
+            return InventoryPriorityState.HEALTHY
+        if normalized_available == 0:
+            return InventoryPriorityState.EMPTY
+        return InventoryPriorityState.REFILL
+
+    def configure_runtime(
+        self,
+        total_concurrency: int,
+        *,
+        inventory_available: int | None = None,
+        inventory_target: int | None = None,
+    ) -> None:
+        """Atomically apply a validated hot-reload gate configuration.
+
+        All coercion that can fail happens before the first mutation.  The
+        remaining assignments and semaphore resizes are non-awaiting and use
+        already validated positive capacities, so a bundle publisher can call
+        this before exposing any new consumer identities.
+        """
+        total = coerce_total_concurrency(total_concurrency)
+        background = background_llm_concurrency(total)
+        inventory_state = self.inventory_priority_state
+        if inventory_available is not None:
+            if inventory_target is None:
+                raise ValueError("inventory_target is required with inventory_available")
+            inventory_state = self._inventory_state_for(
+                inventory_available,
+                inventory_target,
+            )
+        elif inventory_target is not None:
+            raise ValueError("inventory_available is required with inventory_target")
+
+        self._total.resize(total)
+        self._background.resize(background)
+        self.total_concurrency = total
+        self.background_concurrency = background
+        self._background.update_inventory(inventory_state)
 
     def reconfigure(self, total_concurrency: int) -> None:
         """Resize this runtime-owned gate in place for a hot reload."""
-        total = coerce_total_concurrency(total_concurrency)
-        background = background_llm_concurrency(total)
-        self.total_concurrency = total
-        self.background_concurrency = background
-        self._total.resize(total)
-        self._background.resize(background)
+        self.configure_runtime(total_concurrency)
 
     def classify(self, caller: str) -> LLMTrafficClass:
         tag = caller.strip()

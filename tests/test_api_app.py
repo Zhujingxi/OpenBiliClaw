@@ -9,7 +9,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -19,6 +19,110 @@ if TYPE_CHECKING:
 from openbiliclaw import __version__
 from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
+
+
+def _use_native_ollama(config: Any, model: str = "llama3") -> None:
+    """Give direct Config fixtures one credential-free native Chat route."""
+    from dataclasses import replace
+
+    from openbiliclaw.model_config import ChatConnection, ChatRouteConfig
+
+    config.models = replace(
+        config.models,
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="ollama-main",
+                    name="Ollama",
+                    type="ollama",
+                    model=model,
+                    base_url="http://127.0.0.1:11434/v1",
+                ),
+            ),
+            concurrency=config.models.chat.concurrency,
+            timeout_seconds=config.models.chat.timeout_seconds,
+        ),
+    )
+
+
+def _use_native_embedding(
+    config: Any,
+    *,
+    provider_type: str = "ollama",
+    base_url: str = "http://127.0.0.1:11434/v1",
+    model: str = "bge-m3",
+) -> None:
+    from dataclasses import replace
+
+    from openbiliclaw.model_config import EmbeddingProviderConfig, EmbeddingRouteConfig
+
+    native_type = "openai_compatible" if provider_type == "openai" else provider_type
+    config.models = replace(
+        config.models,
+        embedding=EmbeddingRouteConfig(
+            enabled=True,
+            settings=replace(config.models.embedding.settings, model=model),
+            providers=(
+                EmbeddingProviderConfig(
+                    id="embedding-main",
+                    name="Embedding",
+                    type=native_type,
+                    preset="openai" if native_type == "openai_compatible" else "",
+                    base_url=base_url,
+                ),
+            ),
+        ),
+    )
+
+
+_KEEP_EMBEDDING_SERVICE = object()
+
+
+def _set_app_native_embedding(
+    app: Any,
+    *,
+    provider_type: str = "",
+    base_url: str = "http://127.0.0.1:11434/v1",
+    model: str = "bge-m3",
+    service: object = _KEEP_EMBEDDING_SERVICE,
+) -> None:
+    """Keep injected API fixtures aligned with the native runtime bundle."""
+    from contextlib import suppress
+    from dataclasses import replace
+
+    ctx = app.state.runtime_context
+    config = ctx.config
+    if provider_type:
+        _use_native_embedding(
+            config,
+            provider_type=provider_type,
+            base_url=base_url,
+            model=model,
+        )
+    else:
+        config.models = replace(
+            config.models,
+            embedding=replace(
+                config.models.embedding,
+                enabled=False,
+                providers=(),
+            ),
+        )
+    # Preserve the transitional response fields for tests that still exercise
+    # the legacy endpoint shape; runtime health reads only Config.models.
+    config.llm.embedding.provider = provider_type
+    config.llm.embedding.base_url = base_url if provider_type else ""
+    config.llm.embedding.model = model if provider_type else ""
+    bundle = ctx.model_bundle
+    if service is _KEEP_EMBEDDING_SERVICE:
+        service = bundle.embedding_service
+    ctx.model_bundle = replace(
+        bundle,
+        models=config.models,
+        embedding_service=service,
+    )
+    with suppress(Exception):
+        ctx.soul_engine._embedding_service = service
 
 
 def test_source_platform_helpers_delegate_to_canonical_registry() -> None:
@@ -81,35 +185,26 @@ def _injected_soul_engine(gate: object) -> object:
 def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_path) -> None:
     from fastapi.testclient import TestClient
 
-    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+    from openbiliclaw.config import Config
     from openbiliclaw.llm.base import LLMResponse
     from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
     gate = LLMConcurrencyGate(2)
     soul = _injected_soul_engine(gate)
     controller = SimpleNamespace(llm_concurrency_gate=gate, event_hub=None)
-    config = Config(
-        data_dir=str(tmp_path),
-        llm=LLMConfig(
-            default_provider="deepseek",
-            deepseek=LLMProviderConfig(api_key="test", model="test-model"),
-        ),
-    )
+    config = Config(data_dir=str(tmp_path))
+    _use_native_ollama(config, model="test-model")
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
 
-    class ProbeRegistry:
-        default_provider = "deepseek"
-
-        def is_chat_capable(self, name: str) -> bool:
-            return name == "deepseek"
-
-        async def complete_provider(self, *args: object, **kwargs: object) -> LLMResponse:
+    class ProbeAdapter:
+        async def complete(self, *args: object, **kwargs: object) -> LLMResponse:
             assert gate.status_payload()["llm_total_active"] == 1
             assert gate.status_payload()["llm_background_active"] == 1
-            return LLMResponse(content="OK", provider="deepseek")
+            return LLMResponse(content="OK", provider="ollama")
 
     monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_llm_registry", lambda _config: ProbeRegistry()
+        "openbiliclaw.llm.connection_factory.build_chat_adapter",
+        lambda _connection, _options: ProbeAdapter(),
     )
     app = create_app(
         memory_manager=SimpleNamespace(),
@@ -177,9 +272,16 @@ def test_injected_runtime_adopts_one_sided_gate_and_rejects_conflict(monkeypatch
 
 
 def test_injected_compatibility_doubles_receive_fresh_shared_gate(monkeypatch, tmp_path) -> None:
-    from openbiliclaw.config import Config, LLMConfig
+    from dataclasses import replace
 
-    config = Config(data_dir=str(tmp_path), llm=LLMConfig(concurrency=3))
+    from openbiliclaw.config import Config
+
+    config = Config(data_dir=str(tmp_path))
+    config.models = replace(
+        config.models,
+        chat=replace(config.models.chat, concurrency=7),
+    )
+    config.llm.concurrency = 3
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
     soul = SimpleNamespace()
     controller = SimpleNamespace(event_hub=None)
@@ -192,7 +294,7 @@ def test_injected_compatibility_doubles_receive_fresh_shared_gate(monkeypatch, t
     )
     gate = app.state.runtime_context.llm_concurrency_gate
 
-    assert gate.status_payload()["llm_total_concurrency"] == 3
+    assert gate.status_payload()["llm_total_concurrency"] == 7
     assert controller.llm_concurrency_gate is gate
     assert soul._llm_concurrency_gate is gate
 
@@ -262,20 +364,28 @@ def test_failed_late_hot_reload_does_not_mutate_stable_gate_inventory(
     from openbiliclaw.llm.concurrency import InventoryPriorityState
 
     current = Config(data_dir=str(tmp_path / "data"))
-    current.llm.default_provider = "ollama"
-    current.llm.ollama.model = "llama3"
+    _use_native_ollama(current)
     current.scheduler.pool_target_count = 10
     ctx = build_runtime_context(current)
     gate = ctx.llm_concurrency_gate
     gate.update_inventory(available=10, target=10)
-    update_calls: list[tuple[int, int]] = []
-    real_update = gate.update_inventory
+    update_calls: list[tuple[int, int, int]] = []
+    real_configure = gate.configure_runtime
 
-    def record_update(*, available: int, target: int) -> None:
-        update_calls.append((available, target))
-        real_update(available=available, target=target)
+    def record_configuration(
+        total: int,
+        *,
+        inventory_available: int | None = None,
+        inventory_target: int | None = None,
+    ) -> None:
+        update_calls.append((total, int(inventory_available or 0), int(inventory_target or 0)))
+        real_configure(
+            total,
+            inventory_available=inventory_available,
+            inventory_target=inventory_target,
+        )
 
-    monkeypatch.setattr(gate, "update_inventory", record_update)
+    monkeypatch.setattr(gate, "configure_runtime", record_configuration)
 
     class LateFailure:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -283,8 +393,7 @@ def test_failed_late_hot_reload_does_not_mutate_stable_gate_inventory(
 
     monkeypatch.setattr("openbiliclaw.soul.dialogue.SocraticDialogue", LateFailure)
     proposed = Config(data_dir=str(tmp_path / "data"))
-    proposed.llm.default_provider = "ollama"
-    proposed.llm.ollama.model = "llama3"
+    _use_native_ollama(proposed)
     proposed.scheduler.pool_target_count = 30
 
     with pytest.raises(RuntimeError, match="late dialogue"):
@@ -301,28 +410,35 @@ def test_successful_hot_reload_commits_new_inventory_target(monkeypatch, tmp_pat
     from openbiliclaw.llm.concurrency import InventoryPriorityState
 
     current = Config(data_dir=str(tmp_path / "data"))
-    current.llm.default_provider = "ollama"
-    current.llm.ollama.model = "llama3"
+    _use_native_ollama(current)
     current.scheduler.pool_target_count = 10
     ctx = build_runtime_context(current)
     gate = ctx.llm_concurrency_gate
     monkeypatch.setattr(ctx.database, "count_pool_candidates", lambda **_kwargs: 10)
-    update_calls: list[tuple[int, int]] = []
-    real_update = gate.update_inventory
+    update_calls: list[tuple[int, int, int]] = []
+    real_configure = gate.configure_runtime
 
-    def record_update(*, available: int, target: int) -> None:
-        update_calls.append((available, target))
-        real_update(available=available, target=target)
+    def record_configuration(
+        total: int,
+        *,
+        inventory_available: int | None = None,
+        inventory_target: int | None = None,
+    ) -> None:
+        update_calls.append((total, int(inventory_available or 0), int(inventory_target or 0)))
+        real_configure(
+            total,
+            inventory_available=inventory_available,
+            inventory_target=inventory_target,
+        )
 
-    monkeypatch.setattr(gate, "update_inventory", record_update)
+    monkeypatch.setattr(gate, "configure_runtime", record_configuration)
     proposed = Config(data_dir=str(tmp_path / "data"))
-    proposed.llm.default_provider = "ollama"
-    proposed.llm.ollama.model = "llama3"
+    _use_native_ollama(proposed)
     proposed.scheduler.pool_target_count = 30
 
     ctx._rebuild_components(proposed)
 
-    assert update_calls[-1] == (10, 30)
+    assert update_calls[-1] == (4, 10, 30)
     assert gate.inventory_priority_state is InventoryPriorityState.REFILL
     assert ctx.config is proposed
 
@@ -335,8 +451,7 @@ def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
     from openbiliclaw.llm.concurrency import InventoryPriorityState
 
     config = Config(data_dir=str(tmp_path / "data"))
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    _use_native_ollama(config)
     config.scheduler.pool_target_count = 10
     ctx = build_runtime_context(config)
     ctx._rebuild_components(config)
@@ -374,8 +489,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
     from openbiliclaw.llm.concurrency import InventoryPriorityState
 
     config = Config(data_dir=str(tmp_path / "data"))
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    _use_native_ollama(config)
     config.scheduler.pool_target_count = 30
     ctx = build_runtime_context(config)
     for index in range(15):
@@ -391,8 +505,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
         )
 
     first = Config(data_dir=str(tmp_path / "data"))
-    first.llm.default_provider = "ollama"
-    first.llm.ollama.model = "llama3"
+    _use_native_ollama(first)
     first.scheduler.pool_target_count = 30
     ctx._rebuild_components(first)
     old_engine = ctx.recommendation_engine
@@ -401,8 +514,7 @@ async def test_old_engine_commit_callback_uses_current_controller_after_two_relo
     assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.REFILL
 
     second = Config(data_dir=str(tmp_path / "data"))
-    second.llm.default_provider = "ollama"
-    second.llm.ollama.model = "llama3"
+    _use_native_ollama(second)
     second.scheduler.pool_target_count = 10
     ctx._rebuild_components(second)
     assert ctx.recommendation_engine._pool_inventory_commit_callback is old_callback
@@ -428,8 +540,7 @@ async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch
             return True
 
     config = Config(data_dir=str(tmp_path / "data"))
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    _use_native_ollama(config)
     config.scheduler.pool_target_count = 30
     hub = EventHub()
     built = build_runtime_context(config, event_hub=hub)
@@ -459,16 +570,14 @@ async def test_api_pool_commit_publication_survives_multiple_reloads(monkeypatch
     ctx = app.state.runtime_context
 
     first = Config(data_dir=str(tmp_path / "data"))
-    first.llm.default_provider = "ollama"
-    first.llm.ollama.model = "llama3"
+    _use_native_ollama(first)
     first.scheduler.pool_target_count = 30
     ctx._rebuild_components(first)
     first_reloaded_engine = ctx.recommendation_engine
     first_callback = first_reloaded_engine._pool_inventory_commit_callback
 
     second = Config(data_dir=str(tmp_path / "data"))
-    second.llm.default_provider = "ollama"
-    second.llm.ollama.model = "llama3"
+    _use_native_ollama(second)
     second.scheduler.pool_target_count = 10
     ctx._rebuild_components(second)
     current_callback = ctx.recommendation_engine._pool_inventory_commit_callback
@@ -738,8 +847,7 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     project_root = tmp_path / "runtime"
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     cfg = Config()
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.model = "llama3"
+    _use_native_ollama(cfg)
     save_config(cfg, project_root / "config.toml")
     yield
 
@@ -1002,8 +1110,20 @@ class TestBackendAPI:
         ctx = RuntimeContext()
         original_presence = ctx.presence
 
-        def _fake_rebuild_components(self: RuntimeContext, new_config: Config) -> None:
+        def _fake_rebuild_components(
+            self: RuntimeContext,
+            new_config: Config,
+            **_kwargs: object,
+        ) -> object:
+            from openbiliclaw.api.runtime_context import RuntimeModelBundle
+
             self.config = new_config
+            return RuntimeModelBundle(
+                revision="test",
+                chat_route=object(),
+                llm_service=SimpleNamespace(concurrency_gate=None),
+                models=new_config.models,
+            )
 
         monkeypatch.setattr(RuntimeContext, "_rebuild_components", _fake_rebuild_components)
 
@@ -1563,8 +1683,6 @@ class TestBackendAPI:
         self,
         monkeypatch,
     ) -> None:
-        from types import SimpleNamespace
-
         import openbiliclaw.api.app as app_module
         import openbiliclaw.bilibili.api as bilibili_api_module
         import openbiliclaw.llm.service as llm_service_module
@@ -1600,14 +1718,12 @@ class TestBackendAPI:
                 registry: object,
                 memory: object,
                 usage_recorder: object | None = None,
-                module_overrides: object | None = None,
                 concurrency: int = 1,
                 concurrency_gate: object | None = None,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
-                self.module_overrides = module_overrides
                 self.concurrency = concurrency
                 self.concurrency_gate = concurrency_gate
 
@@ -1643,22 +1759,24 @@ class TestBackendAPI:
         assert created_memories[0].initialized == 1
         assert created_memories[0].database is created_databases[0]
 
-    def test_runtime_context_wires_llm_module_overrides(self, tmp_path: Path) -> None:
+    def test_runtime_context_uses_one_route_despite_legacy_routing_fields(
+        self, tmp_path: Path
+    ) -> None:
         from openbiliclaw.api.runtime_context import build_runtime_context
         from openbiliclaw.config import Config
 
         config = Config(data_dir=str(tmp_path / "data"))
-        config.llm.default_provider = "ollama"
-        config.llm.ollama.model = "llama3"
+        _use_native_ollama(config)
         config.llm.soul.provider = "ollama"
         config.llm.soul.model = "llama3-soul"
         config.llm.discovery.model = "llama3-discovery"
 
         ctx = build_runtime_context(config)
 
-        assert ctx.llm_service.module_overrides["soul"].model == "llama3-soul"
-        assert ctx.llm_service.module_overrides["discovery"].model == "llama3-discovery"
-        assert ctx.soul_engine._llm_service.module_overrides["soul"].provider == "ollama"
+        route = ctx.model_bundle.chat_route
+        assert ctx.llm_service.registry is route
+        assert ctx.soul_engine._llm_service.registry is route
+        assert ctx.discovery_engine._llm_service.registry is route
 
     def test_runtime_context_wires_reddit_producer_when_enabled(self, tmp_path: Path) -> None:
         from openbiliclaw.api.runtime_context import build_runtime_context
@@ -1666,8 +1784,7 @@ class TestBackendAPI:
         from openbiliclaw.runtime.reddit_producer import RedditDiscoveryProducer
 
         config = Config(data_dir=str(tmp_path / "data"))
-        config.llm.default_provider = "ollama"
-        config.llm.ollama.model = "llama3"
+        _use_native_ollama(config)
         config.sources.reddit.enabled = True
         config.scheduler.pool_source_shares["reddit"] = 2
 
@@ -1688,8 +1805,7 @@ class TestBackendAPI:
         from openbiliclaw.config import Config
 
         config = Config(data_dir=str(tmp_path / "data"))
-        config.llm.default_provider = "ollama"
-        config.llm.ollama.model = "llama3"
+        _use_native_ollama(config)
         config.sources.douyin.enabled = True
         config.sources.youtube.enabled = True
         config.sources.zhihu.enabled = True
@@ -1742,8 +1858,6 @@ class TestBackendAPI:
         self,
         monkeypatch,
     ) -> None:
-        from types import SimpleNamespace
-
         import openbiliclaw.api.app as app_module
         import openbiliclaw.bilibili.api as bilibili_api_module
         import openbiliclaw.discovery.engine as discovery_engine_module
@@ -1823,14 +1937,12 @@ class TestBackendAPI:
                 registry: object,
                 memory: object,
                 usage_recorder: object | None = None,
-                module_overrides: object | None = None,
                 concurrency: int = 1,
                 concurrency_gate: object | None = None,
             ) -> None:
                 self.registry = registry
                 self.memory = memory
                 self.usage_recorder = usage_recorder
-                self.module_overrides = module_overrides
                 self.concurrency = concurrency
                 self.concurrency_gate = concurrency_gate
 
@@ -1928,50 +2040,46 @@ class TestBackendAPI:
                 self.llm_service = llm_service
                 self.session = session
 
-        fake_config = SimpleNamespace(
-            data_path=Path("/tmp/openbiliclaw-test-data"),
-            bilibili=SimpleNamespace(
-                cookie="", proxy="", browser_executable="", browser_headed=False
-            ),
-            llm=SimpleNamespace(concurrency=3),
-            sources=SimpleNamespace(
-                browser_cdp_url="",
-                browser_headed=False,
-                bilibili=SimpleNamespace(enabled=True),
-                xiaohongshu=SimpleNamespace(
-                    enabled=False,
-                    daily_search_budget=20,
-                    daily_creator_budget=10,
-                    task_interval_seconds=45,
-                ),
-                douyin=SimpleNamespace(enabled=False),
-                youtube=SimpleNamespace(enabled=False),
-                twitter=SimpleNamespace(enabled=False),
-            ),
-            scheduler=SimpleNamespace(
-                enabled=True,
-                pause_on_extension_disconnect=False,
-                pool_target_count=300,
-                account_sync_interval_hours=24,
-                refresh_check_interval_seconds=77,
-                signal_event_threshold=9,
-                trending_refresh_hours=5,
-                explore_refresh_hours=18,
-                discovery_limit=17,
-                proactive_push_interval_seconds=155,
-                speculation_interval_minutes=22,
-                speculation_ttl_days=8,
-                speculation_cooldown_days=9,
-                speculation_confirmation_threshold=4,
-                speculation_max_active=6,
-                speculation_max_primary_interests=17,
-                speculation_max_secondary_interests=66,
-                speculator_idle_interval_minutes=11,
-            ),
+        from dataclasses import replace
+
+        from openbiliclaw.config import Config
+
+        fake_config = Config(data_dir="/tmp/openbiliclaw-test-data")
+        _use_native_ollama(fake_config)
+        fake_config.models = replace(
+            fake_config.models,
+            chat=replace(fake_config.models.chat, concurrency=3),
         )
+        fake_config.sources.bilibili.enabled = True
+        fake_config.sources.xiaohongshu.enabled = False
+        fake_config.sources.xiaohongshu.daily_search_budget = 20
+        fake_config.sources.xiaohongshu.daily_creator_budget = 10
+        fake_config.sources.xiaohongshu.task_interval_seconds = 45
+        fake_config.sources.douyin.enabled = False
+        fake_config.sources.youtube.enabled = False
+        fake_config.sources.twitter.enabled = False
+        fake_config.scheduler.pool_target_count = 300
+        fake_config.scheduler.account_sync_interval_hours = 24
+        fake_config.scheduler.refresh_check_interval_seconds = 77
+        fake_config.scheduler.signal_event_threshold = 9
+        fake_config.scheduler.trending_refresh_hours = 5
+        fake_config.scheduler.explore_refresh_hours = 18
+        fake_config.scheduler.discovery_limit = 17
+        fake_config.scheduler.proactive_push_interval_seconds = 155
+        fake_config.scheduler.speculation_interval_minutes = 22
+        fake_config.scheduler.speculation_ttl_days = 8
+        fake_config.scheduler.speculation_cooldown_days = 9
+        fake_config.scheduler.speculation_confirmation_threshold = 4
+        fake_config.scheduler.speculation_max_active = 6
+        fake_config.scheduler.speculation_max_primary_interests = 17
+        fake_config.scheduler.speculation_max_secondary_interests = 66
+        fake_config.scheduler.speculator_idle_interval_minutes = 11
 
         monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
-        monkeypatch.setattr("openbiliclaw.llm.build_llm_registry", lambda config: "registry")
+        monkeypatch.setattr(
+            "openbiliclaw.llm.connection_factory.build_chat_adapter",
+            lambda _connection, _options: object(),
+        )
         monkeypatch.setattr("openbiliclaw.bilibili.auth.resolve_runtime_cookie", lambda **_: "")
         monkeypatch.setattr(
             discovery_engine_module,
@@ -2051,7 +2159,10 @@ class TestBackendAPI:
         runtime_context = app.state.runtime_context
         old_service = runtime_context.llm_service
         shared_gate = old_service.concurrency_gate
-        fake_config.llm.concurrency = 2
+        fake_config.models = replace(
+            fake_config.models,
+            chat=replace(fake_config.models.chat, concurrency=2),
+        )
 
         runtime_context._rebuild_components(fake_config)
 
@@ -2895,8 +3006,7 @@ class TestBackendAPI:
         from openbiliclaw.config import Config
 
         app.state.runtime_context.config = Config()
-        app.state.runtime_context.config.llm.embedding.provider = "ollama"
-        app.state.runtime_context.config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
+        _use_native_embedding(app.state.runtime_context.config)
         client = TestClient(app)
 
         response = client.get("/api/health")
@@ -2940,8 +3050,11 @@ class TestBackendAPI:
         from openbiliclaw.config import Config
 
         app.state.runtime_context.config = Config()
-        app.state.runtime_context.config.llm.embedding.provider = provider
-        app.state.runtime_context.config.llm.embedding.base_url = base_url
+        _use_native_embedding(
+            app.state.runtime_context.config,
+            provider_type=provider,
+            base_url=base_url,
+        )
         client = TestClient(app)
 
         response = client.get("/api/health")
@@ -4424,7 +4537,7 @@ class TestBackendAPI:
                     }
                 ]
 
-        app = create_app(database=FakeDatabase())
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
         client = TestClient(app)
 
         response = client.get("/api/recommendations")
@@ -4485,7 +4598,7 @@ class TestBackendAPI:
                 )
                 return base
 
-        app = create_app(database=FakeDatabase())
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
         client = TestClient(app)
 
         response = client.get("/api/recommendations")
@@ -4531,7 +4644,7 @@ class TestBackendAPI:
                     },
                 ]
 
-        app = create_app(database=FakeDatabase())
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
         client = TestClient(app)
 
         response = client.get("/api/recommendations")
@@ -5783,7 +5896,7 @@ class TestBackendAPI:
 
         memory = FakeMemoryManager()
         database = FakeDatabase()
-        app = create_app(memory_manager=memory, database=database)
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -5836,7 +5949,7 @@ class TestBackendAPI:
 
         memory = FakeMemoryManager()
         database = FakeDatabase()
-        app = create_app(memory_manager=memory, database=database)
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -5888,7 +6001,9 @@ class TestBackendAPI:
                 return None
 
         memory = FakeMemoryManager()
-        client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+        client = TestClient(
+            create_app(memory_manager=memory, database=FakeDatabase(), soul_engine=object())
+        )
 
         response = client.post(
             "/api/feedback",
@@ -5930,7 +6045,9 @@ class TestBackendAPI:
                 return None
 
         memory = FakeMemoryManager()
-        client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+        client = TestClient(
+            create_app(memory_manager=memory, database=FakeDatabase(), soul_engine=object())
+        )
         response = client.post(
             "/api/feedback",
             json={"recommendation_id": 8, "feedback_type": "dismiss", "note": ""},
@@ -5947,7 +6064,7 @@ class TestBackendAPI:
             def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object] | None:
                 return {"id": recommendation_id, "bvid": "BV1REC", "title": "x"}
 
-        app = create_app(memory_manager=object(), database=FakeDatabase())
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -5968,7 +6085,7 @@ class TestBackendAPI:
             def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object] | None:
                 return {"id": recommendation_id, "bvid": "BV1REC", "title": "讲透城市与建筑"}
 
-        app = create_app(memory_manager=object(), database=FakeDatabase())
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -5989,7 +6106,7 @@ class TestBackendAPI:
             def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object] | None:
                 return None
 
-        app = create_app(memory_manager=object(), database=FakeDatabase())
+        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -9062,7 +9179,7 @@ class TestBackendAPI:
         app = create_app(
             memory_manager=FakeMemoryManager(),
             database=FakeDatabase(),
-            soul_engine=None,
+            soul_engine=SimpleNamespace(),
         )
         client = TestClient(app)
 
@@ -9821,6 +9938,7 @@ class TestBackendAPI:
                     "embedding": {
                         "provider": "openai",
                         "model": "text-embedding-3-small",
+                        "api_key": "sk-test-embedding",
                         "similarity_threshold": 0.78,
                         "fallback_enabled": True,
                     },
@@ -9857,6 +9975,7 @@ class TestBackendAPI:
                 ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
             ),
         )
+        _use_native_ollama(cfg)
         cfg.sources.twitter.enabled = False
         save_config(cfg, config_path)
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
@@ -9902,6 +10021,7 @@ class TestBackendAPI:
                 ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
             ),
         )
+        _use_native_ollama(cfg)
         save_config(cfg, config_path)
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
         monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
@@ -10119,6 +10239,13 @@ class TestEmbeddingAndCompatProviderE2E:
         from openbiliclaw.config import save_config
 
         config_path = tmp_path / "config.toml"
+        if (
+            initial_cfg.llm.default_provider == "deepseek"
+            and not initial_cfg.llm.deepseek.api_key
+            and initial_cfg.llm.openai.api_key
+        ):
+            initial_cfg.llm.default_provider = "openai"
+        _use_native_ollama(initial_cfg, model="test-chat")
         save_config(initial_cfg, config_path)
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
 
@@ -10342,7 +10469,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 },
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 400
 
         issues = resp.json()["config"]["issues"]
         fields = [i["field"] for i in issues]
@@ -11751,7 +11878,11 @@ class TestGuidedInitEndpoints:
             data_dir = tmp_path / "data"
             data_dir.mkdir()
             app.state.runtime_context.config.data_dir = str(data_dir)
-            app.state.runtime_context.config.llm.embedding.provider = embedding_provider
+            _set_app_native_embedding(
+                app,
+                provider_type=embedding_provider,
+                service=None,
+            )
         if prereqs is not None:
             app.state.runtime_context._init_prereqs = prereqs
         return app, db
@@ -11885,7 +12016,11 @@ class TestGuidedInitEndpoints:
             prereqs=prereqs,
             embedding_provider="ollama",
         )
-        app.state.runtime_context.soul_engine._embedding_service = _SlowProbeService()
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            service=_SlowProbeService(),
+        )
         app.state.runtime_context.config.autostart.manage_ollama = False
 
         with TestClient(app) as client:
@@ -12484,8 +12619,12 @@ class TestGuidedInitEndpoints:
             prereqs=prereqs,
             embedding_provider="ollama",
         )
-        app.state.runtime_context.soul_engine._embedding_service = service
-        app.state.runtime_context.config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            service=service,
+        )
 
         with TestClient(app) as client:
             health = client.get("/api/health").json()
@@ -12659,11 +12798,11 @@ class TestEmbeddingDiagnosisAndRepair:
             data_dir = tmp_path / "data"
             data_dir.mkdir(exist_ok=True)
             app.state.runtime_context.config.data_dir = str(data_dir)
-            app.state.runtime_context.config.llm.embedding.provider = embedding_provider
-            if embedding_provider == "ollama":
-                # Every real write path (CLI setup, popup banner, settings
-                # page) sets the model together with the provider.
-                app.state.runtime_context.config.llm.embedding.model = "bge-m3"
+            _set_app_native_embedding(
+                app,
+                provider_type=embedding_provider,
+                service=None,
+            )
         if prereqs is not None:
             app.state.runtime_context._init_prereqs = prereqs
         return app, db
@@ -12834,7 +12973,12 @@ class TestEmbeddingDiagnosisAndRepair:
         monkeypatch.setattr(od, "diagnose_ollama_embedding", fake_diagnose)
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
         app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
-        app.state.runtime_context.config.llm.embedding.base_url = base_url
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url=base_url,
+            service=None,
+        )
 
         with TestClient(app) as client:
             response = client.post("/api/init", json={"sources": ["bilibili"]})
@@ -12863,7 +13007,12 @@ class TestEmbeddingDiagnosisAndRepair:
         monkeypatch.setattr(od, "pull_ollama_model", fake_pull)
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
         app, _ = self._make_app(tmp_path, embedding_provider="ollama", prereqs=prereqs)
-        app.state.runtime_context.config.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
 
         with TestClient(app) as client:
             response = client.post("/api/init", json={"sources": ["bilibili"]})
@@ -13168,7 +13317,12 @@ class TestEmbeddingDiagnosisAndRepair:
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
         cfg = app.state.runtime_context.config
         cfg.autostart.manage_ollama = manage_ollama
-        cfg.llm.embedding.base_url = embedding_base_url
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url=embedding_base_url,
+            service=None,
+        )
         with TestClient(app) as client:
             resp = client.post("/api/embedding/repair")
         assert resp.status_code == 409
@@ -13356,8 +13510,12 @@ class TestEmbeddingDiagnosisAndRepair:
         monkeypatch.setattr(sup, "start_managed_ollama_at", fake_start_at)
         monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
-        cfg = app.state.runtime_context.config
-        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
         with TestClient(app) as client:
             resp = client.post("/api/embedding/repair")
         assert resp.status_code == 202
@@ -13390,8 +13548,12 @@ class TestEmbeddingDiagnosisAndRepair:
         )
         monkeypatch.setattr(sup, "restart_managed_ollama", fake_restart)
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
-        cfg = app.state.runtime_context.config
-        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
         with TestClient(app) as client:
             resp = client.post("/api/embedding/repair")
         assert resp.status_code == 409
@@ -13418,8 +13580,12 @@ class TestEmbeddingDiagnosisAndRepair:
         monkeypatch.setattr(sup, "start_managed_ollama_at", lambda d, h: start_calls.append("s"))
         monkeypatch.setattr(sup, "_ollama_start_serve_background", lambda: start_calls.append("s"))
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
-        cfg = app.state.runtime_context.config
-        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
         with TestClient(app) as client:
             resp = client.post("/api/embedding/repair")
         assert resp.status_code == 409
@@ -13452,7 +13618,12 @@ class TestEmbeddingDiagnosisAndRepair:
         app, _ = self._make_app(tmp_path, embedding_provider="ollama")
         cfg = app.state.runtime_context.config
         cfg.autostart.manage_ollama = False
-        cfg.llm.embedding.base_url = "http://127.0.0.1:11435/v1"
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
         with TestClient(app) as client:
             resp = client.post("/api/embedding/repair")
         assert resp.status_code == 409
@@ -13801,28 +13972,27 @@ class TestLlmFallbackConfigValidationAndProbe:
         calls: list[tuple[str, object]] = []
         runtime_gate = None
 
-        class FakeRegistry:
-            available_providers = ["openai", "deepseek"]
-            default_provider = "openai"
+        class FakeAdapter:
+            def __init__(self, connection: object) -> None:
+                self.connection = connection
 
-            def is_chat_capable(self, name: str) -> bool:
-                return name in ("openai", "deepseek")
-
-            async def complete_provider(self, provider_name, messages, **kwargs):  # noqa: ARG002
+            async def complete(self, messages, **kwargs):  # noqa: ARG002
                 assert runtime_gate is not None
                 status = runtime_gate.status_payload()
                 assert status["llm_total_active"] == 1
                 assert status["llm_background_active"] == 1
-                calls.append((provider_name, kwargs.get("model")))
+                connection_id = str(getattr(self.connection, "id", ""))
+                model = str(getattr(self.connection, "model", ""))
+                calls.append((connection_id, model))
                 return LLMResponse(
                     content="OK",
-                    provider=provider_name,
-                    model=str(kwargs.get("model") or ""),
+                    provider=connection_id,
+                    model=model,
                 )
 
         monkeypatch.setattr(
-            "openbiliclaw.llm.registry.build_llm_registry",
-            lambda probe_cfg: FakeRegistry(),
+            "openbiliclaw.llm.connection_factory.build_chat_adapter",
+            lambda connection, _options: FakeAdapter(connection),
         )
         cfg = self._base_config()
         client, config_path = self._client(monkeypatch, tmp_path, cfg)
@@ -13841,9 +14011,9 @@ class TestLlmFallbackConfigValidationAndProbe:
         body = response.json()
         assert body["ok"] is True, body
         assert body["kind"] == "llm_fallback"
-        assert body["provider"] == "deepseek"
+        assert body["provider"] == "openai_compatible"
         # Exact single-provider probe — never the fallback chain.
-        assert [provider for provider, _model in calls] == ["deepseek"]
+        assert [connection_id for connection_id, _model in calls] == ["legacy-chat-deepseek"]
         assert runtime_gate.classify("api.config_probe") is LLMTrafficClass.MAINTENANCE
         assert runtime_gate.status_payload()["llm_total_active"] == 0
         assert config_path.read_bytes() == before
@@ -13876,7 +14046,7 @@ class TestLlmFallbackConfigValidationAndProbe:
         assert response.status_code == 200
         body = response.json()
         assert body["ok"] is False
-        assert "same as the default" in body["error"]
+        assert "not configured" in body["error"].lower()
 
 
 class TestKeywordGenerationMode:
@@ -13955,12 +14125,14 @@ class TestKeywordGenerationModeWrite:
         # unconfigured default deepseek provider makes the handler return 400).
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 
-        return Config(
+        config = Config(
             llm=LLMConfig(
                 default_provider="ollama",
                 ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
             ),
         )
+        _use_native_ollama(config)
+        return config
 
     @staticmethod
     def _client(monkeypatch: pytest.MonkeyPatch, tmp_path, cfg):  # type: ignore[no-untyped-def]

@@ -10,6 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
+from openbiliclaw.config import Config
+from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 from openbiliclaw.saved_sync.models import (
     NativeSaveCapability,
     NativeSaveResult,
@@ -24,6 +26,22 @@ from openbiliclaw.storage.database import Database
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+
+def _use_native_ollama(config: Config) -> None:
+    config.models = ModelConfig(
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="ollama-main",
+                    name="Ollama",
+                    type="ollama",
+                    model="llama3",
+                    base_url="http://127.0.0.1:11434/v1",
+                ),
+            )
+        )
+    )
 
 
 class _FakeBilibiliAdapter:
@@ -858,8 +876,6 @@ async def test_runtime_rebuild_cancels_inflight_saved_sync_before_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openbiliclaw.api.runtime_context import RuntimeContext
-    from openbiliclaw.config import Config
-
     database = Database(tmp_path / "runtime-cancel.db")
     database.initialize()
     context = RuntimeContext(database=database)
@@ -878,13 +894,26 @@ async def test_runtime_rebuild_cancels_inflight_saved_sync_before_swap(
     )
     await adapter.started.wait()
     replacement = object()
+    candidate = object()
 
-    def fake_rebuild(self: RuntimeContext, config: Config) -> None:
-        del config
+    def fake_rebuild(
+        self: RuntimeContext,
+        config: Config,
+        *,
+        model_bundle: object | None = None,
+        publish: bool = True,
+    ) -> object:
+        del self, config, model_bundle
+        assert publish is False
         assert adapter.cancelled.is_set()
+        return candidate
+
+    def fake_publish(self: RuntimeContext, bundle: object) -> None:
+        assert bundle is candidate
         self.saved_sync_service = replacement
 
     monkeypatch.setattr(RuntimeContext, "_rebuild_components", fake_rebuild)
+    monkeypatch.setattr(RuntimeContext, "_publish_model_bundle", fake_publish)
 
     await context.rebuild_from_config(Config())
 
@@ -898,7 +927,6 @@ async def test_runtime_rebuild_hands_claimed_extension_job_to_detached_watchdog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openbiliclaw.api.runtime_context import RuntimeContext
-    from openbiliclaw.config import Config
     from openbiliclaw.saved_sync.adapters.extension import (
         build_extension_native_save_adapters,
     )
@@ -938,18 +966,31 @@ async def test_runtime_rebuild_hands_claimed_extension_job_to_detached_watchdog(
     assert claimed is not None
 
     replacement: SavedSyncService | None = None
+    candidate = object()
 
-    def fake_rebuild(self: RuntimeContext, config: Config) -> None:
+    def fake_rebuild(
+        self: RuntimeContext,
+        config: Config,
+        *,
+        model_bundle: object | None = None,
+        publish: bool = True,
+    ) -> object:
         nonlocal replacement
-        del config
+        del config, model_bundle
+        assert publish is False
         assert self.extension_native_save_broker is broker
         replacement = SavedSyncService(
             database,
             NativeSaveRouter(build_extension_native_save_adapters(broker)),
         )
+        return candidate
+
+    def fake_publish(self: RuntimeContext, bundle: object) -> None:
+        assert bundle is candidate
         self.saved_sync_service = replacement
 
     monkeypatch.setattr(RuntimeContext, "_rebuild_components", fake_rebuild)
+    monkeypatch.setattr(RuntimeContext, "_publish_model_bundle", fake_publish)
 
     await context.rebuild_from_config(Config())
 
@@ -977,13 +1018,13 @@ def test_runtime_construction_failure_keeps_existing_saved_sync_and_bilibili_cli
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openbiliclaw.api.runtime_context import build_runtime_context
-    from openbiliclaw.config import Config
     from openbiliclaw.recommendation import engine as recommendation_module
 
     config = Config(data_dir=str(tmp_path / "runtime-atomic"))
     config.scheduler.enabled = False
     config.llm.default_provider = "ollama"
     config.llm.ollama.model = "llama3"
+    _use_native_ollama(config)
     context = build_runtime_context(config)
     old_service = context.saved_sync_service
     old_client = context.bilibili_client
@@ -1008,12 +1049,12 @@ async def test_runtime_context_rebuilds_tracked_bilibili_saved_sync_service(
     tmp_path: Path,
 ) -> None:
     from openbiliclaw.api.runtime_context import build_runtime_context
-    from openbiliclaw.config import Config
 
     config = Config(data_dir=str(tmp_path / "runtime-data"))
     config.scheduler.enabled = False
     config.llm.default_provider = "ollama"
     config.llm.ollama.model = "llama3"
+    _use_native_ollama(config)
     context = build_runtime_context(config)
     first_service = context.saved_sync_service
     first_client = context.bilibili_client

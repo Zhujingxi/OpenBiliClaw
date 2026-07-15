@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from openbiliclaw.api.runtime_context import build_youtube_discovery_producer
+from openbiliclaw.api.runtime_context import (
+    build_runtime_model_bundle,
+    build_youtube_discovery_producer,
+)
 from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.bilibili.auth import resolve_runtime_cookie
 from openbiliclaw.config import Config, load_config
-from openbiliclaw.config import llm_concurrency_from_config as _llm_concurrency_from_config
 from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.discovery.strategies.strategies import (
@@ -19,11 +21,9 @@ from openbiliclaw.discovery.strategies.strategies import (
     SearchStrategy,
     TrendingStrategy,
 )
-from openbiliclaw.llm import build_llm_registry
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
-from openbiliclaw.llm.service import LLMService, module_overrides_from_config
-from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
+from openbiliclaw.model_config import compute_model_revision
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.account_sync import AccountSyncService
 from openbiliclaw.runtime.presence import PresenceTracker
@@ -33,6 +33,9 @@ from openbiliclaw.soul.engine import SoulEngine
 from openbiliclaw.storage.database import Database
 
 from .operations import OpenClawAdapter
+
+if TYPE_CHECKING:
+    from openbiliclaw.llm.service import LLMService
 
 
 @dataclass(slots=True)
@@ -54,9 +57,7 @@ class OpenClawAdapterServices:
 def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     """Build the shared service bundle for the OpenClaw adapter."""
     config = load_config()
-    llm_registry = build_llm_registry(config)
-    module_overrides = module_overrides_from_config(config)
-    llm_concurrency = _llm_concurrency_from_config(config)
+    llm_concurrency = config.models.chat.concurrency
 
     database = Database(config.data_path / "openbiliclaw.db")
     database.initialize()
@@ -79,13 +80,22 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
             target=int(config.scheduler.pool_target_count),
         )
 
-    usage_recorder = UsageRecorder(sink=database)
+    model_bundle = build_runtime_model_bundle(
+        config.models,
+        compute_model_revision(config.models),
+        memory=memory_manager,
+        usage_sink=database,
+        concurrency_gate=llm_gate,
+    )
+    llm_registry = model_bundle.chat_route
+    llm_service = model_bundle.llm_service
+    embedding_service = model_bundle.embedding_service
+    usage_recorder = llm_service.usage_recorder
 
     soul_engine = SoulEngine(
         llm=llm_registry,
         memory=memory_manager,
         usage_recorder=usage_recorder,
-        module_overrides=module_overrides,
         llm_concurrency=llm_concurrency,
         llm_concurrency_gate=llm_gate,
         speculation_interval_minutes=config.scheduler.speculation_interval_minutes,
@@ -127,18 +137,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
             getattr(config.scheduler, "profile_consolidation_archive_enabled", True)
         ),
     )
-    llm_service = LLMService(
-        registry=llm_registry,
-        memory=memory_manager,
-        usage_recorder=usage_recorder,
-        module_overrides=module_overrides,
-        concurrency=llm_concurrency,
-        concurrency_gate=llm_gate,
-    )
-    from openbiliclaw.llm.registry import build_embedding_service
     from openbiliclaw.recommendation.curator import PoolCurator
-
-    embedding_service = build_embedding_service(config, llm_registry)
 
     curator = PoolCurator(database)
     recommendation_engine = RecommendationEngine(

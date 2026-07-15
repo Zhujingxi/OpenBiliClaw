@@ -24,14 +24,14 @@ required.
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import logging
 import os
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from openbiliclaw.config import llm_concurrency_from_config as _llm_concurrency_from_config
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.presence import background_llm_work_allowed as _gate
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
@@ -255,13 +255,106 @@ def build_youtube_discovery_producer(
 
 
 @dataclass(frozen=True)
-class _StagedModelCandidate:
-    """Task-7-only model candidate; Task 8 owns production bundle cutover."""
+class _RuntimeModelPublication:
+    """Exact consumer graph published together with one model bundle."""
+
+    config: Any = field(repr=False)
+    llm_concurrency_gate: Any = field(repr=False)
+    llm_concurrency: int
+    inventory_available: int | None
+    bilibili_client: object = field(repr=False)
+    saved_sync_service: object = field(repr=False)
+    soul_engine: object = field(repr=False)
+    dialogue: object = field(repr=False)
+    discovery_engine: object = field(repr=False)
+    recommendation_engine: object = field(repr=False)
+    runtime_controller: object = field(repr=False)
+    account_sync_service: object = field(repr=False)
+    auto_update_service: object = field(repr=False)
+
+
+@dataclass(frozen=True)
+class RuntimeModelBundle:
+    """One immutable model route and the service graph built around it.
+
+    New calls obtain this bundle through :class:`RuntimeContext`; callers that
+    already captured an older service keep using its older ordered route.  The
+    private publication snapshot lets a failed persistence transaction restore
+    the exact previous consumer identities, not reconstructed equivalents.
+    """
 
     revision: str
-    models: ModelConfig = field(repr=False)
-    chat_route: object = field(repr=False)
-    embedding_service: object | None = field(default=None, repr=False)
+    models: ModelConfig = field(repr=False, compare=False)
+    chat_route: Any = field(repr=False)
+    llm_service: Any = field(repr=False)
+    embedding_service: Any | None = field(default=None, repr=False)
+    _publication: _RuntimeModelPublication | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+
+
+def build_runtime_model_bundle(
+    models: ModelConfig,
+    revision: str,
+    *,
+    memory: Any,
+    usage_sink: Any | None,
+    concurrency_gate: Any,
+    environment: Any | None = None,
+) -> RuntimeModelBundle:
+    """Build every Chat and embedding adapter before exposing a bundle."""
+    from openbiliclaw.llm.connection_factory import (
+        AdapterRuntimeOptions,
+        build_chat_adapter,
+    )
+    from openbiliclaw.llm.registry import RegistryBuildError, build_ordered_embedding_service
+    from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+    from openbiliclaw.llm.service import LLMService
+    from openbiliclaw.llm.usage_recorder import UsageRecorder
+
+    options = AdapterRuntimeOptions(
+        timeout_seconds=float(models.chat.timeout_seconds),
+        environment=os.environ if environment is None else environment,
+    )
+    try:
+        connections = tuple(
+            RouteConnection(
+                connection=connection,
+                adapter=build_chat_adapter(connection, options),
+            )
+            for connection in models.chat.connections
+        )
+        embedding_service = build_ordered_embedding_service(
+            models.embedding,
+            revision=revision,
+            runtime_options=options,
+        )
+    except RegistryBuildError:
+        raise
+    except Exception as exc:
+        raise RegistryBuildError(f"Model route construction failed: {exc}") from exc
+    chat_route = OrderedLLMRoute(
+        connections,
+        revision=revision,
+        timeout_seconds=float(models.chat.timeout_seconds),
+    )
+    usage_recorder = UsageRecorder(sink=usage_sink)
+    llm_service = LLMService(
+        registry=chat_route,
+        memory=memory,
+        usage_recorder=usage_recorder,
+        concurrency=models.chat.concurrency,
+        concurrency_gate=concurrency_gate,
+    )
+    return RuntimeModelBundle(
+        revision=revision,
+        models=models,
+        chat_route=chat_route,
+        llm_service=llm_service,
+        embedding_service=embedding_service,
+    )
 
 
 @dataclass
@@ -297,10 +390,10 @@ class RuntimeContext:
     # (review R2 A-1). All three construct paths inherit it via the property.
     _init_coordinator: Any = field(default=None, init=False, repr=False, compare=False)
     _init_prereqs: Any = field(default=None, init=False, repr=False, compare=False)
-    # Staged model-only pointer used by ModelConfigService transactions. Task 8
-    # will compose and wire the production RuntimeModelBundle; this pointer is
-    # deliberately separate from the legacy swappable component fields below.
-    _model_candidate: object | None = field(default=None, init=False, repr=False, compare=False)
+    # One immutable model graph is the source of truth for every new caller.
+    # ``llm_registry`` and ``llm_service`` below remain compatibility aliases
+    # and are always published from this same bundle.
+    model_bundle: RuntimeModelBundle | None = field(default=None, init=False, repr=False)
     _model_swap_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
         init=False,
@@ -360,66 +453,67 @@ class RuntimeContext:
             )
 
     @property
-    def current_model_candidate(self) -> object | None:
+    def current_model_candidate(self) -> RuntimeModelBundle | None:
         """Return the immutable candidate identity held by new model callers."""
-        return self._model_candidate
+        return self.model_bundle
 
     async def build_model_candidate(
         self,
         models: ModelConfig,
         revision: str,
-    ) -> object:
-        """Build every model adapter/route before a persistence transaction.
+    ) -> RuntimeModelBundle:
+        """Build the complete candidate graph without mutating live consumers."""
+        from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
-        This intentionally does not rewire production consumers; Task 8 owns
-        that cutover. It proves the complete native model route is constructible
-        before Task 7 writes bytes to disk.
-        """
-        from openbiliclaw.llm.connection_factory import (
-            AdapterRuntimeOptions,
-            build_chat_adapter,
+        gate = self.llm_concurrency_gate or LLMConcurrencyGate(models.chat.concurrency)
+        candidate = build_runtime_model_bundle(
+            models,
+            revision,
+            memory=self.memory_manager,
+            usage_sink=self.database,
+            concurrency_gate=gate,
         )
-        from openbiliclaw.llm.registry import build_ordered_embedding_service
-        from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+        if self.config is None or self.database is None or self.memory_manager is None:
+            return candidate
 
-        options = AdapterRuntimeOptions(
-            timeout_seconds=float(models.chat.timeout_seconds),
-            environment=os.environ,
-        )
-        chat_route = OrderedLLMRoute(
-            tuple(
-                RouteConnection(
-                    connection=connection,
-                    adapter=build_chat_adapter(connection, options),
-                )
-                for connection in models.chat.connections
-            ),
-            revision=revision,
-            timeout_seconds=float(models.chat.timeout_seconds),
-        )
-        embedding_service = build_ordered_embedding_service(
-            models.embedding,
-            revision=revision,
-            runtime_options=options,
-        )
-        return _StagedModelCandidate(
-            revision=revision,
-            models=models,
-            chat_route=chat_route,
-            embedding_service=embedding_service,
+        candidate_config = copy.copy(self.config)
+        candidate_config.models = models
+        return self._rebuild_components(
+            candidate_config,
+            model_bundle=candidate,
+            publish=False,
         )
 
-    async def swap_model_candidate(self, candidate: object) -> object | None:
-        """Swap the staged pointer under a short lock and return prior identity."""
+    async def swap_model_candidate(
+        self,
+        candidate: RuntimeModelBundle,
+    ) -> RuntimeModelBundle | None:
+        """Atomically publish a complete candidate and emit its revision."""
+        if not isinstance(candidate, RuntimeModelBundle):
+            raise TypeError("candidate must be a RuntimeModelBundle")
         async with self._model_swap_lock:
-            previous = self._model_candidate
-            self._model_candidate = candidate
-            return previous
+            previous = self.model_bundle
+            self._publish_model_bundle(candidate)
+        publish = getattr(self.event_hub, "publish", None)
+        if callable(publish):
+            with suppress(Exception):
+                await publish({"type": "config_reloaded", "revision": candidate.revision})
+        return previous
 
-    async def restore_model_candidate(self, candidate: object | None) -> None:
-        """Restore one exact prior identity after persistence/swap failure."""
+    async def restore_model_candidate(
+        self,
+        candidate: RuntimeModelBundle | None,
+    ) -> None:
+        """Restore one exact prior bundle and every prior consumer identity."""
+        if candidate is not None and not isinstance(candidate, RuntimeModelBundle):
+            raise TypeError("candidate must be a RuntimeModelBundle or None")
         async with self._model_swap_lock:
-            self._model_candidate = candidate
+            if candidate is None:
+                self.model_bundle = None
+                self.llm_registry = None
+                self.llm_service = None
+                return
+            self._publish_model_bundle(candidate)
 
     async def probe_model_draft(
         self,
@@ -619,9 +713,17 @@ class RuntimeContext:
                 "Hot-reload: cancelled %d background task(s) before rebuild",
                 cancelled,
             )
-        self._rebuild_components(new_config)
+        candidate = self._rebuild_components(new_config, publish=False)
+        async with self._model_swap_lock:
+            self._publish_model_bundle(candidate)
 
-    def _rebuild_components(self, new_config: Config) -> None:
+    def _rebuild_components(
+        self,
+        new_config: Config,
+        *,
+        model_bundle: RuntimeModelBundle | None = None,
+        publish: bool = True,
+    ) -> RuntimeModelBundle:
         """Synchronous component construction shared by hot-reload and startup.
 
         ``rebuild_from_config`` (async) calls this after cancelling
@@ -642,11 +744,8 @@ class RuntimeContext:
             SearchStrategy,
             TrendingStrategy,
         )
-        from openbiliclaw.llm import build_llm_registry
         from openbiliclaw.llm.concurrency import LLMConcurrencyGate, background_llm_concurrency
-        from openbiliclaw.llm.registry import build_embedding_service
-        from openbiliclaw.llm.service import LLMService, module_overrides_from_config
-        from openbiliclaw.llm.usage_recorder import UsageRecorder
+        from openbiliclaw.model_config import compute_model_revision
         from openbiliclaw.recommendation.engine import RecommendationEngine
         from openbiliclaw.runtime.account_sync import AccountSyncService
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
@@ -660,12 +759,21 @@ class RuntimeContext:
         from openbiliclaw.soul.dialogue import SocraticDialogue
         from openbiliclaw.soul.engine import SoulEngine
 
-        # 1. LLM layer (with usage ledger so ``openbiliclaw cost`` has data)
-        new_registry = build_llm_registry(new_config)
-        new_usage_recorder = UsageRecorder(sink=self.database)
-        new_module_overrides = module_overrides_from_config(new_config)
-        llm_concurrency = _llm_concurrency_from_config(new_config)
+        # 1. Build the native ordered model routes before any live mutation.
+        llm_concurrency = new_config.models.chat.concurrency
         new_llm_gate = self.llm_concurrency_gate or LLMConcurrencyGate(llm_concurrency)
+        if model_bundle is None:
+            model_bundle = build_runtime_model_bundle(
+                new_config.models,
+                compute_model_revision(new_config.models),
+                memory=self.memory_manager,
+                usage_sink=self.database,
+                concurrency_gate=new_llm_gate,
+            )
+        new_registry = model_bundle.chat_route
+        new_llm_service = model_bundle.llm_service
+        new_usage_recorder = new_llm_service.usage_recorder
+        new_embedding_service = model_bundle.embedding_service
         new_inventory_available: int | None = None
         count_pool = getattr(self.database, "count_pool_candidates", None)
         if callable(count_pool):
@@ -677,15 +785,6 @@ class RuntimeContext:
             except (AttributeError, TypeError):
                 available = int(count_pool())
             new_inventory_available = max(0, available)
-        new_llm_service = LLMService(
-            registry=new_registry,
-            memory=self.memory_manager,
-            usage_recorder=new_usage_recorder,
-            module_overrides=new_module_overrides,
-            concurrency=llm_concurrency,
-            concurrency_gate=new_llm_gate,
-        )
-
         # 2. Bilibili client
         new_bilibili_client = BilibiliAPIClient(
             cookie=resolve_runtime_cookie(
@@ -727,7 +826,6 @@ class RuntimeContext:
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             satisfaction_filter_enabled=satisfaction_filter_enabled,
-            module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
             llm_concurrency_gate=new_llm_gate,
             speculation_interval_minutes=int(
@@ -786,10 +884,7 @@ class RuntimeContext:
             database=self.database,
         )
 
-        # 4. Embedding service
-        new_embedding_service = build_embedding_service(new_config, new_registry)
-
-        # 5. Share embedding with soul pipeline for semantic purges
+        # 4. Share embedding with soul pipeline for semantic purges
         set_emb = getattr(new_soul_engine, "set_embedding_service", None)
         if callable(set_emb):
             set_emb(new_embedding_service)
@@ -1294,39 +1389,70 @@ class RuntimeContext:
             with suppress(Exception):
                 new_auto_update.adopt_status_from(old_auto_update)
 
-        # ── Atomic swap ─────────────────────────────────────────────
-        # All construction succeeded → assign attributes.
-        new_llm_gate.reconfigure(llm_concurrency)
-        self.llm_concurrency_gate = new_llm_gate
-        self.config = new_config
-        self.llm_registry = new_registry
-        self.llm_service = new_llm_service
-        self.bilibili_client = new_bilibili_client
-        self.saved_sync_service = new_saved_sync_service
-        self.soul_engine = new_soul_engine
-        self.dialogue = new_dialogue
-        self.discovery_engine = new_discovery_engine
-        self.recommendation_engine = new_recommendation_engine
-        self.runtime_controller = new_runtime_controller
-        self.account_sync_service = new_account_sync
-        self.auto_update_service = new_auto_update
-        if new_inventory_available is not None:
-            new_llm_gate.update_inventory(
-                available=new_inventory_available,
-                target=int(new_config.scheduler.pool_target_count),
-            )
-        # Drop the cached init prerequisite probes (chat/bilibili) — config or
-        # cookie just changed, so the next /api/init pre-flight must re-probe
-        # against the new provider/cookie instead of a stale TTL value (gui-init
-        # review). The InitCoordinator is intentionally NOT reset: it holds the
-        # current run handle and reads ctx components lazily, so it survives a
-        # rebuild (rebuild also excludes the guided_init task from cancellation).
-        self._init_prereqs = None
-
-        logger.info(
-            "Hot-reload complete — rebuilt %d swappable components",
-            12,
+        publication = _RuntimeModelPublication(
+            config=new_config,
+            llm_concurrency_gate=new_llm_gate,
+            llm_concurrency=llm_concurrency,
+            inventory_available=new_inventory_available,
+            bilibili_client=new_bilibili_client,
+            saved_sync_service=new_saved_sync_service,
+            soul_engine=new_soul_engine,
+            dialogue=new_dialogue,
+            discovery_engine=new_discovery_engine,
+            recommendation_engine=new_recommendation_engine,
+            runtime_controller=new_runtime_controller,
+            account_sync_service=new_account_sync,
+            auto_update_service=new_auto_update,
         )
+        complete_bundle = replace(model_bundle, _publication=publication)
+        if publish:
+            self._publish_model_bundle(complete_bundle)
+        return complete_bundle
+
+    def _publish_model_bundle(self, bundle: RuntimeModelBundle) -> None:
+        """Publish one already-built graph in a short, non-awaiting section."""
+        publication = bundle._publication
+        if publication is None:
+            gate = self.llm_concurrency_gate
+            if gate is None:
+                gate = getattr(bundle.llm_service, "concurrency_gate", None)
+            if gate is not None:
+                gate.configure_runtime(bundle.models.chat.concurrency)
+            self.model_bundle = bundle
+            self.llm_concurrency_gate = gate
+            self.llm_registry = bundle.chat_route
+            self.llm_service = bundle.llm_service
+            return
+
+        gate = publication.llm_concurrency_gate
+        inventory_target: int | None = None
+        if publication.inventory_available is not None:
+            inventory_target = int(publication.config.scheduler.pool_target_count)
+        # Apply all validated gate work before exposing any consumer identity.
+        # ``configure_runtime`` guarantees no fallible operation occurs after
+        # its first mutation, so an exception leaves the old graph untouched.
+        gate.configure_runtime(
+            publication.llm_concurrency,
+            inventory_available=publication.inventory_available,
+            inventory_target=inventory_target,
+        )
+        self.model_bundle = bundle
+        self.llm_concurrency_gate = gate
+        self.config = publication.config
+        self.llm_registry = bundle.chat_route
+        self.llm_service = bundle.llm_service
+        self.bilibili_client = publication.bilibili_client
+        self.saved_sync_service = publication.saved_sync_service
+        self.soul_engine = publication.soul_engine
+        self.dialogue = publication.dialogue
+        self.discovery_engine = publication.discovery_engine
+        self.recommendation_engine = publication.recommendation_engine
+        self.runtime_controller = publication.runtime_controller
+        self.account_sync_service = publication.account_sync_service
+        self.auto_update_service = publication.auto_update_service
+        # Drop cached probes only after a successful model graph publication.
+        self._init_prereqs = None
+        logger.info("Hot-reload complete — published model revision %s", bundle.revision)
 
     async def restart_background_tasks(
         self,

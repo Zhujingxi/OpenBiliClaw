@@ -620,16 +620,28 @@ def _restore_config_snapshot(backup_path: Path, config_path: Path) -> None:
 
 def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
     from openbiliclaw.config import ConfigIssue
-    from openbiliclaw.llm.registry import RegistryBuildError, build_llm_registry
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+    from openbiliclaw.llm.registry import build_ordered_embedding_service
+    from openbiliclaw.model_config import compute_model_revision
 
     issues = list(base_issues)
     try:
-        build_llm_registry(cfg)
-    except RegistryBuildError as exc:
+        options = AdapterRuntimeOptions(
+            timeout_seconds=float(cfg.models.chat.timeout_seconds),
+            environment=os.environ,
+        )
+        for connection in cfg.models.chat.connections:
+            build_chat_adapter(connection, options)
+        build_ordered_embedding_service(
+            cfg.models.embedding,
+            revision=compute_model_revision(cfg.models),
+            runtime_options=options,
+        )
+    except Exception as exc:
         issues.append(
             ConfigIssue(
-                field="llm",
-                message=f"LLM registry would fail to build: {exc}",
+                field="models",
+                message=f"Model routes would fail to build: {exc}",
                 severity="blocking",
             )
         )
@@ -1438,6 +1450,25 @@ def create_app(
             auto_update_service=auto_update_service,
             llm_concurrency_gate=injected_gate,
         )
+        # Even dependency-injected tests/integrations expose one immutable
+        # bundle, so health and every new consumer resolve the same route and
+        # embedding identity as production composition.
+        from openbiliclaw.api.runtime_context import RuntimeModelBundle
+        from openbiliclaw.model_config import compute_model_revision, default_model_config
+
+        injected_service = getattr(soul_engine, "_llm_service", None)
+        injected_route = getattr(injected_service, "registry", None)
+        injected_embedding = getattr(soul_engine, "_embedding_service", None)
+        injected_models = getattr(config, "models", None) or default_model_config()
+        ctx.model_bundle = RuntimeModelBundle(
+            revision=compute_model_revision(injected_models),
+            chat_route=injected_route,
+            llm_service=injected_service,
+            embedding_service=injected_embedding,
+            models=injected_models,
+        )
+        ctx.llm_registry = injected_route
+        ctx.llm_service = injected_service
         if ctx.dialogue is None:
             from openbiliclaw.soul.dialogue import SocraticDialogue
 
@@ -1472,10 +1503,9 @@ def create_app(
                 "; ".join(str(getattr(issue, "message", issue)) for issue in ctx.degraded_issues),
             )
     if ctx.llm_concurrency_gate is None:
-        from openbiliclaw.config import llm_concurrency_from_config
         from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
-        ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+        ctx.llm_concurrency_gate = LLMConcurrencyGate(config.models.chat.concurrency)
 
     def _inventory_target() -> int:
         controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
@@ -2250,15 +2280,44 @@ def create_app(
         _embedding_ready_checked_at = float("-inf")
         _embedding_diag_checked_at = float("-inf")
 
+    def _embedding_route_config() -> Any | None:
+        config = getattr(ctx, "config", None)
+        models = getattr(config, "models", None)
+        return getattr(models, "embedding", None)
+
+    def _embedding_primary_provider() -> Any | None:
+        route = _embedding_route_config()
+        if route is None or not bool(getattr(route, "enabled", False)):
+            return None
+        providers = tuple(getattr(route, "providers", ()) or ())
+        return providers[0] if providers else None
+
+    def _embedding_ollama_provider() -> Any | None:
+        route = _embedding_route_config()
+        if route is None or not bool(getattr(route, "enabled", False)):
+            return None
+        return next(
+            (
+                provider
+                for provider in tuple(getattr(route, "providers", ()) or ())
+                if str(getattr(provider, "type", "") or "").strip().lower() == "ollama"
+            ),
+            None,
+        )
+
     def _embedding_ollama_target() -> tuple[str, str]:
         """(base_url, model) the embedding path would use for Ollama.
 
         Mirrors registry defaults: empty base_url → local daemon, empty
         model → bge-m3.
         """
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
-        model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
+        route = _embedding_route_config()
+        provider = _embedding_ollama_provider()
+        base_url = (
+            str(getattr(provider, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
+        )
+        settings = getattr(route, "settings", None)
+        model = str(getattr(settings, "model", "") or "").strip() or "bge-m3"
         return base_url, model
 
     def _embedding_probe_ttl(outcome: _EmbeddingProbeOutcome) -> float:
@@ -2269,8 +2328,8 @@ def create_app(
             return True
         if outcome != "timed_out" or strict:
             return False
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        primary = _embedding_primary_provider()
+        provider = str(getattr(primary, "type", "") or "").strip().lower()
         if provider != "ollama":
             return False
         from openbiliclaw.runtime.ollama_supervisor import is_loopback
@@ -2297,20 +2356,23 @@ def create_app(
         pull_progress = _embedding_pull_progress_view()
         if pull_progress["running"]:
             return ("repairing", str(pull_progress["status_text"] or _repair_progress_detail()))
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip()
-        if not provider:
+        route = _embedding_route_config()
+        primary = _embedding_primary_provider()
+        provider = str(getattr(primary, "type", "") or "").strip()
+        if route is None or not bool(getattr(route, "enabled", False)):
             return ("disabled", "")
-        soul_engine = getattr(ctx, "soul_engine", None)
-        service = getattr(soul_engine, "_embedding_service", None)
+        if not provider:
+            return ("misconfigured", "embedding route has no configured provider.")
+        bundle = getattr(ctx, "model_bundle", None)
+        service = getattr(bundle, "embedding_service", None)
         if service is None:
             # Configured but the registry couldn't build it. Distinguish an
             # unknown provider NAME (e.g. a browser-translated value like
             # '奥拉玛' — re-pick in settings) from a known provider whose
             # build failed (usually missing key / base_url — fix credentials).
-            from openbiliclaw.llm.registry import _EMBEDDING_CAPABLE_PROVIDERS
+            from openbiliclaw.model_config import connection_type_registry
 
-            if provider.lower() in _EMBEDDING_CAPABLE_PROVIDERS:
+            if connection_type_registry().get(provider.lower()) is not None:
                 return (
                     "misconfigured",
                     f"embedding 服务未能构建（provider={provider}）——"
@@ -2376,8 +2438,8 @@ def create_app(
         """
         nonlocal _embedding_probe_outcome, _embedding_ready_checked_at
 
-        soul_engine = getattr(ctx, "soul_engine", None)
-        service = getattr(soul_engine, "_embedding_service", None)
+        bundle = getattr(ctx, "model_bundle", None)
+        service = getattr(bundle, "embedding_service", None)
         if service is None:
             return False
         probe = getattr(service, "probe", None)
@@ -2414,10 +2476,8 @@ def create_app(
 
     def _embedding_required_for_init() -> bool:
         """Whether guided init must wait for a configured embedding provider."""
-        cfg = getattr(ctx, "config", None)
-        emb = getattr(getattr(cfg, "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip()
-        return bool(provider)
+        route = _embedding_route_config()
+        return bool(route is not None and getattr(route, "enabled", False))
 
     @app.get("/api/ping")
     async def ping() -> JSONResponse:
@@ -2674,10 +2734,14 @@ def create_app(
         try:
             await ctx.rebuild_from_config(cfg)
             await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+            reloaded_bundle = ctx.model_bundle
+            if reloaded_bundle is None:
+                raise RuntimeError("hot reload completed without a model bundle")
             with suppress(Exception):
                 await ctx.event_hub.publish(
                     {
                         "type": "config_reloaded",
+                        "revision": reloaded_bundle.revision,
                         "message": "初始化来源选择已写入配置。",
                     }
                 )
@@ -2962,8 +3026,7 @@ def create_app(
 
     async def _maybe_autostart_embedding_pull() -> bool:
         """Best-effort auto-pull for a locally hosted missing/broken model."""
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
+        if _embedding_ollama_provider() is None:
             return False
         try:
             base_url, model = _embedding_ollama_target()
@@ -3033,9 +3096,7 @@ def create_app(
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip().lower()
-        if provider != "ollama":
+        if _embedding_ollama_provider() is None:
             return JSONResponse(
                 {
                     "error": "unsupported_provider",
@@ -8503,7 +8564,9 @@ def create_app(
         "ok": "X 来源正常，cookie 有效。",
         "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
         "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。",
+        "rate_limited": (
+            "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。"
+        ),
         "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
     }
 
@@ -9958,16 +10021,16 @@ def create_app(
                 cookie_env=cfg.sources.twitter.cookie_env,
             )
 
-        def _provider_out(p: Any) -> LLMProviderConfigOut:
+        def _provider_out(provider_config: Any) -> LLMProviderConfigOut:
             return LLMProviderConfigOut(
-                api_key=_mask(p.api_key),
-                model=p.model,
-                base_url=p.base_url,
-                auth_mode=getattr(p, "auth_mode", ""),
-                api_flavor=getattr(p, "api_flavor", ""),
-                http_referer=getattr(p, "http_referer", ""),
-                x_title=getattr(p, "x_title", ""),
-                reasoning_effort=getattr(p, "reasoning_effort", ""),
+                api_key=_mask(provider_config.api_key),
+                model=provider_config.model,
+                base_url=provider_config.base_url,
+                auth_mode=getattr(provider_config, "auth_mode", ""),
+                api_flavor=getattr(provider_config, "api_flavor", ""),
+                http_referer=getattr(provider_config, "http_referer", ""),
+                x_title=getattr(provider_config, "x_title", ""),
+                reasoning_effort=getattr(provider_config, "reasoning_effort", ""),
             )
 
         issue_list = [
@@ -10333,68 +10396,64 @@ def create_app(
                 if "model" in mdata:
                     mod_cfg.model = str(mdata["model"])
 
+        # Transitional legacy endpoint only: turn its submitted provider shape
+        # into the native in-memory route before validation/hot reload. Task 9
+        # protects this endpoint from model writes; production composition
+        # itself reads only ``Config.models``.
+        from dataclasses import asdict
+
+        from openbiliclaw.model_config import migrate_legacy_llm
+
+        cfg.models = migrate_legacy_llm(asdict(cfg.llm), os.environ).models
+
     async def _probe_llm_config(
         cfg: Any,
         *,
         kind: Literal["llm", "llm_fallback"] = "llm",
     ) -> ConfigServiceProbeResponse:
         from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS
-        from openbiliclaw.llm.registry import build_llm_registry
+        from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+        from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+        from openbiliclaw.model_config import compute_model_revision
 
         started = time.perf_counter()
         is_fallback = kind == "llm_fallback"
-        default_provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
-        provider = (
-            str(getattr(cfg.llm, "fallback_provider", "") or "").strip().lower()
-            if is_fallback
-            else default_provider
-        )
+        connections = tuple(cfg.models.chat.connections)
+        connection_index = 1 if is_fallback else 0
+        connection = connections[connection_index] if len(connections) > connection_index else None
+        provider = str(getattr(connection, "type", "") or "")
         model = ""
-        if is_fallback:
-            # Refuse cleanly (ok=false, not a 500) for the two dead states
-            # the registry would otherwise silently drop.
-            if not provider:
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind=kind,
-                    provider="",
-                    model="",
-                    error="Fallback LLM provider is not configured.",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            if provider == default_provider:
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind=kind,
-                    provider=provider,
-                    model="",
-                    error=(
-                        f"Fallback provider {provider!r} is the same as the default "
-                        "provider — it would never be used."
-                    ),
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
+        if connection is None:
+            label = "Fallback connection" if is_fallback else "Primary connection"
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind=kind,
+                provider="",
+                model="",
+                error=f"{label} is not configured.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
         try:
-            registry = build_llm_registry(cfg)
-            if not is_fallback:
-                provider = provider or str(getattr(registry, "default_provider", "") or "")
-            provider_cfg = getattr(cfg.llm, provider, None)
-            model = str(getattr(provider_cfg, "model", "") or "").strip()
-            if not registry.is_chat_capable(provider):
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind=kind,
-                    provider=provider,
-                    model=model,
-                    error=f"LLM provider {provider!r} is not registered or not chat-capable.",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
+            model = connection.model
+            timeout_s = min(max(float(cfg.models.chat.timeout_seconds), 10.0), 30.0)
+            options = AdapterRuntimeOptions(
+                timeout_seconds=timeout_s,
+                environment=os.environ,
+            )
+            route = OrderedLLMRoute(
+                (
+                    RouteConnection(
+                        connection=connection, adapter=build_chat_adapter(connection, options)
+                    ),
+                ),
+                revision=compute_model_revision(cfg.models),
+                timeout_seconds=timeout_s,
+            )
 
             async def _complete_probe() -> Any:
                 async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
-                    return await registry.complete_provider(
-                        provider,
+                    return await route.complete_connection(
+                        connection.id,
                         [
                             {"role": "system", "content": "Reply with only OK."},
                             {"role": "user", "content": "OpenBiliClaw connectivity probe."},
@@ -10402,7 +10461,7 @@ def create_app(
                         temperature=0,
                         max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
                         reasoning_effort="",
-                        model=model or None,
+                        ignore_circuit=True,
                     )
 
             response = await asyncio.wait_for(
@@ -10432,14 +10491,16 @@ def create_app(
             )
 
     async def _probe_embedding_config(cfg: Any) -> ConfigServiceProbeResponse:
-        from openbiliclaw.llm.base import LLMRegistry
-        from openbiliclaw.llm.registry import build_embedding_service
+        from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
+        from openbiliclaw.llm.registry import build_ordered_embedding_service
+        from openbiliclaw.model_config import compute_model_revision
 
         started = time.perf_counter()
-        emb_cfg = getattr(getattr(cfg, "llm", None), "embedding", None)
-        provider = str(getattr(emb_cfg, "provider", "") or "").strip().lower()
-        model = str(getattr(emb_cfg, "model", "") or "").strip()
-        if not provider:
+        route_config = cfg.models.embedding
+        providers = tuple(route_config.providers)
+        provider = str(getattr(providers[0], "type", "") or "") if providers else ""
+        model = route_config.settings.model
+        if not route_config.enabled or not providers:
             return ConfigServiceProbeResponse(
                 ok=False,
                 kind="embedding",
@@ -10448,7 +10509,14 @@ def create_app(
                 error="Embedding provider is not configured.",
             )
         try:
-            service = build_embedding_service(cfg, LLMRegistry())
+            service = build_ordered_embedding_service(
+                route_config,
+                revision=compute_model_revision(cfg.models),
+                runtime_options=AdapterRuntimeOptions(
+                    timeout_seconds=float(cfg.models.chat.timeout_seconds),
+                    environment=os.environ,
+                ),
+            )
             if service is None:
                 return ConfigServiceProbeResponse(
                     ok=False,
@@ -11141,6 +11209,17 @@ def create_app(
             subsection = getattr(section, target[1])
             setattr(subsection, target[2], "")
 
+        # A transitional legacy credential reset must be reflected in the
+        # native candidate before build validation.  Otherwise the live bundle
+        # would retain the old credential while config.toml is persisted
+        # without it, producing an unbuildable route on the next restart.
+        if any(field.startswith("llm.") for field in reset_fields):
+            from dataclasses import asdict
+
+            from openbiliclaw.model_config import migrate_legacy_llm
+
+            cfg.models = migrate_legacy_llm(asdict(cfg.llm), os.environ).models
+
         issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
         if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
             response = ConfigUpdateResponse(
@@ -11224,11 +11303,15 @@ def create_app(
                 )
                 reload_message += " 运行时组件已热重载，新配置立即生效。"
                 logger.info("Config hot-reload succeeded")
+                reloaded_bundle = ctx.model_bundle
+                if reloaded_bundle is None:
+                    raise RuntimeError("hot reload completed without a model bundle")
                 # Notify WebSocket subscribers so the extension re-fetches data
                 with suppress(Exception):
                     await ctx.event_hub.publish(
                         {
                             "type": "config_reloaded",
+                            "revision": reloaded_bundle.revision,
                             "message": "配置已热重载，运行时组件已重建。",
                         }
                     )

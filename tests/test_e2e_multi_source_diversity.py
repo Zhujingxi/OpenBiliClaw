@@ -439,25 +439,26 @@ class TestMultiSourceDiversityE2E:
             # and in the extension (extractNoteMetadataFromAnchor returns null)
 
             # Verify the API-level filter works
-            from types import SimpleNamespace
-
             from openbiliclaw.api.app import create_app
+            from openbiliclaw.config import Config
+            from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 
-            fake_config = SimpleNamespace(
-                data_path=Path(tmpdir),
-                bilibili=SimpleNamespace(
-                    cookie="", proxy="", browser_executable="", browser_headed=False
-                ),
-                sources=SimpleNamespace(
-                    browser_cdp_url="",
-                    browser_headed=False,
-                    xiaohongshu=SimpleNamespace(
-                        daily_search_budget=20,
-                        daily_creator_budget=10,
-                        task_interval_seconds=45,
-                    ),
-                ),
-                scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
+            fake_config = Config(data_dir=tmpdir)
+            fake_config.scheduler.enabled = False
+            fake_config.sources.xiaohongshu.daily_search_budget = 20
+            fake_config.sources.xiaohongshu.daily_creator_budget = 10
+            fake_config.models = ModelConfig(
+                chat=ChatRouteConfig(
+                    connections=(
+                        ChatConnection(
+                            id="ollama-main",
+                            name="Ollama",
+                            type="ollama",
+                            model="llama3",
+                            base_url="http://127.0.0.1:11434/v1",
+                        ),
+                    )
+                )
             )
 
             import openbiliclaw.config
@@ -466,9 +467,6 @@ class TestMultiSourceDiversityE2E:
 
             try:
                 openbiliclaw.config.load_config = lambda: fake_config
-                import openbiliclaw.llm
-
-                openbiliclaw.llm.build_llm_registry = lambda config: "registry"  # type: ignore
                 import openbiliclaw.bilibili.auth
 
                 openbiliclaw.bilibili.auth.resolve_runtime_cookie = lambda **_: ""  # type: ignore

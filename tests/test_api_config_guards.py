@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from openbiliclaw.config import (
 from openbiliclaw.config import (
     load_config as load_config_from_path,
 )
+from openbiliclaw.model_config import migrate_legacy_llm
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +41,7 @@ def _make_client(
 
 
 def _base_config() -> Config:
-    return Config(
+    config = Config(
         llm=LLMConfig(
             default_provider="openai",
             openai=LLMProviderConfig(
@@ -62,6 +64,10 @@ def _base_config() -> Config:
             ),
         )
     )
+    # The transitional /api/config endpoint still projects the legacy shape,
+    # but runtime validation and publication use the native ordered route.
+    config.models = migrate_legacy_llm(asdict(config.llm), {}).models
+    return config
 
 
 def test_put_config_ignores_masked_chat_provider_api_key(monkeypatch, tmp_path) -> None:
@@ -275,14 +281,14 @@ def test_put_config_uses_same_guard_for_other_chat_providers(monkeypatch, tmp_pa
         assert getattr(load_config_from_path(config_path).llm, provider_name).api_key == before
 
 
-def test_put_config_explicit_reset_clears_allowlisted_secret(monkeypatch, tmp_path) -> None:
+def test_put_config_explicit_reset_clears_unused_allowlisted_secret(monkeypatch, tmp_path) -> None:
     client, cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
 
-    response = client.put("/api/config", json={"reset_fields": ["llm.openai.api_key"]})
+    response = client.put("/api/config", json={"reset_fields": ["llm.claude.api_key"]})
 
     assert response.status_code == 200
-    assert cfg.llm.openai.api_key == ""
-    assert load_config_from_path(config_path).llm.openai.api_key == ""
+    assert cfg.llm.claude.api_key == ""
+    assert load_config_from_path(config_path).llm.claude.api_key == ""
 
 
 def test_put_config_unknown_reset_is_rejected_without_mutation(monkeypatch, tmp_path) -> None:

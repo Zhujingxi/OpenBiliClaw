@@ -1927,13 +1927,15 @@ def _normalize_llm_timeout(value: object) -> int:
 
 
 def llm_concurrency_from_config(config: object) -> int:
-    """Extract LLM concurrency from a config object, with safe fallback.
+    """Extract global chat-route concurrency from ``Config.models``.
 
-    Works with both a full ``Config`` instance and a bare
-    ``types.SimpleNamespace`` (used by test stubs and hot-reload paths).
+    Bare test doubles without a native model configuration receive the safe
+    default.  The retired ``Config.llm`` section is deliberately not consulted:
+    contradictory legacy data must never resize the live global gate.
     """
-    llm_section = getattr(config, "llm", None)
-    raw = getattr(llm_section, "concurrency", DEFAULT_LLM_CONCURRENCY)
+    models_section = getattr(config, "models", None)
+    chat_section = getattr(models_section, "chat", None)
+    raw = getattr(chat_section, "concurrency", DEFAULT_LLM_CONCURRENCY)
     return _normalize_llm_concurrency(raw)
 
 

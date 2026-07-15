@@ -376,7 +376,7 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│       模型连接 + 事务型有序 Chat / Embedding route（阶段 7）     │
+│       模型连接 + 事务型有序 Chat / Embedding route（阶段 8）     │
 │ native [models] → strict parser/revision/safe endpoint ──┐    │
 │ legacy [llm] → effective base+local inspection/map ──────┤    │
 │                 → secret-safe report → closed resolution │    │
@@ -393,7 +393,8 @@ background ─ background admission (default 3) ──────┘
 │ Embedding providers → shared settings adapter → OrderedEmbeddingRoute │
 │                                   ├→ finite/dimension validation + circuit │
 │                                   └→ fixed PNG exact probe + shared cache namespace │
-│ 普通保存保留 raw；Task 8 负责 production consumer/API/UI composition │
+│ RuntimeModelBundle → 全 consumer 原子发布；失败恢复精确旧身份      │
+│ 普通保存保留 raw；模型编辑 API/UI/CLI 由后续任务迁移               │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
@@ -403,6 +404,7 @@ background ─ background admission (default 3) ──────┘
 │  └──────────────────────────┘  └────────────────────────┘   │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
 │  LLMService normal/structured/multimodal/tools → one global route │
+│  caller only controls admission/usage; llm_usage records connection identity │
 │  caller tags → concurrency + usage only; no module model selection │
 │  response → provider/model + connection ID/type/preset/position    │
 │  discovery evaluator: text + metrics + optional compressed cover image input │

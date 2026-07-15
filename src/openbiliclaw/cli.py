@@ -498,11 +498,30 @@ def _initialize_logging(log_level_override: str | None = None) -> None:
 
 
 def _build_registry() -> Any:
-    """Build the configured LLM registry."""
-    from openbiliclaw.config import load_config
-    from openbiliclaw.llm import build_llm_registry
+    """Return the one native ordered Chat route for this CLI process."""
+    return _build_model_bundle().chat_route
 
-    return build_llm_registry(load_config())
+
+def _build_model_bundle() -> Any:
+    """Return one cached native model bundle shared by every CLI consumer."""
+    from openbiliclaw.api.runtime_context import build_runtime_model_bundle
+    from openbiliclaw.config import load_config
+    from openbiliclaw.model_config import compute_model_revision
+
+    cached = _RUNTIME_COMPONENTS.get("model_bundle")
+    if cached is not None:
+        return cached
+    config = load_config()
+    bundle = build_runtime_model_bundle(
+        config.models,
+        compute_model_revision(config.models),
+        memory=_build_memory_manager(),
+        usage_sink=_get_runtime_database(),
+        concurrency_gate=_build_llm_concurrency_gate(),
+    )
+    _RUNTIME_COMPONENTS["model_bundle"] = bundle
+    _RUNTIME_COMPONENTS["usage_recorder"] = bundle.llm_service.usage_recorder
+    return bundle
 
 
 def _build_llm_concurrency_gate() -> Any:
@@ -513,7 +532,7 @@ def _build_llm_concurrency_gate() -> Any:
     cached = _RUNTIME_COMPONENTS.get("llm_concurrency_gate")
     if cached is not None:
         return cached
-    gate = LLMConcurrencyGate(load_config().llm.concurrency)
+    gate = LLMConcurrencyGate(load_config().models.chat.concurrency)
     _RUNTIME_COMPONENTS["llm_concurrency_gate"] = gate
     return gate
 
@@ -563,7 +582,6 @@ def _build_bilibili_client() -> Any:
 def _build_soul_engine() -> Any:
     """Build the configured soul engine with initialized memory storage."""
     from openbiliclaw.config import load_config
-    from openbiliclaw.llm.service import module_overrides_from_config
     from openbiliclaw.soul.engine import SoulEngine
 
     class _UnavailableLLM:
@@ -589,8 +607,7 @@ def _build_soul_engine() -> Any:
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
-        module_overrides=module_overrides_from_config(cfg),
-        llm_concurrency=cfg.llm.concurrency,
+        llm_concurrency=cfg.models.chat.concurrency,
         llm_concurrency_gate=_build_llm_concurrency_gate(),
         speculation_interval_minutes=cfg.scheduler.speculation_interval_minutes,
         speculation_ttl_days=cfg.scheduler.speculation_ttl_days,
@@ -622,8 +639,6 @@ def _build_soul_engine() -> Any:
 
 def _build_recommendation_engine() -> Any:
     """Build the recommendation engine with core-memory-aware LLM access."""
-    from openbiliclaw.config import load_config
-    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
     from openbiliclaw.recommendation.engine import (
         RecommendationEngine,
         SupportsEmbeddingService,
@@ -631,20 +646,9 @@ def _build_recommendation_engine() -> Any:
 
     memory = _build_memory_manager()
     database = _get_runtime_database()
-    cfg = load_config()
-    registry = _build_registry()
-    llm_service = LLMService(
-        registry=registry,
-        memory=memory,
-        usage_recorder=_build_usage_recorder(),
-        module_overrides=module_overrides_from_config(cfg),
-        concurrency=cfg.llm.concurrency,
-        concurrency_gate=_build_llm_concurrency_gate(),
-    )
-    from openbiliclaw.llm.registry import build_embedding_service
-
-    _emb = build_embedding_service(cfg, registry)
-    embedding_service = cast("SupportsEmbeddingService | None", _emb)
+    bundle = _build_model_bundle()
+    llm_service = bundle.llm_service
+    embedding_service = cast("SupportsEmbeddingService | None", bundle.embedding_service)
 
     def _xhs_self_info_provider() -> dict[str, object] | None:
         state = memory.load_discovery_runtime_state()
@@ -663,7 +667,12 @@ def _build_dialogue(soul_engine: Any) -> Any:
     """Build the Socratic dialogue helper for interactive chat."""
     from openbiliclaw.soul.dialogue import SocraticDialogue
 
-    return SocraticDialogue(llm=_build_registry(), soul_engine=soul_engine, session="cli")
+    return SocraticDialogue(
+        llm=None,
+        soul_engine=soul_engine,
+        llm_service=_build_model_bundle().llm_service,
+        session="cli",
+    )
 
 
 def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
@@ -735,7 +744,6 @@ def _build_discovery_engine() -> Any:
         TrendingStrategy,
     )
     from openbiliclaw.llm.concurrency import background_llm_concurrency
-    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 
     memory = _build_memory_manager()
     database = _get_runtime_database()
@@ -743,24 +751,14 @@ def _build_discovery_engine() -> Any:
     from openbiliclaw.config import load_config
 
     cfg = load_config()
-    registry = _build_registry()
-    llm_service = LLMService(
-        registry=registry,
-        memory=memory,
-        usage_recorder=_build_usage_recorder(),
-        module_overrides=module_overrides_from_config(cfg),
-        concurrency=cfg.llm.concurrency,
-        concurrency_gate=_build_llm_concurrency_gate(),
-    )
+    bundle = _build_model_bundle()
+    llm_service = bundle.llm_service
     concurrency = DiscoveryConcurrencyController(
         bilibili_request_concurrency=2,
-        llm_evaluation_concurrency=background_llm_concurrency(cfg.llm.concurrency),
+        llm_evaluation_concurrency=background_llm_concurrency(cfg.models.chat.concurrency),
     )
 
-    # Build embedding service from config (optional)
-    from openbiliclaw.llm.registry import build_embedding_service
-
-    embedding_service = build_embedding_service(cfg, registry)
+    embedding_service = bundle.embedding_service
     discovery_cfg = getattr(cfg, "discovery", None)
 
     engine = ContentDiscoveryEngine(
@@ -1082,12 +1080,10 @@ def _save_runtime_provider_config(
     base_url: str = "",
     model: str = "",
 ) -> None:
-    """Persist the selected provider's full config triple to ``config.toml``.
+    """Persist the guided setup's legacy provider block until Task 14.
 
-    Writes ``default_provider`` plus the per-provider ``[llm.<name>]``
-    block. ``api_key`` / ``base_url`` / ``model`` are only written when
-    non-empty (so existing saved values aren't blown away when the
-    wizard's user accepts a default by leaving the prompt blank).
+    Runtime composition no longer reads this shape. Task 14 owns the guided
+    setup cutover to the transactional native model-config service.
     """
     from openbiliclaw.config import load_config_with_diagnostics, save_config
 
@@ -1541,14 +1537,7 @@ def _save_embedding_config(
     base_url: str = "",
     api_key: str = "",
 ) -> None:
-    """Persist the embedding provider/model selection to config.toml.
-
-    For OpenAI-compatible providers the wizard may collect a custom
-    ``base_url`` / ``api_key`` (e.g. a self-hosted vLLM gateway running
-    bge-m3 over the OpenAI protocol). These are written into
-    ``[llm.embedding]`` because embedding is independent from chat
-    provider configuration.
-    """
+    """Persist the guided setup's legacy embedding block until Task 14."""
     from openbiliclaw.config import load_config_with_diagnostics, save_config
 
     config, diagnostics = load_config_with_diagnostics()
@@ -1560,28 +1549,6 @@ def _save_embedding_config(
         config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
     if api_key:
         config.llm.embedding.api_key = api_key.strip()
-    save_config(config, diagnostics.config_path)
-
-
-def _save_module_overrides(overrides: dict[str, dict[str, str]]) -> None:
-    """Persist per-module LLM overrides to config.toml.
-
-    ``overrides`` maps module name (``soul`` / ``discovery`` /
-    ``recommendation`` / ``evaluation``) to a dict with optional
-    ``provider`` and ``model`` keys. Empty values are written as empty
-    strings, which the loader treats as "use global default".
-    """
-    from openbiliclaw.config import load_config_with_diagnostics, save_config
-
-    config, diagnostics = load_config_with_diagnostics()
-    for module, payload in overrides.items():
-        module_config = getattr(config.llm, module, None)
-        if module_config is None:
-            continue
-        if "provider" in payload:
-            module_config.provider = payload["provider"].strip()
-        if "model" in payload:
-            module_config.model = payload["model"].strip()
     save_config(config, diagnostics.config_path)
 
 
@@ -1894,7 +1861,7 @@ def _prompt_provider_triplet(menu_choice: str) -> tuple[str, str, str, str]:
     return provider, base_url, api_key, model
 
 
-def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool = False) -> None:
+def _interactive_embedding_setup(*, auto_if_ready: bool = False) -> None:
     """Phase 3 — embedding service (v0.3.20+ "有默认值的取舍提问").
 
     Default = 1 (本地 Ollama bge-m3). Mirrors the question shape used by
@@ -2098,60 +2065,14 @@ def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool =
     console.print("[red]未识别的选项,跳过 embedding 配置。[/red]")
 
 
-def _interactive_module_overrides(default_provider: str) -> None:
-    """Phase 4 — optional per-module LLM overrides (advanced, skippable)."""
-    if not typer.confirm(
-        "（高级，可跳过）是否为单个模块单独指定 provider/model？\n"
-        "  典型场景：发现/评估走便宜模型，灵魂画像走高质量模型。",
-        default=False,
-    ):
-        return
-
-    overrides: dict[str, dict[str, str]] = {}
-    modules = (
-        ("soul", "灵魂画像（高质量模型，稳定性优先）"),
-        ("discovery", "内容发现（吞吐量大，建议廉价模型）"),
-        ("recommendation", "推荐文案（解释生成，平衡质量和成本）"),
-        ("evaluation", "内容评估（高频调用，建议廉价模型）"),
-    )
-    for module, desc in modules:
-        if not typer.confirm(f"为 [{module}] {desc} 配置覆盖？", default=False):
-            continue
-        provider = (
-            typer.prompt(
-                f"  {module} provider（留空 = 跟随默认 {default_provider}）",
-                default="",
-                show_default=False,
-            )
-            .strip()
-            .lower()
-        )
-        if provider and provider not in _SUPPORTED_PROVIDERS:
-            console.print(f"  [red]未知 provider「{provider}」，跳过该模块。[/red]")
-            continue
-        model = typer.prompt(
-            f"  {module} 模型（留空 = 跟随 provider 默认）",
-            default="",
-            show_default=False,
-        ).strip()
-        overrides[module] = {"provider": provider, "model": model}
-
-    if overrides:
-        _save_module_overrides(overrides)
-        console.print(f"[green]已写入 {len(overrides)} 个模块的 LLM 覆盖配置。[/green]")
-    else:
-        console.print("[dim]未配置任何模块覆盖。[/dim]")
-
-
 def _interactive_runtime_config_setup() -> None:
     """Guide the user through missing LLM config before init.
 
-    Four-phase flow:
+    Three-phase flow:
       1) Pick LLM service (Ollama-first menu; OpenAI-compat is its own entry,
          not buried inside ``openai``).
       2) Provide the fields that option actually needs.
       3) Choose how embeddings are served (separate question, not bundled).
-      4) Optional per-module overrides (advanced, default skip).
     """
     _print_page_title("初始化前配置引导", "选 LLM、配 Embedding、填 B 站 Cookie")
     _print_provider_table()
@@ -2183,14 +2104,7 @@ def _interactive_runtime_config_setup() -> None:
             "\n[dim]Embedding 是和聊天模型分开的：把视频标题/简介变成向量，"
             "用于跨视频去重和相似度判定。频次很高，所以单独拎出来配。[/dim]"
         )
-        _interactive_embedding_setup(provider, auto_if_ready=True)
-
-        console.print(
-            "\n[bold]最后是 Per-module 覆盖（高级，默认可跳过）[/bold]"
-            "\n[dim]给 soul / discovery / recommendation / evaluation 单独指定模型，"
-            "比如发现/评估走便宜模型，画像走高质量。大多数用户不需要。[/dim]"
-        )
-        _interactive_module_overrides(provider)
+        _interactive_embedding_setup(auto_if_ready=True)
         return
 
 
@@ -4011,10 +3925,7 @@ def setup_embedding() -> None:
     init 时已经问过；如果当时没启用、之后想加上，跑这条命令再走一次引导。
     """
     _print_page_title("配置本地 embedding", "Ollama + bge-m3")
-    from openbiliclaw.config import load_config_with_diagnostics
-
-    config, _ = load_config_with_diagnostics()
-    _interactive_embedding_setup(config.llm.default_provider)
+    _interactive_embedding_setup()
 
 
 @app.command()
@@ -4023,10 +3934,10 @@ def cost(
     by: str = typer.Option(
         "all",
         "--by",
-        help="单维度展开: all (默认 / 三表全显) / day / provider / caller",
+        help="单维度展开: all (默认) / day / connection / provider / caller",
     ),
 ) -> None:
-    """显示本机 LLM 调用花费(按天 + 按 provider/model + 按 caller 模块)。
+    """显示本机 LLM 调用花费(按连接、provider、日期与 caller)。
 
     数据来源:每次成功的 LLM 调用都会写一条到 ``llm_usage`` 表(v0.3.26+)。
     费用按 ``llm.pricing`` 里的官方单价估算,允许 ±20% 误差。本地 Ollama
@@ -4040,6 +3951,7 @@ def cost(
     db = _get_runtime_database()
 
     daily = db.query_llm_usage_by_day(days=days)
+    by_connection = db.query_llm_usage_by_connection(days=days)
     by_provider = db.query_llm_usage_by_provider(days=days)
     by_caller = db.query_llm_usage_by_caller(days=days)
     total = db.query_llm_usage_total(days=days)
@@ -4074,6 +3986,33 @@ def cost(
         console.print()
 
     total_cost = total["cost_cny"] or 1e-9
+
+    if show_all or by == "connection":
+        connection_table = Table(
+            show_header=True,
+            header_style="bold blue",
+            title="按路由连接 (cost by connection)",
+        )
+        connection_table.add_column("顺序", justify="right")
+        connection_table.add_column("Connection ID", no_wrap=True)
+        connection_table.add_column("类型 / Preset")
+        connection_table.add_column("Model")
+        connection_table.add_column("调用数", justify="right")
+        connection_table.add_column("¥ 占比", justify="right", style="bold yellow")
+        for row in by_connection:
+            share = row["cost_cny"] / total_cost * 100
+            connection_type = row["connection_type"] or row["provider"] or "?"
+            preset = row["preset"] or "custom"
+            connection_table.add_row(
+                str(int(row["route_position"]) + 1),
+                row["connection_id"] or "(legacy)",
+                f"{connection_type} / {preset}",
+                row["model"] or "(default)",
+                f"{row['calls']:,}",
+                f"¥{row['cost_cny']:.4f} ({share:.0f}%)",
+            )
+        console.print(connection_table)
+        console.print()
 
     if show_all or by == "provider":
         provider_table = Table(
@@ -7200,8 +7139,6 @@ def profile_consolidate(
     import asyncio as _asyncio
 
     from openbiliclaw.config import load_config
-    from openbiliclaw.llm.registry import build_embedding_service
-    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
     from openbiliclaw.soul.consolidator import ProfileConsolidator
 
     _print_page_title("画像整理", "profile-consolidate")
@@ -7209,25 +7146,13 @@ def profile_consolidate(
     cfg = load_config()
     memory = _build_memory_manager()
     llm_service = None
-    registry = None
+    model_bundle = None
     try:
-        registry = _build_registry()
-        llm_service = LLMService(
-            registry=registry,
-            memory=memory,
-            usage_recorder=_build_usage_recorder(),
-            module_overrides=module_overrides_from_config(cfg),
-            concurrency=cfg.llm.concurrency,
-            concurrency_gate=_build_llm_concurrency_gate(),
-        )
+        model_bundle = _build_model_bundle()
+        llm_service = model_bundle.llm_service
     except Exception as exc:
         console.print(f"[yellow]  LLM 不可用（{exc}）— 只做规则合并与聚类预览。[/yellow]")
-    embedding_service = None
-    if registry is not None:
-        try:
-            embedding_service = build_embedding_service(cfg, registry)
-        except Exception:
-            embedding_service = None
+    embedding_service = model_bundle.embedding_service if model_bundle is not None else None
     if embedding_service is None:
         console.print("[dim]  embedding 服务不可用，退回子串聚类。[/dim]")
 
@@ -8978,7 +8903,6 @@ def keyword_inspiration_dry_run(
         build_inspiration_search_provider,
         build_platform_source_backends,
     )
-    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
     from openbiliclaw.runtime.keyword_planner import KeywordPlanner
     from openbiliclaw.soul.engine import SoulProfileNotInitializedError
 
@@ -9022,17 +8946,8 @@ def keyword_inspiration_dry_run(
         inspiration_params = dataclasses.replace(
             inspiration_params, interest_sample_size=int(interest_limit)
         )
-    memory = _build_memory_manager()
     database = _get_runtime_database()
-    registry = _build_registry()
-    llm_service = LLMService(
-        registry=registry,
-        memory=memory,
-        usage_recorder=_build_usage_recorder(),
-        module_overrides=module_overrides_from_config(config),
-        concurrency=config.llm.concurrency,
-        concurrency_gate=_build_llm_concurrency_gate(),
-    )
+    llm_service = _build_model_bundle().llm_service
     soul_engine = _build_soul_engine()
     try:
         profile_data = asyncio.run(soul_engine.get_profile())
@@ -9142,7 +9057,6 @@ def _normalize_strategy_names(raw: list[str] | None) -> list[str]:
 def _run_xhs_discovery(*, force: bool) -> None:
     """Trigger one Soul-driven xhs keyword production cycle."""
     from openbiliclaw.config import load_config
-    from openbiliclaw.llm.service import LLMService, module_overrides_from_config
     from openbiliclaw.runtime.xhs_producer import XhsTaskProducer
     from openbiliclaw.soul.engine import SoulProfileNotInitializedError
     from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
@@ -9160,17 +9074,8 @@ def _run_xhs_discovery(*, force: bool) -> None:
         raise typer.Exit(code=1) from exc
 
     config = load_config()
-    memory = _build_memory_manager()
     database = _get_runtime_database()
-    registry = _build_registry()
-    llm_service = LLMService(
-        registry=registry,
-        memory=memory,
-        usage_recorder=_build_usage_recorder(),
-        module_overrides=module_overrides_from_config(config),
-        concurrency=config.llm.concurrency,
-        concurrency_gate=_build_llm_concurrency_gate(),
-    )
+    llm_service = _build_model_bundle().llm_service
 
     xhs_cfg = getattr(config.sources, "xiaohongshu", None)
     producer = XhsTaskProducer(
@@ -10053,14 +9958,22 @@ def probe() -> None:
 def config_show() -> None:
     """显示当前配置."""
     from openbiliclaw.config import load_config_with_diagnostics
-    from openbiliclaw.llm import RegistryBuildError, summarize_registry
 
     cfg, diagnostics = load_config_with_diagnostics()
+    chat_connections = tuple(cfg.models.chat.connections)
+    primary = chat_connections[0] if chat_connections else None
     _print_page_title("当前配置概览", "运行时配置")
     rows = [
         ("语言", cfg.language),
-        ("LLM", cfg.llm.default_provider),
-        ("LLM 并发", str(cfg.llm.concurrency)),
+        (
+            "LLM",
+            (
+                f"{primary.name} ({primary.type} / {primary.model})"
+                if primary is not None
+                else "未配置"
+            ),
+        ),
+        ("LLM 并发", str(cfg.models.chat.concurrency)),
         ("B站认证", cfg.bilibili.auth_method),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
         ("停止后台 LLM 请求", "否" if cfg.scheduler.enabled else "是"),
@@ -10086,24 +9999,26 @@ def config_show() -> None:
         rows.append(("配置文件", str(diagnostics.config_path)))
     _print_key_value_table("配置项", rows)
 
-    try:
-        registry = _build_registry()
-        summary = summarize_registry(cfg, registry)
-        _print_key_value_table(
-            "Provider 概览",
-            [
-                ("已注册 Provider", ", ".join(summary.registered_providers)),
-                ("最终默认 Provider", summary.effective_default),
-            ],
+    route_rows = [
+        (
+            "Primary" if index == 0 else f"Fallback {index}",
+            f"{connection.name} [{connection.id}] · {connection.type} · {connection.model}",
         )
-    except RegistryBuildError as exc:
-        _print_key_value_table(
-            "Provider 概览",
-            [
-                ("已注册 Provider", "无"),
-                ("Provider 状态", str(exc)),
-            ],
-        )
+        for index, connection in enumerate(chat_connections)
+    ]
+    _print_key_value_table("Chat 路由", route_rows or [("状态", "未配置")])
+    embedding = cfg.models.embedding
+    _print_key_value_table(
+        "Embedding 路由",
+        [
+            ("状态", "开启" if embedding.enabled else "关闭"),
+            ("共享模型", embedding.settings.model or "未配置"),
+            (
+                "Provider 顺序",
+                ", ".join(provider.id for provider in embedding.providers) or "无",
+            ),
+        ],
+    )
 
     hints = diagnostics.messages + [
         f"{issue.field}: {issue.message}" for issue in diagnostics.issues
@@ -10207,23 +10122,32 @@ def login_codex(
 
 @app.command("health-check")
 def health_check() -> None:
-    """检查当前已注册 LLM provider 的可用性."""
-    from openbiliclaw.llm import RegistryBuildError
+    """按顺序检查当前 Chat 连接的可用性."""
 
     try:
-        registry = _build_registry()
-    except RegistryBuildError as exc:
+        route = _build_registry()
+    except Exception as exc:
         _print_status_panel("error", "Provider 健康检查失败", str(exc))
         raise typer.Exit(code=1) from exc
 
-    results = asyncio.run(registry.health_check_all())
-    _print_page_title("Provider 健康检查", "已注册 LLM Provider 状态")
-    for name, result in results.items():
-        status = "可用" if result.available else "不可用"
-        default_label = " (default)" if result.is_default else ""
-        console.print(f"  {name}{default_label}: {status}")
-        if result.error:
-            console.print(f"    原因: {result.error}")
+    async def _check_all() -> list[tuple[Any, bool, str]]:
+        results: list[tuple[Any, bool, str]] = []
+        for connection in route.connections:
+            try:
+                available = bool(await connection.adapter.health_check())
+                results.append((connection, available, ""))
+            except Exception as exc:
+                results.append((connection, False, str(exc)))
+        return results
+
+    results = asyncio.run(_check_all())
+    _print_page_title("Provider 健康检查", "按 Chat 路由顺序")
+    for index, (connection, available, error) in enumerate(results):
+        status = "可用" if available else "不可用"
+        role = "primary" if index == 0 else f"fallback {index}"
+        console.print(f"  {connection.id} ({role}, {connection.model}): {status}")
+        if error:
+            console.print(f"    原因: {error}")
 
 
 @browser_app.command("status")

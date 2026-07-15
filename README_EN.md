@@ -601,19 +601,20 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Transactional ordered Chat/Embedding model routes (stage 7) │
+│ Transactional ordered Chat/Embedding model routes (stage 8) │
 │ native/legacy + base/local → ModelConfigService path lock  │
 │ safe endpoint → redacted snapshot; credential + local fence │
-│ candidate build → canonical writer reread/rebase/conflict  │
-│ legacy backup → temp/fsync/replace → RuntimeContext swap   │
-│ failure/cancel restores bytes + exact identity             │
+│ full bundle/consumer build → canonical writer reread/rebase/conflict │
+│ legacy backup → temp/fsync/replace → atomic RuntimeContext publish │
+│ failure/cancel restores bytes, stable gate, and exact consumer identity │
 │ Chat record → ID adapter → OrderedLLMRoute (global order)  │
 │ total deadline · revision circuits · exact probe · safe attempts │
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
-│ in-process writer boundary; no cross-process lock; Task 8 composition │
+│ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
+│ in-process writer boundary; no cross-process lock; editor UI/CLI follows │
 ├────────────────────────────────────────────────┤
-│ LLMService paths → one route; caller is concurrency/usage only │
+│ LLMService paths → one route; caller is concurrency/usage only; cost by connection │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │
