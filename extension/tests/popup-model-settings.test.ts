@@ -1,0 +1,467 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import test from "node:test";
+import assert from "node:assert/strict";
+
+const modelState = await import("../popup/popup-model-config-state.js").catch(
+  () => ({} as Record<string, unknown>),
+) as any;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function chatConnection(id: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    name: `Connection ${id}`,
+    type: "openai_compatible",
+    preset: "custom",
+    model: `model-${id}`,
+    base_url: "https://example.test/v1",
+    credential: {
+      source: "inline",
+      configured: true,
+      env_name: "",
+      credential_ref: "",
+      oauth_logged_in: false,
+    },
+    api_mode: "chat_completions",
+    reasoning_effort: "",
+    http_referer: "",
+    x_title: "",
+    num_ctx: 0,
+    probe: null,
+    circuit: { state: "closed" },
+    ...overrides,
+  };
+}
+
+function embeddingProvider(id: string, overrides: Record<string, unknown> = {}) {
+  const record = chatConnection(id, overrides) as Record<string, unknown>;
+  for (const field of ["model", "api_mode", "reasoning_effort", "http_referer", "x_title", "num_ctx"]) {
+    delete record[field];
+  }
+  return record;
+}
+
+function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
+  return {
+    revision,
+    source: "native",
+    models: {
+      schema_version: 1,
+      chat: {
+        connections: ids.map((id) => chatConnection(id)),
+        concurrency: 4,
+        timeout_seconds: 300,
+      },
+      embedding: {
+        enabled: true,
+        settings: {
+          model: "bge-m3",
+          output_dimensionality: 1024,
+          similarity_threshold: 0.82,
+          multimodal_enabled: false,
+        },
+        providers: [embeddingProvider("embedding-a")],
+      },
+    },
+    migration: { state: "none", confirmed: true, issues: [] },
+    overrides: [],
+  };
+}
+
+test("model settings state appends, removes, and reorders stable route peers", () => {
+  for (const name of ["hydrateModelConfig", "appendRouteItem", "removeRouteItem", "moveRouteItem"]) {
+    assert.equal(typeof modelState[name], "function", `${name} should be exported`);
+  }
+
+  let state = modelState.hydrateModelConfig(snapshot(["a", "b"]));
+  state = modelState.appendRouteItem(state, "chat", chatConnection("c"));
+  assert.deepEqual(state.models.chat.connections.map((item: any) => item.id), ["a", "b", "c"]);
+  assert.equal(state.selected.chat, "c");
+  state = modelState.moveRouteItem(state, "chat", "c", 0);
+  assert.deepEqual(state.models.chat.connections.map((item: any) => item.id), ["c", "a", "b"]);
+  assert.equal(state.models.chat.connections[0].credential.action, "keep");
+  state = modelState.removeRouteItem(state, "chat", "a");
+  assert.deepEqual(state.models.chat.connections.map((item: any) => item.id), ["c", "b"]);
+});
+
+test("popup model load installs descriptors independently when its snapshot becomes stale", async () => {
+  assert.equal(typeof modelState.loadIndependentModelResources, "function");
+  const gate = modelState.createLatestRequestGate();
+  const staleSnapshot = deferred<any>();
+  const descriptors = deferred<any>();
+  const latestSnapshot = deferred<any>();
+  let visibleRevision = "";
+  let installedTypes: string[] = [];
+
+  const initial = modelState.loadIndependentModelResources({
+    gate,
+    snapshotRequest: () => staleSnapshot.promise,
+    descriptorRequest: () => descriptors.promise,
+    blocked: () => false,
+    applySnapshot: (value: any) => { visibleRevision = value.revision; },
+    installDescriptors: (value: any) => {
+      installedTypes = value.connection_types.map((item: any) => item.id);
+    },
+  });
+  const reload = modelState.applyLatestSnapshotRequest({
+    gate,
+    request: () => latestSnapshot.promise,
+    blocked: () => false,
+    apply: (value: any) => { visibleRevision = value.revision; },
+  });
+
+  latestSnapshot.resolve({ revision: "revision-new" });
+  assert.equal(await reload, true);
+  staleSnapshot.reject(new Error("stale initial snapshot failed"));
+  descriptors.resolve({ connection_types: [{ id: "ollama" }], groups: [] });
+
+  assert.deepEqual(await initial, {
+    snapshotApplied: false,
+    descriptorsInstalled: true,
+  });
+  assert.equal(visibleRevision, "revision-new");
+  assert.deepEqual(installedTypes, ["ollama"]);
+});
+
+test("model settings state enforces ten peers and protects the final active route item", () => {
+  const ten = modelState.hydrateModelConfig(
+    snapshot(Array.from({ length: 10 }, (_, index) => `chat-${index}`)),
+  );
+  assert.throws(
+    () => modelState.appendRouteItem(ten, "chat", chatConnection("overflow")),
+    /maximum 10/i,
+  );
+  const oneChat = modelState.hydrateModelConfig(snapshot(["only"]));
+  assert.throws(() => modelState.removeRouteItem(oneChat, "chat", "only"), /at least one/i);
+
+  const oneEmbedding = modelState.hydrateModelConfig(snapshot());
+  assert.throws(
+    () => modelState.removeRouteItem(oneEmbedding, "embedding", "embedding-a"),
+    /at least one/i,
+  );
+});
+
+test("model settings presets fill untouched defaults without overwriting custom values", () => {
+  let state = modelState.hydrateModelConfig(snapshot(["a"]));
+  state = modelState.updateRouteField(
+    state,
+    "chat",
+    "a",
+    "base_url",
+    "https://custom.test/v1",
+  );
+  state = modelState.applyPreset(
+    state,
+    "chat",
+    "a",
+    {
+      id: "openrouter",
+      defaults: {
+        base_url: "https://openrouter.ai/api/v1",
+        api_mode: "responses",
+        http_referer: "https://openbiliclaw.local",
+      },
+    },
+    { previousPreset: { id: "custom", defaults: { api_mode: "chat_completions" } } },
+  );
+
+  const record = state.models.chat.connections[0];
+  assert.equal(record.preset, "openrouter");
+  assert.equal(record.base_url, "https://custom.test/v1");
+  assert.equal(record.api_mode, "responses");
+  assert.equal(record.http_referer, "https://openbiliclaw.local");
+});
+
+test("model settings credentials are explicit keep, set, clear, or env actions", () => {
+  let state = modelState.hydrateModelConfig(snapshot(["a"]));
+  assert.equal(state.models.chat.connections[0].credential.action, "keep");
+  assert.equal(state.models.chat.connections[0].credential.value, "");
+
+  for (const [action, value, expected] of [
+    ["set", "new-secret", { action: "set", value: "new-secret" }],
+    ["env", "OPENBILICLAW_API_KEY", { action: "env", value: "OPENBILICLAW_API_KEY" }],
+    ["clear", "ignored", { action: "clear" }],
+    ["keep", "ignored", { action: "keep" }],
+  ] as const) {
+    state = modelState.updateRouteField(state, "chat", "a", "credential", { action, value });
+    const payload = modelState.toModelConfigPayload(state);
+    assert.deepEqual(payload.models.chat.connections[0].credential, expected);
+  }
+});
+
+test("model settings payload is revisioned, strips health, and keeps embedding model shared", () => {
+  const source = snapshot(["a"]);
+  (source.models.chat.connections[0].credential as any).value = "must-not-survive";
+  const state = modelState.hydrateModelConfig(source);
+  const payload = modelState.toModelConfigPayload(state);
+
+  assert.equal(payload.revision, "revision-a");
+  assert.equal("probe" in payload.models.chat.connections[0], false);
+  assert.equal("circuit" in payload.models.chat.connections[0], false);
+  assert.equal("model" in payload.models.embedding.providers[0], false);
+  assert.equal(payload.models.embedding.settings.model, "bge-m3");
+  assert.equal(JSON.stringify(state).includes("must-not-survive"), false);
+});
+
+test("model settings exact probe results require revision, ID, draft, and shared embedding settings", () => {
+  let state = modelState.hydrateModelConfig(snapshot(["a", "b"]));
+  const signature = modelState.createProbeSignature(state, "chat", "a");
+  state = modelState.moveRouteItem(state, "chat", "a", 1);
+  state = modelState.selectRouteItem(state, "chat", "b");
+  const accepted = modelState.applyProbeResult(state, signature, { ok: true, connection_id: "a" });
+  assert.equal(accepted.accepted, true);
+  assert.equal(
+    accepted.state.models.chat.connections.find((item: any) => item.id === "a").probe.ok,
+    true,
+  );
+  assert.equal(
+    accepted.state.models.chat.connections.find((item: any) => item.id === "b").probe,
+    null,
+  );
+
+  const edited = modelState.updateRouteField(state, "chat", "a", "model", "other-model");
+  assert.equal(modelState.applyProbeResult(edited, signature, { ok: true }).accepted, false);
+  const revised = modelState.hydrateModelConfig(snapshot(["a", "b"], "revision-b"));
+  assert.equal(modelState.applyProbeResult(revised, signature, { ok: true }).accepted, false);
+
+  const embedding = modelState.hydrateModelConfig(snapshot());
+  const embeddingSignature = modelState.createProbeSignature(embedding, "embedding", "embedding-a");
+  const changedSettings = modelState.updateRouteSetting(
+    embedding,
+    "embedding",
+    "model",
+    "different-vector-space",
+  );
+  assert.equal(
+    modelState.applyProbeResult(changedSettings, embeddingSignature, { ok: true }).accepted,
+    false,
+  );
+});
+
+test("model settings retain dirty drafts on remote revision and resolve migrations without positions", () => {
+  let state = modelState.hydrateModelConfig(snapshot(["a"], "revision-a"));
+  state = modelState.updateRouteField(state, "chat", "a", "model", "local-model");
+  const retained = modelState.receiveRemoteSnapshot(state, snapshot(["remote"], "revision-b"));
+  assert.equal(retained.models.chat.connections[0].model, "local-model");
+  assert.equal(retained.remoteUpdate.latestRevision, "revision-b");
+
+  state = modelState.setMigrationResolution(retained, "legacy-1", {
+    action: "add_to_chat_route",
+    position: 9,
+  });
+  assert.deepEqual(modelState.toModelConfigPayload(state).migration_resolutions, {
+    "legacy-1": { action: "add_to_chat_route" },
+  });
+});
+
+test("model settings derive local override locks including embedding enabled from provider lock", () => {
+  const source = snapshot();
+  source.overrides = [
+    { path: "models.chat.connections", source: "config.local.toml" },
+    { path: "models.embedding.providers", source: "config.local.toml" },
+  ];
+  const state = modelState.hydrateModelConfig(source);
+
+  assert.equal(state.overrideLocks["models.chat.connections"].source, "config.local.toml");
+  assert.equal(state.overrideLocks["models.embedding.providers"].source, "config.local.toml");
+  assert.equal(state.overrideLocks["models.embedding.enabled"].source, "config.local.toml");
+  assert.equal(state.overrideLocks["models.embedding.settings.model"], null);
+});
+
+test("one-click local Ollama prepares one shared embedding route and preserves Chat credentials", () => {
+  assert.equal(typeof modelState.prepareLocalOllamaEmbedding, "function");
+  const source = snapshot(["chat-primary", "chat-fallback"]);
+  source.models.embedding.enabled = false;
+  source.models.embedding.providers = [];
+  const before = modelState.hydrateModelConfig(source);
+  const descriptor = {
+    id: "ollama",
+    label: "Ollama",
+    category: "local_runtime",
+    capabilities: ["chat", "embedding"],
+    fields: [
+      { name: "model", capabilities: ["chat"] },
+      { name: "base_url", capabilities: [] },
+      { name: "num_ctx", capabilities: ["chat"] },
+    ],
+    preset_definitions: [],
+  };
+
+  const next = modelState.prepareLocalOllamaEmbedding(before, descriptor, {
+    id: "embedding-local-ollama",
+    name: "Local Ollama",
+    model: "bge-m3",
+    output_dimensionality: 1024,
+    base_url: "http://127.0.0.1:11434/v1",
+  });
+  const payload = modelState.toModelConfigPayload(next);
+
+  assert.equal(payload.revision, "revision-a");
+  assert.deepEqual(
+    payload.models.chat.connections.map((item: any) => item.id),
+    ["chat-primary", "chat-fallback"],
+  );
+  assert.deepEqual(
+    payload.models.chat.connections.map((item: any) => item.credential),
+    [{ action: "keep" }, { action: "keep" }],
+  );
+  assert.deepEqual(payload.models.embedding.settings, {
+    model: "bge-m3",
+    output_dimensionality: 1024,
+    similarity_threshold: 0.82,
+    multimodal_enabled: false,
+  });
+  assert.deepEqual(payload.models.embedding.providers, [{
+    id: "embedding-local-ollama",
+    name: "Local Ollama",
+    type: "ollama",
+    preset: "",
+    base_url: "http://127.0.0.1:11434/v1",
+    credential: { action: "clear" },
+  }]);
+  assert.equal("model" in payload.models.embedding.providers[0], false);
+});
+
+test("one-click local Ollama refuses dirty, overridden, or configured non-Ollama routes", () => {
+  const descriptor = {
+    id: "ollama",
+    category: "local_runtime",
+    capabilities: ["embedding"],
+    fields: [{ name: "base_url", capabilities: ["embedding"] }],
+  };
+  const defaults = {
+    id: "embedding-local-ollama",
+    name: "Local Ollama",
+    model: "bge-m3",
+    output_dimensionality: 1024,
+    base_url: "http://127.0.0.1:11434/v1",
+  };
+
+  const configured = modelState.hydrateModelConfig(snapshot());
+  assert.throws(
+    () => modelState.prepareLocalOllamaEmbedding(configured, descriptor, defaults),
+    /configured embedding route/i,
+  );
+  assert.equal(configured.models.embedding.providers[0].credential.action, "keep");
+
+  const emptySource = snapshot();
+  emptySource.models.embedding.enabled = false;
+  emptySource.models.embedding.providers = [];
+  let dirty = modelState.hydrateModelConfig(emptySource);
+  dirty = modelState.updateRouteSetting(dirty, "embedding", "model", "local-change");
+  assert.throws(
+    () => modelState.prepareLocalOllamaEmbedding(dirty, descriptor, defaults),
+    /unsaved model changes/i,
+  );
+
+  const overriddenSource = structuredClone(emptySource);
+  overriddenSource.overrides = [
+    { path: "models.embedding.providers", source: "config.local.toml" },
+  ];
+  const overridden = modelState.hydrateModelConfig(overriddenSource);
+  assert.throws(
+    () => modelState.prepareLocalOllamaEmbedding(overridden, descriptor, defaults),
+    /read-only override/i,
+  );
+});
+
+test("model settings page is sequential list/detail and removes every legacy provider form", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+
+  for (const id of [
+    "popupModelRouteTabs",
+    "popupModelRouteList",
+    "popupModelDetail",
+    "popupModelDetailBack",
+    "popupModelTypeSearch",
+    "popupModelConnectionTypeGroups",
+    "popupModelEmbeddingSharedSettings",
+    "popupModelInspectorFields",
+    "popupModelSaveButton",
+    "popupModelProbeButton",
+    "popupModelReloadRemote",
+    "popupModelMigrationPanel",
+  ]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(controller, new RegExp(`"${id}"`), `${id} should be wired`);
+  }
+
+  for (const legacyId of [
+    "cfgLlmProvider",
+    "cfgLlmFallbackProvider",
+    "cfgEmbeddingProvider",
+    "cfgEmbeddingFallbackProvider",
+    "cfgOpenaiAuthMode",
+    "cfgOpenaiKey",
+    "cfgClaudeKey",
+    "cfgGeminiKey",
+    "cfgDeepseekKey",
+    "cfgOllamaModel",
+    "cfgOpenrouterKey",
+    "cfgOpenaiCompatibleKey",
+    "cfgModuleSoulProvider",
+    "cfgModuleDiscoveryProvider",
+    "cfgModuleRecommendationProvider",
+    "cfgModuleEvaluationProvider",
+  ]) {
+    assert.doesNotMatch(popupHtml, new RegExp(`id="${legacyId}"`));
+    assert.doesNotMatch(popupJs, new RegExp(`"${legacyId}"`));
+  }
+
+  assert.match(popupHtml, /data-popup-model-route="chat"/);
+  assert.match(popupHtml, /data-popup-model-route="embedding"/);
+  assert.match(popupHtml, /data-popup-model-route="runtime"/);
+  assert.match(popupHtml, /popup-model-route-layout/);
+  assert.match(popupHtml, /popup-model-route-page/);
+  assert.match(popupHtml, /popup-model-detail-page/);
+  assert.match(controller, /fetchModelConnectionTypes/);
+  assert.match(controller, /descriptor\.fields/);
+  assert.match(controller, /createProbeSignature/);
+  assert.match(controller, /saveInFlight/);
+  assert.match(controller, /receiveRemoteSnapshot/);
+  assert.match(controller, /focusSelectedRouteControl/);
+});
+
+test("model and general settings saves are separate scopes", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+
+  assert.match(popupHtml, /id="popupModelSaveButton"[^>]*>保存模型 route</);
+  assert.match(popupHtml, /id="settingsSave"[^>]*>保存通用配置</);
+  assert.match(controller, /updateModelConfig\(toModelConfigPayload\(state\)\)/);
+  assert.match(popupJs, /updateConfig\(data\)/);
+  assert.doesNotMatch(popupJs, /\bllm:\s*\{/);
+  assert.doesNotMatch(popupJs, /cfg\.llm\?\./);
+  assert.doesNotMatch(popupJs, /probeConfigService\("(?:llm|llm_fallback|embedding)"/);
+});
+
+test("model controller handles revision conflict, save locking, and popup focus restoration", () => {
+  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+
+  assert.match(controller, /error\.status === 409/);
+  assert.match(controller, /error\.details\?\.error === "revision_conflict"/);
+  assert.match(controller, /setModelEditorLocked\(true\)/);
+  assert.match(controller, /setModelEditorLocked\(false\)/);
+  assert.match(controller, /if \(!state \|\| saveInFlight\) return/);
+  assert.match(controller, /beforeunload/);
+  assert.match(controller, /config_reloaded/);
+  assert.match(controller, /requestAnimationFrame/);
+  assert.match(controller, /popupModelDetailBack/);
+  assert.match(controller, /prepareLocalOllamaEmbedding/);
+  assert.match(controller, /updateModelConfig\(toModelConfigPayload\(prepared\)\)/);
+  assert.match(controller, /configured embedding route/);
+  assert.doesNotMatch(controller, /updateConfig\([^)]*llm/);
+});

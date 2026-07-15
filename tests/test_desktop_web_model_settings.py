@@ -273,15 +273,18 @@ def test_model_modules_are_loaded_and_cache_busted_by_the_backend() -> None:
     assert re.search(r'app\.mount\(\s*"/web/shared"', API_APP)
 
 
-def test_extension_documentation_separates_legacy_popup_from_native_desktop_editor() -> None:
+def test_extension_documentation_describes_native_popup_and_desktop_editors() -> None:
     stale_desktop_claim = (
         "桌面 Web（`/web`）设置页 `src/openbiliclaw/web/desktop/` 的可配置面"
         "与插件 side panel 拉齐：模型 tab 补 `llm.concurrency`"
     )
 
-    assert "插件 side panel 仍展示 legacy 默认/备选 Provider" in EXTENSION_DOC
-    assert "插件 side panel 的 legacy 模型 tab" in EXTENSION_DOC
-    assert "Task 11" in EXTENSION_DOC
-    assert "桌面 Web 已改用 `/api/model-config`" in EXTENSION_DOC
+    assert "模型 tab 以 Chat / Embedding / Runtime 次级 tab" in EXTENSION_DOC
+    assert "插件在 popup 宽度使用列表→详情顺序流" in EXTENSION_DOC
+    assert "桌面 Web 使用宽屏列表 + 侧边 inspector" in EXTENSION_DOC
+    assert "revisioned `PUT /api/model-config`" in EXTENSION_DOC
+    assert "插件 side panel 仍展示 legacy 默认/备选 Provider" not in EXTENSION_DOC
+    assert "插件 side panel 的 legacy 模型 tab" not in EXTENSION_DOC
+    assert "Task 11" not in EXTENSION_DOC
     assert "v0.3.157+ 与桌面 Web 对齐" not in EXTENSION_DOC
     assert stale_desktop_claim not in EXTENSION_DOC

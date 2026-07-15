@@ -96,6 +96,10 @@ import {
   shouldShowEmbeddingBanner,
 } from "./popup-embedding-banner.js";
 import {
+  enableLocalOllamaEmbeddingRoute,
+  initPopupModelSettings,
+} from "./popup-model-settings.js";
+import {
   appendRecommendations,
   checkBackendStatus,
   fetchActivityFeed,
@@ -1799,6 +1803,9 @@ function connectRuntimeStream() {
       renderActivityCard();
       // Hot-reload: re-fetch all data when backend config is reloaded
       if (event.type === "config_reloaded") {
+        window.dispatchEvent(new CustomEvent("openbiliclaw:config-reloaded", {
+          detail: event,
+        }));
         setHint("后端配置已热重载，正在刷新数据…", "success");
         scheduleRecommendationsRefresh();
       }
@@ -6384,7 +6391,7 @@ function bindSettings() {
   const saveBtn = document.getElementById("settingsSave");
   const toast = document.getElementById("settingsToast");
   const issuesContainer = document.getElementById("settingsIssues");
-  const providerSelect = document.getElementById("cfgLlmProvider");
+  const generalActions = document.getElementById("settingsGeneralActions");
   const backendSchemeInput = document.getElementById("cfgBackendScheme");
   const backendHostInput = document.getElementById("cfgBackendHost");
   const backendPortInput = document.getElementById("cfgBackendPort");
@@ -6393,6 +6400,8 @@ function bindSettings() {
   const bannerNoCache = document.getElementById("cfgBannerNoCache");
 
   if (!gearBtn || !overlay || !backBtn || !saveBtn) return;
+
+  const modelSettings = initPopupModelSettings({ onToast: showToast });
 
   // LAN password-gate toggle (local-only; the extension is a trusted-local
   // client so it can manage the gate without being able to lock itself out).
@@ -6441,11 +6450,18 @@ function bindSettings() {
         panel.hidden = !isActive;
       }
     }
+    if (generalActions instanceof HTMLElement) {
+      generalActions.hidden = activePanel === "models";
+    }
   }
 
   for (const [name, tab] of settingsTabs) {
     if (tab instanceof HTMLButtonElement) {
-      tab.addEventListener("click", () => setActiveSettingsPanel(name));
+      tab.addEventListener("click", () => {
+        if (name !== "models" && !modelSettings.confirmLeave()) return;
+        setActiveSettingsPanel(name);
+        if (name === "models") void modelSettings.open();
+      });
     }
   }
 
@@ -6589,91 +6605,6 @@ function bindSettings() {
 
   backendUpdateStatusRefresh = loadBackendUpdateStatus;
 
-  function showProviderFields(provider) {
-    for (const el of overlay.querySelectorAll(".settings-provider-fields")) {
-      el.classList.toggle("is-active", el.dataset.provider === provider);
-    }
-  }
-
-  // 主/备选 Provider 同名保护（与桌面 Web 对齐）：同名 fallback 永远不会触发
-  // （registry 静默丢弃），后端保存也会以 blocking issue 拒绝。禁用备选下拉里
-  // 与默认 Provider 同名的选项；旧配置已处于同名状态时只显示警告、不静默改数据。
-  function syncLlmFallbackSameState() {
-    const fallbackSelect = document.getElementById("cfgLlmFallbackProvider");
-    const warning = document.getElementById("cfgLlmFallbackSameWarning");
-    if (!(fallbackSelect instanceof HTMLSelectElement)) return;
-    const mainValue = providerSelect.value;
-    for (const option of fallbackSelect.options) {
-      option.disabled = Boolean(option.value) && option.value === mainValue;
-    }
-    if (warning) {
-      warning.hidden = !fallbackSelect.value || fallbackSelect.value !== mainValue;
-    }
-  }
-
-  providerSelect.addEventListener("change", () => {
-    showProviderFields(providerSelect.value);
-    syncLlmFallbackSameState();
-  });
-
-  const fallbackProviderSelect = document.getElementById("cfgLlmFallbackProvider");
-  if (fallbackProviderSelect instanceof HTMLSelectElement) {
-    fallbackProviderSelect.addEventListener("change", syncLlmFallbackSameState);
-  }
-
-  // ── Embedding section: dynamic visibility + placeholder ──
-  // Mirrors the backend resolution order in
-  // src/openbiliclaw/llm/registry.py:_build_dedicated_embedding_provider.
-  const EMBEDDING_DEFAULT_MODEL = {
-    "": "留空 = 自动选择",
-    openai: "text-embedding-3-small",
-    gemini: "gemini-embedding-001",
-    ollama: "bge-m3",
-    openai_compatible: "bge-large-en-v1.5",
-    dashscope: "qwen3-vl-embedding",
-  };
-  const EMBEDDING_BASE_URL_HINT = {
-    "": "留空使用默认",
-    openai: "留空 = https://api.openai.com/v1",
-    gemini: "(Gemini SDK 不需要 base_url)",
-    ollama: "http://localhost:11434/v1",
-    openai_compatible: "https://api.together.xyz/v1 / http://localhost:8000/v1",
-    dashscope: "留空 = https://dashscope.aliyuncs.com（国际站 dashscope-intl.aliyuncs.com）",
-  };
-
-  function applyEmbeddingProviderUI() {
-    const select = document.getElementById("cfgEmbeddingProvider");
-    if (!select) return;
-    const provider = select.value;
-    const modelInput = document.getElementById("cfgEmbeddingModel");
-    if (modelInput) {
-      modelInput.placeholder =
-        EMBEDDING_DEFAULT_MODEL[provider] ?? "留空 = 自动选择";
-    }
-    const baseUrlInput = document.getElementById("cfgEmbeddingBaseUrl");
-    if (baseUrlInput) {
-      baseUrlInput.placeholder =
-        EMBEDDING_BASE_URL_HINT[provider] ?? "留空使用默认";
-    }
-    // Field visibility: ollama doesn't need an api_key; gemini doesn't
-    // use base_url. openai_compatible needs both (it's the whole point).
-    for (const el of overlay.querySelectorAll("[data-embedding-field]")) {
-      const field = el.dataset.embeddingField;
-      let visible = true;
-      if (provider === "ollama") {
-        visible = field !== "api_key";
-      } else if (provider === "gemini") {
-        visible = field !== "base_url";
-      }
-      el.style.display = visible ? "" : "none";
-    }
-  }
-
-  const embeddingProviderSelect = document.getElementById("cfgEmbeddingProvider");
-  if (embeddingProviderSelect) {
-    embeddingProviderSelect.addEventListener("change", applyEmbeddingProviderUI);
-  }
-
   function showToast(message, tone = "success") {
     toast.textContent = message;
     toast.dataset.tone = tone;
@@ -6683,7 +6614,7 @@ function bindSettings() {
 
   function setSaveButtonMode(mode = "") {
     saveBtn.dataset.tone = mode === "warning" ? "warning" : "";
-    saveBtn.textContent = mode === "degraded" ? "保存并提示重启" : "保存配置";
+    saveBtn.textContent = mode === "degraded" ? "保存并提示重启（通用配置）" : "保存通用配置";
   }
 
   function hideConfigBanners() {
@@ -6796,13 +6727,6 @@ function bindSettings() {
     const raw = getVal(id);
     if (raw === "") return fallback;
     const parsed = parseInt(raw, 10);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
-
-  const getFloat = (id, fallback) => {
-    const raw = getVal(id);
-    if (raw === "") return fallback;
-    const parsed = parseFloat(raw);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
 
@@ -6946,59 +6870,6 @@ function bindSettings() {
 
   function populateForm(cfg) {
     applyRuntimeConfig(cfg);
-    // LLM
-    providerSelect.value = cfg.llm?.default_provider || "openai";
-    showProviderFields(providerSelect.value);
-    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
-    setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
-    setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
-    syncLlmFallbackSameState();
-
-    setVal("cfgOpenaiAuthMode", cfg.llm?.openai?.auth_mode || "api_key");
-    setVal("cfgOpenaiKey", cfg.llm?.openai?.api_key);
-    setVal("cfgOpenaiModel", cfg.llm?.openai?.model);
-    setVal("cfgOpenaiBaseUrl", cfg.llm?.openai?.base_url);
-    setVal("cfgClaudeKey", cfg.llm?.claude?.api_key);
-    setVal("cfgClaudeModel", cfg.llm?.claude?.model);
-    setVal("cfgGeminiKey", cfg.llm?.gemini?.api_key);
-    setVal("cfgGeminiModel", cfg.llm?.gemini?.model);
-    setVal("cfgDeepseekKey", cfg.llm?.deepseek?.api_key);
-    setVal("cfgDeepseekModel", cfg.llm?.deepseek?.model);
-    setVal("cfgDeepseekBaseUrl", cfg.llm?.deepseek?.base_url);
-    const deepseekReasoning = document.getElementById("cfgDeepseekReasoning");
-    if (deepseekReasoning) deepseekReasoning.value = cfg.llm?.deepseek?.reasoning_effort || "";
-    setVal("cfgOllamaModel", cfg.llm?.ollama?.model);
-    setVal("cfgOllamaBaseUrl", cfg.llm?.ollama?.base_url);
-    setVal("cfgOpenrouterKey", cfg.llm?.openrouter?.api_key);
-    setVal("cfgOpenrouterModel", cfg.llm?.openrouter?.model);
-    setVal("cfgOpenrouterBaseUrl", cfg.llm?.openrouter?.base_url);
-    setVal("cfgOpenrouterReferer", cfg.llm?.openrouter?.http_referer);
-    setVal("cfgOpenrouterTitle", cfg.llm?.openrouter?.x_title);
-    setVal("cfgOpenaiCompatibleKey", cfg.llm?.openai_compatible?.api_key);
-    setVal("cfgOpenaiCompatibleModel", cfg.llm?.openai_compatible?.model);
-    setVal("cfgOpenaiCompatibleBaseUrl", cfg.llm?.openai_compatible?.base_url);
-
-    setVal("cfgModuleSoulProvider", cfg.llm?.soul?.provider);
-    setVal("cfgModuleSoulModel", cfg.llm?.soul?.model);
-    setVal("cfgModuleDiscoveryProvider", cfg.llm?.discovery?.provider);
-    setVal("cfgModuleDiscoveryModel", cfg.llm?.discovery?.model);
-    setVal("cfgModuleRecommendationProvider", cfg.llm?.recommendation?.provider);
-    setVal("cfgModuleRecommendationModel", cfg.llm?.recommendation?.model);
-    setVal("cfgModuleEvaluationProvider", cfg.llm?.evaluation?.provider);
-    setVal("cfgModuleEvaluationModel", cfg.llm?.evaluation?.model);
-
-    // Embedding (v0.3.32+ — owns its own api_key/base_url)
-    const embProvider = document.getElementById("cfgEmbeddingProvider");
-    if (embProvider) embProvider.value = cfg.llm?.embedding?.provider || "";
-    setVal("cfgEmbeddingFallbackProvider", cfg.llm?.embedding?.fallback_provider);
-    setVal("cfgEmbeddingApiKey", cfg.llm?.embedding?.api_key);
-    setVal("cfgEmbeddingBaseUrl", cfg.llm?.embedding?.base_url);
-    setVal("cfgEmbeddingModel", cfg.llm?.embedding?.model);
-    setVal("cfgEmbeddingSimilarity", cfg.llm?.embedding?.similarity_threshold);
-    const embMultimodal = document.getElementById("cfgEmbeddingMultimodalEnabled");
-    if (embMultimodal) embMultimodal.checked = cfg.llm?.embedding?.multimodal_enabled === true;
-    applyEmbeddingProviderUI();
-
     // Bilibili
     const biliAuth = document.getElementById("cfgBiliAuth");
     if (biliAuth) biliAuth.value = cfg.bilibili?.auth_method || "cookie";
@@ -7143,81 +7014,9 @@ function bindSettings() {
 
   function collectForm() {
     const logPath = splitLogPath(getVal("cfgLogPath"), state.runtimeConfig?.logging);
-    const llmFallbackProvider = getVal("cfgLlmFallbackProvider");
-    const embeddingFallbackProvider = getVal("cfgEmbeddingFallbackProvider");
     return {
       language: getVal("cfgLanguage"),
       data_dir: getVal("cfgDataDir"),
-      llm: {
-        default_provider: providerSelect.value,
-        concurrency: getInt("cfgLlmConcurrency", 4),
-        timeout: getInt("cfgLlmTimeout", 300),
-        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除
-        // （老后端会忽略未知字段，新后端不再回显它）。
-        fallback_provider: llmFallbackProvider,
-        openai: {
-          auth_mode: getVal("cfgOpenaiAuthMode") || "api_key",
-          api_key: getVal("cfgOpenaiKey"),
-          model: getVal("cfgOpenaiModel"),
-          base_url: getVal("cfgOpenaiBaseUrl"),
-        },
-        claude: {
-          api_key: getVal("cfgClaudeKey"),
-          model: getVal("cfgClaudeModel"),
-        },
-        gemini: {
-          api_key: getVal("cfgGeminiKey"),
-          model: getVal("cfgGeminiModel"),
-        },
-        deepseek: {
-          api_key: getVal("cfgDeepseekKey"),
-          model: getVal("cfgDeepseekModel"),
-          base_url: getVal("cfgDeepseekBaseUrl"),
-          reasoning_effort: getVal("cfgDeepseekReasoning"),
-        },
-        ollama: {
-          model: getVal("cfgOllamaModel"),
-          base_url: getVal("cfgOllamaBaseUrl"),
-        },
-        openrouter: {
-          api_key: getVal("cfgOpenrouterKey"),
-          model: getVal("cfgOpenrouterModel"),
-          base_url: getVal("cfgOpenrouterBaseUrl"),
-          http_referer: getVal("cfgOpenrouterReferer"),
-          x_title: getVal("cfgOpenrouterTitle"),
-        },
-        openai_compatible: {
-          api_key: getVal("cfgOpenaiCompatibleKey"),
-          model: getVal("cfgOpenaiCompatibleModel"),
-          base_url: getVal("cfgOpenaiCompatibleBaseUrl"),
-        },
-        embedding: {
-          provider: getVal("cfgEmbeddingProvider"),
-          api_key: getVal("cfgEmbeddingApiKey"),
-          base_url: getVal("cfgEmbeddingBaseUrl"),
-          model: getVal("cfgEmbeddingModel"),
-          similarity_threshold: getFloat("cfgEmbeddingSimilarity", 0.82),
-          fallback_enabled: Boolean(embeddingFallbackProvider),
-          fallback_provider: embeddingFallbackProvider,
-          multimodal_enabled: checked("cfgEmbeddingMultimodalEnabled"),
-        },
-        soul: {
-          provider: getVal("cfgModuleSoulProvider"),
-          model: getVal("cfgModuleSoulModel"),
-        },
-        discovery: {
-          provider: getVal("cfgModuleDiscoveryProvider"),
-          model: getVal("cfgModuleDiscoveryModel"),
-        },
-        recommendation: {
-          provider: getVal("cfgModuleRecommendationProvider"),
-          model: getVal("cfgModuleRecommendationModel"),
-        },
-        evaluation: {
-          provider: getVal("cfgModuleEvaluationProvider"),
-          model: getVal("cfgModuleEvaluationModel"),
-        },
-      },
       bilibili: {
         auth_method: getVal("cfgBiliAuth"),
         // An empty textarea must not wipe the synced cookie on save — omit
@@ -7383,81 +7182,6 @@ function bindSettings() {
     statusEl.textContent = `${label} 探测中...`;
   }
 
-  async function runLlmConfigProbe(button, statusEl) {
-    if (!button) return;
-    button.disabled = true;
-    renderProbePending(statusEl, "LLM");
-    try {
-      const result = await probeConfigService("llm", collectForm());
-      renderProbeResult(statusEl, result);
-    } catch (err) {
-      renderProbeResult(statusEl, {
-        ok: false,
-        error: err?.message || "LLM 探测失败",
-      });
-    } finally {
-      button.disabled = false;
-    }
-  }
-
-  async function runEmbeddingConfigProbe(button, statusEl) {
-    if (!button) return;
-    button.disabled = true;
-    renderProbePending(statusEl, "Embedding");
-    try {
-      const result = await probeConfigService("embedding", collectForm());
-      renderProbeResult(statusEl, result);
-    } catch (err) {
-      renderProbeResult(statusEl, {
-        ok: false,
-        error: err?.message || "Embedding 探测失败",
-      });
-    } finally {
-      button.disabled = false;
-    }
-  }
-
-  const probeLlmBtn = document.getElementById("cfgProbeLlm");
-  const probeLlmStatus = document.getElementById("cfgProbeLlmStatus");
-  if (probeLlmBtn instanceof HTMLButtonElement) {
-    probeLlmBtn.addEventListener("click", () => {
-      void runLlmConfigProbe(probeLlmBtn, probeLlmStatus);
-    });
-  }
-
-  async function runLlmFallbackConfigProbe(button, statusEl) {
-    if (!button) return;
-    button.disabled = true;
-    renderProbePending(statusEl, "备选 Provider");
-    try {
-      const result = await probeConfigService("llm_fallback", collectForm());
-      renderProbeResult(statusEl, result);
-    } catch (err) {
-      renderProbeResult(statusEl, {
-        ok: false,
-        error: err?.message || "备选 Provider 探测失败",
-      });
-    } finally {
-      button.disabled = false;
-    }
-  }
-
-  const probeLlmFallbackBtn = document.getElementById("cfgProbeLlmFallback");
-  const probeLlmFallbackStatus = document.getElementById("cfgProbeLlmFallbackStatus");
-  if (probeLlmFallbackBtn instanceof HTMLButtonElement) {
-    probeLlmFallbackBtn.addEventListener("click", () => {
-      void runLlmFallbackConfigProbe(probeLlmFallbackBtn, probeLlmFallbackStatus);
-    });
-  }
-
-  const probeEmbeddingBtn = document.getElementById("cfgProbeEmbedding");
-  const probeEmbeddingStatus = document.getElementById("cfgProbeEmbeddingStatus");
-  if (probeEmbeddingBtn instanceof HTMLButtonElement) {
-    probeEmbeddingBtn.addEventListener("click", () => {
-      void runEmbeddingConfigProbe(probeEmbeddingBtn, probeEmbeddingStatus);
-    });
-  }
-
   async function runNetworkProxyConfigProbe(button, statusEl) {
     if (!button) return;
     button.disabled = true;
@@ -7547,6 +7271,7 @@ function bindSettings() {
     hideConfigBanners();
     setSaveButtonMode("");
     setActiveSettingsPanel("models");
+    void modelSettings.open();
     // Backend port is stored in chrome.storage, not on the backend, so it
     // populates even when the backend is unreachable — which is the whole
     // point of changing it.
@@ -7580,6 +7305,7 @@ function bindSettings() {
   });
 
   backBtn.addEventListener("click", () => {
+    if (!modelSettings.confirmLeave()) return;
     overlay.hidden = true;
   });
 
@@ -7765,18 +7491,7 @@ async function enableLocalOllamaEmbedding(enableBtn) {
     enableBtn.textContent = "启用中…";
   }
   try {
-    await updateConfig({
-      llm: {
-        embedding: {
-          provider: "ollama",
-          model: "bge-m3",
-          // Don't hardcode base_url: Docker deployments use
-          // http://ollama:11434/v1 (sidecar), local deployments use
-          // the default http://localhost:11434/v1.  Omitting it
-          // preserves whatever the backend already has configured.
-        },
-      },
-    });
+    await enableLocalOllamaEmbeddingRoute();
     // Re-check: hot-reload rebuilds the embedding service in-process and
     // /api/health probes it live, so embedding_ready only flips true once
     // Ollama actually serves a vector. Don't claim success on a config
@@ -7843,9 +7558,12 @@ async function enableLocalOllamaEmbedding(enableBtn) {
       "配置已写入，但 Ollama 还没就绪。请确认已运行 `ollama serve` 并 `ollama pull bge-m3`。",
       "error",
     );
-  } catch {
+  } catch (error) {
     failBtn("重试");
-    setHint("启用失败，请检查后端连接后重试。", "error");
+    const detail = error?.status === 409
+      ? "模型配置已在其他位置更新，请打开设置检查后再重试。"
+      : error?.message || "启用失败，请检查后端连接后重试。";
+    setHint(detail, "error");
   }
 }
 

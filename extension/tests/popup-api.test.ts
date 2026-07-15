@@ -28,9 +28,50 @@ import {
   updateConfig,
   __resetPopupHealthCacheForTests,
 } from "../popup/popup-api.js";
+import * as popupApi from "../popup/popup-api.js";
 import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+function modelSnapshotFixture(ids = ["a"], revision = "revision-a") {
+  return {
+    revision,
+    source: "native",
+    models: {
+      schema_version: 1,
+      chat: {
+        connections: ids.map((id) => ({
+          id,
+          name: id,
+          type: "openai_compatible",
+          preset: "custom",
+          model: "test-model",
+          base_url: "https://example.test/v1",
+          credential: { source: "none", configured: false },
+          api_mode: "chat_completions",
+          reasoning_effort: "",
+          http_referer: "",
+          x_title: "",
+          num_ctx: 0,
+        })),
+        concurrency: 4,
+        timeout_seconds: 300,
+      },
+      embedding: {
+        enabled: false,
+        settings: {
+          model: "bge-m3",
+          output_dimensionality: 1024,
+          similarity_threshold: 0.82,
+          multimodal_enabled: false,
+        },
+        providers: [],
+      },
+    },
+    migration: { state: "none", confirmed: true, issues: [] },
+    overrides: [],
+  };
+}
 
 test("health helpers coalesce concurrent popup probes", async () => {
   __resetPopupHealthCacheForTests();
@@ -711,6 +752,132 @@ test("fetchConfig caches successful config snapshots in chrome storage", async (
   }
 });
 
+test("model-config api reads safe snapshots and descriptor groups without reveal_keys", async () => {
+  for (const name of ["fetchModelConfig", "fetchModelConnectionTypes"]) {
+    assert.equal(typeof (popupApi as any)[name], "function", `${name} should be exported`);
+  }
+  const calls: Array<{ url: string; options: any }> = [];
+  globalThis.fetch = (async (url: string, options: any) => {
+    calls.push({ url, options });
+    if (url.endsWith("/model-connection-types")) {
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { connection_types: [], groups: [] };
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return modelSnapshotFixture(["a"]);
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  const modelSnapshot = await (popupApi as any).fetchModelConfig();
+  const descriptors = await (popupApi as any).fetchModelConnectionTypes();
+
+  assert.equal(modelSnapshot.revision, "revision-a");
+  assert.deepEqual(descriptors.groups, []);
+  assert.deepEqual(calls.map((call) => call.url), [
+    "http://127.0.0.1:8420/api/model-config",
+    "http://127.0.0.1:8420/api/model-connection-types",
+  ]);
+  assert.ok(calls.every((call) => !call.url.includes("reveal_keys")));
+  assert.ok(calls.every((call) => call.options.method === "GET"));
+});
+
+test("model-config api sends one revisioned route update through its dedicated endpoint", async () => {
+  assert.equal(typeof (popupApi as any).updateModelConfig, "function");
+  const calls: Array<{ url: string; options: any }> = [];
+  globalThis.fetch = (async (url: string, options: any) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { snapshot: modelSnapshotFixture(["a"], "revision-b") };
+      },
+    };
+  }) as unknown as typeof fetch;
+  const payload = {
+    revision: "revision-a",
+    models: modelSnapshotFixture(["a"]).models,
+    migration_resolutions: {},
+  };
+
+  await (popupApi as any).updateModelConfig(payload);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/model-config");
+  assert.equal(calls[0].options.method, "PUT");
+  assert.equal(calls[0].options.headers["Content-Type"], "application/json");
+  assert.deepEqual(JSON.parse(calls[0].options.body), payload);
+  assert.equal("llm" in JSON.parse(calls[0].options.body), false);
+});
+
+test("model-config api probes one exact draft and preserves 409 conflict details", async () => {
+  assert.equal(typeof (popupApi as any).probeModelConnection, "function");
+  assert.equal((popupApi as any).MODEL_CONFIG_PROBE_TIMEOUT_MS, 60_000);
+  const calls: Array<{ url: string; options: any }> = [];
+  const exact = {
+    kind: "embedding",
+    revision: "revision-a",
+    provider: {
+      id: "embedding-a",
+      name: "Embedding A",
+      type: "ollama",
+      preset: "",
+      base_url: "http://127.0.0.1:11434/v1",
+      credential: { action: "clear" },
+    },
+    settings: {
+      model: "bge-m3",
+      output_dimensionality: 1024,
+      similarity_threshold: 0.82,
+      multimodal_enabled: false,
+    },
+  };
+  globalThis.fetch = (async (url: string, options: any) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { ok: true, connection_id: "embedding-a", observed_dimension: 1024 };
+      },
+    };
+  }) as unknown as typeof fetch;
+
+  await (popupApi as any).probeModelConnection(exact);
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/model-config/probe");
+  assert.equal(calls[0].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].options.body), exact);
+
+  const details = {
+    error: "revision_conflict",
+    latest: modelSnapshotFixture(["remote"], "revision-b"),
+  };
+  globalThis.fetch = (async () => ({
+    ok: false,
+    status: 409,
+    async json() {
+      return details;
+    },
+  })) as unknown as typeof fetch;
+  await assert.rejects(
+    () => (popupApi as any).updateModelConfig({ revision: "revision-a" }),
+    (error: any) => {
+      assert.equal(error.status, 409);
+      assert.deepEqual(error.details, details);
+      return true;
+    },
+  );
+});
+
 test("cacheConfigSnapshot no-ops when chrome storage is unavailable", async () => {
   const originalChrome = (globalThis as { chrome?: unknown }).chrome;
   delete (globalThis as { chrome?: unknown }).chrome;
@@ -840,7 +1007,7 @@ test("probeConfigService posts no-write config probe payload", async () => {
   assert.equal(result.provider, "openai");
 });
 
-test("updateConfig sends PUT with embedding config", async () => {
+test("updateConfig sends only unrelated general settings through the legacy config endpoint", async () => {
   const calls: Array<{ url: string; options: any }> = [];
   globalThis.fetch = async (url: any, options: any) => {
     calls.push({ url, options });
@@ -849,7 +1016,7 @@ test("updateConfig sends PUT with embedding config", async () => {
       async json() {
         return {
           ok: true,
-          config: { language: "zh", llm: { embedding: { provider: "openai", model: "text-embedding-3-small", similarity_threshold: 0.78 } } },
+          config: { language: "zh", scheduler: { enabled: true } },
           message: "配置已保存。",
           reloaded: true,
         };
@@ -857,17 +1024,7 @@ test("updateConfig sends PUT with embedding config", async () => {
     };
   };
 
-  const payload = {
-    llm: {
-      default_provider: "openai",
-      openai: { api_key: "sk-test", model: "gpt-4o" },
-      embedding: {
-        provider: "openai",
-        model: "text-embedding-3-small",
-        similarity_threshold: 0.78,
-      },
-    },
-  };
+  const payload = { language: "zh", scheduler: { enabled: true } };
 
   const result = await updateConfig(payload);
 
@@ -877,10 +1034,9 @@ test("updateConfig sends PUT with embedding config", async () => {
   assert.equal(calls[0].options.headers["Content-Type"], "application/json");
 
   const sentBody = JSON.parse(calls[0].options.body);
-  assert.equal(sentBody.llm.embedding.provider, "openai");
-  assert.equal(sentBody.llm.embedding.model, "text-embedding-3-small");
-  assert.equal(sentBody.llm.embedding.similarity_threshold, 0.78);
-  assert.equal(sentBody.llm.openai.api_key, "sk-test");
+  assert.equal(sentBody.language, "zh");
+  assert.deepEqual(sentBody.scheduler, { enabled: true });
+  assert.equal("llm" in sentBody, false);
 
   assert.equal(result.ok, true);
   assert.equal(result.reloaded, true);

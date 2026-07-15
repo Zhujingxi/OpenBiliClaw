@@ -11,21 +11,6 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgBackendPort",
     "cfgExtDeviceKey",
     "cfgDataDir",
-    "cfgLlmFallbackProvider",
-    "cfgEmbeddingFallbackProvider",
-    "cfgEmbeddingMultimodalEnabled",
-    "cfgOpenaiAuthMode",
-    "cfgDeepseekReasoning",
-    "cfgOpenrouterReferer",
-    "cfgOpenrouterTitle",
-    "cfgModuleSoulProvider",
-    "cfgModuleSoulModel",
-    "cfgModuleDiscoveryProvider",
-    "cfgModuleDiscoveryModel",
-    "cfgModuleRecommendationProvider",
-    "cfgModuleRecommendationModel",
-    "cfgModuleEvaluationProvider",
-    "cfgModuleEvaluationModel",
     "cfgBiliBrowserExecutable",
     "cfgBiliBrowserHeaded",
     "cfgSourcesBrowserCdp",
@@ -402,36 +387,12 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     popupJs,
     /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
   );
-  assert.match(popupJs, /setVal\("cfgLlmConcurrency", cfg\.llm\?\.concurrency \?\? 4\)/);
-  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrency", 4\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);
   assert.match(
     popupJs,
     /multimodal_image_timeout_seconds: getInt\("cfgMultimodalImageTimeout", 6\)/,
-  );
-});
-
-test("settings page round-trips embedding multimodal cover toggle + dashscope provider", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-
-  // DashScope must be selectable as an embedding provider (not TOML-only).
-  assert.match(
-    popupHtml,
-    /<select id="cfgEmbeddingProvider">[\s\S]*<option value="dashscope"/,
-    "dashscope should be an embedding provider option",
-  );
-  // The image-only cover embedding toggle must exist and be wired both ways.
-  assert.match(popupHtml, /id="cfgEmbeddingMultimodalEnabled" type="checkbox"/);
-  assert.match(
-    popupJs,
-    /embMultimodal\.checked = cfg\.llm\?\.embedding\?\.multimodal_enabled === true/,
-  );
-  assert.match(
-    popupJs,
-    /multimodal_enabled: checked\("cfgEmbeddingMultimodalEnabled"\)/,
   );
 });
 
@@ -470,61 +431,6 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   );
 });
 
-test("settings page round-trips OpenAI auth mode", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-
-  assert.match(popupHtml, /id="cfgOpenaiAuthMode"/);
-  assert.match(popupHtml, /<option value="api_key">API Key<\/option>/);
-  assert.match(popupHtml, /<option value="codex_oauth">Codex OAuth<\/option>/);
-  assert.match(
-    popupJs,
-    /setVal\("cfgOpenaiAuthMode", cfg\.llm\?\.openai\?\.auth_mode \|\| "api_key"\)/,
-  );
-  assert.match(popupJs, /auth_mode: getVal\("cfgOpenaiAuthMode"\) \|\| "api_key"/);
-});
-
-test("settings page round-trips explicit LLM and embedding fallback providers", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-
-  assert.match(popupHtml, /id="cfgLlmFallbackProvider"/);
-  assert.match(popupHtml, /id="cfgEmbeddingFallbackProvider"/);
-  assert.doesNotMatch(popupHtml, /id="cfgLlmFallbackEnabled"/);
-  assert.doesNotMatch(popupHtml, /id="cfgEmbeddingFallbackEnabled"/);
-  assert.match(popupJs, /setVal\("cfgLlmFallbackProvider", cfg\.llm\?\.fallback_provider\)/);
-  assert.match(
-    popupJs,
-    /setVal\("cfgEmbeddingFallbackProvider", cfg\.llm\?\.embedding\?\.fallback_provider\)/,
-  );
-  assert.match(popupJs, /const llmFallbackProvider = getVal\("cfgLlmFallbackProvider"\)/);
-  assert.match(popupJs, /fallback_provider: llmFallbackProvider/);
-  assert.match(
-    popupJs,
-    /const embeddingFallbackProvider = getVal\("cfgEmbeddingFallbackProvider"\)/,
-  );
-  assert.match(
-    popupJs,
-    /fallback_provider: embeddingFallbackProvider/,
-  );
-});
-
-test("settings page exposes and wires LLM and embedding probe buttons", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-
-  assert.match(popupHtml, /id="cfgProbeLlm"/);
-  assert.match(popupHtml, /id="cfgProbeEmbedding"/);
-  assert.match(popupHtml, /id="cfgProbeLlmStatus"/);
-  assert.match(popupHtml, /id="cfgProbeEmbeddingStatus"/);
-  assert.match(popupHtml, /id="cfgProbeLlmFallback"/);
-  assert.match(popupHtml, /id="cfgProbeLlmFallbackStatus"/);
-  assert.match(popupJs, /probeConfigService\("llm", collectForm\(\)\)/);
-  assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
-  assert.match(popupJs, /probeConfigService\("llm_fallback", collectForm\(\)\)/);
-  assert.match(popupJs, /function renderProbeResult/);
-});
-
 test("settings general tab exposes and wires the network proxy field (aligned with desktop web)", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
@@ -543,39 +449,6 @@ test("settings general tab exposes and wires the network proxy field (aligned wi
   assert.match(popupJs, /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/);
   assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ mode, proxy \} \}\)/);
   assert.match(popupJs, /function runNetworkProxyConfigProbe/);
-});
-
-test("settings page guards against a same-name LLM fallback (aligned with desktop web)", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
-
-  // Inline warning for legacy same-name configs (data is never silently reset).
-  assert.match(popupHtml, /id="cfgLlmFallbackSameWarning"/);
-  assert.match(popupHtml, /备选与默认 Provider 相同时永远不会生效/);
-  // The sync disables the same-name option and runs on hydration + both selects.
-  assert.match(popupJs, /function syncLlmFallbackSameState/);
-  assert.match(popupJs, /option\.value === mainValue/);
-  const syncCalls = popupJs.match(/syncLlmFallbackSameState\(\)/g) ?? [];
-  assert.ok(syncCalls.length >= 2, "sync must run from hydration and the provider change handler");
-});
-
-test("settings page placeholders match config example defaults", () => {
-  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
-  const expectedDefaults = [
-    ["cfgOpenaiModel", "gpt-5-nano"],
-    ["cfgClaudeModel", "claude-sonnet-4-6"],
-    ["cfgOllamaModel", "qwen2.5:7b"],
-    ["cfgOllamaBaseUrl", "http://localhost:11434/v1"],
-    ["cfgOpenrouterModel", "openai/gpt-5-nano"],
-  ];
-
-  for (const [id, placeholder] of expectedDefaults) {
-    assert.match(
-      popupHtml,
-      new RegExp(`id="${id}"[^>]*placeholder="${placeholder.replaceAll("*", "\\*")}"`),
-      `${id} placeholder should match config.example.toml default`,
-    );
-  }
 });
 
 test("source-share suggestion button uses settings-scope helpers and form switches", () => {

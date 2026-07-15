@@ -604,9 +604,9 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型 API + 有序 Chat/Embedding route + 桌面编辑器（阶段 9–10）│
-│ Chat/Embedding/Runtime tabs · ordered list + selected inspector │
-│ descriptor 分组搜索类型 · Embedding 共享设置 · 窄屏 list→detail │
+│ 模型 API + 有序 Chat/Embedding route + 桌面/插件编辑器（阶段 9–11）│
+│ Chat/Embedding/Runtime tabs · 同一稳定-ID ordered route │
+│ Desktop inspector · Extension sequential list→detail · descriptor 驱动 │
 │ strict GET/PUT snapshot/save · descriptor · exact probe  │
 │ legacy /api/config 仅无凭据投影；旧模型写入返回 warning    │
 │ native/legacy + base/local → ModelConfigService path lock │
@@ -621,7 +621,7 @@ background ─ background admission (default 3) ──────┘
 │ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │
 │ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
-│ guided-init reservation 共用 writer；无跨进程锁；插件/CLI 后续迁移 │
+│ guided-init reservation 共用 writer；无跨进程锁；移动端/CLI 后续迁移 │
 ├────────────────────────────────────────────────┤
 │ LLMService 全路径 → 同一 route；caller 仅并发/usage；成本按 connection 归因 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

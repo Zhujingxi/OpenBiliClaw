@@ -601,9 +601,9 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model API + transactional Chat/Embedding routes + desktop editor (stages 9–10) │
-│ Chat/Embedding/Runtime tabs · ordered list + selected inspector │
-│ descriptor type search · shared Embedding settings · narrow list→detail │
+│ Model API + transactional Chat/Embedding routes + desktop/extension editors (stages 9–11) │
+│ Chat/Embedding/Runtime tabs · one stable-ID ordered route │
+│ Desktop inspector · extension sequential list→detail · descriptor-driven fields │
 │ strict GET/PUT snapshot/save · descriptors · exact draft probe │
 │ legacy /api/config is a credential-free projection with write guard │
 │ native/legacy + base/local → ModelConfigService path lock  │
@@ -618,7 +618,7 @@ background ─ background admission (default 3) ──────┘
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
-│ guided-init reservation shares writer; no cross-process lock; plugin/CLI follow │
+│ guided-init reservation shares writer; no cross-process lock; mobile/CLI follow │
 ├────────────────────────────────────────────────┤
 │ LLMService paths → one route; caller is concurrency/usage only; cost by connection │
 │   LLM adapters · Source adapters (SourceAdapter) │
