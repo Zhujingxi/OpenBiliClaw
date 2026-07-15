@@ -4,6 +4,8 @@
 
 引导初始化（guided init）让用户既能在命令行 `openbiliclaw init`、也能在浏览器插件「推荐」tab、桌面 Web（`/web`）未初始化空状态、或安装包首启 `/setup/` 向导里点「开始初始化」完成首轮建模。所有图形入口共用同一套四阶段流水线，后端再叠加进度状态机、前置检查和写者门控，保证图形化初始化在一个活跃后端上安全运行。
 
+命令行 `openbiliclaw init` 在模型配置缺失或无效且当前为交互终端时，会先后打开原生 Chat 与 Embedding 路由编辑器。两个编辑器都按 provider registry descriptor 只展示所选连接类型适用的字段，并统一经 `ModelConfigService` 校验和保存；init 模块不再维护 provider 专用菜单、TOML 写入器或独立校验规则。非交互终端仍直接报告配置错误。
+
 四阶段（与 CLI 完全一致）：
 
 1. **拉取数据** — B站 历史 / 收藏 / 关注（`_fetch_bilibili_init_data`，v0.3.118+ 仅当 `include_bili=True`，B 站与其他来源一样可取消）+ 小红书 / 抖音 / YouTube bootstrap 信号采集（按本轮勾选来源）+ 知乎 `bootstrap_events` + Reddit `bootstrap_events` + X 点赞 / 收藏（`_fetch_x_init_data`,服务端 twitter-cli 直拉、无扩展任务,与 B站 一样在本轮直接持久化;cookie 未同步时静默跳过）→ 统一 `build_event` → `memory.propagate_event` 入库。X 点赞 → `event_type="like"`、收藏 → `event_type="favorite"`(均为显式正向信号,v0.3.118+ 同时进画像构建的 history 行,保证 X-only 初始化也有画像输入)。Reddit saved → `favorite`、upvoted → `like`、subscribed subreddit → `follow`，每个分支默认最多 300 条；Reddit-only 初始化会等待插件回传这些信号，若 0 条则走统一 `empty_signals`。
