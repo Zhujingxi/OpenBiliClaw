@@ -86,12 +86,28 @@ class SupportsEmbedding(Protocol):
     def name(self) -> str: ...
 
     @property
+    def connection_type(self) -> str: ...
+
+    @property
+    def preset(self) -> str: ...
+
+    @property
     def settings(self) -> EmbeddingModelSettings: ...
 
     @property
     def provider(self) -> _EmbeddingProvider: ...
 
+    @property
+    def supports_image_embedding(self) -> bool: ...
+
     async def embed(self, text: str) -> list[float]: ...
+
+    async def embed_image(
+        self,
+        image_bytes: bytes,
+        *,
+        mime_type: str = "image/jpeg",
+    ) -> list[float]: ...
 
 
 @dataclass(frozen=True)
@@ -99,12 +115,23 @@ class EmbeddingProtocolAdapter:
     """Bind a native provider to one immutable shared embedding model space."""
 
     name: str
+    connection_type: str
+    preset: str
     settings: EmbeddingModelSettings
     provider: _EmbeddingProvider = field(repr=False)
 
     @property
     def supports_image_embedding(self) -> bool:
-        return bool(getattr(self.provider, "supports_image_embedding", False))
+        if not bool(getattr(self.provider, "supports_image_embedding", False)):
+            return False
+        checker = getattr(self.provider, "is_multimodal_embedding_model", None)
+        if callable(checker):
+            try:
+                if not bool(checker(self.settings.model)):
+                    return False
+            except Exception:
+                return False
+        return callable(getattr(self.provider, "embed_image", None))
 
     async def embed(self, text: str) -> list[float]:
         return await self.provider.embed(text, model=self.settings.model)
@@ -287,6 +314,8 @@ def build_embedding_adapter(
         raise LLMProviderError("connection type is not supported")
     return EmbeddingProtocolAdapter(
         name=provider.id,
+        connection_type=provider.type,
+        preset=provider.preset,
         settings=settings,
         provider=native,
     )

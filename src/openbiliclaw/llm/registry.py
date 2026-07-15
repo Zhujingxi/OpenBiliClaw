@@ -31,7 +31,9 @@ from .openrouter_provider import OpenRouterProvider
 
 if TYPE_CHECKING:
     from openbiliclaw.config import Config
-    from openbiliclaw.llm.embedding import SupportsEmbeddingService
+    from openbiliclaw.llm.embedding import EmbeddingCache, SupportsEmbeddingService
+    from openbiliclaw.llm.route import CircuitTable
+    from openbiliclaw.model_config import EmbeddingRouteConfig
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +169,43 @@ _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
 # process (not once per build_embedding_service call — runtime_context
 # rebuilds embedding on every PUT /api/config and we don't want to spam).
 _embedding_compat_warned: set[str] = set()
+
+
+def build_ordered_embedding_service(
+    route_config: EmbeddingRouteConfig,
+    *,
+    revision: str,
+    runtime_options: AdapterRuntimeOptions,
+    persistent_cache: EmbeddingCache | None = None,
+    circuits: CircuitTable | None = None,
+) -> SupportsEmbeddingService | None:
+    """Build the native ordered route without provider-derived model defaults.
+
+    This is the ``[models.embedding]`` construction path used by the staged
+    runtime bundle work.  The legacy ``build_embedding_service(config,
+    registry)`` entry point below intentionally remains in place until Task 8
+    cuts every production composition caller over in one atomic change.
+    """
+    if not route_config.enabled:
+        return None
+    if not route_config.providers:
+        raise RegistryBuildError("Enabled embedding route has no providers.")
+
+    from openbiliclaw.llm.embedding import EmbeddingService
+    from openbiliclaw.llm.embedding_route import OrderedEmbeddingRoute
+
+    settings = route_config.settings
+    adapters = tuple(
+        build_embedding_adapter(provider, settings, runtime_options)
+        for provider in route_config.providers
+    )
+    route = OrderedEmbeddingRoute(
+        adapters,
+        settings=settings,
+        revision=revision,
+        circuits=circuits,
+    )
+    return EmbeddingService(route, persistent_cache=persistent_cache)
 
 
 def build_embedding_service(

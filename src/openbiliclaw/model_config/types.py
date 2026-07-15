@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
@@ -67,6 +69,26 @@ class EmbeddingModelSettings:
     output_dimensionality: int = 1024
     similarity_threshold: float = 0.82
     multimodal_enabled: bool = False
+
+    def cache_namespace(self) -> str:
+        """Return a provider-independent namespace for this shared space.
+
+        Provider IDs and route order are deliberately absent.  Compatible
+        endpoints may therefore reuse cached vectors, while any route-wide
+        setting change moves future reads and writes into a new namespace.
+        """
+        payload = json.dumps(
+            {
+                "model": self.model,
+                "multimodal_enabled": self.multimodal_enabled,
+                "output_dimensionality": self.output_dimensionality,
+                "similarity_threshold": self.similarity_threshold,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return f"embedding-v1:{hashlib.sha256(payload).hexdigest()}"
 
 
 @dataclass(frozen=True)

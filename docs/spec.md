@@ -376,7 +376,7 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│             模型连接 + 有序 Chat route（阶段 5）               │
+│          模型连接 + 有序 Chat / Embedding route（阶段 6）       │
 │ native [models] → strict parser/revision ────────────────┐    │
 │ legacy [llm] → exact raw/URL inspection → chat/embed map ┤    │
 │                 → secret-safe report → closed resolution │    │
@@ -385,13 +385,16 @@ background ─ background admission (default 3) ──────┘
 │ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
 │                                   ├→ total deadline + safe attempts │
 │                                   └→ revision-aware CircuitTable   │
+│ Embedding providers → shared settings adapter → OrderedEmbeddingRoute │
+│                                   ├→ finite/dimension validation + circuit │
+│                                   └→ fixed PNG exact probe + shared cache namespace │
 │ 普通保存保留 raw；Task 8 负责 RuntimeContext/API/UI composition 与事务 │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
 │  │ OpenAI / Claude / Gemini │  │ EmbeddingService       │   │
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │
-│  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
+│  │ OpenRouter + Codex OAuth │  │ 共享 namespace + 安全降级 │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
 │  LLMService normal/structured/multimodal/tools → one global route │

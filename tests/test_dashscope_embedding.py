@@ -8,12 +8,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from openbiliclaw.config import Config
+from openbiliclaw.llm.connection_factory import EmbeddingProtocolAdapter
 from openbiliclaw.llm.dashscope_provider import DashScopeEmbeddingProvider
 from openbiliclaw.llm.embedding import EmbeddingService
 from openbiliclaw.llm.registry import (
     _embedding_provider_honors_output_dimensionality,
     build_embedding_service,
 )
+from openbiliclaw.model_config import EmbeddingModelSettings
 
 
 def test_is_multimodal_embedding_model_markers() -> None:
@@ -22,6 +24,33 @@ def test_is_multimodal_embedding_model_markers() -> None:
     assert DashScopeEmbeddingProvider.is_multimodal_embedding_model("multimodal-embedding-v1")
     assert not DashScopeEmbeddingProvider.is_multimodal_embedding_model("text-embedding-v3")
     assert not DashScopeEmbeddingProvider.is_multimodal_embedding_model("")
+
+
+def test_protocol_adapter_image_capability_respects_the_shared_model() -> None:
+    provider = DashScopeEmbeddingProvider(api_key="sk-test")
+    text_only = EmbeddingProtocolAdapter(
+        name="dashscope-text",
+        connection_type="dashscope_api",
+        preset="",
+        settings=EmbeddingModelSettings(
+            model="text-embedding-v3",
+            multimodal_enabled=True,
+        ),
+        provider=provider,
+    )
+    multimodal = EmbeddingProtocolAdapter(
+        name="dashscope-image",
+        connection_type="dashscope_api",
+        preset="",
+        settings=EmbeddingModelSettings(
+            model="qwen3-vl-embedding",
+            multimodal_enabled=True,
+        ),
+        provider=provider,
+    )
+
+    assert text_only.supports_image_embedding is False
+    assert multimodal.supports_image_embedding is True
 
 
 @pytest.mark.asyncio

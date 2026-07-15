@@ -7,7 +7,9 @@ from openbiliclaw.llm.embedding import (
     EmbeddingService,
     image_embedding_cache_key,
 )
+from openbiliclaw.llm.embedding_route import OrderedEmbeddingRoute
 from openbiliclaw.llm.gemini_provider import GeminiProvider
+from openbiliclaw.model_config import EmbeddingModelSettings
 
 
 class _FakeEmbedProvider:
@@ -233,3 +235,72 @@ async def test_text_only_provider_has_no_image_support() -> None:
     )
     assert service.supports_image_embedding is False
     assert service.image_embedding_active() is False
+
+
+async def test_ordered_route_failure_degrades_safely_and_never_caches_invalid_vector(
+    tmp_path: Path,
+) -> None:
+    sentinel = "Bearer provider-raw-secret"
+    settings = EmbeddingModelSettings(model="bge-m3", output_dimensionality=2)
+
+    class FailingAdapter:
+        name = "safe-id"
+        connection_type = "ollama"
+        preset = ""
+        supports_image_embedding = False
+
+        def __init__(self) -> None:
+            self.settings = settings
+            self.calls = 0
+
+        async def embed(self, text: str) -> list[float]:
+            self.calls += 1
+            raise RuntimeError(sentinel)
+
+    adapter = FailingAdapter()
+    route = OrderedEmbeddingRoute((adapter,), settings=settings, revision="r1")
+    cache = EmbeddingCache(tmp_path / "embedding-cache.db")
+    cache.initialize()
+    service = EmbeddingService(route, persistent_cache=cache)
+
+    assert await service.embed("private text") == []
+    assert await service.embed("private text") == []
+    assert adapter.calls == 2
+    assert cache.count() == 0
+    assert sentinel not in service.last_unavailable_reason
+
+
+async def test_ordered_route_settings_are_the_only_service_model_space_source() -> None:
+    settings = EmbeddingModelSettings(
+        model="shared-model",
+        output_dimensionality=2,
+        similarity_threshold=0.61,
+        multimodal_enabled=False,
+    )
+
+    class Adapter:
+        name = "endpoint"
+        connection_type = "openai_compatible"
+        preset = "custom"
+        supports_image_embedding = False
+
+        def __init__(self) -> None:
+            self.settings = settings
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0]
+
+    route = OrderedEmbeddingRoute((Adapter(),), settings=settings, revision="r1")
+    service = EmbeddingService(
+        route,
+        model="must-not-override-route",
+        cache_model="must-not-contaminate-cache",
+        similarity_threshold=0.99,
+        multimodal_enabled=True,
+    )
+
+    assert await service.embed("text") == [1.0, 0.0]
+    assert service._model == "shared-model"  # noqa: SLF001
+    assert service._cache_model == settings.cache_namespace()  # noqa: SLF001
+    assert service.similarity_threshold == 0.61
+    assert service.multimodal_enabled is False

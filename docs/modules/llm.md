@@ -4,7 +4,7 @@
 
 热重载不会替换 gate 对象，而是原地 `reconfigure()`：升容立即按优先级唤醒等待者；降容不撤销已进入 provider 的工作，并在 active 降到新容量以下前停止新准入。配置探测也使用 `api.config_probe` 后台分类经过同一 gate。
 
-> 统一的多 LLM Provider 接口，支持 OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，并提供按稳定 connection ID 执行的全局有序 Chat route、总 deadline、retry 与 revision-aware circuit。
+> 统一的多 LLM Provider 接口，支持 OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，并提供按稳定 connection ID 执行的全局有序 Chat / Embedding route、Provider retry、revision-aware circuit 与安全探测。
 
 ## 概述
 
@@ -12,7 +12,7 @@
 
 核心设计：
 - **Provider 抽象** — `LLMProvider` ABC 定义统一接口
-- **有序路由** — `OrderedLLMRoute` 按配置数组顺序尝试 connection，并以稳定 ID 隔离同类型连接
+- **有序路由** — `OrderedLLMRoute` / `OrderedEmbeddingRoute` 按配置数组顺序尝试 connection，并以稳定 ID 隔离同类型连接
 - **Service 门面** — `LLMService` 封装 prompt 组装 + 调用 + 校验
 - **统一异常与熔断** — Provider 错误归一化后进入安全 aggregate attempt 与 revision-aware circuit
 
@@ -23,8 +23,9 @@
 | 2.1 Provider 实现 | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带 retry + 超时 |
 | 2.2 Provider Registry | ✅ | 自动注册 + 可配置 fallback + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
-| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。Chat adapter 已可组成阶段 5 route；Embedding route 与完整 runtime/API/UI composition 仍由后续任务接线 |
+| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。Embedding adapter 还暴露 connection type/preset，并按具体 model 判定图像 embedding 能力 |
 | 全局有序 Chat route（阶段 5） | ✅ | `OrderedLLMRoute` 精确保持 1–10 条配置数组顺序，允许多个同类型 connection；Provider 内 transport retry 完成后才尝试下一项，整条 route 共用一个总 deadline。rate-limit、永久配置错误与 transient 使用不同 circuit，exact probe 可绕过并在成功时关闭；aggregate attempt 和响应 metadata 均为 secret-safe |
+| 共享设置有序 Embedding route（阶段 6） | ✅ | `OrderedEmbeddingRoute` 精确保持 Provider 数组顺序，并要求所有 adapter 持有同一个不可变 `EmbeddingModelSettings` 对象；空值、非数值和非有限向量按本次调用 fallback，配置维度不匹配才打开 provider+revision 永久 circuit。精确探测只调用目标 ID，并在多模态开启时使用仓库固定 PNG；共享设置生成与 Provider ID/顺序无关的 cache namespace |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
 | v0.3.164 LLM 失败安全边界 | ✅ | `describe_llm_failure()` 识别 moderation、鉴权、额度/限流、provider/service 超时与空响应；`safe_llm_failure_message()` 为 API / CLI / OpenClaw 的公共边界提供固定安全兜底，未知异常不回传上游文本 |
@@ -40,7 +41,7 @@
 | v0.3.75 Provider per-call model | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible 的 `complete(..., model=...)` 支持单次模型覆盖，不修改 provider 实例默认 `_model` |
 | 体验优化：B站动态语气 | ✅ | 推荐、画像总结和聊天 prompt 统一接入 `ToneProfile`，在“老B友”基础上按用户画像微调语气 |
 | v0.3.0 Ollama embedding 兜底 | ✅ | `OllamaProvider.embed()` 走原生 `/api/embeddings`，配合 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需要额外的 embedding API Key |
-| v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；`build_embedding_service` 按 provider 自动选默认 model（gemini→gemini-embedding-001 / openai→text-embedding-3-small / ollama→bge-m3） |
+| v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；legacy `build_embedding_service` 继续按 provider 选择默认 model。注入原生 route 时，Service 从其共享 settings 派生 model、维度、阈值、多模态开关与 cache namespace，拒绝缓存空、非数值、非有限或维度不符的向量；完整 production composition 留给 Task 8 |
 | 可选封面 image-only embedding | ✅ | `[llm.embedding].multimodal_enabled` + 多模态 embedding 模型（`gemini-embedding-2` 族，或 `dashscope` + `qwen3-vl-embedding` 等）时，`EmbeddingService.embed_image()` 把压缩封面打成向量，与文本同 `model`/维度空间；discovery 入池按封面 URL 派生键（`image_embedding_cache_key_for_url`）预热，Delight 线上 `precompute_delight_scores` 消费（见 [recommendation 模块](recommendation.md) 封面视觉加成）。默认关闭；provider/model 不支持图像或开关关闭时自动 no-op（纯文本模型零成本、打分与旧版逐字节一致） |
 | DashScope 多模态 embedding | ✅ | `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API；`embed`/`embed_image` 独立向量（不 `enable_fusion`）；默认 `qwen3-vl-embedding`；`output_dimensionality` 对 qwen3-vl 透传 `dimension`；embedding-only（`complete` 拒绝） |
 | v0.3.113 Embedding 目标维度 | ✅ | `[llm.embedding].output_dimensionality` 默认 1024，与 Ollama `bge-m3` 对齐；Gemini 传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时传 `dimensions`，Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传。L2 cache 仅在 provider 确认支持目标维度时按 `model#dim=N` 签名隔离，同一文本的不同维度向量不会互相覆盖，也不会把未生效的兼容后端标成伪维度 |
@@ -173,6 +174,37 @@ probe = await route.complete_connection(
 `CircuitTable` 以 `(connection_id, config_revision)` 精确二元组隔离状态：新旧 runtime 即使共享表，也不会通过查询、失败或成功互相删除状态；成功只关闭本 revision。失败的 exact probe 采用单调合并，永久 circuit 不被削弱，仍在 open 的 timed circuit 只会保留或延长 `retry_at`，并保留实际生效状态对应的 failure kind/count。
 
 路由耗尽时抛 `LLMRouteExhaustedError`。其 `attempts` 只包含 `connection_id`、`connection_type`、`preset`、`route_position`、`failure_kind` 与固定英文摘要，不保存原始异常、响应体、credential 或含 userinfo 的 URL。成功响应保留既有 `provider` / `model` 计价字段，同时写入四个 connection metadata 字段。
+
+### Ordered Embedding route
+
+```python
+from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_embedding_adapter
+from openbiliclaw.llm.embedding_route import OrderedEmbeddingRoute
+from openbiliclaw.model_config import compute_model_revision
+
+settings = models.embedding.settings
+providers = tuple(
+    build_embedding_adapter(record, settings, AdapterRuntimeOptions())
+    for record in models.embedding.providers
+)
+route = OrderedEmbeddingRoute(
+    providers,
+    settings=settings,
+    revision=compute_model_revision(models),
+)
+
+vector = await route.embed("repository-owned probe text")
+probe = await route.probe_provider("embedding-primary")
+print(probe.observed_dimension, probe.image_probe_performed)
+```
+
+`OrderedEmbeddingRoute` 要求每个 adapter 的 `settings is settings`，因此 Provider 只能改变 credential、endpoint 与 transport，不能覆盖 model、维度、相似度阈值或多模态开关。调用严格按数组位置执行；单个 Provider 内部 retry 完成后才尝试下一项。同类型 Provider 由稳定 ID 独立隔离。`EmbeddingService` 注入该 route 后忽略 legacy 构造参数中的 model/cache namespace/阈值/多模态值，统一从共享 settings 派生，避免调用方制造第二套向量空间。
+
+成功向量必须是非空、非布尔的有限数值列表。空向量、非数值、`NaN`/`inf` 和错误 shape 只触发本次 fallback，不跨请求熔断；只有非零 `output_dimensionality` 与返回维度不一致时记录 `config_error` 永久 circuit。Circuit 继续以 `(provider_id, config_revision)` 隔离；失败精确探测不会削弱已有状态，成功只关闭目标 Provider 的当前 revision。`output_dimensionality=0` 接受 Provider 原生维度，并由探测结果报告该维度。
+
+`probe_provider(id)` 绕过目标 circuit、只调用该 ID、不走 fallback、不读写 embedding cache，也不修改配置。多模态开启时，它还用仓库内固定 1×1 PNG 与固定 `image/png` MIME 探测图像向量；报告只能证明该 endpoint 在本次调用返回了可验证维度，不能证明不同 endpoint 的远端模型权重完全相同。建议在启用原生 route 前逐项探测所有 Provider，尤其是维度设为 `0` 时。
+
+`EmbeddingModelSettings.cache_namespace()` 只散列共享 model、维度、阈值和多模态开关，因此兼容 endpoint 重排或更换稳定 ID 可复用缓存；任一共享设置变化都会切换 namespace。`EmbeddingService` 对 route 耗尽保持既有产品降级语义：返回 `[]`、不写缓存，并通过 `last_unavailable_reason` 暴露固定安全原因，不保留上游异常或用户文本。
 
 ### Provider 类
 
@@ -408,7 +440,7 @@ stats = cache.stats()
 
 `LLMService` 不再包含 caller-prefix / module bucket 选择逻辑。`soul.*`、`discovery.*`、`recommendation.*`、`eval.*` 等 caller 全部调用注入对象的同一个 `complete()`；caller 继续参与 concurrency priority 与 usage ledger，不改变 connection、model 或 fallback 顺序。
 
-Task 5 为未修改的 `RuntimeContext`、CLI 与 Soul 构造器暂时保留 `ModuleOverride`、`module_overrides_from_config()` 和 `LLMService.module_overrides` 形状。解析出的 legacy 数据只用于构造兼容，不被 `LLMService` 读取。完整 composition 改为从 `Config.models` 构造 `OrderedLLMRoute`、删除这些旧参数以及切换配置探测/API/UI 属于 Task 8；在此之前 production runtime 仍可注入 legacy `LLMRegistry`，但同样只走其全局 `complete()` 路径。
+阶段 5/6 已提供原生 `OrderedLLMRoute`、`OrderedEmbeddingRoute` 与 `build_ordered_embedding_service()` 构造核心。未修改的 `RuntimeContext`、CLI 与 Soul 构造器仍暂时保留 `ModuleOverride`、`module_overrides_from_config()`、`LLMService.module_overrides` 和 legacy `build_embedding_service()` 形状。解析出的 legacy module 数据只用于构造兼容，不被 `LLMService` 读取。完整 composition 改为从 `Config.models` 构造两条 route、删除旧参数以及切换配置探测/API/UI 属于 Task 8；在此之前 production runtime 的公开行为保持兼容。
 
 ### 异常体系
 
@@ -419,7 +451,8 @@ LLMProviderError          # 基类
 └── LLMResponseError      # 响应无效（空内容）
 
 LLMFallbackError          # 所有 provider 都失败
-└── LLMRouteExhaustedError  # 有序 route 耗尽；携带安全 RouteAttempt
+├── LLMRouteExhaustedError  # Chat route 耗尽；携带安全 RouteAttempt
+└── EmbeddingRouteExhaustedError  # Embedding route 耗尽；携带安全 EmbeddingRouteAttempt
 RegistryBuildError        # 无法构建 registry（无可用 provider）
 
 LLMServiceError           # Service 层基类
@@ -523,7 +556,7 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 ## 设计决策
 
 1. **retry 策略**：传输 / provider 临时错误走 3 次重试 + 线性退避（0.25s × attempt）；通用 OpenAI-compatible 的 `LLMResponseError` 默认不重试。DeepSeek 例外：线上观测到它会偶发 HTTP 200 但 `content=""`，因此 `DeepSeekProvider` 对空内容额外重试一次。`reasoning_effort=""` 会显式发送 `thinking={"type":"disabled"}`，避免 DeepSeek v4 省略字段时默认开启 thinking。HTTP 400 会记录 provider response body 摘要，避免只看到 `Error code: 400`
-2. **fallback 顺序**：原生 Chat route 严格使用 `models.chat.connections` 数组顺序并允许最多十条同等 connection；legacy runtime 在 Task 8 composition cutover 前仍把 `[llm].default_provider` / `fallback_provider` 映射为自身全局 `complete()` 链。Embedding 暂按既有显式主备语义，Task 6 再接入共享模型设置的有序 route。
+2. **fallback 顺序**：原生 Chat / Embedding route 分别严格使用 `models.chat.connections` / `models.embedding.providers` 数组顺序并允许最多十条同类 connection；Provider 自身 retry 总在跨 Provider fallback 之前完成。Embedding Provider 共用一个 settings 对象与 Provider-order-invariant cache namespace。legacy runtime 在 Task 8 composition cutover 前仍使用既有显式主备构造路径。
    - **备选何时触发**：`LLMRegistry.complete()` 链上遇到 provider 级失败时——`LLMProviderError` / `LLMTimeoutError` / `LLMRateLimitError`（限流同时触发 60s cooldown），以及 v0.3.156+ 的 `LLMResponseError`（空 / 坏 content——劣质网关最常见的死法是 HTTP 200 但内容为空，provider 内部自重试一次后换备选再试；此前该类错误直接上抛、备选永远不接管）。单 provider 链耗尽后统一抛 `LLMFallbackError`（原始错误在 `__cause__`）。
    - **备选何时刻意不触发**：legacy `complete_provider()` 仅为配置探测等精确调用保留，跨 provider 兜底会违背探测目标；模块 caller 已不再进入此路径。备选与默认 provider 同名、未注册（缺凭据）或非 chat-capable 时被 `_fallback_order()` 静默丢弃——运行时静默丢弃是正确行为（不能每次补全都刷日志），死状态的可见性由两处兜底：`_collect_config_issues` 在保存 / 加载时以 blocking issue 拦截（见 [配置参考](config.md)），`build_llm_registry` 在构建时对「同名 / 未注册 / 非 chat-capable」按具体原因打一次 WARNING（v0.3.155+，覆盖 env 覆盖与手改 config.toml 绕过保存校验的场景）。
    - **开关语义（v0.3.156+）**：`[llm].fallback_provider` 非空即启用，留空即关闭——旧的 `[llm].fallback_enabled` 布尔字段从未被回退链读取，已彻底移除（config 加载忽略存量 key，PUT /api/config 忽略旧客户端仍发送的该字段，GET 不再回显）。embedding 侧的 `[llm.embedding].fallback_enabled` 仍然有效（借用 chat-side 凭据的旧兼容开关）。

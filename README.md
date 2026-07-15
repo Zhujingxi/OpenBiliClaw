@@ -604,12 +604,14 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型连接 + 有序 Chat route（阶段 5）                   │
+│ 模型连接 + 有序 Chat / Embedding route（阶段 6）       │
 │ native [models] strict parse/revision → Config.models    │
 │ legacy [llm] 精确 raw/URL 检查 → chat/embed 映射与报告   │
 │ 封闭 resolution → 权威校验 → 有效内存候选                │
 │ Chat 记录 → ID adapter → OrderedLLMRoute（全局原序）      │
 │ 总 deadline · revision circuit · exact probe · 安全 attempt │
+│ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │
+│ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
 │ Task 8 待办：RuntimeContext/API/UI composition 与事务 backup │
 ├────────────────────────────────────────────────┤
 │ LLMService 全路径 → 同一 route；caller 仅并发/usage    │

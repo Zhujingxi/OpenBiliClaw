@@ -25,6 +25,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol
 
+from openbiliclaw.model_config import EmbeddingModelSettings
+
 logger = logging.getLogger(__name__)
 
 _IMAGE_CACHE_KEY_PREFIX = "img:"
@@ -189,11 +191,14 @@ class EmbeddingCache:
             return None
 
     def put(self, key: str, vector: list[float], model: str = "") -> None:
+        normalized = _coerce_embedding_vector(vector)
+        if not normalized:
+            return
         with self._lock:
             self.conn.execute(
                 """INSERT OR REPLACE INTO embedding_cache (text_key, vector, model)
                    VALUES (?, ?, ?)""",
-                (key, json.dumps(vector), model),
+                (key, json.dumps(normalized), model),
             )
             self.conn.commit()
 
@@ -213,8 +218,10 @@ class EmbeddingService:
     Discovery writes to both layers; recommendation reads hit L1 first,
     then L2, and only calls the API as a last resort.
 
-    All parameters (model, threshold, cache_size) can be configured
-    via ``[llm.embedding]`` in config.toml.
+    Native ordered routes derive model, threshold, multimodal behavior and
+    cache namespace exclusively from their shared ``EmbeddingModelSettings``.
+    Direct legacy provider construction remains available until Task 8 cuts
+    runtime composition over from ``[llm.embedding]``.
     """
 
     # Fixed text used by ``probe()`` for /api/health live readiness checks.
@@ -233,8 +240,20 @@ class EmbeddingService:
         multimodal_enabled: bool = False,
     ) -> None:
         self._provider = provider
+        route_settings = getattr(provider, "settings", None)
+        self._shared_settings = (
+            route_settings if isinstance(route_settings, EmbeddingModelSettings) else None
+        )
+        if self._shared_settings is not None:
+            model = self._shared_settings.model
+            cache_model = self._shared_settings.cache_namespace()
+            similarity_threshold = self._shared_settings.similarity_threshold
+            multimodal_enabled = self._shared_settings.multimodal_enabled
         self._model = model
         self._cache_model = cache_model or model
+        self._expected_dimension = (
+            self._shared_settings.output_dimensionality if self._shared_settings is not None else 0
+        )
         # OrderedDict + move_to_end on hit gives us proper LRU instead of
         # FIFO. With a 500-key cache and bursty access patterns (delight
         # scoring iterates the same like_texts repeatedly), FIFO would
@@ -256,6 +275,12 @@ class EmbeddingService:
         self._provider_semaphore = asyncio.Semaphore(max_concurrent_provider_calls)
         self.multimodal_enabled = bool(multimodal_enabled)
         self.supports_image_embedding = self._detect_image_embedding_support()
+        self._last_unavailable_reason = ""
+
+    @property
+    def last_unavailable_reason(self) -> str:
+        """Return the most recent fixed, secret-safe degradation reason."""
+        return self._last_unavailable_reason
 
     def image_embedding_active(self) -> bool:
         """True when config opts in and the provider/model can embed images."""
@@ -279,24 +304,44 @@ class EmbeddingService:
             return []
         cached = self._l1_cache.get(key)
         if cached is not None:
-            self._l1_cache.move_to_end(key)
-            return cached
+            validated = self._validate_vector(cached)
+            if validated:
+                self._l1_cache.move_to_end(key)
+                return validated
+            self._l1_cache.pop(key, None)
         if self._l2_cache is not None:
             persisted = self._l2_cache.get(key, model=self._cache_model)
             if persisted is not None:
-                self._l1_cache[key] = persisted
-                return persisted
+                validated = self._validate_vector(persisted)
+                if validated:
+                    self._l1_cache[key] = validated
+                    return validated
         return []
 
     def _store_vector(self, key: str, vector: list[float]) -> None:
+        normalized = self._validate_vector(vector)
+        if not normalized:
+            return
         if len(self._l1_cache) >= self._cache_size and key not in self._l1_cache:
             self._l1_cache.popitem(last=False)
-        self._l1_cache[key] = vector
+        self._l1_cache[key] = normalized
         if self._l2_cache is not None:
             try:
-                self._l2_cache.put(key, vector, model=self._cache_model)
+                self._l2_cache.put(key, normalized, model=self._cache_model)
             except Exception:
                 logger.debug("L2 cache write failed", exc_info=True)
+
+    def _validate_vector(self, value: object) -> list[float]:
+        vector = _coerce_embedding_vector(value) or []
+        if not vector:
+            return []
+        if self._expected_dimension != 0 and len(vector) != self._expected_dimension:
+            return []
+        return vector
+
+    def _mark_unavailable(self, reason: str) -> None:
+        self._last_unavailable_reason = reason
+        logger.warning("Embedding unavailable: %s", reason)
 
     def lookup_cached(self, text: str) -> list[float]:
         """Cache-only lookup — never triggers a provider API call.
@@ -326,6 +371,7 @@ class EmbeddingService:
         # L1 / L2 cache lookup (also covers warming-side hits).
         cached = self.lookup_cached(text)
         if cached:
+            self._last_unavailable_reason = ""
             return cached
 
         # L3: API call (throttled — see __init__ semaphore comment)
@@ -333,7 +379,7 @@ class EmbeddingService:
             try:
                 vector = await self._provider.embed(key, model=self._model)
             except Exception:
-                logger.warning("Embedding failed for: %s", key[:50], exc_info=True)
+                self._mark_unavailable("All configured embedding providers are unavailable.")
                 return []
 
         # Never cache an empty vector. Empty means the provider failed
@@ -346,16 +392,13 @@ class EmbeddingService:
         # likes_alignment for the most relevant content. Surface a
         # WARN per occurrence so the failure mode is visible at the
         # service layer, not buried in provider-level logs.
+        vector = self._validate_vector(vector)
         if not vector:
-            logger.warning(
-                "Embedding service got empty vector for key=%r — "
-                "provider returned [] (likely transient failure). "
-                "Skipping cache write so the next call retries.",
-                key[:80],
-            )
+            self._mark_unavailable("The embedding provider returned no valid vector.")
             return []
 
         self._store_vector(key, vector)
+        self._last_unavailable_reason = ""
         return vector
 
     async def embed_image(
@@ -382,6 +425,7 @@ class EmbeddingService:
 
         cached = self._lookup_cache_key(key)
         if cached:
+            self._last_unavailable_reason = ""
             return cached
 
         embed_image = getattr(self._provider, "embed_image", None)
@@ -396,24 +440,16 @@ class EmbeddingService:
                     model=self._model,
                 )
             except Exception:
-                logger.warning(
-                    "Image embedding failed for key=%s",
-                    key[:50],
-                    exc_info=True,
-                )
+                self._mark_unavailable("All configured embedding providers are unavailable.")
                 return []
 
-        vector = _coerce_embedding_vector(raw_vector) or []
+        vector = self._validate_vector(raw_vector)
         if not vector:
-            logger.warning(
-                "Embedding service got empty image vector for key=%r — "
-                "provider returned [] (likely transient failure). "
-                "Skipping cache write so the next call retries.",
-                key[:80],
-            )
+            self._mark_unavailable("The embedding provider returned no valid image vector.")
             return []
 
         self._store_vector(key, vector)
+        self._last_unavailable_reason = ""
         return vector
 
     async def probe(self) -> bool:
@@ -431,9 +467,9 @@ class EmbeddingService:
             try:
                 vector = await self._provider.embed(self._PROBE_TEXT, model=self._model)
             except Exception:
-                logger.debug("Embedding readiness probe failed", exc_info=True)
+                logger.debug("Embedding readiness probe failed")
                 return False
-        return bool(vector)
+        return bool(self._validate_vector(vector))
 
     async def are_similar(self, text_a: str, text_b: str) -> bool:
         """Check if two texts are semantically similar above threshold."""
@@ -483,5 +519,11 @@ def _coerce_embedding_vector(value: object) -> list[float] | None:
     for item in value:
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return None
-        vector.append(float(item))
+        try:
+            number = float(item)
+        except (OverflowError, ValueError):
+            return None
+        if not math.isfinite(number):
+            return None
+        vector.append(number)
     return vector

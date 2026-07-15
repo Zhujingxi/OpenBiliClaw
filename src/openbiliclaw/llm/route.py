@@ -1,4 +1,4 @@
-"""Deterministic ordered Chat routing with revision-aware circuit breakers."""
+"""Deterministic ordered Chat routing with shared revision-aware circuits."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ RouteFailureKind: TypeAlias = Literal[
     "invalid_response",
     "moderation",
 ]
+CircuitFailureKind: TypeAlias = RouteFailureKind | Literal["config_error"]
 
 _FALLBACK_KINDS = frozenset(
     {
@@ -42,10 +43,11 @@ _FALLBACK_KINDS = frozenset(
         "server_error",
         "invalid_response",
         "moderation",
+        "config_error",
     }
 )
 _TRANSIENT_CIRCUIT_KINDS = frozenset({"timeout", "connection", "server_error"})
-_PERMANENT_CIRCUIT_KINDS = frozenset({"auth_failed", "model_not_found"})
+_PERMANENT_CIRCUIT_KINDS = frozenset({"auth_failed", "model_not_found", "config_error"})
 _PROMPT_SCOPED_KINDS = frozenset({"invalid_response", "moderation"})
 # Approved design calibration (2026-07-15): start at 15 seconds so ten dead
 # endpoints cannot stall every background call, double to a five-minute cap,
@@ -64,6 +66,7 @@ _SAFE_SUMMARIES: dict[str, str] = {
     "server_error": "The connection returned a server error.",
     "invalid_response": "The connection returned an invalid response.",
     "moderation": "The connection declined this request under its content policy.",
+    "config_error": "The connection is incompatible with the configured model space.",
 }
 
 
@@ -140,7 +143,7 @@ class CircuitState:
     """Secret-safe runtime circuit state for one connection and revision."""
 
     revision: str
-    failure_kind: RouteFailureKind
+    failure_kind: CircuitFailureKind
     opened_at: float
     retry_at: float | None
     failure_count: int
@@ -151,7 +154,7 @@ class CircuitState:
 
 
 class CircuitTable:
-    """In-memory circuit states keyed by stable connection ID and revision."""
+    """In-memory circuit states keyed by stable route ID and revision."""
 
     def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         self._clock = clock or time.monotonic
@@ -179,7 +182,7 @@ class CircuitTable:
         """Open the category-specific circuit without retaining ``exc``."""
         if failure_kind not in _FALLBACK_KINDS:
             return
-        kind = cast("RouteFailureKind", failure_kind)
+        kind = cast("CircuitFailureKind", failure_kind)
         if kind in _PROMPT_SCOPED_KINDS:
             return
 
@@ -228,8 +231,9 @@ class CircuitTable:
     ) -> None:
         """Merge a failed exact probe without weakening an open circuit."""
         if previous is not None:
-            # Permanent auth/model protection is released only by success for
-            # this exact revision. A failed exact probe cannot replace it.
+            # Permanent auth/model/config protection is released only by
+            # success for this exact revision. A failed exact probe cannot
+            # replace it.
             if previous.permanent:
                 return
             # Keep the entire prior state when it is still open and carries an
@@ -334,7 +338,14 @@ class OrderedLLMRoute:
         state = self.circuits.state_for(connection.id, self.revision)
         if not ignore_circuit and self.circuits.should_skip(connection.id, self.revision):
             if state is not None:
-                attempts.append(RouteAttempt.safe(connection, position, state.failure_kind))
+                # Chat adapters never record the embedding-only config_error kind.
+                attempts.append(
+                    RouteAttempt.safe(
+                        connection,
+                        position,
+                        cast("RouteFailureKind", state.failure_kind),
+                    )
+                )
             raise LLMRouteExhaustedError(attempts)
         response = await self._attempt(
             connection,
