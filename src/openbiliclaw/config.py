@@ -6,7 +6,6 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
@@ -28,6 +27,7 @@ from openbiliclaw.model_config import (
     parse_model_config,
     render_model_config,
 )
+from openbiliclaw.model_config.serialization import encode_toml_basic_string
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -965,6 +965,19 @@ def _override_leaf_paths(value: object, prefix: str) -> tuple[str, ...]:
     for key, item in value.items():
         if isinstance(key, str):
             paths.extend(_override_leaf_paths(item, f"{prefix}.{key}"))
+    return tuple(paths)
+
+
+def _env_model_override_paths() -> tuple[str, ...]:
+    """Return exact model leaves supplied by the generic environment layer."""
+    prefix = "OPENBILICLAW_LLM_"
+    paths: list[str] = []
+    for env_key in sorted(os.environ):
+        if not env_key.startswith(prefix):
+            continue
+        suffix = env_key[len(prefix) :]
+        if suffix:
+            paths.append("llm." + ".".join(suffix.lower().split("_")))
     return tuple(paths)
 
 
@@ -2306,6 +2319,9 @@ def load_config_with_diagnostics(
                 raw = _deep_merge(raw, file_data)
 
     raw = _apply_env_overrides(raw)
+    model_override_paths = tuple(
+        dict.fromkeys((*model_override_paths, *_env_model_override_paths()))
+    )
     # Removed-key notices are collected from the RAW [discovery] table before
     # _build_discovery ever runs — the values are ignored, never fail-fast.
     diagnostics.issues.extend(_removed_discovery_key_issues(raw))
@@ -2549,13 +2565,21 @@ def _autostart_lines(
 
 def _read_on_disk_model_tables(
     path: Path,
+    *,
+    require_existing: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Return raw native and legacy model tables from one concrete file."""
+    """Return raw model tables, failing closed for an existing destination."""
     try:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
+        if require_existing:
+            raise ConfigError("无法安全保存配置：保存前无法读取现有配置文件。") from None
         return None, None
+    except OSError:
+        raise ConfigError("无法安全保存配置：保存前无法读取现有配置文件。") from None
+    except tomllib.TOMLDecodeError:
+        raise ConfigError("无法安全保存配置：现有配置文件不是有效 TOML。") from None
     models = data.get("models")
     llm = data.get("llm")
     return (
@@ -2569,16 +2593,6 @@ def _local_model_table_exists() -> bool:
     path = _project_root() / "config.local.toml"
     models, llm = _read_on_disk_model_tables(path)
     return models is not None or llm is not None
-
-
-def _legacy_model_values_are_overridden(*, consult_local: bool) -> bool:
-    """Return whether a higher layer makes legacy values non-authoritative."""
-    if any(key.startswith("OPENBILICLAW_LLM_") for key in os.environ):
-        return True
-    if not consult_local:
-        return False
-    _, local_llm = _read_on_disk_model_tables(_project_root() / "config.local.toml")
-    return local_llm is not None
 
 
 def _refresh_legacy_llm_snapshot(config: Config, path: Path) -> None:
@@ -2597,7 +2611,7 @@ _BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 def _generic_toml_key(value: str) -> str:
     if _BARE_TOML_KEY.fullmatch(value):
         return value
-    return json.dumps(value, ensure_ascii=False)
+    return _toml_string(value)
 
 
 def _generic_toml_path(parts: tuple[str, ...]) -> str:
@@ -2612,7 +2626,7 @@ def _is_array_of_tables(value: object) -> TypeGuard[list[Mapping[str, object]]]:
 
 def _generic_toml_value(value: object, path: str) -> str:
     if isinstance(value, str):
-        return json.dumps(value, ensure_ascii=False)
+        return _toml_string(value)
     if isinstance(value, bool):
         return _toml_bool(value)
     if isinstance(value, int):
@@ -2773,11 +2787,14 @@ def _changed_legacy_table(
     current: object,
     persisted: object,
     field_names: tuple[str, ...],
+    *,
+    overridden_paths: frozenset[str],
 ) -> None:
     changed = [
         field_name
         for field_name in field_names
-        if getattr(current, field_name) != getattr(persisted, field_name)
+        if f"llm.{name}.{field_name}" not in overridden_paths
+        and getattr(current, field_name) != getattr(persisted, field_name)
     ]
     if not changed:
         return
@@ -2801,6 +2818,7 @@ def _legacy_llm_with_known_changes(
     persisted = _build_config({"llm": dict(raw)}).llm
     snapshot = getattr(config, "_legacy_llm_snapshot", None)
     baseline = snapshot if isinstance(snapshot, LLMConfig) else persisted
+    overridden_paths = frozenset(config.model_meta.override_paths)
 
     top_level_values = {
         "default_provider": (config.llm.default_provider, baseline.default_provider),
@@ -2815,7 +2833,7 @@ def _legacy_llm_with_known_changes(
         ),
     }
     for key, (current, before) in top_level_values.items():
-        if current != before:
+        if f"llm.{key}" not in overridden_paths and current != before:
             result[key] = current
 
     for provider_name, field_names in _LEGACY_PROVIDER_RENDER_FIELDS.items():
@@ -2825,6 +2843,7 @@ def _legacy_llm_with_known_changes(
             getattr(config.llm, provider_name),
             getattr(baseline, provider_name),
             field_names,
+            overridden_paths=overridden_paths,
         )
     _changed_legacy_table(
         result,
@@ -2832,6 +2851,7 @@ def _legacy_llm_with_known_changes(
         config.llm.embedding,
         baseline.embedding,
         _LEGACY_EMBEDDING_RENDER_FIELDS,
+        overridden_paths=overridden_paths,
     )
     for module_name in _LEGACY_MODULE_NAMES:
         _changed_legacy_table(
@@ -2840,6 +2860,7 @@ def _legacy_llm_with_known_changes(
             getattr(config.llm, module_name),
             getattr(baseline, module_name),
             ("provider", "model"),
+            overridden_paths=overridden_paths,
         )
     return result
 
@@ -2851,7 +2872,6 @@ def _model_section_lines(
     on_disk_llm: Mapping[str, object] | None,
     models_authoritative: bool,
     preserve_model_absence: bool,
-    preserve_legacy_values: bool,
 ) -> list[str]:
     if models_authoritative:
         return render_model_config(config.models)
@@ -2862,9 +2882,7 @@ def _model_section_lines(
     if on_disk_llm is not None:
         if lines:
             lines.append("")
-        llm_raw = on_disk_llm
-        if on_disk_models is None and not preserve_legacy_values:
-            llm_raw = _legacy_llm_with_known_changes(config, on_disk_llm)
+        llm_raw = _legacy_llm_with_known_changes(config, on_disk_llm)
         lines.extend(_render_raw_model_table("llm", llm_raw))
     if lines or preserve_model_absence:
         return lines
@@ -2889,13 +2907,14 @@ def save_config(
     # password and flip the reconcile fingerprint basis.
     on_disk_auth = _read_on_disk_auth(path) if path_existed else None
     on_disk_autostart = _read_on_disk_autostart(path) if path_existed else None
-    on_disk_models, on_disk_llm = _read_on_disk_model_tables(path) if path_existed else (None, None)
+    on_disk_models, on_disk_llm = (
+        _read_on_disk_model_tables(path, require_existing=True) if path_existed else (None, None)
+    )
     # config.local.toml is merged ONLY when load_config runs with no explicit path
     # (production / default path). For a save to any other explicit file it was
     # never merged, so its overrides must not gate this render (review r11).
     consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
     preserve_model_absence = path_existed or (consult_local and _local_model_table_exists())
-    preserve_legacy_values = _legacy_model_values_are_overridden(consult_local=consult_local)
     path.write_text(
         _render_config_toml(
             config,
@@ -2906,7 +2925,6 @@ def save_config(
             autostart_authoritative=autostart_authoritative,
             models_authoritative=models_authoritative,
             preserve_model_absence=preserve_model_absence,
-            preserve_legacy_values=preserve_legacy_values,
             consult_local=consult_local,
         ),
         encoding="utf-8",
@@ -2925,7 +2943,6 @@ def _render_config_toml(
     autostart_authoritative: bool = False,
     models_authoritative: bool = False,
     preserve_model_absence: bool = False,
-    preserve_legacy_values: bool = False,
     consult_local: bool = False,
 ) -> str:
     """Render a Config dataclass into TOML."""
@@ -2948,7 +2965,6 @@ def _render_config_toml(
             on_disk_llm=on_disk_llm,
             models_authoritative=models_authoritative,
             preserve_model_absence=preserve_model_absence,
-            preserve_legacy_values=preserve_legacy_values,
         )
     )
     lines.append("")
@@ -3176,8 +3192,7 @@ def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str
 
 def _toml_string(value: str) -> str:
     """Render a TOML string literal."""
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
+    return encode_toml_basic_string(value)
 
 
 def _toml_bool(value: bool) -> str:

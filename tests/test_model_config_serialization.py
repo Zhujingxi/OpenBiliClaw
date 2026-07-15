@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import tomllib
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import openbiliclaw.model_config as model_config_module
-from openbiliclaw.config import load_config, save_config
+from openbiliclaw.config import Config, ConfigError, load_config, save_config
 from openbiliclaw.model_config import (
     ChatConnection,
     ChatRouteConfig,
@@ -19,10 +20,6 @@ from openbiliclaw.model_config import (
     EmbeddingRouteConfig,
     ModelConfig,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 NATIVE_MODELS_TOML = """
 [models]
@@ -278,6 +275,16 @@ def test_render_model_config_round_trips_and_is_deterministic() -> None:
     )
 
 
+@pytest.mark.parametrize("schema_version", [1.0, True])
+def test_render_model_config_requires_exact_integer_schema_version_one(
+    schema_version: object,
+) -> None:
+    config = replace(model_config(), schema_version=schema_version)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        _render_model_config(config)
+
+
 def test_render_model_config_flattens_each_credential_source() -> None:
     config = model_config(chat_ids=("inline", "env", "oauth"))
     connections = (
@@ -316,6 +323,22 @@ def test_render_model_config_never_writes_empty_inline_secret_placeholder() -> N
     rendered = "\n".join(_render_model_config(config))
 
     assert 'api_key = ""' not in rendered
+
+
+def test_authoritative_native_render_escapes_forbidden_toml_controls() -> None:
+    config = model_config(chat_ids=("control",))
+    forbidden_controls = "\x00\x08\t\n\x0b\x0c\r\x1f\x7f"
+    connection = replace(
+        config.chat.connections[0],
+        name=f"Native{forbidden_controls}Name",
+    )
+    config = replace(config, chat=replace(config.chat, connections=(connection,)))
+
+    rendered = "\n".join(_render_model_config(config))
+    reparsed = tomllib.loads(rendered)
+
+    assert "\\u007F" in rendered
+    assert reparsed["models"]["chat"]["connections"][0]["name"] == connection.name
 
 
 def test_revision_changes_when_inline_secret_changes_without_exposing_it() -> None:
@@ -378,6 +401,82 @@ def test_unrelated_save_does_not_migrate_or_drop_legacy_model_data(tmp_path: Pat
     assert after == before
     assert [route["name"] for route in after["vendor"]["routes"]] == ["first", "second"]
     assert after["deepseek"]["api_key"] == "sk-legacy-inline"
+
+
+def test_raw_model_preservation_escapes_del_in_unknown_key_and_value(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[llm]\ndefault_provider = "deepseek"\n"vendor\\u007Fkey" = "value\\u007F"\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(path)
+
+    save_config(loaded, path)
+
+    rendered = path.read_text(encoding="utf-8")
+    reparsed = tomllib.loads(rendered)
+    assert rendered.count("\\u007F") >= 2
+    assert reparsed["llm"]["vendor\x7fkey"] == "value\x7f"
+
+
+def test_ordinary_save_aborts_when_existing_config_is_malformed(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    original = b'[llm]\napi_key = "secret-that-must-not-appear\n'
+    path.write_bytes(original)
+
+    with pytest.raises(ConfigError) as raised:
+        save_config(Config(), path)
+
+    assert path.read_bytes() == original
+    assert "secret-that-must-not-appear" not in str(raised.value)
+
+
+def test_ordinary_save_aborts_when_existing_config_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.toml"
+    original = b'[llm]\ndefault_provider = "deepseek"\n'
+    path.write_bytes(original)
+    original_open = Path.open
+
+    def fail_target_reads(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if self == path and "r" in mode:
+            raise OSError("secret-os-detail")
+        return original_open(self, mode, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", fail_target_reads)
+        with pytest.raises(ConfigError) as raised:
+            save_config(Config(), path)
+
+    assert path.read_bytes() == original
+    assert "secret-os-detail" not in str(raised.value)
+
+
+def test_ordinary_save_still_creates_a_genuinely_absent_destination(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+
+    save_config(Config(), path)
+
+    with path.open("rb") as handle:
+        rendered = tomllib.load(handle)
+    assert rendered["llm"]["default_provider"] == "deepseek"
+
+
+def test_ordinary_save_preserves_model_absence_in_valid_existing_file(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[general]\nlanguage = "en"\n', encoding="utf-8")
+    loaded = load_config(path)
+
+    save_config(loaded, path)
+
+    with path.open("rb") as handle:
+        rendered = tomllib.load(handle)
+    assert rendered["general"]["language"] == "en"
+    assert "models" not in rendered
+    assert "llm" not in rendered
 
 
 def test_legacy_model_edit_updates_known_field_without_dropping_raw_extensions(
@@ -526,3 +625,63 @@ def test_unrelated_default_path_save_does_not_bake_local_legacy_layer(
         llm = tomllib.load(handle)["llm"]
     assert llm["deepseek"]["model"] == "deepseek-v4-flash"
     assert llm["deepseek"]["vendor_option"] == "keep-provider-option"
+
+
+def test_env_legacy_override_records_the_exact_leaf_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_LLM_CONCURRENCY", "9")
+    (tmp_path / "config.toml").write_text(
+        LEGACY_WITH_UNKNOWN_PROVIDER_KEY,
+        encoding="utf-8",
+    )
+
+    loaded = load_config()
+
+    assert loaded.llm.concurrency == 9
+    assert "llm.concurrency" in loaded.model_meta.override_paths
+
+
+def test_env_legacy_override_does_not_block_unrelated_known_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("OPENBILICLAW_LLM_CONCURRENCY", "9")
+    base = tmp_path / "config.toml"
+    base.write_text(LEGACY_WITH_UNKNOWN_PROVIDER_KEY, encoding="utf-8")
+    loaded = load_config()
+    loaded.llm.timeout = 111
+
+    save_config(loaded)
+
+    with base.open("rb") as handle:
+        llm = tomllib.load(handle)["llm"]
+    assert llm["concurrency"] == 4
+    assert llm["timeout"] == 111
+    assert llm["vendor_extension"] == "keep-me"
+
+
+def test_local_legacy_override_does_not_block_unrelated_known_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    base = tmp_path / "config.toml"
+    local = tmp_path / "config.local.toml"
+    base.write_text(LEGACY_WITH_UNKNOWN_PROVIDER_KEY, encoding="utf-8")
+    local.write_text('[llm.deepseek]\nmodel = "local-only-model"\n', encoding="utf-8")
+    loaded = load_config()
+    loaded.llm.openai.model = "openai-updated"
+    loaded.llm.deepseek.model = "must-not-bake-over-local"
+
+    save_config(loaded)
+
+    with base.open("rb") as handle:
+        llm = tomllib.load(handle)["llm"]
+    assert llm["deepseek"]["model"] == "deepseek-v4-flash"
+    assert llm.get("openai", {}).get("model") == "openai-updated"
+    assert llm["deepseek"]["vendor_option"] == "keep-provider-option"
+    assert (
+        tomllib.loads(local.read_text(encoding="utf-8"))["llm"]["deepseek"]["model"]
+        == "local-only-model"
+    )

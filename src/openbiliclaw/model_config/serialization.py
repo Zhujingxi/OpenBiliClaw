@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from typing import TypeAlias
 
@@ -243,8 +242,32 @@ def parse_model_config(raw: Mapping[str, object]) -> ModelConfig:
     )
 
 
-def _toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+def encode_toml_basic_string(value: str) -> str:
+    """Encode one TOML basic string without emitting forbidden controls."""
+    short_escapes = {
+        "\b": "\\b",
+        "\t": "\\t",
+        "\n": "\\n",
+        "\f": "\\f",
+        "\r": "\\r",
+        '"': '\\"',
+        "\\": "\\\\",
+    }
+    encoded = ['"']
+    for char in value:
+        escaped = short_escapes.get(char)
+        if escaped is not None:
+            encoded.append(escaped)
+            continue
+        codepoint = ord(char)
+        if codepoint <= 0x1F or codepoint == 0x7F:
+            encoded.append(f"\\u{codepoint:04X}")
+            continue
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise ValueError("TOML strings require Unicode scalar values")
+        encoded.append(char)
+    encoded.append('"')
+    return "".join(encoded)
 
 
 def _toml_bool(value: bool) -> str:
@@ -257,7 +280,7 @@ def _toml_number(value: float) -> str:
 
 def _append_optional(lines: list[str], name: str, value: str) -> None:
     if value:
-        lines.append(f"{name} = {_toml_string(value)}")
+        lines.append(f"{name} = {encode_toml_basic_string(value)}")
 
 
 def _append_credential(lines: list[str], credential: CredentialConfig) -> None:
@@ -272,16 +295,16 @@ def _append_credential(lines: list[str], credential: CredentialConfig) -> None:
         if credential.source == "none":
             return
         raise ValueError("models credential source is not supported")
-    lines.append(f"{key} = {_toml_string(credential.value)}")
+    lines.append(f"{key} = {encode_toml_basic_string(credential.value)}")
 
 
 def _render_chat_connection(connection: ChatConnection) -> list[str]:
     lines = [
         "[[models.chat.connections]]",
-        f"id = {_toml_string(connection.id)}",
-        f"name = {_toml_string(connection.name)}",
-        f"type = {_toml_string(connection.type.strip().lower())}",
-        f"model = {_toml_string(connection.model)}",
+        f"id = {encode_toml_basic_string(connection.id)}",
+        f"name = {encode_toml_basic_string(connection.name)}",
+        f"type = {encode_toml_basic_string(connection.type.strip().lower())}",
+        f"model = {encode_toml_basic_string(connection.model)}",
     ]
     _append_optional(lines, "preset", connection.preset.strip().lower())
     _append_optional(lines, "base_url", connection.base_url)
@@ -298,9 +321,9 @@ def _render_chat_connection(connection: ChatConnection) -> list[str]:
 def _render_embedding_provider(provider: EmbeddingProviderConfig) -> list[str]:
     lines = [
         "[[models.embedding.providers]]",
-        f"id = {_toml_string(provider.id)}",
-        f"name = {_toml_string(provider.name)}",
-        f"type = {_toml_string(provider.type.strip().lower())}",
+        f"id = {encode_toml_basic_string(provider.id)}",
+        f"name = {encode_toml_basic_string(provider.name)}",
+        f"type = {encode_toml_basic_string(provider.type.strip().lower())}",
     ]
     _append_optional(lines, "preset", provider.preset.strip().lower())
     _append_optional(lines, "base_url", provider.base_url)
@@ -310,7 +333,7 @@ def _render_embedding_provider(provider: EmbeddingProviderConfig) -> list[str]:
 
 def render_model_config(config: ModelConfig) -> list[str]:
     """Render a native model configuration in one stable TOML order."""
-    if isinstance(config.schema_version, bool) or config.schema_version != 1:
+    if type(config.schema_version) is not int or config.schema_version != 1:
         raise ValueError("models.schema_version: only schema version 1 is supported")
 
     lines = [
@@ -331,7 +354,7 @@ def render_model_config(config: ModelConfig) -> list[str]:
             f"enabled = {_toml_bool(config.embedding.enabled)}",
             "",
             "[models.embedding.settings]",
-            f"model = {_toml_string(config.embedding.settings.model)}",
+            f"model = {encode_toml_basic_string(config.embedding.settings.model)}",
             f"output_dimensionality = {config.embedding.settings.output_dimensionality}",
             "similarity_threshold = "
             f"{_toml_number(config.embedding.settings.similarity_threshold)}",
