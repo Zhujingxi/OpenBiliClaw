@@ -38,6 +38,32 @@ if TYPE_CHECKING:
     from typing import Any
 
 
+_EXCEPTION_SECRET = "test-secret-exception-chain-never-retain"
+
+
+def _exception_artifacts(error: BaseException) -> str:
+    """Collect surfaced exception state, including CLI-model traceback locals."""
+    artifacts: list[str] = []
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        artifacts.extend((repr(current), repr(current.args)))
+        for related in (current.__context__, current.__cause__):
+            if related is not None:
+                pending.append(related)
+        traceback = current.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            if frame.f_code.co_filename.endswith("openbiliclaw/cli_models.py"):
+                artifacts.extend(f"{name}={value!r}" for name, value in frame.f_locals.items())
+            traceback = traceback.tb_next
+    return "\n".join(artifacts)
+
+
 class FakeCoordinator:
     """Network-free runtime coordinator used by CLI persistence tests."""
 
@@ -561,12 +587,121 @@ def test_models_save_failure_never_echoes_secret_bearing_exception(
     assert "test-secret-inline-never-print" not in result.output
 
 
+def test_model_command_exit_drops_api_key_from_reachable_traceback_locals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    path = _project_root(monkeypatch, tmp_path, _models())
+    module = _models_module(runner)
+    coordinator = FakeCoordinator()
+    coordinator.fail_build_with = _EXCEPTION_SECRET
+    _install_service(module, monkeypatch, ModelConfigService(path, coordinator))
+
+    result = runner.invoke(
+        app,
+        ["models", "edit", "route-a", "--api-key", _EXCEPTION_SECRET],
+    )
+
+    assert result.exit_code == 1
+    assert _EXCEPTION_SECRET not in result.output
+    assert result.exception is not None
+    assert _EXCEPTION_SECRET not in _exception_artifacts(result.exception)
+
+
+def test_model_safe_boundary_drops_recursive_secret_exception_state(
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+
+    def fail_with_secret() -> None:
+        options = module.RecordOptions(api_key=_EXCEPTION_SECRET)
+        raise RuntimeError(_EXCEPTION_SECRET, options)
+
+    with pytest.raises(typer.Exit) as caught:
+        module._run_safe(fail_with_secret)
+
+    surfaced = caught.value
+    assert surfaced.exit_code == 1
+    assert surfaced.__context__ is None
+    assert surfaced.__cause__ is None
+    assert _EXCEPTION_SECRET not in _exception_artifacts(surfaced)
+
+
+def test_record_options_repr_excludes_inline_api_key(runner: CliRunner) -> None:
+    module = _models_module(runner)
+
+    rendered = repr(module.RecordOptions(api_key=_EXCEPTION_SECRET))
+
+    assert _EXCEPTION_SECRET not in rendered
+    assert "api_key=" not in rendered
+
+
+@pytest.mark.parametrize("editor_name", ["guided_chat_editor", "guided_embedding_editor"])
+def test_guided_editors_use_the_secret_safe_exception_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    editor_name: str,
+) -> None:
+    module = _models_module(runner)
+    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
+
+    def fail_service() -> ModelConfigService:
+        raise RuntimeError(_EXCEPTION_SECRET)
+
+    monkeypatch.setattr(module, "_build_model_config_service", fail_service)
+
+    with pytest.raises(typer.Exit) as caught:
+        getattr(module, editor_name)()
+
+    surfaced = caught.value
+    assert surfaced.exit_code == 1
+    assert surfaced.__context__ is None
+    assert surfaced.__cause__ is None
+    assert _EXCEPTION_SECRET not in _exception_artifacts(surfaced)
+
+
+def test_setup_embedding_noninteractive_never_enters_prompting_editor(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: False)
+
+    def unexpected_editor() -> None:
+        calls.append("editor")
+        raise RuntimeError(_EXCEPTION_SECRET)
+
+    monkeypatch.setattr(module, "guided_embedding_editor", unexpected_editor)
+    monkeypatch.setattr(
+        module.typer,
+        "prompt",
+        lambda *_args, **_kwargs: pytest.fail("non-TTY setup must never prompt"),
+    )
+
+    result = runner.invoke(app, ["setup-embedding"])
+
+    assert result.exit_code == 1
+    assert calls == []
+    assert result.output.strip() == (
+        "Error: setup-embedding requires an interactive terminal. "
+        "For automation, use `openbiliclaw models add --kind embedding` "
+        "with explicit options."
+    )
+    assert _EXCEPTION_SECRET not in result.output
+    if result.exception is not None:
+        assert _EXCEPTION_SECRET not in _exception_artifacts(result.exception)
+
+
 def test_setup_embedding_delegates_to_native_embedding_route_editor(
     monkeypatch: pytest.MonkeyPatch,
     runner: CliRunner,
 ) -> None:
     module = _models_module(runner)
     calls: list[bool] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
     monkeypatch.setattr(module, "guided_embedding_editor", lambda: calls.append(True))
     monkeypatch.setattr(
         cli_module,
@@ -587,6 +722,8 @@ def test_guided_runtime_setup_uses_native_chat_then_embedding_editors(
 ) -> None:
     module = _models_module(runner)
     calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
     monkeypatch.setattr(module, "guided_chat_editor", lambda: calls.append("chat"))
     monkeypatch.setattr(module, "guided_embedding_editor", lambda: calls.append("embedding"))
     monkeypatch.setattr(
@@ -605,6 +742,77 @@ def test_guided_runtime_setup_uses_native_chat_then_embedding_editors(
     cli_module._interactive_runtime_config_setup()
 
     assert calls == ["chat", "embedding"]
+
+
+def _prepare_guided_chat_edit(
+    module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        module,
+        "_guided_type_and_preset",
+        lambda *_args: ("openai_compatible", "custom"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_guided_record_options",
+        lambda *_args, **_kwargs: module.RecordOptions(
+            connection_type="openai_compatible",
+            preset="custom",
+            name="Guided A",
+            model="guided-chat-a",
+            base_url="https://guided-a.example.test/v1",
+            api_mode="chat_completions",
+        ),
+    )
+
+    def fake_prompt(label: str, **kwargs: object) -> str:
+        values = {
+            "Stable connection ID": "route-a",
+            "Connection name": "Guided A",
+        }
+        return values.get(label, str(kwargs.get("default", "")))
+
+    monkeypatch.setattr(module.typer, "prompt", fake_prompt)
+
+
+def test_guided_chat_edit_preserves_every_existing_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    path = _project_root(monkeypatch, tmp_path, _models())
+    module = _models_module(runner)
+    _install_service(module, monkeypatch, ModelConfigService(path, FakeCoordinator()))
+    _prepare_guided_chat_edit(module, monkeypatch)
+
+    module.guided_chat_editor()
+
+    rows = tomllib.loads(path.read_text(encoding="utf-8"))["models"]["chat"]["connections"]
+    assert [row["id"] for row in rows] == ["route-a", "route-b"]
+    assert rows[0]["name"] == "Guided A"
+    assert rows[0]["model"] == "guided-chat-a"
+    assert rows[1]["name"] == "Gateway B"
+
+
+def test_guided_chat_conflict_retry_preserves_concurrently_added_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    path = _project_root(monkeypatch, tmp_path, _models())
+    module = _models_module(runner)
+    service = ConflictOnceService(path, FakeCoordinator())
+    _install_service(module, monkeypatch, service)
+    _prepare_guided_chat_edit(module, monkeypatch)
+
+    module.guided_chat_editor()
+
+    rows = tomllib.loads(path.read_text(encoding="utf-8"))["models"]["chat"]["connections"]
+    assert service.conflicts == 1
+    assert [row["id"] for row in rows] == ["route-a", "route-b", "concurrent-route"]
+    assert rows[0]["name"] == "Guided A"
 
 
 def test_guided_chat_prompts_only_fields_exposed_by_selected_descriptor(

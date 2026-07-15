@@ -707,9 +707,11 @@ Enable multimodal embeddings? [y/N]:
 Base URL [http://127.0.0.1:11434/v1]:
 ```
 
-选择 `add` 会在现有列表末尾添加一个全局唯一稳定 ID；`edit` 保持 ID 和列表位置不变；`disable` 关闭 Embedding 并清空 Provider 列表。所有 Provider 始终共享同一 model、输出维度、相似度阈值和多模态开关，Provider 自身只保存 type/preset、endpoint 与 credential。需要精确调整位置或在脚本中配置时使用 `openbiliclaw models move/add/edit`；需要真实连通性检查时显式运行 `openbiliclaw models probe <id>`。
+引导只提供 `add/edit/disable` 三种选择：`add` 会在现有列表末尾添加一个全局唯一稳定 ID，`edit` 保持 ID 和列表位置不变，`disable` 会清空整个 Embedding route。删除单个 Provider 使用 `openbiliclaw models remove <id>`，重排单个 Provider 使用 `openbiliclaw models move <id> --position <1-10>`。所有 Provider 始终共享同一 model、输出维度、相似度阈值和多模态开关，Provider 自身只保存 type/preset、endpoint 与 credential；需要真实连通性检查时显式运行 `openbiliclaw models probe <id>`。
 
 本命令只负责配置。Ollama 二进制、daemon 与模型权重继续由用户、安装包或专用修复流程管理；CLI 不在配置提交中执行安装、后台启动或网络调用。
+
+`setup-embedding` 需要交互终端；自动化脚本应改用带完整显式参数的 `openbiliclaw models add --kind embedding`。非交互调用会返回非零退出码，不会打开编辑器或等待输入。
 
 ### `openbiliclaw recommend`
 

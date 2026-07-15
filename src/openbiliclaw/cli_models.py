@@ -6,6 +6,7 @@ import asyncio
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Literal, NoReturn, TypeAlias, cast
 
 import typer
@@ -77,7 +78,7 @@ class RecordOptions:
     http_referer: str | None = None
     x_title: str | None = None
     num_ctx: int | None = None
-    api_key: str | None = None
+    api_key: str | None = dataclass_field(default=None, repr=False)
     api_key_env: str | None = None
     credential_ref: str | None = None
     clear_credential: bool = False
@@ -821,21 +822,46 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(code=1)
 
 
-def _run_safe(operation: Callable[[], None]) -> None:
+def _run_safe(
+    operation: Callable[[], None],
+    *,
+    sensitive_values: list[str | None] | None = None,
+) -> None:
+    exit_code: int | None = None
+    field_errors: tuple[ModelConfigFieldError, ...] = ()
+    safe_message: str | None = None
     try:
-        operation()
-    except typer.Exit:
-        raise
-    except ModelsSaveError as exc:
-        _print_field_errors(exc.errors)
-        raise typer.Exit(code=1) from None
-    except ModelConfigValidationError as exc:
-        _print_field_errors(exc.errors)
-        raise typer.Exit(code=1) from None
-    except ModelsCliError as exc:
-        _fail(str(exc))
-    except Exception:
-        _fail("The model command failed safely; no credential value was displayed.")
+        try:
+            operation()
+            return
+        except typer.Exit as exc:
+            exit_code = exc.exit_code
+        except ModelsSaveError as exc:
+            field_errors = exc.errors
+            exit_code = 1
+        except ModelConfigValidationError as exc:
+            field_errors = exc.errors
+            exit_code = 1
+        except ModelsCliError as exc:
+            safe_message = str(exc)
+            exit_code = 1
+        except Exception:
+            safe_message = "The model command failed safely; no credential value was displayed."
+            exit_code = 1
+    finally:
+        if sensitive_values is not None:
+            for index in range(len(sensitive_values)):
+                sensitive_values[index] = None
+
+    # Do not retain the callback or any caught exception traceback in the
+    # sanitized exception raised to Typer/Click.
+    del operation
+    del sensitive_values
+    if field_errors:
+        _print_field_errors(field_errors)
+    elif safe_message is not None:
+        typer.echo(f"Error: {safe_message}", err=True)
+    raise typer.Exit(code=exit_code if exit_code is not None else 1) from None
 
 
 def _record_options(
@@ -920,6 +946,9 @@ def add_model(
 ) -> None:
     """Add one Chat connection or Embedding provider at a one-based position."""
 
+    inline_api_key = [api_key]
+    api_key = None
+
     def operation() -> None:
         route_kind = kind.strip().lower()
         if route_kind not in {"chat", "embedding"}:
@@ -938,7 +967,7 @@ def add_model(
             model=model if selected_kind == "chat" else None,
             base_url=base_url,
             api_mode=api_mode,
-            api_key=api_key,
+            api_key=inline_api_key[0],
             api_key_env=api_key_env,
             credential_ref=credential_ref,
             reasoning_effort=reasoning_effort,
@@ -1005,7 +1034,7 @@ def add_model(
         )
         typer.echo(f"Added {stable_id}; revision={saved.revision}")
 
-    _run_safe(operation)
+    _run_safe(operation, sensitive_values=inline_api_key)
 
 
 @models_app.command("edit")
@@ -1044,6 +1073,9 @@ def edit_model(
 ) -> None:
     """Edit one route record without changing its stable ID."""
 
+    inline_api_key = [api_key]
+    api_key = None
+
     def operation() -> None:
         service = _build_model_config_service()
         interactive = _interactive_terminal()
@@ -1054,7 +1086,7 @@ def edit_model(
             model=model,
             base_url=base_url,
             api_mode=api_mode,
-            api_key=api_key,
+            api_key=inline_api_key[0],
             api_key_env=api_key_env,
             credential_ref=credential_ref,
             reasoning_effort=reasoning_effort,
@@ -1131,7 +1163,7 @@ def edit_model(
         )
         typer.echo(f"Edited {connection_id}; revision={saved.revision}")
 
-    _run_safe(operation)
+    _run_safe(operation, sensitive_values=inline_api_key)
 
 
 @models_app.command("remove")
@@ -1342,8 +1374,8 @@ def _guided_record_options(
     return options
 
 
-def guided_chat_editor() -> None:
-    """Interactively replace the Chat route with one descriptor-driven connection."""
+def _guided_chat_editor() -> None:
+    """Interactively add or edit one descriptor-driven Chat connection."""
     service = _build_model_config_service()
     snapshot = service.read()
     current = snapshot.models.chat.connections[0] if snapshot.models.chat.connections else None
@@ -1368,29 +1400,36 @@ def guided_chat_editor() -> None:
         existing=current,
     )
 
+    initial_models = public_models_to_domain(snapshot.models)
+    initial_existing = next(
+        (item for item in initial_models.chat.connections if item.id == stable_id),
+        None,
+    )
+    initial_public = next(
+        (item for item in snapshot.models.chat.connections if item.id == stable_id),
+        None,
+    )
+    intended_record, intended_action = _chat_record(
+        stable_id,
+        options,
+        existing=initial_existing,
+        existing_status=initial_public.credential if initial_public is not None else None,
+        interactive=True,
+    )
+
     def mutation(
         models: ModelConfig,
         latest: ModelConfigSnapshot,
     ) -> tuple[ModelConfig, dict[str, CredentialAction]]:
-        existing_domain: ChatConnection | None = None
-        existing_status: PublicCredentialStatus | None = None
-        for domain_item in models.chat.connections:
-            if domain_item.id == stable_id:
-                existing_domain = domain_item
-                break
-        for public_item in latest.models.chat.connections:
-            if public_item.id == stable_id:
-                existing_status = public_item.credential
-                break
-        record, action = _chat_record(
-            stable_id,
-            options,
-            existing=existing_domain,
-            existing_status=existing_status,
-            interactive=True,
+        del latest
+        exists = any(item.id == stable_id for item in models.chat.connections)
+        candidate = (
+            service.edit(models, stable_id, intended_record)
+            if exists
+            else service.add(models, intended_record, position=1)
         )
-        candidate = replace(models, chat=replace(models.chat, connections=(record,)))
-        return candidate, ({stable_id: action} if action is not None else {})
+        actions = {stable_id: intended_action} if intended_action is not None else {}
+        return candidate, actions
 
     saved = asyncio.run(
         _save_with_rebase(
@@ -1403,7 +1442,12 @@ def guided_chat_editor() -> None:
     typer.echo(f"Configured Chat route; revision={saved.revision}")
 
 
-def guided_embedding_editor() -> None:
+def guided_chat_editor() -> None:
+    """Run the guided Chat editor through the shared secret-safe boundary."""
+    _run_safe(_guided_chat_editor)
+
+
+def _guided_embedding_editor() -> None:
     """Interactively add/edit/disable providers in one shared Embedding space."""
     service = _build_model_config_service()
     snapshot = service.read()
@@ -1534,6 +1578,11 @@ def guided_embedding_editor() -> None:
         )
     )
     typer.echo(f"Configured Embedding route; revision={saved.revision}")
+
+
+def guided_embedding_editor() -> None:
+    """Run the guided Embedding editor through the shared secret-safe boundary."""
+    _run_safe(_guided_embedding_editor)
 
 
 __all__ = [

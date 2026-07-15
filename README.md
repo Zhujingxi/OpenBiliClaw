@@ -414,10 +414,11 @@ curl -fsSL https://ollama.com/install.sh | sh && ollama serve &
 macOS / Windows 用户可以从 [ollama.com/download](https://ollama.com/download) 安装官方 App。启动 Ollama 后运行：
 
 ```bash
+ollama pull bge-m3
 uv run openbiliclaw setup-embedding
 ```
 
-向导会自动拉取 `bge-m3`（约 1.1GB，CPU 可跑）并写入配置。
+`setup-embedding` 只负责配置，写入原生 `[models.embedding]`。它不会安装、启动、下载或访问网络；Ollama 与 `bge-m3` 需要按上面的步骤先准备好，真实连通性检查请另行运行 `openbiliclaw models probe <id>`。
 
 </details>
 

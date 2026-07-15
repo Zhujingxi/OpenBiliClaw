@@ -2873,9 +2873,12 @@ def test_init_guides_missing_runtime_config_interactively(
             return []
 
     guided_calls: list[str] = []
+    validation_calls: list[str] = []
+    config_errors = iter(["models.chat.connections[0].credential: missing", None])
 
     def fake_load_runtime_config_error(*, render: bool = True) -> str | None:
-        return "models.chat.connections[0].credential"
+        validation_calls.append("validate")
+        return next(config_errors)
 
     monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True, raising=False)
     monkeypatch.setattr(
@@ -2934,10 +2937,116 @@ def test_init_guides_missing_runtime_config_interactively(
 
     assert result.exit_code == 1
     assert guided_calls == ["chat", "embedding"]
+    assert validation_calls == ["validate", "validate"]
     assert "初始化前配置引导" in result.stdout
     assert "按连接类型配置 Chat 与 Embedding" in result.stdout
     assert "module override" not in result.stdout.lower()
     assert "历史为空" in result.stdout
+
+
+def test_init_does_not_open_model_editors_for_unrelated_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    from openbiliclaw import cli_models as cli_models_module
+
+    guided_calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: "api.auth.password_hash: invalid password hash",
+    )
+    monkeypatch.setattr(
+        cli_models_module,
+        "guided_chat_editor",
+        lambda: guided_calls.append("chat"),
+    )
+    monkeypatch.setattr(
+        cli_models_module,
+        "guided_embedding_editor",
+        lambda: guided_calls.append("embedding"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_auth_manager",
+        lambda: pytest.fail("unrelated config errors must stop before auth"),
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert guided_calls == []
+    assert "配置错误" in result.output
+    assert "api.auth.password_hash" in result.output
+
+
+def test_init_revalidates_after_guided_models_and_stops_before_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    errors = iter(
+        [
+            "models.chat.connections[0].credential: missing",
+            "api.auth.password_hash: invalid password hash",
+        ]
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: next(errors),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_interactive_runtime_config_setup",
+        lambda: calls.append("models"),
+    )
+
+    def unexpected_auth() -> object:
+        calls.append("auth")
+        raise RuntimeError("auth must not be reached")
+
+    monkeypatch.setattr(cli_module, "_build_auth_manager", unexpected_auth)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert calls == ["models"]
+    assert "配置错误" in result.output
+    assert "api.auth.password_hash" in result.output
+
+
+def test_init_treats_legacy_llm_validation_as_model_related(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = iter(["llm.openai.api_key: missing", None])
+    calls: list[str] = []
+
+    class FakeAuthManager:
+        async def get_status(self) -> SimpleNamespace:
+            return SimpleNamespace(authenticated=True)
+
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: next(errors),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_interactive_runtime_config_setup",
+        lambda: calls.append("models"),
+    )
+    monkeypatch.setattr(cli_module, "_build_auth_manager", FakeAuthManager)
+
+    status = cli_module._prepare_init_runtime()
+
+    assert status.authenticated is True
+    assert calls == ["models"]
 
 
 def test_init_guides_missing_auth_interactively(

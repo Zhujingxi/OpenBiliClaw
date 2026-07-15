@@ -857,10 +857,12 @@ errors, or a no-API-key setup. Steps:
 1. User installs the official Ollama app: macOS / Windows from
    `https://ollama.com/download` (start the app so `localhost:11434` is live), Linux
    `curl -fsSL https://ollama.com/install.sh | sh && ollama serve &`.
-2. User runs `cd <INSTALL_DIR> && uv run openbiliclaw setup-embedding`.
-3. The wizard probes `localhost:11434`, pulls `bge-m3` if missing, and
-   writes `[llm.embedding] provider/model/base_url` to `config.toml`.
-   Restart the backend after this.
+2. User prepares the model with `ollama pull bge-m3`.
+3. User runs `cd <INSTALL_DIR> && uv run openbiliclaw setup-embedding`.
+   This command is configuration-only and writes native `[models.embedding]`;
+   it does not install, start, download, probe, or access the network. Use
+   `openbiliclaw models probe <id>` separately when a real connectivity check
+   is required, then restart the backend if it is already running.
 
 Do NOT run these steps for the user automatically — Ollama install is a
 system-level package the user must consent to.

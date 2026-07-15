@@ -166,6 +166,58 @@ def test_cli_module_docs_show_native_model_editor_while_bootstrap_keeps_its_menu
     assert "User picked OpenAI 官方 (option 2 in agent-install.md)" not in bootstrap
 
 
+def test_current_setup_embedding_docs_are_configuration_only() -> None:
+    readme = _read("README.md")
+    readme_en = _read("README_EN.md")
+    faq = _read("docs/faq.md")
+    agent_doc = _read("docs/agent-install.md")
+
+    readme_section = readme.split("<summary>高级：本地 embedding / Ollama</summary>", 1)[1].split(
+        "</details>", 1
+    )[0]
+    readme_en_section = readme_en.split("<summary>Advanced: local embedding / Ollama</summary>", 1)[
+        1
+    ].split("</details>", 1)[0]
+    faq_section = faq.split("### 不想为 embedding 单独配 API Key？", 1)[1].split(
+        "### 手机打不开", 1
+    )[0]
+    agent_section = agent_doc.split("## Optional: local Ollama as the embedding fallback", 1)[
+        1
+    ].split("## Hard rules", 1)[0]
+
+    assert "只负责配置" in readme_section
+    assert "原生 `[models.embedding]`" in readme_section
+    assert "不会安装、启动、下载或访问网络" in readme_section
+    assert "向导会自动拉取" not in readme_section
+
+    assert "configuration-only" in readme_en_section
+    assert "native `[models.embedding]`" in readme_en_section
+    assert "does not install, start, download, or access the network" in readme_en_section
+    assert "The wizard pulls" not in readme_en_section
+
+    assert "只负责配置" in faq_section
+    assert "原生 `[models.embedding]`" in faq_section
+    assert "不会安装、启动、下载或访问网络" in faq_section
+    assert "自动拉取" not in faq_section
+
+    assert "configuration-only" in agent_section
+    assert "native `[models.embedding]`" in agent_section
+    assert "does not install, start, download, probe, or access the network" in agent_section
+    assert "writes `[llm.embedding]" not in agent_section
+
+
+def test_cli_docs_distinguish_guided_embedding_disable_from_item_commands() -> None:
+    cli_doc = _read("docs/modules/cli.md")
+    section = cli_doc.split("### `openbiliclaw setup-embedding`", 1)[1].split(
+        "### `openbiliclaw recommend`", 1
+    )[0]
+
+    assert "add/edit/disable" in section
+    assert "`disable` 会清空整个 Embedding route" in section
+    assert "`openbiliclaw models remove <id>`" in section
+    assert "`openbiliclaw models move <id> --position <1-10>`" in section
+
+
 def test_backend_tag_workflow_only_updates_aggregate_release() -> None:
     workflow = _read(".github/workflows/release-backend.yml")
     docs_index = _read("docs/index.md")

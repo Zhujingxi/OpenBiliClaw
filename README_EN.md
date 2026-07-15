@@ -410,10 +410,11 @@ curl -fsSL https://ollama.com/install.sh | sh && ollama serve &
 macOS / Windows users can install the official app from [ollama.com/download](https://ollama.com/download). Start Ollama, then run:
 
 ```bash
+ollama pull bge-m3
 uv run openbiliclaw setup-embedding
 ```
 
-The wizard pulls `bge-m3` (~1.1GB, CPU-only is fine) and writes the config.
+`setup-embedding` is configuration-only and writes native `[models.embedding]`. It does not install, start, download, or access the network; prepare Ollama and `bge-m3` first as shown above, then run `openbiliclaw models probe <id>` separately for a real connectivity check.
 
 </details>
 

@@ -1083,6 +1083,12 @@ def _is_interactive_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+def _is_model_runtime_config_error(error: str) -> bool:
+    """Return whether a fieldized runtime error belongs to model configuration."""
+    field = error.partition(":")[0].strip()
+    return field in {"models", "llm"} or field.startswith(("models.", "llm."))
+
+
 def _ollama_has_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Return True if Ollama already has the named model pulled."""
     import httpx
@@ -1176,10 +1182,17 @@ def _prepare_init_runtime() -> Any:
     """Ensure runtime config and auth are ready before init proceeds."""
     error = _load_runtime_config_error(render=False)
     if error is not None:
+        if not _is_model_runtime_config_error(error):
+            _print_runtime_config_error(error)
+            raise typer.Exit(code=1)
         if not _is_interactive_terminal():
             _print_runtime_config_error(error)
             raise typer.Exit(code=1)
         _interactive_runtime_config_setup()
+        error = _load_runtime_config_error(render=False)
+        if error is not None:
+            _print_runtime_config_error(error)
+            raise typer.Exit(code=1)
 
     auth_manager = _build_auth_manager()
     status = asyncio.run(auth_manager.get_status())
@@ -2932,6 +2945,14 @@ def _reddit_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[s
 @app.command("setup-embedding")
 def setup_embedding() -> None:
     """Open the native shared-settings and ordered-provider Embedding editor."""
+    if not _is_interactive_terminal():
+        typer.echo(
+            "Error: setup-embedding requires an interactive terminal. "
+            "For automation, use `openbiliclaw models add --kind embedding` "
+            "with explicit options.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     _print_page_title("配置 Embedding 路由", "共享向量空间与有序 Provider")
     _interactive_embedding_setup()
 

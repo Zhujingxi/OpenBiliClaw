@@ -4,7 +4,7 @@
 
 引导初始化（guided init）让用户既能在命令行 `openbiliclaw init`、也能在浏览器插件「推荐」tab、桌面 Web（`/web`）未初始化空状态、或安装包首启 `/setup/` 向导里点「开始初始化」完成首轮建模。所有图形入口共用同一套四阶段流水线，后端再叠加进度状态机、前置检查和写者门控，保证图形化初始化在一个活跃后端上安全运行。
 
-命令行 `openbiliclaw init` 在模型配置缺失或无效且当前为交互终端时，会先后打开原生 Chat 与 Embedding 路由编辑器。两个编辑器都按 provider registry descriptor 只展示所选连接类型适用的字段，并统一经 `ModelConfigService` 校验和保存；init 模块不再维护 provider 专用菜单、TOML 写入器或独立校验规则。非交互终端仍直接报告配置错误。
+命令行 `openbiliclaw init` 只在校验错误路径属于 `models.*`（或待迁移的 legacy `llm.*`）且当前为交互终端时，先后打开原生 Chat 与 Embedding 路由编辑器；其他配置错误直接失败，不会误入模型向导。两个编辑器都按 provider registry descriptor 只展示所选连接类型适用的字段，并统一经 `ModelConfigService` 校验和保存；init 模块不再维护 provider 专用菜单、TOML 写入器或独立校验规则。两个编辑器完成后会重新执行完整运行时配置校验，校验仍失败时在进入认证步骤前停止。非交互终端仍直接报告配置错误。
 
 四阶段（与 CLI 完全一致）：
 
