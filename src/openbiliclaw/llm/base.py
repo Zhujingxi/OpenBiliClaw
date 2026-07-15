@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import errno
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,20 @@ class LLMProviderError(Exception):
 class LLMRateLimitError(LLMProviderError):
     """Raised when a provider rate-limits a request."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        normalized = normalize_retry_after_seconds(retry_after_seconds)
+        self.retry_after_seconds = normalized
+        # Existing background coordinators inspect ``retry_after``. Keep the
+        # alias until their Task 8 cutover so one parsed provider header drives
+        # both the ordered route circuit and the legacy scheduler backoff.
+        self.retry_after = normalized
+
 
 class LLMTimeoutError(LLMProviderError):
     """Raised when a provider request times out."""
@@ -36,6 +53,70 @@ class LLMResponseError(LLMProviderError):
 
 class LLMFallbackError(LLMProviderError):
     """Raised when all candidate providers fail."""
+
+
+def normalize_retry_after_seconds(
+    value: object,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    """Parse a positive Retry-After delta or HTTP date without retaining input."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        seconds = float(value)
+        return seconds if math.isfinite(seconds) and seconds > 0 else None
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        seconds = float(candidate)
+    except ValueError:
+        seconds = 0.0
+    if math.isfinite(seconds) and seconds > 0:
+        return seconds
+    try:
+        parsed = parsedate_to_datetime(candidate)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    delay = (parsed - current).total_seconds()
+    return delay if math.isfinite(delay) and delay > 0 else None
+
+
+def retry_after_seconds_from_exception(exc: BaseException) -> float | None:
+    """Extract a safe Retry-After value from a mapped or SDK exception."""
+    for attribute in ("retry_after_seconds", "retry_after"):
+        try:
+            value = getattr(exc, attribute, None)
+        except Exception:
+            continue
+        parsed = normalize_retry_after_seconds(value)
+        if parsed is not None:
+            return parsed
+
+    try:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+    except Exception:
+        return None
+    if headers is None:
+        return None
+    for key in ("retry-after", "Retry-After"):
+        try:
+            value = headers.get(key)
+        except Exception:
+            continue
+        parsed = normalize_retry_after_seconds(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def classify_llm_unavailability(exc: BaseException) -> str | None:
@@ -81,7 +162,16 @@ _LLM_MODERATION_MARKERS = (
     "10013",
 )
 
-_LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+_LLM_AUTH_MARKERS = (
+    "authentication",
+    "unauthorized",
+    "invalid api key",
+    "permission denied",
+    "forbidden",
+    "401",
+    "http 403",
+    "status 403",
+)
 # The provider host was reachable and answered, but the configured *model* is
 # missing: a local Ollama model that was never pulled returns HTTP 404 with
 # ``{"type": "not_found_error", "message": "model 'x' not found, try pulling it
@@ -95,6 +185,8 @@ _LLM_MODEL_NOT_FOUND_MARKERS = (
     "no such model",
     "does not exist or you do not have access",
     "model does not exist",
+    "http 404",
+    "status 404",
 )
 _LLM_QUOTA_MARKERS = (
     "rate limit",
@@ -166,11 +258,38 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
 
     seen: set[int] = set()
     current: BaseException | None = exc
-    rate_limited = no_provider = auth_failed = model_not_found = False
+    moderation = rate_limited = no_provider = auth_failed = model_not_found = False
     timed_out = invalid_response = connection = server_error = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
+        if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
+            moderation = True
+        try:
+            attempts = getattr(current, "attempts", ())
+        except Exception:
+            attempts = ()
+        for attempt in attempts if isinstance(attempts, tuple | list) else ():
+            try:
+                attempt_kind = str(getattr(attempt, "failure_kind", ""))
+            except Exception:
+                continue
+            if attempt_kind == "moderation":
+                moderation = True
+            elif attempt_kind == "rate_limited":
+                rate_limited = True
+            elif attempt_kind == "auth_failed":
+                auth_failed = True
+            elif attempt_kind == "model_not_found":
+                model_not_found = True
+            elif attempt_kind == "timeout":
+                timed_out = True
+            elif attempt_kind == "connection":
+                connection = True
+            elif attempt_kind == "server_error":
+                server_error = True
+            elif attempt_kind == "invalid_response":
+                invalid_response = True
         if isinstance(current, LLMRateLimitError) or any(
             marker in message for marker in _LLM_QUOTA_MARKERS
         ):
@@ -213,6 +332,8 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
         ):
             invalid_response = True
         current = current.__cause__ or current.__context__
+    if moderation:
+        return "moderation"
     if rate_limited:
         return "rate_limited"
     if no_provider:
@@ -357,6 +478,10 @@ class LLMResponse:
     usage: dict[str, int] | None = None  # token counts
     raw: Any = None  # Raw provider response
     tool_calls: list[dict[str, Any]] | None = None  # Phase 4: function calling
+    connection_id: str = ""
+    connection_type: str = ""
+    preset: str = ""
+    route_position: int = 0
 
 
 @dataclass

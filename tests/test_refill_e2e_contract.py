@@ -220,7 +220,7 @@ def test_openclaw_live_config_disables_embedding_and_ollama_without_mutating_inp
     assert "ollama" not in registry.available_providers
 
 
-def test_live_refill_provider_override_wins_over_evaluation_module_override(
+def test_live_refill_provider_override_sets_global_route_and_module_data_is_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     loaded = Config(
@@ -255,10 +255,9 @@ def test_live_refill_provider_override_wins_over_evaluation_module_override(
         "evaluation": "openai_compatible",
     }
     assert all(override.model == "" for override in overrides.values())
-    assert service._resolve_module_override("discovery.evaluate_batch") == (
-        "openai_compatible",
-        None,
-    )
+    assert registry.default_provider == "openai_compatible"
+    assert service.module_overrides == overrides
+    assert not hasattr(service, "_resolve_module_override")
 
 
 def test_live_refill_fails_when_explicit_provider_is_not_registered(

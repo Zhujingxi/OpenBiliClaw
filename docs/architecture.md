@@ -6,7 +6,7 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 
 ```text
 interactive ─────────────────────────────────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ global Chat route
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  └─ while queued: guarantee 2, may borrow all 3
@@ -14,23 +14,27 @@ background ─ background admission (default 3) ──────┘
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
 
-model connection foundation (stage 4; no route/runtime/API edge yet)
+model connection + ordered Chat runtime (stage 5; composition cutover pending)
 ├─ native [models] ─ strict parser/revision ────────────────┐
 └─ legacy [llm] ─ exact raw + endpoint inspection ─────────┤
                    ├─ chat / embedding mapping ─ report ───┤
                    └─ closed resolutions ─ final validator ┤
                                                            └─ Config.models (memory)
-                                                                │ explicit construction only
+                                                                │
                                                                 ▼
                                                            connection_factory
-                                                           ├─ Chat protocol adapters by connection ID
+                                                           ├─ ID-named Chat adapters ─ OrderedLLMRoute
+                                                           │                         ├─ total deadline
+                                                           │                         └─ revision-aware CircuitTable
                                                            └─ Embedding adapter + shared settings identity
-   ordinary saves preserve parsed raw [models]/[llm]; no migration write
+   LLMService callers ─ one global complete() path ──────────────┘
+   ordinary saves preserve parsed raw [models]/[llm]; no migration write;
+   Task 8 still owns RuntimeContext/API/UI composition and old constructor removal
 ```
 
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
-3. **模型连接基础层（阶段 4，尚未接入运行 route）** — `model_config/` 提供不可变 Chat / Embedding schema、代码内 connection-type descriptor registry、严格的原生 `[models]` parser / renderer / revision，以及 raw legacy `[llm]` 的只读 migration adapter。legacy inspection 对已知字段执行精确类型检查，并用统一、脱敏的 endpoint normalizer 阻断 userinfo、query、fragment、异常端口/路径和控制字符；mapping 按 Chat / Embedding 分层，Embedding fallback 只有显式启用、Provider 可用且有效 model / 维度 / model 级 multimodal capability 同空间时才进入候选。封闭 resolution 会真正移除确认删除的不可用连接，并在返回前调用权威 validator；任何 blocking issue 都不会产出部分结果。`llm/connection_factory.py` 可把单条记录显式构造成按稳定 ID 命名的 protocol adapter：OpenAI / DeepSeek / OpenRouter / custom 共用不可变 hook 的 `OpenAIProtocolProvider`，Anthropic 官方 / custom 共用 `AnthropicCompatibleProvider`，Embedding adapter 持有调用方传入的同一个共享 settings 对象。凭据只在构造时解析，Codex OAuth 先验证精确官方 endpoint 再读 token，出站代理仍由 endpoint-aware `network` 策略决定且 Ollama 强制直连。`[models]` 与 `[llm]` 共存时只采用 native 值。普通整文件保存继续从目标文件 parsed raw table 保留两段，不执行迁移写入。ordered route、circuit、runtime cutover、模型 API/UI 和事务 backup 仍未接线
+3. **模型连接与有序 Chat 路由层（阶段 5）** — `model_config/` 提供不可变 Chat / Embedding schema、代码内 connection-type descriptor registry、严格的原生 `[models]` parser / renderer / revision，以及 raw legacy `[llm]` 的只读 migration adapter。legacy inspection 对已知字段执行精确类型检查，并用统一、脱敏的 endpoint normalizer 阻断 userinfo、query、fragment、异常端口/路径和控制字符；mapping 按 Chat / Embedding 分层，Embedding fallback 只有显式启用、Provider 可用且有效 model / 维度 / model 级 multimodal capability 同空间时才进入候选。封闭 resolution 会真正移除确认删除的不可用连接，并在返回前调用权威 validator；任何 blocking issue 都不会产出部分结果。`llm/connection_factory.py` 把单条记录构造成按稳定 ID 命名的 protocol adapter，`llm/route.py` 再按配置数组原序组成 `OrderedLLMRoute`：同类型连接保持独立，总 deadline 覆盖整条链，Provider retry 先于 fallback，revision-aware circuit 按失败类别冷却，exact probe 成功可关闭 circuit，安全 aggregate 不保留上游原文。`LLMService` 的普通、结构化、多模态和工具路径都只委托同一个全局 `complete()`；caller 仅保留并发/usage 语义。`[models]` 与 `[llm]` 共存时只采用 native 值，普通保存仍保留 parsed raw 两段。Task 8 仍负责把 `RuntimeContext` / API / UI composition 全面切到该 route、删除旧构造参数与完成事务 backup；Embedding ordered route 属于 Task 6
 4. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源；`sources.platforms` 注册表统一七个平台族的别名、strategy 与 URL host 身份
 6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
@@ -66,7 +70,7 @@ model connection foundation (stage 4; no route/runtime/API edge yet)
 - `migrate_legacy_llm()` 的公开 facade 保持稳定，内部按 inspection / Chat / Embedding / mapping / DTO 拆分；从 raw table 只把显式 default/fallback 放入 Chat route，已知 scalar 不做隐式 coercion，官方 endpoint 需通过统一的规范 URL 检查。Embedding fallback 还必须显式启用、Provider 可用并满足精确空间约束；未路由 credential、模块覆盖、未知/污染值和不可用或不兼容 fallback 留在 secret-safe `MigrationReport`，确定性 ID 保证重复加载 revision 稳定
 - `apply_migration_resolutions()` 独立在 resolution 模块，接受封闭、带 position / shared-settings payload 的类型化 choice；未知或缺失 choice、`cancel`、无效 payload、route 溢出、移除唯一 Chat connection 或最终 validator 的 blocking issue 均 fail closed，不返回部分候选，且本层不创建 backup 或写盘
 - `Config.models` 与不落盘 `ModelConfigMeta` 承载 native / legacy / default 来源、迁移状态、报告和 local override path；`[models]` 共存时完全忽略 `[llm]` 值与 credential。`save_config()` 默认通过 model-scoped generic TOML emitter 保留目标文件 parsed raw `[models]` / `[llm]` 语义，显式 authoritative 模式才只写 `[models]`
-- 本阶段已有单记录 `build_chat_adapter()` / `build_embedding_adapter()` 构造边界，但没有 migration transaction/backup、ordered runtime route、circuit、配置 API、UI 或 CLI 模型编辑器接线；现有运行时链仍使用 legacy registry，替换由后续阶段完成
+- 单记录 `build_chat_adapter()` 已可组成 `OrderedLLMRoute`，按稳定 connection ID 提供总 deadline、安全 attempt 与 revision-aware circuit；`LLMService` 已移除 module/caller 选择语义。migration transaction/backup、Embedding route、配置 API/UI/CLI 模型编辑器与 `RuntimeContext` composition 替换仍由后续阶段完成
 
 ### Saved Sync (`saved_sync/`)
 - `NativeSaveRouter` 根据 adapter capability 确定 favorite / watch-later 路由；watch-later 仅在平台不支持原生动作且支持 favorite 时回退
@@ -152,7 +156,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 ### Runtime (`runtime/`)
 - 系统生命周期管理和服务编排
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream`，让 popup 设置页和手机版二维码入口仍能工作；其他 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路
-- 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会从 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 注入同一份 module override；热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞 `/api/config` 响应
+- 配置热重载：Task 8 composition cutover 前，`RuntimeContext` 重建 registry / service / engine 时仍会把 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 解析结果作为 deprecated 构造数据传入，但 `LLMService` 不读取这些值，所有 caller 共享同一全局 `complete()` 路径；热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞 `/api/config` 响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新
 - `runtime.autostart` — 当前用户作用域开机自启动 manager：macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart；API / CLI / 插件设置页通过 `GET /api/autostart-status` 与 `POST /api/autostart/apply` 管理，带 env-managed / `config.local.toml` shadow guard，并用开启「先写 config 后注册 OS」、关闭「先注销 OS 后写 config」的方向化事务避免崩溃残留
 - `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从 chat / embedding / fallback 配置判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
@@ -228,10 +232,10 @@ X 是第六个内容源，分两条独立通路：
 
 ### LLM Providers (`llm/`)
 - 统一的多模型接口（OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter）
-- `connection_factory.py` 从不可变 `ChatConnection` / `EmbeddingProviderConfig` 记录显式构造 adapter；`AdapterRuntimeOptions` 只携带 timeout、精确环境映射和 secret-safe Codex token loader。OpenAI-protocol preset 由 frozen `OpenAIProtocolOptions` 隔离 request body/header/API mode，Embedding 用 `EmbeddingProtocolAdapter` 保留共享 `EmbeddingModelSettings` 对象身份。该工厂尚未组成 ordered route，也未替换 legacy `build_llm_registry()` / `build_embedding_service()`
+- `connection_factory.py` 从不可变 `ChatConnection` / `EmbeddingProviderConfig` 记录显式构造 adapter；`AdapterRuntimeOptions` 只携带 timeout、精确环境映射和 secret-safe Codex token loader。OpenAI-protocol preset 由 frozen `OpenAIProtocolOptions` 隔离 request body/header/API mode，Embedding 用 `EmbeddingProtocolAdapter` 保留共享 `EmbeddingModelSettings` 对象身份。Chat adapter 可按配置数组精确组成 `OrderedLLMRoute`；完整 runtime composition 与 legacy builder 删除留给 Task 8，Embedding route 留给 Task 6
 - `codex_auth.py` 提供实验性的 Codex CLI ChatGPT OAuth 凭据导入和刷新；`[llm.openai].auth_mode="codex_oauth"` 时仍注册为 `openai` provider，只替换认证来源，并限制 `base_url` 为 OpenAI 官方 API 域名
-- Provider 注册和切换；`LLMRegistry.complete()` 保留默认 fallback 链，`complete_provider()` 用于 per-module override 的精确 provider 调用，不会在指定 provider 错误时静默 spill 到 default
-- `LLMService` 通过内置 caller bucket 路由 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]`，覆盖 `discovery.evaluate*`、`recommendation.evaluate_batch`、`eval.*`、`sources.xhs.*` 等实际 caller；Delight runtime 的 `precompute_delight_scores()` 已直接复用 Evo 结果，不再保留单独的 Delight LLM scorer caller；`model` 覆盖作为 per-call 参数传给 provider，不修改 provider 默认模型
+- `OrderedLLMRoute` 以稳定 connection ID 而非 Provider 名为键：同类型记录可重复，严格按数组位置执行；总 deadline 不因 fallback 重置，rate-limit（`Retry-After` 或 60 秒）、auth/model 永久态、15 秒起至 300 秒的 transient 与 prompt-scoped failure 分别管理。exact probe 只调用目标 ID、可绕过 open circuit，并在成功时关闭；route 耗尽只暴露安全结构化 attempts
+- `LLMResponse` 在既有 `provider` / `model` 计价字段之外携带 `connection_id` / `connection_type` / `preset` / `route_position`。`LLMService` 的普通、结构化、多模态与 tool path 全部调用同一个 route；caller tag 仅用于并发 admission 与 usage，不再选择模块 Provider/model。旧 module override DTO/parser 暂留给 Task 8 未改构造器，但值在 service 内是 no-op
 - 结构化输出共享解析：`llm/json_utils.py` 为 discovery eval-batch、recommendation copy/classify、soul awareness/insight/profile/speculator 提供统一 JSON 容错，兼容 MiMo / OpenAI-compatible wrapper、fenced JSON、JSONL、schema echo 和 malformed `{ [ ... ] }`
 - v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
 - `EmbeddingService` L1 内存 + L2 SQLite 双层缓存；`embedding.provider="ollama"` 且 embedding 凭据为空时直接使用本地 Ollama 默认地址，不再产生向后兼容 warning

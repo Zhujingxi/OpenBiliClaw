@@ -161,6 +161,20 @@ def _openai_bad_request(message: str) -> openai.BadRequestError:
     )
 
 
+def _openai_rate_limit(message: str, *, retry_after: str) -> openai.RateLimitError:
+    request = httpx.Request("POST", "https://gateway.example.test/v1")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"Retry-After": retry_after},
+    )
+    return openai.RateLimitError(
+        message,
+        response=response,
+        body={"error": {"message": message}},
+    )
+
+
 class _FakeEndpoint:
     def __init__(self, response: object) -> None:
         self.response = response
@@ -455,10 +469,28 @@ async def test_anthropic_rate_limit_is_fixed_non_retryable_and_chain_safe(
         await adapter.complete([{"role": "user", "content": "hi"}])
 
     assert str(exc_info.value) == "anthropic-a rate limit exceeded"
+    assert exc_info.value.retry_after_seconds == 17.0
     assert len(messages.calls) == 1
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+def test_openai_rate_limit_preserves_safe_retry_after_at_adapter_boundary(
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-openai-rate-secret"
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai", connection_id="openai-a"),
+        _runtime_options(),
+    )
+
+    mapped = adapter._map_caught_error(_openai_rate_limit(sentinel, retry_after="23"))
+
+    assert isinstance(mapped, LLMRateLimitError)
+    assert mapped.retry_after_seconds == 23.0
+    assert str(mapped) == "openai-a rate limit exceeded"
+    _assert_error_chain_omits(mapped, sentinel)
 
 
 @pytest.mark.asyncio
@@ -776,6 +808,31 @@ def test_gemini_error_categories_use_fixed_provider_id_text(
         assert str(mapped) == expected_message
         assert sentinel not in str(mapped)
         assert sentinel not in repr(mapped)
+
+
+def test_gemini_rate_limit_preserves_retry_after_at_adapter_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gemini_provider,
+        "genai",
+        SimpleNamespace(Client=lambda **_: SimpleNamespace()),
+    )
+    adapter = gemini_provider.GeminiProvider(
+        api_key="test-key",
+        provider_name="gemini-a",
+    )
+
+    class StatusError(RuntimeError):
+        status_code = 429
+        response = SimpleNamespace(headers={"retry-after": "29"})
+
+    mapped = adapter._map_error(StatusError("private upstream body"))
+
+    assert isinstance(mapped, LLMRateLimitError)
+    assert mapped.retry_after_seconds == 29.0
+    assert str(mapped) == "gemini-a rate limit exceeded"
+    assert "private upstream body" not in repr(mapped)
 
 
 @pytest.mark.asyncio

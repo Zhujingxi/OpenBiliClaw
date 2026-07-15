@@ -577,7 +577,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ```text
 interactive ─────────────────────────────────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ global Chat route
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  └─ while queued: guarantee 2, may borrow all 3
@@ -601,13 +601,15 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model-connection foundation (stage 4; runtime route not wired) │
+│ Model connections + ordered Chat route (stage 5)         │
 │ native [models] strict parse/revision → Config.models      │
 │ legacy [llm] exact raw/URL inspection → chat/embed + report │
 │ closed resolution → authoritative validation → valid memory │
-│ one record → ID-named protocol adapter; shared embedding settings │
-│ no ordered route/circuit/cutover/transaction/backup/API/UI │
+│ Chat record → ID adapter → OrderedLLMRoute (global order)  │
+│ total deadline · revision circuits · exact probe · safe attempts │
+│ Task 8: RuntimeContext/API/UI composition + transaction backup │
 ├────────────────────────────────────────────────┤
+│ LLMService paths → one route; caller is concurrency/usage only │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │

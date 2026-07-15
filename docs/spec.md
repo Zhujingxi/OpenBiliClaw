@@ -209,7 +209,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ```text
 interactive ─────────────────────────────────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ global Chat route
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  └─ while queued: guarantee 2, may borrow all 3
@@ -376,15 +376,16 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│             模型连接基础（阶段 4，尚未接入运行 route）          │
+│             模型连接 + 有序 Chat route（阶段 5）               │
 │ native [models] → strict parser/revision ────────────────┐    │
 │ legacy [llm] → exact raw/URL inspection → chat/embed map ┤    │
 │                 → secret-safe report → closed resolution │    │
 │                 → authoritative final validation ────────┤    │
 │                                                         └→ Config.models（内存）│
-│ Config.models 记录 → connection_factory → ID-named protocol adapter │
-│ OpenAI presets 共用 frozen hooks；Embedding 保留共享 settings 身份  │
-│ 普通保存保留 raw；不含 ordered route/circuit/cutover/事务/API/UI   │
+│ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
+│                                   ├→ total deadline + safe attempts │
+│                                   └→ revision-aware CircuitTable   │
+│ 普通保存保留 raw；Task 8 负责 RuntimeContext/API/UI composition 与事务 │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
@@ -393,7 +394,9 @@ background ─ background admission (default 3) ──────┘
 │  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
-│  LLMService caller bucket → per-module provider/model override │
+│  LLMService normal/structured/multimodal/tools → one global route │
+│  caller tags → concurrency + usage only; no module model selection │
+│  response → provider/model + connection ID/type/preset/position    │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
 │  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │
 │  结构化 JSON helper: wrapper / fenced / JSONL / schema echo / MiMo 容错 │

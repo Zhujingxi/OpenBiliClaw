@@ -14,6 +14,7 @@ from .base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    retry_after_seconds_from_exception,
 )
 
 genai: Any | None
@@ -217,7 +218,10 @@ class GeminiProvider(LLMProvider):
 
     def _map_error(self, exc: Exception) -> LLMProviderError:
         if isinstance(exc, LLMRateLimitError):
-            return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self._provider_name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if isinstance(exc, (LLMTimeoutError, TimeoutError, httpx.TimeoutException)):
             return LLMTimeoutError(f"{self._provider_name} request timed out")
         if isinstance(exc, LLMResponseError):
@@ -228,7 +232,10 @@ class GeminiProvider(LLMProvider):
         status_code = self._safe_status_code(exc)
         error_type = type(exc).__name__.lower().replace("_", "")
         if status_code == 429 or "ratelimit" in error_type or "resourceexhausted" in error_type:
-            return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self._provider_name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if status_code in {401, 403}:
             return LLMProviderError(f"{self._provider_name} authentication failed")
         if (errors is not None and isinstance(exc, errors.ServerError)) or (

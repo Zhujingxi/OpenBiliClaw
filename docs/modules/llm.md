@@ -4,17 +4,17 @@
 
 热重载不会替换 gate 对象，而是原地 `reconfigure()`：升容立即按优先级唤醒等待者；降容不撤销已进入 provider 的工作，并在 active 降到新容量以下前停止新准入。配置探测也使用 `api.config_probe` 后台分类经过同一 gate。
 
-> 统一的多 LLM Provider 接口，支持 OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带显式备选 Provider、retry 和健康检查。
+> 统一的多 LLM Provider 接口，支持 OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，并提供按稳定 connection ID 执行的全局有序 Chat route、总 deadline、retry 与 revision-aware circuit。
 
 ## 概述
 
-`llm/` 包提供了一套抽象的 LLM 调用接口，上层模块（Soul Engine、Discovery Engine 等）通过 `LLMService` 或 `LLMRegistry` 发起调用，不需要关心底层用的是哪个模型。
+`llm/` 包提供了一套抽象的 LLM 调用接口。`LLMService` 的普通、结构化、多模态和工具调用共享同一条全局路由；caller tag 只用于并发准入与 usage 归属，不再选择模块专属 Provider / model。
 
 核心设计：
 - **Provider 抽象** — `LLMProvider` ABC 定义统一接口
-- **Registry 管理** — 根据 config 自动注册可用 provider，fallback 默认关闭、可在配置中显式打开
+- **有序路由** — `OrderedLLMRoute` 按配置数组顺序尝试 connection，并以稳定 ID 隔离同类型连接
 - **Service 门面** — `LLMService` 封装 prompt 组装 + 调用 + 校验
-- **统一异常** — 所有 provider 错误归一化为标准异常类型
+- **统一异常与熔断** — Provider 错误归一化后进入安全 aggregate attempt 与 revision-aware circuit
 
 ## 已实现功能
 
@@ -23,7 +23,8 @@
 | 2.1 Provider 实现 | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带 retry + 超时 |
 | 2.2 Provider Registry | ✅ | 自动注册 + 可配置 fallback + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
-| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。工厂尚未组成 ordered route/circuit，也未切换现有 runtime、API 或 UI |
+| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。Chat adapter 已可组成阶段 5 route；Embedding route 与完整 runtime/API/UI composition 仍由后续任务接线 |
+| 全局有序 Chat route（阶段 5） | ✅ | `OrderedLLMRoute` 精确保持 1–10 条配置数组顺序，允许多个同类型 connection；Provider 内 transport retry 完成后才尝试下一项，整条 route 共用一个总 deadline。rate-limit、永久配置错误与 transient 使用不同 circuit，exact probe 可绕过并在成功时关闭；aggregate attempt 和响应 metadata 均为 secret-safe |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
 | v0.3.164 LLM 失败安全边界 | ✅ | `describe_llm_failure()` 识别 moderation、鉴权、额度/限流、provider/service 超时与空响应；`safe_llm_failure_message()` 为 API / CLI / OpenClaw 的公共边界提供固定安全兜底，未知异常不回传上游文本 |
@@ -35,7 +36,7 @@
 | v0.3.150+ DeepSeek thinking 显式关闭 | ✅ | `DeepSeekProvider.complete(..., reasoning_effort="")` 会向 DeepSeek 请求体写入 `thinking={"type":"disabled"}`。DeepSeek v4 默认开启 thinking，单纯省略字段并不会关闭 reasoning；配置页 LLM 探测和短结构化任务因此能真正避免 thinking 先耗尽输出预算后返回空 `content` |
 | v0.3.150+ reasoning-only 诊断 | ✅ | OpenAI-compatible / DeepSeek / OpenRouter / Ollama native 返回 HTTP 200 且含 `reasoning_content` / `reasoning` / `thinking`、但最终 `content` 为空时，仍判为不可用，但错误会明确提示 `returned reasoning but no final content` 并带 `finish_reason`，避免和完全空响应混淆 |
 | v0.3.117+ reasoning-first 探活 | ✅ | `LLMProvider.health_check()` 与配置页 LLM 测试探针统一使用 `max_tokens=4096`，避免 SenseNova 等 OpenAI-compatible reasoning-first 模型先产出 `message.reasoning`、尚未到 `message.content` 就被截断，从而误报空响应 |
-| v0.3.75 Per-module LLM 路由生效 | ✅ | `LLMService` 按 caller bucket 路由 `[llm.soul/discovery/recommendation/evaluation]`，通过 `LLMRegistry.complete_provider()` 精确调用 chat-capable provider；provider 错误不 spill 到 default，拼错 provider INFO 一次后降级 |
+| 全局 route 取代模块选择 | ✅ | `LLMService` 所有调用路径只委托同一个 `complete()`；旧 `ModuleOverride` / `module_overrides_from_config()` 仅保留为 Task 8 构造器兼容数据，传入值不影响路由，Task 8 完成 runtime composition 后删除 |
 | v0.3.75 Provider per-call model | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible 的 `complete(..., model=...)` 支持单次模型覆盖，不修改 provider 实例默认 `_model` |
 | 体验优化：B站动态语气 | ✅ | 推荐、画像总结和聊天 prompt 统一接入 `ToneProfile`，在“老B友”基础上按用户画像微调语气 |
 | v0.3.0 Ollama embedding 兜底 | ✅ | `OllamaProvider.embed()` 走原生 `/api/embeddings`，配合 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需要额外的 embedding API Key |
@@ -126,7 +127,50 @@ assert embedding.settings is settings
 
 `AdapterRuntimeOptions` 是 frozen、secret-safe 的构造参数，仅包含 timeout、可选的精确环境映射和可选 Codex token loader；传入的 environment 会在构造时复制成只读快照，后续修改调用方 dict 不会改变 credential resolution，映射和值也不进入 repr。proxy / `trust_env` 不对调用方开放，Factory 始终按最终 endpoint 调用 `openbiliclaw.network.proxy_for_endpoint()` / `trust_env_for_endpoint()`，Ollama 则固定直连。Credential 在构造期一次解析：`inline` 使用存储值，`env` 只读取记录指定的变量名，`oauth` 只接受 `credential_ref=codex`，`none` 只接受 descriptor 没有 credential 字段的本地类型。Codex OAuth 在调用 token loader 前要求 endpoint 精确等于 `https://api.openai.com/v1`（空值会规范成该地址）；显式端口、额外 path、query、fragment 或 userinfo 均失败关闭。OpenAI / Anthropic custom endpoint 先经过同一个 HTTP(S) validator：拒绝无 host、userinfo、query/fragment（含空 delimiter）、控制字符、反斜线、外层空白和非法 host/port，再调用 network policy 或 SDK；合法 custom path/port 原样保留。
 
-OpenAI / DeepSeek / OpenRouter / custom Chat 记录都精确构造 `OpenAIProtocolProvider`；其 `OpenAIProtocolOptions` 为 frozen dataclass，headers 映射也做只读冻结，preset、reasoning effort 与 attribution headers 不进入 repr，因此不同连接或并发调用之间不会串用或意外展示这些 hook。Protocol adapter 只在 SDK catch 边界把原始 400 解析成私有布尔信号，在不保留原文的前提下继续支持 Responses temperature 降级和 Chat / Responses JSON format 兼容降级；无关 400 不重试、不触发降级，原生 `openai.APITimeoutError` 与 built-in/httpx timeout 一样映射为可重试 `LLMTimeoutError`。Anthropic 官方 / custom 都精确构造 `AnthropicCompatibleProvider` 并透传已校验的 custom base URL；timeout 与 5xx/connection 属于可重试 transient，429、401/403 和其他 4xx 直接返回固定 ID 文本，终态异常不保留可能含密钥的上游 cause/context，usage total 会计入 cache read/create token。Gemini 与新 OpenAI protocol adapter 的未知 SDK/transport 异常同样只产生固定 ID 文本并切断 secret-bearing chain。Gemini 仍使用原生 `google-genai`，Ollama 保留 native `num_ctx` 路径。现有 `OpenAIProvider` / `DeepSeekProvider` / `OpenRouterProvider` / `ClaudeProvider` 构造 API 与 legacy registry 路径仍保留，待后续 runtime cutover 后再单独移除。
+OpenAI / DeepSeek / OpenRouter / custom Chat 记录都精确构造 `OpenAIProtocolProvider`；其 `OpenAIProtocolOptions` 为 frozen dataclass，headers 映射也做只读冻结，preset、reasoning effort 与 attribution headers 不进入 repr，因此不同连接或并发调用之间不会串用或意外展示这些 hook。Protocol adapter 只在 SDK catch 边界把原始 400 解析成私有布尔信号，在不保留原文的前提下继续支持 Responses temperature 降级和 Chat / Responses JSON format 兼容降级；无关 400 不重试、不触发降级，原生 `openai.APITimeoutError` 与 built-in/httpx timeout 一样映射为可重试 `LLMTimeoutError`。Anthropic 官方 / custom 都精确构造 `AnthropicCompatibleProvider` 并透传已校验的 custom base URL；timeout 与 5xx/connection 属于可重试 transient，429、401/403 和其他 4xx 直接返回固定 ID 文本，终态异常不保留可能含密钥的上游 cause/context，usage total 会计入 cache read/create token。Gemini 与新 OpenAI protocol adapter 的未知 SDK/transport 异常同样只产生固定 ID 文本并切断 secret-bearing chain。Gemini 仍使用原生 `google-genai`，Ollama 保留 native `num_ctx` 路径。现有 `OpenAIProvider` / `DeepSeekProvider` / `OpenRouterProvider` / `ClaudeProvider` 构造 API 与 legacy registry composition 仍保留到 Task 8；其模块覆盖值已经不再参与 `LLMService` 选择。
+
+### Ordered Chat route
+
+```python
+from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+from openbiliclaw.model_config import compute_model_revision
+
+runtime_options = AdapterRuntimeOptions(timeout_seconds=models.chat.timeout_seconds)
+connections = tuple(
+    RouteConnection(
+        connection=record,
+        adapter=build_chat_adapter(record, runtime_options),
+    )
+    for record in models.chat.connections
+)
+route = OrderedLLMRoute(
+    connections,
+    revision=compute_model_revision(models),
+    timeout_seconds=models.chat.timeout_seconds,
+)
+
+response = await route.complete([{"role": "user", "content": "hello"}])
+print(response.connection_id, response.connection_type, response.preset)
+
+# 精确探测稳定 ID；即使 circuit 已开也可显式绕过，成功会关闭该 circuit。
+probe = await route.complete_connection(
+    "chat-primary",
+    [{"role": "user", "content": "reply OK"}],
+    ignore_circuit=True,
+)
+```
+
+数组位置是唯一执行顺序：index 0 为 primary，其后依次为 fallback；相同 `type` / `preset` 的记录仍是由 ID 隔离的独立 peer。Provider 自身 transport retry 完成后才进入下一条 connection。`timeout_seconds` 是整条 route 的总 deadline，每次 attempt 只获得剩余时间，耗尽后不启动新 fallback；调用方取消、请求 schema 错误和编程错误立即传播。
+
+| failure kind | circuit 行为 |
+|---|---|
+| rate limit / quota | 使用安全解析后的 `Retry-After`，缺失或非法时 60 秒 |
+| auth failed / model not found | 保持 open，直到 config revision 改变或 exact probe 成功 |
+| timeout / connection / server error | 15、30、60、120、240 秒，随后固定 300 秒；任意成功清零 |
+| invalid response / moderation | 本次 fallback，不打开跨请求 circuit |
+
+路由耗尽时抛 `LLMRouteExhaustedError`。其 `attempts` 只包含 `connection_id`、`connection_type`、`preset`、`route_position`、`failure_kind` 与固定英文摘要，不保存原始异常、响应体、credential 或含 userinfo 的 URL。成功响应保留既有 `provider` / `model` 计价字段，同时写入四个 connection metadata 字段。
 
 ### Provider 类
 
@@ -198,7 +242,7 @@ token = await get_valid_codex_token()
 
 Codex OAuth 是实验路径：OpenAI 官方 API 认证仍以 Platform API key 为准；该模块只复用本机 Codex CLI 凭据，不自建 OAuth PKCE 浏览器流程，也不会把 token 打印到 CLI 输出。
 
-### Registry
+### Legacy Registry（Task 8 composition 兼容）
 
 ```python
 from openbiliclaw.llm import build_llm_registry
@@ -211,7 +255,7 @@ print(registry.default_provider)     # "deepseek"
 # 默认不 fallback；如需备选，设置 [llm].fallback_provider 为第二个 provider
 response = await registry.complete([{"role": "user", "content": "hi"}])
 
-# 精确调用某个 chat-capable provider，不走 fallback；用于 per-module override
+# 精确调用某个 chat-capable provider，不走 fallback；旧配置探测仍使用此接口
 response = await registry.complete_provider(
     "deepseek",
     [{"role": "user", "content": "hi"}],
@@ -242,12 +286,10 @@ POST /api/config/probe-service
 
 ```python
 from openbiliclaw.llm import LLMService
-from openbiliclaw.llm.service import module_overrides_from_config
 
 service = LLMService(
-    registry=registry,
+    registry=route,
     memory=memory_manager,
-    module_overrides=module_overrides_from_config(config),
 )
 response = await service.complete_socratic_dialogue(
     user_message="我最近喜欢看纪录片",
@@ -360,23 +402,11 @@ stats = cache.stats()
 
 当 refill waiter 存在时，新 maintenance 最多一个；没有 runnable refill 时 maintenance 可借用所有空闲后台槽，保持 work-conserving。`empty` 只 park 新 maintenance，绝不会取消或抢占已经进入 provider 的 maintenance。状态输出同时包含 refill/maintenance active、waiting、priority-active 与 inventory state。
 
-#### 分模块路由(v0.3.75+)
+#### 全局路由与 staged runtime cutover
 
-`LLMService` 的 `module_overrides` 来自 `module_overrides_from_config(config)`。
-路由不使用 caller 第一段朴素判断，而是内置 bucket：
+`LLMService` 不再包含 caller-prefix / module bucket 选择逻辑。`soul.*`、`discovery.*`、`recommendation.*`、`eval.*` 等 caller 全部调用注入对象的同一个 `complete()`；caller 继续参与 concurrency priority 与 usage ledger，不改变 connection、model 或 fallback 顺序。
 
-| caller 前缀 | module bucket |
-|---|---|
-| `soul.*` | `soul` |
-| `discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` | `discovery` |
-| `recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` | `evaluation` |
-| 其他 `recommendation.*` | `recommendation` |
-
-命中 override 后走 `registry.complete_provider(provider, ..., model=model)`：
-
-- override provider 错误 / rate-limit：直接报错，不自动 spill 到 default。
-- override provider 未注册或不是 chat-capable：按 `(bucket, provider)` INFO 一次，然后走默认 provider 路径；是否跨 provider fallback 取决于 `[llm].fallback_provider` 是否非空。
-- 只填 `model` 不填 `provider`：使用 `registry.default_provider` + per-call model。
+Task 5 为未修改的 `RuntimeContext`、CLI 与 Soul 构造器暂时保留 `ModuleOverride`、`module_overrides_from_config()` 和 `LLMService.module_overrides` 形状。解析出的 legacy 数据只用于构造兼容，不被 `LLMService` 读取。完整 composition 改为从 `Config.models` 构造 `OrderedLLMRoute`、删除这些旧参数以及切换配置探测/API/UI 属于 Task 8；在此之前 production runtime 仍可注入 legacy `LLMRegistry`，但同样只走其全局 `complete()` 路径。
 
 ### 异常体系
 
@@ -387,6 +417,7 @@ LLMProviderError          # 基类
 └── LLMResponseError      # 响应无效（空内容）
 
 LLMFallbackError          # 所有 provider 都失败
+└── LLMRouteExhaustedError  # 有序 route 耗尽；携带安全 RouteAttempt
 RegistryBuildError        # 无法构建 registry（无可用 provider）
 
 LLMServiceError           # Service 层基类
@@ -490,9 +521,9 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 ## 设计决策
 
 1. **retry 策略**：传输 / provider 临时错误走 3 次重试 + 线性退避（0.25s × attempt）；通用 OpenAI-compatible 的 `LLMResponseError` 默认不重试。DeepSeek 例外：线上观测到它会偶发 HTTP 200 但 `content=""`，因此 `DeepSeekProvider` 对空内容额外重试一次。`reasoning_effort=""` 会显式发送 `thinking={"type":"disabled"}`，避免 DeepSeek v4 省略字段时默认开启 thinking。HTTP 400 会记录 provider response body 摘要，避免只看到 `Error code: 400`
-2. **fallback 顺序**：默认关闭。chat 只在 `[llm].fallback_provider` 非空时按默认 provider 优先、随后这个显式备选 provider 尝试；embedding 只在 `[llm.embedding].fallback_provider` 非空时按显式 provider 优先、随后这个备选 provider 尝试。Embedding provider 留空表示禁用，不再跟随默认 LLM。
+2. **fallback 顺序**：原生 Chat route 严格使用 `models.chat.connections` 数组顺序并允许最多十条同等 connection；legacy runtime 在 Task 8 composition cutover 前仍把 `[llm].default_provider` / `fallback_provider` 映射为自身全局 `complete()` 链。Embedding 暂按既有显式主备语义，Task 6 再接入共享模型设置的有序 route。
    - **备选何时触发**：`LLMRegistry.complete()` 链上遇到 provider 级失败时——`LLMProviderError` / `LLMTimeoutError` / `LLMRateLimitError`（限流同时触发 60s cooldown），以及 v0.3.156+ 的 `LLMResponseError`（空 / 坏 content——劣质网关最常见的死法是 HTTP 200 但内容为空，provider 内部自重试一次后换备选再试；此前该类错误直接上抛、备选永远不接管）。单 provider 链耗尽后统一抛 `LLMFallbackError`（原始错误在 `__cause__`）。
-   - **备选何时刻意不触发**：`complete_provider()` 精确路由（per-module override 与配置探测按用户指定 provider 调用，跨 provider 兜底会违背意图；注意 `[llm.<module>]` **只填 `model` 不填 `provider` 同样命中精确路由**——模型钉死意味着换 provider 也违背意图，该模块的调用同样不走备选）；备选与默认 provider 同名、未注册（缺凭据）或非 chat-capable 时被 `_fallback_order()` 静默丢弃——运行时静默丢弃是正确行为（不能每次补全都刷日志），死状态的可见性由两处兜底：`_collect_config_issues` 在保存 / 加载时以 blocking issue 拦截（见 [配置参考](config.md)），`build_llm_registry` 在构建时对「同名 / 未注册 / 非 chat-capable」按具体原因打一次 WARNING（v0.3.155+，覆盖 env 覆盖与手改 config.toml 绕过保存校验的场景）。
+   - **备选何时刻意不触发**：legacy `complete_provider()` 仅为配置探测等精确调用保留，跨 provider 兜底会违背探测目标；模块 caller 已不再进入此路径。备选与默认 provider 同名、未注册（缺凭据）或非 chat-capable 时被 `_fallback_order()` 静默丢弃——运行时静默丢弃是正确行为（不能每次补全都刷日志），死状态的可见性由两处兜底：`_collect_config_issues` 在保存 / 加载时以 blocking issue 拦截（见 [配置参考](config.md)），`build_llm_registry` 在构建时对「同名 / 未注册 / 非 chat-capable」按具体原因打一次 WARNING（v0.3.155+，覆盖 env 覆盖与手改 config.toml 绕过保存校验的场景）。
    - **开关语义（v0.3.156+）**：`[llm].fallback_provider` 非空即启用，留空即关闭——旧的 `[llm].fallback_enabled` 布尔字段从未被回退链读取，已彻底移除（config 加载忽略存量 key，PUT /api/config 忽略旧客户端仍发送的该字段，GET 不再回显）。embedding 侧的 `[llm.embedding].fallback_enabled` 仍然有效（借用 chat-side 凭据的旧兼容开关）。
    - **init 前置探测认备选（v0.3.156+）**：`InitPrereqs.chat_ready()` 先探默认 provider，失败且存在可用备选（已注册、chat-capable、非同名）时再探备选，任一通过即 ready——运行时所有 chat 调用都走回退链，主 provider 挂、备选健康时不应拦初始化（经备选通过时 INFO 一条说明）。
 3. **Protocol DI**：`SupportsComplete` Protocol 解耦了调用方和具体实现，测试时可注入 Fake
@@ -504,6 +535,6 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 9. **Prompt 风格集中收口**：推荐、画像和聊天的“老B友”语气由共享 `ToneProfile` 驱动，不允许各模块各自发散成不同人格
 10. **Prompt-cache 约定**：高频结构化 builder 的 system prompt 必须保持静态；user prompt 按“tone / 画像 / 长期偏好 / 来源上下文 / 本批内容或历史”从稳定到易变排序，并使用确定性 JSON。使用完整 `profile_summary` 的高频链路优先经 `profile_prompt_layers()` 分层渲染，稳定层放前、recent 层放后；调用方不得再把同一份动态画像通过 core memory 追加进 system prompt，便于 DeepSeek / Claude / OpenAI / Gemini 的 provider-side prompt cache 复用前缀
 11. **结构化输出只在 helper 处放宽**：业务模块不再各自手写 JSON 截取逻辑；容错集中在 `json_utils.py`，模块侧用 predicate 收紧语义，避免一个 provider 的异常 shape 修复污染其他任务。
-12. **分模块 override 不隐式改意图**：`[llm.<module>]` 命中时必须精确调用用户指定的 chat provider；只有 provider 拼错或不是 chat-capable 时才降级到默认链并 INFO 一次。模型覆盖通过 per-call `model=` 完成，避免污染 provider 实例状态或影响其他模块。
+12. **caller 不选择模型连接**：所有 `LLMService` 路径共享同一全局 route；模块 caller 只用于并发和 usage。legacy 模块覆盖形状在 Task 8 删除前可被旧构造器传入，但运行时忽略其 provider / model 值。
 13. **Codex OAuth 只做认证层**：legacy `auth_mode="codex_oauth"` 不注册新 provider，而是给现有 `OpenAIProvider` 注入动态 token provider。connection-record factory 则只接受 `codex_oauth + credential_ref="codex"`，并在 token lookup 前验证精确官方 endpoint。两条路径都不会把 token 发送给 OpenAI-compatible 代理。
 14. **失败分类先于批响应解析**：共享 classifier 保持 rate-limit / no-provider / auth / invalid-response 的特定语义优先级，并额外识别连接失败与 HTTP 500/502/503/504；调用方只把 provider transient 交给协调器退避，不把 JSON shape 错误误判成网络失败。

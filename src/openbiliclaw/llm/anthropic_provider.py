@@ -16,6 +16,7 @@ from .base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    retry_after_seconds_from_exception,
 )
 
 if TYPE_CHECKING:
@@ -164,7 +165,10 @@ class AnthropicCompatibleProvider(LLMProvider):
 
     def _map_error(self, exc: Exception) -> LLMProviderError:
         if isinstance(exc, LLMRateLimitError):
-            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self.name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if isinstance(
             exc,
             (LLMTimeoutError, TimeoutError, httpx.TimeoutException, anthropic.APITimeoutError),
@@ -172,7 +176,10 @@ class AnthropicCompatibleProvider(LLMProvider):
             return LLMTimeoutError(f"{self.name} request timed out")
         status_code = self._safe_status_code(exc)
         if isinstance(exc, anthropic.RateLimitError) or status_code == 429:
-            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self.name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if isinstance(exc, anthropic.AuthenticationError) or status_code == 401:
             return _AnthropicPermanentError(f"{self.name} authentication failed")
         if isinstance(exc, anthropic.PermissionDeniedError) or status_code == 403:

@@ -62,6 +62,17 @@ class FakeProvider(LLMProvider):
         return self.health
 
 
+def test_llm_response_keeps_legacy_pricing_fields_with_empty_route_metadata() -> None:
+    response = LLMResponse(content="ok", provider="openai", model="gpt-test")
+
+    assert response.provider == "openai"
+    assert response.model == "gpt-test"
+    assert response.connection_id == ""
+    assert response.connection_type == ""
+    assert response.preset == ""
+    assert response.route_position == 0
+
+
 def test_build_llm_registry_registers_available_providers() -> None:
     config = Config(
         llm=LLMConfig(

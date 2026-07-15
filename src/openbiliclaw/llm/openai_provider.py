@@ -24,6 +24,7 @@ from .base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    retry_after_seconds_from_exception,
 )
 
 logger = logging.getLogger(__name__)
@@ -476,14 +477,18 @@ class OpenAIProvider(LLMProvider):
         body_excerpt = self._provider_error_body_excerpt(exc)
         message = f"{exc} {body_excerpt}".lower()
         if status_code_int == 429 or "rate limit" in message or "too many requests" in message:
-            return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self._provider_name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if status_code_int in _BILLING_BACKOFF_STATUS_CODES or any(
             marker in message for marker in _BILLING_BACKOFF_MARKERS
         ):
             detail = body_excerpt or str(exc)
             return LLMRateLimitError(
                 f"{self._provider_name} provider backoff: HTTP {status_code_int or status_code}: "
-                f"{detail}"
+                f"{detail}",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
             )
         if status_code_int and status_code_int >= 500:
             return LLMProviderError(f"{self._provider_name} server error: {status_code}")
@@ -766,7 +771,10 @@ class OpenAIProtocolProvider(OpenAIProvider):
         response_format_rejected: bool,
     ) -> LLMProviderError:
         if isinstance(exc, LLMRateLimitError):
-            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self.name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if isinstance(
             exc,
             (LLMTimeoutError, TimeoutError, httpx.TimeoutException, openai.APITimeoutError),
@@ -786,7 +794,10 @@ class OpenAIProtocolProvider(OpenAIProvider):
             or status_code == 429
             or "ratelimit" in error_type
         ):
-            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+            return LLMRateLimitError(
+                f"{self.name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if isinstance(exc, openai.AuthenticationError) or status_code in {401, 403}:
             return _OpenAIProtocolError(
                 f"{self.name} authentication failed",

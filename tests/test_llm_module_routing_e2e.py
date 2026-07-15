@@ -1,4 +1,4 @@
-"""End-to-end tests for config-backed LLM module routing."""
+"""End-to-end regression test for one global LLM route."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class RecordingProvider(LLMProvider):
 
 
 @pytest.mark.asyncio
-async def test_runtime_context_routes_configured_module_overrides(
+async def test_runtime_context_ignores_legacy_module_overrides_for_global_route(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -92,9 +92,5 @@ async def test_runtime_context_routes_configured_module_overrides(
         caller="discovery.keyword_inspiration",
     )
 
-    assert [call["model"] for call in deepseek.calls] == [
-        "deepseek-eval",
-        "deepseek-discovery",
-        "deepseek-discovery",
-    ]
-    assert [call["model"] for call in openai.calls] == ["gpt-rec"]
+    assert deepseek.calls == []
+    assert [call["model"] for call in openai.calls] == [None, None, None, None]
