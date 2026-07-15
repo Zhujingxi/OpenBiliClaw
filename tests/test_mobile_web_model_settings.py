@@ -12,6 +12,7 @@ API_PATH = WEB / "js/api.js"
 MODEL_PATH = WEB / "js/views/model-settings.js"
 CSS_PATH = WEB / "css/app.css"
 FOCUS_RUNTIME_PATH = WEB / "js/saved-sync-runtime.js"
+CONTROLLER_PATH = WEB / "js/mobile-model-settings-controller.js"
 
 
 def _read(path: Path) -> str:
@@ -206,10 +207,9 @@ def test_revisioned_save_locks_the_editor_and_keeps_safe_failure_drafts() -> Non
     save = model.split("async function saveModels()", 1)[1].split(
         "async function fetchModelSnapshot", 1
     )[0]
-
     for marker in (
         "beginSave",
-        "snapshotRequestGate.invalidate()",
+        "modelResources.invalidateSnapshotRequests()",
         "setModelEditorLocked(true)",
         "updateModelConfig(toModelConfigPayload(state))",
         "revision_conflict",
@@ -236,17 +236,18 @@ def test_save_invalidates_probe_and_resets_a_pending_probe_label() -> None:
 
 def test_latest_snapshot_and_descriptor_ownership_are_rechecked_after_settle() -> None:
     model = _read(MODEL_PATH)
+    controller = _read(CONTROLLER_PATH)
     load = model.split("async function loadModelSettings()", 1)[1].split(
         "function confirmLeave", 1
     )[0]
 
-    assert "createLatestRequestGate" in model
-    assert "snapshotRequestGate" in model
-    assert "descriptorRequestGate" in model
-    assert "loadIndependentModelResources" in load
-    assert "snapshotApplied" in load
-    assert "descriptorsInstalled" in load
-    assert "preserveStatus" in load
+    assert "createMobileModelResourceCoordinator" in model
+    assert "modelResources.enterModels()" in load
+    assert "createLatestRequestGate" in controller
+    assert "loadIndependentModelResources" in controller
+    assert "snapshotReady" in controller
+    assert "descriptorsReady" in controller
+    assert "preserveStatus" in model
 
 
 def test_late_get_remote_reload_and_dirty_navigation_never_overwrite_the_draft() -> None:
@@ -284,8 +285,51 @@ def test_disposed_settings_instance_cannot_clobber_a_reopened_overlay() -> None:
     assert "if (disposed || !modelOperations.isProbeCurrent(generation)) return" in probe
     assert "if (disposed) return" in save
     assert "if (!disposed)" in save.split("finally", 1)[1]
-    assert "if (disposed) return loaded" in load
+    assert "if (disposed) return readiness" in load
     assert "if (disposed) return" in load.split("catch", 1)[1]
+
+
+def test_live_handlers_delegate_to_the_tested_mobile_controller_seams() -> None:
+    model = _read(MODEL_PATH)
+
+    update_field = model.split("function updateField(", 1)[1].split("function updateCredential", 1)[
+        0
+    ]
+    update_credential = model.split("function updateCredential(", 1)[1].split(
+        "function probeRequestVisible", 1
+    )[0]
+    show_list = model.split("function showRouteList(", 1)[1].split("function openRouteDetail", 1)[0]
+    fetch_snapshot = model.split("async function fetchModelSnapshot", 1)[1].split(
+        "async function loadModelSettings", 1
+    )[0]
+    switch_section = model.split("function switchSettingsSection", 1)[1].split(
+        "function onBeforeUnload", 1
+    )[0]
+    save = model.split("async function saveModels()", 1)[1].split(
+        "async function fetchModelSnapshot", 1
+    )[0]
+    migration_handler = model.split('byId("mobileModelMigrationPanel").addEventListener', 1)[
+        1
+    ].split("focusController =", 1)[0]
+
+    assert "exactDraftRenderer.afterDraftMutation" in update_field
+    assert "exactDraftRenderer.afterDraftMutation" in update_credential
+    assert "exactDraftRenderer.beforeRouteList()" in show_list
+    assert model.count("exactDraftRenderer.afterDraftMutation()") >= 3
+    assert "modelResources.reloadSnapshot()" in fetch_snapshot
+    assert "loadModelSettings()" in switch_section
+    assert 'id="mobileModelLoadRetry"' in model
+    assert 'modelLoadRetry.addEventListener("click"' in model
+    assert "!readiness.ready && !readiness.loading" in switch_section
+    assert (
+        "modelResources.enterModels()"
+        in model.split("async function loadModelSettings", 1)[1].split("function confirmLeave", 1)[
+            0
+        ]
+    )
+    assert save.index("guardMobileModelRuntime") < save.index("updateModelConfig")
+    assert "exactDraftRenderer.afterDraftMutation()" in migration_handler
+    assert "resolveOpener" in model
 
 
 def test_opener_list_and_detail_focus_are_restored_with_semantic_controls() -> None:
@@ -335,7 +379,13 @@ def test_mobile_model_controls_have_touch_targets_and_visible_focus() -> None:
 
 def test_mobile_does_not_offer_the_one_click_ollama_convenience_path() -> None:
     model = _read(MODEL_PATH)
+    config_docs = _read(ROOT / "docs/modules/config.md")
+    runtime_docs = _read(ROOT / "docs/modules/runtime.md")
 
     assert "enableLocalOllamaEmbedding" not in model
     assert "prepareLocalOllamaEmbedding" not in model
     assert "一键启用" not in model
+    assert "桌面与插件的一键" not in config_docs
+    assert "只有浏览器插件提供" in config_docs
+    assert "只有浏览器插件提供" in runtime_docs
+    assert "桌面 Web 的 Embedding repair" in runtime_docs

@@ -8,18 +8,20 @@ import {
 } from "../api.js";
 import { createDialogFocusController } from "../saved-sync-runtime.js";
 import {
+  createExactDraftRenderCoordinator,
+  createMobileModelResourceCoordinator,
+  guardMobileModelRuntime,
+} from "../mobile-model-settings-controller.js";
+import {
   MAX_ROUTE_ITEMS,
   appendRouteItem,
-  applyLatestSnapshotRequest,
   applyPreset,
   applyProbeResult,
   changeConnectionType,
   changePreset,
-  createLatestRequestGate,
   createModelOperationGate,
   createProbeSignature,
   hydrateModelConfig,
-  loadIndependentModelResources,
   mapServerFieldErrors,
   moveRouteItem,
   probeSignatureMatches,
@@ -113,6 +115,8 @@ export async function openMobileSettings(opener) {
 
     <section class="mobile-settings-panel" data-mobile-settings-panel="models" hidden>
       <h3 class="mobile-settings-panel-title" tabindex="-1">Models</h3>
+      <button id="mobileModelLoadRetry" class="mobile-model-load-retry btn btn-outline"
+        type="button" hidden>重试加载 Models</button>
       <fieldset id="mobileModelEditorBoundary" class="mobile-model-editor-boundary"
         aria-label="模型路由编辑器" aria-busy="false">
         <div class="mobile-model-route-tabs" role="tablist" aria-label="模型类型">
@@ -226,11 +230,16 @@ export async function openMobileSettings(opener) {
           <label class="mobile-model-field">
             <span>Chat 并发数</span>
             <input id="mobileModelChatConcurrency" type="number" min="1" max="16"
-              inputmode="numeric">
+              inputmode="numeric" aria-describedby="mobileModelChatConcurrencyError">
+            <span id="mobileModelChatConcurrencyError" class="mobile-model-field-error"
+              role="alert" hidden></span>
           </label>
           <label class="mobile-model-field">
             <span>整条 route 超时（秒）</span>
-            <input id="mobileModelChatTimeout" type="number" min="10" inputmode="numeric">
+            <input id="mobileModelChatTimeout" type="number" min="10" inputmode="numeric"
+              aria-describedby="mobileModelChatTimeoutError">
+            <span id="mobileModelChatTimeoutError" class="mobile-model-field-error"
+              role="alert" hidden></span>
           </label>
           <div id="mobileModelRuntimeSummary" class="mobile-model-runtime-summary"
             aria-live="polite"></div>
@@ -251,6 +260,7 @@ export async function openMobileSettings(opener) {
   const savedRetry = card.querySelector(".mobile-settings-retry");
   const savedStatus = card.querySelector(".mobile-settings-status");
   const closeButton = card.querySelector(".mobile-settings-close");
+  const modelLoadRetry = byId("mobileModelLoadRetry");
   let currentSettingsSection = "saved";
   let savedStoredValue = false;
   let configLoaded = false;
@@ -258,10 +268,59 @@ export async function openMobileSettings(opener) {
   let state = null;
   let connectionTypes = { connection_types: [], groups: [] };
   let routeView = "list";
+  let runtimeFieldErrors = {};
   let disposed = false;
   const modelOperations = createModelOperationGate();
-  const snapshotRequestGate = createLatestRequestGate();
-  const descriptorRequestGate = createLatestRequestGate();
+  const modelResources = createMobileModelResourceCoordinator({
+    snapshotRequest: () => fetchModelConfig(),
+    descriptorRequest: () => fetchModelConnectionTypes(),
+    blocked: ({ remote }) => (
+      disposed
+      || modelOperations.saveInFlight
+      || (!remote && Boolean(state?.dirty))
+    ),
+    onSnapshotBlocked: (snapshot) => {
+      if (disposed || !state) return;
+      state = receiveRemoteSnapshot(state, snapshot);
+      render({ preserveStatus: true });
+    },
+    applySnapshot: (snapshot, { remote }) => {
+      if (disposed) return;
+      if (remote && state) state = receiveRemoteSnapshot(state, snapshot);
+      else state = retainSelection(hydrateModelConfig(snapshot), state);
+      state.activeRoute ||= "chat";
+      if (!remote) routeView = "list";
+      render({ preserveStatus: true });
+    },
+    installDescriptors: (descriptors) => {
+      if (disposed) return;
+      connectionTypes = descriptors;
+      if (state && !modelOperations.saveInFlight) render({ preserveStatus: true });
+    },
+    onReadinessChange: (readiness) => {
+      if (!disposed) setModelEditorLocked(!readiness.ready);
+    },
+  });
+  const exactDraftRenderer = createExactDraftRenderCoordinator({
+    clearInlineErrors: () => {
+      card.querySelectorAll("[data-mobile-model-inline-error]").forEach(
+        (element) => element.remove(),
+      );
+    },
+    renderErrorSummary,
+    renderRouteList,
+    renderProbeStatus: () => {
+      if (state && state.activeRoute !== "runtime") {
+        renderProbeStatus(selectedRecord(state, state.activeRoute));
+      }
+    },
+    renderInspector,
+    renderCredential: () => {
+      if (!state || state.activeRoute === "runtime") return;
+      const record = selectedRecord(state, state.activeRoute);
+      if (record) renderCredential(record, descriptorFor(record.type));
+    },
+  });
 
   function setSavedStatus(message, alert = false) {
     if (disposed) return;
@@ -356,15 +415,16 @@ export async function openMobileSettings(opener) {
   }
 
   function modelMutationBlocked() {
-    return !state || modelOperations.saveInFlight;
+    return !state || !modelResources.readiness().ready || modelOperations.saveInFlight;
   }
 
   function syncOperationControls() {
     const controls = modelOperations.controlState();
     const save = byId("mobileModelSaveButton");
     const probe = byId("mobileModelProbeButton");
-    if (save) save.disabled = controls.saveDisabled || !state;
-    if (probe) probe.disabled = controls.probeDisabled || !state;
+    const resourcesReady = modelResources.readiness().ready;
+    if (save) save.disabled = controls.saveDisabled || !state || !resourcesReady;
+    if (probe) probe.disabled = controls.probeDisabled || !state || !resourcesReady;
   }
 
   function setModelEditorLocked(locked) {
@@ -393,7 +453,8 @@ export async function openMobileSettings(opener) {
   function errorMarkup(recordId, field) {
     const error = fieldError(recordId, field);
     return error
-      ? `<span class="mobile-model-field-error" role="alert">${escapeHtml(error.message)}</span>`
+      ? `<span class="mobile-model-field-error" data-mobile-model-inline-error
+          role="alert">${escapeHtml(error.message)}</span>`
       : "";
   }
 
@@ -768,6 +829,20 @@ export async function openMobileSettings(opener) {
     renderProbeStatus(record);
   }
 
+  function renderRuntimeFieldErrors(errors = runtimeFieldErrors) {
+    runtimeFieldErrors = { ...errors };
+    for (const [id, field] of [
+      ["mobileModelChatConcurrencyError", "concurrency"],
+      ["mobileModelChatTimeoutError", "timeout_seconds"],
+    ]) {
+      const host = byId(id);
+      if (!host) continue;
+      const message = runtimeFieldErrors[field] || "";
+      host.textContent = message;
+      host.hidden = !message;
+    }
+  }
+
   function renderRuntime() {
     if (state.activeRoute !== "runtime") return;
     byId("mobileModelChatConcurrency").value = String(state.models.chat.concurrency);
@@ -789,6 +864,7 @@ export async function openMobileSettings(opener) {
         ${state.models.embedding.enabled ? "enabled" : "disabled"}</strong></div>
       <div><span>Current health</span><strong>
         ${healthy} passed probes · ${open} open circuits</strong></div>`;
+    renderRuntimeFieldErrors();
   }
 
   function migrationResolution(action) {
@@ -857,6 +933,7 @@ export async function openMobileSettings(opener) {
   }
 
   function showRouteList({ focus = true } = {}) {
+    exactDraftRenderer.beforeRouteList();
     routeView = "list";
     byId("mobileModelRouteLayout")?.classList.remove("is-detail");
     if (focus) focusSelectedRouteControl();
@@ -1009,13 +1086,13 @@ export async function openMobileSettings(opener) {
         }
         state = result.state;
       }
-      renderInspector();
+      exactDraftRenderer.afterDraftMutation({ rebuildInspector: true });
     } else {
       state = updateRouteField(state, state.activeRoute, record.id, field, value);
       if (field === "name") {
         byId("mobileModelInspectorTitle").textContent = value || "连接详情";
-        renderRouteList();
       }
+      exactDraftRenderer.afterDraftMutation();
     }
     setModelStatus("有未保存的模型更改。");
   }
@@ -1031,9 +1108,7 @@ export async function openMobileSettings(opener) {
       "credential",
       { action, value },
     );
-    if (rerender) {
-      renderCredential(selectedRecord(state, state.activeRoute), descriptorFor(record.type));
-    }
+    exactDraftRenderer.afterDraftMutation({ rerenderCredential: rerender });
     setModelStatus("有未保存的模型更改。");
   }
 
@@ -1123,9 +1198,26 @@ export async function openMobileSettings(opener) {
 
   async function saveModels() {
     if (!state) return;
+    const runtimeValid = guardMobileModelRuntime(
+      state.models.chat,
+      renderRuntimeFieldErrors,
+    );
+    if (!runtimeValid) {
+      state.activeRoute = "runtime";
+      routeView = "list";
+      render({ preserveStatus: true });
+      setModelStatus("请修正标记的 Runtime 字段；当前草稿尚未丢失。", "error");
+      window.requestAnimationFrame(() => {
+        const target = runtimeFieldErrors.concurrency
+          ? byId("mobileModelChatConcurrency")
+          : byId("mobileModelChatTimeout");
+        target?.focus();
+      });
+      return;
+    }
     const save = modelOperations.beginSave();
     if (!save) return;
-    snapshotRequestGate.invalidate();
+    modelResources.invalidateSnapshotRequests();
     setModelEditorLocked(true);
     byId("mobileModelSaveButton").textContent = "保存中…";
     if (save.invalidatedProbe) {
@@ -1163,72 +1255,30 @@ export async function openMobileSettings(opener) {
 
   async function fetchModelSnapshot(remote = false) {
     if (modelOperations.saveInFlight) return false;
-    return applyLatestSnapshotRequest({
-      gate: snapshotRequestGate,
-      request: () => fetchModelConfig(),
-      blocked: () => (
-        disposed
-        || modelOperations.saveInFlight
-        || (!remote && Boolean(state?.dirty))
-      ),
-      onBlocked: (snapshot) => {
-        if (disposed || !state) return;
-        state = receiveRemoteSnapshot(state, snapshot);
-        render({ preserveStatus: true });
-      },
-      apply: (snapshot) => {
-        if (disposed) return;
-        if (remote && state) state = receiveRemoteSnapshot(state, snapshot);
-        else state = retainSelection(hydrateModelConfig(snapshot), state);
-        render({ preserveStatus: true });
-      },
-    });
+    if (!remote) return modelResources.enterModels();
+    return modelResources.reloadSnapshot();
   }
 
   async function loadModelSettings() {
+    modelLoadRetry.hidden = true;
     setModelStatus("正在读取模型配置与连接类型…");
     try {
-      const loaded = await loadIndependentModelResources({
-        gate: snapshotRequestGate,
-        descriptorGate: descriptorRequestGate,
-        snapshotRequest: () => fetchModelConfig(),
-        descriptorRequest: () => fetchModelConnectionTypes(),
-        blocked: () => (
-          disposed || modelOperations.saveInFlight || Boolean(state?.dirty)
-        ),
-        onSnapshotBlocked: (snapshot) => {
-          if (disposed || !state) return;
-          state = receiveRemoteSnapshot(state, snapshot);
-          render({ preserveStatus: true });
-        },
-        applySnapshot: (snapshot) => {
-          if (disposed) return;
-          state = retainSelection(hydrateModelConfig(snapshot), state);
-          state.activeRoute ||= "chat";
-          routeView = "list";
-          render({ preserveStatus: true });
-        },
-        installDescriptors: (descriptors) => {
-          if (disposed) return;
-          connectionTypes = descriptors;
-          if (state && !modelOperations.saveInFlight) {
-            render({ preserveStatus: true });
-          }
-        },
-      });
-      if (disposed) return loaded;
-      if (loaded.snapshotApplied && loaded.descriptorsInstalled && state) {
+      const readiness = await modelResources.enterModels();
+      if (disposed) return readiness;
+      if (readiness.ready && state) {
+        modelLoadRetry.hidden = true;
         setModelStatus(`模型配置已同步 · ${state.revision.slice(0, 12)}`);
       } else if (state?.remoteUpdate) {
         setModelStatus("远端已有更新；本地未保存草稿仍保留。");
       } else if (state?.dirty) {
         setModelStatus("模型配置已读取；本地草稿尚未保存。");
       }
-      return loaded;
+      return readiness;
     } catch (error) {
-      if (disposed) return { snapshotApplied: false, descriptorsInstalled: false };
+      if (disposed) return modelResources.readiness();
+      modelLoadRetry.hidden = false;
       setModelStatus(error.message || "无法读取模型配置。", "error");
-      return { snapshotApplied: false, descriptorsInstalled: false };
+      return modelResources.readiness();
     }
   }
 
@@ -1239,8 +1289,7 @@ export async function openMobileSettings(opener) {
   function destroy({ restoreFocus = true } = {}) {
     if (disposed) return;
     disposed = true;
-    snapshotRequestGate.invalidate();
-    descriptorRequestGate.invalidate();
+    modelResources.invalidate();
     window.removeEventListener("beforeunload", onBeforeUnload);
     window.removeEventListener("openbiliclaw:config-reloaded", onConfigReloaded);
     if (restoreFocus) focusController?.deactivate();
@@ -1257,7 +1306,13 @@ export async function openMobileSettings(opener) {
   }
 
   function switchSettingsSection(nextSection, trigger = null) {
-    if (nextSection === currentSettingsSection) return true;
+    if (nextSection === currentSettingsSection) {
+      const readiness = modelResources.readiness();
+      if (nextSection === "models" && !readiness.ready && !readiness.loading) {
+        void loadModelSettings();
+      }
+      return true;
+    }
     if (
       currentSettingsSection === "models"
       && nextSection !== "models"
@@ -1272,7 +1327,9 @@ export async function openMobileSettings(opener) {
     card.querySelectorAll("[data-mobile-settings-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.mobileSettingsPanel !== nextSection;
     });
-    if (nextSection === "models" && !state) void loadModelSettings();
+    if (nextSection === "models" && !modelResources.readiness().ready) {
+      void loadModelSettings();
+    }
     window.requestAnimationFrame(() => {
       if (disposed) return;
       const panel = card.querySelector(
@@ -1303,6 +1360,7 @@ export async function openMobileSettings(opener) {
   });
   closeButton.addEventListener("click", requestClose);
   savedRetry.addEventListener("click", () => { void loadSavedSync(); });
+  modelLoadRetry.addEventListener("click", () => { void loadModelSettings(); });
   savedSave.addEventListener("click", () => { void saveSavedSync(); });
   savedToggle.addEventListener("change", () => {
     if (!savedToggle.checked || savedStoredValue) return;
@@ -1421,6 +1479,7 @@ export async function openMobileSettings(opener) {
       if (modelMutationBlocked() || modelControlLocked(path)) return;
       const value = kind === "number" ? Number(event.target.value) : event.target.value;
       state = updateRouteSetting(state, "embedding", field, value);
+      exactDraftRenderer.afterDraftMutation();
       setModelStatus("有未保存的模型更改。");
     });
   }
@@ -1435,6 +1494,7 @@ export async function openMobileSettings(opener) {
       "multimodal_enabled",
       event.target.checked,
     );
+    exactDraftRenderer.afterDraftMutation();
     setModelStatus("有未保存的模型更改。");
   });
   byId("mobileModelChatConcurrency").addEventListener("input", (event) => {
@@ -1445,6 +1505,9 @@ export async function openMobileSettings(opener) {
       "concurrency",
       Number(event.target.value),
     );
+    delete runtimeFieldErrors.concurrency;
+    renderRuntimeFieldErrors();
+    exactDraftRenderer.afterDraftMutation();
     setModelStatus("有未保存的模型更改。");
   });
   byId("mobileModelChatTimeout").addEventListener("input", (event) => {
@@ -1458,6 +1521,9 @@ export async function openMobileSettings(opener) {
       "timeout_seconds",
       Number(event.target.value),
     );
+    delete runtimeFieldErrors.timeout_seconds;
+    renderRuntimeFieldErrors();
+    exactDraftRenderer.afterDraftMutation();
     setModelStatus("有未保存的模型更改。");
   });
   byId("mobileModelMigrationPanel").addEventListener("click", (event) => {
@@ -1469,13 +1535,20 @@ export async function openMobileSettings(opener) {
       button.dataset.migrationId,
       migrationResolution(button.dataset.migrationAction),
     );
+    exactDraftRenderer.afterDraftMutation();
     renderMigration();
     setModelStatus("迁移选择尚未保存。");
   });
 
+  setModelEditorLocked(true);
   focusController = createDialogFocusController({
     dialog: overlay,
     opener,
+    resolveOpener: () => {
+      const liveOpener = opener?.id ? document.getElementById(opener.id) : null;
+      if (liveOpener?.isConnected) return liveOpener;
+      return opener?.isConnected ? opener : null;
+    },
     onClose: requestClose,
   });
   focusController.activate();

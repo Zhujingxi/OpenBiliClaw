@@ -204,7 +204,8 @@ export function createDialogFocusController(options = {}) {
       if (!active) return;
       active = false;
       doc?.removeEventListener?.("keydown", onKeydown);
-      opener?.focus?.();
+      const focusTarget = options.resolveOpener ? options.resolveOpener() : opener;
+      focusTarget?.focus?.();
     },
   };
 }

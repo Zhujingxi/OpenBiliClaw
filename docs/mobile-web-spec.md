@@ -71,8 +71,10 @@
    - 连接类型完全由 descriptor 分组、搜索、preset 与字段定义驱动；credentials 使用 `keep / set / env / clear` 显式动作
    - Embedding 的 model、维度、相似度阈值和多模态开关是 route 共享设置；Runtime 编辑 Chat concurrency 与 timeout
    - 保存使用 revisioned `PUT /api/model-config`，失败保留草稿，`409` 与字段错误就地展示；精确 probe 绑定 revision、route kind、稳定 ID 与 draft fingerprint
-   - snapshot 与 descriptor 使用独立 latest-request gate；迟到 snapshot 不覆盖编辑中的草稿，`config_reloaded` 在 clean draft 自动同步、dirty draft 只提示远端更新
-   - 关闭设置或从 Models 切到 Saved Sync 时仅在模型草稿 dirty 时确认；关闭、列表/详情返回都恢复合理焦点
+   - snapshot 与 descriptor 分别维护 readiness 与 latest-request gate；Saved Sync 先收到 `config_reloaded` 仍会在首次进入 Models 补载 descriptor，descriptor 失败可由显式按钮或重新进入 Models 单独重试，两项都 ready 前锁定编辑器
+   - model / preset / credential / Embedding 共享设置变更同步刷新列表、probe health 与错误投影；单纯 Back 导航保留仍有效的服务端字段错误
+   - Runtime 保存前校验 concurrency 为 1–16 的整数、timeout 为至少 10 秒的整数，非法值就地提示且不发 PUT
+   - 关闭设置或从 Models 切到 Saved Sync 时仅在模型草稿 dirty 时确认；关闭、列表/详情返回都恢复合理焦点，shell 重绘替换 opener 后按稳定 ID 聚焦当前 live 设置按钮
    - 移动端不提供一键本地 Ollama，避免把窄屏编辑器变成隐式覆盖入口
 
 ### 不包含
@@ -102,6 +104,7 @@ src/openbiliclaw/web/
 │   ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
 │   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
 │   ├── app-launch.js   # 移动端深链拉起目标平台 App + 网页回落
+│   ├── mobile-model-settings-controller.js # Models 资源 readiness、精确草稿渲染与保存校验
 │   ├── views/
 │   │   ├── recommend.js  # 推荐页渲染 & 交互
 │   │   ├── profile.js    # 画像页渲染 & 交互
