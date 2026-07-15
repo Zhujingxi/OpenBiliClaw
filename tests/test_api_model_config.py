@@ -143,6 +143,19 @@ def _runtime_consumer_identities(context: object) -> tuple[object, ...]:
     )
 
 
+def _assert_loop_slots_match_registry(
+    slots: tuple[object, object, object],
+    tracked: tuple[tuple[asyncio.Task[Any], ...], ...],
+) -> None:
+    """Assert every live app loop slot is the registry's sole owner."""
+    for slot_task, tracked_tasks in zip(slots, tracked, strict=True):
+        assert isinstance(slot_task, asyncio.Task)
+        if slot_task.done():
+            assert tracked_tasks == ()
+        else:
+            assert tracked_tasks == (slot_task,)
+
+
 def _credential(action: str = "keep", value: str = "") -> dict[str, str]:
     return {"action": action, "value": value}
 
@@ -713,6 +726,323 @@ def test_model_put_cancels_detached_old_graph_work_before_reload_event(
         assert detached_count_before_cleanup == 0
         assert event_detached_states == [True]
         assert event_task_states == [(True, True, True)]
+
+
+def test_model_cutover_serializes_with_guided_restart_without_orphaned_loops(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A guided-style restart cannot interleave a second complete loop set."""
+    from openbiliclaw.api.model_config_routes import _AppModelRuntimeCoordinator
+
+    app, _config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        assert client.portal is not None
+        loop_slots = ("refresh_task", "account_sync_task", "auto_update_task")
+        loop_names = ("refresh_loop", "account_sync_loop", "auto_update_loop")
+        event_slots: list[tuple[object, object, object]] = []
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                event_slots.append(tuple(getattr(app.state, slot) for slot in loop_slots))
+            return True
+
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        monkeypatch.setattr(context, "background_llm_work_allowed", lambda: False)
+
+        async def overlap_restarts() -> tuple[
+            tuple[object, object, object],
+            tuple[tuple[asyncio.Task[Any], ...], ...],
+            int,
+            str,
+        ]:
+            real_cancel_all = context.task_registry.cancel_all
+            first_drained = asyncio.Event()
+            first_release = asyncio.Event()
+            cancel_calls = 0
+            guided_restart: asyncio.Task[None] | None = None
+            model_cutover: asyncio.Task[object | None] | None = None
+            fallback_release: asyncio.Task[None] | None = None
+
+            async def controlled_cancel_all(
+                *,
+                grace_seconds: float = 1.5,
+                exclude: frozenset[str] = frozenset(),
+            ) -> int:
+                nonlocal cancel_calls
+                cancelled = await real_cancel_all(
+                    grace_seconds=grace_seconds,
+                    exclude=exclude,
+                )
+                cancel_calls += 1
+                if cancel_calls == 1:
+                    first_drained.set()
+                    await first_release.wait()
+                else:
+                    # Without lifecycle serialization, the concurrent model
+                    # restart reaches a second drain and releases the paused
+                    # guided restart after taking the same empty snapshot.
+                    first_release.set()
+                return cancelled
+
+            async def release_after_scheduler_turns() -> None:
+                # With serialization, no second drain can enter until the first
+                # restart releases ownership. Keep the harness implementation-
+                # independent by eventually releasing the first owner.
+                for _ in range(50):
+                    if first_release.is_set():
+                        return
+                    await asyncio.sleep(0)
+                first_release.set()
+
+            changed = replace(
+                _native_models(),
+                chat=replace(_native_models().chat, timeout_seconds=125),
+            )
+            revision = compute_model_revision(changed)
+            candidate = await context.build_model_candidate(changed, revision)
+            lifecycle = _AppModelRuntimeCoordinator(
+                app,
+                context,
+                getattr(context.event_hub, "publish", None),
+            )
+            context.task_registry.cancel_all = controlled_cancel_all
+            try:
+                guided_restart = asyncio.create_task(context.restart_background_tasks(app))
+                await asyncio.wait_for(first_drained.wait(), timeout=5)
+                model_cutover = asyncio.create_task(lifecycle.swap_model_candidate(candidate))
+                fallback_release = asyncio.create_task(release_after_scheduler_turns())
+                await asyncio.gather(guided_restart, model_cutover, fallback_release)
+
+                final_slots = tuple(getattr(app.state, slot) for slot in loop_slots)
+                tracked = tuple(
+                    tuple(
+                        task
+                        for task, name in context.task_registry._tasks.items()
+                        if name == loop_name and not task.done()
+                    )
+                    for loop_name in loop_names
+                )
+                return final_slots, tracked, cancel_calls, revision
+            finally:
+                first_release.set()
+                pending = tuple(
+                    task
+                    for task in (guided_restart, model_cutover, fallback_release)
+                    if task is not None and not task.done()
+                )
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                context.task_registry.cancel_all = real_cancel_all
+
+        final_slots, tracked_loop_sets, cancel_calls, revision = client.portal.call(
+            overlap_restarts
+        )
+
+        assert cancel_calls == 2
+        assert len(event_slots) == 1
+        assert event_slots[0] == final_slots
+        _assert_loop_slots_match_registry(final_slots, tracked_loop_sets)
+        assert context.model_bundle is not None
+        assert context.model_bundle.revision == revision
+
+
+def test_model_save_cancelled_while_waiting_for_lifecycle_snapshot_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A save snapshots only after an in-flight lifecycle transition completes."""
+    from openbiliclaw.api.model_config_routes import _AppModelRuntimeCoordinator
+    from openbiliclaw.model_config.service import (
+        CredentialAction,
+        ModelConfigSaveRequest,
+        ModelConfigService,
+    )
+
+    app, config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        assert client.portal is not None
+        loop_slots = ("refresh_task", "account_sync_task", "auto_update_task")
+        loop_names = ("refresh_loop", "account_sync_loop", "auto_update_loop")
+        reload_events: list[dict[str, Any]] = []
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                reload_events.append(dict(event))
+            return True
+
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        monkeypatch.setattr(context, "background_llm_work_allowed", lambda: False)
+
+        async def cancel_waiting_save() -> tuple[
+            int,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            bool,
+            tuple[object, object, object],
+            tuple[tuple[asyncio.Task[Any], ...], ...],
+        ]:
+            real_cancel_all = context.task_registry.cancel_all
+            first_drained = asyncio.Event()
+            first_release = asyncio.Event()
+            cancel_calls = 0
+            guided_restart: asyncio.Task[None] | None = None
+            save_task: asyncio.Task[Any] | None = None
+            before_disk = config_path.read_bytes()
+            before_state = context.capture_model_runtime_state()
+            before_consumers = _runtime_consumer_identities(context)
+
+            async def controlled_cancel_all(
+                *,
+                grace_seconds: float = 1.5,
+                exclude: frozenset[str] = frozenset(),
+            ) -> int:
+                nonlocal cancel_calls
+                cancelled = await real_cancel_all(
+                    grace_seconds=grace_seconds,
+                    exclude=exclude,
+                )
+                cancel_calls += 1
+                if cancel_calls == 1:
+                    first_drained.set()
+                    await first_release.wait()
+                return cancelled
+
+            lifecycle = _AppModelRuntimeCoordinator(
+                app,
+                context,
+                getattr(context.event_hub, "publish", None),
+            )
+            restaged = asyncio.Event()
+            real_restage = lifecycle.restage_model_candidate
+
+            def record_restage(candidate: object, models: ModelConfig, revision: str) -> object:
+                result = real_restage(candidate, models, revision)
+                restaged.set()
+                return result
+
+            lifecycle.restage_model_candidate = record_restage
+            service = ModelConfigService(
+                config_path,
+                lifecycle,
+                precommit_guard=lambda: False,
+            )
+            snapshot = service.read()
+            changed = replace(
+                _native_models(),
+                chat=replace(_native_models().chat, timeout_seconds=126),
+            )
+            revision = compute_model_revision(changed)
+            actions = {
+                item.id: CredentialAction("keep")
+                for item in (*changed.chat.connections, *changed.embedding.providers)
+            }
+            request = ModelConfigSaveRequest(
+                revision=snapshot.revision,
+                models=changed,
+                credential_actions=actions,
+            )
+
+            context.task_registry.cancel_all = controlled_cancel_all
+            try:
+                guided_restart = asyncio.create_task(context.restart_background_tasks(app))
+                await asyncio.wait_for(first_drained.wait(), timeout=5)
+                save_task = asyncio.create_task(service.save(request))
+                await asyncio.wait_for(restaged.wait(), timeout=5)
+
+                # The app coordinator must capture its rollback token under
+                # lifecycle ownership before disk replacement or publication.
+                # The config writer is already held here; lifecycle code never
+                # acquires it, so this is a deliberate one-way lock order.
+                for _ in range(100):
+                    bundle = context.model_bundle
+                    if bundle is not None and bundle.revision == revision:
+                        break
+                    if save_task.done():
+                        break
+                    await asyncio.sleep(0)
+                candidate_visible_while_waiting = (
+                    context.model_bundle is not None and context.model_bundle.revision == revision
+                )
+                disk_changed_while_waiting = config_path.read_bytes() != before_disk
+                calls_before_release = cancel_calls
+                done_before_cancel = save_task.done()
+                cancel_accepted = save_task.cancel()
+                first_release.set()
+                await guided_restart
+                cancelled_raised = False
+                try:
+                    await save_task
+                except asyncio.CancelledError:
+                    cancelled_raised = True
+
+                final_slots = tuple(getattr(app.state, slot) for slot in loop_slots)
+                tracked = tuple(
+                    tuple(
+                        task
+                        for task, name in context.task_registry._tasks.items()
+                        if name == loop_name and not task.done()
+                    )
+                    for loop_name in loop_names
+                )
+                restored = (
+                    config_path.read_bytes() == before_disk
+                    and _runtime_consumer_identities(context) == before_consumers
+                    and context.model_bundle is before_state.model_bundle
+                    and context.config is before_state.config
+                )
+                return (
+                    calls_before_release,
+                    candidate_visible_while_waiting,
+                    disk_changed_while_waiting,
+                    done_before_cancel,
+                    cancel_accepted,
+                    cancelled_raised,
+                    restored,
+                    final_slots,
+                    tracked,
+                )
+            finally:
+                first_release.set()
+                pending = tuple(
+                    task
+                    for task in (guided_restart, save_task)
+                    if task is not None and not task.done()
+                )
+                if pending:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                context.task_registry.cancel_all = real_cancel_all
+
+        (
+            calls_before_release,
+            candidate_visible_while_waiting,
+            disk_changed_while_waiting,
+            done_before_cancel,
+            cancel_accepted,
+            cancelled_raised,
+            restored,
+            final_slots,
+            tracked_loop_sets,
+        ) = client.portal.call(cancel_waiting_save)
+
+        assert calls_before_release == 1
+        assert candidate_visible_while_waiting is False
+        assert disk_changed_while_waiting is False
+        assert done_before_cancel is False
+        assert cancel_accepted is True
+        assert cancelled_raised is True
+        assert restored is True
+        assert reload_events == []
+        _assert_loop_slots_match_registry(final_slots, tracked_loop_sets)
 
 
 def test_model_save_cancellation_during_task_stop_rolls_back_and_propagates(

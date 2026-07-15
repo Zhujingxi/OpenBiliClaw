@@ -122,17 +122,36 @@ class _AppModelRuntimeCoordinator:
         self.context = context
         self._event_publisher = event_publisher
 
-    @property
-    def current_model_candidate(self) -> object:
+    def _lifecycle_state(
+        self,
+        runtime_state: object,
+        active: tuple[bool, bool, bool],
+    ) -> _AppModelLifecycleState:
         return _AppModelLifecycleState(
-            runtime_state=self.context.capture_model_runtime_state(),
-            refresh_active=_task_slot_active(self.app, "refresh_task"),
-            account_sync_active=_task_slot_active(self.app, "account_sync_task"),
-            auto_update_active=_task_slot_active(self.app, "auto_update_task"),
+            runtime_state=runtime_state,
+            refresh_active=active[0],
+            account_sync_active=active[1],
+            auto_update_active=active[2],
             app_degraded=bool(getattr(self.app.state, "degraded", False)),
             app_degraded_reason=str(getattr(self.app.state, "degraded_reason", "")),
             app_degraded_issues=list(getattr(self.app.state, "degraded_issues", [])),
         )
+
+    @property
+    def current_model_candidate(self) -> object:
+        return self._lifecycle_state(
+            self.context.capture_model_runtime_state(),
+            (
+                _task_slot_active(self.app, "refresh_task"),
+                _task_slot_active(self.app, "account_sync_task"),
+                _task_slot_active(self.app, "auto_update_task"),
+            ),
+        )
+
+    async def capture_current_model_candidate(self) -> object:
+        """Wait for settled lifecycle ownership before capturing rollback state."""
+        runtime_state, active = await self.context.capture_model_runtime_task_state(self.app)
+        return self._lifecycle_state(runtime_state, active)
 
     async def build_model_candidate(self, models: ModelConfig, revision: str) -> object:
         return await self.context.build_model_candidate(models, revision)

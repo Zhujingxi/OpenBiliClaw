@@ -388,9 +388,10 @@ background ─ background admission (default 3) ──────┘
 │ redacted snapshot/revision → credential action → local fence │
 │ build complete RuntimeContext candidate → canonical writer   │
 │ init guard + immediate reread → rebase / authority conflict  │
+│ lifecycle-locked settled runtime/task snapshot before replace │
 │ legacy backup → temp/fsync/replace → app lifecycle activation │
-│ publish graph → drain old registry → restart app loops → clear degraded → one event │
-│ failure/cancel → restore bytes/runtime graph + old-equivalent app-loop ownership │
+│ publish graph → serialized drain/restart → clear degraded → one final-slot event │
+│ failure/cancel → shielded restore reacquires lifecycle ownership │
 │ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
 │                                   ├→ total deadline + safe attempts │
 │                                   └→ revision-aware CircuitTable   │

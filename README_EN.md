@@ -607,8 +607,10 @@ background ─ background admission (default 3) ──────┘
 │ native/legacy + base/local → ModelConfigService path lock  │
 │ safe endpoint → redacted snapshot; credential + local fence │
 │ full graph build → writer init guard + reread/rebase/conflict │
-│ backup → temp/fsync/replace → publish graph → drain old registry → restart app loops → one event │
-│ degraded clears; failure restores bytes/runtime graph and old-equivalent loop ownership │
+│ lifecycle-locked settled runtime/loop snapshot; cancelled wait writes/publishes nothing │
+│ backup → temp/fsync/replace → publish graph → serialized drain/restart → one event │
+│ every public stop/restart is exclusive; drain excludes guided_init; event sees final slots │
+│ degraded clears; mid-cutover cancellation shield-restores after reacquiring lifecycle ownership │
 │ Chat record → ID adapter → OrderedLLMRoute (global order)  │
 │ total deadline · revision circuits · capture/recheck probe · safe attempts │
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │

@@ -8,7 +8,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, cast
 
 from openbiliclaw.config_write import (
     coordinated_config_disk_write,
@@ -60,7 +60,7 @@ from .types import (
 from .validation import validate_model_config
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
 CredentialActionName: TypeAlias = Literal["keep", "set", "clear", "env"]
 RouteRecord: TypeAlias = ChatConnection | EmbeddingProviderConfig
@@ -547,6 +547,17 @@ async def _restore_transaction(
     return disk_restored
 
 
+async def _capture_current_model_candidate(
+    coordinator: ModelRuntimeCoordinator,
+) -> object | None:
+    """Use lifecycle-aware capture when a coordinator exposes that capability."""
+    capture = getattr(coordinator, "capture_current_model_candidate", None)
+    if callable(capture):
+        callback = cast("Callable[[], Awaitable[object | None]]", capture)
+        return await callback()
+    return coordinator.current_model_candidate
+
+
 class ModelConfigService:
     """Read public model snapshots and commit complete candidates atomically."""
 
@@ -763,7 +774,7 @@ class ModelConfigService:
                 # Capture the exact post-rebase runtime identity. Rollback must
                 # retain any unrelated ordinary-config update that won while
                 # the initial model candidate was building.
-                previous = self.coordinator.current_model_candidate
+                previous = await _capture_current_model_candidate(self.coordinator)
                 backup_path: Path | None = None
                 with coordinated_config_disk_write(self.path):
                     if latest.base_source == "legacy":

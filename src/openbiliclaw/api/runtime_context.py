@@ -424,6 +424,12 @@ class RuntimeContext:
         repr=False,
         compare=False,
     )
+    _background_lifecycle_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     # ── Swappable (rebuilt on hot-reload) ───────────────────────────
     config: Any = None
@@ -581,6 +587,28 @@ class RuntimeContext:
             auto_update_service=self.auto_update_service,
             init_prereqs=self._init_prereqs,
         )
+
+    async def capture_model_runtime_task_state(
+        self,
+        app: FastAPI,
+    ) -> tuple[RuntimeModelState, tuple[bool, bool, bool]]:
+        """Capture runtime identity and settled app-loop activity together.
+
+        Model saves call this while holding the canonical config writer. Runtime
+        lifecycle code never acquires that writer, so waiting here preserves a
+        one-way lock order and cannot snapshot transiently cleared task slots.
+        """
+        async with self._background_lifecycle_lock:
+            active: list[bool] = []
+            for name in ("refresh_task", "account_sync_task", "auto_update_task"):
+                task = getattr(app.state, name, None)
+                done = getattr(task, "done", None)
+                active.append(task is not None and not (bool(done()) if callable(done) else False))
+            return self.capture_model_runtime_state(), (
+                active[0],
+                active[1],
+                active[2],
+            )
 
     async def restore_model_runtime_state(self, state: RuntimeModelState) -> None:
         """Restore a complete normal or degraded graph from one exact token."""
@@ -1601,7 +1629,12 @@ class RuntimeContext:
         logger.info("Hot-reload complete — published model revision %s", bundle.revision)
 
     async def stop_background_tasks(self, app: FastAPI) -> None:
-        """Clear app slots and drain all old-graph work without hiding caller cancel."""
+        """Serialize a stop-only lifecycle transition for app-owned work."""
+        async with self._background_lifecycle_lock:
+            await self._stop_background_tasks_unlocked(app)
+
+    async def _stop_background_tasks_unlocked(self, app: FastAPI) -> None:
+        """Clear app slots and drain old-graph work while lifecycle ownership is held."""
         tasks: list[Any] = []
         for attr in ("refresh_task", "account_sync_task", "auto_update_task"):
             task = getattr(app.state, attr, None)
@@ -1633,8 +1666,21 @@ class RuntimeContext:
         *,
         run_post_reload_llm_work: bool = True,
     ) -> None:
-        """Cancel old background tasks and start new ones from current components."""
-        await self.stop_background_tasks(app)
+        """Serialize one complete drain-and-restart lifecycle transition."""
+        async with self._background_lifecycle_lock:
+            await self._restart_background_tasks_unlocked(
+                app,
+                run_post_reload_llm_work=run_post_reload_llm_work,
+            )
+
+    async def _restart_background_tasks_unlocked(
+        self,
+        app: FastAPI,
+        *,
+        run_post_reload_llm_work: bool,
+    ) -> None:
+        """Drain and restart app work while lifecycle ownership is held."""
+        await self._stop_background_tasks_unlocked(app)
 
         # Start new tasks from the freshly-built components.
         # v0.3.63+: route through ``self.task_registry.track`` so the

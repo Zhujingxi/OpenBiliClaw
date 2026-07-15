@@ -62,6 +62,16 @@ review.
   normal/degraded runtime graph, then recreates old-equivalent app loops
   according to the previous ownership; it does not claim to preserve the same
   `asyncio.Task` objects or recreate cancelled detached old-graph one-shots.
+- Serialized every public background stop/restart with one stable
+  `RuntimeContext` lifecycle lock. One ownership now spans slot clearing,
+  registry drain, loop creation, and post-reload one-shot scheduling, while
+  `guided_init` remains excluded from drain. The model service uses an optional
+  async coordinator capability to wait for a settled runtime/task snapshot
+  before backup, replacement, or publication; legacy/fake coordinators retain
+  the synchronous property fallback. Cancellation while waiting changes
+  neither disk nor runtime, while cancellation after replacement enters the
+  existing shielded restore, which reacquires lifecycle ownership before
+  rebuilding old-equivalent loops.
 - Moved guided-init reservation into the canonical config writer and added a
   model-save precommit guard inside that same writer. A model commit and init
   reservation therefore cannot cross after their handler-level checks. Probes
@@ -130,19 +140,31 @@ review.
   repairs through `PUT /api/model-config`, and verifies task restart precedes
   the single event, both degraded flags clear, the full graph exists, and a
   formerly guarded API returns `200`.
+- Final lifecycle-serialization RED paused a guided-init-style restart after
+  its real registry drain, then overlapped a real app model cutover. Before the
+  lock, both restarts drained the same old set, created separate loop sets, and
+  the reload event captured slots later overwritten by the other restart. A
+  second RED showed the model transaction replacing disk and publishing its
+  candidate before it could obtain settled lifecycle state. GREEN proves one
+  final registry-owned set, event/final-slot identity, lifecycle-aware capture
+  before replacement/publication, unchanged disk/runtime on cancellation while
+  waiting, and shielded rollback compatibility for cancellation during drain.
 
 ## Verification
 
+- Final lifecycle-serialization RED/GREEN nodes: `2 passed` in 1.37s.
+- Lifecycle cancellation/restart/detached-work plus registry compatibility set:
+  `13 passed` in 1.43s.
 - Final reviewer-blocker regression set: `4 passed` in 1.25s.
 - Closed-loop repeated-save compatibility reproductions: `2 passed` in focused
   isolated runs.
-- Required Task 9 matrix: `90 passed` in 6.54s.
-- Model API, production app, and degraded compatibility set: `446 passed` in
-  19.40s.
+- Required Task 9 matrix: `92 passed` in 7.48s.
+- Model API, production app, and degraded compatibility set: `448 passed` in
+  20.31s.
 - Model domain, service, connection factory, ordered Chat/Embedding route, and
-  runtime bundle set: `460 passed` in 1.40s.
-- Background task registry set: `7 passed` in 0.75s.
-- Full repository suite: `5,430 passed, 41 skipped` in 145.52s.
+  runtime bundle set: `460 passed` in 1.37s.
+- Background task registry set: `7 passed` in 0.79s.
+- Full repository suite: `5,432 passed, 41 skipped` in 146.21s.
 - MyPy strict check: success across 223 source files.
 - Repository-wide Ruff lint: passed.
 - All four touched Python files pass Ruff format check.
