@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
 import httpx
+import openai
 import pytest
 
 from openbiliclaw.llm import anthropic_provider, gemini_provider, openai_provider
@@ -147,6 +148,16 @@ def _responses_response(content: str = "ok") -> SimpleNamespace:
         output_text=content,
         output=[],
         usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2),
+    )
+
+
+def _openai_bad_request(message: str) -> openai.BadRequestError:
+    request = httpx.Request("POST", "https://gateway.example.test/v1")
+    response = httpx.Response(400, request=request)
+    return openai.BadRequestError(
+        message,
+        response=response,
+        body={"error": {"message": message}},
     )
 
 
@@ -848,6 +859,175 @@ async def test_openai_protocol_status_inspection_failure_is_fixed_and_chain_safe
         await adapter.complete([{"role": "user", "content": "hi"}])
 
     assert str(exc_info.value) == "chat-openai request failed"
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_openai_protocol_responses_temperature_fallback_keeps_raw_error_private(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-temperature-secret endpoint=https://private.example.test"
+    calls: list[dict[str, object]] = []
+
+    async def fail_request(**kwargs: object) -> object:
+        calls.append(dict(kwargs))
+        if "temperature" in kwargs:
+            raise _openai_bad_request(f"Unsupported parameter: 'temperature'; {sentinel}")
+        raise _openai_bad_request(f"fallback request failed; {sentinel}")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai", api_mode="responses"),
+        _runtime_options(),
+    )
+    monkeypatch.setattr(fake_openai_clients[0].responses_endpoint, "create", fail_request)
+    monkeypatch.setattr(openai_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert len(calls) == 2
+    assert "temperature" in calls[0]
+    assert "temperature" not in calls[1]
+    assert str(exc_info.value) == "chat-openai request failed: HTTP 400"
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["chat_completions", "responses"])
+async def test_openai_protocol_json_format_fallback_keeps_raw_error_private(
+    api_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-format-secret endpoint=https://private.example.test"
+    calls: list[dict[str, object]] = []
+
+    async def fail_request(**kwargs: object) -> object:
+        calls.append(dict(kwargs))
+        if len(calls) == 1:
+            message = (
+                '"response_format.type" must be "json_schema" or "text"'
+                if api_mode == "chat_completions"
+                else "Unsupported parameter: 'text.format'"
+            )
+            raise _openai_bad_request(f"{message}; {sentinel}")
+        raise _openai_bad_request(f"fallback request failed; {sentinel}")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai", api_mode=api_mode),
+        _runtime_options(),
+    )
+    endpoint = (
+        fake_openai_clients[0].chat_endpoint
+        if api_mode == "chat_completions"
+        else fake_openai_clients[0].responses_endpoint
+    )
+    monkeypatch.setattr(endpoint, "create", fail_request)
+    monkeypatch.setattr(openai_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete(
+            [{"role": "user", "content": "hi"}],
+            json_mode=True,
+        )
+
+    assert len(calls) == 2
+    if api_mode == "chat_completions":
+        first_format = cast("dict[str, object]", calls[0]["response_format"])
+        second_format = cast("dict[str, object]", calls[1]["response_format"])
+        assert first_format["type"] == "json_object"
+        assert second_format["type"] == "json_schema"
+    else:
+        assert calls[0]["text"] == {"format": {"type": "json_object"}}
+        assert "text" not in calls[1]
+    assert str(exc_info.value) == "chat-openai request failed: HTTP 400"
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_mode", ["chat_completions", "responses"])
+async def test_openai_protocol_unrelated_400_is_permanent_without_fallback(
+    api_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-unrelated-secret endpoint=https://private.example.test"
+    calls: list[dict[str, object]] = []
+
+    async def fail_request(**kwargs: object) -> object:
+        calls.append(dict(kwargs))
+        raise _openai_bad_request(
+            f"Validation failed for temperature and response_format; {sentinel}"
+        )
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("permanent HTTP 400 errors must not be retried")
+
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai", api_mode=api_mode),
+        _runtime_options(),
+    )
+    endpoint = (
+        fake_openai_clients[0].chat_endpoint
+        if api_mode == "chat_completions"
+        else fake_openai_clients[0].responses_endpoint
+    )
+    monkeypatch.setattr(endpoint, "create", fail_request)
+    monkeypatch.setattr(openai_provider.asyncio, "sleep", unexpected_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete(
+            [{"role": "user", "content": "hi"}],
+            json_mode=True,
+        )
+
+    assert len(calls) == 1
+    if api_mode == "chat_completions":
+        assert calls[0]["response_format"] == {"type": "json_object"}
+    else:
+        assert "temperature" in calls[0]
+        assert calls[0]["text"] == {"format": {"type": "json_object"}}
+    assert str(exc_info.value) == "chat-openai request failed: HTTP 400"
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_openai_protocol_native_sdk_timeout_is_typed_and_chain_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-timeout-secret endpoint=https://private.example.test"
+    calls = 0
+
+    async def fail_request(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        error = openai.APITimeoutError(httpx.Request("POST", "https://gateway.example.test/v1"))
+        error.__cause__ = RuntimeError(sentinel)
+        raise error
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai"),
+        _runtime_options(),
+    )
+    monkeypatch.setattr(fake_openai_clients[0].chat_endpoint, "create", fail_request)
+    monkeypatch.setattr(openai_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMTimeoutError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert calls == 3
+    assert str(exc_info.value) == "chat-openai request timed out"
     _assert_error_chain_omits(exc_info.value, sentinel)
 
 

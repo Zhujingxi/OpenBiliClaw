@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 import httpx
+import openai
 from openai import AsyncOpenAI
 
 from .base import (
@@ -37,6 +38,24 @@ _BILLING_BACKOFF_MARKERS = (
     "余额不足",
     "账户余额",
 )
+
+
+class _OpenAIProtocolError(LLMProviderError):
+    """A sanitized protocol failure carrying only internal boolean signals."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        temperature_rejected: bool = False,
+        response_format_rejected: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.temperature_rejected = temperature_rejected
+        self.response_format_rejected = response_format_rejected
+
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -706,7 +725,7 @@ class OpenAIProtocolProvider(OpenAIProvider):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                mapped = self._map_error(exc)
+                mapped = self._map_caught_error(exc)
                 last_error = mapped
             if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
                 break
@@ -715,31 +734,112 @@ class OpenAIProtocolProvider(OpenAIProvider):
             raise LLMProviderError(f"{self.name} request failed")
         raise last_error from None
 
+    def _map_caught_error(self, exc: Exception) -> LLMProviderError:
+        """Map one caught exception without retaining its raw value or text."""
+        status_code = self._safe_protocol_status_code(exc)
+        temperature_rejected, response_format_rejected = self._compatibility_signals(
+            exc,
+            status_code=status_code,
+        )
+        return self._map_protocol_error(
+            exc,
+            status_code=status_code,
+            temperature_rejected=temperature_rejected,
+            response_format_rejected=response_format_rejected,
+        )
+
     def _map_error(self, exc: Exception) -> LLMProviderError:
+        """Map errors outside a request catch without inspecting raw message text."""
+        return self._map_protocol_error(
+            exc,
+            status_code=self._safe_protocol_status_code(exc),
+            temperature_rejected=False,
+            response_format_rejected=False,
+        )
+
+    def _map_protocol_error(
+        self,
+        exc: Exception,
+        *,
+        status_code: int | None,
+        temperature_rejected: bool,
+        response_format_rejected: bool,
+    ) -> LLMProviderError:
         if isinstance(exc, LLMRateLimitError):
             return LLMRateLimitError(f"{self.name} rate limit exceeded")
-        if isinstance(exc, (LLMTimeoutError, TimeoutError, httpx.TimeoutException)):
+        if isinstance(
+            exc,
+            (LLMTimeoutError, TimeoutError, httpx.TimeoutException, openai.APITimeoutError),
+        ):
             return LLMTimeoutError(f"{self.name} request timed out")
         if isinstance(exc, LLMResponseError):
             return LLMResponseError(f"{self.name} returned an invalid response")
         if isinstance(exc, LLMProviderError):
-            return LLMProviderError(f"{self.name} request failed")
+            return _OpenAIProtocolError(
+                f"{self.name} request failed",
+                retryable=True,
+            )
 
-        status_code = self._safe_protocol_status_code(exc)
         error_type = type(exc).__name__.lower().replace("_", "")
-        if status_code == 429 or "ratelimit" in error_type:
-            return LLMRateLimitError(f"{self.name} rate limit exceeded")
-        if status_code in {401, 403}:
-            return LLMProviderError(f"{self.name} authentication failed")
-        if status_code is not None and status_code >= 500:
-            return LLMProviderError(f"{self.name} server error: {status_code}")
-        if status_code is not None:
-            return LLMProviderError(f"{self.name} request failed: HTTP {status_code}")
-        if isinstance(exc, (httpx.TransportError, ConnectionError)) or (
-            "connectionerror" in error_type
+        if (
+            isinstance(exc, openai.RateLimitError)
+            or status_code == 429
+            or "ratelimit" in error_type
         ):
-            return LLMProviderError(f"{self.name} connection failed")
-        return LLMProviderError(f"{self.name} request failed")
+            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+        if isinstance(exc, openai.AuthenticationError) or status_code in {401, 403}:
+            return _OpenAIProtocolError(
+                f"{self.name} authentication failed",
+                retryable=False,
+            )
+        if status_code is not None and status_code >= 500:
+            return _OpenAIProtocolError(
+                f"{self.name} server error: {status_code}",
+                retryable=True,
+            )
+        if status_code is not None:
+            return _OpenAIProtocolError(
+                f"{self.name} request failed: HTTP {status_code}",
+                retryable=False,
+                temperature_rejected=temperature_rejected,
+                response_format_rejected=response_format_rejected,
+            )
+        if isinstance(
+            exc,
+            (openai.APIConnectionError, httpx.TransportError, ConnectionError),
+        ) or ("connectionerror" in error_type):
+            return _OpenAIProtocolError(
+                f"{self.name} connection failed",
+                retryable=True,
+            )
+        return _OpenAIProtocolError(
+            f"{self.name} request failed",
+            retryable=True,
+        )
+
+    @staticmethod
+    def _compatibility_signals(
+        exc: Exception,
+        *,
+        status_code: int | None,
+    ) -> tuple[bool, bool]:
+        if status_code != 400:
+            return False, False
+        try:
+            message = str(exc).lower()
+        except Exception:
+            return False, False
+        rejection_markers = ("unsupported", "not supported", "does not support")
+        temperature_rejected = "temperature" in message and any(
+            marker in message for marker in rejection_markers
+        )
+        response_format_rejected = (
+            "response_format.type" in message and "json_schema" in message and "text" in message
+        ) or (
+            ("response_format" in message or "text.format" in message)
+            and any(marker in message for marker in rejection_markers)
+        )
+        return temperature_rejected, response_format_rejected
 
     def _safe_protocol_status_code(self, exc: Exception) -> int | None:
         try:
@@ -747,6 +847,48 @@ class OpenAIProtocolProvider(OpenAIProvider):
         except Exception:
             return None
         return self._status_code_int(value)
+
+    @staticmethod
+    def _temperature_rejected(exc: LLMProviderError) -> bool:
+        if isinstance(exc, _OpenAIProtocolError):
+            return exc.temperature_rejected
+        return OpenAIProvider._temperature_rejected(exc)
+
+    @staticmethod
+    def _json_object_response_format_rejected(exc: LLMProviderError) -> bool:
+        if isinstance(exc, _OpenAIProtocolError):
+            return exc.response_format_rejected
+        return OpenAIProvider._json_object_response_format_rejected(exc)
+
+    @staticmethod
+    def _uses_responses_json_object(value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        response_format = value.get("format")
+        return isinstance(response_format, dict) and response_format.get("type") == "json_object"
+
+    async def _responses_request_dropping_rejected_temperature(
+        self,
+        kwargs: dict[str, Any],
+    ) -> Any:
+        try:
+            return await super()._responses_request_dropping_rejected_temperature(kwargs)
+        except LLMProviderError as exc:
+            if self._uses_responses_json_object(
+                kwargs.get("text")
+            ) and self._json_object_response_format_rejected(exc):
+                logger.info(
+                    "%s rejected Responses JSON format; retrying without it",
+                    self.name,
+                )
+                kwargs.pop("text")
+                return await super()._responses_request_dropping_rejected_temperature(kwargs)
+            raise
+
+    def _is_retryable(self, exc: LLMProviderError) -> bool:
+        if isinstance(exc, _OpenAIProtocolError):
+            return exc.retryable
+        return super()._is_retryable(exc)
 
     async def complete(
         self,
