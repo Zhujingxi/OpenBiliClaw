@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -109,6 +113,36 @@ def _make_client(
     return TestClient(app), config_path
 
 
+def _make_production_app(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[Any, Path]:
+    """Compose the real runtime graph while keeping all data under ``tmp_path``."""
+    config_path = tmp_path / "config.toml"
+    config = Config(data_dir=str(tmp_path / "data"), models=_native_models())
+    save_config(config, config_path, models_authoritative=True)
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("FALLBACK_API_KEY", "resolved-test-key")
+    return create_app(), config_path
+
+
+def _runtime_consumer_identities(context: object) -> tuple[object, ...]:
+    return tuple(
+        getattr(context, name)
+        for name in (
+            "model_bundle",
+            "llm_service",
+            "soul_engine",
+            "dialogue",
+            "discovery_engine",
+            "recommendation_engine",
+            "runtime_controller",
+            "account_sync_service",
+            "auto_update_service",
+        )
+    )
+
+
 def _credential(action: str = "keep", value: str = "") -> dict[str, str]:
     return {"action": action, "value": value}
 
@@ -169,6 +203,41 @@ def _put_payload(revision: str, models: ModelConfig) -> dict:
         },
         "migration_resolutions": {},
     }
+
+
+def _replace_primary_credential_on_disk(config_path: Path, secret: str) -> str:
+    """Simulate a concurrent credential-only writer and return its revision."""
+    config = load_config(config_path)
+    models = config.models
+    primary = replace(
+        models.chat.connections[0],
+        credential=CredentialConfig(source="inline", value=secret),
+    )
+    config.models = replace(
+        models,
+        chat=replace(
+            models.chat,
+            connections=(primary, *models.chat.connections[1:]),
+        ),
+    )
+    save_config(config, config_path, models_authoritative=True)
+    return compute_model_revision(config.models)
+
+
+class _BlockingProbeGate:
+    """Hold a probe before route admission using cross-loop-safe events."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    @asynccontextmanager
+    async def slot(self, *, caller: str):
+        assert caller == "api.config_probe"
+        self.entered.set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.001)
+        yield
 
 
 def test_model_api_models_are_strict_and_hide_credential_value_from_repr() -> None:
@@ -451,6 +520,114 @@ def test_put_model_config_keeps_existing_secrets_saves_order_and_emits_one_revis
     assert _INLINE_SECRET in persisted
     reload_events = [item for item in events if item.get("type") == "config_reloaded"]
     assert reload_events == [{"type": "config_reloaded", "revision": body["revision"]}]
+
+
+def test_model_put_restarts_new_graph_tasks_before_emitting_reload_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The API-owned lifecycle restarts task owners before announcing reload."""
+    app, _config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        old_consumers = _runtime_consumer_identities(context)
+        old_tasks = tuple(
+            getattr(app.state, name)
+            for name in ("refresh_task", "account_sync_task", "auto_update_task")
+        )
+        lifecycle: list[str] = []
+        restarted: list[tuple[tuple[object, ...], tuple[object, ...]]] = []
+        real_restart = context.restart_background_tasks
+
+        async def restart_for_new_graph(app_arg: object, **kwargs: object) -> None:
+            assert app_arg is app
+            assert _runtime_consumer_identities(context) != old_consumers
+            await real_restart(app_arg, **kwargs)
+            new_tasks = tuple(
+                getattr(app.state, name)
+                for name in ("refresh_task", "account_sync_task", "auto_update_task")
+            )
+            restarted.append((_runtime_consumer_identities(context), new_tasks))
+            lifecycle.append("restart")
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                lifecycle.append("event")
+            return True
+
+        monkeypatch.setattr(context, "restart_background_tasks", restart_for_new_graph)
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        before = client.get("/api/model-config").json()
+        changed = replace(
+            _native_models(),
+            chat=replace(_native_models().chat, concurrency=4),
+        )
+
+        response = client.put(
+            "/api/model-config",
+            json=_put_payload(before["revision"], changed),
+        )
+
+        assert response.status_code == 200, response.text
+        assert lifecycle == ["restart", "event"]
+        assert len(restarted) == 1
+        new_consumers, new_tasks = restarted[0]
+        assert new_consumers == _runtime_consumer_identities(context)
+        assert all(new is not old for new, old in zip(new_tasks, old_tasks, strict=True))
+        assert new_tasks[0] is not None and not new_tasks[0].done()
+        assert new_tasks[1] is not None and not new_tasks[1].done()
+        assert new_tasks[2] is not None
+
+
+def test_model_put_restart_failure_rolls_back_disk_graph_tasks_and_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed new-task activation restores the exact old graph before reply."""
+    app, config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        before = client.get("/api/model-config").json()
+        before_disk = config_path.read_bytes()
+        old_consumers = _runtime_consumer_identities(context)
+        restart_consumers: list[tuple[object, ...]] = []
+        reload_events: list[dict[str, Any]] = []
+
+        async def fail_then_restore(app_arg: object, **kwargs: object) -> None:
+            del kwargs
+            assert app_arg is app
+            restart_consumers.append(_runtime_consumer_identities(context))
+            if len(restart_consumers) == 1:
+                raise RuntimeError("new background task failed")
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                reload_events.append(dict(event))
+            return True
+
+        monkeypatch.setattr(context, "restart_background_tasks", fail_then_restore)
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        changed = replace(
+            _native_models(),
+            chat=replace(_native_models().chat, timeout_seconds=120),
+        )
+
+        response = client.put(
+            "/api/model-config",
+            json=_put_payload(before["revision"], changed),
+        )
+
+        assert response.status_code == 400
+        assert response.json()["errors"][0]["code"] == "runtime_swap_failed"
+        assert response.json()["rollback_applied"] is True
+        assert config_path.read_bytes() == before_disk
+        assert _runtime_consumer_identities(context) == old_consumers
+        assert len(restart_consumers) == 2
+        assert restart_consumers[0] != old_consumers
+        assert restart_consumers[1] == old_consumers
+        assert reload_events == []
 
 
 def test_stale_put_returns_latest_snapshot_without_mutation(
@@ -1029,6 +1206,160 @@ def test_probe_keep_requires_same_stable_id_and_current_revision(
     assert stale.json()["error"] == "revision_conflict"
 
 
+def test_probe_waiting_for_gate_never_resolves_keep_from_a_newer_revision(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Revision A cannot borrow revision B's credential after gate waiting."""
+    calls: list[ChatConnection] = []
+
+    async def probe(self: object, draft: object, settings: object = None) -> object:
+        calls.append(cast("ChatConnection", draft))
+        return ModelConfigProbeResult(
+            ok=True,
+            connection_id=cast("ChatConnection", draft).id,
+            capability="chat",
+        )
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.runtime_context.RuntimeContext.probe_model_draft",
+        probe,
+    )
+    client, config_path = _make_client(monkeypatch, tmp_path)
+    ctx = client.app.state.runtime_context
+    gate = _BlockingProbeGate()
+    ctx.llm_concurrency_gate = gate
+    current = client.get("/api/model-config").json()
+    body = {
+        "kind": "chat",
+        "revision": current["revision"],
+        "connection": _chat_payload(_native_models().chat.connections[0]),
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/model-config/probe", json=body)
+        assert gate.entered.wait(timeout=2)
+        latest_revision = _replace_primary_credential_on_disk(
+            config_path,
+            "revision-b-secret-never-probed",
+        )
+        gate.release.set()
+        response = future.result(timeout=5)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "revision_conflict"
+    assert response.json()["latest_revision"] == latest_revision
+    assert calls == []
+    assert "revision-b-secret-never-probed" not in response.text
+
+
+def test_probe_rechecks_init_after_gate_before_credential_or_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[ChatConnection] = []
+
+    async def probe(self: object, draft: object, settings: object = None) -> object:
+        calls.append(cast("ChatConnection", draft))
+        return ModelConfigProbeResult(
+            ok=True,
+            connection_id=cast("ChatConnection", draft).id,
+            capability="chat",
+        )
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.runtime_context.RuntimeContext.probe_model_draft",
+        probe,
+    )
+    client, _config_path = _make_client(monkeypatch, tmp_path)
+    context = client.app.state.runtime_context
+    active = {"value": False}
+    context._init_coordinator = SimpleNamespace(
+        init_active=lambda: active["value"],
+    )
+    gate = _BlockingProbeGate()
+    context.llm_concurrency_gate = gate
+    current = client.get("/api/model-config").json()
+    body = {
+        "kind": "chat",
+        "revision": current["revision"],
+        "connection": _chat_payload(_native_models().chat.connections[0]),
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/model-config/probe", json=body)
+        assert gate.entered.wait(timeout=2)
+        active["value"] = True
+        gate.release.set()
+        response = future.result(timeout=5)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "init_running"
+    assert calls == []
+
+
+def test_probe_completion_is_revalidated_before_history_or_live_circuit_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A captured A probe stays on A and cannot attach after a B-only secret edit."""
+    probe_entered = threading.Event()
+    probe_release = threading.Event()
+    probed_secrets: list[str] = []
+    circuit_resets: list[tuple[str, str, str]] = []
+
+    async def probe(self: object, draft: object, settings: object = None) -> object:
+        connection = cast("ChatConnection", draft)
+        probed_secrets.append(connection.credential.value)
+        probe_entered.set()
+        while not probe_release.is_set():
+            await asyncio.sleep(0.001)
+        return ModelConfigProbeResult(
+            ok=True,
+            connection_id=connection.id,
+            capability="chat",
+        )
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.runtime_context.RuntimeContext.probe_model_draft",
+        probe,
+    )
+    client, config_path = _make_client(monkeypatch, tmp_path)
+    ctx = client.app.state.runtime_context
+    monkeypatch.setattr(
+        ctx,
+        "record_model_probe_success",
+        lambda connection_id, capability, revision: circuit_resets.append(
+            (connection_id, capability, revision)
+        ),
+    )
+    current = client.get("/api/model-config").json()
+    body = {
+        "kind": "chat",
+        "revision": current["revision"],
+        "connection": _chat_payload(_native_models().chat.connections[0]),
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/model-config/probe", json=body)
+        assert probe_entered.wait(timeout=2)
+        latest_revision = _replace_primary_credential_on_disk(
+            config_path,
+            "revision-b-secret-never-borrowed",
+        )
+        probe_release.set()
+        response = future.result(timeout=5)
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "revision_conflict"
+    assert response.json()["latest_revision"] == latest_revision
+    assert probed_secrets == [_INLINE_SECRET]
+    assert circuit_resets == []
+    latest = client.get("/api/model-config").json()
+    assert latest["models"]["chat"]["connections"][0]["probe"] is None
+    assert "revision-b-secret-never-borrowed" not in response.text
+
+
 def test_get_config_native_projection_is_non_authoritative_limited_and_secret_free(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1141,6 +1472,65 @@ def test_model_endpoints_refuse_mutation_during_active_init(
 
     assert response.status_code == 409
     assert response.json()["error"] == "init_running"
+
+
+def test_model_save_rechecks_init_inside_canonical_precommit_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Init winning during candidate build prevents disk, runtime, and event changes."""
+    app, config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        active = {"value": False}
+        context._init_coordinator = SimpleNamespace(
+            init_active=lambda: active["value"],
+        )
+        build_entered = threading.Event()
+        build_release = threading.Event()
+        real_build = context.build_model_candidate
+
+        async def build_then_wait(models: ModelConfig, revision: str) -> object:
+            candidate = await real_build(models, revision)
+            build_entered.set()
+            while not build_release.is_set():
+                await asyncio.sleep(0.001)
+            return candidate
+
+        reload_events: list[dict[str, Any]] = []
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                reload_events.append(dict(event))
+            return True
+
+        monkeypatch.setattr(context, "build_model_candidate", build_then_wait)
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        current = client.get("/api/model-config").json()
+        before_disk = config_path.read_bytes()
+        before_consumers = _runtime_consumer_identities(context)
+        changed = replace(
+            _native_models(),
+            chat=replace(_native_models().chat, timeout_seconds=121),
+        )
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                client.put,
+                "/api/model-config",
+                json=_put_payload(current["revision"], changed),
+            )
+            assert build_entered.wait(timeout=3)
+            active["value"] = True
+            build_release.set()
+            response = future.result(timeout=10)
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "init_running"
+        assert config_path.read_bytes() == before_disk
+        assert _runtime_consumer_identities(context) == before_consumers
+        assert reload_events == []
 
 
 def test_openapi_and_validation_error_shapes_contain_no_raw_secret_field_names_or_values(

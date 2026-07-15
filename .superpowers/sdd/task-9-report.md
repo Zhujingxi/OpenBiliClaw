@@ -2,10 +2,11 @@
 
 ## Status
 
-Complete. The branch now exposes the dedicated, secret-safe model
-configuration API, protects native `[models]` from legacy `/api/config`
-writers, and retains only the outbound-network probe on the legacy probe
-endpoint.
+Complete after review remediation. The branch exposes the dedicated,
+secret-safe model configuration API, protects native `[models]` from legacy
+`/api/config` writers, retains only the outbound-network probe on the legacy
+probe endpoint, and now closes the probe/lifecycle/init races found during
+review.
 
 ## Delivered scope
 
@@ -45,6 +46,27 @@ endpoint.
   unreachable model probe implementations were removed.
 - Kept all four model endpoints reachable in degraded mode and guarded model
   saves/probes while guided initialization is active.
+- Bound every HTTP exact probe to one captured revision. A `keep` credential is
+  resolved while holding the short model path lock, the network call runs after
+  releasing that lock, and completion revalidates the same revision before any
+  history or live-circuit effect. A stale probe returns the latest snapshot with
+  no side effect. `ModelConfigService.probe()` remains only as non-HTTP legacy
+  compatibility for callers that do not attach history/circuit effects.
+- Added an app-owned model lifecycle coordinator. A successful save now
+  publishes the complete graph without an event, restarts background loops from
+  that graph, clears runtime/app degraded state, then publishes exactly one
+  `config_reloaded`. Failure or cancellation restores the old bytes and exact
+  normal/degraded runtime graph, then recreates old-equivalent background tasks
+  according to the previous ownership; it does not claim to preserve the same
+  `asyncio.Task` objects.
+- Moved guided-init reservation into the canonical config writer and added a
+  model-save precommit guard inside that same writer. A model commit and init
+  reservation therefore cannot cross after their handler-level checks. Probes
+  also recheck init after maintenance-gate admission, before credential capture
+  or network work.
+- Made a successful dedicated model save a complete degraded-mode recovery:
+  full consumer graph, background loops, both degraded flags, and the reload
+  event all transition in the lifecycle order above without requiring restart.
 - Updated configuration/runtime module docs, changelog, index, architecture,
   spec, and bilingual README architecture diagrams. The graphical list/detail
   editors and CLI editor remain explicitly assigned to later tasks.
@@ -66,21 +88,37 @@ endpoint.
 - The legacy migration API fixture now generates a real unrouted credential
   issue and verifies its tuple-backed `allowed_actions` survives strict JSON
   output as a non-empty list without exposing either legacy secret.
+- Probe-race RED used two deterministic barriers: a gate-waiting revision-A
+  request and an in-flight revision-A network call both returned `200` before
+  remediation after revision B changed only the secret. They now return `409`,
+  never borrow B's secret, and never update B history/circuit state.
+- Lifecycle RED showed only `config_reloaded` with no background-task restart;
+  an injected restart failure also returned `200`. The production-app
+  regression now proves `restart -> event`, while failure restores disk and the
+  exact old consumer graph, restarts old-equivalent task ownership, and emits no
+  success event.
+- Init-race RED showed a save completing with `200` after init became active
+  during candidate construction, and `try_start()` occurring outside the
+  canonical writer. Both deterministic regressions now return/observe the
+  guarded behavior. A separate gate barrier verifies a probe performs no
+  credential or network work when init starts while it waits.
+- A degraded-runtime integration regression forces initial registry failure,
+  repairs through `PUT /api/model-config`, and verifies task restart precedes
+  the single event, both degraded flags clear, the full graph exists, and a
+  formerly guarded API returns `200`.
 
 ## Verification
 
-- Required Task 9 matrix: `80 passed` in 5.89s.
-- Task 9 plus broad API/degraded compatibility set: `487 passed` in 34.18s.
-- Model domain, service, ordered Chat/Embedding route, and runtime bundle set:
-  `339 passed` in 1.61s.
-- Full repository suite: `5,418 passed, 41 skipped` in 146.87s.
+- Review race/lifecycle/init/degraded regression set: `9 passed` in 1.51s.
+- Required Task 9 matrix: `86 passed` in 6.25s.
+- Model API, production app, and degraded compatibility set: `442 passed` in
+  18.85s.
+- Model domain, service, connection factory, ordered Chat/Embedding route, and
+  runtime bundle set: `460 passed` in 1.65s.
+- Full repository suite: `5,426 passed, 41 skipped` in 146.32s.
 - MyPy strict check: success across 223 source files.
 - Repository-wide Ruff lint: passed.
-- Every touched Python file passes Ruff format check. The repository-wide
-  format check still reports six pre-existing unrelated files
-  (`saved_sync/extension_broker.py`, `saved_sync/service.py`,
-  `soul/preference_analyzer.py`, and three corresponding test files); Task 9
-  did not rewrite them.
+- All seven touched Python files pass Ruff format check.
 - `git diff --check`: passed.
 - Fresh temporary-root `openbiliclaw config-show`: passed and displayed only
   default/redacted model state without starting the server.

@@ -67,8 +67,8 @@ guided-init 的 `InitPrereqs.chat_ready()` 识别 production `OrderedLLMRoute.co
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
-| 不可变模型 bundle 与事务恢复 | ✅ | `RuntimeContext.build_model_candidate()` 从 `Config.models` 构造完整 `RuntimeModelBundle` 和全部 consumer，不改变 live pointer；`swap_model_candidate()` 原子发布并只在成功后发送带 revision 的 `config_reloaded`，`restore_model_candidate()` 恢复精确旧身份且不发送成功事件。旧在途调用保留旧 route，新调用读取新 bundle。 |
-| 权威模型配置 API 与精确探测状态 | ✅ | `api/model_config_routes.py` 把 `ModelConfigService` 暴露为 revision-guarded GET/PUT、descriptor registry 和 exact draft probe。公开 snapshot 只含 credential 状态、迁移/override、按稳定 ID 绑定的 exact probe 与 live circuit 摘要；共享 Embedding 设置参与 probe fingerprint。成功探测当前持久化记录只关闭同 ID/capability/current-revision circuit，edited/unsaved draft 不改变 live circuit，也不覆盖已保存记录的最近探测摘要。 |
+| 不可变模型 bundle 与事务恢复 | ✅ | `RuntimeContext.build_model_candidate()` 从 `Config.models` 构造完整 `RuntimeModelBundle` 和全部 consumer，不改变 live pointer；兼容用 `swap_model_candidate()` 原子发布并只在成功后发送带 revision 的 `config_reloaded`。模型 API 的 app lifecycle coordinator 改用无事件 `activate_model_candidate()`，待新 graph 后台任务启动、degraded state 清除后再发一次事件；失败恢复精确旧 normal/degraded runtime graph，并按旧 ownership 重建等价后台任务（不保留原 `asyncio.Task` 对象）。旧在途调用保留旧 route，新调用读取新 bundle。 |
+| 权威模型配置 API 与精确探测状态 | ✅ | `api/model_config_routes.py` 把 `ModelConfigService` 暴露为 revision-guarded GET/PUT、descriptor registry 和 exact draft probe。公开 snapshot 只含 credential 状态、迁移/override、按稳定 ID 绑定的 exact probe 与 live circuit 摘要；共享 Embedding 设置参与 probe fingerprint。probe 在 gate admission 后重查 init，以短 path lock 捕获 revision-bound draft/`keep` credential，网络期间不持配置锁，完成后重查 revision；stale 结果返回 `409` 且不写 history/circuit。成功探测当前持久化记录只关闭同 ID/capability/current-revision circuit，edited/unsaved draft 不改变 live circuit，也不覆盖已保存记录的最近探测摘要。 |
 | 全局 ordered route 热重载 | ✅ | runtime、Soul、Dialogue、Discovery、Recommendation、health/Ollama 与 OpenClaw 都使用同一个全局 ordered route；模块 override 已删除。热重载后的正向兴趣和避雷 speculator tick 仍 detached 到 `BackgroundTaskRegistry`，不阻塞配置响应。 |
 | 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
 | 原生保存 service 热重载 | ✅ | `saved_sync_service` 是可替换组件：每次构造新 `BilibiliAPIClient` 时同步创建 router + 六平台 extension adapters + `BilibiliNativeSaveAdapter` + `SavedSyncService`。重载先取消旧 registry inflight；所有新组件构造成功后才原子发布，任一构造失败保留完整旧组件与稳定 broker。 |
@@ -101,15 +101,18 @@ bundle = build_runtime_model_bundle(
 candidate = await context.build_model_candidate(models, revision)
 previous = await context.swap_model_candidate(candidate)
 await context.restore_model_candidate(previous)
+state = context.capture_model_runtime_state()
+previous = await context.activate_model_candidate(candidate)
+await context.restore_model_runtime_state(state)
 result = await context.probe_model_draft(connection_or_provider, embedding_settings)
 closed = context.record_model_probe_success(connection_id, capability, revision)
 ```
 
 - `build_runtime_model_bundle()` 构造全部 adapter、`OrderedLLMRoute`、ordered Embedding service、usage recorder 与主 `LLMService`；任一构造失败时不返回部分 bundle。
 - `build_model_candidate()` 进一步 staging 全部依赖 consumer，不交换生产引用，也不发起探测请求。
-- `current_model_candidate` 返回新请求将取得的不可变 bundle 身份；`swap_model_candidate()` 与 `restore_model_candidate()` 在同一个短异步锁内替换指针及完整 consumer graph。
+- `current_model_candidate` 返回新请求将取得的不可变 bundle 身份；兼容用 `swap_model_candidate()` / `restore_model_candidate()` 在短异步锁内替换指针及完整 consumer graph。模型 HTTP lifecycle 使用 `capture_model_runtime_state()`、无事件 `activate_model_candidate()` 与 `restore_model_runtime_state()` 保存/恢复 normal 或 degraded 的完整 graph。
 - `probe_model_draft()` 构造只含目标记录的 route，Chat 使用 exact connection 调用，Embedding 使用 exact provider 与共享 settings；不遍历 fallback、不落盘。adapter/route 归一化的 `LLMProviderError` 转成不含上游详情的 `ModelConfigProbeResult`，未知程序错误不被伪装成探测失败。
-- successful swap 才发布 `{"type": "config_reloaded", "revision": ...}`；restore/rollback 不发布成功事件。
+- 直接 `swap_model_candidate()` 保持既有行为：成功 publication 后发布 `{"type": "config_reloaded", "revision": ...}`。模型 HTTP lifecycle 则在无事件 publication、后台任务重启和 degraded 清理全部完成后发布一次；restore/rollback 不发布成功事件，旧任务按先前 ownership 重建为等价的新 task 对象。
 
 扩展共享原生保存基础（6/6 executor 已接、fixture 全覆盖，并于 2026-07-14 完成 favorite + watch-later/fallback 真实账号验证）：
 
@@ -231,6 +234,8 @@ embedding_progress.reset()
 - `GET /api/runtime-status` 与 `/api/runtime-stream`：用于 popup 展示降级状态；stream 会先发送 `{type:"degraded", ...}` 并保持连接。
 
 其他 API 在降级模式下返回 503，避免在缺少 LLM registry、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。
+
+降级状态下成功 `PUT /api/model-config` 会构造并发布完整 runtime graph，启动新 graph 的后台任务，清除 `RuntimeContext` 与 app 两层 degraded 标记，再发一次 `config_reloaded`；调用方无需重启 daemon。构造、publication 或任务启动失败时，文件和完整 degraded runtime state 都恢复，且不发送成功事件。
 
 ### Runtime Status Pool Counts
 
@@ -502,7 +507,7 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 配置恢复是 runtime 和 API 的交界：`/api/config` 写盘前先校验新配置可构建 LLM registry，正常模式下写入后调用 `RuntimeContext.rebuild_from_config()` 与 `restart_background_tasks()`。热重载失败会恢复 `config.toml.bak`，并把 `rollback_applied` 返回给调用方；降级模式不做热重载，保存成功后返回 `restart_required=true`，要求用户重启 daemon 让新的 registry 生效。
 
-原生模型配置使用阶段 7 的 model-scoped 串行锁与全配置 canonical path boundary，并由 `PUT /api/model-config` 暴露为唯一权威 HTTP 写路径：首次读取后执行 revision guard、credential merge、migration resolution、validation，并在 canonical boundary 外构造 candidate；提交前再与 auth admin、guided-init source opt-in、autostart apply、`PUT /api/config` 共用同一路径事务，立即重读 base/local。普通字段并发变化会从最新原字节 rebase，模型 authority 的来源、内容或 local provenance 变化会 conflict。bounded 同步 disk gate 从不跨 `await`，异步所有权则持续覆盖 legacy backup、原子替换、短锁 pointer swap 和 rollback；另一 task 的同步 writer 在 swap 窗口快速失败。swap 异常或 `CancelledError` 都会先按事务前快照恢复文件与 `current_model_candidate`；取消随后原样传播。该流程仍使用独立 pre-model-refactor backup，不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild。协调范围仅限当前进程且没有跨进程文件锁：即时重读只能发现读取前已可见的外部变化，外部 writer 仍可在重读到替换之间的窄窗口竞争。
+原生模型配置使用阶段 7 的 model-scoped 串行锁与全配置 canonical path boundary，并由 `PUT /api/model-config` 暴露为唯一权威 HTTP 写路径：首次读取后执行 revision guard、credential merge、migration resolution、validation，并在 canonical boundary 外构造 candidate；提交前再与 auth admin、guided-init source opt-in、autostart apply、`PUT /api/config` 共用同一路径事务，先检查 guided-init precommit guard，再立即重读 base/local。guided init 的 `try_start` reservation 也在同一 canonical writer 内完成，因此 init 与模型 commit 只能有一方先取得 writer。普通字段并发变化会从最新原字节 rebase，模型 authority 的来源、内容或 local provenance 变化会 conflict。bounded 同步 disk gate 从不跨 `await`，异步所有权则持续覆盖 legacy backup、原子替换、无事件 graph publication、后台任务重启和 rollback；另一 task 的同步 writer 在 swap 窗口快速失败。swap/restart 异常或 `CancelledError` 都会先按事务前快照恢复文件和完整 normal/degraded runtime graph，并按旧 ownership 重建等价 task；取消随后原样传播。该流程仍使用独立 pre-model-refactor backup，不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild。协调范围仅限当前进程且没有跨进程文件锁：即时重读只能发现读取前已可见的外部变化，外部 writer 仍可在重读到替换之间的窄窗口竞争。
 
 热重载成功后，所有可替换 LLM 入口都会拿到同一 `RuntimeModelBundle.chat_route`。稳定 gate 的 proposed target/inventory 直到全部新组件构造成功并进入 atomic publication 后才更新；晚期构造失败保留旧 target/state，不会让仍在运行的旧 runtime 提前进入新配置的 refill 模式：
 

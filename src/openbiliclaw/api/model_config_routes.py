@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -52,8 +53,10 @@ from openbiliclaw.model_config import (
 )
 from openbiliclaw.model_config.service import (
     CredentialAction,
+    ModelConfigCommitBlockedError,
     ModelConfigFieldError,
     ModelConfigProbeResult,
+    ModelConfigRevisionConflictError,
     ModelConfigSaveRequest,
     ModelConfigService,
     ModelConfigSnapshot,
@@ -82,6 +85,126 @@ class _StoredProbe:
     revision: str
     record_fingerprint: str
     probed_at: str
+
+
+@dataclass(frozen=True)
+class _AppModelLifecycleState:
+    """Runtime, degraded-mode, and task ownership before one API save."""
+
+    runtime_state: object
+    refresh_active: bool
+    account_sync_active: bool
+    auto_update_active: bool
+    app_degraded: bool
+    app_degraded_reason: str
+    app_degraded_issues: list[object]
+
+
+def _task_slot_active(app: FastAPI, name: str) -> bool:
+    task = getattr(app.state, name, None)
+    if task is None:
+        return False
+    done = getattr(task, "done", None)
+    return not bool(done()) if callable(done) else True
+
+
+class _AppModelRuntimeCoordinator:
+    """Own model publication, app task restart, degraded recovery, and event order."""
+
+    def __init__(
+        self,
+        app: FastAPI,
+        context: RuntimeContext,
+        event_publisher: EventPublisher | None,
+    ) -> None:
+        self.app = app
+        self.context = context
+        self._event_publisher = event_publisher
+
+    @property
+    def current_model_candidate(self) -> object:
+        return _AppModelLifecycleState(
+            runtime_state=self.context.capture_model_runtime_state(),
+            refresh_active=_task_slot_active(self.app, "refresh_task"),
+            account_sync_active=_task_slot_active(self.app, "account_sync_task"),
+            auto_update_active=_task_slot_active(self.app, "auto_update_task"),
+            app_degraded=bool(getattr(self.app.state, "degraded", False)),
+            app_degraded_reason=str(getattr(self.app.state, "degraded_reason", "")),
+            app_degraded_issues=list(getattr(self.app.state, "degraded_issues", [])),
+        )
+
+    async def build_model_candidate(self, models: ModelConfig, revision: str) -> object:
+        return await self.context.build_model_candidate(models, revision)
+
+    def restage_model_candidate(
+        self,
+        candidate: object,
+        models: ModelConfig,
+        revision: str,
+    ) -> object:
+        return self.context.restage_model_candidate(candidate, models, revision)
+
+    async def swap_model_candidate(self, candidate: object) -> object | None:
+        previous = await self.context.activate_model_candidate(cast("Any", candidate))
+        await self.context.restart_background_tasks(self.app)
+        self.context.degraded = False
+        self.context.degraded_reason = ""
+        self.context.degraded_issues = []
+        self.app.state.degraded = False
+        self.app.state.degraded_reason = ""
+        self.app.state.degraded_issues = []
+        publish = getattr(self.context.event_hub, "publish", None)
+        if not callable(publish):
+            publish = self._event_publisher
+        if callable(publish):
+            with suppress(Exception):
+                await publish(
+                    {
+                        "type": "config_reloaded",
+                        "revision": cast("Any", candidate).revision,
+                    }
+                )
+        return previous
+
+    async def restore_model_candidate(self, candidate: object | None) -> None:
+        if not isinstance(candidate, _AppModelLifecycleState):
+            raise TypeError("candidate must be an app model lifecycle state")
+        await self.context.restore_model_runtime_state(cast("Any", candidate.runtime_state))
+        self.app.state.degraded = candidate.app_degraded
+        self.app.state.degraded_reason = candidate.app_degraded_reason
+        self.app.state.degraded_issues = list(candidate.app_degraded_issues)
+        active = (
+            candidate.refresh_active,
+            candidate.account_sync_active,
+            candidate.auto_update_active,
+        )
+        if not any(active):
+            await self.context.stop_background_tasks(self.app)
+            return
+        await self.context.restart_background_tasks(
+            self.app,
+            run_post_reload_llm_work=(candidate.refresh_active or candidate.account_sync_active),
+        )
+        for slot, expected in zip(
+            ("refresh_task", "account_sync_task", "auto_update_task"),
+            active,
+            strict=True,
+        ):
+            if expected:
+                continue
+            task = getattr(self.app.state, slot, None)
+            if task is not None:
+                task.cancel()
+                with suppress(BaseException):
+                    await task
+            setattr(self.app.state, slot, None)
+
+    async def probe_model_draft(
+        self,
+        draft: ChatConnection | EmbeddingProviderConfig,
+        settings: EmbeddingModelSettings | None = None,
+    ) -> ModelConfigProbeResult:
+        return await self.context.probe_model_draft(draft, settings)
 
 
 def _record_fingerprint(
@@ -472,19 +595,15 @@ def install_model_config_routes(
     init_active: Callable[[], bool],
     event_publisher: EventPublisher | None = None,
 ) -> ModelConfigService:
-    """Install model endpoints while keeping the main application module thin.
-
-    ``RuntimeContext.swap_model_candidate`` is the sole event publisher for a
-    successful save.  ``event_publisher`` is accepted explicitly so route
-    composition documents that ownership without emitting a duplicate event.
-    """
+    """Install model endpoints with one explicit app-lifecycle owner."""
+    lifecycle = _AppModelRuntimeCoordinator(app, context, event_publisher)
     service = ModelConfigService(
         config_path,
-        cast("ModelRuntimeCoordinator", context),
+        cast("ModelRuntimeCoordinator", lifecycle),
+        precommit_guard=init_active,
     )
     probe_results: dict[str, _StoredProbe] = {}
     known_revision = ""
-    _ = event_publisher
 
     def observe_revision(snapshot: ModelConfigSnapshot) -> None:
         """Discard history after an unexplained out-of-band revision change."""
@@ -557,6 +676,11 @@ def install_model_config_routes(
             )
         try:
             result = await service.save(_save_request(payload))
+        except ModelConfigCommitBlockedError:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "init_running", "detail": "Initialization is active."},
+            )
         except ModelConfigValidationError as exc:
             return _validation_response(exc)
         except Exception:
@@ -654,21 +778,57 @@ def install_model_config_routes(
                     ],
                 },
             )
+        capture = None
         try:
             gate = context.llm_concurrency_gate
             if gate is None:
-                result = await service.probe(
+                if init_active():
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": "init_running",
+                            "detail": "Initialization is active.",
+                        },
+                    )
+                capture = await service.capture_probe(
                     draft,
+                    revision=payload.revision,
                     settings=settings,
                     credential_action=action,
                 )
+                result = await service.probe_captured(capture)
             else:
                 async with gate.slot(caller="api.config_probe"):
-                    result = await service.probe(
+                    if init_active():
+                        return JSONResponse(
+                            status_code=409,
+                            content={
+                                "error": "init_running",
+                                "detail": "Initialization is active.",
+                            },
+                        )
+                    capture = await service.capture_probe(
                         draft,
+                        revision=payload.revision,
                         settings=settings,
                         credential_action=action,
                     )
+                    result = await service.probe_captured(capture)
+            snapshot = await service.revalidate_probe_capture(capture)
+        except ModelConfigRevisionConflictError as exc:
+            observe_revision(exc.snapshot)
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "revision_conflict",
+                    "latest_revision": exc.snapshot.revision,
+                    "latest": _snapshot_out(
+                        exc.snapshot,
+                        context,
+                        probe_results,
+                    ).model_dump(mode="json"),
+                },
+            )
         except ModelConfigValidationError as exc:
             return _validation_response(exc)
         except Exception:
@@ -679,6 +839,23 @@ def install_model_config_routes(
                 error_code="probe_failed",
                 message="The exact model draft probe failed.",
             )
+            if capture is not None:
+                try:
+                    snapshot = await service.revalidate_probe_capture(capture)
+                except ModelConfigRevisionConflictError as exc:
+                    observe_revision(exc.snapshot)
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": "revision_conflict",
+                            "latest_revision": exc.snapshot.revision,
+                            "latest": _snapshot_out(
+                                exc.snapshot,
+                                context,
+                                probe_results,
+                            ).model_dump(mode="json"),
+                        },
+                    )
         probed_at = _probe_timestamp()
         record_fingerprint = _record_fingerprint(
             draft,

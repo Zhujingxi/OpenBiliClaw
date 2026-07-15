@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Any
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -7,6 +10,13 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.api.runtime_context import build_runtime_context
 from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
 from openbiliclaw.llm.registry import RegistryBuildError
+from openbiliclaw.model_config import (
+    ChatConnection,
+    ChatRouteConfig,
+    EmbeddingModelSettings,
+    EmbeddingRouteConfig,
+    ModelConfig,
+)
 
 
 def _clear_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,6 +48,69 @@ def _valid_config(tmp_path) -> Config:
 def _save_project_config(monkeypatch: pytest.MonkeyPatch, tmp_path, cfg: Config) -> None:
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     save_config(cfg, tmp_path / "config.toml")
+
+
+def _recovery_models() -> ModelConfig:
+    return ModelConfig(
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="local-main",
+                    name="Local main",
+                    type="ollama",
+                    model="qwen3:8b",
+                    base_url="http://127.0.0.1:11434/v1",
+                ),
+            ),
+            concurrency=2,
+            timeout_seconds=30,
+        ),
+        embedding=EmbeddingRouteConfig(
+            enabled=False,
+            settings=EmbeddingModelSettings(model="bge-m3"),
+        ),
+    )
+
+
+def _model_put_payload(revision: str, models: ModelConfig) -> dict[str, object]:
+    return {
+        "revision": revision,
+        "models": {
+            "schema_version": models.schema_version,
+            "chat": {
+                "connections": [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "type": item.type,
+                        "model": item.model,
+                        "preset": item.preset,
+                        "base_url": item.base_url,
+                        "credential": {"action": "keep", "value": ""},
+                        "api_mode": item.api_mode,
+                        "reasoning_effort": item.reasoning_effort,
+                        "http_referer": item.http_referer,
+                        "x_title": item.x_title,
+                        "num_ctx": item.num_ctx,
+                    }
+                    for item in models.chat.connections
+                ],
+                "concurrency": models.chat.concurrency,
+                "timeout_seconds": models.chat.timeout_seconds,
+            },
+            "embedding": {
+                "enabled": models.embedding.enabled,
+                "settings": {
+                    "model": models.embedding.settings.model,
+                    "output_dimensionality": models.embedding.settings.output_dimensionality,
+                    "similarity_threshold": models.embedding.settings.similarity_threshold,
+                    "multimodal_enabled": models.embedding.settings.multimodal_enabled,
+                },
+                "providers": [],
+            },
+        },
+        "migration_resolutions": {},
+    }
 
 
 def test_build_runtime_context_stays_strict_for_invalid_llm_config(
@@ -107,6 +180,81 @@ def test_degraded_config_put_saves_recovery_config_and_requires_restart(
     assert body["restart_required"] is True
     assert "restart" in body["message"].lower()
     assert "sk-new-valid-key" in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+
+def test_model_config_save_fully_recovers_degraded_runtime_before_reload_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Dedicated model repair opens the API only after its new task graph starts."""
+    from openbiliclaw.api import runtime_context as runtime_module
+
+    models = _recovery_models()
+    config = Config(data_dir=str(tmp_path / "data"), models=models)
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(config, tmp_path / "config.toml", models_authoritative=True)
+    real_build_runtime_context = runtime_module.build_runtime_context
+
+    def fail_initial_build(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RegistryBuildError("forced initial registry failure")
+
+    monkeypatch.setattr(runtime_module, "build_runtime_context", fail_initial_build)
+    app = create_app()
+    monkeypatch.setattr(runtime_module, "build_runtime_context", real_build_runtime_context)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        assert context.degraded is True
+        assert context.runtime_controller is None
+        lifecycle: list[str] = []
+        restarted_tasks: list[tuple[object, object, object]] = []
+        real_restart = context.restart_background_tasks
+
+        async def restart_recovered_graph(app_arg: Any, **kwargs: object) -> None:
+            assert app_arg is app
+            assert context.degraded is True
+            assert context.runtime_controller is not None
+            await real_restart(app_arg, **kwargs)
+            restarted_tasks.append(
+                (
+                    app.state.refresh_task,
+                    app.state.account_sync_task,
+                    app.state.auto_update_task,
+                )
+            )
+            lifecycle.append("restart")
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                assert context.degraded is False
+                assert app.state.degraded is False
+                lifecycle.append("event")
+            return True
+
+        monkeypatch.setattr(context, "restart_background_tasks", restart_recovered_graph)
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        current = client.get("/api/model-config").json()
+        changed = replace(models, chat=replace(models.chat, timeout_seconds=45))
+
+        response = client.put(
+            "/api/model-config",
+            json=_model_put_payload(current["revision"], changed),
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["reloaded"] is True
+        assert lifecycle == ["restart", "event"]
+        assert context.degraded is False
+        assert app.state.degraded is False
+        assert context.model_bundle is not None
+        assert context.runtime_controller is not None
+        assert len(restarted_tasks) == 1
+        refresh_task, account_task, auto_update_task = restarted_tasks[0]
+        assert refresh_task is not None and not refresh_task.done()
+        assert account_task is not None and not account_task.done()
+        assert auto_update_task is not None
+        assert client.get("/api/profile-summary").status_code == 200
 
 
 def test_degraded_mode_keeps_mobile_static_shell_assets_reachable(

@@ -609,15 +609,15 @@ background ─ background admission (default 3) ──────┘
 │ legacy /api/config 仅无凭据投影；旧模型写入返回 warning    │
 │ native/legacy + base/local → ModelConfigService path lock │
 │ safe endpoint → 脱敏 snapshot；credential + local fence  │
-│ 完整 bundle/consumer build → canonical writer 即时重读/rebase/conflict │
-│ legacy backup → temp/fsync/replace → RuntimeContext 原子发布 │
-│ 失败/取消恢复旧字节、稳定 gate 与精确 consumer 身份       │
+│ 完整 bundle/consumer build → writer 内 init guard + 重读/rebase/conflict │
+│ backup → temp/fsync/replace → 发布 graph → 重启任务 → 单次事件 │
+│ degraded 成功后解除；失败/取消恢复旧字节/runtime graph 与旧等价任务归属 │
 │ Chat 记录 → ID adapter → OrderedLLMRoute（全局原序）      │
-│ 总 deadline · revision circuit · exact probe · 安全 attempt │
+│ 总 deadline · revision circuit · probe 前捕获/完成后复核 · 安全 attempt │
 │ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │
 │ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
-│ 进程内 writer 协调；无跨进程文件锁；图形 UI/CLI 编辑器后续迁移 │
+│ guided-init reservation 共用 writer；无跨进程锁；UI/CLI 后续迁移 │
 ├────────────────────────────────────────────────┤
 │ LLMService 全路径 → 同一 route；caller 仅并发/usage；成本按 connection 归因 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

@@ -12023,6 +12023,52 @@ class TestGuidedInitEndpoints:
         assert resp.status_code == 409
         assert resp.json()["error"] == "already_running"
 
+    def test_init_reservation_occurs_inside_canonical_config_writer(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from contextlib import asynccontextmanager
+
+        from fastapi.testclient import TestClient
+
+        captured = self._capture_run_guided_init(monkeypatch)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        writer_active = {"value": False}
+        writer_entries: list[Path] = []
+
+        @asynccontextmanager
+        async def guarded_writer(path: Path):
+            assert writer_active["value"] is False
+            writer_active["value"] = True
+            writer_entries.append(path)
+            try:
+                yield
+            finally:
+                writer_active["value"] = False
+
+        coordinator = app.state.runtime_context.init_coordinator
+        real_try_start = coordinator.try_start
+
+        def guarded_try_start(run_id: str) -> bool:
+            assert writer_active["value"] is True
+            return bool(real_try_start(run_id))
+
+        monkeypatch.setattr(
+            "openbiliclaw.api.app.coordinated_config_write",
+            guarded_writer,
+        )
+        monkeypatch.setattr(coordinator, "try_start", guarded_try_start)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={})
+            assert response.status_code == 202
+            self._drive_until(client, captured, key="include_reddit")
+
+        assert len(writer_entries) == 1
+        assert writer_active["value"] is False
+
     def test_init_missing_bilibili_resets_to_idle(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 

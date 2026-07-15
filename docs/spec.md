@@ -387,16 +387,18 @@ background ─ background admission (default 3) ──────┘
 │                                                         └→ ModelConfigService path lock │
 │ redacted snapshot/revision → credential action → local fence │
 │ build complete RuntimeContext candidate → canonical writer   │
-│ immediate reread → unrelated rebase / authority conflict     │
-│ legacy backup → temp/file fsync/replace/dir fsync → swap      │
-│ swap failure/cancel → restore old bytes, mode, exact identity │
+│ init guard + immediate reread → rebase / authority conflict  │
+│ legacy backup → temp/fsync/replace → app lifecycle activation │
+│ publish graph → restart tasks → clear degraded → one event   │
+│ failure/cancel → restore bytes/runtime graph + old-equivalent task ownership │
 │ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
 │                                   ├→ total deadline + safe attempts │
 │                                   └→ revision-aware CircuitTable   │
 │ Embedding providers → shared settings adapter → OrderedEmbeddingRoute │
 │                                   ├→ finite/dimension validation + circuit │
 │                                   └→ fixed PNG exact probe + shared cache namespace │
-│ RuntimeModelBundle → 全 consumer 原子发布；失败恢复精确旧身份      │
+│ probe: revision capture → network unlocked → revision recheck │
+│ RuntimeModelBundle → 全 consumer 原子发布并激活对应后台任务        │
 │ 普通保存保留 raw；模型 API 权威；图形 UI/CLI 编辑器后续迁移        │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │

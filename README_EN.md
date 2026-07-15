@@ -606,15 +606,15 @@ background ─ background admission (default 3) ──────┘
 │ legacy /api/config is a credential-free projection with write guard │
 │ native/legacy + base/local → ModelConfigService path lock  │
 │ safe endpoint → redacted snapshot; credential + local fence │
-│ full bundle/consumer build → canonical writer reread/rebase/conflict │
-│ legacy backup → temp/fsync/replace → atomic RuntimeContext publish │
-│ failure/cancel restores bytes, stable gate, and exact consumer identity │
+│ full graph build → writer init guard + reread/rebase/conflict │
+│ backup → temp/fsync/replace → publish graph → restart tasks → one event │
+│ degraded clears; failure restores bytes/runtime graph and old-equivalent task ownership │
 │ Chat record → ID adapter → OrderedLLMRoute (global order)  │
-│ total deadline · revision circuits · exact probe · safe attempts │
+│ total deadline · revision circuits · capture/recheck probe · safe attempts │
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
-│ in-process writer boundary; no cross-process lock; editor UI/CLI follows │
+│ guided-init reservation shares writer; no cross-process lock; UI/CLI follows │
 ├────────────────────────────────────────────────┤
 │ LLMService paths → one route; caller is concurrency/usage only; cost by connection │
 │   LLM adapters · Source adapters (SourceAdapter) │

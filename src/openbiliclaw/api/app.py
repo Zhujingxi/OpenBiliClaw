@@ -2904,8 +2904,12 @@ def create_app(
             await _persist_guided_init_source_opt_in(effective_sources)
 
         run_id = uuid.uuid4().hex
-        if not coord.try_start(run_id):
-            return JSONResponse({"error": "already_running"}, status_code=409)
+        # Reserve guided init inside the same path-scoped writer boundary used
+        # by every config transaction. Once this CAS wins, later writers see
+        # init_active; if a writer wins first, reservation waits for its commit.
+        async with coordinated_config_write(_model_config_path()):
+            if not coord.try_start(run_id):
+                return JSONResponse({"error": "already_running"}, status_code=409)
 
         # Critical-section revalidation: prereqs may have lapsed between the
         # status poll and now. On a miss, roll the reservation back to idle so

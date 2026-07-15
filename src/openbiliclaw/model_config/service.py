@@ -60,7 +60,7 @@ from .types import (
 from .validation import validate_model_config
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 CredentialActionName: TypeAlias = Literal["keep", "set", "clear", "env"]
 RouteRecord: TypeAlias = ChatConnection | EmbeddingProviderConfig
@@ -249,6 +249,27 @@ class ModelConfigProbeResult:
     observed_dimension: int = 0
     error_code: str = ""
     message: str = ""
+
+
+@dataclass(frozen=True)
+class ModelConfigProbeCapture:
+    """One secret-bearing probe draft bound to an exact persisted revision."""
+
+    revision: str
+    draft: RouteRecord = field(repr=False)
+    settings: EmbeddingModelSettings | None = field(default=None, repr=False)
+
+
+class ModelConfigRevisionConflictError(RuntimeError):
+    """A revision-bound operation observed a newer public snapshot."""
+
+    def __init__(self, snapshot: ModelConfigSnapshot) -> None:
+        self.snapshot = snapshot
+        super().__init__("Model configuration revision changed.")
+
+
+class ModelConfigCommitBlockedError(RuntimeError):
+    """The canonical commit guard rejected a candidate before persistence."""
 
 
 class ModelRuntimeCoordinator(Protocol):
@@ -532,6 +553,7 @@ class ModelConfigService:
         *,
         local_path: str | Path | None = None,
         environment: Mapping[str, str] | None = None,
+        precommit_guard: Callable[[], bool] | None = None,
     ) -> None:
         self.path = Path(path).expanduser().resolve()
         selected_local = (
@@ -541,6 +563,7 @@ class ModelConfigService:
         )
         self.local_path = selected_local if selected_local != self.path else None
         self.coordinator = coordinator
+        self._precommit_guard = precommit_guard
         self._environment = MappingProxyType(
             dict(os.environ if environment is None else environment)
         )
@@ -669,6 +692,8 @@ class ModelConfigService:
             # Join the canonical boundary only at commit time, then re-read and
             # rebase under its bounded disk gate immediately before replacement.
             async with coordinated_config_write(self.path):
+                if self._precommit_guard is not None and self._precommit_guard():
+                    raise ModelConfigCommitBlockedError("Model configuration commit is blocked.")
                 with coordinated_config_disk_write(self.path):
                     latest = self._read_state()
                     latest_snapshot = self._snapshot(latest)
@@ -836,7 +861,14 @@ class ModelConfigService:
         settings: EmbeddingModelSettings | None = None,
         credential_action: CredentialAction | None = None,
     ) -> ModelConfigProbeResult:
-        """Delegate one exact, non-persisting draft probe to the coordinator."""
+        """Probe one draft for legacy direct callers without API-side effects.
+
+        This compatibility helper has no caller-supplied revision contract and
+        must not back an HTTP endpoint.  Revision-guarded callers use
+        :meth:`capture_probe`, :meth:`probe_captured`, and
+        :meth:`revalidate_probe_capture` so a ``keep`` credential and any live
+        effects stay bound to one persisted revision.
+        """
         candidate = draft
         if credential_action is not None:
             _validate_action(draft.id, credential_action)
@@ -864,6 +896,69 @@ class ModelConfigService:
                 else applied.embedding.providers[0]
             )
         return await self.coordinator.probe_model_draft(candidate, settings)
+
+    async def capture_probe(
+        self,
+        draft: RouteRecord,
+        *,
+        revision: str,
+        settings: EmbeddingModelSettings | None = None,
+        credential_action: CredentialAction | None = None,
+    ) -> ModelConfigProbeCapture:
+        """Resolve a draft from exactly ``revision`` without holding a network lock."""
+        async with _path_lock(self.path):
+            state = self._read_state()
+            if state.revision != revision:
+                raise ModelConfigRevisionConflictError(self._snapshot(state))
+            candidate = draft
+            if credential_action is not None:
+                _validate_action(draft.id, credential_action)
+                shell = ModelConfig(
+                    chat=replace(
+                        state.models.chat,
+                        connections=(draft,) if isinstance(draft, ChatConnection) else (),
+                    ),
+                    embedding=replace(
+                        state.models.embedding,
+                        enabled=isinstance(draft, EmbeddingProviderConfig),
+                        settings=settings or state.models.embedding.settings,
+                        providers=((draft,) if isinstance(draft, EmbeddingProviderConfig) else ()),
+                    ),
+                )
+                applied = _apply_credential_actions(
+                    shell,
+                    state.models,
+                    {draft.id: credential_action},
+                )
+                candidate = (
+                    applied.chat.connections[0]
+                    if isinstance(draft, ChatConnection)
+                    else applied.embedding.providers[0]
+                )
+            return ModelConfigProbeCapture(
+                revision=state.revision,
+                draft=candidate,
+                settings=settings,
+            )
+
+    async def probe_captured(
+        self,
+        capture: ModelConfigProbeCapture,
+    ) -> ModelConfigProbeResult:
+        """Run one captured probe after releasing all config locks."""
+        return await self.coordinator.probe_model_draft(capture.draft, capture.settings)
+
+    async def revalidate_probe_capture(
+        self,
+        capture: ModelConfigProbeCapture,
+    ) -> ModelConfigSnapshot:
+        """Require the captured revision again before attaching live effects."""
+        async with _path_lock(self.path):
+            state = self._read_state()
+            snapshot = self._snapshot(state)
+            if state.revision != capture.revision:
+                raise ModelConfigRevisionConflictError(snapshot)
+            return snapshot
 
     def add(
         self,

@@ -295,6 +295,30 @@ class RuntimeModelBundle:
     )
 
 
+@dataclass(frozen=True)
+class RuntimeModelState:
+    """Exact swappable runtime identity used by app-lifecycle rollback."""
+
+    model_bundle: RuntimeModelBundle | None = field(repr=False)
+    config: Any = field(repr=False)
+    degraded: bool
+    degraded_reason: str
+    degraded_issues: list[Any] = field(repr=False)
+    llm_concurrency_gate: Any = field(repr=False)
+    llm_registry: Any = field(repr=False)
+    llm_service: Any = field(repr=False)
+    bilibili_client: Any = field(repr=False)
+    saved_sync_service: Any = field(repr=False)
+    soul_engine: Any = field(repr=False)
+    dialogue: Any = field(repr=False)
+    discovery_engine: Any = field(repr=False)
+    recommendation_engine: Any = field(repr=False)
+    runtime_controller: Any = field(repr=False)
+    account_sync_service: Any = field(repr=False)
+    auto_update_service: Any = field(repr=False)
+    init_prereqs: Any = field(repr=False)
+
+
 def build_runtime_model_bundle(
     models: ModelConfig,
     revision: str,
@@ -516,16 +540,80 @@ class RuntimeContext:
         candidate: RuntimeModelBundle,
     ) -> RuntimeModelBundle | None:
         """Atomically publish a complete candidate and emit its revision."""
-        if not isinstance(candidate, RuntimeModelBundle):
-            raise TypeError("candidate must be a RuntimeModelBundle")
-        async with self._model_swap_lock:
-            previous = self.model_bundle
-            self._publish_model_bundle(candidate)
+        previous = await self.activate_model_candidate(candidate)
         publish = getattr(self.event_hub, "publish", None)
         if callable(publish):
             with suppress(Exception):
                 await publish({"type": "config_reloaded", "revision": candidate.revision})
         return previous
+
+    async def activate_model_candidate(
+        self,
+        candidate: RuntimeModelBundle,
+    ) -> RuntimeModelBundle | None:
+        """Publish a candidate without owning app tasks or reload events."""
+        if not isinstance(candidate, RuntimeModelBundle):
+            raise TypeError("candidate must be a RuntimeModelBundle")
+        async with self._model_swap_lock:
+            previous = self.model_bundle
+            self._publish_model_bundle(candidate)
+        return previous
+
+    def capture_model_runtime_state(self) -> RuntimeModelState:
+        """Capture every swappable identity before an app-owned activation."""
+        return RuntimeModelState(
+            model_bundle=self.model_bundle,
+            config=self.config,
+            degraded=self.degraded,
+            degraded_reason=self.degraded_reason,
+            degraded_issues=self.degraded_issues,
+            llm_concurrency_gate=self.llm_concurrency_gate,
+            llm_registry=self.llm_registry,
+            llm_service=self.llm_service,
+            bilibili_client=self.bilibili_client,
+            saved_sync_service=self.saved_sync_service,
+            soul_engine=self.soul_engine,
+            dialogue=self.dialogue,
+            discovery_engine=self.discovery_engine,
+            recommendation_engine=self.recommendation_engine,
+            runtime_controller=self.runtime_controller,
+            account_sync_service=self.account_sync_service,
+            auto_update_service=self.auto_update_service,
+            init_prereqs=self._init_prereqs,
+        )
+
+    async def restore_model_runtime_state(self, state: RuntimeModelState) -> None:
+        """Restore a complete normal or degraded graph from one exact token."""
+        if not isinstance(state, RuntimeModelState):
+            raise TypeError("state must be a RuntimeModelState")
+        async with self._model_swap_lock:
+            if state.model_bundle is not None:
+                self._publish_model_bundle(state.model_bundle)
+            else:
+                gate = state.llm_concurrency_gate
+                models = getattr(state.config, "models", None)
+                concurrency = getattr(getattr(models, "chat", None), "concurrency", None)
+                configure_runtime = getattr(gate, "configure_runtime", None)
+                if callable(configure_runtime) and isinstance(concurrency, int):
+                    configure_runtime(concurrency)
+            self.model_bundle = state.model_bundle
+            self.config = state.config
+            self.degraded = state.degraded
+            self.degraded_reason = state.degraded_reason
+            self.degraded_issues = state.degraded_issues
+            self.llm_concurrency_gate = state.llm_concurrency_gate
+            self.llm_registry = state.llm_registry
+            self.llm_service = state.llm_service
+            self.bilibili_client = state.bilibili_client
+            self.saved_sync_service = state.saved_sync_service
+            self.soul_engine = state.soul_engine
+            self.dialogue = state.dialogue
+            self.discovery_engine = state.discovery_engine
+            self.recommendation_engine = state.recommendation_engine
+            self.runtime_controller = state.runtime_controller
+            self.account_sync_service = state.account_sync_service
+            self.auto_update_service = state.auto_update_service
+            self._init_prereqs = state.init_prereqs
 
     async def restore_model_candidate(
         self,
@@ -1512,6 +1600,16 @@ class RuntimeContext:
         self._init_prereqs = None
         logger.info("Hot-reload complete — published model revision %s", bundle.revision)
 
+    async def stop_background_tasks(self, app: FastAPI) -> None:
+        """Cancel the three app-owned loops and clear their task slots."""
+        for attr in ("refresh_task", "account_sync_task", "auto_update_task"):
+            task = getattr(app.state, attr, None)
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            setattr(app.state, attr, None)
+
     async def restart_background_tasks(
         self,
         app: FastAPI,
@@ -1519,13 +1617,7 @@ class RuntimeContext:
         run_post_reload_llm_work: bool = True,
     ) -> None:
         """Cancel old background tasks and start new ones from current components."""
-        # Cancel existing tasks
-        for attr in ("refresh_task", "account_sync_task", "auto_update_task"):
-            task = getattr(app.state, attr, None)
-            if task is not None:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+        await self.stop_background_tasks(app)
 
         # Start new tasks from the freshly-built components.
         # v0.3.63+: route through ``self.task_registry.track`` so the
