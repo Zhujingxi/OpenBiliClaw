@@ -112,11 +112,21 @@ class SocraticDialogue:
 
                 async def _background_learn() -> None:
                     try:
-                        await learn_fn(
-                            user_message=user_message,
-                            assistant_reply=reply,
-                            session=self._session,
-                        )
+                        # This chain was initiated by an interactive user turn.
+                        # It must keep running even when background admission is
+                        # parked because canonical inventory is empty; otherwise
+                        # the user's explicit correction cannot repair the very
+                        # recommendation state that triggered it. The bypass only
+                        # skips background admission — every provider call still
+                        # respects the runtime-wide total concurrency gate.
+                        from openbiliclaw.llm.service import _background_admission_bypass
+
+                        with _background_admission_bypass():
+                            await learn_fn(
+                                user_message=user_message,
+                                assistant_reply=reply,
+                                session=self._session,
+                            )
                     except Exception:
                         logger.exception("Failed to learn from dialogue turn.")
 

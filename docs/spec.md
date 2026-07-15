@@ -228,7 +228,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
 
-下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
+下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；用户主动学习任务使用 task-local bypass 跳过 background admission、保留 total gate，避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享 dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -283,6 +283,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 推荐/探针反馈：即时 UI -> 10s 可撤销提交 -> API；推荐再经 5s 合并学习 │ │
+│  │ 对话/反馈新增长期避雷 -> shared dislike purge -> purged_by_dislike │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ runtime status：available/raw/pending 库存 -> 插件/移动/桌面 │   │
@@ -408,7 +409,8 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
 │  SQLite: events(inferred_satisfaction) / discovery_candidates     │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
-│          content_cache(item_key) / recommendations(item_key) / chat_turns / avoidance_state │
+│          content_cache(item_key: nonblank partial unique + legacy blank repair)              │
+│          recommendations(item_key) / chat_turns / avoidance_state                             │
 │          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```

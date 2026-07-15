@@ -308,6 +308,8 @@ stats = cache.stats()
 
 当 refill waiter 存在时，新 maintenance 最多一个；没有 runnable refill 时 maintenance 可借用所有空闲后台槽，保持 work-conserving。`empty` 只 park 新 maintenance，绝不会取消或抢占已经进入 provider 的 maintenance。状态输出同时包含 refill/maintenance active、waiting、priority-active 与 inventory state。
 
+用户对话的首个 `soul.dialogue*` 回复本身属于 interactive。回复成功后派发的 `dialogue_insight → preference → profile/pool_purge` 仍保留各自 caller、maintenance 分类和用量归属，但继承 task-local `_background_admission_bypass`：它们跳过 background admission，避免用户明确纠偏在 `inventory=empty` 或后台暂停时反过来等待库存；total gate 与 total priority 仍然生效，不会绕过 provider 总并发或挤掉新的交互请求。
+
 #### 分模块路由(v0.3.75+)
 
 `LLMService` 的 `module_overrides` 来自 `module_overrides_from_config(config)`。

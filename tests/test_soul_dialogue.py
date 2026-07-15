@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from openbiliclaw.llm.base import LLMResponse
-from openbiliclaw.llm.service import LLMResponseContentError, ModuleOverride
+from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+from openbiliclaw.llm.service import (
+    _BACKGROUND_ADMISSION_BYPASS,
+    LLMResponseContentError,
+    ModuleOverride,
+)
 from openbiliclaw.soul.dialogue import DialogueTurn, SocraticDialogue
 
 
@@ -71,6 +76,40 @@ async def test_dialogue_respond_appends_user_and_agent_turns() -> None:
     assert soul_engine.learn_calls == [
         "cli:我最近很喜欢看讲得很透的纪录片。->我猜你喜欢的是那种能慢慢展开逻辑的讲述方式。"
     ]
+
+
+@pytest.mark.asyncio
+async def test_dialogue_learning_bypasses_empty_inventory_background_admission() -> None:
+    service = FakeService(response="明白，我会记住这个明确的避雷方向。")
+    gate = LLMConcurrencyGate(total_concurrency=3)
+    gate.update_inventory(available=0, target=300)
+    learned = asyncio.Event()
+    observed_bypass: list[bool] = []
+
+    class GateAwareSoulEngine:
+        async def learn_from_dialogue(self, **kwargs: object) -> None:
+            del kwargs
+            bypass_background = _BACKGROUND_ADMISSION_BYPASS.get()
+            observed_bypass.append(bypass_background)
+            async with gate.slot(
+                caller="soul.dialogue_insight",
+                bypass_background=bypass_background,
+            ):
+                learned.set()
+
+    dialogue = SocraticDialogue(
+        llm=None,
+        soul_engine=GateAwareSoulEngine(),  # type: ignore[arg-type]
+        llm_service=service,
+        session="popup",
+    )
+
+    reply = await dialogue.respond("以后不要再推荐跑分视频。")
+    await asyncio.wait_for(learned.wait(), timeout=1)
+
+    assert reply == "明白，我会记住这个明确的避雷方向。"
+    assert observed_bypass == [True]
+    assert _BACKGROUND_ADMISSION_BYPASS.get() is False
 
 
 @pytest.mark.asyncio

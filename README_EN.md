@@ -189,10 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.170 (2026-07-15)**
+📌 Latest: **v0.3.171 (2026-07-16)**
 
-- **Reshuffle no longer stalls behind pool maintenance** — maintenance now runs in a dedicated SQLite worker with bounded batches; real-data reshuffles reach roughly 0.5s P50.
-- **The app stays responsive during heavy maintenance** — snapshots, recommendation writes, and status publication leave the event-loop hot path, with health checks measuring 40.1ms P99.
+- **Sharing data across versions no longer empties the pool** — legacy desktop writers can keep adding Bilibili and Douyin candidates with blank `item_key` values, and the current release repairs and deduplicates them at startup.
+- **“I don't want this” now becomes a real long-term avoidance** — once persisted, exact candidates are purged asynchronously and semantic recall plus model review removes similar content without delaying the reply or full profile rebuild.
+- **Source “Apply now” works in pip/venv installs** — when `uv` is unavailable, the backend syncs runtime dependencies with its current Python and restarts through the module entry point.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -623,7 +624,8 @@ guided init: signals → preferences → full profile commit → discover → ev
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning
+Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
+                                      │                      └new dislike: shared purge → content_cache
                                       └failure/timeout: rollback provisional history → safe error / failed turn
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)

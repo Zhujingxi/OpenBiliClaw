@@ -16,8 +16,10 @@ import locale
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1001,9 +1003,42 @@ class AutoUpdateService:
                 return
 
             install_cmd = self._detect_install_command(root)
-            install = await self._run_command(install_cmd, root, timeout=300)
+            logger.info("Auto-update syncing dependencies with: %s", install_cmd)
+            try:
+                install = await self._run_command(install_cmd, root, timeout=300)
+            except FileNotFoundError as exc:
+                missing = Path(str(exc.filename or "dependency tool")).name
+                logger.exception("Auto-update dependency tool is unavailable: %s", missing)
+                await self._mark_apply_failed(
+                    "dependency_sync_failed",
+                    detail=f"依赖同步工具不可用({missing});请重新运行安装器修复运行环境",
+                )
+                return
+            except subprocess.TimeoutExpired:
+                logger.exception("Auto-update dependency sync timed out after 300 seconds")
+                await self._mark_apply_failed(
+                    "dependency_sync_failed",
+                    detail=(
+                        f"依赖同步超时({self._install_tool_name(install_cmd)},300 秒);"
+                        "请检查网络后重试"
+                    ),
+                )
+                return
             if install.returncode != 0:
-                await self._mark_apply_failed("dependency_sync_failed")
+                output = install.stderr.strip() or install.stdout.strip() or "<no output>"
+                logger.error(
+                    "Auto-update dependency sync failed (exit=%s, command=%s): %s",
+                    install.returncode,
+                    install_cmd,
+                    output,
+                )
+                await self._mark_apply_failed(
+                    "dependency_sync_failed",
+                    detail=(
+                        f"依赖同步失败({self._install_tool_name(install_cmd)},"
+                        f"退出码 {install.returncode});请查看后端日志中的完整错误"
+                    ),
+                )
                 return
 
             self._state = "restart_pending"
@@ -1025,10 +1060,10 @@ class AutoUpdateService:
             logger.exception("Auto-update apply failed")
             await self._mark_apply_failed("dependency_sync_failed")
 
-    async def _mark_apply_failed(self, reason: str) -> None:
+    async def _mark_apply_failed(self, reason: str, *, detail: str = "") -> None:
         self._state = "error"
         self._reason = reason
-        self._update_error = reason
+        self._update_error = detail or reason
         await self._publish_event({"type": "backend_update_failed", "reason": reason})
 
     async def _publish_event(self, event: dict[str, object]) -> None:
@@ -1100,15 +1135,66 @@ class AutoUpdateService:
 
     @staticmethod
     def _detect_install_command(root: Path) -> list[str]:
-        """Detect the best install command based on the project environment."""
-        # Prefer uv if uv.lock exists
-        if (root / "uv.lock").exists():
-            return ["uv", "sync"]
-        # Fallback to pip
+        """Choose a dependency-only sync command available to this daemon.
+
+        A repository always contains ``uv.lock``, including installs created by
+        the supported pip/venv fallback.  Treating the lockfile itself as proof
+        that the daemon can execute ``uv`` made those installs fast-forward the
+        source and then fail with ``FileNotFoundError('uv')``.  Probe PATH
+        explicitly and otherwise use the pip belonging to the running Python.
+
+        Neither command reinstalls the editable OpenBiliClaw project.  The
+        running console entry point can be locked on Windows, while the source
+        checkout is already live through the editable install and will be
+        re-imported after restart.  ``--inexact`` keeps that editable project
+        (and any user-selected extras) while uv synchronizes runtime deps.
+        """
+        if (root / "uv.lock").exists() and shutil.which("uv") is not None:
+            return ["uv", "sync", "--no-install-project", "--inexact"]
+
+        dependencies = AutoUpdateService._read_runtime_dependencies(root)
+        if dependencies:
+            return [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                *dependencies,
+            ]
+
+        # Defensive compatibility for an unusual legacy checkout whose
+        # pyproject metadata cannot be read.  Normal releases always take one
+        # of the dependency-only paths above.
         return [sys.executable, "-m", "pip", "install", "-e", "."]
 
     @staticmethod
+    def _read_runtime_dependencies(root: Path) -> list[str]:
+        """Read PEP 508 runtime requirements from ``pyproject.toml``."""
+        try:
+            with (root / "pyproject.toml").open("rb") as file:
+                payload = tomllib.load(file)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            logger.warning("Auto-update could not read pyproject dependencies: %s", exc)
+            return []
+        project = payload.get("project")
+        if not isinstance(project, dict):
+            return []
+        dependencies = project.get("dependencies")
+        if not isinstance(dependencies, list):
+            return []
+        return [item.strip() for item in dependencies if isinstance(item, str) and item.strip()]
+
+    @staticmethod
+    def _install_tool_name(command: Sequence[str]) -> str:
+        if len(command) >= 3 and command[1:3] == ["-m", "pip"]:
+            return "pip"
+        return Path(command[0]).name if command else "unknown"
+
+    @staticmethod
     def _restart_process() -> None:
-        """Restart the current process with the same arguments."""
-        logger.info("Restarting process: %s %s", sys.executable, sys.argv)
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+        """Restart the git-install CLI through a cross-platform module entry."""
+        argv = [sys.executable, "-m", "openbiliclaw.cli", *sys.argv[1:]]
+        logger.info("Restarting process: %s", argv)
+        os.execv(sys.executable, argv)

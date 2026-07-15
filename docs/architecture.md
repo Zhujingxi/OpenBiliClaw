@@ -76,7 +76,7 @@ background refresh → maintenance DB worker / isolated connection
 - `/api/feedback` — 推荐卡主动反馈入口；桌面 Web 的 `like/dislike/dismiss` 先经过客户端 10 秒 pending-action 屏障，撤销时不会发出写请求，倒计时结束或 `pagehide` keepalive flush 后才进入 API；失败时客户端回滚。API 写 recommendation 反馈字段和 memory `feedback` 事件后，不再每条反馈直接启动画像重分析，而是交给 runtime `FeedbackBatchScheduler` 做短窗口合并，再由 `SoulEngine.process_feedback_batch_if_needed()` 单飞读取反馈游标。评论和探针聊天不走客户端屏障；进入 LLM 偏好分析前会剥离插件原始大字段，只保留偏好相关 metadata。
 - `InterestSpeculator` — 兴趣推测与投机性发现
 - `AvoidanceSpeculator` — 不喜欢领域探针；未确认前只展示给用户确认，不进入推荐过滤，确认后通过共享 dislike writeback 写入 `disliked_topics` 并清理候选池
-- 苏格拉底式用户对话
+- 苏格拉底式用户对话；回复后的用户主动学习链用 task-local bypass 跳过 background admission（仍经过 total gate），所以空库存也能学习。若真正新增长期避雷项，偏好落盘即启动共享 dislike writeback：精确清池先执行，语义精判与完整画像重建并行，把匹配候选标成 `purged_by_dislike`，不阻塞回复
 
 对话链路的失败边界是端到端一致的：
 
@@ -85,6 +85,8 @@ Web / CLI / OpenClaw
         │ dialogue request
         ▼
 SocraticDialogue ── success ──> user+agent history ──> background learning
+                                      (bypass background admission; keep total gate)
+                                                       └─ new dislike ──> shared pool purge
         │
         └─ failure/timeout ──> rollback provisional history
                               └─> boundary-safe error / failed durable turn
@@ -104,7 +106,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - `DiscoveredContent` 全形态：新增 `body_text`（推文 / thread / 知乎回答摘要全文 / Reddit selftext 或评论正文）+ `content_type`（`video`/`note`/`tweet`/`thread`/`answer`/`article`/`question`/`post`/`comment`，复用候选池既有 shape 字段），让 X / 知乎 / Reddit 这类文字为主的来源能正确流过统一待评估池并渲染成文字卡。
 - 统一发布时间契约：Bilibili、小红书、抖音、YouTube、X、知乎和 Reddit 的当前来源 payload 只在存在语义明确字段时生成 `published_at`（UTC RFC 3339）或 `published_label`（清洗后的来源相对文本）。字段与时长/互动元数据一起走 `source normalizer -> DiscoveredContent -> discovery_candidates -> content_cache -> recommendation/delight API`；缺失值不阻断候选，重新发现的空值不覆盖已有非空值，旧缓存不联网回填，也不从 `discovered_at`、任务时间、互动时间或推荐时间猜测。
 - 统一待评估池：`source adapters -> discovery_candidates -> tokenized claim -> 最多 3 个 LLM-only worker -> 串行 commit/admission -> content_cache -> expression copy -> servable pool`。API daemon 任一 30 条 worker 完成即补位，总在途不超过 90；串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission，超额结果保留为 `evaluated`。OpenClaw one-shot 不启动这些 daemon owner：`recommend(refresh_if_needed=True)` 的首轮 source supply 与 inline claim 固定 ≤4（fetch oversample=1、min eval batch=4、inline evaluator=1），随后请求再补下一批，并在 admission commit 后 await ≤4 durable expression copy、禁用本次 split retry；首 batch 的有效 subset 立即成为 canonical pool，未完成行保持 pending，不会留下 notify-only coordinator 或 detached provider task。projected 只计 `available + admitted_pending_copy + evaluated_pending_admission`，不计 raw pending/evaluating；完成 / 释放匹配 `id + status + claim_token`，60 秒只作 API safety wake。
-- 候选分层、去重和缓存写入：`discovery.admission` 定义贯穿候选评估、缓存写入与数据库展示的唯一准入策略——非 `explore` 至少使用全局门槛，精确 `explore` 唯一使用 `0.58`。达标候选通过 `cache_evaluated_results()` admission 到正式推荐池 `content_cache`，`_cache_results()` 写前再次 fail closed，数据库取池 / 回填 / delight 等出口再执行同一来源感知条件；写入时 `pool_status='suppressed'` 的旧候选只有在新分数达标时自动复活成 `'fresh'`。`DiscoveredContent.item_key` 由共享 identity helper 派生；B 站缓存仍使用 raw BV storage key，其它平台使用 namespaced key，原始 ID 独立保留在 `content_id`。`content_cache` 是 recommendation serve 的唯一正式池，`discovery_candidates` 是 discovery 阶段的待评估 / 已评估队列。
+- 候选分层、去重和缓存写入：`discovery.admission` 定义贯穿候选评估、缓存写入与数据库展示的唯一准入策略——非 `explore` 至少使用全局门槛，精确 `explore` 唯一使用 `0.58`。达标候选通过 `cache_evaluated_results()` admission 到正式推荐池 `content_cache`，`_cache_results()` 写前再次 fail closed，数据库取池 / 回填 / delight 等出口再执行同一来源感知条件；写入时 `pool_status='suppressed'` 的旧候选只有在新分数达标时自动复活成 `'fresh'`。`DiscoveredContent.item_key` 由共享 identity helper 派生；B 站缓存仍使用 raw BV storage key，其它平台使用 namespaced key，原始 ID 独立保留在 `content_id`。非空 `item_key` 由 partial unique index 保护，空串仅容纳不知道该 additive 列的旧写入器；当前初始化会补全空 identity、合并 canonical 冲突并恢复 partial unique。`content_cache` 是 recommendation serve 的唯一正式池，`discovery_candidates` 是 discovery 阶段的待评估 / 已评估队列。
 - v0.3.0+ 多样性栈：trending 固定 `rid=0` + 非 0 rid 本地洗牌轮转覆盖，并按 rid 交错 / explore 按 domain 交错 / `_compress_topic_repeats` 单次压缩 / `trim_topic_group_overflow` 跨源跨轮配额（任意 topic_group ≤ 池子 10%）/ deficit-source 合并 + 并行 fan-out
 
 ### Sources (`sources/`) — 多源适配层 (v0.3.0+)
@@ -125,7 +127,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 ### Recommendation Engine (`recommendation/`)
 - 推荐排序与朋友式推荐表达生成；统一从候选池读取
 - 推荐列表、换批、pending delight 单条/批量及 runtime delight 事件都增量透传 `published_at` / `published_label`。桌面 Web、移动 Web、扩展 popup 与 CLI 按同一规则消费：精确时间优先并转本地相对日期，来源标签兜底，双空值不渲染；API 层不重写相对时间。
-- 推荐、delight 与保存列表出口共享 `item_key / content_id / source_platform / content_url / content_type` 身份契约；`content_cache.item_key` 唯一索引并由 `recommendations.item_key` 引用。插件 side panel、桌面 Web 与移动 Web 的卡片先 POST `/api/saved/{list_kind}`，保存页再用 `/sync` + durable task poll 做显式平台写入；默认关闭的 `saved_sync.auto_sync_enabled` 只决定本地保存后是否创建后台任务。手动同步对当前 adapter 支持且未处于已同步 / 同步中的项始终可用；仅 `unsupported_adapter_missing` 可在 adapter 注册后重新进入单项/批量快照，`unsupported_content_type` 等真实能力限制继续显示为仅本地保存。本地 `/remove` 永不反向删除平台记录。
+- 推荐、delight 与保存列表出口共享 `item_key / content_id / source_platform / content_url / content_type` 身份契约；`content_cache.item_key` 对非空 canonical identity 使用 partial unique index，并用独立普通索引支持 lookup，`recommendations.item_key` 引用同一 identity。插件 side panel、桌面 Web 与移动 Web 的卡片先 POST `/api/saved/{list_kind}`，保存页再用 `/sync` + durable task poll 做显式平台写入；默认关闭的 `saved_sync.auto_sync_enabled` 只决定本地保存后是否创建后台任务。手动同步对当前 adapter 支持且未处于已同步 / 同步中的项始终可用；仅 `unsupported_adapter_missing` 可在 adapter 注册后重新进入单项/批量快照，`unsupported_content_type` 等真实能力限制继续显示为仅本地保存。本地 `/remove` 永不反向删除平台记录。
 - `/api/recommendation-click` 会保留 `content_id / content_url / source_platform`：插件、移动 Web 或桌面 Web 打开推荐内容后，后端把点击写成对应来源的统一事件和 `recommendation_click` 强画像信号；只传 `recommendation_id` 时会从 `recommendations + content_cache` 回填跨源字段，避免 YouTube / 抖音等 ID 被套成 B 站 URL。
 - `PoolCurator` 五维评分（relevance · freshness · topic_fatigue · source_monotony · serendipity）
 - v0.3.1 双轴 fatigue：`recent_topic_keys` (细) + `recent_topic_groups` (粗) 取 max；曲线 `count^1.5/len*5`，count=2 即触发 0.47 强抑制

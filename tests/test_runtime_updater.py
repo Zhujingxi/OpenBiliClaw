@@ -640,6 +640,7 @@ async def test_successful_apply_fetches_merges_syncs_and_publishes_restart(
     (tmp_path / ".git").mkdir()
     (tmp_path / "uv.lock").write_text("", encoding="utf-8")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(updater.shutil, "which", lambda command: f"/tools/{command}")
     calls: list[list[str]] = []
     events: list[dict[str, object]] = []
     restarted = False
@@ -673,7 +674,7 @@ async def test_successful_apply_fetches_merges_syncs_and_publishes_restart(
     assert payload["accepted"] is True
     assert ["git", "fetch", "--force", "--tags", "origin"] in calls
     assert ["git", "merge", "--ff-only", "backend-v0.3.92"] in calls
-    assert ["uv", "sync"] in calls
+    assert ["uv", "sync", "--no-install-project", "--inexact"] in calls
     assert restarted is True
     assert events == [{"type": "backend_restart_pending", "latest_tag": "backend-v0.3.92"}]
 
@@ -730,10 +731,12 @@ async def test_run_command_uses_async_subprocess_exec(
 async def test_apply_dependency_failure_publishes_backend_update_failed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     (tmp_path / ".git").mkdir()
     (tmp_path / "uv.lock").write_text("", encoding="utf-8")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(updater.shutil, "which", lambda command: f"/tools/{command}")
     events: list[dict[str, object]] = []
 
     async def _publish(event: dict[str, object]) -> None:
@@ -749,22 +752,104 @@ async def test_apply_dependency_failure_publishes_backend_update_failed(
             )
         if command == ["git", "rev-parse", "--git-dir"]:
             return subprocess.CompletedProcess(command, 0, ".git\n", "")
-        if command == ["uv", "sync"]:
+        if command == ["uv", "sync", "--no-install-project", "--inexact"]:
             return subprocess.CompletedProcess(command, 1, "", "dependency failed")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     service = updater.AutoUpdateService(enabled=False, event_publisher=_publish)
     monkeypatch.setattr(service, "_run_command", _run_command)
 
-    status_code, payload = await service.request_apply(tag="backend-v0.3.92")
-    if service._apply_task is not None:
-        await asyncio.wait_for(service._apply_task, timeout=0.5)
+    with caplog.at_level(logging.ERROR):
+        status_code, payload = await service.request_apply(tag="backend-v0.3.92")
+        if service._apply_task is not None:
+            await asyncio.wait_for(service._apply_task, timeout=0.5)
 
     assert status_code == 202
     assert payload["accepted"] is True
     assert service.get_update_status()["state"] == "error"
     assert service.get_update_status()["reason"] == "dependency_sync_failed"
+    assert service.get_update_status()["last_error"] == (
+        "依赖同步失败(uv,退出码 1);请查看后端日志中的完整错误"
+    )
+    assert "dependency failed" in caplog.text
     assert events == [{"type": "backend_update_failed", "reason": "dependency_sync_failed"}]
+
+
+def test_install_command_uses_uv_only_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    monkeypatch.setattr(updater.shutil, "which", lambda command: f"/tools/{command}")
+
+    assert updater.AutoUpdateService._detect_install_command(tmp_path) == [
+        "uv",
+        "sync",
+        "--no-install-project",
+        "--inexact",
+    ]
+
+
+def test_install_command_falls_back_to_running_python_when_uv_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """\
+[project]
+name = "example"
+version = "1.0.0"
+dependencies = ["httpx>=0.27", "Pillow>=10; python_version >= '3.11'"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updater.shutil, "which", lambda _command: None)
+    monkeypatch.setattr(updater.sys, "executable", "/venv/bin/python")
+
+    assert updater.AutoUpdateService._detect_install_command(tmp_path) == [
+        "/venv/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--no-input",
+        "httpx>=0.27",
+        "Pillow>=10; python_version >= '3.11'",
+    ]
+
+
+def test_restart_process_uses_module_entrypoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(updater.sys, "executable", r"C:\OpenBiliClaw\.venv\Scripts\python.exe")
+    monkeypatch.setattr(
+        updater.sys,
+        "argv",
+        [r"C:\OpenBiliClaw\.venv\Scripts\openbiliclaw.exe", "serve-api", "--port", "8420"],
+    )
+    monkeypatch.setattr(
+        updater.os,
+        "execv",
+        lambda executable, argv: calls.append((executable, list(argv))),
+    )
+
+    updater.AutoUpdateService._restart_process()
+
+    assert calls == [
+        (
+            r"C:\OpenBiliClaw\.venv\Scripts\python.exe",
+            [
+                r"C:\OpenBiliClaw\.venv\Scripts\python.exe",
+                "-m",
+                "openbiliclaw.cli",
+                "serve-api",
+                "--port",
+                "8420",
+            ],
+        )
+    ]
 
 
 @pytest.mark.asyncio

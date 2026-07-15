@@ -209,10 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.170（2026-07-15）**
+📌 最新版本：**v0.3.171（2026-07-16）**
 
-- **换一换不再被后台维护卡住** —— 推荐池维护迁入独立 SQLite worker 并分批释放写锁，真实数据换批 P50 降至约 0.5 秒。
-- **重维护期间界面仍保持响应** —— 库存快照、推荐写入和状态广播退出事件循环热路径，实测健康检查 P99 40.1ms。
+- **跨版本共享数据不再击穿推荐池** —— 旧桌面版向新版数据库写入空 `item_key` 时可继续补入 B 站 / 抖音候选，当前版启动会自动回填和去重。
+- **对话里的“不想看”会成为真正的长期避雷** —— 偏好落盘后立即异步清掉精确命中的候选，再用语义召回与模型精判继续清理相似内容，不等待画像重建也不阻塞回复。
+- **源码版“立即应用”兼容 pip/venv** —— 后端没有安装 `uv` 时会改用当前 Python 同步运行依赖，并通过模块入口安全重启。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -626,7 +627,8 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习
+Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
+                                      │                      └新避雷：共享清池 → content_cache
                                       └失败/超时：回滚临时历史 → 安全错因 / failed turn
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
