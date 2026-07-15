@@ -2932,3 +2932,174 @@ class TestNetworkProxyConfig:
         monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "system")
         config = load_config(config_path)
         assert config.network.mode == "system"
+
+
+class TestLegacyModelMigrationLoading:
+    """Legacy model conversion is in-memory, deterministic, and non-authoritative."""
+
+    _LEGACY = """
+[llm]
+default_provider = "deepseek"
+concurrency = 5
+timeout = 120
+
+[llm.deepseek]
+api_key = "legacy-secret"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+reasoning_effort = "max"
+""".strip()
+
+    _NATIVE = """
+[models]
+schema_version = 1
+
+[models.chat]
+concurrency = 2
+timeout_seconds = 45
+
+[[models.chat.connections]]
+id = "native-main"
+name = "Native main"
+type = "openai_compatible"
+preset = "custom"
+model = "native-model"
+base_url = "https://native.example/v1"
+api_key_env = "NATIVE_API_KEY"
+api_mode = "chat_completions"
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = ""
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+""".strip()
+
+    def test_legacy_only_load_builds_models_without_changing_bytes(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.toml"
+        original = self._LEGACY.encode()
+        path.write_bytes(original)
+
+        config, diagnostics = load_config_with_diagnostics(
+            path,
+            ensure_default_file=False,
+        )
+
+        assert path.read_bytes() == original
+        assert config.model_meta.source == "legacy"
+        assert config.model_meta.migration == "ready"
+        assert config.model_meta.migration_report is not None
+        assert config.model_meta.migration_report.issues == ()
+        assert [item.preset for item in config.models.chat.connections] == ["deepseek"]
+        assert config.models.chat.concurrency == 5
+        assert config.models.chat.timeout_seconds == 120
+        assert any("[llm]" in message and "只读" in message for message in diagnostics.messages)
+
+    def test_legacy_pending_decisions_are_stored_and_diagnosed_in_memory(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "config.toml"
+        path.write_text(
+            self._LEGACY
+            + """
+
+[llm.evaluation]
+provider = "openai"
+model = "evaluation-only"
+""",
+            encoding="utf-8",
+        )
+
+        config, diagnostics = load_config_with_diagnostics(
+            path,
+            ensure_default_file=False,
+        )
+
+        assert config.model_meta.source == "legacy"
+        assert config.model_meta.migration == "pending"
+        assert config.model_meta.migration_report is not None
+        assert "module_override_removed" in config.model_meta.migration_report.issue_codes
+        assert any("待确认" in message for message in diagnostics.messages)
+        assert any(
+            issue.field == "llm.evaluation" and "legacy-secret" not in issue.message
+            for issue in diagnostics.issues
+        )
+
+    def test_native_models_win_and_legacy_credentials_never_mix_in(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.toml"
+        original = f"{self._NATIVE}\n\n{self._LEGACY}\n".encode()
+        path.write_bytes(original)
+
+        config, diagnostics = load_config_with_diagnostics(
+            path,
+            ensure_default_file=False,
+        )
+
+        assert path.read_bytes() == original
+        assert config.model_meta.source == "native"
+        assert config.model_meta.migration == "none"
+        assert config.model_meta.migration_report is None
+        assert [item.id for item in config.models.chat.connections] == ["native-main"]
+        assert config.models.chat.connections[0].credential.value == "NATIVE_API_KEY"
+        assert config.models.chat.connections[0].credential.value != "legacy-secret"
+        assert config.llm.deepseek.api_key == ""
+        assert config.llm.default_provider == "deepseek"
+        assert any(
+            "[models]" in message and "[llm]" in message and "忽略" in message
+            for message in diagnostics.messages
+        )
+
+    def test_native_models_ignore_even_a_malformed_legacy_value(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.toml"
+        path.write_text(
+            'llm = "malformed-legacy-secret"\n\n' + self._NATIVE,
+            encoding="utf-8",
+        )
+
+        config, diagnostics = load_config_with_diagnostics(
+            path,
+            ensure_default_file=False,
+        )
+
+        assert config.model_meta.source == "native"
+        assert [item.id for item in config.models.chat.connections] == ["native-main"]
+        assert config.llm.deepseek.api_key == ""
+        assert "malformed-legacy-secret" not in repr(diagnostics)
+        assert any("[llm]" in message and "忽略" in message for message in diagnostics.messages)
+
+    def test_default_source_has_no_migration_report(self, tmp_path: Path) -> None:
+        path = tmp_path / "config.toml"
+        path.write_text('[general]\nlanguage = "en"\n', encoding="utf-8")
+
+        config, diagnostics = load_config_with_diagnostics(
+            path,
+            ensure_default_file=False,
+        )
+
+        assert config.model_meta.source == "default"
+        assert config.model_meta.migration == "none"
+        assert config.model_meta.migration_report is None
+        assert not any("[llm]" in message for message in diagnostics.messages)
+
+    def test_config_local_legacy_paths_and_values_remain_accurate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        (tmp_path / "config.toml").write_text(self._LEGACY, encoding="utf-8")
+        (tmp_path / "config.local.toml").write_text(
+            '[llm.deepseek]\nmodel = "local-model"\n',
+            encoding="utf-8",
+        )
+
+        config, diagnostics = load_config_with_diagnostics(ensure_default_file=False)
+
+        assert config.model_meta.source == "legacy"
+        assert config.model_meta.override_paths == ("llm.deepseek.model",)
+        assert config.models.chat.connections[0].model == "local-model"
+        assert any(
+            "llm.deepseek.model" in message and "覆盖" in message
+            for message in diagnostics.messages
+        )

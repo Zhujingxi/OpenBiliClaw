@@ -601,10 +601,10 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model-config persistence foundation (stage 2; runtime not wired) │
-│ frozen schema · descriptors/validation · native TOML/revision │
-│ Config.models; ordinary saves preserve raw [models]/[llm] without migration │
-│ No runtime adapter/route/API/UI; current [llm] path unchanged │
+│ Model-config compatibility foundation (stage 3; runtime not wired) │
+│ native [models] strict parse/revision → Config.models      │
+│ legacy [llm] read-only adapter/report/resolution → memory  │
+│ raw-preserving saves; no transaction/backup/runtime/API/UI │
 ├────────────────────────────────────────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │

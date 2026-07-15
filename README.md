@@ -604,10 +604,10 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型配置持久化基础（阶段 2，尚未接入运行链）           │
-│ frozen schema · descriptors/validation · 原生 TOML/revision │
-│ Config.models；普通保存保留 raw [models]/[llm]，不静默迁移 │
-│ 无 runtime adapter/route/API/UI；现有 [llm] 运行链不变 │
+│ 模型配置兼容基础（阶段 3，尚未接入运行链）             │
+│ native [models] strict parse/revision → Config.models    │
+│ legacy [llm] 只读 adapter/report/resolution → 内存候选   │
+│ 普通保存保留 raw；无事务迁移/backup/runtime/API/UI       │
 ├────────────────────────────────────────────────┤
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │

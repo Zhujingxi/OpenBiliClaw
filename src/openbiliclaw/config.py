@@ -21,9 +21,11 @@ from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import urlparse
 
 from openbiliclaw.model_config import (
+    MigrationReport,
     ModelConfig,
     ModelConfigParseError,
     default_model_config,
+    migrate_legacy_llm,
     parse_model_config,
     render_model_config,
 )
@@ -836,6 +838,11 @@ class ModelConfigMeta:
     source: str = "default"
     migration: str = "none"
     override_paths: tuple[str, ...] = ()
+    migration_report: MigrationReport | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         """Freeze override path order even when a caller supplies a list."""
@@ -1141,7 +1148,7 @@ def _models_from_raw(
     *,
     override_paths: tuple[str, ...] = (),
 ) -> tuple[ModelConfig, ModelConfigMeta]:
-    """Select native models without performing legacy conversion."""
+    """Select native models or construct a read-only legacy candidate."""
     if "models" in raw:
         models_raw = raw["models"]
         if not isinstance(models_raw, Mapping):
@@ -1151,9 +1158,19 @@ def _models_from_raw(
             migration="none",
             override_paths=override_paths,
         )
-    source = "legacy" if "llm" in raw else "default"
+    if "llm" in raw:
+        llm_raw = raw["llm"]
+        if not isinstance(llm_raw, Mapping):
+            raise TypeError("[llm] must be a table")
+        migrated = migrate_legacy_llm(llm_raw, os.environ)
+        return migrated.models, ModelConfigMeta(
+            source="legacy",
+            migration=("pending" if migrated.report.has_pending_decisions else "ready"),
+            override_paths=override_paths,
+            migration_report=migrated.report,
+        )
     return default_model_config(), ModelConfigMeta(
-        source=source,
+        source="default",
         migration="none",
         override_paths=override_paths,
     )
@@ -1168,9 +1185,17 @@ def _build_config(
     general = _raw_table(raw.get("general", {}))
     api_raw = raw.get("api", {}) if isinstance(raw.get("api"), dict) else {}
     llm_value = raw.get("llm", {})
-    if not isinstance(llm_value, Mapping):
+    if "models" in raw:
+        # Native model configuration is authoritative.  The compatibility
+        # table contributes neither values nor credentials, even when its
+        # legacy shape is malformed; diagnostics report only that it was
+        # ignored.  Raw preservation still keeps its on-disk bytes on an
+        # ordinary (non-authoritative) save.
+        llm_raw: dict[str, Any] = {}
+    elif not isinstance(llm_value, Mapping):
         raise TypeError("[llm] must be a table")
-    llm_raw = _raw_table(llm_value)
+    else:
+        llm_raw = _raw_table(llm_value)
     bili_raw = _raw_table(raw.get("bilibili", {}))
     sources_raw = _raw_table(raw.get("sources", {}))
     sched_raw = dict(raw.get("scheduler", {}))
@@ -2269,6 +2294,43 @@ def _is_openai_official_base_url(base_url: str) -> bool:
     return parsed.scheme == "https" and (parsed.hostname or "").lower() == "api.openai.com"
 
 
+def _append_model_load_diagnostics(
+    raw: Mapping[str, object],
+    config: Config,
+    diagnostics: ConfigDiagnostics,
+) -> None:
+    """Expose model provenance without leaking legacy values or credentials."""
+    meta = config.model_meta
+    if meta.source == "legacy":
+        diagnostics.messages.append(
+            "已只读加载 legacy [llm] 并在内存中构造 Config.models；磁盘未改写。"
+        )
+        report = meta.migration_report
+        if report is not None:
+            blocking_count = sum(issue.severity == "blocking" for issue in report.issues)
+            if blocking_count:
+                diagnostics.messages.append(
+                    f"legacy 模型迁移存在 {blocking_count} 项待确认决定；显式解决前不会写盘。"
+                )
+            diagnostics.issues.extend(
+                ConfigIssue(
+                    field=issue.field,
+                    message=f"legacy 模型迁移：{issue.reason}。",
+                    severity=issue.severity,
+                )
+                for issue in report.issues
+            )
+    elif meta.source == "native" and "llm" in raw:
+        diagnostics.messages.append(
+            "检测到 [models] 与 [llm]；[models] 为唯一权威配置，[llm] 已忽略。"
+        )
+
+    if meta.override_paths:
+        diagnostics.messages.append(
+            "模型配置包含 config.local.toml 或环境覆盖：" + ", ".join(meta.override_paths) + "。"
+        )
+
+
 def load_config_with_diagnostics(
     config_path: str | Path | None = None,
     *,
@@ -2326,6 +2388,7 @@ def load_config_with_diagnostics(
     # _build_discovery ever runs — the values are ignored, never fail-fast.
     diagnostics.issues.extend(_removed_discovery_key_issues(raw))
     config = _build_config(raw, model_override_paths=model_override_paths)
+    _append_model_load_diagnostics(raw, config, diagnostics)
     diagnostics.issues.extend(_collect_config_issues(config))
     return config, diagnostics
 

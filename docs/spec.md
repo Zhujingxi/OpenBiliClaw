@@ -376,11 +376,11 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│             模型配置持久化基础（阶段 2，尚未接入运行链）        │
-│  model_config: frozen Chat/Embedding schema + tuple order     │
-│  descriptors/validation + strict native TOML + safe revision  │
-│  Config.models；普通保存保留 raw [models]/[llm]，不做 legacy migration │
-│  不含 runtime adapter/route/API/UI；现有 [llm] 运行链不变       │
+│             模型配置兼容基础（阶段 3，尚未接入运行链）          │
+│ native [models] → strict parser/revision ────────────────┐    │
+│ legacy [llm] → read-only adapter/report/resolutions ─────┤    │
+│                                                         └→ Config.models（内存）│
+│ 普通保存保留 raw [models]/[llm]；不含事务迁移/backup/runtime/API/UI │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
