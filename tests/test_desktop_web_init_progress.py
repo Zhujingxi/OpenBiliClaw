@@ -54,19 +54,20 @@ def test_desktop_surfaces_stall_copy_after_90s_of_silence() -> None:
 def test_desktop_shows_expectation_copy_and_stage_eta() -> None:
     app_js = _app_js()
     # Idle expectation management near the start button.
-    assert "整个过程通常需要 2–5 分钟" in app_js
+    assert "严格按顺序生成" in app_js
+    assert "通常需要 4–10 分钟" in app_js
     assert "进度会保留" in app_js
     # Running stage row surfaces its typical duration.
     assert "本阶段通常约" in app_js
     assert "stageEtaText" in app_js
 
 
-def test_desktop_keeps_existing_override_states() -> None:
-    """The two pre-existing display overrides must survive the upgrade."""
+def test_desktop_trusts_terminal_init_contract_and_keeps_embedding_override() -> None:
     app_js = _app_js()
-    # First-pool wait pins 95%.
-    assert "pct: 95" in app_js
-    assert "整理首轮内容池" in app_js
+    # Backend completion now means either a serviceable first pool or explicit
+    # partial success. The client must not invent a second indefinite 95% wait.
+    assert "pct: 95" not in app_js
+    assert "initWaitingForFirstPool" not in app_js
     # Embedding pull borrows the progress bar while idle.
     assert "embeddingPull.pct" in app_js
 
@@ -99,16 +100,17 @@ def test_setup_wizard_surfaces_stall_and_expectation_copy() -> None:
     assert "没有新进展" in html
     assert "可以继续等待，或取消后重试" in html
     assert "● 进行中" in html
-    assert "整个过程通常需要 2–5 分钟" in html
+    assert "严格按顺序生成" in html
+    assert "通常需要 4–10 分钟" in html
     assert "本阶段通常约" in html
     assert "initStallHint" in html
 
 
-def test_setup_wizard_keeps_first_pool_and_embedding_overrides() -> None:
+def test_setup_wizard_uses_terminal_contract_and_keeps_embedding_override() -> None:
     html = _setup_html()
-    # First-pool wait pins 95%.
-    assert '"95%"' in html
-    assert "整理首轮内容池" in html
+    assert '"95%"' not in html
+    assert "renderWaitingForFirstPool" not in html
+    assert "showInitCompletion" in html
     # Embedding pull borrows the progress bar while idle.
     assert "pull.active && !status?.running" in html
 
@@ -124,10 +126,11 @@ def test_timeout_reason_is_actionable_and_announced_across_web_surfaces() -> Non
         assert 'aria-live="polite"' in source
         assert '"assertive"' in source
 
-    # Partial success must retain the backend explanation rather than showing
-    # the ordinary indefinite first-pool waiting copy.
+    # Partial success retains the backend explanation while letting the user
+    # enter the application instead of waiting behind a synthetic 95% state.
     assert "status?.partial_success ? initStatusReasonText(status)" in app_js
-    assert "renderWaitingForFirstPool(status)" in setup_html
+    assert "showInitCompletion(status)" in setup_html
+    assert "renderWaitingForFirstPool" not in setup_html
 
 
 def test_desktop_reattaches_init_poll_when_a_run_is_live_at_load() -> None:
@@ -148,5 +151,13 @@ def test_desktop_reattaches_init_poll_when_a_run_is_live_at_load() -> None:
     assert "state.initStatus = snapshot;" in apply_snapshot
     assert "snapshot.running" in apply_snapshot
     assert "embeddingPullProgressView(snapshot).active" in apply_snapshot
-    assert "initWaitingForFirstPool(snapshot)" in apply_snapshot
+    assert "initWaitingForFirstPool" not in apply_snapshot
     assert "scheduleInitStatusRefresh(INIT_STATUS_POLL_MS)" in apply_snapshot
+
+
+def test_desktop_terminal_init_status_wins_over_stale_runtime_snapshot() -> None:
+    app_js = _app_js()
+    decision = app_js.split("function shouldShowInitOnboarding(status)", 1)[1]
+    decision = decision.split("\n    }", 1)[0]
+    assert "state.initStatus?.initialized === true" in decision
+    assert "return false" in decision

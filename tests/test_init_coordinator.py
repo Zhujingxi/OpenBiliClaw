@@ -204,7 +204,7 @@ def test_initial_stages_carry_eta_seconds(tmp_path: Path) -> None:
     coord.try_start("run-1")
     stages = coord.get_status()["stages"]
     assert {s["n"]: s["eta_seconds"] for s in stages} == _STAGE_ETAS
-    assert _STAGE_ETAS == {1: 90, 2: 180, 3: 70, 4: 120}
+    assert _STAGE_ETAS == {1: 90, 2: 180, 3: 70, 4: 300}
 
 
 async def test_stage_progress_persists_and_emits(tmp_path: Path) -> None:

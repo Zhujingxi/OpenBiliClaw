@@ -6,6 +6,7 @@ Provides the command-line entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from openbiliclaw.llm.base import safe_llm_failure_message
+from openbiliclaw.llm.service import _background_admission_bypass
 from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
     _is_default_ollama_endpoint,
@@ -48,14 +50,15 @@ _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE = (
     "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
 )
 _INIT_DISCOVERY_TIMEOUT_MESSAGE = (
-    "画像已生成，但首轮内容池等待内容发现超过 10 分钟仍未完成，"
+    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 10 分钟仍未完成，"
     "本次初始化已按“部分完成”结束，避免继续卡住。"
     "常见原因是所选内容源未登录或网络不可达，也可能是 AI 评估响应过慢。"
     "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
 )
 _INIT_DISCOVERY_PARTIAL_MESSAGE = (
-    "画像已生成，但首轮内容发现失败，本次初始化已按“部分完成”结束。"
-    "常见原因是所选内容源暂不可用或 AI 评估失败。"
+    "画像已生成，但首轮内容发现、个性化评分或推荐文案生成失败，"
+    "尚未产出可直接浏览的首轮内容，本次初始化已按“部分完成”结束。"
+    "常见原因是所选内容源暂不可用，或 AI 评估 / 文案生成失败。"
     "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
 )
 
@@ -276,7 +279,7 @@ _EXTENSION_PRESENCE_REQUIRED_WARNING = (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
 
 def _print_page_title(title: str, subtitle: str = "") -> None:
@@ -403,6 +406,7 @@ async def _run_with_progress(
     label: str,
     eta_seconds: int,
     tick_seconds: int = 20,
+    status_provider: Callable[[], str] | None = None,
 ) -> Any:
     """Run a coroutine while printing periodic progress updates.
 
@@ -413,6 +417,14 @@ async def _run_with_progress(
     "started, ETA Xs" line, ticks every ``tick_seconds`` with
     elapsed/ETA while the work runs, and prints a final completion
     line with actual wall time.
+
+    ``status_provider`` (optional) returns a short live-status suffix —
+    e.g. ``"已完成 3/12 批"`` — appended to every heartbeat so a stalled
+    inner batch shows a *frozen* sub-progress next to the growing
+    elapsed clock, pinpointing where it hung. The ETA half never lies:
+    once ``elapsed`` passes ``eta_seconds`` the heartbeat switches from a
+    ``预计还需 ~Ns`` countdown (which would otherwise pin at ``~0s`` and
+    read as "about to finish") to an explicit "已超预估、仍在处理" notice.
     """
     import time as _time
     from contextlib import suppress as _suppress
@@ -424,8 +436,17 @@ async def _run_with_progress(
         while True:
             await asyncio.sleep(tick_seconds)
             elapsed = int(_time.monotonic() - start)
-            remaining = max(0, eta_seconds - elapsed)
-            console.print(f"  [dim]· {label}: 已用 {elapsed}s / 预计还需 ~{remaining}s[/dim]")
+            if elapsed < eta_seconds:
+                eta_part = f"预计还需 ~{eta_seconds - elapsed}s"
+            else:
+                eta_part = f"已超预估(~{eta_seconds}s)，仍在处理"
+            status = ""
+            if status_provider is not None:
+                with _suppress(Exception):
+                    text = status_provider()
+                    if text:
+                        status = f" · {text}"
+            console.print(f"  [dim]· {label}: 已用 {elapsed}s / {eta_part}{status}[/dim]")
 
     ticker_task = asyncio.create_task(_ticker())
     try:
@@ -2276,24 +2297,42 @@ async def _run_init_discovery_backfill_async(
     *,
     target_pool_count: int = 100,
     label_suffix: str = "",
+    progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
 ) -> int:
-    """Backfill the initial discovery pool in stages until the target is reached."""
+    """Build the first serviceable discovery pool from the committed profile."""
     from openbiliclaw.discovery.pool_snapshot import build_cold_start_pool_snapshot
+    from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+    async def _report(done: int, total: int, note: str) -> None:
+        if progress_callback is None:
+            return
+        result = progress_callback(done, total, note)
+        if inspect.isawaitable(result):
+            await result
 
     database = _get_runtime_database()
     discovery_engine = _build_discovery_engine()
+    gate = _build_llm_concurrency_gate()
+    target = max(0, int(target_pool_count))
+    if target == 0:
+        await _report(4, 4, "已跳过首轮内容池构建")
+        return 0
+
     discovered_count = 0
+    copy_error: BaseException | None = None
 
     for index, strategies in enumerate(_INIT_DISCOVERY_PLAN, start=1):
         current_pool_count = database.count_pool_candidates()
-        if current_pool_count >= target_pool_count:
+        gate.update_inventory(available=current_pool_count, target=target)
+        if current_pool_count >= target:
             break
-        request_limit = max(20, target_pool_count - current_pool_count)
+        await _report(0, 4, "正在基于完整画像生成发现方向并抓取候选")
+        request_limit = max(20, target - current_pool_count)
         pool_snapshot = (
             build_cold_start_pool_snapshot(
                 profile,
-                pool_target_count=target_pool_count,
-                source_targets={"bilibili": target_pool_count},
+                pool_target_count=target,
+                source_targets={"bilibili": target},
             )
             if current_pool_count <= 0
             else None
@@ -2302,9 +2341,7 @@ async def _run_init_discovery_backfill_async(
             f"补货阶段 {index}/{len(_INIT_DISCOVERY_PLAN)}: {_format_strategy_group(strategies)}"
             f"{label_suffix}"
         )
-        console.print(
-            f"当前池子 {current_pool_count}/{target_pool_count}，本轮请求上限 {request_limit}"
-        )
+        console.print(f"当前池子 {current_pool_count}/{target}，本轮请求上限 {request_limit}")
         discovered = await _run_with_progress(
             discovery_engine.discover(
                 profile,
@@ -2319,34 +2356,43 @@ async def _run_init_discovery_backfill_async(
             eta_seconds=300,
         )
         discovered_count += len(discovered)
-        console.print(
-            "阶段完成: "
-            f"当前池子 {database.count_pool_candidates()}/{target_pool_count}，"
-            f"本轮发现 {len(discovered)} 条"
+        current_pool_count = database.count_pool_candidates()
+        gate.update_inventory(available=current_pool_count, target=target)
+        await _report(
+            2,
+            4,
+            f"已发现 {discovered_count} 条候选，正在生成首轮推荐文案",
         )
 
+        if current_pool_count < target:
+            recommendation_engine = _build_recommendation_engine()
+            try:
+                copied = await recommendation_engine.drain_pending_expression_copy(
+                    profile=profile,
+                    limit=max(1, target),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                copy_error = exc
+                copied = max(0, int(getattr(exc, "completed", 0) or 0))
+            current_pool_count = database.count_pool_candidates()
+            gate.update_inventory(available=current_pool_count, target=target)
+            await _report(
+                3,
+                4,
+                f"已生成 {copied} 条推荐文案，正在验证首轮内容可用性",
+            )
+        console.print(
+            f"阶段完成: 当前池子 {current_pool_count}/{target}，本轮发现 {len(discovered)} 条"
+        )
+
+    available = database.count_pool_candidates()
+    gate.update_inventory(available=available, target=target)
+    if available <= 0:
+        raise InitialPoolUnavailableError(discovered_count=discovered_count) from copy_error
+    await _report(4, 4, f"首轮内容池已就绪（{available} 条可直接浏览）")
     return discovered_count
-
-
-def _build_draft_profile_for_discover(memory: Any) -> Any:
-    """Build a preference-only ``OnionProfile`` so discover can start
-    in parallel with ``build_initial_profile`` (P3).
-
-    The full profile builder runs an LLM synthesis call over history +
-    preference + awareness + insights to produce
-    ``personality_portrait``, ``deep_needs``, ``core_traits`` etc. —
-    fields that *colour* discover's evaluation prompt but aren't
-    load-bearing for relevance scoring (interests + style +
-    favorite_up_users carry the signal). Letting discover use a
-    preference-only draft while the real profile builds in the
-    background overlaps two phases that previously serialised.
-    """
-    from openbiliclaw.soul.profile import OnionProfile
-
-    preference_layer = memory.get_layer("preference").data
-    draft = OnionProfile()
-    draft.populate_from_flat_preference(preference_layer)
-    return draft
 
 
 def _xhs_bootstrap_dedupe_hours() -> float:
@@ -5836,14 +5882,17 @@ async def run_guided_init(
 
       1. fetch B站 + collect cross-platform bootstrap signals → propagate
       2. analyze preferences
-      3/4. build soul profile ‖ backfill discovery pool (parallel)
+      3. build and durably commit the full soul profile
+      4. discover, evaluate, write recommendation copy, and verify the first
+         serviceable pool from that committed profile
 
     Bilibili is optional like every other source (``include_bili``); at
     least one selected source must yield signals or stage 1 raises
     ``GuidedInitError("empty_signals")``. ``client`` may be ``None`` when
     ``include_bili`` is False.
 
-    ``discover_backfill`` is the one genuinely path-specific step: the CLI
+    Stage 4 never starts from a draft profile. ``discover_backfill`` is the one
+    genuinely path-specific step: the CLI
     injects :func:`_run_init_discovery_backfill_async` (one-shot engine);
     the API injects ``controller.run_init_backfill`` (holds the refresh
     lock). When ``coordinator``/``run_id`` are supplied, stage transitions
@@ -5881,14 +5930,17 @@ async def run_guided_init(
     )
     _stage1_source_done = 0
 
-    async def _stage1_begin_source(label: str) -> None:
+    async def _stage1_begin_source(label: str, *, wait_hint: str = "") -> None:
         if coordinator is not None and run_id is not None:
+            note = f"正在采集 {label}"
+            if wait_hint:
+                note += f" · {wait_hint}"
             await coordinator.stage_progress(
                 run_id,
                 1,
                 done=_stage1_source_done,
                 total=_stage1_source_total,
-                note=f"正在采集 {label}",
+                note=note,
             )
 
     def _stage1_finish_source() -> None:
@@ -5956,7 +6008,7 @@ async def run_guided_init(
     # the API event loop isn't frozen for the collect window. CLI output /
     # ordering is unchanged (it's sequential here regardless).
     if include_xhs:
-        await _stage1_begin_source("小红书")
+        await _stage1_begin_source("小红书", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
     xhs_events, xhs_scope_counts, xhs_status = await asyncio.to_thread(
         _collect_xhs_bootstrap_events, xhs_task_id
     )
@@ -5993,7 +6045,7 @@ async def run_guided_init(
             "(开始抢一次浏览器焦点,~60-90 秒)。[/dim]"
         )
     if include_dy:
-        await _stage1_begin_source("抖音")
+        await _stage1_begin_source("抖音", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
     dy_events, dy_scope_counts, dy_status = await asyncio.to_thread(
         _collect_dy_bootstrap_events, dy_task_id
     )
@@ -6032,7 +6084,7 @@ async def run_guided_init(
             "(开始抢一次浏览器焦点,~30-90 秒)。[/dim]"
         )
     if include_yt:
-        await _stage1_begin_source("YouTube")
+        await _stage1_begin_source("YouTube", wait_hint="扩展未响应会在约 5 分钟后自动跳过")
     yt_events, yt_scope_counts, yt_status = await asyncio.to_thread(
         _collect_yt_bootstrap_events, yt_task_id
     )
@@ -6069,7 +6121,7 @@ async def run_guided_init(
             "  [dim]已请求扩展拉知乎浏览 / 收藏 / 点赞(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
     if include_zhihu:
-        await _stage1_begin_source("知乎")
+        await _stage1_begin_source("知乎", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
     zhihu_events, zhihu_scope_counts, zhihu_status = await asyncio.to_thread(
         _collect_zhihu_bootstrap_events, zhihu_task_id
     )
@@ -6127,7 +6179,7 @@ async def run_guided_init(
             "  [dim]已请求扩展拉 Reddit 收藏 / 点赞 / 订阅(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
     if include_reddit:
-        await _stage1_begin_source("Reddit")
+        await _stage1_begin_source("Reddit", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
     reddit_events, reddit_scope_counts, reddit_status = await asyncio.to_thread(
         _collect_reddit_bootstrap_events, reddit_task_id
     )
@@ -6262,34 +6314,51 @@ async def run_guided_init(
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
 
     # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
-    # instead of sitting static (init-progress spec Phase 1). API path maps each
-    # chunk onto coordinator.stage_progress; CLI path (no coordinator) prints an
-    # equivalent line alongside the existing eta countdown (spec Phase 4).
+    # instead of sitting static (init-progress spec Phase 1). We ALWAYS echo the
+    # completion line to stdout (desktop.log captures stdout, not the logger's
+    # openbiliclaw.log — so without this the desktop log shows only the eta
+    # heartbeat and a stall is invisible) and, on the API path, also fan the
+    # count onto coordinator.stage_progress for the GUI. ``_chunk_progress`` is
+    # a live mirror the heartbeat reads so every tick shows "已完成 X/N 批";
+    # when a chunk hangs that count freezes next to the growing clock.
+    _chunk_progress = {"done": 0, "total": 0}
+
     async def _stage2_progress(done: int, total: int) -> None:
+        _chunk_progress["done"] = done
+        _chunk_progress["total"] = total
+        console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
         if coordinator is not None and run_id is not None:
             await coordinator.stage_progress(
                 run_id, 2, done=done, total=total, note=f"第 {done}/{total} 批"
             )
-        else:
-            console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
+
+    def _chunk_status() -> str:
+        total = _chunk_progress["total"]
+        if total <= 0:
+            return "分片准备中"
+        return f"已完成 {_chunk_progress['done']}/{total} 批"
 
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
     try:
-        await asyncio.wait_for(
-            _run_with_progress(
-                soul_engine.analyze_events(
-                    events,
-                    event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
-                    progress_callback=_stage2_progress,
+        with _background_admission_bypass():
+            await asyncio.wait_for(
+                _run_with_progress(
+                    soul_engine.analyze_events(
+                        events,
+                        event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+                        progress_callback=_stage2_progress,
+                    ),
+                    label="分析偏好（分片批处理）",
+                    eta_seconds=180,
+                    status_provider=_chunk_status,
                 ),
-                label="分析偏好（分片批处理）",
-                eta_seconds=180,
-            ),
-            timeout=(
-                profile_analysis_timeout_seconds if profile_analysis_timeout_seconds > 0 else None
-            ),
-        )
+                timeout=(
+                    profile_analysis_timeout_seconds
+                    if profile_analysis_timeout_seconds > 0
+                    else None
+                ),
+            )
     except TimeoutError as exc:
         raise GuidedInitError(
             "analyze_failed",
@@ -6313,10 +6382,17 @@ async def run_guided_init(
         raise GuidedInitError("analyze_failed", message) from exc
     await _stage_done(2)
 
-    # ── Stage 3 + 4: build profile ‖ discovery backfill (parallel) ──
+    # ── Stage 3: build and durably commit the full profile ──
     await _stage_started(3)
-    await _stage_started(4)
-    _print_section_title("3/4 生成画像 + 4/4 发现内容(并发)")
+    _print_section_title("3/4 生成并保存完整画像")
+    if coordinator is not None and run_id is not None:
+        await coordinator.stage_progress(
+            run_id,
+            3,
+            done=0,
+            total=2,
+            note="正在综合偏好、历史与认知线索",
+        )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
         combined_history.append(
@@ -6356,90 +6432,119 @@ async def run_guided_init(
     if x_likes_events or x_bookmark_events:
         combined_history.extend(_x_events_to_history_items(x_likes_events + x_bookmark_events))
 
-    # Discover starts on a preference-only draft so trending / search /
-    # related_chain / explore can score candidates while the LLM
-    # synthesizes the rich personality_portrait / deep_needs fields.
-    draft_profile = _build_draft_profile_for_discover(memory)
+    async def _build_initial_profile() -> Any:
+        with _background_admission_bypass():
+            return await soul_engine.build_initial_profile(combined_history)
 
-    profile_task = asyncio.create_task(
-        asyncio.wait_for(
-            _run_with_progress(
-                soul_engine.build_initial_profile(combined_history),
-                label="生成画像(单次 LLM 综合分析)",
-                eta_seconds=70,
-            ),
-            timeout=profile_build_timeout_seconds if profile_build_timeout_seconds > 0 else None,
-        )
-    )
-    discover_task = asyncio.create_task(
-        asyncio.wait_for(
-            discover_backfill(
-                draft_profile,
-                target_pool_count=target_pool_count,
-                label_suffix=" — 用 P2 草稿画像并发预热",
-            ),
-            timeout=discovery_timeout_seconds if discovery_timeout_seconds > 0 else None,
-        )
-    )
     profile_data: Any = None
     discovered_count = 0
     discover_exc: BaseException | None = None
     discovery_reason: str | None = None
     discovery_detail = ""
+
+    # Profile is load-bearing. CancelledError is deliberately NOT caught so
+    # the API wrapper records `cancelled`, never `completed`.
     try:
-        # Profile is load-bearing. CancelledError is deliberately NOT caught —
-        # it propagates (and the finally tears down the sibling) so the wrapper
-        # records `cancelled`, never `completed`.
-        try:
-            profile_data = await profile_task
-        except Exception as exc:
-            # Surface the real LLM cause (moderation refusal / no provider /
-            # rate limit / timeout) so the init page shows *why* it failed
-            # instead of a generic "稍后重试". Falls back to generic when the
-            # failure carries no recognizable LLM signal.
-            from openbiliclaw.llm.base import describe_llm_failure
-
-            if isinstance(exc, TimeoutError):
-                message = _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE
-            else:
-                llm_reason = describe_llm_failure(exc)
-                message = (
-                    f"画像生成失败：{llm_reason}"
-                    if llm_reason
-                    else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
-                )
-            raise GuidedInitError("profile_failed", message) from exc
-        await _stage_done(3)
-
-        # Discover is best-effort: a normal failure leaves a partial pool the
-        # user can still start with. Cancellation propagates (not caught).
-        try:
-            discovered_count = await discover_task
-        except Exception as exc:
-            discovered_count = 0
-            discover_exc = exc
-            if isinstance(exc, TimeoutError):
-                discovery_reason = "discovery_timeout"
-                discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
-            else:
-                discovery_reason = "discovery_partial"
-                discovery_detail = _INIT_DISCOVERY_PARTIAL_MESSAGE
-        await _stage_done(
-            4,
-            status="warning" if discover_exc is not None else "ok",
-            reason=discovery_reason,
+        profile_data = await asyncio.wait_for(
+            _run_with_progress(
+                _build_initial_profile(),
+                label="生成并保存完整画像(单次 LLM 综合分析)",
+                eta_seconds=70,
+            ),
+            timeout=profile_build_timeout_seconds if profile_build_timeout_seconds > 0 else None,
         )
-    finally:
-        # Guarantee neither parallel task outlives this scope on ANY exit path —
-        # including a CancelledError raised at an await *between* the stages
-        # (e.g. _stage_done(3)'s event publish). An orphaned run_init_backfill
-        # would otherwise keep holding _refresh_lock. Cancel then drain both.
-        for _parallel_task in (profile_task, discover_task):
-            if not _parallel_task.done():
-                _parallel_task.cancel()
-        for _parallel_task in (profile_task, discover_task):
-            with suppress(BaseException):
-                await _parallel_task
+    except Exception as exc:
+        # Surface the real LLM cause (moderation refusal / no provider /
+        # rate limit / timeout) so the init page shows *why* it failed.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        if isinstance(exc, TimeoutError):
+            message = _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE
+        else:
+            llm_reason = describe_llm_failure(exc)
+            message = (
+                f"画像生成失败：{llm_reason}"
+                if llm_reason
+                else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
+            )
+        raise GuidedInitError("profile_failed", message) from exc
+
+    if coordinator is not None and run_id is not None:
+        await coordinator.stage_progress(
+            run_id,
+            3,
+            done=2,
+            total=2,
+            note="完整画像已保存，下一步将严格基于它生成内容",
+        )
+    await _stage_done(3)
+
+    # ── Stage 4: only the committed full profile may drive discovery ──
+    await _stage_started(4)
+    _print_section_title("4/4 建立首轮可用内容池")
+
+    async def _stage4_progress(done: int, total: int, note: str) -> None:
+        if coordinator is not None and run_id is not None:
+            await coordinator.stage_progress(
+                run_id,
+                4,
+                done=done,
+                total=total,
+                note=note,
+            )
+        else:
+            console.print(f"  [dim]首轮内容池：{note}（{done}/{total}）[/dim]")
+
+    await _stage4_progress(0, 4, "完整画像已就绪，准备发现候选内容")
+    backfill_kwargs: dict[str, Any] = {
+        "target_pool_count": target_pool_count,
+        "label_suffix": "",
+    }
+    try:
+        signature = inspect.signature(discover_backfill)
+    except (TypeError, ValueError):
+        accepts_progress_callback = True
+    else:
+        accepts_progress_callback = "progress_callback" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+    if accepts_progress_callback:
+        backfill_kwargs["progress_callback"] = _stage4_progress
+
+    # Stage 4 is best-effort once the full profile exists: timeout/failure is
+    # terminal *partial success*, and clients may enter the app while the
+    # restarted runtime continues replenishment. Cancellation still propagates.
+    try:
+        discovered_count = await asyncio.wait_for(
+            discover_backfill(profile_data, **backfill_kwargs),
+            timeout=discovery_timeout_seconds if discovery_timeout_seconds > 0 else None,
+        )
+        await _stage4_progress(4, 4, "首轮内容已完成评分与推荐文案，可直接浏览")
+    except Exception as exc:
+        from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+        discovered_count = max(0, int(getattr(exc, "discovered_count", 0) or 0))
+        discover_exc = exc
+        if isinstance(exc, TimeoutError):
+            discovery_reason = "discovery_timeout"
+            discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
+        elif isinstance(exc, InitialPoolUnavailableError):
+            discovery_reason = "discovery_partial"
+            discovery_detail = (
+                "画像已生成，首轮发现也已完成"
+                f"（发现 {exc.discovered_count} 条候选），但尚无候选完成评分与推荐文案，"
+                "因此目前没有可直接浏览的首轮内容。本次初始化已按“部分完成”结束，"
+                "系统会在后台继续补齐；你可以先进入应用，并检查 AI 服务与平台登录状态。"
+            )
+        else:
+            discovery_reason = "discovery_partial"
+            discovery_detail = _INIT_DISCOVERY_PARTIAL_MESSAGE
+    await _stage_done(
+        4,
+        status="warning" if discover_exc is not None else "ok",
+        reason=discovery_reason,
+    )
 
     return InitResult(
         history=history,
@@ -6587,13 +6692,13 @@ def init(
         else "拉取所选平台数据（B 站已跳过）"
     )
     console.print(
-        "[bold yellow]⏱  这一步首次运行预计需要 2–5 分钟，"
+        "[bold yellow]⏱  这一步首次运行通常需要 4–10 分钟，"
         "请保持网络畅通别中断。[/bold yellow]\n"
-        "  四个阶段会依次跑：\n"
+        "  四个阶段会严格依次执行，完整画像保存后才开始内容发现：\n"
         f"    1/4  {stage1_label}\n"
         "    2/4  分析偏好（LLM 调用，≈ 30–90s）\n"
-        "    3/4  生成灵魂画像（LLM 调用，≈ 30–60s）\n"
-        "    4/4  发现首轮内容池（多策略并发 + LLM 评估，≈ 1–3 分钟）\n"
+        "    3/4  生成并保存完整画像（LLM 调用，≈ 30–70s）\n"
+        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案，≈ 2–5 分钟）\n"
         "[dim]全程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。[/dim]\n"
     )
     if not include_bili:

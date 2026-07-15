@@ -128,7 +128,6 @@
     const INIT_STATUS_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
     const INIT_STATUS_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STATUS_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
-    const INIT_FIRST_POOL_WAIT_TEXT = "画像已生成，正在整理首轮内容池；等第一批内容可刷后才算初始化完成。";
     const CHAT_PLACEHOLDERS = [
       "说说你最近怎么想——你是什么样的人、喜欢什么、讨厌什么，都可以直接说。",
       "比如：我喜欢慢慢讲清楚的长视频，讨厌标题党和故意搞悬念的。",
@@ -1286,7 +1285,7 @@
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "整个过程通常需要 2–5 分钟，期间可离开此页面，进度会保留。";
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–10 分钟；多平台采集或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
@@ -1416,28 +1415,6 @@
       return base || progress?.failedReason || "初始化未完成，请稍后重试。";
     }
 
-    function initContentReadyFromRuntime(status = state.runtimeStatus) {
-      const runtime = normalizeRuntimeStatus(status);
-      return Boolean(runtime) && (
-        runtime.pool_available_count > 0 ||
-        runtime.recommendation_count > 0
-      );
-    }
-
-    function initWaitingForFirstPool(status = state.initStatus) {
-      return Boolean(status?.initialized) && !initContentReadyFromRuntime(state.runtimeStatus);
-    }
-
-    async function refreshRuntimeStatusForInitContent() {
-      try {
-        const runtime = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 60000 });
-        state.runtimeStatus = normalizeRuntimeStatus(runtime);
-      } catch {
-        // Keep the last runtime snapshot; the init poll will retry.
-      }
-      return initContentReadyFromRuntime(state.runtimeStatus);
-    }
-
     function selectedInitSourcesFromDom() {
       return Array.from(document.querySelectorAll("input[data-init-source]"))
         .filter((input) => input.checked)
@@ -1503,7 +1480,7 @@
 
     function initOnboardingPhase(status, progress) {
       if (state.initBusy) return "busy";
-      if (Boolean(status?.initialized)) return initContentReadyFromRuntime(state.runtimeStatus) ? "completed" : "running";
+      if (Boolean(status?.initialized)) return "completed";
       if (Boolean(status?.running)) return "running";
       if (progress.failed) return "failed";
       return "idle";
@@ -1558,18 +1535,13 @@
       const status = state.initStatus;
       const progress = initProgressView(status);
       const isRunning = Boolean(status?.running);
-      const waitingForFirstPool = initWaitingForFirstPool(status);
       const embeddingPull = embeddingPullProgressView(status);
-      const displayProgress = waitingForFirstPool
-        ? { ...progress, active: true, failed: false, pct: 95, stageLabel: "4/4 整理首轮内容池" }
-        : embeddingPull.active && !isRunning
+      const displayProgress = embeddingPull.active && !isRunning
           ? { active: true, failed: false, pct: embeddingPull.pct, label: embeddingPull.label, stageLabel: "" }
         : progress;
-      const alreadyInitialized = Boolean(status?.initialized) && !waitingForFirstPool;
-      const showProgress = isRunning || displayProgress.failed || waitingForFirstPool || embeddingPull.active;
-      const reason = waitingForFirstPool
-        ? (status?.partial_success ? initStatusReasonText(status) : state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
-        : displayProgress.failed
+      const alreadyInitialized = Boolean(status?.initialized);
+      const showProgress = isRunning || displayProgress.failed || embeddingPull.active;
+      const reason = displayProgress.failed
           ? (state.initReason || initFailureText(status, displayProgress))
           : (state.initReason || initStatusReasonText(status) || "");
       const phase = initOnboardingPhase(status, displayProgress);
@@ -1577,14 +1549,12 @@
         ? "检查中…"
         : isRunning
           ? "初始化进行中…"
-          : waitingForFirstPool
-            ? "整理首轮内容…"
           : alreadyInitialized
-            ? "已初始化"
+            ? status?.partial_success ? "画像已就绪，后台补池中" : "已初始化"
             : displayProgress.failed
               ? "重试初始化"
               : "开始初始化";
-      const buttonDisabled = state.initBusy || isRunning || waitingForFirstPool || alreadyInitialized;
+      const buttonDisabled = state.initBusy || isRunning || alreadyInitialized;
       const staleness = stalenessView(status);
       const stallText = isRunning
         ? staleness.fresh
@@ -1593,7 +1563,7 @@
         : "";
       // Expectation management near the start button while a run can begin.
       const expectationText =
-        !isRunning && !waitingForFirstPool && !alreadyInitialized ? INIT_EXPECTATION_HINT : "";
+        !isRunning && !alreadyInitialized ? INIT_EXPECTATION_HINT : "";
       const existing = grid.querySelector(".init-onboarding");
       if (existing?.dataset.initPhase === phase && phase !== "idle" && phase !== "busy") {
         updateInitOnboardingStatus(existing, status, displayProgress, reason, buttonLabel, buttonDisabled);
@@ -1606,7 +1576,7 @@
           <div class="init-onboarding-copy">
             <p class="eyebrow">Guided init</p>
             <h3>还没完成初始化</h3>
-            <p class="video-meta">先检查 AI 服务和所选平台登录，通过后在这里一步步拉取数据、生成画像、补齐首轮内容池。B 站默认勾选但可取消，至少保留一个来源。</p>
+            <p class="video-meta">先检查 AI 服务和所选平台登录，再依次拉取数据、分析偏好、保存完整画像，最后严格基于这份画像生成首轮可用推荐。B 站默认勾选但可取消，至少保留一个来源。</p>
           </div>
           ${isRunning ? "" : initSourcesMarkup()}
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
@@ -1671,26 +1641,22 @@
       }
       initRefreshInFlight = true;
       clearInitPolling();
-      const wasInitialized = Boolean(state.initStatus?.initialized) && initContentReadyFromRuntime(state.runtimeStatus);
+      const wasInitialized = Boolean(state.initStatus?.initialized);
       try {
         const status = await requestJsonStrict(ENDPOINTS.initStatus, { timeoutMs: 60000 });
         state.initStatus = status;
         state.initReason = "";
         if (status?.initialized) {
-          if (!(await refreshRuntimeStatusForInitContent())) {
-            state.initReason = status?.partial_success
-              ? initStatusReasonText(status)
-              : INIT_FIRST_POOL_WAIT_TEXT;
-            renderAll();
-            scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
-            return;
-          }
           renderAll();
           clearInitPolling();
           initRefreshPending = false;
           if (!wasInitialized) {
             scheduleBackendHydration();
-            showToast("初始化完成，正在加载推荐");
+            showToast(
+              status?.partial_success
+                ? "完整画像已就绪；首轮推荐将在后台继续补齐"
+                : "初始化完成，正在加载推荐"
+            );
           }
           return;
         }
@@ -1731,15 +1697,8 @@
       }
       if (status.initialized) {
         state.initBusy = false;
-        if (await refreshRuntimeStatusForInitContent()) {
-          state.initReason = "";
-          scheduleBackendHydration();
-        } else {
-          state.initReason = status?.partial_success
-            ? initStatusReasonText(status)
-            : INIT_FIRST_POOL_WAIT_TEXT;
-          scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
-        }
+        state.initReason = status?.partial_success ? initStatusReasonText(status) : "";
+        scheduleBackendHydration();
         renderAll();
         return;
       }
@@ -5124,8 +5083,12 @@
 
     function shouldShowInitOnboarding(status) {
       const runtime = normalizeRuntimeStatus(status);
-      if (initWaitingForFirstPool(state.initStatus)) return true;
       if (Boolean(state.initStatus?.running)) return true;
+      // init-status owns the terminal contract: normal completion already
+      // verified a serviceable canonical row, while partial completion
+      // explicitly lets the user enter and leaves replenishment to runtime.
+      // A stale runtime snapshot must not recreate the onboarding card.
+      if (state.initStatus?.initialized === true) return false;
       // /api/init-status is the authoritative pre-init source. runtime-status
       // can be transiently unreachable (state.runtimeStatus stays null) or get
       // rebuilt from field-less runtime events / message merges, where the
@@ -6492,11 +6455,10 @@
         state.initStatus = snapshot;
         renderVideos();
         // Re-attach the init poll if a run is live at load time. Hydrate only
-        // fetches init-status once, while the poll observes quiet heartbeats and
-        // first-pool readiness when runtime events are unavailable.
+        // fetches init-status once, while the poll observes quiet heartbeats
+        // when runtime events are unavailable.
         if (snapshot.running
-          || embeddingPullProgressView(snapshot).active
-          || initWaitingForFirstPool(snapshot)) {
+          || embeddingPullProgressView(snapshot).active) {
           scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         }
       }

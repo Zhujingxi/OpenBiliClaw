@@ -26,7 +26,12 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _TOTAL_STAGES = 4
-_STAGE_LABELS = {1: "拉取数据", 2: "分析偏好", 3: "生成画像", 4: "发现内容池"}
+_STAGE_LABELS = {
+    1: "拉取数据",
+    2: "分析偏好",
+    3: "生成并保存完整画像",
+    4: "生成首轮可用推荐",
+}
 _ACTIVE = ("starting", "running")
 
 # Typical per-stage duration surfaced to the GUI so the progress bar can render
@@ -34,9 +39,9 @@ _ACTIVE = ("starting", "running")
 # show "本阶段通常约 X 分钟". Calibration provenance: stages 2/3 migrated from
 # the live CLI eta constants (``cli.py`` _run_with_progress calls: 180s analyze,
 # 70s profile); stages 1/4 are typical observed values for the fetch and
-# discovery-backfill phases. These are display-only hints — reopen calibration
+# discovery + evaluation + expression-copy phases. These are display-only hints — reopen calibration
 # after any LLM provider / model swap (CLAUDE.md pitfall rule 3).
-_STAGE_ETAS = {1: 90, 2: 180, 3: 70, 4: 120}
+_STAGE_ETAS = {1: 90, 2: 180, 3: 70, 4: 300}
 
 
 def _initial_stages() -> list[dict[str, Any]]:
@@ -63,8 +68,8 @@ class InitCoordinator:
         self._ctx = ctx
         self._current_task: asyncio.Task[Any] | None = None
         self._enqueued_task_ids: set[str] = set()
-        # Serializes status writes + event publishes so the parallel stage 3/4
-        # progress updates can't interleave / reorder ``sequence`` (spec §5e).
+        # Serializes status writes + event publishes so heartbeat and
+        # fine-grained stage progress cannot interleave / reorder ``sequence``.
         self._write_lock = asyncio.Lock()
         self._seq = 0
 

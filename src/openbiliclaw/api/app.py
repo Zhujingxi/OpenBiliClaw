@@ -2709,13 +2709,20 @@ def create_app(
         coord = ctx.init_coordinator
 
         async def _api_discover_backfill(
-            profile: Any, *, target_pool_count: int, label_suffix: str = ""
+            profile: Any,
+            *,
+            target_pool_count: int,
+            label_suffix: str = "",
+            progress_callback: Any = None,
         ) -> int:
             # API path backfills through the live controller so it holds the
             # refresh lock (B1); ``label_suffix`` is CLI-only console flavour.
             return int(
                 await ctx.runtime_controller.run_init_backfill(
-                    profile, target_pool_count, fully_parallel=True
+                    profile,
+                    target_pool_count,
+                    fully_parallel=True,
+                    progress_callback=progress_callback,
                 )
             )
 
@@ -8503,7 +8510,9 @@ def create_app(
         "ok": "X 来源正常，cookie 有效。",
         "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
         "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。",
+        "rate_limited": (
+            "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。"
+        ),
         "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
     }
 
@@ -9688,9 +9697,7 @@ def create_app(
         publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
         if callable(publish):
             with suppress(Exception):
-                delivered = bool(
-                    await publish({"type": "extension_reload", "source": "dev"})
-                )
+                delivered = bool(await publish({"type": "extension_reload", "source": "dev"}))
         return {"ok": True, "delivered": delivered}
 
     def _autostart_status_out(

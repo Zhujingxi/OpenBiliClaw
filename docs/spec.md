@@ -208,14 +208,19 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 ## 3. 系统架构
 
 ```text
-interactive ─────────────────────────────────────────┐
+interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ provider
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
+             │  ├─ supply includes explore queries / source extraction while low
              │  └─ while queued: guarantee 2, may borrow all 3
              │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
+
+guided init: signals → preferences → full profile commit
+                                  → discovery → evaluation → copy → canonical pool ready
+                                  → terminal → runtime schedules optional probes
 ```
 
 下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
@@ -283,7 +288,7 @@ background ─ background admission (default 3) ──────┘
 │  │ 画像编辑：编辑面板 -> /api/profile/edit -> 覆盖层（插件/移动/桌面三端） │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 引导初始化：画像信号来源选择 + 前置清单 -> /api/init + 进度流（B 站可取消；Reddit 可独立初始化）│ │
+│  │ 引导初始化：来源 + 前置清单 -> /api/init；完整画像提交 -> 发现/评估/表达 -> canonical ready │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
 │                      Agent 核心层                             │
@@ -313,7 +318,7 @@ background ─ background admission (default 3) ──────┘
 │  │     Interest probes: near 5 + challenge 3 独立 active 额度 │   │
 │  │     Probe memory: domain / axis / distance + exploration buffer │ │
 │  │     AccountSync: B 站账号增量 -> Memory/Soul bootstrap     │   │
-│  │     Guided init: selected profile-signal sources + LLM/embedding live probe -> run_guided_init + InitCoordinator │ │
+│  │     Guided init: stage 3 full-profile commit barrier -> stage 4 discover/evaluate/copy/canonical verify │ │
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │

@@ -8,7 +8,10 @@ from typing import Any
 
 import pytest
 
-from openbiliclaw.runtime.refresh import ContinuousRefreshController
+from openbiliclaw.runtime.refresh import (
+    ContinuousRefreshController,
+    InitialPoolUnavailableError,
+)
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 
 
@@ -125,6 +128,70 @@ async def test_run_init_backfill_releases_lock_on_cancel() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert ctrl._refresh_lock.locked() is False
+
+
+async def test_run_init_backfill_drains_copy_before_reporting_success() -> None:
+    class _CanonicalDB:
+        available = 0
+
+        def count_pool_candidates(self, **_kw: Any) -> int:
+            return self.available
+
+    class _Copy:
+        def __init__(self, db: _CanonicalDB) -> None:
+            self.db = db
+            self.calls: list[tuple[Any, int]] = []
+
+        async def drain_pending_expression_copy(self, *, profile: Any, limit: int) -> int:
+            self.calls.append((profile, limit))
+            self.db.available = 1
+            return 1
+
+    db = _CanonicalDB()
+    disc = _FakeDisc()
+    copy = _Copy(db)
+    ctrl = _ctrl(db, disc)
+    ctrl.recommendation_engine = copy
+    progress: list[tuple[int, int, str]] = []
+
+    async def _progress(done: int, total: int, note: str) -> None:
+        progress.append((done, total, note))
+
+    profile = object()
+    discovered = await ctrl.run_init_backfill(
+        profile,
+        target_pool_count=15,
+        progress_callback=_progress,
+    )
+
+    assert discovered == 2
+    assert copy.calls == [(profile, 15)]
+    assert db.available == 1
+    assert any(done == 2 and "生成首轮推荐文案" in note for done, _total, note in progress)
+    assert progress[-1] == (4, 4, "首轮内容池已就绪（1 条可直接浏览）")
+
+
+async def test_run_init_backfill_rejects_raw_only_result_and_releases_lock() -> None:
+    class _RawOnlyDB:
+        def count_pool_candidates(self, **_kw: Any) -> int:
+            return 0
+
+        def count_pool_readiness(self, **_kw: Any) -> dict[str, int]:
+            return {"available": 0, "pending": 2}
+
+    class _NoCopy:
+        async def drain_pending_expression_copy(self, *, profile: Any, limit: int) -> int:
+            return 0
+
+    ctrl = _ctrl(_RawOnlyDB(), _FakeDisc())
+    ctrl.recommendation_engine = _NoCopy()
+
+    with pytest.raises(InitialPoolUnavailableError) as excinfo:
+        await ctrl.run_init_backfill(object(), target_pool_count=15)
+
+    assert excinfo.value.discovered_count == 2
+    assert excinfo.value.pending_count == 2
     assert ctrl._refresh_lock.locked() is False
 
 
