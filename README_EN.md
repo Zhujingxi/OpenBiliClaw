@@ -601,15 +601,17 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model connections + ordered Chat/Embedding routes (stage 6) │
-│ native [models] strict parse/revision → Config.models      │
+│ Transactional ordered Chat/Embedding model routes (stage 7) │
+│ native [models] / legacy [llm] → ModelConfigService path lock │
 │ legacy [llm] exact raw/URL inspection → chat/embed + report │
-│ closed resolution → authoritative validation → valid memory │
+│ revision + credential action + resolution + local fence    │
+│ complete candidate build → legacy backup → temp/fsync/replace │
+│ short RuntimeContext swap; failure/cancel restores bytes + identity │
 │ Chat record → ID adapter → OrderedLLMRoute (global order)  │
 │ total deadline · revision circuits · exact probe · safe attempts │
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
-│ Task 8: RuntimeContext/API/UI composition + transaction backup │
+│ Task 8: production consumer/API/UI composition + old constructor removal │
 ├────────────────────────────────────────────────┤
 │ LLMService paths → one route; caller is concurrency/usage only │
 │   LLM adapters · Source adapters (SourceAdapter) │

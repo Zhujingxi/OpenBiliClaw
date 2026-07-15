@@ -604,15 +604,17 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型连接 + 有序 Chat / Embedding route（阶段 6）       │
-│ native [models] strict parse/revision → Config.models    │
+│ 模型连接 + 事务型有序 Chat / Embedding route（阶段 7）   │
+│ native [models] / legacy [llm] → ModelConfigService path lock │
 │ legacy [llm] 精确 raw/URL 检查 → chat/embed 映射与报告   │
-│ 封闭 resolution → 权威校验 → 有效内存候选                │
+│ revision + credential action + resolution + local fence  │
+│ 完整 candidate build → legacy backup → temp/fsync/replace │
+│ RuntimeContext 短锁 swap；失败/取消恢复旧字节与精确对象身份 │
 │ Chat 记录 → ID adapter → OrderedLLMRoute（全局原序）      │
 │ 总 deadline · revision circuit · exact probe · 安全 attempt │
 │ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │
 │ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
-│ Task 8 待办：RuntimeContext/API/UI composition 与事务 backup │
+│ Task 8 待办：production consumer/API/UI composition 与旧构造器删除 │
 ├────────────────────────────────────────────────┤
 │ LLMService 全路径 → 同一 route；caller 仅并发/usage    │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

@@ -2771,6 +2771,95 @@ def _render_raw_model_table(name: str, raw: Mapping[str, object]) -> list[str]:
     return lines
 
 
+_MODEL_DOCUMENT_ROOTS = frozenset({"llm", "models"})
+
+
+def _toml_header_root(line: str) -> str | None:
+    """Return a table header's decoded root key using ``tomllib`` semantics."""
+    candidate = line.lstrip()
+    if not candidate.startswith("["):
+        return None
+    try:
+        parsed = tomllib.loads(candidate.rstrip("\r\n") + "\n")
+    except tomllib.TOMLDecodeError:
+        return None
+    roots = list(parsed)
+    return roots[0] if len(roots) == 1 else None
+
+
+def render_model_config_document(original: bytes, models: ModelConfig) -> bytes:
+    """Replace model authority while preserving every unrelated source byte.
+
+    The complete source is parsed first, then table-header roots are decoded by
+    ``tomllib`` rather than a second hand-written TOML key parser.  Existing
+    ``[models]`` and legacy ``[llm]`` blocks are removed wherever they occur and
+    one native section is inserted at the first model block.  Inline/dotted
+    model authority that cannot be isolated safely fails closed.
+    """
+    try:
+        text = original.decode("utf-8")
+        parsed = tomllib.loads(text) if text else {}
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise ConfigError("无法安全保存模型配置：现有配置文件不是有效 TOML。") from None
+
+    lines = text.splitlines(keepends=True)
+    rendered_parts: list[str | None] = []
+    roots_seen: set[str] = set()
+    skipping_model_block = False
+    trailing_trivia: list[str] = []
+    marker_added = False
+    for line in lines:
+        root = _toml_header_root(line)
+        if root is not None:
+            if skipping_model_block:
+                if root not in _MODEL_DOCUMENT_ROOTS:
+                    rendered_parts.extend(trailing_trivia)
+                trailing_trivia.clear()
+            skipping_model_block = root in _MODEL_DOCUMENT_ROOTS
+            if skipping_model_block:
+                roots_seen.add(root)
+                if not marker_added:
+                    rendered_parts.append(None)
+                    marker_added = True
+                continue
+            rendered_parts.append(line)
+            continue
+        if skipping_model_block:
+            if not line.strip() or line.lstrip().startswith("#"):
+                trailing_trivia.append(line)
+            else:
+                trailing_trivia.clear()
+            continue
+        rendered_parts.append(line)
+    if skipping_model_block:
+        rendered_parts.extend(trailing_trivia)
+
+    for root in _MODEL_DOCUMENT_ROOTS:
+        if root in parsed and root not in roots_seen:
+            raise ConfigError("无法安全保存模型配置：模型配置必须使用明确的 TOML 表头。")
+
+    newline = "\r\n" if "\r\n" in text else "\n"
+    model_text = newline.join(render_model_config(models)) + newline
+    if marker_added:
+        output = "".join(model_text if part is None else part for part in rendered_parts)
+    else:
+        output = text
+        if output and not output.endswith(("\n", "\r")):
+            output += newline
+        output += model_text
+
+    try:
+        reparsed = tomllib.loads(output)
+        raw_models = reparsed.get("models")
+        if not isinstance(raw_models, Mapping) or "llm" in reparsed:
+            raise ConfigError("无法安全保存模型配置：未能生成唯一的 [models] 配置。")
+        if parse_model_config(raw_models) != models:
+            raise ConfigError("无法安全保存模型配置：模型配置写入校验失败。")
+    except (tomllib.TOMLDecodeError, ModelConfigParseError, ValueError, TypeError):
+        raise ConfigError("无法安全保存模型配置：未能生成有效的 [models] 配置。") from None
+    return output.encode("utf-8")
+
+
 def _render_legacy_llm_lines(config: Config) -> list[str]:
     lines = [
         "[llm]",

@@ -376,19 +376,23 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│          模型连接 + 有序 Chat / Embedding route（阶段 6）       │
+│       模型连接 + 事务型有序 Chat / Embedding route（阶段 7）     │
 │ native [models] → strict parser/revision ────────────────┐    │
 │ legacy [llm] → exact raw/URL inspection → chat/embed map ┤    │
 │                 → secret-safe report → closed resolution │    │
 │                 → authoritative final validation ────────┤    │
-│                                                         └→ Config.models（内存）│
+│                                                         └→ ModelConfigService path lock │
+│ redacted snapshot/revision → credential action → local fence │
+│ build complete RuntimeContext candidate → legacy backup      │
+│ same-dir temp/file fsync/replace/dir fsync → pointer swap     │
+│ swap failure/cancel → restore old bytes, mode, exact identity │
 │ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
 │                                   ├→ total deadline + safe attempts │
 │                                   └→ revision-aware CircuitTable   │
 │ Embedding providers → shared settings adapter → OrderedEmbeddingRoute │
 │                                   ├→ finite/dimension validation + circuit │
 │                                   └→ fixed PNG exact probe + shared cache namespace │
-│ 普通保存保留 raw；Task 8 负责 RuntimeContext/API/UI composition 与事务 │
+│ 普通保存保留 raw；Task 8 负责 production consumer/API/UI composition │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │

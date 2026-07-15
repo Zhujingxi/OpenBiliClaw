@@ -67,6 +67,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
+| 模型候选 staging 与事务恢复钩子（阶段 7） | ✅（生产 composition 待 Task 8） | `RuntimeContext.build_model_candidate()` 在写盘前构造完整 Chat adapter route 与共享设置 Embedding service，但不改变当前指针；`swap_model_candidate()` / `restore_model_candidate()` 只在短锁内交换精确对象身份，让旧请求继续持有旧 route。`probe_model_draft()` 只探测指定 ID：预期 Provider/transport 失败返回固定、脱敏结果，程序错误与取消继续传播。`ModelConfigService` 在 swap 失败或取消时先恢复旧配置字节与旧对象，再返回错误或继续传播取消。 |
 | 配置热重载 LLM override | ✅ | `RuntimeContext._rebuild_components()` 从 config 构造 `module_overrides`，同时注入主 `LLMService` 与 `SoulEngine` 内部 service；热重载后的正向兴趣和避雷 speculator tick 都 detached 到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应。 |
 | 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
 | 原生保存 service 热重载 | ✅ | `saved_sync_service` 是可替换组件：每次构造新 `BilibiliAPIClient` 时同步创建 router + 六平台 extension adapters + `BilibiliNativeSaveAdapter` + `SavedSyncService`。重载先取消旧 registry inflight；所有新组件构造成功后才原子发布，任一构造失败保留完整旧组件与稳定 broker。 |
@@ -85,6 +86,20 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
   root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
 
 ## 公开 API
+
+阶段 7 的模型 runtime coordinator 边界：
+
+```python
+candidate = await context.build_model_candidate(models, revision)
+previous = await context.swap_model_candidate(candidate)
+await context.restore_model_candidate(previous)
+result = await context.probe_model_draft(connection_or_provider, embedding_settings)
+```
+
+- `build_model_candidate()` 构造全部 adapter、`OrderedLLMRoute` 与 ordered Embedding service，不交换生产引用，也不发起探测请求。
+- `current_model_candidate` 返回新请求将取得的不可变候选身份；`swap_model_candidate()` 与 `restore_model_candidate()` 在同一个短异步锁内替换指针。
+- `probe_model_draft()` 构造只含目标记录的 route，Chat 使用 exact connection 调用，Embedding 使用 exact provider 与共享 settings；不遍历 fallback、不落盘。adapter/route 归一化的 `LLMProviderError` 转成不含上游详情的 `ModelConfigProbeResult`，未知程序错误不被伪装成探测失败。
+- 这些钩子当前只服务 `ModelConfigService` 的可构造性、交换与回滚契约；Task 8 才会把现有 production consumer 从 legacy registry 全面接到该 candidate bundle。
 
 扩展共享原生保存基础（6/6 executor 已接、fixture 全覆盖，并于 2026-07-14 完成 favorite + watch-later/fallback 真实账号验证）：
 
@@ -475,6 +490,8 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 ### Config recovery boundary
 
 配置恢复是 runtime 和 API 的交界：`/api/config` 写盘前先校验新配置可构建 LLM registry，正常模式下写入后调用 `RuntimeContext.rebuild_from_config()` 与 `restart_background_tasks()`。热重载失败会恢复 `config.toml.bak`，并把 `rollback_applied` 返回给调用方；降级模式不做热重载，保存成功后返回 `restart_required=true`，要求用户重启 daemon 让新的 registry 生效。
+
+原生模型配置使用独立的阶段 7 事务边界：`ModelConfigService` 在 path lock 内执行 revision guard、credential merge、migration resolution、validation、candidate build、legacy backup、原子替换与短锁 pointer swap。swap 异常或 `CancelledError` 都会先按事务前快照恢复文件与 `current_model_candidate`；取消随后原样传播。该边界不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild，也尚未由 API 路由暴露。
 
 热重载成功后，所有可替换 LLM 入口都会拿到同一份 `module_overrides_from_config(config)`。稳定 gate 的 proposed target/inventory 直到全部新组件构造成功并完成 atomic swap 后才更新；晚期构造失败保留旧 target/state，不会让仍在运行的旧 runtime 提前进入新配置的 refill 模式：
 

@@ -26,9 +26,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openbiliclaw.config import llm_concurrency_from_config as _llm_concurrency_from_config
 from openbiliclaw.runtime.presence import PresenceTracker
@@ -40,6 +41,13 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
     from openbiliclaw.config import Config
+    from openbiliclaw.model_config import (
+        ChatConnection,
+        EmbeddingModelSettings,
+        EmbeddingProviderConfig,
+        ModelConfig,
+    )
+    from openbiliclaw.model_config.service import ModelConfigProbeResult
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -246,6 +254,16 @@ def build_youtube_discovery_producer(
     )
 
 
+@dataclass(frozen=True)
+class _StagedModelCandidate:
+    """Task-7-only model candidate; Task 8 owns production bundle cutover."""
+
+    revision: str
+    models: ModelConfig = field(repr=False)
+    chat_route: object = field(repr=False)
+    embedding_service: object | None = field(default=None, repr=False)
+
+
 @dataclass
 class RuntimeContext:
     """Mutable holder for all runtime components used by API endpoints."""
@@ -279,6 +297,16 @@ class RuntimeContext:
     # (review R2 A-1). All three construct paths inherit it via the property.
     _init_coordinator: Any = field(default=None, init=False, repr=False, compare=False)
     _init_prereqs: Any = field(default=None, init=False, repr=False, compare=False)
+    # Staged model-only pointer used by ModelConfigService transactions. Task 8
+    # will compose and wire the production RuntimeModelBundle; this pointer is
+    # deliberately separate from the legacy swappable component fields below.
+    _model_candidate: object | None = field(default=None, init=False, repr=False, compare=False)
+    _model_swap_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     # ── Swappable (rebuilt on hot-reload) ───────────────────────────
     config: Any = None
@@ -330,6 +358,148 @@ class RuntimeContext:
                 ),
                 task_starter=lambda name, coro: self.task_registry.track(name, coro),
             )
+
+    @property
+    def current_model_candidate(self) -> object | None:
+        """Return the immutable candidate identity held by new model callers."""
+        return self._model_candidate
+
+    async def build_model_candidate(
+        self,
+        models: ModelConfig,
+        revision: str,
+    ) -> object:
+        """Build every model adapter/route before a persistence transaction.
+
+        This intentionally does not rewire production consumers; Task 8 owns
+        that cutover. It proves the complete native model route is constructible
+        before Task 7 writes bytes to disk.
+        """
+        from openbiliclaw.llm.connection_factory import (
+            AdapterRuntimeOptions,
+            build_chat_adapter,
+        )
+        from openbiliclaw.llm.registry import build_ordered_embedding_service
+        from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+
+        options = AdapterRuntimeOptions(
+            timeout_seconds=float(models.chat.timeout_seconds),
+            environment=os.environ,
+        )
+        chat_route = OrderedLLMRoute(
+            tuple(
+                RouteConnection(
+                    connection=connection,
+                    adapter=build_chat_adapter(connection, options),
+                )
+                for connection in models.chat.connections
+            ),
+            revision=revision,
+            timeout_seconds=float(models.chat.timeout_seconds),
+        )
+        embedding_service = build_ordered_embedding_service(
+            models.embedding,
+            revision=revision,
+            runtime_options=options,
+        )
+        return _StagedModelCandidate(
+            revision=revision,
+            models=models,
+            chat_route=chat_route,
+            embedding_service=embedding_service,
+        )
+
+    async def swap_model_candidate(self, candidate: object) -> object | None:
+        """Swap the staged pointer under a short lock and return prior identity."""
+        async with self._model_swap_lock:
+            previous = self._model_candidate
+            self._model_candidate = candidate
+            return previous
+
+    async def restore_model_candidate(self, candidate: object | None) -> None:
+        """Restore one exact prior identity after persistence/swap failure."""
+        async with self._model_swap_lock:
+            self._model_candidate = candidate
+
+    async def probe_model_draft(
+        self,
+        draft: ChatConnection | EmbeddingProviderConfig,
+        settings: EmbeddingModelSettings | None = None,
+    ) -> ModelConfigProbeResult:
+        """Probe exactly one draft without fallback, cache, or persistence."""
+        from openbiliclaw.llm.base import LLMProviderError
+        from openbiliclaw.llm.connection_factory import (
+            AdapterRuntimeOptions,
+            build_chat_adapter,
+            build_embedding_adapter,
+        )
+        from openbiliclaw.llm.embedding_route import OrderedEmbeddingRoute
+        from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+        from openbiliclaw.model_config import (
+            ChatConnection,
+            EmbeddingModelSettings,
+            EmbeddingProviderConfig,
+        )
+        from openbiliclaw.model_config.service import ModelConfigProbeResult
+
+        options = AdapterRuntimeOptions(timeout_seconds=30.0, environment=os.environ)
+        try:
+            if isinstance(draft, ChatConnection):
+                chat_adapter = build_chat_adapter(draft, options)
+                chat_route = OrderedLLMRoute(
+                    (RouteConnection(connection=draft, adapter=chat_adapter),),
+                    revision="draft-probe",
+                    timeout_seconds=30.0,
+                )
+                await chat_route.complete_connection(
+                    draft.id,
+                    [{"role": "user", "content": "Reply with OK."}],
+                    max_tokens=8,
+                    ignore_circuit=True,
+                )
+                return ModelConfigProbeResult(
+                    ok=True,
+                    connection_id=draft.id,
+                    capability="chat",
+                )
+            if isinstance(draft, EmbeddingProviderConfig) and isinstance(
+                settings,
+                EmbeddingModelSettings,
+            ):
+                embedding_adapter = build_embedding_adapter(draft, settings, options)
+                embedding_route = OrderedEmbeddingRoute(
+                    (embedding_adapter,),
+                    settings=settings,
+                    revision="draft-probe",
+                )
+                result = await embedding_route.probe_provider(draft.id)
+                return ModelConfigProbeResult(
+                    ok=True,
+                    connection_id=draft.id,
+                    capability="embedding",
+                    observed_dimension=result.observed_dimension,
+                )
+        except LLMProviderError:
+            # Adapter construction and exact routes normalize expected remote,
+            # credential, and capability failures to this secret-safe boundary.
+            # Programming errors intentionally propagate to the caller.
+            capability: Literal["chat", "embedding"] = (
+                "embedding" if isinstance(draft, EmbeddingProviderConfig) else "chat"
+            )
+            return ModelConfigProbeResult(
+                ok=False,
+                connection_id=str(getattr(draft, "id", "")),
+                capability=capability,
+                error_code="probe_failed",
+                message="The exact model draft probe failed.",
+            )
+        return ModelConfigProbeResult(
+            ok=False,
+            connection_id=str(getattr(draft, "id", "")),
+            capability="embedding",
+            error_code="invalid_probe_draft",
+            message="The exact model draft is incomplete.",
+        )
 
     def add_pool_inventory_commit_subscriber(self, callback: Any) -> None:
         """Register a stable post-commit observer once for this context."""

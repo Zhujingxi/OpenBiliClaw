@@ -14,29 +14,32 @@ background ─ background admission (default 3) ──────┘
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
 
-model connection + ordered Chat/Embedding runtime (stage 6; composition cutover pending)
+model connection + transactional ordered Chat/Embedding runtime (stage 7)
 ├─ native [models] ─ strict parser/revision ────────────────┐
 └─ legacy [llm] ─ exact raw + endpoint inspection ─────────┤
                    ├─ chat / embedding mapping ─ report ───┤
                    └─ closed resolutions ─ final validator ┤
-                                                           └─ Config.models (memory)
-                                                                │
-                                                                ▼
-                                                           connection_factory
-                                                           ├─ ID-named Chat adapters ─ OrderedLLMRoute
-                                                           │                         ├─ total deadline
-                                                           │                         └─ revision-aware CircuitTable
-                                                           └─ ID-named Embedding adapters ─ OrderedEmbeddingRoute
-                                                                                      ├─ shared settings/cache namespace
-                                                                                      └─ vector validation/config circuit/exact probe
-   LLMService callers ─ one global complete() path ──────────────┘
-   ordinary saves preserve parsed raw [models]/[llm]; no migration write;
-   Task 8 still owns RuntimeContext/API/UI composition and old constructor removal
+                                                           └─ ModelConfigService (per-path lock)
+                                                              ├─ public redacted snapshot + revision guard
+                                                              ├─ keep/set/clear/env + local override fence
+                                                              ├─ build complete RuntimeContext candidate
+                                                              └─ legacy backup → temp/fsync/replace → pointer swap
+                                                                                 └─ failure/cancel: disk + identity rollback
+                                                                                              │
+                                                                                              ▼
+                                                                                         connection_factory
+                                                                                         ├─ ID Chat adapters ─ OrderedLLMRoute
+                                                                                         │                    └─ revision circuits
+                                                                                         └─ ID Embedding adapters ─ OrderedEmbeddingRoute
+                                                                                                              └─ shared settings/exact probe
+   LLMService callers ─ one global complete() path ───────────────────────────────────────────┘
+   ordinary saves preserve parsed raw model sections; Task 8 still owns production
+   RuntimeContext/API/UI composition and old constructor removal
 ```
 
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
-3. **模型连接与有序 Chat / Embedding 路由层（阶段 6）** — `model_config/` 提供不可变 Chat / Embedding schema、代码内 connection-type descriptor registry、严格的原生 `[models]` parser / renderer / revision，以及 raw legacy `[llm]` 的只读 migration adapter。legacy inspection 对已知字段执行精确类型检查，并用统一、脱敏的 endpoint normalizer 阻断 userinfo、query、fragment、异常端口/路径和控制字符；mapping 按 Chat / Embedding 分层，Embedding fallback 只有显式启用、Provider 可用且有效 model / 维度 / model 级 multimodal capability 同空间时才进入候选。封闭 resolution 会真正移除确认删除的不可用连接，并在返回前调用权威 validator；任何 blocking issue 都不会产出部分结果。`llm/connection_factory.py` 把单条记录构造成按稳定 ID 命名的 protocol adapter：`llm/route.py` 的 `OrderedLLMRoute` 与 `llm/embedding_route.py` 的 `OrderedEmbeddingRoute` 都按配置数组原序执行，并让 Provider 自身 retry 先于 fallback。Embedding route 额外强制所有 adapter 共享同一个 settings 对象、验证非空有限数值和配置维度，只把维度不匹配记录成 provider+revision 永久 circuit；精确探测不走 fallback/cache/config，并在多模态开启时使用仓库固定 PNG。`EmbeddingService` 从共享 settings 派生 cache namespace 和产品参数，失败仍安全降级为空向量。`LLMService` 的普通、结构化、多模态和工具路径都只委托同一个全局 `complete()`；caller 仅保留并发/usage 语义。`[models]` 与 `[llm]` 共存时只采用 native 值，普通保存仍保留 parsed raw 两段。Task 8 仍负责把 `RuntimeContext` / API / UI composition 全面切到两条 route、删除旧构造参数与完成事务 backup
+3. **模型连接、事务保存与有序 Chat / Embedding 路由层（阶段 7）** — `model_config/` 提供不可变 schema、descriptor registry、严格 parser / renderer / revision、legacy migration，以及唯一可权威改写模型段的 `ModelConfigService`。service 在 resolved path lock 内先执行 revision guard 与显式 credential action，再应用封闭 migration resolution、local override fence 和权威 validation；完整 runtime candidate 构造成功后才创建首次 legacy backup，并用同目录 temp、file/directory `fsync`、`os.replace` 写盘，最后通过 `RuntimeContext` 短锁交换对象身份。swap 失败或取消会恢复旧字节、mode 与旧候选，取消随后继续传播。source editor 用 `tomllib` 识别模型 table 边界，未知 table、注释与 CRLF 保持原字节，inline/dotted authority 失败关闭。`connection_factory.py` 把稳定 ID 记录构造成 `OrderedLLMRoute` / `OrderedEmbeddingRoute`；Provider retry 先于 fallback，Embedding adapter 共用 settings，exact probe 不走 fallback/cache/config。`LLMService` 全路径只委托全局 `complete()`；Task 8 仍负责把 production consumer、API 与 UI 全面接到 candidate bundle，并删除旧构造参数。
 4. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
 5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源；`sources.platforms` 注册表统一七个平台族的别名、strategy 与 URL host 身份
 6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
@@ -72,7 +75,8 @@ model connection + ordered Chat/Embedding runtime (stage 6; composition cutover 
 - `migrate_legacy_llm()` 的公开 facade 保持稳定，内部按 inspection / Chat / Embedding / mapping / DTO 拆分；从 raw table 只把显式 default/fallback 放入 Chat route，已知 scalar 不做隐式 coercion，官方 endpoint 需通过统一的规范 URL 检查。Embedding fallback 还必须显式启用、Provider 可用并满足精确空间约束；未路由 credential、模块覆盖、未知/污染值和不可用或不兼容 fallback 留在 secret-safe `MigrationReport`，确定性 ID 保证重复加载 revision 稳定
 - `apply_migration_resolutions()` 独立在 resolution 模块，接受封闭、带 position / shared-settings payload 的类型化 choice；未知或缺失 choice、`cancel`、无效 payload、route 溢出、移除唯一 Chat connection 或最终 validator 的 blocking issue 均 fail closed，不返回部分候选，且本层不创建 backup 或写盘
 - `Config.models` 与不落盘 `ModelConfigMeta` 承载 native / legacy / default 来源、迁移状态、报告和 local override path；`[models]` 共存时完全忽略 `[llm]` 值与 credential。`save_config()` 默认通过 model-scoped generic TOML emitter 保留目标文件 parsed raw `[models]` / `[llm]` 语义，显式 authoritative 模式才只写 `[models]`
-- 单记录 `build_chat_adapter()` / `build_embedding_adapter()` 分别组成 `OrderedLLMRoute` / `OrderedEmbeddingRoute`；Embedding Provider 共享同一 settings 对象与 Provider-order-invariant cache namespace，向量维度错误按 ID+revision 熔断，精确探测只验证目标。`LLMService` 已移除 module/caller 选择语义；migration transaction/backup、配置 API/UI/CLI 模型编辑器与 `RuntimeContext` composition 替换仍由 Task 8 完成
+- `ModelConfigService` 公开脱敏 snapshot、stable-ID list mutation、exact draft probe 与 revision-guarded save；credential 只有 keep/set/clear/env 四种写动作。`_service_storage.py` 隔离 base/local layer、source-preserving model document edit、mode-preserving backup、same-directory atomic write 和 rollback。`config.local.toml` shadow path 在 snapshot 标明 source 并保持只读，不会被烘焙到 base
+- `RuntimeContext.build_model_candidate()` 在持久化前构造完整 route bundle，`swap_model_candidate()` / `restore_model_candidate()` 只在短锁内替换精确身份；预期 probe failure 返回安全 DTO，程序错误与取消传播。单记录 `build_chat_adapter()` / `build_embedding_adapter()` 分别组成 `OrderedLLMRoute` / `OrderedEmbeddingRoute`；Embedding Provider 共享同一 settings 与 Provider-order-invariant cache namespace，向量维度错误按 ID+revision 熔断，精确探测只验证目标。Task 8 仍负责 production composition、配置 API/UI/CLI 模型编辑器与旧构造器删除
 
 ### Saved Sync (`saved_sync/`)
 - `NativeSaveRouter` 根据 adapter capability 确定 favorite / watch-later 路由；watch-later 仅在平台不支持原生动作且支持 favorite 时回退

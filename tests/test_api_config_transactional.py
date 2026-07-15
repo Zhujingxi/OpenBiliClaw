@@ -18,7 +18,17 @@ from openbiliclaw.config import (
     load_config,
     save_config,
 )
+from openbiliclaw.llm import connection_factory
+from openbiliclaw.llm.base import LLMProviderError
 from openbiliclaw.logging_setup import configure_logging
+from openbiliclaw.model_config import (
+    ChatConnection,
+    ChatRouteConfig,
+    EmbeddingModelSettings,
+    EmbeddingRouteConfig,
+    ModelConfig,
+    compute_model_revision,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -198,3 +208,97 @@ async def test_put_config_serializes_concurrent_saves(
     assert second.status_code == 200
     assert load_config(config_path).llm.openai.model == "gpt-5-mini"
     assert load_config(tmp_path / "config.toml.bak").llm.openai.model == "gpt-4.1-mini"
+
+
+async def test_runtime_model_candidate_swap_is_staged_and_identity_preserving() -> None:
+    context = RuntimeContext()
+    first = object()
+    second = object()
+
+    initial = await context.swap_model_candidate(first)
+    held_by_in_flight_request = context.current_model_candidate
+    previous = await context.swap_model_candidate(second)
+
+    assert initial is None
+    assert previous is first
+    assert held_by_in_flight_request is first
+    assert context.current_model_candidate is second
+    await context.restore_model_candidate(previous)
+    assert context.current_model_candidate is first
+
+
+async def test_runtime_model_candidate_build_is_side_effect_free_until_swap() -> None:
+    context = RuntimeContext()
+    models = ModelConfig(
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="local",
+                    name="Local",
+                    type="ollama",
+                    model="local-model",
+                    base_url="http://127.0.0.1:11434/v1",
+                ),
+            ),
+            timeout_seconds=30,
+        ),
+        embedding=EmbeddingRouteConfig(
+            enabled=False,
+            settings=EmbeddingModelSettings(model="embedding-model"),
+        ),
+    )
+    revision = compute_model_revision(models)
+
+    candidate = await context.build_model_candidate(models, revision)
+
+    assert context.current_model_candidate is None
+    assert candidate.revision == revision
+    assert candidate.models is models
+    await context.swap_model_candidate(candidate)
+    assert context.current_model_candidate is candidate
+
+
+async def test_runtime_exact_probe_returns_safe_result_for_expected_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = RuntimeContext()
+    draft = ChatConnection(
+        id="local",
+        name="Local",
+        type="ollama",
+        model="local-model",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+
+    def fail_adapter(_draft: object, _options: object) -> object:
+        raise LLMProviderError("test-secret-provider-detail")
+
+    monkeypatch.setattr(connection_factory, "build_chat_adapter", fail_adapter)
+
+    result = await context.probe_model_draft(draft)
+
+    assert result.ok is False
+    assert result.error_code == "probe_failed"
+    assert result.message == "The exact model draft probe failed."
+    assert "test-secret-provider-detail" not in repr(result)
+
+
+async def test_runtime_exact_probe_propagates_programming_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = RuntimeContext()
+    draft = ChatConnection(
+        id="local",
+        name="Local",
+        type="ollama",
+        model="local-model",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+
+    def crash_adapter(_draft: object, _options: object) -> object:
+        raise RuntimeError("programming error")
+
+    monkeypatch.setattr(connection_factory, "build_chat_adapter", crash_adapter)
+
+    with pytest.raises(RuntimeError, match="programming error"):
+        await context.probe_model_draft(draft)
