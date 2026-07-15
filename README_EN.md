@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.168 (2026-07-14)**
+📌 Latest: **v0.3.169 (2026-07-15)**
 
-- **Initialization no longer hangs forever at 49%** — profile timeouts now show the real cause and recovery action, pool timeouts enter the app and continue filling in the background, and stale CA paths no longer break every network client.
-- **DashScope multimodal cover embeddings** — optionally use Alibaba Bailian or Gemini cover semantics for a bounded visual boost in regular and delight recommendations; rankings remain unchanged while disabled.
-- **One-line installs reliably update old checkouts** — regenerated dirty lockfiles are safely restored before fast-forwarding, while genuine local edits get a prominent warning and an optional stash-preserving update path.
+- **First-run initialization now has a single owner** — background profiling pauses during setup, preference chunks use concurrency-aware deadlines and cancellation, and empty-inventory admission loops, ghost run locks, and post-completion event-loop stalls are removed.
+- **DeepSeek and Ollama connectivity checks no longer misreport failures** — probes disable unnecessary reasoning, Ollama registers only explicit chat models, embedding-only setups no longer launch `llama3`, and custom DeepSeek Base URLs are honored.
+- **Model reasoning effort now defaults to medium** — OpenAI, Claude, Gemini, DeepSeek, and OpenRouter use their native reasoning controls, while short discovery, recommendation, and source-extraction tasks retain low-latency settings.
+- **Desktop setup feedback is clearer and more resilient** — new users get the classic palette, all three setup surfaces show real batches, elapsed time, cancellation, and recovery actions, and narrow delight cards plus scroll autoload are fixed.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
