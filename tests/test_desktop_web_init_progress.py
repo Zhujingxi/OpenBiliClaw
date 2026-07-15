@@ -43,9 +43,11 @@ def test_desktop_surfaces_stall_copy_after_90s_of_silence() -> None:
     assert "INIT_STALL_THRESHOLD_SECONDS = 90" in app_js
     assert "stalenessView" in app_js
     assert "last_activity" in app_js
-    assert "没有新进展" in app_js
-    assert "可以继续等待，或取消后重试" in app_js
-    assert "● 进行中" in app_js
+    assert "last_heartbeat_at" in app_js
+    assert "last_progress_at" in app_js
+    assert "没有完成新的工作单元" in app_js
+    assert "没有心跳" in app_js
+    assert "● 后端在线" in app_js
     # Amber styling hook for the stalled state.
     assert "init-stall-hint" in app_js
     assert ".init-stall-hint" in APP_CSS.read_text(encoding="utf-8")
@@ -55,10 +57,11 @@ def test_desktop_shows_expectation_copy_and_stage_eta() -> None:
     app_js = _app_js()
     # Idle expectation management near the start button.
     assert "严格按顺序生成" in app_js
-    assert "通常需要 4–10 分钟" in app_js
+    assert "通常需要 4–20 分钟" in app_js
     assert "进度会保留" in app_js
     # Running stage row surfaces its typical duration.
     assert "本阶段通常约" in app_js
+    assert "已超常见用时；本轮上限" in app_js
     assert "stageEtaText" in app_js
 
 
@@ -97,13 +100,31 @@ def test_setup_wizard_surfaces_stall_and_expectation_copy() -> None:
     assert "INIT_STALL_THRESHOLD_SECONDS = 90" in html
     assert "stalenessView" in html
     assert "last_activity" in html
-    assert "没有新进展" in html
-    assert "可以继续等待，或取消后重试" in html
-    assert "● 进行中" in html
+    assert "last_heartbeat_at" in html
+    assert "last_progress_at" in html
+    assert "没有完成新的工作单元" in html
+    assert "没有心跳" in html
+    assert "● 后端在线" in html
     assert "严格按顺序生成" in html
-    assert "通常需要 4–10 分钟" in html
+    assert "通常需要 4–20 分钟" in html
     assert "本阶段通常约" in html
+    assert "已超常见用时；本轮上限" in html
     assert "initStallHint" in html
+
+
+def test_web_surfaces_indeterminate_progress_timeouts_and_cancel() -> None:
+    app_js = _app_js()
+    app_css = APP_CSS.read_text(encoding="utf-8")
+    html = _setup_html()
+    for source in (app_js, html):
+        assert 'mode === "indeterminate"' in source
+        assert "取消初始化" in source
+        assert "暂时无法连接初始化后台" in source
+        assert 'indeterminate ? "100%"' in source
+    assert 'cancelInit: "/init/cancel"' in app_js
+    assert 'fetchWithTimeout("/api/init/cancel"' in html
+    assert ".init-progress-fill.indeterminate" in app_css
+    assert ".progress-fill.indeterminate" in html
 
 
 def test_setup_wizard_uses_terminal_contract_and_keeps_embedding_override() -> None:

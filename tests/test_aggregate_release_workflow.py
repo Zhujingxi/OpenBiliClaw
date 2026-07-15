@@ -157,6 +157,13 @@ def test_aggregate_release_helper_does_not_backfill_previous_channel_assets(
     )
     fake_gh.chmod(0o755)
 
+    # Keep this contract test hermetic. The aggregate helper also probes GHCR
+    # with curl; letting that hit the real network makes the subprocess race
+    # its 20-second timeout under a busy full-suite run.
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+    fake_curl.chmod(0o755)
+
     env = os.environ.copy()
     env.update(
         {

@@ -6,6 +6,7 @@
       qrInfo: "/qr-info",
       initStatus: "/init-status",
       startInit: "/init",
+      cancelInit: "/init/cancel",
       recommendations: "/recommendations",
       refresh: "/recommendations/refresh",
       reshuffle: "/recommendations/reshuffle",
@@ -123,6 +124,7 @@
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
+      collection_timeout: "数据采集达到总等待上限，已停止继续等待平台或扩展。",
       none: ""
     };
     const INIT_STATUS_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
@@ -1343,14 +1345,18 @@
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
     // _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
     const INIT_STALL_THRESHOLD_SECONDS = 90;
-    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–10 分钟；多平台采集或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+    const INIT_EXPECTATION_HINT = "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
 
     const _runViewState = new Map();
 
     function _viewState(runId) {
       let st = _runViewState.get(runId);
       if (!st) {
-        st = { stageStartMs: new Map(), maxPct: 0, lastMark: null, lastChangeMs: 0 };
+        st = {
+          stageStartMs: new Map(), maxPct: 0,
+          lastHeartbeatMark: null, lastHeartbeatChangeMs: 0,
+          lastProgressMark: null, lastProgressChangeMs: 0
+        };
         _runViewState.set(runId, st);
         if (_runViewState.size > 8) {
           const oldest = _runViewState.keys().next().value;
@@ -1362,6 +1368,18 @@
 
     function _runningStageFraction(stage, st, nowMs) {
       const prog = stage?.progress;
+      if (prog?.mode === "indeterminate") {
+        const eta = Number(stage?.eta_seconds || 0);
+        if (eta > 0 && st) {
+          let startMs = st.stageStartMs.get(stage.n);
+          if (startMs === undefined) {
+            startMs = nowMs;
+            st.stageStartMs.set(stage.n, startMs);
+          }
+          return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta));
+        }
+        return STAGE_FRACTION_FALLBACK;
+      }
       const progTotal = prog ? Number(prog.total || 0) : 0;
       if (progTotal > 0) {
         const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
@@ -1380,41 +1398,63 @@
       return STAGE_FRACTION_FALLBACK;
     }
 
-    // "本阶段通常约 X 分钟" for a stage carrying eta_seconds ("" otherwise);
-    // X rounds UP to the nearest half minute.
+    // Show the calibrated duration before it elapses; afterwards stop repeating
+    // an already-broken estimate and surface the real hard ceiling instead.
     function stageEtaText(stage) {
       const eta = Number(stage?.eta_seconds || 0);
       if (eta <= 0) return "";
+      const elapsed = Number(stage?.progress?.elapsed_seconds || 0);
+      if (elapsed > eta) {
+        const maxSeconds = Number(stage?.progress?.max_seconds || 0);
+        if (maxSeconds > 0) {
+          return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
+        }
+        return "已超常见用时；AI 或平台仍可能在处理";
+      }
       const halfMinutes = Math.ceil(eta / 30) / 2;
       return `本阶段通常约 ${halfMinutes} 分钟`;
     }
 
-    // Liveness indicator driven by last_activity (bumped by every backend
-    // write incl. the 30s heartbeat). Staleness is measured from the CLIENT
-    // time the (sequence, last_activity) marker last changed — clock-skew
-    // immune. Old backends without the field get no stall detection.
+    // Split connection liveness from substantive work progress. A healthy 30s
+    // heartbeat must not disguise a provider call that stopped advancing.
     function stalenessView(status, nowMs = Date.now()) {
       if (!status?.running) return { fresh: true, staleSeconds: 0, text: "" };
       const runId = status.run_id ? String(status.run_id) : "";
-      if (!runId || !status.last_activity) {
-        return { fresh: true, staleSeconds: 0, text: "● 进行中" };
+      const heartbeatAt = status.last_heartbeat_at || status.last_activity;
+      const progressAt = status.last_progress_at || status.last_activity;
+      if (!runId || !heartbeatAt) {
+        return { fresh: true, staleSeconds: 0, text: "● 后端已接单 · 正在建立进度" };
       }
       const st = _viewState(runId);
-      const mark = `${status.sequence ?? ""}|${status.last_activity}`;
-      if (st.lastMark !== mark) {
-        st.lastMark = mark;
-        st.lastChangeMs = nowMs;
+      const heartbeatMark = `${status.sequence ?? ""}|${heartbeatAt}`;
+      if (st.lastHeartbeatMark !== heartbeatMark) {
+        st.lastHeartbeatMark = heartbeatMark;
+        st.lastHeartbeatChangeMs = nowMs;
       }
-      const staleSeconds = Math.max(0, Math.round((nowMs - st.lastChangeMs) / 1000));
-      if (staleSeconds > INIT_STALL_THRESHOLD_SECONDS) {
-        const minutes = Math.max(1, Math.round(staleSeconds / 60));
+      const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
+      if (st.lastProgressMark !== progressMark) {
+        st.lastProgressMark = progressMark;
+        st.lastProgressChangeMs = nowMs;
+      }
+      const heartbeatStale = Math.max(0, Math.round((nowMs - st.lastHeartbeatChangeMs) / 1000));
+      const progressStale = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+      if (heartbeatStale > INIT_STALL_THRESHOLD_SECONDS) {
+        const minutes = Math.max(1, Math.round(heartbeatStale / 60));
         return {
           fresh: false,
-          staleSeconds,
-          text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，或取消后重试。`
+          staleSeconds: heartbeatStale,
+          text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`
         };
       }
-      return { fresh: true, staleSeconds, text: "● 进行中" };
+      if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+        const minutes = Math.max(1, Math.round(progressStale / 60));
+        return {
+          fresh: false,
+          staleSeconds: progressStale,
+          text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`
+        };
+      }
+      return { fresh: true, staleSeconds: progressStale, text: "● 后端在线 · 正在处理" };
     }
 
     function initProgressView(status, nowMs = Date.now()) {
@@ -1427,6 +1467,7 @@
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
+      const indeterminate = Boolean(running && currentStage?.progress?.mode === "indeterminate");
       let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
       const note = currentStage?.progress?.note;
       if (stageLabel && note) stageLabel += ` · ${note}`;
@@ -1445,6 +1486,7 @@
       return {
         active: running,
         failed: Boolean(failedStage),
+        indeterminate,
         pct,
         stageLabel,
         etaText: running ? stageEtaText(currentStage) : "",
@@ -1538,8 +1580,8 @@
 
     function initOnboardingPhase(status, progress) {
       if (state.initBusy) return "busy";
-      if (Boolean(status?.initialized)) return "completed";
       if (Boolean(status?.running)) return "running";
+      if (Boolean(status?.initialized)) return "completed";
       if (progress.failed) return "failed";
       return "idle";
     }
@@ -1553,10 +1595,15 @@
       const progressLabel = progress.failed
         ? initFailureText(status, progress)
         : progress.active
-          ? progress.label || `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.label || (progress.indeterminate
+            ? progress.stageLabel || "正在初始化"
+            : `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`)
           : "等待开始";
       if (progressBox) progressBox.hidden = !(Boolean(status?.running) || progress.failed);
-      if (progressFill) progressFill.style.width = `${progress.pct}%`;
+      if (progressFill) {
+        progressFill.style.width = progress.indeterminate ? "100%" : `${progress.pct}%`;
+      }
+      if (progressFill) progressFill.classList.toggle("indeterminate", Boolean(progress.indeterminate));
       if (progressText) {
         progressText.textContent = progressLabel;
         progressText.setAttribute("role", progress.failed ? "alert" : "status");
@@ -1585,6 +1632,11 @@
       if (startButton) {
         startButton.disabled = buttonDisabled;
         startButton.textContent = buttonLabel;
+      }
+      const cancelButton = section.querySelector('[data-init-action="cancel"]');
+      if (cancelButton) {
+        cancelButton.hidden = !status?.running;
+        cancelButton.disabled = !status?.running;
       }
     }
 
@@ -1639,14 +1691,15 @@
           ${isRunning ? "" : initSourcesMarkup()}
           <ul class="init-checklist">${initChecklistMarkup(status, state.initSelectedSources)}</ul>
           <div class="init-progress"${showProgress ? "" : " hidden"}>
-            <div class="init-progress-track"><div class="init-progress-fill" style="width:${displayProgress.pct}%"></div></div>
-            <p role="${displayProgress.failed ? "alert" : "status"}" aria-live="${displayProgress.failed ? "assertive" : "polite"}" aria-atomic="true">${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）` : "等待开始")}</p>
+            <div class="init-progress-track"><div class="init-progress-fill${displayProgress.indeterminate ? " indeterminate" : ""}" style="width:${displayProgress.indeterminate ? 100 : displayProgress.pct}%"></div></div>
+            <p role="${displayProgress.failed ? "alert" : "status"}" aria-live="${displayProgress.failed ? "assertive" : "polite"}" aria-atomic="true">${escapeHtml(displayProgress.failed ? initFailureText(status, displayProgress) : displayProgress.active ? displayProgress.label || (displayProgress.indeterminate ? displayProgress.stageLabel || "正在初始化" : `${displayProgress.stageLabel || "正在初始化"}（${displayProgress.pct}%）`) : "等待开始")}</p>
           </div>
           <p class="init-stall-hint${stallText && !staleness.fresh ? " stale" : ""}"${stallText ? "" : " hidden"}>${escapeHtml(stallText)}</p>
           <p class="init-expectation"${expectationText ? "" : " hidden"}>${escapeHtml(expectationText)}</p>
           <p class="init-reason" role="status" aria-live="polite" aria-atomic="true"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
           <div class="init-actions">
             <button class="small-btn primary" type="button" data-init-action="start"${buttonDisabled ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
+            <button class="small-btn" type="button" data-init-action="cancel"${isRunning ? "" : " hidden"}>取消初始化</button>
             <button class="small-btn" type="button" data-init-action="settings">打开设置</button>
           </div>
         </section>`;
@@ -1654,6 +1707,9 @@
       if (loadMore) loadMore.hidden = true;
       grid.querySelector('[data-init-action="start"]')?.addEventListener("click", () => {
         void handleDesktopStartInitClick();
+      });
+      grid.querySelector('[data-init-action="cancel"]')?.addEventListener("click", (event) => {
+        void handleDesktopCancelInitClick(event.currentTarget);
       });
       grid.querySelector('[data-init-action="settings"]')?.addEventListener("click", () => {
         openSettingsPage("sources");
@@ -1700,15 +1756,25 @@
       initRefreshInFlight = true;
       clearInitPolling();
       const wasInitialized = Boolean(state.initStatus?.initialized);
+      const wasRunning = Boolean(state.initStatus?.running);
       try {
         const status = await requestJsonStrict(ENDPOINTS.initStatus, { timeoutMs: 60000 });
         state.initStatus = status;
         state.initReason = "";
+        if (status?.running) {
+          renderAll();
+          scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
+          return;
+        }
         if (status?.initialized) {
           renderAll();
           clearInitPolling();
           initRefreshPending = false;
-          if (!wasInitialized) {
+          // Stage 3 makes initialized=true while stage 4 still owns the run.
+          // Rehydrate runtime inventory on the running -> terminal edge too;
+          // otherwise the recommendation grid can finish while the header and
+          // pool rail keep the pre-init runtime snapshot until a page reload.
+          if (!wasInitialized || wasRunning) {
             scheduleBackendHydration();
             showToast(
               status?.partial_success
@@ -1719,14 +1785,14 @@
           return;
         }
         renderAll();
-        if (status?.running || embeddingPullProgressView(status).active) {
+        if (embeddingPullProgressView(status).active) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
           clearInitPolling();
         }
       } catch (error) {
         scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
-        state.initReason = error?.message || "初始化状态读取失败。";
+        state.initReason = `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`;
         renderAll();
       } finally {
         initRefreshInFlight = false;
@@ -1753,18 +1819,18 @@
         renderAll();
         return;
       }
-      if (status.initialized) {
-        state.initBusy = false;
-        state.initReason = status?.partial_success ? initStatusReasonText(status) : "";
-        scheduleBackendHydration();
-        renderAll();
-        return;
-      }
       if (status.running) {
         state.initBusy = false;
         renderAll();
         clearInitPolling();
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
+        return;
+      }
+      if (status.initialized) {
+        state.initBusy = false;
+        state.initReason = status?.partial_success ? initStatusReasonText(status) : "";
+        scheduleBackendHydration();
+        renderAll();
         return;
       }
       if (!selected.length) {
@@ -1802,6 +1868,30 @@
         state.initReason = describeInitReason(code) || error?.message || "初始化没能启动，请稍后重试。";
         state.initBusy = false;
         renderAll();
+      }
+    }
+
+    async function handleDesktopCancelInitClick(button) {
+      if (button instanceof HTMLButtonElement) {
+        button.disabled = true;
+        button.textContent = "正在取消…";
+      }
+      try {
+        await requestJsonStrict(ENDPOINTS.cancelInit, { method: "POST", timeoutMs: 15000 });
+        showToast("已发送取消请求，正在安全结束当前步骤");
+        scheduleInitStatusRefresh(300);
+      } catch (error) {
+        if (error?.status !== 409) {
+          state.initReason = error?.details?.detail || error?.message || "取消请求失败。";
+          renderAll();
+        } else {
+          scheduleInitStatusRefresh(300);
+        }
+      } finally {
+        if (button instanceof HTMLButtonElement && button.isConnected) {
+          button.textContent = "取消初始化";
+          button.disabled = false;
+        }
       }
     }
 

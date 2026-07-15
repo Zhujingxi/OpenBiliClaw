@@ -1375,6 +1375,33 @@ def test_save_config_round_trips_empty_deepseek_reasoning_effort(tmp_path: Path)
     assert loaded.llm.deepseek.reasoning_effort == ""
 
 
+def test_save_config_round_trips_supported_provider_reasoning_efforts(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.openai.reasoning_effort = "low"
+    config.llm.claude.reasoning_effort = "high"
+    config.llm.gemini.reasoning_effort = "minimal"
+    config.llm.openrouter.reasoning_effort = "max"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.openai.reasoning_effort == "low"
+    assert loaded.llm.claude.reasoning_effort == "high"
+    assert loaded.llm.gemini.reasoning_effort == "minimal"
+    assert loaded.llm.openrouter.reasoning_effort == "max"
+
+
+def test_supported_provider_reasoning_effort_defaults_to_medium() -> None:
+    config = Config()
+
+    assert config.llm.openai.reasoning_effort == "medium"
+    assert config.llm.claude.reasoning_effort == "medium"
+    assert config.llm.gemini.reasoning_effort == "medium"
+    assert config.llm.deepseek.reasoning_effort == "medium"
+    assert config.llm.openrouter.reasoning_effort == "medium"
+
+
 def test_llm_and_embedding_fallback_defaults_are_disabled() -> None:
     config = Config()
 
@@ -2543,9 +2570,8 @@ def test_collect_issues_blocks_openai_compatible_llm_fallback_without_base_url()
     assert "base_url" in issues[0].message
 
 
-def test_collect_issues_blocks_ollama_llm_fallback_without_model_or_base_url() -> None:
-    """Mirrors `_maybe_ollama_provider`: Ollama only registers with a model
-    or base_url; a bare `fallback_provider = "ollama"` would never fire."""
+def test_collect_issues_blocks_ollama_llm_fallback_without_model() -> None:
+    """An Ollama server URL cannot identify which local chat model to use."""
     config = Config()
     config.llm.default_provider = "openai"
     config.llm.openai.api_key = "sk-main"
@@ -2556,8 +2582,25 @@ def test_collect_issues_blocks_ollama_llm_fallback_without_model_or_base_url() -
     assert issues
     assert all(issue.severity == "blocking" for issue in issues)
 
+    config.llm.ollama.base_url = "http://localhost:11434/v1"
+    assert _llm_fallback_issues(config)
+
     config.llm.ollama.model = "llama3"
     assert _llm_fallback_issues(config) == []
+
+
+def test_collect_issues_blocks_default_ollama_without_model() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.base_url = "http://localhost:11434/v1"
+
+    issues = _collect_config_issues(config)
+
+    assert any(
+        issue.field == "llm.ollama.model" and issue.severity == "blocking" for issue in issues
+    )
 
 
 def test_collect_issues_allows_gemini_llm_fallback_with_env_key(

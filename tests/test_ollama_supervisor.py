@@ -15,14 +15,19 @@ def test_ollama_required_detects_chat_and_embedding_routes() -> None:
     assert ollama_required(cfg) is False
 
     cfg.llm.default_provider = "ollama"
+    # Naming Ollama as a route does not invent a chat model.
+    assert ollama_required(cfg) is False
+    cfg.llm.ollama.model = "qwen2.5:7b"
     assert ollama_required(cfg) is True
 
     cfg = Config()
     cfg.llm.fallback_provider = " ollama "
+    cfg.llm.ollama.model = "qwen2.5:7b"
     assert ollama_required(cfg) is True
 
     cfg = Config()
     cfg.llm.discovery.provider = "OLLAMA"
+    cfg.llm.ollama.model = "qwen2.5:7b"
     assert ollama_required(cfg) is True
 
     cfg = Config()
@@ -55,6 +60,7 @@ def test_effective_ollama_endpoint_strips_v1_suffix_for_chat() -> None:
 
     cfg = Config()
     cfg.llm.default_provider = "ollama"
+    cfg.llm.ollama.model = "qwen2.5:7b"
     cfg.llm.ollama.base_url = "http://localhost:11434/v1/"
 
     assert effective_ollama_endpoint(cfg) == "http://localhost:11434"
@@ -80,6 +86,7 @@ def test_ollama_probe_uses_root_api_version_after_v1_endpoint(
 
     cfg = Config()
     cfg.llm.default_provider = "ollama"
+    cfg.llm.ollama.model = "qwen2.5:7b"
     cfg.llm.ollama.base_url = "http://localhost:11434/v1"
     endpoint = effective_ollama_endpoint(cfg)
     seen_urls: list[str] = []

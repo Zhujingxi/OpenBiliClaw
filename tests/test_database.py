@@ -6,6 +6,7 @@ See docs/specs/gui-init.md §5a and docs/plans/2026-06-07-gui-init-implementatio
 from __future__ import annotations
 
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,38 @@ def test_get_latest_init_run_none_when_empty(tmp_path: Path) -> None:
     assert _db(tmp_path).get_latest_init_run() is None
 
 
+def test_init_runs_migrates_separate_progress_clock(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE init_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            stage INTEGER NOT NULL DEFAULT 0,
+            stages_json TEXT,
+            partial_success INTEGER NOT NULL DEFAULT 0,
+            error_reason TEXT,
+            error_detail TEXT,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP
+        );
+        INSERT INTO init_runs (run_id, status, sequence, updated_at)
+        VALUES ('legacy-run', 'completed', 7, '2026-07-01 01:02:03');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+    run = db.get_latest_init_run()
+    assert run["progress_sequence"] == 0
+    assert str(run["progress_at"]) == "2026-07-01 01:02:03"
+
+
 def test_init_run_reserve_and_roundtrip(tmp_path: Path) -> None:
     db = _db(tmp_path)
     assert db.try_reserve_init_starting("run-1") is True
@@ -39,6 +72,8 @@ def test_init_run_reserve_and_roundtrip(tmp_path: Path) -> None:
     assert run["status"] == "starting"
     assert run["stage"] == 0
     assert run["partial_success"] == 0
+    assert run["progress_sequence"] == 0
+    assert run["progress_at"] is not None
 
     db.update_init_run(
         "run-1",

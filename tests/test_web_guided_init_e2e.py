@@ -41,6 +41,10 @@ def _status(
         "running": running,
         "run_id": "test-run",
         "sequence": current_stage,
+        "progress_sequence": current_stage,
+        "last_activity": "2026-07-15 08:00:00",
+        "last_heartbeat_at": "2026-07-15 08:00:00",
+        "last_progress_at": "2026-07-15 08:00:00",
         "current_stage": current_stage,
         "total_stages": 4,
         "stages": stages
@@ -68,6 +72,7 @@ def _status(
 class GuidedInitStub:
     def __init__(self) -> None:
         self.init_posts: list[dict[str, Any]] = []
+        self.cancel_posts = 0
         self.config_puts: list[dict[str, Any]] = []
         self.current_status = _status()
         self.post_init_error: tuple[int, dict[str, Any]] | None = None
@@ -119,6 +124,36 @@ class GuidedInitStub:
                 {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
                 {"n": 3, "label": "生成并保存完整画像", "status": "ok", "reason": None},
                 {"n": 4, "label": "生成首轮可用推荐", "status": "ok", "reason": None},
+            ],
+        )
+
+    def set_profile_ready_discovering(self) -> None:
+        """Strict-init overlap: profile exists, but stage 4 still owns run."""
+        self.current_status = _status(
+            initialized=True,
+            running=True,
+            current_stage=4,
+            can_start=False,
+            reason="already_running",
+            stages=[
+                {"n": 1, "label": "拉取数据", "status": "ok", "reason": None},
+                {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
+                {"n": 3, "label": "生成并保存完整画像", "status": "ok", "reason": None},
+                {
+                    "n": 4,
+                    "label": "生成首轮可用推荐",
+                    "status": "running",
+                    "reason": None,
+                    "eta_seconds": 300,
+                    "progress": {
+                        "done": 0,
+                        "total": 0,
+                        "mode": "indeterminate",
+                        "elapsed_seconds": 40,
+                        "max_seconds": 600,
+                        "note": "严格基于完整画像发现候选内容",
+                    },
+                },
             ],
         )
 
@@ -215,7 +250,19 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                     self,
                     {
                         "config": {
-                            "llm": {"default_provider": "ollama", "ollama": {}},
+                            "llm": {
+                                "default_provider": "ollama",
+                                "ollama": {
+                                    "model": "qwen2.5:7b",
+                                    "base_url": "http://localhost:11434/v1",
+                                },
+                                "openai_compatible": {
+                                    "api_key": "sk-t************alue",
+                                    "model": "compat-model",
+                                    "base_url": "https://compat.example/v1",
+                                    "api_flavor": "responses",
+                                },
+                            },
                             "bilibili": {"cookie": "SESSDATA=test"},
                             "sources": {
                                 "bilibili": {"enabled": True},
@@ -267,6 +314,28 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                     return _json_response(self, body, status_code)
                 state.set_running()
                 return _json_response(self, state.start_response(), 202)
+            if path == "/api/init/cancel":
+                state.cancel_posts += 1
+                state.current_status = _status(
+                    running=False,
+                    can_start=True,
+                    reason="cancelled",
+                    stages=[
+                        {
+                            "n": n,
+                            "label": label,
+                            "status": "cancelled",
+                            "reason": "cancelled",
+                        }
+                        for n, label in (
+                            (1, "拉取数据"),
+                            (2, "分析偏好"),
+                            (3, "生成并保存完整画像"),
+                            (4, "生成首轮可用推荐"),
+                        )
+                    ],
+                )
+                return _json_response(self, {"cancelling": True, "run_id": "test-run"}, 202)
             return _json_response(self, {"ok": True})
 
         def do_PUT(self) -> None:  # noqa: N802
@@ -384,6 +453,30 @@ def _install_fake_runtime_stream(page: Any, *, fast_watchdog: bool = False) -> N
         })();
         """
     page.add_init_script(script.replace("__WATCHDOG_SETUP__", watchdog_setup))
+
+
+def test_setup_wizard_e2e_restores_fields_per_provider(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """Provider switches must not leak another provider's model or endpoint."""
+    base_url, _ = guided_init_server
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.wait_for_function("document.querySelector('#model').value === 'qwen2.5:7b'")
+
+    chromium_page.locator("#provider").select_option("openai_compatible")
+    assert chromium_page.locator("#model").input_value() == "compat-model"
+    assert chromium_page.locator("#baseUrl").input_value() == "https://compat.example/v1"
+    assert chromium_page.locator("#apiFlavor").input_value() == "responses"
+
+    chromium_page.locator("#model").fill("compat-draft")
+    chromium_page.locator("#provider").select_option("ollama")
+    assert chromium_page.locator("#model").input_value() == "qwen2.5:7b"
+    assert chromium_page.locator("#baseUrl").input_value() == "http://localhost:11434/v1"
+
+    chromium_page.locator("#provider").select_option("openai_compatible")
+    assert chromium_page.locator("#model").input_value() == "compat-draft"
+    assert chromium_page.locator("#baseUrl").input_value() == "https://compat.example/v1"
 
 
 def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
@@ -767,6 +860,96 @@ def test_setup_wizard_e2e_resumes_running_init_on_page_load(
     assert chromium_page.locator("#startInit").is_disabled()
     # Re-attach only observes: no second POST /api/init.
     assert stub.init_posts == []
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_profile_ready_does_not_finish_while_discovery_is_running(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    """Regression for PR #117: running wins when both booleans are true."""
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
+    stub.set_profile_ready_discovering()
+
+    if surface == "setup":
+        chromium_page.goto(f"{base_url}/setup/")
+        chromium_page.wait_for_selector('[data-panel="2"].active')
+        assert chromium_page.locator('[data-panel="3"].active').count() == 0
+        assert chromium_page.locator("#cancelInit").is_visible()
+        label = chromium_page.locator("#initProgressLabel")
+    else:
+        chromium_page.goto(f"{base_url}/web/")
+        chromium_page.wait_for_selector(".init-onboarding", state="attached")
+        assert chromium_page.locator('[data-init-action="cancel"]').is_visible()
+        label = chromium_page.locator(".init-progress p")
+
+    assert "4/4" in label.inner_text()
+    assert "严格基于完整画像" in label.inner_text()
+    # Indeterminate work has a moving visual but does not claim an item pct.
+    assert "%" not in label.inner_text()
+
+
+def test_desktop_web_e2e_rehydrates_runtime_when_profile_ready_run_completes(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """The stage-4 terminal edge must replace the pre-init runtime snapshot."""
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
+    stub.set_profile_ready_discovering()
+
+    chromium_page.goto(f"{base_url}/web/")
+    chromium_page.wait_for_selector(".init-onboarding", state="attached")
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#poolAvailable')?.innerText.includes('后端未初始化')"
+    )
+
+    stub.set_initialized()
+    stub.runtime_status.update(
+        {
+            "initialized": True,
+            "pool_available_count": 12,
+            "pool_target_count": 300,
+        }
+    )
+    chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
+
+    chromium_page.wait_for_function("() => document.querySelector('.init-onboarding') === null")
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#statusLabel')?.innerText.includes('已连接本地后端')"
+    )
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#poolAvailable')?.innerText.includes('还有 12 条可换')"
+    )
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_running_init_can_be_cancelled_from_progress_panel(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
+    stub.set_running()
+
+    if surface == "setup":
+        chromium_page.goto(f"{base_url}/setup/")
+        chromium_page.wait_for_selector('[data-panel="2"].active')
+        chromium_page.locator("#cancelInit").click()
+        retry = chromium_page.locator("#startInit")
+    else:
+        chromium_page.goto(f"{base_url}/web/")
+        chromium_page.wait_for_selector(".init-onboarding", state="attached")
+        chromium_page.locator('[data-init-action="cancel"]').click()
+        retry = chromium_page.locator('[data-init-action="start"]')
+
+    chromium_page.wait_for_function("() => document.body.innerText.includes('初始化已取消')")
+    assert stub.cancel_posts == 1
+    assert retry.is_enabled()
+    assert "重试初始化" in retry.inner_text()
 
 
 def test_setup_wizard_e2e_partial_success_enters_completion_screen(

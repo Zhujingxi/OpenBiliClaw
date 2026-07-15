@@ -293,15 +293,12 @@ class LLMProviderConfig:
     api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
-    # DeepSeek v4 thinking-mode control. "" disables; "high" / "max" enable
-    # reasoning. v0.3.31 default = "max" — combined with v0.3.29's prompt-cache
-    # refactor (system 100% static, DeepSeek auto-cache 90% off) the
-    # reasoning-token cost becomes affordable, and the LLM produces noticeably
-    # better tags (franchise_key consistent across batch, score_threshold=0.70
-    # still gives healthy pool throughput). Set to "" if the per-day spend
-    # creeps too high and you want to trade off label quality for budget.
-    # Ignored by providers that don't accept ``thinking`` / ``reasoning_effort``.
-    reasoning_effort: str = "max"
+    # Balanced provider-native reasoning default.  LLMService overrides channel
+    # extraction/scoring/copy callers to ""; adapters disable thinking or use
+    # the cheapest supported approximation.  Generic OpenAI-compatible and
+    # Ollama routes ignore this field because their model capabilities are not
+    # safely inferable from the wire protocol alone.
+    reasoning_effort: str = "medium"
     # Ollama-only: context window (tokens). 0 = use Ollama's server default
     # (usually 4096) via the OpenAI-compat ``/v1`` shim. When >0, chat routes
     # through Ollama's native ``/api/chat`` so ``options.num_ctx`` actually
@@ -2000,21 +1997,16 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 )
             # Keep in sync with llm/registry.py `_maybe_ollama_provider` /
             # `_ollama_is_chat_capable` (config cannot import the registry —
-            # cycle): Ollama only registers when `[llm.ollama]` has a model
-            # or base_url, and naming it as fallback_provider already marks
-            # it chat-capable — so non-registration is the only dead state
-            # left to check here.
-            if (
-                fallback_name == "ollama"
-                and not config.llm.ollama.model.strip()
-                and not config.llm.ollama.base_url.strip()
-            ):
+            # cycle). A base URL cannot identify an installed chat model, so
+            # fallback Ollama always requires an explicit model.
+            if fallback_name == "ollama" and not config.llm.ollama.model.strip():
                 issues.append(
                     ConfigIssue(
                         field="llm.fallback_provider",
                         message=(
                             "备选 provider `ollama` 需要在 `[llm.ollama]` 填 `model` "
-                            "或 `base_url`，否则不会被注册，fallback 永远不会生效。"
+                            "（例如 `qwen2.5:7b`）；仅填写 `base_url` 无法确定聊天模型，"
+                            "fallback 不会生效。"
                         ),
                         severity="blocking",
                     )
@@ -2128,6 +2120,18 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     "默认 provider `openai_compatible` 必须填 `base_url` "
                     "(例如 Groq: https://api.groq.com/openai/v1)。"
                 ),
+            )
+        )
+
+    if provider_name == "ollama" and not config.llm.ollama.model.strip():
+        issues.append(
+            ConfigIssue(
+                field="llm.ollama.model",
+                message=(
+                    "默认 provider `ollama` 必须明确填写聊天 `model` "
+                    "（例如 `qwen2.5:7b`）；系统不会再隐式使用 `llama3`。"
+                ),
+                severity="blocking",
             )
         )
 
@@ -2749,7 +2753,7 @@ def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str
         lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
     if name in {"openai", "openai_compatible"}:
         lines.append(f"api_flavor = {_toml_string(provider.api_flavor)}")
-    if name == "deepseek":
+    if name in {"openai", "claude", "gemini", "deepseek", "openrouter"}:
         lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
     if name == "openrouter":
         lines.append(f"http_referer = {_toml_string(provider.http_referer)}")

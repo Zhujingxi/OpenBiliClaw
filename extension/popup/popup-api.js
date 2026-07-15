@@ -314,7 +314,7 @@ export async function fetchRuntimeStatus() {
 }
 
 export async function fetchInitStatus() {
-  return requestJson("/init-status", { method: "GET" });
+  return requestJson("/init-status", { method: "GET", timeoutMs: 45000 });
 }
 
 export async function fetchXSourceStatus() {
@@ -336,11 +336,12 @@ export async function startInit({ force = false, sources } = {}) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
+    timeoutMs: 60000,
   });
 }
 
 export async function cancelInit() {
-  return requestJson("/init/cancel", { method: "POST" });
+  return requestJson("/init/cancel", { method: "POST", timeoutMs: 15000 });
 }
 
 export async function fetchUpdateStatus() {

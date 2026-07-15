@@ -1240,6 +1240,18 @@ class Database:
         Returns:
             Inserted row ID.
         """
+        cursor = self._execute_write(
+            "INSERT INTO events "
+            "(event_type, url, title, context, metadata, "
+            " inferred_satisfaction, satisfaction_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            self._event_insert_params(event_type, kwargs),
+        )
+        return cursor.lastrowid or 0
+
+    @staticmethod
+    def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
+        """Normalize one event into the canonical SQLite row shape."""
         import json
 
         from openbiliclaw.sources.event_format import classify_event_satisfaction
@@ -1250,15 +1262,8 @@ class Database:
         elif raw_context is None:
             context_text = ""
         else:
-            # Legacy dict / list payload — JSON-encode for storage.
             context_text = json.dumps(raw_context, ensure_ascii=False)
-
         metadata_payload = kwargs.get("metadata", {})
-
-        # Single classification owner. Reconstruct the event dict shape
-        # the classifier expects (event_type + url + title + metadata).
-        # API ingest may set dwell fields at the top level as well; pass
-        # those through so the click rules read either location.
         classifier_event: dict[str, Any] = {
             "event_type": event_type,
             "url": kwargs.get("url", ""),
@@ -1269,23 +1274,45 @@ class Database:
             if top_level_key in kwargs and kwargs[top_level_key] is not None:
                 classifier_event[top_level_key] = kwargs[top_level_key]
         inferred_satisfaction, satisfaction_reason = classify_event_satisfaction(classifier_event)
-
-        cursor = self._execute_write(
-            "INSERT INTO events "
-            "(event_type, url, title, context, metadata, "
-            " inferred_satisfaction, satisfaction_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                event_type,
-                kwargs.get("url", ""),
-                kwargs.get("title", ""),
-                context_text,
-                json.dumps(metadata_payload, ensure_ascii=False),
-                inferred_satisfaction,
-                satisfaction_reason,
-            ),
+        return (
+            event_type,
+            kwargs.get("url", ""),
+            kwargs.get("title", ""),
+            context_text,
+            json.dumps(metadata_payload, ensure_ascii=False),
+            inferred_satisfaction,
+            satisfaction_reason,
         )
-        return cursor.lastrowid or 0
+
+    def insert_events_batch(self, events: Sequence[Mapping[str, Any]]) -> int:
+        """Insert many normalized events in one isolated transaction.
+
+        Guided init can import hundreds of rows. Using an isolated connection
+        keeps SQLite's busy wait off the API event loop and one transaction
+        avoids hundreds of commit windows competing with background writers.
+        """
+        rows = [
+            self._event_insert_params(
+                str(event.get("event_type") or event.get("type") or "").strip(),
+                event,
+            )
+            for event in events
+        ]
+        if not rows:
+            return 0
+        conn = self.open_connection()
+        try:
+            conn.executemany(
+                "INSERT INTO events "
+                "(event_type, url, title, context, metadata, "
+                " inferred_satisfaction, satisfaction_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+            return len(rows)
+        finally:
+            conn.close()
 
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get recent events.
@@ -10754,6 +10781,12 @@ class Database:
                 -- an internal_error is diagnosable without server logs.
                 error_detail    TEXT,
                 sequence        INTEGER NOT NULL DEFAULT 0,
+                -- ``updated_at`` is the worker heartbeat; these two fields
+                -- advance only when a lifecycle milestone or real unit of
+                -- work completes. Keeping them separate lets clients tell a
+                -- live-but-slow provider call from a dead backend.
+                progress_sequence INTEGER NOT NULL DEFAULT 0,
+                progress_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 finished_at     TIMESTAMP
@@ -10764,6 +10797,16 @@ class Database:
         }
         if "error_detail" not in existing_columns:
             self.conn.execute("ALTER TABLE init_runs ADD COLUMN error_detail TEXT")
+        if "progress_sequence" not in existing_columns:
+            self.conn.execute(
+                "ALTER TABLE init_runs ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0"
+            )
+        if "progress_at" not in existing_columns:
+            self.conn.execute("ALTER TABLE init_runs ADD COLUMN progress_at TIMESTAMP")
+            self.conn.execute(
+                "UPDATE init_runs SET progress_at = COALESCE(updated_at, CURRENT_TIMESTAMP) "
+                "WHERE progress_at IS NULL"
+            )
 
     def get_latest_init_run(self) -> dict[str, Any] | None:
         """Return the most recent init run as a dict, or None if none exist.
@@ -10796,12 +10839,16 @@ class Database:
                 return False
             conn.execute(
                 """
-                INSERT INTO init_runs (run_id, status, stage, sequence, started_at, updated_at)
-                VALUES (?, 'starting', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO init_runs (
+                    run_id, status, stage, sequence, progress_sequence,
+                    progress_at, started_at, updated_at
+                )
+                VALUES (?, 'starting', 0, 0, 0,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(run_id) DO UPDATE SET
-                    status='starting', stage=0, sequence=0, partial_success=0,
+                    status='starting', stage=0, sequence=0, progress_sequence=0,
                     error_reason=NULL, error_detail=NULL, finished_at=NULL,
-                    updated_at=CURRENT_TIMESTAMP
+                    progress_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
                 """,
                 (run_id,),
             )
@@ -10824,6 +10871,8 @@ class Database:
             "error_reason",
             "error_detail",
             "sequence",
+            "progress_sequence",
+            "progress_at",
             "finished_at",
         }
         unknown = set(fields) - allowed
@@ -10848,6 +10897,9 @@ class Database:
             """
             UPDATE init_runs
                SET status = 'failed', error_reason = 'interrupted',
+                   sequence = sequence + 1,
+                   progress_sequence = sequence + 1,
+                   progress_at = CURRENT_TIMESTAMP,
                    finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE status IN ('starting','running')
             """

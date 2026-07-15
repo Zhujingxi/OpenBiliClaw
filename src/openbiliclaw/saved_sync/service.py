@@ -230,8 +230,7 @@ class SavedSyncService:
                         except _NativeSaveTaskRunnerOwnershipLostError:
                             current = self.get_sync_task(task_id)
                             if all(
-                                item.status not in {"pending", "syncing"}
-                                for item in current.items
+                                item.status not in {"pending", "syncing"} for item in current.items
                             ):
                                 work.cancel()
                                 await asyncio.gather(work, return_exceptions=True)

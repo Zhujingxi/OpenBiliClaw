@@ -99,18 +99,23 @@ class AccountSyncService:
                 "new_event_count": 0,
                 "reason": "no_auth",
             }
-        if not self._last_seen_authenticated:
-            self._last_seen_authenticated = True
-            logger.info(
-                "account_sync: bilibili cookie now ready — first history "
-                "fetch will run on this tick"
-            )
+        # Keep the first authenticated tick untouched while guided init owns
+        # the bootstrap path (or before the first complete profile exists).
+        # Besides avoiding the fetch, this must run before the transition log
+        # and flag update so a paused tick cannot falsely announce that the
+        # first history fetch is about to start.
         if self.llm_work_allowed is not None and not self.llm_work_allowed():
             return {
                 "synced": False,
                 "new_event_count": 0,
                 "reason": "llm_paused",
             }
+        if not self._last_seen_authenticated:
+            self._last_seen_authenticated = True
+            logger.info(
+                "account_sync: bilibili cookie now ready — first history "
+                "fetch will run on this tick"
+            )
         state = self.memory_manager.load_account_sync_state()
         if not self._is_due(str(state.get("last_account_sync_at", ""))):
             return {

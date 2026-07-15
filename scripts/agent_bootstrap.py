@@ -771,7 +771,11 @@ def apply_confirmation_answers_to_args(
         args.bilibili_favorite_limit = answers.bilibili_favorite_limit
     if args.bilibili_follow_limit is None:
         args.bilibili_follow_limit = answers.bilibili_follow_limit
-    if answers.cookie_mode == "manual" and answers.bilibili_cookie and not args.bilibili_cookie:
+    if (
+        answers.cookie_mode == "manual"
+        and answers.bilibili_cookie
+        and not args.bilibili_cookie
+    ):
         args.bilibili_cookie = answers.bilibili_cookie
     if answers.cookie_mode == "extension":
         args.wait_for_extension_cookie = True
@@ -814,11 +818,7 @@ def apply_human_install_answers_to_args(
         args.bilibili_favorite_limit = answers.bilibili_favorite_limit
     if args.bilibili_follow_limit is None:
         args.bilibili_follow_limit = answers.bilibili_follow_limit
-    if (
-        answers.cookie_mode == "manual"
-        and answers.bilibili_cookie
-        and not args.bilibili_cookie
-    ):
+    if answers.cookie_mode == "manual" and answers.bilibili_cookie and not args.bilibili_cookie:
         args.bilibili_cookie = answers.bilibili_cookie
     args.wait_for_extension_cookie = answers.cookie_mode == "extension"
 
@@ -2178,6 +2178,10 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
         base_url = str(provider_cfg.get("base_url", "") or "").strip()
         if not base_url:
             missing.append("llm.openai_compatible.base_url")
+    if provider == "ollama":
+        model = str(provider_cfg.get("model", "") or "").strip()
+        if not model:
+            missing.append("llm.ollama.model")
     if not (cookie_inline or cookie_on_disk):
         missing.append("bilibili.cookie")
 
@@ -3073,7 +3077,15 @@ def run(args: argparse.Namespace) -> int:
     # service from inside a container would be wrong.
     ollama_models_needed: list[str] = []
     if (args.provider or status["provider"]) == "ollama":
-        ollama_models_needed.append((args.llm_model or "llama3").strip())
+        configured_ollama_model = str(
+            read_simple_toml(project_dir / "config.toml")
+            .get("llm", {})
+            .get("ollama", {})
+            .get("model", "")
+            or ""
+        ).strip()
+        if configured_ollama_model:
+            ollama_models_needed.append(configured_ollama_model)
     if (args.embedding_provider or "").strip() == "ollama":
         ollama_models_needed.append((args.embedding_model or "bge-m3").strip())
     # When we auto-wired Ollama for embedding (Claude / DeepSeek /

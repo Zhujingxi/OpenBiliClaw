@@ -10,6 +10,7 @@ import httpx
 from anthropic import AsyncAnthropic
 
 from .base import (
+    DEFAULT_REASONING_EFFORT,
     LLMProvider,
     LLMProviderError,
     LLMRateLimitError,
@@ -38,8 +39,10 @@ class ClaudeProvider(LLMProvider):
         base_url: str = "",
         proxy: str = "",
         trust_env: bool = True,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     ) -> None:
         self._model = model
+        self._reasoning_effort = reasoning_effort.strip()
         self.base_url = base_url.strip()
         # Overseas routing policy mirrors OpenAIProvider.
         self._proxy = proxy.strip()
@@ -74,10 +77,6 @@ class ClaudeProvider(LLMProvider):
         reasoning_effort: str | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        # ``reasoning_effort`` is DeepSeek-specific; Claude has its own
-        # ``thinking`` mode controlled separately. Accept the kwarg for
-        # signature compatibility but don't act on it here.
-        del reasoning_effort
         effective_model = (model or "").strip() or self._model
         # Extract system message if present
         system = ""
@@ -102,15 +101,20 @@ class ClaudeProvider(LLMProvider):
         system_text = system or "You are a helpful assistant."
         system_param: Any = self._render_system_param(system_text)
 
+        request_kwargs: dict[str, Any] = {
+            "model": effective_model,
+            "max_tokens": max_tokens,
+            "system": system_param,
+            "messages": chat_messages,
+            "temperature": temperature,
+        }
+        effort = self._claude_effort(effective_model, reasoning_effort)
+        if effort is not None:
+            request_kwargs["output_config"] = {"effort": effort}
+
         response = cast(
             "Message",
-            await self._request_with_retry(
-                model=effective_model,
-                max_tokens=max_tokens,
-                system=system_param,
-                messages=chat_messages,
-                temperature=temperature,
-            ),
+            await self._request_with_retry(**request_kwargs),
         )
 
         content = ""
@@ -164,19 +168,56 @@ class ClaudeProvider(LLMProvider):
             }
         ]
 
+    def _claude_effort(self, model: str, requested: str | None) -> str | None:
+        """Map portable effort onto Claude models that expose output_config."""
+
+        if not self._supports_effort(model):
+            return None
+        effort = self._reasoning_effort if requested is None else requested.strip().lower()
+        if effort in {"", "none", "minimal"}:
+            return "low"
+        # ``xhigh`` is not present in every installed Anthropic SDK/model and
+        # ``max`` is model-specific.  High is the safe portable upper level.
+        if effort in {"max", "xhigh"}:
+            return "high"
+        if effort in {"low", "medium", "high"}:
+            return effort
+        return DEFAULT_REASONING_EFFORT
+
+    @staticmethod
+    def _supports_effort(model: str) -> bool:
+        name = model.strip().lower().replace(".", "-")
+        return any(
+            marker in name
+            for marker in (
+                "claude-fable-5",
+                "claude-mythos-5",
+                "claude-mythos-preview",
+                "claude-opus-4-5",
+                "claude-opus-4-6",
+                "claude-opus-4-7",
+                "claude-opus-4-8",
+                "claude-sonnet-4-6",
+                "claude-sonnet-5",
+            )
+        )
+
     async def _request_with_retry(self, **kwargs: Any) -> Any:
         """Send a request with bounded retry for transient failures."""
         last_error: Exception | None = None
 
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                return await self._client.messages.create(
-                    model=cast("str", kwargs["model"]),
-                    max_tokens=cast("int", kwargs["max_tokens"]),
-                    system=kwargs["system"],
-                    messages=cast("list[MessageParam]", kwargs["messages"]),
-                    temperature=cast("float", kwargs["temperature"]),
-                )
+                request_kwargs: dict[str, Any] = {
+                    "model": cast("str", kwargs["model"]),
+                    "max_tokens": cast("int", kwargs["max_tokens"]),
+                    "system": kwargs["system"],
+                    "messages": cast("list[MessageParam]", kwargs["messages"]),
+                    "temperature": cast("float", kwargs["temperature"]),
+                }
+                if "output_config" in kwargs:
+                    request_kwargs["output_config"] = kwargs["output_config"]
+                return await self._client.messages.create(**request_kwargs)
             except Exception as exc:
                 mapped = self._map_error(exc)
                 last_error = mapped

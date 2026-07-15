@@ -58,6 +58,7 @@ Either command:
 5. Starts the backend and runs a health check against `/api/health`. One-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
    - **Optional LAN password gate**: exposing `0.0.0.0` makes the UI reachable by any device on the network. To require a login for LAN/remote devices (the local machine and the browser extension stay password-free), run `openbiliclaw set-password` (or answer "yes" to the init prompt), or set `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…` for unattended/Docker installs. See [`docs/modules/api-auth.md`](modules/api-auth.md). Behind a same-host reverse proxy, also set `[api.auth].trusted_proxies` or have the proxy enforce auth.
 6. Verifies the configured LLM provider and embedding service with real lightweight calls before init; if either fails, it blocks init with `status=service_check_failed`
+   - The chat probe explicitly disables DeepSeek thinking. Ollama chat also requires an explicit `[llm.ollama].model`; a Base URL or embedding-only `bge-m3` config never implies `llama3`.
 7. Automatically runs init after credentials, confirmations, and AI service checks are complete, then prints a self-contained **status block** at the very end of stdout:
 
 ```
@@ -447,9 +448,11 @@ user is:
 >   不需要你做任何事，全程会打印进度。
 >   首次推理会比较慢（CPU 跑模型），不是装坏了。」
 
-Then run with `--provider ollama --llm-model llama3` (or
+Then run with `--provider ollama --llm-model qwen2.5:7b` (or
 `qwen2.5:3b` for a smaller model on weaker hardware), plus the Step 3
 embedding flags. No `--llm-api-key` or `--llm-base-url` needed.
+`--llm-model` is mandatory for Ollama chat: the bootstrap reports
+`llm.ollama.model` as missing instead of guessing or pulling `llama3`.
 
 If the auto-install fails (no `brew` on Mac, no `winget` on Windows,
 no `sudo` on Linux), the bootstrap emits an `ollama_install_failed`
@@ -461,6 +464,7 @@ Inside Docker mode the bootstrap **does not** auto-install Ollama for
 the chat LLM. If the user chooses chat provider `ollama`, tell them to
 run host-side Ollama and set `[llm.ollama] base_url` to
 `http://host.docker.internal:11434/v1` so the container can reach it.
+Set `[llm.ollama] model` to the exact host-side chat model as well.
 This is separate from embedding: the default Docker embedding path uses
 the compose sidecar at `http://ollama:11434/v1` and does not require a
 host Ollama install.
@@ -683,7 +687,7 @@ user already gave for the primary LLM is reused. The free tier
 ```bash
 python3 scripts/agent_bootstrap.py \
   --provider ollama \
-  --llm-model llama3 \
+  --llm-model qwen2.5:7b \
   --embedding-provider ollama \
   --embedding-model bge-m3 \
   --no-xhs \
@@ -865,14 +869,11 @@ errors, or a no-API-key setup. Steps:
 Do NOT run these steps for the user automatically — Ollama install is a
 system-level package the user must consent to.
 
-> **Backend version note**: in v0.3.0–v0.3.2 the wizard wrote the
-> embedding config but the LLM registry never registered Ollama
-> unless `[llm.ollama]` was also populated, so embedding silently
-> kept hitting the user's primary cloud provider. Fixed in **v0.3.3**:
-> the registry auto-registers Ollama whenever `[llm.embedding]` asks
-> for it. If a user reports "I configured ollama but embedding still
-> hits Gemini/OpenAI", check their backend version and tell them to
-> upgrade to v0.3.3+ and restart.
+> **Backend version note**: v0.3.32+ builds embedding from its own
+> `[llm.embedding]` provider and does not route it through the chat
+> registry. This separation is intentional: local `bge-m3` can serve
+> embeddings without registering Ollama for chat or causing any
+> `llama3` probe. Older v0.3.0–v0.3.2 installs should be upgraded.
 
 ## Hard rules
 

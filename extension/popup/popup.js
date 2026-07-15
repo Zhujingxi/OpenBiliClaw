@@ -102,6 +102,7 @@ import {
   fetchUpdateStatus,
   checkBackendUpdate,
   applyBackendUpdate,
+  cancelInit,
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
@@ -214,6 +215,7 @@ const elements = {
   initProgressLabel: document.getElementById("initProgressLabel"),
   initStallHint: document.getElementById("initStallHint"),
   initStartBtn: document.getElementById("initStartBtn"),
+  initCancelBtn: document.getElementById("initCancelBtn"),
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
@@ -1049,6 +1051,20 @@ function _setInitStartButton(label, enabled) {
   }
 }
 
+function _setInitCancelButton(visible, enabled = visible) {
+  if (!(elements.initCancelBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+  elements.initCancelBtn.hidden = !visible;
+  elements.initCancelBtn.disabled = !enabled;
+  if (!elements.initCancelBtn.dataset.bound) {
+    elements.initCancelBtn.dataset.bound = "1";
+    elements.initCancelBtn.addEventListener("click", () => {
+      void handleCancelInitClick();
+    });
+  }
+}
+
 function _setInitReason(text, assertive = true) {
   if (elements.initStartReason instanceof HTMLElement) {
     elements.initStartReason.textContent = text || "";
@@ -1245,6 +1261,7 @@ function renderInitPanelIdle() {
     elements.initStallHint.classList.remove("stale");
   }
   _setInitStartButton("开始初始化", true);
+  _setInitCancelButton(false);
   _setInitReason("");
 }
 
@@ -1264,7 +1281,8 @@ function renderInitProgress(status) {
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
-      elements.initProgressBar.style.width = `${progress.pct}%`;
+      elements.initProgressBar.style.width = progress.indeterminate ? "100%" : `${progress.pct}%`;
+      elements.initProgressBar.classList.toggle("indeterminate", progress.indeterminate);
     }
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
@@ -1272,7 +1290,9 @@ function renderInitProgress(status) {
         : progress.partial
           ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
         : progress.active
-          ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.indeterminate
+            ? progress.stageLabel || "正在初始化"
+            : `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
       elements.initProgressLabel.setAttribute("role", progress.failed ? "alert" : "status");
       elements.initProgressLabel.setAttribute(
@@ -1299,15 +1319,19 @@ function renderInitProgress(status) {
   }
   if (progress.active) {
     _setInitStartButton("初始化进行中…", false);
+    _setInitCancelButton(true);
     _setInitReason("");
   } else if (progress.failed) {
     _setInitStartButton("重试初始化", true);
+    _setInitCancelButton(false);
     _setInitReason("");
   } else if (progress.partial) {
     _setInitStartButton("画像已生成", false);
+    _setInitCancelButton(false);
     _setInitReason(describeInitStatusReason(status), false);
   } else {
     _setInitStartButton("已初始化", false);
+    _setInitCancelButton(false);
     _setInitReason("");
   }
 }
@@ -1318,7 +1342,11 @@ async function pollInitProgress() {
   let status = null;
   try {
     status = await fetchInitStatus();
-  } catch {
+  } catch (error) {
+    _setInitReason(
+      `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`,
+      false,
+    );
     clearInitPolling();
     initPollTimer = setTimeout(() => {
       void pollInitProgress();
@@ -1344,6 +1372,31 @@ async function pollInitProgress() {
     );
     scheduleRecommendationsRefresh();
     void loadProfileSummary({ force: true });
+  }
+}
+
+async function handleCancelInitClick() {
+  if (elements.initCancelBtn instanceof HTMLButtonElement) {
+    elements.initCancelBtn.disabled = true;
+    elements.initCancelBtn.textContent = "取消中…";
+  }
+  try {
+    await cancelInit();
+    _setInitReason("已发送取消请求，正在安全结束当前步骤…", false);
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollInitProgress(), 300);
+  } catch (error) {
+    if (error?.status === 409) {
+      clearInitPolling();
+      initPollTimer = setTimeout(() => void pollInitProgress(), 300);
+    } else {
+      _setInitReason(error?.details?.detail || error?.message || "取消请求失败。");
+    }
+  } finally {
+    if (elements.initCancelBtn instanceof HTMLButtonElement) {
+      elements.initCancelBtn.textContent = "取消";
+      elements.initCancelBtn.disabled = false;
+    }
   }
 }
 

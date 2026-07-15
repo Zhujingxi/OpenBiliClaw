@@ -6,6 +6,7 @@ cross-layer updates, bidirectional corrections, and self-editing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import TYPE_CHECKING, Any
@@ -856,6 +857,28 @@ class MemoryManager:
             metadata=metadata,
         )
         logger.debug("Event persisted: %s", event_type)
+
+    async def propagate_events(self, events: list[dict[str, Any]]) -> int:
+        """Persist an event batch without blocking the caller's event loop."""
+        normalized: list[dict[str, Any]] = []
+        for event in events:
+            event_type = str(event.get("event_type") or event.get("type") or "").strip()
+            if event_type not in _EVENT_TYPES:
+                raise ValueError(f"Unsupported event type: {event_type or 'unknown'}")
+            item = dict(event)
+            item["event_type"] = event_type
+            metadata_raw = item.get("metadata", {})
+            if isinstance(metadata_raw, dict):
+                metadata = dict(metadata_raw)
+                if "signal_strength" not in metadata:
+                    signal_strength = default_signal_strength_for_event(event_type, metadata)
+                    if signal_strength is not None:
+                        metadata["signal_strength"] = signal_strength
+                item["metadata"] = metadata
+            normalized.append(item)
+        inserted = await asyncio.to_thread(self._database.insert_events_batch, normalized)
+        logger.debug("Event batch persisted: %s rows", inserted)
+        return inserted
 
     def query_events(
         self,

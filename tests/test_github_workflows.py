@@ -44,10 +44,7 @@ def test_chrome_webstore_listing_workflow_is_probe_first_and_never_uploads_a_zip
     assert '--mode "$MODE"' in workflow
     assert "args+=(--replace-pending)" in workflow
     assert "args+=(--publish)" in workflow
-    assert (
-        "CHROME_WEBSTORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}"
-        in workflow
-    )
+    assert "CHROME_WEBSTORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}" in workflow
     assert "chrome-webstore-metadata.mjs" in workflow
     assert "chrome-webstore-upload.mjs" not in workflow
     assert "npm run package" not in workflow

@@ -3155,6 +3155,29 @@
       cursor: not-allowed;
     }
 
+    .init-control-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .init-control-actions .init-start-btn {
+      flex: 1;
+      width: auto;
+    }
+
+    .init-cancel-btn {
+      padding: 10px 12px;
+      border: 1px solid var(--border, #d8d8e0);
+      border-radius: 12px;
+      background: var(--surface, #fff);
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .init-cancel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
     .init-checklist li.init-hint-row {
       color: var(--text-secondary);
       font-size: 11px;
@@ -3245,6 +3268,13 @@
       background: linear-gradient(90deg, #fb7299, #5aa9ff);
       transition: width 0.4s ease;
     }
+
+    .init-progress-bar.indeterminate {
+      background-size: 220% 100%;
+      animation: init-progress-shimmer 1.35s linear infinite;
+    }
+
+    @keyframes init-progress-shimmer { to { background-position: -220% 0; } }
 
     .init-progress-label {
       margin-top: 6px;
@@ -4768,7 +4798,10 @@
               <p id="initProgressLabel" class="init-progress-label" role="status" aria-live="polite" aria-atomic="true"></p>
             </div>
             <p id="initStallHint" class="init-stall-hint" hidden></p>
-            <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
+            <div class="init-control-actions">
+              <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
+              <button id="initCancelBtn" type="button" class="init-cancel-btn" hidden>取消</button>
+            </div>
             <p id="initStartReason" class="init-start-reason" hidden role="status" aria-live="polite" aria-atomic="true"></p>
           </div>
         </div>
@@ -5117,6 +5150,7 @@
             <label for="cfgDeepseekReasoning">Reasoning Effort</label>
             <select id="cfgDeepseekReasoning">
               <option value="">关闭</option>
+              <option value="medium">medium（默认）</option>
               <option value="high">high</option>
               <option value="max">max</option>
             </select>

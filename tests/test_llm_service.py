@@ -55,6 +55,7 @@ class FakeRegistry:
         self.calls: list[list[dict[str, object]]] = []
         self.provider_calls: list[dict[str, object]] = []
         self.json_modes: list[bool] = []
+        self.reasoning_efforts: list[str | None] = []
 
     async def complete(
         self,
@@ -67,6 +68,7 @@ class FakeRegistry:
     ) -> LLMResponse:
         self.calls.append(messages)
         self.json_modes.append(json_mode)
+        self.reasoning_efforts.append(reasoning_effort)
         if self.error is not None:
             raise self.error
         return self.response or LLMResponse(content="", provider="openai")
@@ -529,6 +531,43 @@ async def test_complete_with_core_memory_can_skip_core_memory_for_cacheable_eval
     assert "你是内容评估助手。" in system_content
     assert "## 用户画像" not in system_content
     assert registry.calls[0][1]["content"] == "请评估这个视频。"
+    assert registry.reasoning_efforts == [""]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("caller", "requested", "expected"),
+    [
+        ("discovery.x.keyword_gen", None, ""),
+        ("recommendation.expression", None, ""),
+        ("sources.xhs.keyword_gen", None, ""),
+        ("yt_search.generate_queries", None, ""),
+        ("runtime.bilibili_extension_search.queries", None, ""),
+        ("eval.query_quality", None, ""),
+        ("eval.scenario_gen", None, None),
+        ("soul.profile_build", None, None),
+        ("discovery.evaluate_batch", "max", "max"),
+    ],
+)
+async def test_channel_callers_default_to_no_reasoning(
+    caller: str,
+    requested: str | None,
+    expected: str | None,
+) -> None:
+    registry = FakeRegistry(LLMResponse(content="ok", provider="openai"))
+    service = LLMService(
+        registry=registry,
+        memory=FakeMemoryManager(core_prompt=""),
+    )  # type: ignore[arg-type]
+
+    await service.complete_with_core_memory(
+        system_instruction="A",
+        user_input="B",
+        caller=caller,
+        reasoning_effort=requested,
+    )
+
+    assert registry.reasoning_efforts == [expected]
 
 
 @pytest.mark.asyncio
@@ -603,6 +642,7 @@ async def test_complete_multimodal_structured_task_sends_text_and_images() -> No
     )
 
     assert registry.json_modes == [True]
+    assert registry.reasoning_efforts == [""]
     assert registry.calls[0][0]["content"] == (
         "输出 json。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
     )

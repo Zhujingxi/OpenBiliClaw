@@ -134,6 +134,12 @@ class InitStageProgressOut(BaseModel):
     done: int = 0
     total: int = 0
     note: str | None = None
+    # ``indeterminate`` means the backend is inside one long operation with
+    # no honest item count (for example one LLM request). elapsed/max still
+    # provide a bounded countdown without inventing a percentage.
+    mode: str = "determinate"  # determinate | indeterminate
+    elapsed_seconds: int | None = None
+    max_seconds: int | None = None
 
 
 class InitStageOut(BaseModel):
@@ -160,7 +166,7 @@ class InitPrerequisitesOut(BaseModel):
     # Classified cause when embedding_ready is False, so the UI can say
     # WHY instead of a dead retry (v0.3.155+): ok | disabled | misconfigured |
     # not_running | model_missing | model_broken | model_path_encoding |
-    # disk_full | network | model_oom | provider_error | error.
+    # disk_full | network | model_oom | provider_error | checking | error.
     embedding_check: str = "ok"
     embedding_detail: str = ""  # human-readable hint ("" when ok/disabled)
     # Live pull progress while a one-click repair is downloading the model
@@ -192,10 +198,15 @@ class InitStatusOut(BaseModel):
     prerequisites: InitPrerequisitesOut = Field(default_factory=InitPrerequisitesOut)
     reason: str = "none"
     detail: str = ""
-    # Wall-clock (server tz) of the most recent status write for the current
-    # run — advanced by every stage/progress/heartbeat write. "" when idle.
-    # The GUI derives a "still working / stalled" indicator from now minus this.
+    # Backward-compatible alias of ``last_heartbeat_at``. New clients must use
+    # the explicit liveness/progress clocks below instead of treating a heartbeat
+    # as proof that useful work advanced.
     last_activity: str = ""
+    # Explicit liveness/progress clocks. ``last_activity`` remains as a
+    # compatibility alias of ``last_heartbeat_at`` for older clients.
+    last_heartbeat_at: str = ""
+    last_progress_at: str = ""
+    progress_sequence: int = 0
 
 
 class RecommendationOut(BaseModel):
@@ -1549,7 +1560,7 @@ class LLMProviderConfigOut(BaseModel):
     api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
-    reasoning_effort: str = ""
+    reasoning_effort: str = "medium"
 
 
 class EmbeddingConfigOut(BaseModel):

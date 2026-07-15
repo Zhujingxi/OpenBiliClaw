@@ -2,10 +2,12 @@
 
 **Created:** 2026-06-07
 **Spec:** [`docs/specs/gui-init.md`](../specs/gui-init.md)（**CONVERGED**,Codex 对抗 review R1–R7,R7 判 SHIP / 0 spec 级缺陷)
-**Status:** 待执行 — **CONVERGED**（Codex plan review R1–R3;R3 判 **SHIP**,0 A 级缺陷;2 nit 已修)。A1 已实现,可从 A2 开干。
+**Status:** **IMPLEMENTED + HARDENED**。下文保留 2026-06-07 的历史任务拆解；当前运行契约与验收状态以本页“后续实现收口”及 `docs/modules/init.md` 为准。
 **Reviews:** R1(coverage + buildability + Codex,8 findings):6 A 级——coordinator 接线/启动 reconcile 缺任务(→新增 A3)、`task_registry` exclude 该单列(→新增 A4)、D1 在 E2 前不可独测(→ fixture 经 coordinator/DB 置 active run)、B2 低估 CLI 的 `time.sleep` 采集器 + per-event `asyncio.run` 耦合(→ B2 加去同步/去 asyncio.run 子任务)、bootstrap handler 会直接写画像需截流(→ D1 截流到 init 缓冲)+ 2 B 级(行号校正、A1 方法名对齐 `get_latest_init_run`/`update_init_run`)。全部 incorporated;任务数 11→13。 R2(复核,8 findings):R1 的 8 项全 RESOLVED,另挖 7 A + 1 B——coordinator 持旧 `runtime_controller` 引用(→ ctx 惰性取)、rejection 路径留 stuck `starting` 行(→ 廉价前置先于占坑 + 复位)、cancel 没存 task 句柄(→ `attach_task`)、bootstrap task_id 注册桥未定义(→ `on_task_enqueued` 回调 + `register_enqueued_task`)、`/api/feedback`+`/api/recommendation-click` 漏 gate、`embedding_ready` 漏前置、`unsupported_runtime` 漏 data/config 可写性、reconcile 须在 degraded 早返回前。全部 incorporated。 R3(收口):R2 的 8 项全 RESOLVED,仅 2 B nit(D1 result handoff 点明 `merge_result`、F1 清单补 embedding)已修,**判 SHIP**。收敛轨迹:R1 8(6 blocking)→ R2 8(7 A,finer)→ R3 0 A + 2 nit。
 **Scope:** **Phase 1** = 后端(共享 init 流水线 + InitCoordinator + 3 端点)+ **浏览器插件**(推荐 tab CTA + 前置清单 + 进度)。**Phase 2**(网页 `/setup` 第④步 + `/web` 空状态)不在本计划,复用同一组端点后做。
-**测试限制(诚实声明):** init 完整跑通需**真 B站 cookie + 真 LLM key**(本机无有效凭据)。本计划能自动验证的:CLI init 无回归、InitCoordinator 状态机/并发/崩溃恢复、前置门控、status/cancel、写者 409/skip、插件渲染逻辑;**完整画像生成的端到端需用户用真号手测**(列入 DoD)。
+**2026-07-15 验收记录：** 已在隔离数据目录使用**真 B 站登录 + 真 LLM**完成 `/setup/` GUI 全流程：1100 条采集信号 → 6 个偏好批次 → 完整画像 → 20 条发现候选 → 首轮 canonical 推荐，最终四阶段全 `ok`。测试外壳曾在阶段 3 人为终止一次后端，重启验证旧 run 自动落成 `interrupted`、释放单飞锁并可从 UI 重试；第二轮完整成功。扩展真实同步 B 站 Cookie，popup 控制逻辑由 955 项扩展测试覆盖；浏览器安全策略禁止自动化直接打开 `chrome-extension://` popup，因此未绕过该策略做视觉点击。
+
+> **后续实现收口（2026-07-15）：** 本文件保留 2026-06-07 的历史任务拆解，不再是当前运行契约。尤其 B2 中“阶段 3/4 并行”已废弃；当前必须是完整画像校验并落盘后才开始阶段 4，且由 `InitCoordinator` 提交屏障防回归。阶段 timeout、租约恢复和三端进度契约以 [`docs/modules/init.md`](../modules/init.md) 为准。
 
 > 把 spec 的 §1–§5 拆成**依赖有序、每个 = 一个原子 commit** 的任务。最高风险:**B2 把 CLI init 四阶段抽成共享异步函数**(动核心 soul/发现,不能回归 `openbiliclaw init`)+ **D1 写者门控**(碰一堆既有端点/循环)。这两个测试最重、review 最细。
 
@@ -205,19 +207,19 @@ G1. 验收矩阵 ; G2. 文档同步(CLAUDE.md 强制)
 |---|---|---|
 | **B2 抽 run_guided_init 回归 `openbiliclaw init`**(动核心 soul/发现) | 高 | 保留 CLI 所有交互;`test_cli.py` 全回归;保 P3/P4 并行 + 零 `asyncio.run`;code review 重点 |
 | **D1 写者门控碰多处端点/循环**,漏一个 = init 被并发写污染/被 rebuild cancel | 高 | 枚举清单逐个;init 任务对 rebuild 豁免做双保险;每端点/循环单测 |
-| **无法在本机 E2E 完整 init**(缺真 B站/LLM 凭据) | 中 | mock 到 `run_guided_init` 边界全测;**完整画像生成列入用户手测 DoD** |
+| 真号 E2E 受凭据 / 平台状态影响 | 中 | 2026-07-15 已用隔离目录完成真 B 站 + 真 LLM 全流程；自动化仍保留 stub E2E，避免 CI 依赖外部账号 |
 | 协作式取消时 stage 4 持 `_refresh_lock` 不释放 → 死锁 | 中 | B1 `finally` 释放 + 取消测试 |
 | 插件无法自动 E2E | 中 | DOM-agnostic 函数单测 + 手测 |
 
 ## 4. 完成定义 (DoD)
 
-- [ ] 三条 gate 命令(2 pytest + extension)全绿。
-- [ ] `mypy src/`(strict)、`ruff check src/ tests/`、`ruff format` 通过。
-- [ ] `openbiliclaw init`(CLI)**零回归**(现有 `test_cli.py` 全绿、行为/退出码/文案不变)。
-- [ ] spec Acceptance 勾选项有对应通过测试(除需真凭据的完整 init)。
-- [ ] **用户用真 B站 号 + 真 LLM key 手测一次完整 GUI init**(插件推荐 tab → 前置清单 → 开始初始化 → 进度 → 画像生成 → 推荐出现),记录结果。
-- [ ] CLAUDE.md 文档同步清单全过。
-- [ ] 默认行为不变:未触发 init 时无新副作用;CLI init 路径除「stage 4 走 run_init_backfill」外等价。
+- [x] 三条 gate 命令全绿：Python `4969 passed, 18 skipped`，扩展 `955 passed`，独立 Chromium guided-init E2E 全绿。
+- [x] `mypy src/`(strict)、`ruff check src/ tests/`、`ruff format --check`、扩展 typecheck / build、release version check 通过。
+- [x] `openbiliclaw init`(CLI)**零回归**（完整 `test_cli.py` 已包含在全套门禁）。
+- [x] spec Acceptance 勾选项有对应自动化测试；真凭据路径另有下项隔离验收。
+- [x] **真 B 站号 + 真 LLM 完整 GUI init**已记录：`/setup/` 前置清单 → 开始 → 四阶段进度 → 完整画像 → 首轮推荐；桌面 `/web` 同时验收运行中重连、双真窗口与终态推荐。扩展真实同步 Cookie；popup 因浏览器安全策略不直接自动打开，以扩展控制逻辑测试替代视觉自动化。
+- [x] CLAUDE.md 文档同步清单已按本次接口 / 数据流范围更新模块文档、spec、changelog 与本计划。
+- [x] 默认行为不变：未触发 init 时无新副作用；CLI init 路径除「stage 4 走 run_init_backfill」外等价。
 
 ## 5. 约定与边界
 

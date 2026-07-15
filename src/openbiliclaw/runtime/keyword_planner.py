@@ -1885,8 +1885,11 @@ class KeywordPlanner:
             return None
         try:
             profile = await self._soul_engine.get_profile()
-        except Exception:
-            logger.info("keyword planner skipped: soul profile unavailable", exc_info=True)
+        except Exception as exc:
+            # Missing profile is normal before the first successful init (and
+            # immediately after a failed attempt). Keep the reason without an
+            # INFO-level traceback that makes a clean skip look like a crash.
+            logger.info("keyword planner skipped: soul profile unavailable: %s", exc)
             return None
         return cast("SoulProfile | None", profile)
 

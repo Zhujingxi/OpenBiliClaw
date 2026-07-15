@@ -44,6 +44,16 @@ async def test_chat_ready_true_and_cached() -> None:
     assert provider.calls == 1  # single probe within TTL
 
 
+async def test_cached_readiness_exists_after_both_preflight_checks() -> None:
+    pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie=""))
+    assert pr.has_cached_readiness() is False
+    assert await pr.chat_ready() is True
+    assert pr.has_cached_readiness() is False
+    assert await pr.bilibili_check() == "failed"
+    assert pr.peek_bilibili() == "failed"
+    assert pr.has_cached_readiness() is True
+
+
 async def test_chat_ready_false_when_provider_unhealthy() -> None:
     pr = InitPrereqs(_ctx(provider=_Provider(ok=False)))
     assert await pr.chat_ready() is False
@@ -57,12 +67,14 @@ async def test_chat_ready_false_when_no_registry() -> None:
 def _ctx_with_fallback(default: Any, fallback: Any, *, fallback_name: str = "claude") -> Any:
     """Context whose registry carries a chat-capable fallback provider."""
     ctx = _ctx(provider=default)
-    providers = {"": default, fallback_name: fallback}
+    providers = {"": default, "openai": default}
+    if fallback_name != "openai":
+        providers[fallback_name] = fallback
     ctx.llm_registry = SimpleNamespace(
         get=lambda name="": providers[name],
         default_provider="openai",
         fallback_provider=fallback_name,
-        is_chat_capable=lambda name: name == fallback_name,
+        is_chat_capable=lambda name: name in {"openai", fallback_name},
     )
     return ctx
 
@@ -98,6 +110,21 @@ async def test_chat_ready_skips_fallback_probe_when_default_is_healthy() -> None
     pr = InitPrereqs(_ctx_with_fallback(default, fallback))
     assert await pr.chat_ready() is True
     assert fallback.calls == 0
+
+
+async def test_chat_ready_never_probes_non_chat_default() -> None:
+    provider = _Provider(ok=True)
+    registry = SimpleNamespace(
+        get=lambda _name="": provider,
+        default_provider="ollama",
+        fallback_provider="",
+        is_chat_capable=lambda _name: False,
+    )
+    ctx = _ctx(provider=provider)
+    ctx.llm_registry = registry
+
+    assert await InitPrereqs(ctx).chat_ready() is False
+    assert provider.calls == 0
 
 
 async def test_bilibili_check_failed_without_cookie() -> None:

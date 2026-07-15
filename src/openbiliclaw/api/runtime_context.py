@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
+_BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 1.5
 
 
 def _pool_source_shares_from_config(config: Any) -> dict[str, int]:
@@ -407,18 +408,29 @@ class RuntimeContext:
     def background_llm_work_allowed(self) -> bool:
         """Return whether daemon-owned background LLM / embedding work may run.
 
-        While a guided init is active, ALL daemon-owned background loops
-        (account_sync, continuous refresh, soul pipeline ticks) pause so they
-        can't race init's explicit analyze/build/backfill or double-process
-        signals (gui-init D1). Init's own work bypasses this gate — it calls
-        ``soul_engine`` / ``run_init_backfill`` directly, neither of which
-        consults ``llm_work_allowed``.
+        Before the first full profile exists, and while a guided init is active,
+        ALL daemon-owned background loops (account_sync, continuous refresh,
+        soul pipeline ticks) pause.  This keeps account-sync from fetching and
+        analysing the same bootstrap history before the user presses Start,
+        then racing or duplicating guided init's explicit analyze/build/backfill
+        work. Init's own work bypasses this gate — it calls ``soul_engine`` /
+        ``run_init_backfill`` directly, neither of which consults
+        ``llm_work_allowed``.
         """
         try:
             if self.database is not None and self.init_coordinator.init_active():
                 return False
         except Exception:
             pass
+        try:
+            profile_ready = getattr(getattr(self, "soul_engine", None), "is_profile_ready", None)
+            if callable(profile_ready) and not bool(profile_ready()):
+                return False
+        except Exception:
+            # A broken readiness read is not permission to start background LLM
+            # work against an unknown profile state.  Guided init remains
+            # available because its explicit calls bypass this predicate.
+            return False
         scheduler = getattr(getattr(self, "config", None), "scheduler", None)
         return _gate(scheduler, self.presence)
 
@@ -1165,41 +1177,88 @@ class RuntimeContext:
         run_post_reload_llm_work: bool = True,
     ) -> None:
         """Cancel old background tasks and start new ones from current components."""
-        # Cancel existing tasks
+        # Cancel existing tasks. A third-party/provider coroutine may swallow
+        # cancellation; never let a config hot-reload (which precedes guided
+        # init reservation) wait forever and look like a dead POST /api/init.
+        stuck_tasks: set[str] = set()
+        current_loop = asyncio.get_running_loop()
         for attr in ("refresh_task", "account_sync_task", "auto_update_task"):
             task = getattr(app.state, attr, None)
             if task is not None:
+                # TestClient and embedded hosts may reuse RuntimeContext across
+                # event-loop lifetimes. A pending Task owned by a closed/foreign
+                # loop cannot be awaited or safely cancelled from this loop;
+                # retain ownership and, crucially, do not start a duplicate.
+                task_loop = task.get_loop()
+                if task_loop is not current_loop:
+                    if task.done():
+                        try:
+                            task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            logger.warning(
+                                "Stale %s from a prior event loop exited with an error",
+                                attr,
+                                exc_info=True,
+                            )
+                    else:
+                        stuck_tasks.add(attr)
+                        logger.warning(
+                            "Cannot cancel stale %s owned by a different event loop; "
+                            "leaving it attached and suppressing duplicate startup",
+                            attr,
+                        )
+                    continue
                 task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                done, _ = await asyncio.wait(
+                    {task}, timeout=_BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS
+                )
+                if task not in done:
+                    stuck_tasks.add(attr)
+                    logger.warning("Timed out cancelling stale %s during hot-reload", attr)
+                    continue
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.warning(
+                        "Stale %s exited with an error during hot-reload", attr, exc_info=True
+                    )
 
         # Start new tasks from the freshly-built components.
         # v0.3.63+: route through ``self.task_registry.track`` so the
         # next hot-reload's ``cancel_all`` cleanly stops them too.
         if run_post_reload_llm_work:
             run_forever = getattr(self.runtime_controller, "run_forever", None)
-            app.state.refresh_task = (
-                self.task_registry.track("refresh_loop", run_forever())
-                if callable(run_forever)
-                else None
-            )
+            if "refresh_task" not in stuck_tasks:
+                app.state.refresh_task = (
+                    self.task_registry.track("refresh_loop", run_forever())
+                    if callable(run_forever)
+                    else None
+                )
 
             sync_forever = getattr(self.account_sync_service, "run_forever", None)
-            app.state.account_sync_task = (
-                self.task_registry.track("account_sync_loop", sync_forever())
-                if callable(sync_forever)
-                else None
-            )
+            if "account_sync_task" not in stuck_tasks:
+                app.state.account_sync_task = (
+                    self.task_registry.track("account_sync_loop", sync_forever())
+                    if callable(sync_forever)
+                    else None
+                )
         else:
-            app.state.refresh_task = None
-            app.state.account_sync_task = None
+            if "refresh_task" not in stuck_tasks:
+                app.state.refresh_task = None
+            if "account_sync_task" not in stuck_tasks:
+                app.state.account_sync_task = None
 
         update_forever = getattr(self.auto_update_service, "run_forever", None)
-        app.state.auto_update_task = (
-            self.task_registry.track("auto_update_loop", update_forever())
-            if callable(update_forever)
-            else None
-        )
+        if "auto_update_task" not in stuck_tasks:
+            app.state.auto_update_task = (
+                self.task_registry.track("auto_update_loop", update_forever())
+                if callable(update_forever)
+                else None
+            )
 
         llm_work_allowed = run_post_reload_llm_work and self.background_llm_work_allowed()
 

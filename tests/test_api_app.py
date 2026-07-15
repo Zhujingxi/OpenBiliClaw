@@ -1111,6 +1111,101 @@ class TestBackendAPI:
         assert ctx.task_registry.stats().get("prewarm_pool_mmr_embeddings") is None
 
     @pytest.mark.asyncio
+    async def test_restart_background_tasks_bounds_cancel_ignoring_coroutine(
+        self, monkeypatch
+    ) -> None:
+        """Hot reload must return even when an old provider loop swallows cancel."""
+        from contextlib import suppress
+        from types import SimpleNamespace
+
+        import openbiliclaw.api.runtime_context as runtime_context_module
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        stop = asyncio.Event()
+
+        async def _stubborn() -> None:
+            while not stop.is_set():
+                try:
+                    await stop.wait()
+                except asyncio.CancelledError:
+                    # Simulate a third-party coroutine that consumes cancel.
+                    continue
+
+        stale = asyncio.create_task(_stubborn())
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                refresh_task=stale,
+                account_sync_task=None,
+                auto_update_task=None,
+            )
+        )
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        monkeypatch.setattr(
+            runtime_context_module,
+            "_BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS",
+            0.01,
+        )
+        await asyncio.sleep(0)  # let the coroutine enter its cancel-swallowing loop
+        try:
+            await asyncio.wait_for(
+                ctx.restart_background_tasks(app, run_post_reload_llm_work=False),
+                timeout=0.2,
+            )
+            # The live old task remains owned; no duplicate replacement is
+            # started merely to make the reload look successful.
+            assert app.state.refresh_task is stale
+            assert not stale.done()
+        finally:
+            stop.set()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(stale, timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_restart_background_tasks_accepts_done_task_from_prior_loop(self) -> None:
+        """Embedded/TestClient hosts may preserve app.state across loop lifetimes."""
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class PriorLoopTask:
+            def get_loop(self) -> object:
+                return object()
+
+            def done(self) -> bool:
+                return True
+
+            def result(self) -> None:
+                return None
+
+            def cancel(self) -> None:
+                raise AssertionError("a completed foreign-loop task must not be cancelled")
+
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                refresh_task=PriorLoopTask(),
+                account_sync_task=None,
+                auto_update_task=None,
+            )
+        )
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+
+        await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+
+        assert app.state.refresh_task is None
+
+    @pytest.mark.asyncio
     async def test_restart_tasks_detaches_speculator_tick(self) -> None:
         from types import SimpleNamespace
 
@@ -11651,6 +11746,9 @@ class _FakeInitPrereqs:
     def peek_chat(self) -> bool:
         return self._chat
 
+    def has_cached_readiness(self) -> bool:
+        return True
+
     def enabled_platforms(self) -> list[str]:
         return list(self._platforms)
 
@@ -12132,17 +12230,22 @@ class TestGuidedInitEndpoints:
         from fastapi.testclient import TestClient
 
         app, _ = self._make_app(tmp_path)
-        coord = app.state.runtime_context.init_coordinator
-        assert coord.try_start("ws-run")
-
-        with (
-            TestClient(app) as client,
-            client.websocket_connect("/api/runtime-stream") as websocket,
-        ):
-            asyncio.run(coord.stage_started("ws-run", 1))
-            progress = websocket.receive_json()
-            asyncio.run(coord.complete("ws-run"))
-            completed = websocket.receive_json()
+        with TestClient(app) as client:
+            # Reserve only after application startup. Startup intentionally
+            # reconciles pre-existing active rows as interrupted; reserving
+            # before TestClient enters would create a terminal run that late
+            # stage writes must not resurrect.
+            coord = app.state.runtime_context.init_coordinator
+            assert coord.try_start("ws-run")
+            assert client.portal is not None
+            with client.websocket_connect("/api/runtime-stream") as websocket:
+                # Publish on TestClient's application loop.  ``asyncio.run``
+                # here creates a foreign loop, so the subscriber queue is
+                # filled without waking the WebSocket waiter and CI hangs.
+                client.portal.call(coord.stage_started, "ws-run", 1)
+                progress = websocket.receive_json()
+                client.portal.call(coord.complete, "ws-run")
+                completed = websocket.receive_json()
 
         assert progress["type"] == "init_progress"
         assert progress["run_id"] == "ws-run"
@@ -12371,6 +12474,63 @@ class TestGuidedInitEndpoints:
         assert body["prerequisites"]["llm_ready"] is True
         assert body["prerequisites"]["bilibili_logged_in"] is True
 
+    def test_init_status_skips_embedding_probe_when_already_initialized(
+        self, tmp_path: Path
+    ) -> None:
+        """Completed-page polling must not queue behind background prewarm."""
+        from fastapi.testclient import TestClient
+
+        class _SlowEmbeddingService:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def probe(self) -> bool:
+                self.calls += 1
+                await asyncio.sleep(10)
+                return True
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True)
+        app, _ = self._make_app(
+            tmp_path,
+            profile_ready=True,
+            prereqs=prereqs,
+            embedding_provider="ollama",
+        )
+        service = _SlowEmbeddingService()
+        app.state.runtime_context.soul_engine._embedding_service = service
+
+        with TestClient(app) as client:
+            response = client.get("/api/init-status")
+
+        assert response.status_code == 200
+        assert response.json()["initialized"] is True
+        assert service.calls == 0
+
+    def test_init_status_skips_live_probes_while_init_is_running(self, tmp_path: Path) -> None:
+        """Polling progress must not compete with the run's provider budget.
+
+        This also covers the strict-init overlap where the profile exists
+        (initialized=true) while stage 4 is still running.
+        """
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True)
+        app, _ = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
+        with TestClient(app) as client:
+            coord = app.state.runtime_context.init_coordinator
+            assert coord.try_start("run-live") is True
+            asyncio.run(coord.mark_running("run-live"))
+            asyncio.run(coord.stage_started("run-live", 3))
+            asyncio.run(coord.stage_done("run-live", 3))
+            asyncio.run(coord.stage_started("run-live", 4))
+            body = client.get("/api/init-status").json()
+
+        assert body["initialized"] is True
+        assert body["running"] is True
+        assert body["reason"] == "already_running"
+        assert prereqs.chat_ready_calls == 0
+        assert prereqs.bilibili_check_calls == 0
+
     def test_init_status_probes_live_before_initialization(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
@@ -12410,6 +12570,29 @@ class TestGuidedInitEndpoints:
         body = resp.json()
         assert body["can_start"] is False
         assert body["reason"] == "llm_not_ready"
+
+    def test_init_status_preserves_terminal_failure_when_prereq_later_fails(
+        self, tmp_path: Path
+    ) -> None:
+        """A follow-up probe must not hide the persisted cause of a failed run."""
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=False, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        detail = "偏好分析等待 AI 服务超过 6 分钟仍未返回结果，已自动停止。"
+        with TestClient(app) as client:
+            coord = app.state.runtime_context.init_coordinator
+            assert coord.try_start("run-timeout") is True
+            asyncio.run(coord.mark_running("run-timeout"))
+            asyncio.run(coord.stage_started("run-timeout", 2))
+            asyncio.run(coord.fail("run-timeout", "analyze_failed", detail=detail))
+            body = client.get("/api/init-status").json()
+
+        assert body["can_start"] is False
+        assert body["reason"] == "analyze_failed"
+        assert body["detail"] == detail
+        assert prereqs.chat_ready_calls == 0
+        assert prereqs.bilibili_check_calls == 0
 
     @pytest.mark.parametrize(
         ("chat_ready", "expected_reason", "expected_can_start"),

@@ -199,6 +199,26 @@ class LLMService:
         ("recommendation", "recommendation"),
         ("soul", "soul"),
     )
+    # Channel-facing work is dominated by bounded JSON extraction, scoring,
+    # keyword generation, and short recommendation copy.  Letting these calls
+    # inherit a provider-wide DeepSeek thinking setting can spend the entire
+    # output budget before any final JSON is emitted.  Soul/profile work keeps
+    # the configured provider default; callers can always opt back in by
+    # explicitly passing ``high`` or ``max``.
+    _NO_REASONING_DEFAULT_PREFIXES: ClassVar[tuple[str, ...]] = (
+        "discovery",
+        "recommendation",
+        "sources",
+        "yt_search",
+        "runtime.bilibili_extension_search",
+    )
+    _NO_REASONING_DEFAULT_CALLERS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "eval.query_quality",
+            "eval.relevance",
+            "eval.specificity",
+        }
+    )
 
     registry: SupportsComplete
     memory: MemoryManager
@@ -293,6 +313,26 @@ class LLMService:
             return None
         return provider, model or None
 
+    @classmethod
+    def _reasoning_effort_for_call(
+        cls,
+        caller: str,
+        requested: str | None,
+    ) -> str | None:
+        """Resolve the per-call thinking mode without mutating provider state."""
+
+        if requested is not None:
+            return requested
+        tag = caller.strip()
+        if tag in cls._NO_REASONING_DEFAULT_CALLERS:
+            return ""
+        if any(
+            cls._caller_matches_route_prefix(tag, prefix)
+            for prefix in cls._NO_REASONING_DEFAULT_PREFIXES
+        ):
+            return ""
+        return None
+
     @staticmethod
     def _structured_json_contract(system_instruction: str) -> str:
         """Ensure JSON-mode instructions carry a lowercase ``json`` token.
@@ -332,10 +372,11 @@ class LLMService:
         ``"discovery.eval"``) attached to the usage row so the ``cost``
         report can break spend down by module.
 
-        ``reasoning_effort`` (v0.3.51+) lets a caller force-disable the
-        provider's thinking mode for tasks that don't benefit from it
-        (structured eval / classify / write-expression). ``None`` keeps
-        the provider default; ``""`` explicitly disables for this call.
+        ``reasoning_effort`` (v0.3.51+) lets a caller override the provider's
+        thinking mode. ``""`` explicitly disables it. ``None`` keeps the
+        provider default for Soul/profile work, while channel-facing discovery,
+        recommendation, source extraction, and short evaluation callers default
+        to ``""``. An explicit ``"high"`` / ``"max"`` always wins.
 
         ``bypass_semaphore`` (legacy name) skips only background admission;
         every provider call still respects the runtime total gate.
@@ -354,6 +395,10 @@ class LLMService:
             parts.append("以下是当前用户的 core memory，请作为理解背景：")
             parts.append(core_memory_block)
         system_content = "\n\n".join(parts)
+        effective_reasoning_effort = self._reasoning_effort_for_call(
+            caller,
+            reasoning_effort,
+        )
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
         if history:
             messages.extend(history)
@@ -367,7 +412,7 @@ class LLMService:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
-                    reasoning_effort=reasoning_effort,
+                    reasoning_effort=effective_reasoning_effort,
                 )
             provider, model = routed
             return await self.registry.complete_provider(
@@ -376,7 +421,7 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=effective_reasoning_effort,
                 model=model,
             )
 
@@ -494,6 +539,10 @@ class LLMService:
             parts.append("以下是当前用户的 core memory，请作为理解背景：")
             parts.append(core_memory_block)
         system_content = "\n\n".join(parts)
+        effective_reasoning_effort = self._reasoning_effort_for_call(
+            caller,
+            reasoning_effort,
+        )
 
         user_parts: list[dict[str, Any]] = [{"type": "text", "text": user_input}]
         for image in image_inputs:
@@ -526,7 +575,7 @@ class LLMService:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=True,
-                    reasoning_effort=reasoning_effort,
+                    reasoning_effort=effective_reasoning_effort,
                 )
             provider, model = routed
             return await self.registry.complete_provider(
@@ -535,7 +584,7 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=True,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=effective_reasoning_effort,
                 model=model,
             )
 

@@ -22,6 +22,7 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 
 - **ContentDiscoveryEngine** — 发现策略编排器，负责注册、运行、去重、批量评估和缓存收口；也提供只拉原始候选的 `produce_candidates()`
 - **批量评估输出预算** — 文本与多模态 evaluator 每个 provider 请求最多声明 4096 个输出 tokens；该值覆盖 30 条结构化评分的生产观测范围，同时避免兼容服务按过大的声明上限预占额度并误触发 `insufficient_quota`
+- **渠道短任务不继承 thinking** — B 站 / 小红书 / 抖音 / YouTube / X 关键词生成、通用 Web 抽取、单条 / 批量候选评分经 `LLMService` 时，未指定的 `reasoning_effort` 默认解析为 `""`；不受旧 DeepSeek 全局 `max` 配置影响，也不改动 Soul / 画像的深度任务
 - **DiscoveryCandidatePipeline** — 统一候选待评估池的生产 / 入队 / 混源 batch 评估 / 入推荐池 admission 编排器
 - **admission.effective_admission_threshold()** — 评估、缓存收口和数据库展示出口共享的纯准入策略；精确 `explore=0.58` 是唯一低于全局门槛的例外
 - **DiscoveryCandidateWrite / discovery_candidates** — 原始候选的持久化队列结构，所有来源先落到 `pending_eval`，再由统一 evaluator claim

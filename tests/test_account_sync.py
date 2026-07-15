@@ -559,11 +559,12 @@ async def test_account_sync_if_due_skips_without_fetching_when_llm_work_paused()
         is_authenticated=True,
     )
     soul = _FakeSoulEngine()
+    gate = {"allowed": False}
     service = AccountSyncService(
         memory_manager=memory,
         bilibili_client=client,
         soul_engine=soul,
-        llm_work_allowed=lambda: False,
+        llm_work_allowed=lambda: gate["allowed"],
     )
 
     result = await service.sync_if_due()
@@ -577,6 +578,15 @@ async def test_account_sync_if_due_skips_without_fetching_when_llm_work_paused()
     assert soul.calls == []
     assert memory.events == []
     assert not memory.state.get("last_account_sync_at")
+    assert service._last_seen_authenticated is False
+
+    # The first allowed tick must still be treated as the auth-ready
+    # transition and perform the fetch; a paused tick must not consume it.
+    gate["allowed"] = True
+    resumed = await service.sync_if_due()
+    assert resumed["synced"] is True
+    assert client.history_calls == 1
+    assert service._last_seen_authenticated is True
 
 
 @pytest.mark.asyncio
