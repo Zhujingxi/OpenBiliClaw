@@ -121,6 +121,20 @@ def test_enabled_embedding_route_size_is_one_through_ten(count: int, valid: bool
     assert ("embedding_provider_count" not in issue_codes(config)) is valid
 
 
+def test_valid_typed_embedding_provider_has_no_validation_issues() -> None:
+    provider = EmbeddingProviderConfig(
+        id="ollama-embedding",
+        name="Ollama Embedding",
+        type="ollama",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+    config = model_config(
+        embedding_enabled=True,
+        embedding_providers=(provider,),
+    )
+    assert validate_model_config(config, connection_type_registry()) == []
+
+
 def test_connection_ids_are_required_and_unique_across_both_routes() -> None:
     blank = model_config(chat_ids=("",))
     assert "blank_connection_id" in issue_codes(blank)

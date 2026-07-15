@@ -601,6 +601,10 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Model-config domain foundation (stage 1; not wired) │
+│ frozen schema · connection descriptors · validation │
+│ No TOML/migration/API/adapter/route/UI; current [llm] path unchanged │
+├────────────────────────────────────────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │

@@ -604,6 +604,10 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ 模型配置领域基础（阶段 1，尚未接入运行链）             │
+│ frozen schema · connection descriptors · validation │
+│ 无 TOML/迁移/API/adapter/route/UI；现有 [llm] 链路不变 │
+├────────────────────────────────────────────────┤
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · 已看身份                     │

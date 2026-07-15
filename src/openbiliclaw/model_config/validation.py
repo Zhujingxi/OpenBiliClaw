@@ -208,24 +208,7 @@ def _validate_record(
     allowed_fields = frozenset(
         (*_COMMON_CONNECTION_FIELDS, *definition.allowed_fields(capability, preset))
     )
-    candidate_fields = (
-        set(record)
-        if isinstance(record, Mapping)
-        else {
-            "id",
-            "name",
-            "type",
-            "model",
-            "preset",
-            "base_url",
-            "credential",
-            "api_mode",
-            "reasoning_effort",
-            "http_referer",
-            "x_title",
-            "num_ctx",
-        }
-    )
+    candidate_fields = set(record) if isinstance(record, Mapping) else set(vars(record))
     for field_name in sorted(candidate_fields - allowed_fields):
         if capability == "embedding" and field_name == "model":
             issues.append(

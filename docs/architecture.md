@@ -13,14 +13,18 @@ background ─ background admission (default 3) ──────┘
              │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
+
+model_config foundation (stage 1; no runtime/API edge yet)
+└─ immutable schema ─ connection descriptors ─ validation/default
 ```
 
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话交互 · 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
-3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
-4. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源；`sources.platforms` 注册表统一七个平台族的别名、strategy 与 URL host 身份
-5. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
-6. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
+3. **模型配置领域基础层（阶段 1，尚未接线）** — `model_config/` 只提供不可变 Chat / Embedding schema、代码内 connection-type descriptor registry、验证问题和无密钥默认值；尚不解析或写入 TOML，也不接管 legacy `[llm]`、runtime Provider、API 或 UI
+4. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System
+5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / 通用 Web 源；`sources.platforms` 注册表统一七个平台族的别名、strategy 与 URL host 身份
+6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
+7. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
 
 海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> LLM SDK / YouTube / updater / Codex OAuth`。`direct` 默认注入 `trust_env=False`，`system` 才继承环境 / OS 代理，`custom` 注入指定 URL；B站 / 抖音 / Ollama / 国内 CDN 客户端不读取该边界。
 
@@ -43,6 +47,12 @@ background ─ background admission (default 3) ──────┘
 - adapter bootstrap、DTO 裁剪和异常翻译
 - 将现有 runtime / engine 能力暴露为 OpenClaw 可调用 skill
 - 提供 JSON CLI bridge，供仓库内真实 OpenClaw skill pack 调用
+
+### Model Configuration Domain (`model_config/`)
+- 以 frozen dataclass 表示有序 Chat route、共享模型空间的 Embedding route、credential source 与字段化 validation issue；有序集合统一使用 tuple，Chat 角色仅由位置派生
+- 代码内 connection-type registry 提供 JSON-safe label、category、capability、字段、preset、默认值和帮助文案，不含 adapter 类、callable 或 secret
+- `validate_model_config()` 统一检查 route 数量、全局唯一 ID、type/preset capability、类型专属字段与 credential source；typed Embedding provider 没有 model 字段，raw provider 显式携带 `model` 会被拒绝
+- 本阶段没有 TOML serialization、legacy migration、runtime adapter/route、配置 API 或 UI 接线；现有运行时继续读取 `[llm]`
 
 ### Saved Sync (`saved_sync/`)
 - `NativeSaveRouter` 根据 adapter capability 确定 favorite / watch-later 路由；watch-later 仅在平台不支持原生动作且支持 favorite 时回退
