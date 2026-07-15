@@ -900,6 +900,102 @@ def test_malformed_embedding_credential_has_one_stable_removal_resolution() -> N
     assert "nested-embedding-secret" not in repr(first)
 
 
+@pytest.mark.parametrize(
+    ("raw_field", "malformed"),
+    [
+        ("api_key", {"token": "borrowed-api-secret-sentinel"}),
+        ("base_url", {"url": "borrowed-endpoint-secret-sentinel"}),
+    ],
+)
+def test_borrowed_embedding_fields_keep_provider_source_and_one_resolution(
+    raw_field: str,
+    malformed: object,
+) -> None:
+    openai: dict[str, object] = {
+        "api_key": "openai-secret",
+        "model": "gpt-5-nano",
+        "base_url": "",
+    }
+    openai[raw_field] = malformed
+    raw: dict[str, object] = {
+        "default_provider": "deepseek",
+        "fallback_provider": "openai",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai": openai,
+        "embedding": {
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "api_key": "",
+            "base_url": "",
+            "output_dimensionality": 1536,
+            "fallback_enabled": True,
+            "multimodal_enabled": False,
+        },
+    }
+
+    first = _migrate(raw)
+    second = _migrate(raw)
+    source_field = f"llm.openai.{raw_field}"
+    source_issues = [item for item in first.report.issues if item.field == source_field]
+    blocking = [item for item in first.report.issues if item.severity == "blocking"]
+
+    assert len(source_issues) == 1
+    assert source_issues == blocking
+    assert all(item.field != f"llm.embedding.{raw_field}" for item in first.report.issues)
+    assert [item.id for item in first.report.issues] == [item.id for item in second.report.issues]
+    resolved = _apply(
+        first,
+        {source_issues[0].id: _resolution("confirm_remove_after_backup")},
+    )
+    assert [item.preset for item in resolved.chat.connections] == ["deepseek"]
+    assert resolved.embedding.enabled is False
+    assert resolved.embedding.providers == ()
+    assert validate_model_config(resolved, connection_type_registry()) == []
+    assert "borrowed-" not in repr(first)
+
+
+@pytest.mark.parametrize(
+    ("raw_field", "malformed"),
+    [
+        ("api_key", {"token": "dedicated-api-secret-sentinel"}),
+        ("base_url", {"url": "dedicated-endpoint-secret-sentinel"}),
+    ],
+)
+def test_dedicated_embedding_fields_keep_embedding_source_path(
+    raw_field: str,
+    malformed: object,
+) -> None:
+    embedding: dict[str, object] = {
+        "provider": "openai",
+        "model": "text-embedding-3-small",
+        "api_key": "embedding-secret",
+        "base_url": "",
+        "output_dimensionality": 1536,
+        "fallback_enabled": False,
+        "multimodal_enabled": False,
+    }
+    embedding[raw_field] = malformed
+    raw: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "embedding": embedding,
+    }
+
+    result = _migrate(raw)
+    expected_field = f"llm.embedding.{raw_field}"
+    blocking = [item for item in result.report.issues if item.severity == "blocking"]
+
+    assert len(blocking) == 1
+    assert blocking[0].field == expected_field
+    resolved = _apply(
+        result,
+        {blocking[0].id: _resolution("confirm_remove_after_backup")},
+    )
+    assert resolved.embedding.enabled is False
+    assert resolved.embedding.providers == ()
+    assert "dedicated-" not in repr(result)
+
+
 def test_issue_collector_deduplicates_only_identical_semantic_decisions() -> None:
     collector = IssueCollector()
     first = collector.add(

@@ -11,6 +11,7 @@ from ._migration_types import (
     MigrationResolution,
     MigrationResolutionError,
     _EmbeddingProviderState,
+    _PendingValue,
 )
 from .registry import connection_type_registry
 from .types import ChatConnection, EmbeddingModelSettings, EmbeddingProviderConfig, ModelConfig
@@ -80,7 +81,9 @@ def apply_migration_resolutions(
     if set(choices) != required_ids:
         raise _resolution_error()
 
-    pending = {item.issue_id: item for item in result._pending}
+    pending: dict[str, list[_PendingValue]] = {}
+    for item in result._pending:
+        pending.setdefault(item.issue_id, []).append(item)
     chat_additions: list[tuple[int, ChatConnection]] = []
     chat_removals: set[str] = set()
     embedding_removals: set[str] = set()
@@ -95,13 +98,16 @@ def apply_migration_resolutions(
         if resolution.action not in issue.allowed_actions or resolution.action == "cancel":
             raise _resolution_error()
 
-        value = pending.get(issue.id)
+        values = pending.get(issue.id, [])
         if resolution.action == "add_to_chat_route":
             if type(resolution.position) is not int or resolution.embedding_settings is not None:
                 raise _resolution_error()
-            if value is None or value.chat_connection is None:
+            chat_candidates = [
+                value.chat_connection for value in values if value.chat_connection is not None
+            ]
+            if len(chat_candidates) != 1:
                 raise _resolution_error()
-            chat_additions.append((resolution.position, value.chat_connection))
+            chat_additions.append((resolution.position, chat_candidates[0]))
             continue
 
         if resolution.action == "apply_shared_embedding_settings":
@@ -109,12 +115,21 @@ def apply_migration_resolutions(
                 resolution.embedding_settings
             ):
                 raise _resolution_error()
+            embedding_candidates = [
+                value
+                for value in values
+                if value.embedding_provider is not None and value.embedding_state is not None
+            ]
             if (
-                value is None
-                or value.embedding_provider is None
-                or value.embedding_state is None
+                len(embedding_candidates) != 1
                 or embedding_addition is not None
                 or resolution.embedding_settings is None
+            ):
+                raise _resolution_error()
+            value = embedding_candidates[0]
+            if (
+                value.embedding_provider is None
+                or value.embedding_state is None
                 or value.embedding_state.provider_id != value.embedding_provider.id
             ):
                 raise _resolution_error()
@@ -127,18 +142,17 @@ def apply_migration_resolutions(
 
         if resolution.position is not None or resolution.embedding_settings is not None:
             raise _resolution_error()
-        if (
-            resolution.action == "confirm_remove_after_backup"
-            and value is not None
-            and value.remove_chat_connection_id
-        ):
-            chat_removals.add(value.remove_chat_connection_id)
-        if (
-            resolution.action == "confirm_remove_after_backup"
-            and value is not None
-            and value.remove_embedding_provider_id
-        ):
-            embedding_removals.add(value.remove_embedding_provider_id)
+        if resolution.action == "confirm_remove_after_backup":
+            chat_removals.update(
+                value.remove_chat_connection_id
+                for value in values
+                if value.remove_chat_connection_id
+            )
+            embedding_removals.update(
+                value.remove_embedding_provider_id
+                for value in values
+                if value.remove_embedding_provider_id
+            )
 
     retained_chat = tuple(
         connection

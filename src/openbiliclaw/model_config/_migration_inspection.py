@@ -154,6 +154,7 @@ class RawText:
     valid: bool
     configured: bool
     issue_id: str = ""
+    source_field: str = ""
 
 
 def text_field(
@@ -168,7 +169,7 @@ def text_field(
 ) -> RawText:
     """Read an exact string without coercing lists, numbers, or booleans."""
     if name not in raw:
-        return RawText(default, True, False)
+        return RawText(default, True, False, source_field=field)
     value = raw[name]
     if not isinstance(value, str):
         configured = value_configured(value)
@@ -178,9 +179,9 @@ def text_field(
             credential_configured=configured if credential else False,
             reason=reason,
         )
-        return RawText(default, False, configured, issue.id)
+        return RawText(default, False, configured, issue.id, field)
     stripped = value.strip()
-    return RawText(stripped, True, bool(stripped))
+    return RawText(stripped, True, bool(stripped), source_field=field)
 
 
 def exact_int_field(
@@ -256,6 +257,7 @@ class NormalizedEndpoint:
     valid: bool
     official: bool = False
     issue_id: str = ""
+    source_field: str = ""
 
 
 def _normalized_netloc(parsed: SplitResult, hostname: str, port: int | None) -> str:
@@ -284,17 +286,17 @@ def inspect_endpoint(
     """
     if isinstance(raw_value, str) and raw_value == "":
         if canonical_official:
-            return NormalizedEndpoint(canonical_official, True, True)
+            return NormalizedEndpoint(canonical_official, True, True, source_field=field)
         if default:
-            return NormalizedEndpoint(default, True)
+            return NormalizedEndpoint(default, True, source_field=field)
         if required:
             issue = collector.add(
                 "invalid_legacy_value",
                 field,
                 reason="legacy_endpoint_is_required",
             )
-            return NormalizedEndpoint("", False, issue_id=issue.id)
-        return NormalizedEndpoint("", True)
+            return NormalizedEndpoint("", False, issue_id=issue.id, source_field=field)
+        return NormalizedEndpoint("", True, source_field=field)
 
     if not isinstance(raw_value, str):
         issue = collector.add(
@@ -302,7 +304,7 @@ def inspect_endpoint(
             field,
             reason="legacy_endpoint_must_be_string",
         )
-        return NormalizedEndpoint("", False, issue_id=issue.id)
+        return NormalizedEndpoint("", False, issue_id=issue.id, source_field=field)
 
     value = raw_value.strip()
     if not value:
@@ -311,7 +313,7 @@ def inspect_endpoint(
             field,
             reason="legacy_endpoint_is_invalid",
         )
-        return NormalizedEndpoint("", False, issue_id=issue.id)
+        return NormalizedEndpoint("", False, issue_id=issue.id, source_field=field)
 
     invalid_characters = (
         any(not char.isprintable() or char.isspace() for char in raw_value) or "\\" in raw_value
@@ -368,9 +370,9 @@ def inspect_endpoint(
             field,
             reason="legacy_endpoint_is_invalid",
         )
-        return NormalizedEndpoint("", False, issue_id=issue.id)
+        return NormalizedEndpoint("", False, issue_id=issue.id, source_field=field)
     if official:
-        return NormalizedEndpoint(canonical_official, True, True)
+        return NormalizedEndpoint(canonical_official, True, True, source_field=field)
 
     normalized = urlunsplit(
         (
@@ -381,7 +383,7 @@ def inspect_endpoint(
             "",
         )
     )
-    return NormalizedEndpoint(normalized, True)
+    return NormalizedEndpoint(normalized, True, source_field=field)
 
 
 def normalized_ollama_endpoint(value: str) -> str:
@@ -400,6 +402,7 @@ class InspectedCredential:
     valid: bool = True
     configured: bool = False
     issue_id: str = ""
+    source_field: str = ""
 
 
 def inspect_credential_from_raw(
@@ -425,6 +428,7 @@ def inspect_credential_from_raw(
             valid=inline.valid,
             configured=inline.configured,
             issue_id=inline.issue_id,
+            source_field=inline.source_field,
         )
 
     env_names: tuple[str, ...] = ()
@@ -440,11 +444,13 @@ def inspect_credential_from_raw(
                 valid=inline.valid,
                 configured=True,
                 issue_id=inline.issue_id,
+                source_field=inline.source_field,
             )
     return InspectedCredential(
         valid=inline.valid,
         configured=inline.configured,
         issue_id=inline.issue_id,
+        source_field=inline.source_field,
     )
 
 

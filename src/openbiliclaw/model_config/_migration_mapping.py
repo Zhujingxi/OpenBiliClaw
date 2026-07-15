@@ -356,7 +356,8 @@ def _map_embedding_route(
                 environment,
                 used_ids,
                 collector,
-                prefix="llm.embedding",
+                endpoint_prefix="llm.embedding",
+                credential_prefix=f"llm.{embedding_name}" if borrow_primary else None,
                 inspected_credential=None if borrow_primary else embedding_credential,
             )
             primary_provider = primary_mapped.provider
@@ -369,21 +370,42 @@ def _map_embedding_route(
                 )
             )
             if not embedding_provider_usable(primary_provider, primary_mapped.endpoint_valid):
-                issue_id = primary_mapped.credential_issue_id
-                if not issue_id:
-                    issue_id = collector.add(
-                        "invalid_legacy_value",
-                        "llm.embedding.api_key",
-                        provider=embedding_name,
-                        credential_configured=False,
-                        reason="configured_embedding_provider_has_no_usable_configuration",
-                    ).id
-                pending.append(
-                    _PendingValue(
-                        issue_id=issue_id,
-                        remove_embedding_provider_id=primary_provider.id,
+                removal_issue_ids: list[str] = []
+                credential_inspection = primary_mapped.credential_inspection
+                if (
+                    primary_provider.type != "ollama"
+                    and primary_provider.credential.source == "none"
+                ):
+                    credential_issue_id = credential_inspection.issue_id
+                    if not credential_issue_id:
+                        credential_issue_id = collector.add(
+                            "invalid_legacy_value",
+                            credential_inspection.source_field,
+                            provider=embedding_name,
+                            credential_configured=False,
+                            reason="configured_embedding_provider_has_no_usable_configuration",
+                        ).id
+                    removal_issue_ids.append(credential_issue_id)
+                endpoint_issue_id = primary_mapped.endpoint_inspection.issue_id
+                if not primary_mapped.endpoint_valid and endpoint_issue_id:
+                    removal_issue_ids.append(endpoint_issue_id)
+                if not removal_issue_ids:
+                    removal_issue_ids.append(
+                        collector.add(
+                            "invalid_legacy_value",
+                            primary_mapped.endpoint_inspection.source_field,
+                            provider=embedding_name,
+                            credential_configured=False,
+                            reason="configured_embedding_provider_has_no_usable_configuration",
+                        ).id
                     )
-                )
+                for issue_id in dict.fromkeys(removal_issue_ids):
+                    pending.append(
+                        _PendingValue(
+                            issue_id=issue_id,
+                            remove_embedding_provider_id=primary_provider.id,
+                        )
+                    )
 
     fallback_name, _fallback_valid = _provider_name(
         embedding_raw,
@@ -418,7 +440,7 @@ def _map_embedding_route(
                 environment,
                 used_ids,
                 collector,
-                prefix=f"llm.{fallback_name}",
+                endpoint_prefix=f"llm.{fallback_name}",
             )
             fallback_provider = fallback_mapped.provider
             fallback_space = embedding_space(fallback_name)

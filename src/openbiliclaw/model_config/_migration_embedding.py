@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ._migration_constants import (
@@ -13,6 +13,7 @@ from ._migration_constants import (
 from ._migration_inspection import (
     InspectedCredential,
     IssueCollector,
+    NormalizedEndpoint,
     bounded_float_field,
     exact_bool_field,
     exact_int_field,
@@ -38,8 +39,13 @@ class MappedEmbeddingProvider:
     """One mapped provider plus private, secret-free inspection metadata."""
 
     provider: EmbeddingProviderConfig = field(repr=False)
-    endpoint_valid: bool = True
-    credential_issue_id: str = ""
+    credential_inspection: InspectedCredential = field(repr=False)
+    endpoint_inspection: NormalizedEndpoint = field(repr=False)
+
+    @property
+    def endpoint_valid(self) -> bool:
+        """Expose endpoint validity without discarding its source metadata."""
+        return self.endpoint_inspection.valid
 
 
 def _embedding_type_and_preset(provider: str) -> tuple[str, str]:
@@ -60,7 +66,7 @@ def _embedding_endpoint(
     *,
     field: str,
     collector: IssueCollector,
-) -> tuple[str, bool]:
+) -> NormalizedEndpoint:
     if provider == "openai":
         endpoint = inspect_endpoint(
             raw_value,
@@ -93,8 +99,9 @@ def _embedding_endpoint(
         )
     else:
         endpoint = inspect_endpoint(raw_value, field=field, collector=collector)
-    value = normalized_ollama_endpoint(endpoint.value) if provider == "ollama" else endpoint.value
-    return value, endpoint.valid
+    if provider == "ollama":
+        return replace(endpoint, value=normalized_ollama_endpoint(endpoint.value))
+    return endpoint
 
 
 def map_embedding_provider(
@@ -105,28 +112,32 @@ def map_embedding_provider(
     used_ids: set[str],
     collector: IssueCollector,
     *,
-    prefix: str,
+    endpoint_prefix: str,
+    credential_prefix: str | None = None,
     inspected_credential: InspectedCredential | None = None,
 ) -> MappedEmbeddingProvider:
     """Map one provider while retaining only safe inspection metadata."""
     connection_type, preset = _embedding_type_and_preset(provider)
+    credential_source_prefix = credential_prefix or endpoint_prefix
     inspection = inspected_credential
     if inspection is None:
         inspection = inspect_credential_from_raw(
             provider,
             credential_raw,
             env,
-            prefix=prefix,
+            prefix=credential_source_prefix,
             collector=collector,
         )
     credential = CredentialConfig() if provider == "ollama" else inspection.credential
     base_url_raw = endpoint_raw.get("base_url", "")
+    base_url_field = f"{endpoint_prefix}.base_url"
     if base_url_raw == "" and endpoint_raw is not credential_raw:
         base_url_raw = credential_raw.get("base_url", "")
-    base_url, endpoint_valid = _embedding_endpoint(
+        base_url_field = f"{credential_source_prefix}.base_url"
+    endpoint = _embedding_endpoint(
         provider,
         base_url_raw,
-        field=f"{prefix}.base_url",
+        field=base_url_field,
         collector=collector,
     )
     return MappedEmbeddingProvider(
@@ -135,11 +146,11 @@ def map_embedding_provider(
             name=PROVIDER_LABELS[provider],
             type=connection_type,
             preset=preset,
-            base_url=base_url,
+            base_url=endpoint.value,
             credential=credential,
         ),
-        endpoint_valid=endpoint_valid,
-        credential_issue_id=inspection.issue_id,
+        credential_inspection=inspection,
+        endpoint_inspection=endpoint,
     )
 
 
