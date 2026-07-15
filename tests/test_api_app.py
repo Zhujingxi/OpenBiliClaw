@@ -11887,6 +11887,78 @@ class TestGuidedInitEndpoints:
             app.state.runtime_context._init_prereqs = prereqs
         return app, db
 
+    @staticmethod
+    def _install_ordered_init_route(app, *health: bool):
+        from dataclasses import replace
+
+        from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+        from openbiliclaw.model_config import ChatConnection
+
+        class _HealthAdapter:
+            def __init__(self, available: bool) -> None:
+                self.available = available
+                self.calls = 0
+
+            async def health_check(self) -> bool:
+                self.calls += 1
+                return self.available
+
+        adapters = tuple(_HealthAdapter(available) for available in health)
+        route = OrderedLLMRoute(
+            tuple(
+                RouteConnection(
+                    connection=ChatConnection(
+                        id=f"init-route-{index}",
+                        name=f"Init Route {index}",
+                        type="ollama",
+                        model=f"model-{index}",
+                    ),
+                    adapter=adapter,
+                )
+                for index, adapter in enumerate(adapters)
+            ),
+            revision="init-endpoint-test",
+            timeout_seconds=30,
+        )
+        ctx = app.state.runtime_context
+        ctx.llm_registry = route
+        ctx.model_bundle = replace(ctx.model_bundle, chat_route=route)
+        ctx._init_prereqs = None
+        return adapters
+
+    def test_init_status_probes_real_ordered_route_fallback(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        primary, fallback = self._install_ordered_init_route(app, False, True)
+
+        with TestClient(app) as client:
+            response = client.get("/api/init-status")
+
+        assert response.status_code == 200
+        assert response.json()["prerequisites"]["llm_ready"] is True
+        assert primary.calls == 1
+        assert fallback.calls == 1
+
+    def test_init_post_probes_real_ordered_route_fallback(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        captured = self._capture_run_guided_init(monkeypatch)
+        app, _ = self._make_app(tmp_path)
+        primary, fallback = self._install_ordered_init_route(app, False, True)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={})
+            assert response.status_code == 202
+            self._drive_until(client, captured)
+
+        assert primary.calls == 1
+        assert fallback.calls == 1
+
     def test_init_rejects_non_local(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
@@ -13521,6 +13593,58 @@ class TestEmbeddingDiagnosisAndRepair:
         assert resp.status_code == 202
         assert private_starts == [("/tmp/private-models", "http://127.0.0.1:11435")]
 
+    def test_repair_not_running_uses_embedding_endpoint_when_chat_differs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        diagnoses = iter(
+            [
+                ("not_running", "Ollama 服务无法连接"),
+                ("model_missing", "缺 bge-m3"),
+            ]
+        )
+        managed_endpoints: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return next(diagnoses)
+
+        def fake_ensure(endpoint: str) -> bool:
+            managed_endpoints.append(endpoint)
+            return True
+
+        async def fake_pull(base_url: str, model: str, *, on_progress=None, **_kw: object):
+            if on_progress is not None:
+                on_progress("success", 0, 0)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "ensure_managed_ollama", fake_ensure)
+        monkeypatch.setattr("openbiliclaw.llm.ollama_diagnostics.pull_ollama_model", fake_pull)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        _use_native_ollama(app.state.runtime_context.config)
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
+
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+
+        assert resp.status_code == 202
+        assert managed_endpoints == ["http://127.0.0.1:11435"]
+
     def test_repair_provider_error_restarts_recorded_private_daemon(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -13559,6 +13683,100 @@ class TestEmbeddingDiagnosisAndRepair:
         assert resp.status_code == 409
         assert resp.json()["error"] == "provider_error"
         assert restart_calls == ["restart"]
+
+    def test_repair_provider_error_gates_restart_on_exact_embedding_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+        )
+        gated_endpoints: list[str] = []
+        restart_calls: list[str] = []
+        original_may_manage = sup.may_manage_ollama_endpoint
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("error", "Ollama 响应异常（GET /api/tags -> 500）：server busy")
+
+        def capture_may_manage(endpoint: str) -> bool:
+            gated_endpoints.append(endpoint)
+            return original_may_manage(endpoint)
+
+        def fake_restart() -> tuple[bool, str]:
+            restart_calls.append("restart")
+            return (False, "start_failed")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(sup, "may_manage_ollama_endpoint", capture_may_manage)
+        monkeypatch.setattr(sup, "restart_managed_ollama", fake_restart)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        _use_native_ollama(app.state.runtime_context.config)
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
+
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+
+        assert resp.status_code == 409
+        assert gated_endpoints == ["http://127.0.0.1:11435"]
+        assert restart_calls == ["restart"]
+
+    def test_repair_path_migration_never_restarts_different_chat_endpoint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.runtime import ollama_supervisor as sup
+
+        monkeypatch.setattr(
+            sup,
+            "_managed_daemon",
+            sup._ManagedDaemon(None, "http://127.0.0.1:11434", "/tmp/chat-models"),
+        )
+        restart_calls: list[str] = []
+
+        async def fake_diagnose(base_url: str, model: str, **_kw: object) -> tuple[str, str]:
+            return ("model_path_encoding", "模型路径含非 ASCII 字符")
+
+        def fake_restart(path: str) -> tuple[bool, str]:
+            restart_calls.append(path)
+            return (True, "")
+
+        monkeypatch.setattr(
+            "openbiliclaw.llm.ollama_diagnostics.diagnose_ollama_embedding", fake_diagnose
+        )
+        monkeypatch.setattr(
+            sup,
+            "ollama_models_relocation_candidate",
+            lambda: str(tmp_path / "relocated-models"),
+        )
+        monkeypatch.setattr(sup, "restart_managed_ollama_with_models_dir", fake_restart)
+        app, _ = self._make_app(tmp_path, embedding_provider="ollama")
+        _use_native_ollama(app.state.runtime_context.config)
+        _set_app_native_embedding(
+            app,
+            provider_type="ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            service=None,
+        )
+
+        with TestClient(app) as client:
+            resp = client.post("/api/embedding/repair")
+
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "manual_fix_required"
+        assert restart_calls == []
 
     def test_repair_not_running_still_409s_without_record_on_custom_endpoint(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

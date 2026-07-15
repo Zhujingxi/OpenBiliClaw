@@ -476,7 +476,34 @@ class RuntimeContext:
         if self.config is None or self.database is None or self.memory_manager is None:
             return candidate
 
-        candidate_config = copy.copy(self.config)
+        candidate_config = copy.deepcopy(self.config)
+        candidate_config.models = models
+        return self._rebuild_components(
+            candidate_config,
+            model_bundle=candidate,
+            publish=False,
+        )
+
+    def restage_model_candidate(
+        self,
+        candidate: object,
+        models: ModelConfig,
+        revision: str,
+    ) -> RuntimeModelBundle:
+        """Rebase a built model graph onto the current complete runtime config.
+
+        Model candidate construction may overlap an unrelated ordinary config
+        transaction. The canonical model-save boundary calls this synchronous
+        method after that writer has finished, so publication preserves the
+        latest non-model settings without awaiting under the model swap lock.
+        """
+        if not isinstance(candidate, RuntimeModelBundle):
+            raise TypeError("candidate must be a RuntimeModelBundle")
+        if candidate.revision != revision or candidate.models != models:
+            raise ValueError("candidate models or revision changed before restaging")
+        if self.config is None or self.database is None or self.memory_manager is None:
+            return candidate
+        candidate_config = copy.deepcopy(self.config)
         candidate_config.models = models
         return self._rebuild_components(
             candidate_config,

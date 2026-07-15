@@ -283,3 +283,74 @@ async def test_gate_configuration_failure_does_not_publish_candidate(
     assert _consumer_identities(context) == old_consumers
     assert context.llm_concurrency_gate is gate
     assert gate.total_concurrency == old_capacity
+
+
+async def test_model_save_restages_live_graph_after_unrelated_config_reload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """A canonical ordinary writer may win while the model candidate builds."""
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import load_config, save_config
+    from openbiliclaw.config_write import coordinated_config_write
+    from openbiliclaw.llm import connection_factory
+    from openbiliclaw.model_config.service import (
+        ModelConfigSaveRequest,
+        ModelConfigService,
+    )
+
+    monkeypatch.setattr(
+        connection_factory,
+        "build_chat_adapter",
+        lambda item, _options: _BlockingAdapter(item),
+    )
+    config_path = tmp_path / "config.toml"
+    initial = _config(tmp_path, _connection("primary", "model-old"))
+    initial.scheduler.pool_target_count = 20
+    save_config(initial, config_path, models_authoritative=True)
+    context = build_runtime_context(initial)
+    service = ModelConfigService(config_path, context)
+    requested = replace(
+        initial.models,
+        chat=replace(
+            initial.models.chat,
+            connections=(_connection("primary", "model-new"),),
+        ),
+    )
+
+    candidate_built = asyncio.Event()
+    release_candidate = asyncio.Event()
+    real_build = context.build_model_candidate
+
+    async def hold_first_candidate(models: ModelConfig, revision: str) -> object:
+        candidate = await real_build(models, revision)
+        candidate_built.set()
+        await release_candidate.wait()
+        return candidate
+
+    monkeypatch.setattr(context, "build_model_candidate", hold_first_candidate)
+    save_task = asyncio.create_task(
+        service.save(
+            ModelConfigSaveRequest(
+                revision=service.read().revision,
+                models=requested,
+            )
+        )
+    )
+    await candidate_built.wait()
+
+    ordinary = load_config(config_path)
+    ordinary.scheduler.pool_target_count = 77
+    async with coordinated_config_write(config_path):
+        save_config(ordinary, config_path)
+        await context.rebuild_from_config(ordinary)
+    release_candidate.set()
+    result = await save_task
+
+    persisted = load_config(config_path)
+    assert result.ok is True
+    assert persisted.models.chat.connections[0].model == "model-new"
+    assert persisted.scheduler.pool_target_count == 77
+    assert context.model_bundle.models.chat.connections[0].model == "model-new"
+    assert context.config.scheduler.pool_target_count == 77
+    assert context.runtime_controller.pool_target_count == 77

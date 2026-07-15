@@ -8,6 +8,10 @@
 
 gate 属于 `RuntimeContext` 的稳定部分，容量只读取 `models.chat.concurrency`，并且只在 candidate 已完整构造、publication 即将成功时原地更新。旧、新 route 因此始终竞争同一个真实总上限；失败 candidate 不会提前改变容量或 inventory state。
 
+模型 candidate 的 adapter 构造可以和普通配置写并行，但完整 consumer graph 不再携带构造开始时的全配置快照。`ModelConfigService` 进入 canonical writer、重读并完成模型 authority/revision 判定后，会调用同步 `restage_model_candidate()`，把已经构造好的 route/service 重新挂到当前 `RuntimeContext.config` 的完整配置图上，再写盘和短锁发布。因此普通 writer 在 candidate 等待期间提交的 scheduler/source 等非模型字段会同时保留在磁盘和 live controller；restage 失败时不写盘、不 swap。
+
+guided-init 的 `InitPrereqs.chat_ready()` 识别 production `OrderedLLMRoute.connections`，按配置顺序直接探测每个 connection adapter，第一条健康连接即通过；primary 不健康时会继续验证 fallback。旧的 `registry.get()` / `fallback_provider` 分支只保留给显式注入的 legacy test/embedding context，不会用于 production ordered route。
+
 ## 概述
 
 `src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。

@@ -49,9 +49,11 @@ class FakeCoordinator:
         self._current_model_candidate: object = object()
         self.allow_current_reads = True
         self.build_calls = 0
+        self.restage_calls = 0
         self.swap_calls = 0
         self.restore_calls = 0
         self.fail_build = False
+        self.fail_restage = False
         self.fail_swap = False
         self.fail_restore = False
         self.build_entered: asyncio.Event | None = None
@@ -73,6 +75,17 @@ class FakeCoordinator:
         if self.fail_build:
             raise RuntimeError("candidate build failed")
         return (models, revision)
+
+    def restage_model_candidate(
+        self,
+        candidate: object,
+        models: ModelConfig,
+        revision: str,
+    ) -> object:
+        self.restage_calls += 1
+        if self.fail_restage:
+            raise RuntimeError("candidate restage failed")
+        return candidate if candidate == (models, revision) else (models, revision)
 
     async def swap_model_candidate(self, candidate: object) -> object:
         self.swap_calls += 1
@@ -466,6 +479,7 @@ async def test_persisted_endpoint_check_allows_credential_supplied_by_local_arra
 
     assert result.ok is True
     assert coordinator.build_calls == 1
+    assert coordinator.restage_calls == 1
     assert coordinator.swap_calls == 1
     persisted = tomllib.loads(path.read_text(encoding="utf-8"))["models"]
     base_connection = persisted["chat"]["connections"][0]
@@ -667,6 +681,32 @@ async def test_candidate_failure_changes_neither_disk_nor_runtime(tmp_path: Path
     assert result.ok is False
     assert path.read_bytes() == before_file
     assert coordinator.current_model_candidate is before_bundle
+    assert coordinator.swap_calls == 0
+
+
+async def test_candidate_restage_failure_changes_neither_disk_nor_runtime(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    models = _models()
+    _write_native(path, models)
+    coordinator = FakeCoordinator()
+    coordinator.fail_restage = True
+    service = ModelConfigService(path, coordinator)
+    before_file = path.read_bytes()
+    before_bundle = coordinator.current_model_candidate
+
+    result = await service.save(
+        ModelConfigSaveRequest(
+            revision=service.read().revision,
+            models=replace(models, chat=replace(models.chat, timeout_seconds=120)),
+        )
+    )
+
+    assert result.ok is False
+    assert result.errors[0].code == "candidate_build_failed"
+    assert path.read_bytes() == before_file
+    assert coordinator.current_model_candidate is before_bundle
+    assert coordinator.build_calls == 1
+    assert coordinator.restage_calls == 1
     assert coordinator.swap_calls == 0
 
 
@@ -958,6 +998,7 @@ async def test_model_save_rebases_over_concurrent_ordinary_unrelated_write(
     result = await save_task
 
     assert result.ok is True
+    assert coordinator.restage_calls == 1
     parsed = tomllib.loads(path.read_text(encoding="utf-8"))
     assert parsed["general"]["language"] == "en-US"
     assert parsed["models"]["chat"]["timeout_seconds"] == 120

@@ -518,12 +518,19 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 `(host, models_dir)` 拉起新 daemon。任何 restart 都复用记录规格：私有 daemon 永远不会
 回到 11434、也不会丢私有模型目录。`stop_managed_ollama` 清整条记录。
 
-**端点判定**：`is_managed_endpoint(endpoint)` 做 host:port 归一化比较（`localhost` ≡
-`127.0.0.1` ≡ `::1`，scheme / `/v1` path 不敏感）；`may_manage_ollama_endpoint(endpoint)` =
-默认 loopback 11434 **或** 已记录的托管 daemon，是 `api/app.py` 两个修复 gate
-（not_running / provider_error）唯一使用的谓词。`ensure_managed_ollama(endpoint)` 按记录
-路由 not_running 修复的启动动作（私有 → `start_managed_ollama_at(记录目录, 记录端口)`，
-否则默认路径）。
+**单 daemon 与端点判定**：supervisor 每个进程只记录一个 managed daemon。
+`configured_ollama_endpoints(config)` 按 Chat connection 顺序、再按 Embedding provider 顺序列出
+去重后的 daemon roots；`effective_ollama_endpoint(config)` 只选第一条，形成 general startup 的
+显式 Chat-first 单目标策略。其它不同 endpoint 必须已由外部或专用 desktop owner 管理。
+`is_managed_endpoint(endpoint)` 做 host:port 归一化比较（`localhost` ≡ `127.0.0.1` ≡ `::1`，
+scheme / `/v1` path 不敏感）。没有记录时 `may_manage_ollama_endpoint()` 只允许默认 11434；
+已有记录后只允许精确匹配该记录，不会用 11434 覆盖 11435 的 ownership 或反向覆盖。
+
+Embedding repair 不使用 Chat-first `effective_ollama_endpoint()`：它把当前被诊断 provider 的
+`base_url` 交给 `ollama_daemon_endpoint()` 得到精确 root，并让 not-running start、
+provider-error restart gate 与 model-path migration gate 全部检查这个 root。
+`ensure_managed_ollama(endpoint)` 再按匹配记录路由启动动作（私有 →
+`start_managed_ollama_at(记录目录, 记录端口)`，无记录默认 root → 默认路径）。
 
 **Watchdog**：`start_ollama_watchdog(interval_seconds=30)` 幂等地启动单个 daemon 线程
 （`obc-ollama-watchdog`），两条成功启动路径（默认 + 私有，含收养分支）都会自动布防。
@@ -539,8 +546,9 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 
 | Endpoint | 记录状态 | not_running 动作 | provider_error 动作 |
 | --- | --- | --- | --- |
-| `localhost:11434`（默认） | 有/无记录 | 默认路径启动（同旧行为） | spec-aware restart |
+| `localhost:11434`（默认） | 无记录或匹配的 11434 记录 | 默认路径启动（同旧行为） | spec-aware restart |
 | `127.0.0.1:11435`（with-embedding 私有） | 有记录（spawn 或收养） | `start_managed_ollama_at(记录目录, 记录端口)` | spec-aware restart（私有路径） |
+| 任一 loopback root | 已记录另一个 host:port | 409（单 daemon ownership 不匹配） | 409，不重启另一 endpoint |
 | 自定义端口 / 远端 | 无记录 | 409（不越权，同旧行为） | 409 |
 | 任意 | `manage_ollama=false` | 409 | 409 |
 

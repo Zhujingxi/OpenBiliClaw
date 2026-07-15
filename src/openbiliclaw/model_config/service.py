@@ -259,6 +259,13 @@ class ModelRuntimeCoordinator(Protocol):
 
     async def build_model_candidate(self, models: ModelConfig, revision: str) -> object: ...
 
+    def restage_model_candidate(
+        self,
+        candidate: object,
+        models: ModelConfig,
+        revision: str,
+    ) -> object: ...
+
     async def swap_model_candidate(self, candidate: object) -> object | None: ...
 
     async def restore_model_candidate(self, candidate: object | None) -> None: ...
@@ -700,12 +707,36 @@ class ModelConfigService:
                             errors=(error,),
                         )
 
-                    # Capture the exact old runtime identity while ordinary API
-                    # transactions are excluded.  The disk gate is released
-                    # before awaiting the coordinator; the async owner remains
-                    # active through swap or rollback.
-                    previous = self.coordinator.current_model_candidate
-                    backup_path: Path | None = None
+                # The first candidate was built before joining the canonical
+                # boundary. An ordinary config transaction may have published
+                # unrelated settings while that build awaited, so rebuild the
+                # full consumer publication from the current live Config now.
+                # This operation is synchronous for RuntimeContext: it holds
+                # neither the disk gate nor the short model-swap lock.
+                try:
+                    runtime_candidate = self.coordinator.restage_model_candidate(
+                        runtime_candidate,
+                        effective,
+                        rebased_revision,
+                    )
+                except Exception:
+                    error = ModelConfigFieldError(
+                        "models",
+                        "candidate_build_failed",
+                        "The model runtime candidate could not be restaged.",
+                    )
+                    return ModelConfigSaveResult(
+                        ok=False,
+                        snapshot=latest_snapshot,
+                        errors=(error,),
+                    )
+
+                # Capture the exact post-rebase runtime identity. Rollback must
+                # retain any unrelated ordinary-config update that won while
+                # the initial model candidate was building.
+                previous = self.coordinator.current_model_candidate
+                backup_path: Path | None = None
+                with coordinated_config_disk_write(self.path):
                     if latest.base_source == "legacy":
                         try:
                             backup_path = _create_legacy_backup(
@@ -724,7 +755,6 @@ class ModelConfigService:
                                 snapshot=latest_snapshot,
                                 errors=(error,),
                             )
-
                     try:
                         _atomic_write(self.path, payload, latest.mode)
                     except OSError as exc:

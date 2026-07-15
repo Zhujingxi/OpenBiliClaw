@@ -48,6 +48,23 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
     cfg.scheduler.speculator_idle_interval_minutes = 11
 
     captured: dict[str, object] = {}
+    bundle_calls = 0
+    chat_route = object()
+    embedding_service = object()
+    usage_recorder = object()
+    concurrency_gate = object()
+
+    def build_model_bundle() -> object:
+        nonlocal bundle_calls
+        bundle_calls += 1
+        return SimpleNamespace(
+            chat_route=chat_route,
+            embedding_service=embedding_service,
+            llm_service=SimpleNamespace(
+                usage_recorder=usage_recorder,
+                concurrency_gate=concurrency_gate,
+            ),
+        )
 
     class FakeSoulEngine:
         def __init__(self, **kwargs: object) -> None:
@@ -55,7 +72,12 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
 
     monkeypatch.setattr(config_module, "load_config", lambda: cfg)
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
-    monkeypatch.setattr(cli_module, "_build_registry", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_model_bundle", build_model_bundle)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_registry",
+        lambda: pytest.fail("SoulEngine must consume the model bundle directly"),
+    )
     monkeypatch.setattr("openbiliclaw.soul.engine.SoulEngine", FakeSoulEngine)
 
     cli_module._build_soul_engine()
@@ -68,6 +90,11 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
     assert captured["speculation_max_primary_interests"] == 17
     assert captured["speculation_max_secondary_interests"] == 66
     assert captured["speculator_idle_interval_minutes"] == 11
+    assert bundle_calls == 1
+    assert captured["llm"] is chat_route
+    assert captured["embedding_service"] is embedding_service
+    assert captured["usage_recorder"] is usage_recorder
+    assert captured["llm_concurrency_gate"] is concurrency_gate
 
 
 def _write_example_config(project_root: Path) -> None:

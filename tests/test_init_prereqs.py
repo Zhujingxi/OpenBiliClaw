@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
+from openbiliclaw.model_config import ChatConnection
 from openbiliclaw.runtime import init_prereqs
 from openbiliclaw.runtime.init_prereqs import InitPrereqs
 
@@ -17,6 +19,25 @@ class _Provider:
     async def health_check(self) -> bool:
         self.calls += 1
         return self._ok
+
+
+def _ordered_route(*providers: _Provider) -> OrderedLLMRoute:
+    return OrderedLLMRoute(
+        tuple(
+            RouteConnection(
+                connection=ChatConnection(
+                    id=f"route-{index}",
+                    name=f"Route {index}",
+                    type="ollama",
+                    model=f"model-{index}",
+                ),
+                adapter=provider,
+            )
+            for index, provider in enumerate(providers)
+        ),
+        revision="init-prereqs-test",
+        timeout_seconds=30,
+    )
 
 
 def _ctx(
@@ -52,6 +73,17 @@ async def test_chat_ready_false_when_provider_unhealthy() -> None:
 async def test_chat_ready_false_when_no_registry() -> None:
     pr = InitPrereqs(_ctx(provider=None))
     assert await pr.chat_ready() is False
+
+
+async def test_chat_ready_probes_ordered_connections_until_first_healthy() -> None:
+    primary = _Provider(ok=False)
+    fallback = _Provider(ok=True)
+    ctx = _ctx(provider=None)
+    ctx.llm_registry = _ordered_route(primary, fallback)
+
+    assert await InitPrereqs(ctx).chat_ready() is True
+    assert primary.calls == 1
+    assert fallback.calls == 1
 
 
 def _ctx_with_fallback(default: Any, fallback: Any, *, fallback_name: str = "claude") -> Any:

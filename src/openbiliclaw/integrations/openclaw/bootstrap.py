@@ -95,6 +95,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     soul_engine = SoulEngine(
         llm=llm_registry,
         memory=memory_manager,
+        embedding_service=embedding_service,
         usage_recorder=usage_recorder,
         llm_concurrency=llm_concurrency,
         llm_concurrency_gate=llm_gate,

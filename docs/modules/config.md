@@ -165,7 +165,7 @@ auto_sync_enabled = false
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否期望系统登录后自动拉起 `openbiliclaw start`。可通过插件 / 桌面 Web 设置页或 `openbiliclaw autostart enable/disable` 修改 |
-| `manage_ollama` | bool | `true` | `start` 时如果检测到当前配置需要本机 Ollama，且 endpoint 是默认 `127.0.0.1:11434`，会在 Ollama 未运行时尝试后台拉起 `ollama serve`。自定义端口或远端 endpoint 只探测不拉起 |
+| `manage_ollama` | bool | `true` | `start` 使用单托管 daemon 策略：优先取第一条 Ollama Chat connection，没有时取第一条 Ollama Embedding provider；选中默认 `127.0.0.1:11434` 且未运行时才尝试后台拉起 `ollama serve`。其它不同、自定义或远端 endpoint 需由外部/专用 owner 管理；Embedding repair 始终按自身 provider 精确 endpoint 处理 |
 
 `save_config()` 默认会保留磁盘上已有的 `[autostart].enabled`，避免普通配置保存用陈旧快照覆盖用户刚从 API / CLI 改过的自启动开关。只有 `/api/autostart/apply` 和 `openbiliclaw autostart enable/disable` 会以 `autostart_authoritative=true` 权威写入该字段。
 

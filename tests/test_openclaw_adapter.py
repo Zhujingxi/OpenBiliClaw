@@ -780,6 +780,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             self.llm = llm
             self.memory = memory
             self.kwargs = kwargs
+            self._embedding_service = kwargs.get("embedding_service")
 
     class FakeLLMService:
         def __init__(
@@ -911,6 +912,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     )
 
     route = object()
+    embedding_service = object()
 
     def build_bundle(*_args: object, memory: object, concurrency_gate: object, **_kwargs: object):
         service = FakeLLMService(
@@ -922,7 +924,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         return SimpleNamespace(
             chat_route=route,
             llm_service=service,
-            embedding_service=None,
+            embedding_service=embedding_service,
         )
 
     monkeypatch.setattr(bootstrap_module, "load_config", lambda: fake_config)
@@ -978,6 +980,8 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         created_databases[0],
     ]
     assert services.soul_engine.llm is route
+    assert services.soul_engine.kwargs["embedding_service"] is embedding_service
+    assert services.soul_engine._embedding_service is embedding_service
     assert services.soul_engine.kwargs["speculation_interval_minutes"] == 22
     assert services.soul_engine.kwargs["speculation_ttl_days"] == 8
     assert services.soul_engine.kwargs["speculation_cooldown_days"] == 9
@@ -1897,3 +1901,30 @@ async def test_respond_avoidance_probe_confirm_delegates_to_speculator() -> None
         domain="浅层热点复读",
     )
     assert soul_engine._avoidance_speculator.confirmed == ["浅层热点复读"]
+
+
+@pytest.mark.asyncio
+async def test_respond_avoidance_probe_uses_soul_embedding_for_semantic_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openbiliclaw.integrations.openclaw.operations as operations_module
+
+    adapter, soul_engine, memory_manager, *_ = _build_adapter()
+    embedding_service = object()
+    soul_engine._embedding_service = embedding_service
+    memory_manager.get_layer = lambda _name: SimpleNamespace(data={})  # type: ignore[attr-defined]
+    captured: dict[str, object] = {}
+
+    async def fake_apply_new_dislikes(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(operations_module, "apply_new_dislikes", fake_apply_new_dislikes)
+
+    result = await adapter.respond_avoidance_probe(
+        AvoidanceProbeFeedbackRequest(domain="浅层热点复读", response="confirm")
+    )
+
+    assert result.ok is True
+    assert captured["embedding_service"] is embedding_service
+    assert captured["topics"] == ["浅层热点复读"]

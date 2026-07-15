@@ -78,6 +78,8 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 ### `openbiliclaw config-show`
 
 显示当前加载的原生 `Config.models`、ordered Chat connection 列表和共享设置 Embedding route。primary 与 fallback 使用同一种 connection 记录结构，仅由列表位置决定优先级。
+
+CLI runtime builder 每个进程只取一次缓存的 `RuntimeModelBundle` 来构造 `SoulEngine`：Chat route、Embedding service、usage recorder 与 concurrency gate 都来自该同一 bundle。这样 CLI 的手动 dislike / avoidance 写回与 API/OpenClaw 一样可以执行语义候选池清理，不会因为另建 registry 或漏接 embedding 而降级。
 配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 
 ```bash
@@ -263,7 +265,7 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 
 数据库健康后、API server 启动前，`start` 还会执行自启动相关的轻量 reconcile：
 
-- 如果当前 LLM / embedding 配置需要本机 Ollama、`[autostart].manage_ollama=true` 且 endpoint 是默认 `localhost:11434`，会探测 `/api/version`；未运行时尝试后台执行 `ollama serve`。远端或自定义 loopback 端口只探测，不强行拉起。
+- 如果当前 Chat / Embedding route 需要 Ollama 且 `[autostart].manage_ollama=true`，startup 使用显式的**单托管 daemon**策略：按 Chat connection 顺序选择第一条 Ollama endpoint；没有 Ollama Chat 时才选择第一条 Ollama Embedding endpoint。只有被选中的默认 `127.0.0.1:11434` 会在未运行时尝试后台执行 `ollama serve`；其余不同 endpoint 需已由外部或专用 desktop owner 管理。Embedding 一键修复不复用这个 Chat-first 选择，而是始终管理被诊断 Embedding provider 的精确 daemon root。
 - 如果 `[autostart].enabled=true` 但系统登录项缺失，会在没有环境变量管理风险时重新注册当前用户登录项；发现 `OPENBILICLAW_*` / provider API key 等环境变量覆盖时只告警并跳过，避免注册一个下次登录拿不到配置的启动项。
 - 如果 `[autostart].enabled=false` 但系统登录项仍残留，会尝试移除该当前用户登录项，让手动编辑配置后的下一次启动也能回到关闭状态。
 

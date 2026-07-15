@@ -3106,6 +3106,9 @@ def create_app(
                 status_code=409,
             )
         base_url, model = _embedding_ollama_target()
+        from openbiliclaw.runtime.ollama_supervisor import ollama_daemon_endpoint
+
+        embedding_endpoint = ollama_daemon_endpoint(base_url)
 
         from openbiliclaw.llm.ollama_diagnostics import (
             DIAG_DISK_FULL,
@@ -3133,7 +3136,6 @@ def create_app(
                     return JSONResponse({"ok": True, "already_ok": True, "model": model})
                 if code == DIAG_NOT_RUNNING:
                     from openbiliclaw.runtime.ollama_supervisor import (
-                        effective_ollama_endpoint,
                         ensure_managed_ollama,
                         is_loopback,
                         may_manage_ollama_endpoint,
@@ -3141,12 +3143,11 @@ def create_app(
                     )
 
                     cfg = ctx.config
-                    endpoint = effective_ollama_endpoint(cfg)
                     may_manage = (
                         bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                         and ollama_required(cfg)
-                        and is_loopback(endpoint)
-                        and may_manage_ollama_endpoint(endpoint)
+                        and is_loopback(embedding_endpoint)
+                        and may_manage_ollama_endpoint(embedding_endpoint)
                     )
                     if not may_manage:
                         return JSONResponse(
@@ -3161,7 +3162,7 @@ def create_app(
                             },
                             status_code=409,
                         )
-                    if not ensure_managed_ollama(endpoint):
+                    if not ensure_managed_ollama(embedding_endpoint):
                         return JSONResponse(
                             {"error": "not_running", "detail": detail},
                             status_code=409,
@@ -3170,6 +3171,8 @@ def create_app(
                     continue
                 if code == DIAG_MODEL_PATH_ENCODING:
                     from openbiliclaw.runtime.ollama_supervisor import (
+                        is_loopback,
+                        may_manage_ollama_endpoint,
                         ollama_models_relocation_candidate,
                         restart_managed_ollama_with_models_dir,
                     )
@@ -3180,6 +3183,14 @@ def create_app(
                         "请手动设置系统环境变量 OLLAMA_MODELS 为纯英文路径"
                         f"（如 D:\\ollama\\models），然后重启 Ollama 并重新拉取 {model}。"
                     )
+                    if not (
+                        is_loopback(embedding_endpoint)
+                        and may_manage_ollama_endpoint(embedding_endpoint)
+                    ):
+                        return JSONResponse(
+                            {"error": "manual_fix_required", "detail": manual_detail},
+                            status_code=409,
+                        )
                     models_dir = ollama_models_relocation_candidate()
                     if models_dir is None:
                         return JSONResponse(
@@ -3221,7 +3232,6 @@ def create_app(
                 if code == DIAG_ERROR:
                     if not provider_error_restarted:
                         from openbiliclaw.runtime.ollama_supervisor import (
-                            effective_ollama_endpoint,
                             is_loopback,
                             may_manage_ollama_endpoint,
                             ollama_required,
@@ -3229,12 +3239,11 @@ def create_app(
                         )
 
                         cfg = ctx.config
-                        endpoint = effective_ollama_endpoint(cfg)
                         may_manage = (
                             bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                             and ollama_required(cfg)
-                            and is_loopback(endpoint)
-                            and may_manage_ollama_endpoint(endpoint)
+                            and is_loopback(embedding_endpoint)
+                            and may_manage_ollama_endpoint(embedding_endpoint)
                         )
                         provider_error_restarted = True
                         if may_manage and actions < _max_embedding_repair_actions:

@@ -103,6 +103,38 @@ def test_effective_ollama_endpoint_uses_embedding_base_url() -> None:
     assert effective_ollama_endpoint(cfg) == "http://127.0.0.1:11434"
 
 
+def test_general_startup_policy_lists_distinct_endpoints_chat_first() -> None:
+    from openbiliclaw.runtime.ollama_supervisor import (
+        configured_ollama_endpoints,
+        effective_ollama_endpoint,
+    )
+
+    cfg = Config()
+    _with_ollama_chat(cfg, base_url="http://127.0.0.1:11434/v1")
+    _with_ollama_embedding(cfg, base_url="http://127.0.0.1:11435/v1")
+
+    assert configured_ollama_endpoints(cfg) == (
+        "http://127.0.0.1:11434",
+        "http://127.0.0.1:11435",
+    )
+    assert effective_ollama_endpoint(cfg) == "http://127.0.0.1:11434"
+
+
+def test_single_daemon_policy_refuses_a_different_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import ollama_supervisor as sup
+
+    monkeypatch.setattr(
+        sup,
+        "_managed_daemon",
+        sup._ManagedDaemon(None, "http://127.0.0.1:11435", "/tmp/private-models"),
+    )
+
+    assert sup.may_manage_ollama_endpoint("http://127.0.0.1:11435/v1") is True
+    assert sup.may_manage_ollama_endpoint("http://127.0.0.1:11434") is False
+
+
 def test_ollama_probe_uses_root_api_version_after_v1_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

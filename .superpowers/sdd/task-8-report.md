@@ -126,3 +126,83 @@ Success: no issues found in 221 source files
 .venv/bin/pytest -q
 5383 passed, 41 skipped, 2756 warnings in 177.35s
 ```
+
+## Independent-review remediation
+
+Four post-commit review findings were reproduced before fixes:
+
+- guided init called legacy `registry.get()` on `OrderedLLMRoute`, so both init
+  endpoints raised `TypeError` instead of probing primary/fallback adapters;
+- a model candidate built while an ordinary config writer won could later
+  publish its stale whole-config consumer graph;
+- CLI and OpenClaw omitted the bundle-owned Embedding service from `SoulEngine`,
+  disabling semantic cleanup for manual/avoidance dislikes;
+- embedding repair diagnosed its exact provider URL but used Chat-first
+  `effective_ollama_endpoint()` for daemon start/restart decisions.
+
+RED evidence captured during remediation:
+
+```text
+guided-init ordered-route regressions: 3 failed
+live stale-rebase race: 1 failed (pool_target_count reverted 77 -> 20)
+CLI/OpenClaw bundle wiring: 2 composition failures
+mixed Chat 11434 / Embedding 11435 Ollama management: 5 failed
+```
+
+The fixes now probe ordered Chat adapters directly; synchronously restage the
+already-built route/service on current live config after canonical reread;
+wire one exact bundle-owned Embedding service through CLI/OpenClaw Soul; and
+derive every embedding repair management gate from the exact provider root.
+General Ollama startup remains an explicit Chat-first, single-managed-daemon
+policy, and a recorded endpoint blocks management of another host:port.
+
+Focused GREEN evidence before final whole-repository verification:
+
+```text
+init prereqs + both init endpoints: 22 passed
+model service + runtime bundle: 94 passed
+CLI/OpenClaw embedding identity and cleanup: 4 passed
+Ollama supervisor + complete embedding repair class: 84 passed
+```
+
+Fresh post-remediation verification:
+
+```text
+.venv/bin/pytest tests/test_model_config_service.py \
+  tests/test_api_config_transactional.py tests/test_runtime_model_bundle.py -q
+106 passed, 30 warnings in 3.36s
+
+.venv/bin/pytest tests/test_runtime_model_bundle.py \
+  tests/test_llm_module_routing_e2e.py tests/test_llm_usage.py \
+  tests/test_api_app.py tests/test_openclaw_adapter.py tests/test_cli.py -q
+647 passed, 1411 warnings in 22.36s
+
+.venv/bin/pytest tests/test_ollama_supervisor.py -q
+41 passed, 1 warning in 1.12s
+
+.venv/bin/ruff check src/ tests/
+All checks passed!
+
+.venv/bin/mypy src/
+Success: no issues found in 221 source files
+
+.venv/bin/pytest -q
+5394 passed, 41 skipped, 2776 warnings in 161.23s
+```
+
+The required whole-tree formatter exposed six unrelated baseline-only style
+hunks. They were restored byte-for-byte to the preceding Task 8 commit so this
+remediation does not absorb out-of-scope work. The affected tests and static
+checks were then rerun on the final scoped tree:
+
+```text
+.venv/bin/pytest tests/test_saved_sync_api.py \
+  tests/test_preference_analyzer.py tests/test_github_workflows.py -q
+99 passed, 178 warnings in 5.31s
+
+.venv/bin/ruff check src/ tests/
+All checks passed!
+
+.venv/bin/mypy src/
+Success: no issues found in 221 source files
+```

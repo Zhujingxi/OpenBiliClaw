@@ -599,16 +599,24 @@ def _build_soul_engine() -> Any:
     cfg = load_config()
     memory = _build_memory_manager()
     try:
-        llm = _build_registry()
+        model_bundle = _build_model_bundle()
+        llm = model_bundle.chat_route
+        embedding_service = model_bundle.embedding_service
+        usage_recorder = model_bundle.llm_service.usage_recorder
+        llm_concurrency_gate = model_bundle.llm_service.concurrency_gate
     except Exception:
         llm = _UnavailableLLM()
+        embedding_service = None
+        usage_recorder = _build_usage_recorder()
+        llm_concurrency_gate = _build_llm_concurrency_gate()
     return SoulEngine(
         llm=llm,
         memory=memory,
-        usage_recorder=_build_usage_recorder(),
+        embedding_service=embedding_service,
+        usage_recorder=usage_recorder,
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
         llm_concurrency=cfg.models.chat.concurrency,
-        llm_concurrency_gate=_build_llm_concurrency_gate(),
+        llm_concurrency_gate=llm_concurrency_gate,
         speculation_interval_minutes=cfg.scheduler.speculation_interval_minutes,
         speculation_ttl_days=cfg.scheduler.speculation_ttl_days,
         speculation_cooldown_days=cfg.scheduler.speculation_cooldown_days,
