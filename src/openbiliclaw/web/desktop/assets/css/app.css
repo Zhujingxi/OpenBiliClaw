@@ -150,6 +150,7 @@
       --page-gutter: clamp(32px, 2vw, 40px);
     }
 
+
     /* ═══════════════════════════════════════════════════
        🌙 暗色主题
        ═══════════════════════════════════════════════════ */
@@ -1046,8 +1047,11 @@
     .theme-segmented button:active { background: var(--accent-strong); color: var(--accent-on); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .theme-segmented button.is-active { background: var(--accent); color: var(--accent-on); }
     .theme-segmented button[aria-checked="true"] { background: var(--accent); color: var(--accent-on); }
+    .theme-segmented-2col { grid-template-columns: repeat(2, minmax(74px, 1fr)); width: fit-content; }
     .settings-hue-field { grid-template-columns: minmax(180px, 1fr) auto; align-items: center; gap: var(--space-3) var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--surface), var(--bg) 42%); }
     .settings-hue-field > span:first-child { color: var(--fg); font-weight: 700; }
+    .settings-hue-field.is-disabled { opacity: 0.35; pointer-events: none; }
+    .settings-hue-hint { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: var(--text-sm); }
     .hue-swatches { display: inline-flex; gap: 6px; flex-wrap: wrap; }
     .hue-swatch { min-width: 56px; min-height: 32px; border: 2px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--swatch); color: var(--accent-on); padding: 0 var(--space-2); font-size: 12px; font-weight: 700; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
     .hue-swatch:hover { background: var(--accent); color: var(--accent-on); border-color: var(--accent); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
@@ -1459,4 +1463,263 @@
   min-width: 44px; text-align: right;
   font-size: 13px; font-weight: 700; color: var(--accent);
   font-variant-numeric: tabular-nums;
+}
+
+/* ═══════════════════════════════════════════════════
+   🏺 经典配色 — 元素级覆盖（还原 Pre-ThemePR 行为）
+   ═══════════════════════════════════════════════════ */
+
+/* ── .search ── */
+:root[data-accent="classic"] .search button { background: var(--fg); color: var(--surface); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .search button:hover,
+:root[data-accent="classic"] .search button:active { background: var(--fg-2); color: var(--surface); transform: scale(0.97); }
+:root[data-accent="classic"] .search:focus-within { border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+
+/* ── .topbar ── */
+:root[data-accent="classic"] .topbar { box-shadow: none; }
+
+/* ── .icon-btn / .pill-btn ── */
+:root[data-accent="classic"] .icon-btn,
+:root[data-accent="classic"] .pill-btn { border-width: 1px; }
+:root[data-accent="classic"] .icon-btn:hover,
+:root[data-accent="classic"] .pill-btn:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .icon-btn:active,
+:root[data-accent="classic"] .pill-btn:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .nav-action ── */
+:root[data-accent="classic"] .nav-action:hover { background: var(--surface-warm); color: var(--fg); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .nav-action:active { background: color-mix(in oklab, var(--surface-warm), var(--fg) 8%); color: var(--fg); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .top-message-btn / .top-theme-btn / .backend-status-pill hover ── */
+:root[data-accent="classic"] .top-message-btn:hover,
+:root[data-accent="classic"] .top-theme-btn:hover,
+:root[data-accent="classic"] .backend-status-pill:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .top-message-btn:active,
+:root[data-accent="classic"] .top-theme-btn:active,
+:root[data-accent="classic"] .backend-status-pill:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .gh-star ── */
+:root[data-accent="classic"] .gh-star { border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 45%); }
+:root[data-accent="classic"] .gh-star:hover { border-color: var(--accent); background: color-mix(in oklab, var(--surface), var(--accent) 7%); color: var(--fg); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .gh-star:active { background: color-mix(in oklab, var(--surface), var(--accent) 12%); color: var(--fg); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .gh-star-left { background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"] .gh-star-left:hover { background: var(--fg-2); }
+:root[data-accent="classic"] .gh-star-left:active { background: var(--fg-2); }
+
+/* ── .top-mobile-btn ── */
+:root[data-accent="classic"] .top-mobile-btn { border-color: var(--fg); background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"] .top-mobile-btn:hover { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .top-mobile-btn:active { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); transform: scale(0.97); }
+
+/* ── .top-actions accent buttons ── */
+:root[data-accent="classic"] .top-actions .backend-status-pill,
+:root[data-accent="classic"] .top-actions .top-theme-btn,
+:root[data-accent="classic"] .top-actions .top-message-btn { background: var(--surface); border-color: var(--border-soft); color: var(--fg); }
+:root[data-accent="classic"] .top-actions .backend-status-pill .badge-dot { background: var(--success); }
+
+/* ── .reshuffle-toggle ── */
+:root[data-accent="classic"] .reshuffle-toggle { border-width: 1px; border-color: var(--border-soft); background: var(--surface); color: var(--muted); }
+:root[data-accent="classic"] .reshuffle-toggle:hover { background: var(--surface-warm); border-color: var(--border-soft); color: var(--fg); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .reshuffle-toggle:active { background: var(--surface-warm); border-color: var(--border-soft); transform: scale(0.97); }
+:root[data-accent="classic"] .reshuffle-switch { background: var(--surface-warm); box-shadow: inset 0 0 0 1px var(--border-soft); }
+:root[data-accent="classic"] .reshuffle-switch::after { background: var(--surface); }
+:root[data-accent="classic"] .reshuffle-toggle input:checked + .reshuffle-switch { background: color-mix(in oklab, var(--accent), var(--surface) 28%); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent), var(--border-soft) 40%); }
+
+/* ── .chip ── */
+:root[data-accent="classic"] .chip { border-color: var(--border-soft); background: var(--surface); color: var(--fg-2); }
+:root[data-accent="classic"] .chip:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: none; }
+:root[data-accent="classic"] .chip:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); }
+:root[data-accent="classic"] .chip.is-active,
+:root[data-accent="classic"] .chip[aria-checked="true"] { background: var(--fg); color: var(--surface); border-color: var(--fg); }
+
+/* ── .video-card ── */
+:root[data-accent="classic"] .video-card { background: var(--surface); }
+:root[data-accent="classic"] .video-card .small-btn { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+:root[data-accent="classic"] .video-card .small-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+:root[data-accent="classic"] .video-card .small-btn:active { background: var(--accent-active); transform: scale(0.97); }
+
+/* ── .cover ── */
+:root[data-accent="classic"] .cover { background: linear-gradient(135deg, var(--surface-warm), color-mix(in oklab, var(--accent), var(--fg) 35%)); }
+:root[data-accent="classic"] .cover[data-platform="douyin"] { background: linear-gradient(135deg, var(--fg), color-mix(in oklab, var(--accent), var(--fg) 54%)); }
+
+/* ── .pill-btn.dark ── */
+:root[data-accent="classic"] .pill-btn.dark:hover { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .pill-btn.dark:active { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .side-drawer ── */
+:root[data-accent="classic"] button.side-drawer-btn { background: var(--surface); border-color: var(--border-soft); color: var(--fg-2); }
+:root[data-accent="classic"] button.side-drawer-btn:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] button.side-drawer-btn:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .side-drawer-nav .nav-action:hover { background: color-mix(in oklab, var(--surface-warm), var(--accent) 6%); color: var(--fg); box-shadow: none; }
+:root[data-accent="classic"] .side-drawer-nav .nav-action:active { background: color-mix(in oklab, var(--surface-warm), var(--accent) 10%); transform: scale(0.97); }
+:root[data-accent="classic"] .side-drawer-nav .nav-action .nav-glyph { background: var(--surface-warm); color: var(--fg-2); }
+:root[data-accent="classic"] .side-drawer-nav .nav-action span:not(.nav-glyph):not(.nav-count-badge) { color: var(--fg-2); }
+
+/* ── .recommendation-actions ── */
+:root[data-accent="classic"] .recommendation-actions .icon-btn { background: var(--surface); border-color: var(--border-soft); color: var(--fg-2); }
+:root[data-accent="classic"] .recommendation-actions .icon-btn:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .recommendation-actions .icon-btn:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .card-feedback-icons 基础类 ── */
+:root[data-accent="classic"] .card-feedback-icons { border-color: var(--border-soft); background: var(--surface); }
+:root[data-accent="classic"] .card-feedback-icons:hover { box-shadow: none; }
+
+/* ── .feedback-icon-btn 全局 hover/active/pressed ── */
+:root[data-accent="classic"] .feedback-icon-btn:hover { background: var(--surface-warm); color: var(--fg); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .feedback-icon-btn:active { background: var(--surface-warm); color: var(--fg); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .feedback-icon-btn[aria-pressed="true"] { background: var(--surface-warm); color: var(--fg-2); }
+:root[data-accent="classic"] .feedback-icon-btn.is-neutral:hover { background: var(--surface-warm); color: var(--fg); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .feedback-icon-btn.is-neutral:active { background: var(--surface-warm); color: var(--fg); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .reason ── */
+:root[data-accent="classic"] .reason { background: var(--surface-warm); border-color: var(--border); }
+
+/* ── .delight ── */
+:root[data-accent="classic"] .delight:hover { box-shadow: var(--elev-raised); border-color: var(--border-soft); }
+:root[data-accent="classic"] .delight-nav { background: transparent; color: var(--fg-2); }
+:root[data-accent="classic"] .delight-nav .icon-btn { color: var(--fg-2); }
+:root[data-accent="classic"] .delight-nav .icon-btn:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .delight-nav .icon-btn:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); }
+:root[data-accent="classic"] .delight-nav #delightCount { color: var(--fg-2); }
+:root[data-accent="classic"] .thumb { background: linear-gradient(135deg, var(--fg), var(--fg-2)); }
+:root[data-accent="classic"] .delight .thumb::before { background: linear-gradient(135deg, var(--fg), var(--fg-2)); }
+:root[data-accent="classic"] .delight .thumb.is-text-media { background: linear-gradient(135deg, var(--fg-2), var(--surface-warm)); }
+:root[data-accent="classic"] .delight-main-actions button.small-btn { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+:root[data-accent="classic"] .delight-main-actions button.small-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .delight-main-actions button.small-btn:active { background: var(--accent-active); border-color: var(--accent-active); transform: scale(0.97); }
+:root[data-accent="classic"] .delight-excerpt-toggle { color: var(--fg-2); }
+:root[data-accent="classic"] .delight-main-actions.is-composing .composer-cancel:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .delight-main-actions.is-composing .composer-cancel:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .video-card .card-actions.is-composing .composer-cancel:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .video-card .card-actions.is-composing .composer-cancel:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .small-btn ── */
+:root[data-accent="classic"] .small-btn:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .small-btn:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .small-btn.chat-action:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .small-btn.chat-action:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .small-btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+:root[data-accent="classic"] .small-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .small-btn.primary:active { background: var(--accent-active); border-color: var(--accent-active); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .pill-btn.primary ── */
+:root[data-accent="classic"] .pill-btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+:root[data-accent="classic"] .pill-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .pill-btn.primary:active { background: var(--accent-active); border-color: var(--accent-active); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .side-drawer .small-btn ── */
+:root[data-accent="classic"] .side-drawer .small-btn:hover { background: var(--surface-warm); border-color: var(--border-soft); color: var(--fg); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .side-drawer .small-btn:active { background: var(--surface-warm); border-color: var(--border-soft); color: var(--fg); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .message-item accent backgrounds ── */
+:root[data-accent="classic"] .message-item .inline-chat-send { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+:root[data-accent="classic"] .message-item .inline-chat-send:hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .message-item .inline-chat-cancel:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .message-item .inline-chat-cancel:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .message-item .inline-chat-input:focus-visible { border-color: var(--border-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+:root[data-accent="classic"] .message-primary-actions .small-btn { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
+:root[data-accent="classic"] .message-primary-actions .small-btn:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+:root[data-accent="classic"] .message-primary-actions .small-btn.secondary:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .message-primary-actions .small-btn.secondary:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .profile-chip-list .chip / .message-item .profile-chip-row .chip ── */
+:root[data-accent="classic"] .profile-chip-list .chip { background: var(--surface-warm); }
+:root[data-accent="classic"] .message-item .profile-chip-row .chip { border-color: var(--border-soft); background: var(--surface); }
+
+/* ── .metric accent ── */
+:root[data-accent="classic"] .metric strong { color: var(--fg); }
+
+/* ── .side-drawer .activity-item accent dot ── */
+:root[data-accent="classic"] .side-drawer .activity-item::before { background: var(--fg-2); }
+
+/* ── .message-note / .message-action-result accent ── */
+:root[data-accent="classic"] .message-note.is-success { border-color: color-mix(in oklab, var(--success), var(--border) 58%); background: color-mix(in oklab, var(--success), var(--surface) 88%); }
+:root[data-accent="classic"] .message-item.is-resolved { border-color: color-mix(in oklab, var(--success), var(--border) 64%); background: color-mix(in oklab, var(--surface), var(--success) 4%); }
+:root[data-accent="classic"] .message-action-result { border-color: color-mix(in oklab, var(--success), var(--border) 58%); background: color-mix(in oklab, var(--success), var(--surface) 88%); }
+
+/* ═══════════════════════════════════════════════════
+   🏺 经典配色 — 去除辉光特效（accent 阴影）
+   ═══════════════════════════════════════════════════ */
+
+/* ── focus / input ── */
+:root[data-accent="classic"] input:focus-visible,
+:root[data-accent="classic"] textarea:focus-visible,
+:root[data-accent="classic"] select:focus-visible { box-shadow: none; }
+:root[data-accent="classic"] .message-chat-view .chat-input:focus-within { border: 0; box-shadow: none; }
+:root[data-accent="classic"] .chat-page .chat-input:focus-within { border: 0; box-shadow: none; }
+
+/* ── .feedback-undo-btn ── */
+:root[data-accent="classic"] .feedback-undo-btn { color: var(--fg-2); }
+:root[data-accent="classic"] .feedback-undo-btn:hover { background: var(--surface-warm); }
+
+/* ── .video-card ── */
+:root[data-accent="classic"] .video-card:hover { box-shadow: var(--elev-raised); border-color: var(--border-soft); }
+:root[data-accent="classic"] .video-card.is-feedback-pending { box-shadow: inset 0 0 0 1px var(--border-soft); }
+
+/* ── .custom-select ── */
+:root[data-accent="classic"] .custom-select.is-open .custom-select-trigger { border-color: var(--border-soft); box-shadow: var(--focus-ring); }
+:root[data-accent="classic"] .custom-select-trigger:hover { border-color: var(--border-soft); box-shadow: none; }
+:root[data-accent="classic"] .custom-select-dropdown { box-shadow: 0 4px 16px color-mix(in oklab, var(--fg), transparent 80%); }
+:root[data-accent="classic"] .custom-select-option:hover { background: var(--surface-warm); color: var(--fg); }
+:root[data-accent="classic"] .custom-select-option.is-selected { background: var(--surface-warm); color: var(--fg-2); font-weight: 600; }
+
+/* ── .settings-tab / .settings-subtab ── */
+:root[data-accent="classic"] .settings-tab:hover { box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .settings-tab:active { box-shadow: var(--elev-ring); transform: scale(0.97); }
+:root[data-accent="classic"] .settings-subtab:hover { box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .settings-subtab:active { box-shadow: var(--elev-ring); transform: scale(0.97); }
+:root[data-accent="classic"] .settings-subtab.is-active { background: var(--surface-warm); color: var(--fg); box-shadow: inset 0 0 0 1px var(--border-soft); }
+
+/* ── .theme-segmented button ── */
+:root[data-accent="classic"] .theme-segmented button:hover { box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .theme-segmented button:active { box-shadow: var(--elev-ring); transform: scale(0.97); }
+
+/* ── .hue-swatch ── */
+:root[data-accent="classic"] .hue-swatch:hover { box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .hue-swatch:active { box-shadow: var(--elev-ring); transform: scale(0.97); }
+:root[data-accent="classic"] .hue-swatch[aria-checked="true"] { box-shadow: 0 0 0 2px var(--border-soft); }
+
+/* ── .mobile-menu-item ── */
+:root[data-accent="classic"] .mobile-menu-item:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .mobile-menu-item:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ── .spec-actions / .message-card-actions .probe-btn ── */
+:root[data-accent="classic"] .spec-actions .probe-btn:hover,
+:root[data-accent="classic"] .message-card-actions .probe-btn:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .spec-actions .probe-btn:active,
+:root[data-accent="classic"] .message-card-actions .probe-btn:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .spec-actions .probe-btn.is-neutral,
+:root[data-accent="classic"] .message-card-actions .probe-btn.is-neutral { background: var(--surface-warm); color: var(--fg-2); border-color: var(--border-soft); }
+:root[data-accent="classic"] .spec-actions .probe-btn.is-neutral:hover,
+:root[data-accent="classic"] .message-card-actions .probe-btn.is-neutral:hover { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
+:root[data-accent="classic"] .spec-actions .probe-btn.is-neutral:active,
+:root[data-accent="classic"] .message-card-actions .probe-btn.is-neutral:active { background: var(--surface-warm); color: var(--fg); border-color: var(--border-soft); transform: scale(0.97); box-shadow: var(--elev-ring); }
+
+/* ═══════════════════════════════════════════════════
+   🏺 经典配色 — 暗色覆盖
+   ═══════════════════════════════════════════════════ */
+:root[data-accent="classic"][data-theme="dark"] .search button { background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .search button:hover,
+:root[data-accent="classic"][data-theme="dark"] .search button:active { background: var(--fg-2); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .top-mobile-btn { border-color: var(--fg); background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .top-mobile-btn:hover { background: var(--fg-2); border-color: var(--fg-2); }
+:root[data-accent="classic"][data-theme="dark"] .pill-btn.dark { background: var(--fg); color: var(--surface); border-color: var(--fg); }
+:root[data-accent="classic"][data-theme="dark"] .pill-btn.dark:hover { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .pill-btn.dark:active { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .gh-star-left { background: var(--fg); color: var(--surface); }
+:root[data-accent="classic"][data-theme="dark"] .gh-star-left:hover,
+:root[data-accent="classic"][data-theme="dark"] .gh-star-left:active { background: var(--fg-2); }
+
+@media (prefers-color-scheme: dark) {
+  :root[data-accent="classic"]:not([data-theme="light"]) .search button { background: var(--fg); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .search button:hover,
+  :root[data-accent="classic"]:not([data-theme="light"]) .search button:active { background: var(--fg-2); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .top-mobile-btn { border-color: var(--fg); background: var(--fg); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .top-mobile-btn:hover { background: var(--fg-2); border-color: var(--fg-2); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .pill-btn.dark { background: var(--fg); color: var(--surface); border-color: var(--fg); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .pill-btn.dark:hover { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .pill-btn.dark:active { background: var(--fg-2); border-color: var(--fg-2); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .gh-star-left { background: var(--fg); color: var(--surface); }
+  :root[data-accent="classic"]:not([data-theme="light"]) .gh-star-left:hover,
+  :root[data-accent="classic"]:not([data-theme="light"]) .gh-star-left:active { background: var(--fg-2); }
 }

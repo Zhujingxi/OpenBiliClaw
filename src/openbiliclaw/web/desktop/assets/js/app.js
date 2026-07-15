@@ -516,6 +516,12 @@
     const _storedHue = parseInt(storageGet(THEME_HUE_STORAGE_KEY), 10);
     // Number.isFinite guard so a persisted hue of 0 (烈焰红) survives reload instead of falling back to 20.
     state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
+    const ACCENT_STORAGE_KEY = "obc.accentStyle";
+    // 迁移：已有自定义色相的老用户默认 modern，保留色相；新用户默认 classic
+    const _hasCustomHue = storageGet(THEME_HUE_STORAGE_KEY) !== null;
+    const _storedAccent = storageGet(ACCENT_STORAGE_KEY);
+    state.accentStyle = _storedAccent === "modern" ? "modern" : "classic";
+    if (!_storedAccent && _hasCustomHue) state.accentStyle = "modern";
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
@@ -664,6 +670,7 @@
       setInput("delightQueueLimit", String(limit));
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
+      applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
@@ -676,15 +683,17 @@
       storageSet(DELIGHT_QUEUE_LIMIT_KEY, String(limit));
       storageSet(THEME_STORAGE_KEY, state.themeMode);
       storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
+      storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
       storageSet(DISMISS_ON_RESHUFFLE_KEY, state.dismissOnReshuffle ? "1" : "0");
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
+      applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
       renderReshuffleToggle();
       renderAutoLoadOnScrollToggle();
       syncAutoLoadObserver();
-      return { delightQueueLimit: limit, themeMode: state.themeMode, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
+      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, dismissOnReshuffle: state.dismissOnReshuffle, autoLoadOnScroll: state.autoLoadOnScroll };
     }
 
     function getRuntimeStreamUrl() {
@@ -2440,6 +2449,42 @@
     function cycleThemeMode() {
       const index = THEME_OPTIONS.indexOf(normalizeThemeMode(state.themeMode));
       setThemeMode(THEME_OPTIONS[(index + 1) % THEME_OPTIONS.length], { toast: true });
+    }
+
+    function applyAccentStyle(style = state.accentStyle) {
+      state.accentStyle = style;
+      if (style === "classic") {
+        document.documentElement.dataset.accent = "classic";
+      } else {
+        document.documentElement.removeAttribute("data-accent");
+      }
+      renderThemeAccentControls();
+    }
+
+    function setAccentStyle(style, { persist = true, toast = false } = {}) {
+      applyAccentStyle(style);
+      if (persist) storageSet(ACCENT_STORAGE_KEY, style);
+      if (toast) showToast(style === "classic" ? "已切换为经典配色，可在设置中调节主题色" : "已切换为动态主题色");
+    }
+
+    function renderThemeAccentControls() {
+      document.querySelectorAll("[data-accent-choice]").forEach((button) => {
+        const isActive = button.dataset.accentChoice === state.accentStyle;
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-checked", isActive ? "true" : "false");
+        button.tabIndex = isActive ? 0 : -1;
+      });
+      const hueSection = document.querySelector(".settings-hue-field");
+      if (!hueSection) return;
+      const isClassic = state.accentStyle === "classic";
+      hueSection.classList.toggle("is-disabled", isClassic);
+      hueSection.querySelectorAll("button, input").forEach((el) => {
+        if (el.matches("[data-accent-choice]")) return;
+        el.disabled = isClassic;
+        el.setAttribute("aria-disabled", isClassic ? "true" : "false");
+      });
+      const hint = hueSection.querySelector(".settings-hue-hint");
+      if (hint) hint.hidden = !isClassic;
     }
 
     function renderThemeControls() {
@@ -7339,6 +7384,9 @@
     });
     document.querySelectorAll("[data-hue]").forEach((button) => {
       button.addEventListener("click", () => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
+    });
+    document.querySelectorAll("[data-accent-choice]").forEach((button) => {
+      button.addEventListener("click", () => setAccentStyle(button.dataset.accentChoice, { toast: true }));
     });
     safeBind("#hueSlider", "input", (event) => {
       const val = parseInt(event.target.value, 10);

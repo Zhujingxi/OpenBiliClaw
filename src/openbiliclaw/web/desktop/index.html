@@ -14,10 +14,14 @@
         }
         const hue = window.localStorage?.getItem("obc.themeHue");
         if (hue) { document.documentElement.style.setProperty("--hue-primary", hue); }
+        const accent = window.localStorage?.getItem("obc.accentStyle");
+        // 默认 classic；只有显式存了 "modern" 才不设 data-accent（走默认 modern 样式）
+        if (accent !== "modern") document.documentElement.dataset.accent = "classic";
       } catch {}
     })();
   </script>
   <link rel="stylesheet" href="/web/assets/css/app.css">
+  <link rel="stylesheet" href="/web/assets/css/classic.css">
 </head>
 <body>
   <div class="app-shell">
@@ -636,6 +640,13 @@
               <button type="button" data-theme-choice="dark">深色</button>
             </div>
           </div>
+          <div class="settings-field full">
+            <span>色彩引擎</span>
+            <div class="theme-segmented theme-segmented-2col" role="radiogroup" aria-label="色彩引擎">
+              <button type="button" data-accent-choice="modern">动态主题色</button>
+              <button type="button" data-accent-choice="classic">经典配色</button>
+            </div>
+          </div>
           <div class="settings-field full settings-hue-field">
             <span>主题色相</span>
             <div class="hue-swatches" id="themeHueSetting" role="radiogroup" aria-label="主题色相">
@@ -656,6 +667,7 @@
               <input type="range" id="hueSlider" min="0" max="360" value="20" class="hue-slider" aria-label="自定义色相">
               <input type="number" id="hueValueInput" min="0" max="360" value="20" class="hue-value" aria-label="色相值">
             </div>
+            <p class="settings-hue-hint" hidden>经典模式下不可用，切换至动态主题色后可自定义色相</p>
           </div>
           <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
             <span>换一批时忽略当前</span>
@@ -675,7 +687,7 @@
               <span id="autoLoadOnScrollSettingText">开启</span>
             </span>
           </label>
-          <p class="settings-note-inline">后端地址、端口、外观主题、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
+          <p class="settings-note-inline">后端地址、端口、外观主题、色彩引擎、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
         </div>
 
         <div class="settings-panel" data-settings-panel="logging" hidden>
