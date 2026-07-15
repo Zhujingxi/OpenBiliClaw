@@ -23,9 +23,9 @@
 | 2.1 Provider 实现 | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带 retry + 超时 |
 | 2.2 Provider Registry | ✅ | 自动注册 + 可配置 fallback + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
-| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。Embedding adapter 还暴露 connection type/preset，并按具体 model 判定图像 embedding 能力 |
+| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。Embedding adapter 还暴露 connection type/preset，并按具体 model 判定图像 embedding 能力；本地能力 checker 异常原样传播，不伪装成不支持 |
 | 全局有序 Chat route（阶段 5） | ✅ | `OrderedLLMRoute` 精确保持 1–10 条配置数组顺序，允许多个同类型 connection；Provider 内 transport retry 完成后才尝试下一项，整条 route 共用一个总 deadline。rate-limit、永久配置错误与 transient 使用不同 circuit；普通成功只清 timed/transient，exact probe 可绕过并在同 ID+revision 成功时关闭永久态；aggregate attempt 和响应 metadata 均为 secret-safe |
-| 共享设置有序 Embedding route（阶段 6） | ✅ | `OrderedEmbeddingRoute` 精确保持 Provider 数组顺序，并要求所有 adapter 持有同一个不可变 `EmbeddingModelSettings` 对象；空值、非数值和非有限向量按本次调用 fallback，固定维度不匹配及原生维度多模态探测长度不一致打开 provider+revision 永久 circuit。普通成功不清永久态，精确探测只调用目标 ID，并在多模态开启时使用仓库固定 PNG；只有类型化 Provider/明确 transport 失败参与 fallback，共享设置生成与 Provider ID/顺序无关的 cache namespace |
+| 共享设置有序 Embedding route（阶段 6） | ✅ | `OrderedEmbeddingRoute` 精确保持 Provider 数组顺序，并要求所有 adapter 持有同一个不可变 `EmbeddingModelSettings` 对象；空值、非数值和非有限向量按本次调用 fallback，固定维度不匹配及原生维度多模态探测长度不一致打开 provider+revision 永久 circuit。普通成功不清永久态，精确探测只调用目标 ID，并在多模态开启时使用仓库固定 PNG；只有类型化 Provider/明确 transport 失败参与 fallback，能力 property/checker 异常传播，共享设置生成与 Provider ID/顺序无关的 cache namespace |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
 | v0.3.164 LLM 失败安全边界 | ✅ | `describe_llm_failure()` 识别 moderation、鉴权、额度/限流、provider/service 超时与空响应；`safe_llm_failure_message()` 为 API / CLI / OpenClaw 的公共边界提供固定安全兜底，未知异常不回传上游文本 |
@@ -41,7 +41,7 @@
 | v0.3.75 Provider per-call model | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible 的 `complete(..., model=...)` 支持单次模型覆盖，不修改 provider 实例默认 `_model` |
 | 体验优化：B站动态语气 | ✅ | 推荐、画像总结和聊天 prompt 统一接入 `ToneProfile`，在“老B友”基础上按用户画像微调语气 |
 | v0.3.0 Ollama embedding 兜底 | ✅ | `OllamaProvider.embed()` 走原生 `/api/embeddings`，配合 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需要额外的 embedding API Key |
-| v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；legacy `build_embedding_service` 继续按 provider 选择默认 model。注入原生 route 时，Service 从其共享 settings 派生 model、维度、阈值、多模态开关与 cache namespace，拒绝缓存空、非数值、非有限或维度不符的向量；只对已识别 Provider/transport 失败降级，取消、调用方和未知编程错误传播；完整 production composition 留给 Task 8 |
+| v0.3.0 EmbeddingService 双层缓存 | ✅ | L1 内存 + L2 SQLite 持久化；legacy `build_embedding_service` 继续按 provider 选择默认 model。注入原生 route 时，Service 从其共享 settings 派生 model、维度、阈值、多模态开关与 cache namespace，拒绝缓存空、非数值、非有限或维度不符的向量；只对已识别 Provider/transport 失败降级，取消、调用方、能力 checker 和未知编程错误传播；完整 production composition 留给 Task 8 |
 | 可选封面 image-only embedding | ✅ | `[llm.embedding].multimodal_enabled` + 多模态 embedding 模型（`gemini-embedding-2` 族，或 `dashscope` + `qwen3-vl-embedding` 等）时，`EmbeddingService.embed_image()` 把压缩封面打成向量，与文本同 `model`/维度空间；discovery 入池按封面 URL 派生键（`image_embedding_cache_key_for_url`）预热，Delight 线上 `precompute_delight_scores` 消费（见 [recommendation 模块](recommendation.md) 封面视觉加成）。默认关闭；provider/model 不支持图像或开关关闭时自动 no-op（纯文本模型零成本、打分与旧版逐字节一致） |
 | DashScope 多模态 embedding | ✅ | `provider = "dashscope"` → `DashScopeEmbeddingProvider`：原生 multimodal-embedding API；`embed`/`embed_image` 独立向量（不 `enable_fusion`）；默认 `qwen3-vl-embedding`；`output_dimensionality` 对 qwen3-vl 透传 `dimension`；embedding-only（`complete` 拒绝） |
 | v0.3.113 Embedding 目标维度 | ✅ | `[llm.embedding].output_dimensionality` 默认 1024，与 Ollama `bge-m3` 对齐；Gemini 传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时传 `dimensions`，Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传。L2 cache 仅在 provider 确认支持目标维度时按 `model#dim=N` 签名隔离，同一文本的不同维度向量不会互相覆盖，也不会把未生效的兼容后端标成伪维度 |
@@ -204,7 +204,7 @@ print(probe.observed_dimension, probe.image_probe_performed)
 
 `probe_provider(id)` 绕过目标 circuit、只调用该 ID、不走 fallback、不读写 embedding cache，也不修改配置。多模态开启时，它还用仓库内固定 1×1 PNG 与固定 `image/png` MIME 探测图像向量；报告只能证明该 endpoint 在本次调用返回了可验证且模态长度一致的维度，不能证明不同 endpoint 的远端模型权重完全相同。建议在启用原生 route 前逐项探测所有 Provider，尤其是维度设为 `0` 时。
 
-`EmbeddingModelSettings.cache_namespace()` 只散列共享 model、维度、阈值和多模态开关，因此兼容 endpoint 重排或更换稳定 ID 可复用缓存；任一共享设置变化都会切换 namespace。只有类型化 Provider 失败和明确识别的 transport 失败参与 fallback/circuit；取消、请求/调用方错误及未知编程错误会原样传播。`EmbeddingService` 仅对这些已识别失败导致的 route 耗尽保持既有产品降级语义：返回 `[]`、不写缓存，并通过 `last_unavailable_reason` 暴露固定安全原因，不保留上游异常或用户文本。
+`EmbeddingModelSettings.cache_namespace()` 只散列共享 model、维度、阈值和多模态开关，因此兼容 endpoint 重排或更换稳定 ID 可复用缓存；任一共享设置变化都会切换 namespace。只有类型化 Provider 失败和明确识别的 transport 失败参与 fallback/circuit；取消、请求/调用方错误、同步图像能力 property/checker 错误及未知编程错误会原样传播。能力检查只有明确返回 `False` 时才表示不支持，不会调用后续 Provider、写 circuit/cache 或设置不可用原因。`EmbeddingService` 仅对已识别请求失败导致的 route 耗尽保持既有产品降级语义：返回 `[]`、不写缓存，并通过 `last_unavailable_reason` 暴露固定安全原因，不保留上游异常或用户文本。
 
 ### Provider 类
 

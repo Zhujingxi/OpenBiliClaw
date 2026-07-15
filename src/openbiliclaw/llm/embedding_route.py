@@ -370,12 +370,9 @@ class OrderedEmbeddingRoute:
 
     @staticmethod
     def _supports_image(provider: SupportsEmbedding) -> bool:
-        try:
-            return bool(provider.supports_image_embedding) and callable(
-                getattr(provider, "embed_image", None)
-            )
-        except Exception:
-            return False
+        return bool(provider.supports_image_embedding) and callable(
+            getattr(provider, "embed_image", None)
+        )
 
     def _require_shared_model(self, model: str | None) -> None:
         if model is not None and model != self.settings.model:

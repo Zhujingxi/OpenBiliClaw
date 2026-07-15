@@ -214,6 +214,38 @@ async def test_embed_image_inactive_for_text_only_model() -> None:
     assert provider.image_calls == []
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [ValueError, TypeError, RuntimeError, AssertionError, asyncio.CancelledError],
+)
+def test_direct_service_propagates_capability_checker_errors_before_cache_or_masking(
+    tmp_path: Path,
+    error_type: type[BaseException],
+) -> None:
+    error = error_type("direct provider capability checker failed")
+
+    class ExplodingCapabilityProvider(_FakeImageEmbedProvider):
+        def is_multimodal_embedding_model(self, model: str) -> bool:
+            raise error
+
+    provider = ExplodingCapabilityProvider()
+    cache = EmbeddingCache(tmp_path / "embedding-cache.db")
+    cache.initialize()
+
+    with pytest.raises(error_type) as captured:
+        EmbeddingService(
+            provider,
+            model="gemini-embedding-2",
+            persistent_cache=cache,
+            multimodal_enabled=True,
+        )
+
+    assert captured.value is error
+    assert provider.calls == []
+    assert provider.image_calls == []
+    assert cache.count() == 0
+
+
 async def test_embed_image_caches_and_reuses_vector(tmp_path: Path) -> None:
     provider = _FakeImageEmbedProvider(image_vector=[0.2, 0.4, 0.6])
     cache = EmbeddingCache(tmp_path / "embedding-cache.db")

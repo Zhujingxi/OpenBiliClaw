@@ -125,12 +125,8 @@ class EmbeddingProtocolAdapter:
         if not bool(getattr(self.provider, "supports_image_embedding", False)):
             return False
         checker = getattr(self.provider, "is_multimodal_embedding_model", None)
-        if callable(checker):
-            try:
-                if not bool(checker(self.settings.model)):
-                    return False
-            except Exception:
-                return False
+        if callable(checker) and not bool(checker(self.settings.model)):
+            return False
         return callable(getattr(self.provider, "embed_image", None))
 
     async def embed(self, text: str) -> list[float]:

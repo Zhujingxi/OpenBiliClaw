@@ -340,6 +340,78 @@ async def test_enabled_multimodal_route_skips_provider_without_image_capability(
     assert circuits.state_for("text-only", "r1") is None
 
 
+@pytest.mark.parametrize("operation", ["text", "image", "probe"])
+@pytest.mark.parametrize(
+    "error_type",
+    [ValueError, TypeError, RuntimeError, AssertionError, asyncio.CancelledError],
+)
+async def test_capability_property_errors_propagate_without_fallback_or_circuit(
+    operation: str,
+    error_type: type[BaseException],
+) -> None:
+    settings = _settings(multimodal=True)
+    error = error_type("capability property failed")
+
+    class ExplodingCapabilityAdapter:
+        name = "broken-capability"
+        connection_type = "openai_compatible"
+        preset = "custom"
+
+        def __init__(self) -> None:
+            self.settings = settings
+            self.calls: list[str] = []
+
+        @property
+        def supports_image_embedding(self) -> bool:
+            raise error
+
+        async def embed(self, text: str) -> list[float]:
+            self.calls.append("text")
+            return [1.0, 0.0]
+
+        async def embed_image(
+            self,
+            image_bytes: bytes,
+            *,
+            mime_type: str = "image/jpeg",
+        ) -> list[float]:
+            self.calls.append("image")
+            return [1.0, 0.0]
+
+    broken = ExplodingCapabilityAdapter()
+    fallback = _adapter(
+        "fallback",
+        settings,
+        [0.0, 1.0],
+        images=([0.0, 1.0],),
+        supports_image=True,
+    )
+    circuits = CircuitTable()
+    route = OrderedEmbeddingRoute(
+        (broken, fallback),
+        settings=settings,
+        revision="r1",
+        circuits=circuits,
+    )
+
+    async def invoke() -> None:
+        if operation == "text":
+            await route.embed("private text")
+        elif operation == "image":
+            await route.embed_image(b"private image")
+        else:
+            await route.probe_provider("broken-capability")
+
+    with pytest.raises(error_type) as captured:
+        await invoke()
+
+    assert captured.value is error
+    assert broken.calls == []
+    assert fallback.calls == []
+    assert circuits.state_for("broken-capability", "r1") is None
+    assert circuits.state_for("fallback", "r1") is None
+
+
 async def test_embed_image_falls_back_and_uses_shared_vector_space() -> None:
     settings = _settings(multimodal=True)
     empty = _adapter(

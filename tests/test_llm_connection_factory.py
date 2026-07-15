@@ -1673,6 +1673,89 @@ async def test_every_registry_embedding_adapter_receives_one_shared_settings_obj
     assert captured_model == settings.model
 
 
+@pytest.mark.parametrize(
+    "error_type",
+    [ValueError, TypeError, RuntimeError, AssertionError, asyncio.CancelledError],
+)
+def test_embedding_protocol_adapter_propagates_model_capability_checker_errors(
+    error_type: type[BaseException],
+) -> None:
+    error = error_type("native capability checker failed")
+    checked_models: list[str] = []
+
+    class NativeProvider:
+        supports_image_embedding = True
+
+        @staticmethod
+        def is_multimodal_embedding_model(model: str) -> bool:
+            checked_models.append(model)
+            raise error
+
+        async def embed(self, text: str, *, model: str = "") -> list[float]:
+            return [1.0, 0.0]
+
+        async def embed_image(
+            self,
+            image_bytes: bytes,
+            *,
+            mime_type: str = "image/jpeg",
+            model: str = "",
+        ) -> list[float]:
+            return [1.0, 0.0]
+
+    settings = EmbeddingModelSettings(
+        model="native-multimodal-model",
+        multimodal_enabled=True,
+    )
+    adapter = _factory().EmbeddingProtocolAdapter(
+        name="native-provider",
+        connection_type="gemini_api",
+        preset="default",
+        settings=settings,
+        provider=NativeProvider(),
+    )
+
+    with pytest.raises(error_type) as captured:
+        _ = adapter.supports_image_embedding
+
+    assert captured.value is error
+    assert checked_models == [settings.model]
+
+
+def test_embedding_protocol_adapter_preserves_explicit_unsupported_model() -> None:
+    class NativeProvider:
+        supports_image_embedding = True
+
+        @staticmethod
+        def is_multimodal_embedding_model(model: str) -> bool:
+            return False
+
+        async def embed(self, text: str, *, model: str = "") -> list[float]:
+            return [1.0, 0.0]
+
+        async def embed_image(
+            self,
+            image_bytes: bytes,
+            *,
+            mime_type: str = "image/jpeg",
+            model: str = "",
+        ) -> list[float]:
+            return [1.0, 0.0]
+
+    adapter = _factory().EmbeddingProtocolAdapter(
+        name="native-provider",
+        connection_type="gemini_api",
+        preset="default",
+        settings=EmbeddingModelSettings(
+            model="text-only-model",
+            multimodal_enabled=True,
+        ),
+        provider=NativeProvider(),
+    )
+
+    assert adapter.supports_image_embedding is False
+
+
 @pytest.mark.asyncio
 async def test_openai_embedding_adapter_passes_shared_output_dimension(
     fake_openai_clients: list[_FakeOpenAIClient],

@@ -291,10 +291,7 @@ class EmbeddingService:
         provider = self._provider
         checker = getattr(provider, "is_multimodal_embedding_model", None)
         if callable(checker):
-            try:
-                if not bool(checker(self._model)):
-                    return False
-            except Exception:
+            if not bool(checker(self._model)):
                 return False
         elif not bool(getattr(provider, "supports_image_embedding", False)):
             return False
