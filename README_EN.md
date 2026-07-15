@@ -607,8 +607,8 @@ background ─ background admission (default 3) ──────┘
 │ native/legacy + base/local → ModelConfigService path lock  │
 │ safe endpoint → redacted snapshot; credential + local fence │
 │ full graph build → writer init guard + reread/rebase/conflict │
-│ backup → temp/fsync/replace → publish graph → restart tasks → one event │
-│ degraded clears; failure restores bytes/runtime graph and old-equivalent task ownership │
+│ backup → temp/fsync/replace → publish graph → drain old registry → restart app loops → one event │
+│ degraded clears; failure restores bytes/runtime graph and old-equivalent loop ownership │
 │ Chat record → ID adapter → OrderedLLMRoute (global order)  │
 │ total deadline · revision circuits · capture/recheck probe · safe attempts │
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │

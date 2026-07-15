@@ -55,6 +55,7 @@ from openbiliclaw.model_config.service import (
     CredentialAction,
     ModelConfigCommitBlockedError,
     ModelConfigFieldError,
+    ModelConfigProbeBlockedError,
     ModelConfigProbeResult,
     ModelConfigRevisionConflictError,
     ModelConfigSaveRequest,
@@ -815,6 +816,11 @@ def install_model_config_routes(
                     )
                     result = await service.probe_captured(capture)
             snapshot = await service.revalidate_probe_capture(capture)
+        except ModelConfigProbeBlockedError:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "init_running", "detail": "Initialization is active."},
+            )
         except ModelConfigRevisionConflictError as exc:
             observe_revision(exc.snapshot)
             return JSONResponse(

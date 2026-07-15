@@ -272,6 +272,10 @@ class ModelConfigCommitBlockedError(RuntimeError):
     """The canonical commit guard rejected a candidate before persistence."""
 
 
+class ModelConfigProbeBlockedError(RuntimeError):
+    """The operation guard rejected a probe inside its capture boundary."""
+
+
 class ModelRuntimeCoordinator(Protocol):
     """Build-before-write and identity-based runtime swap contract."""
 
@@ -907,6 +911,8 @@ class ModelConfigService:
     ) -> ModelConfigProbeCapture:
         """Resolve a draft from exactly ``revision`` without holding a network lock."""
         async with _path_lock(self.path):
+            if self._precommit_guard is not None and self._precommit_guard():
+                raise ModelConfigProbeBlockedError("Model configuration probe is blocked.")
             state = self._read_state()
             if state.revision != revision:
                 raise ModelConfigRevisionConflictError(self._snapshot(state))

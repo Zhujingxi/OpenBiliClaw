@@ -610,8 +610,8 @@ background ─ background admission (default 3) ──────┘
 │ native/legacy + base/local → ModelConfigService path lock │
 │ safe endpoint → 脱敏 snapshot；credential + local fence  │
 │ 完整 bundle/consumer build → writer 内 init guard + 重读/rebase/conflict │
-│ backup → temp/fsync/replace → 发布 graph → 重启任务 → 单次事件 │
-│ degraded 成功后解除；失败/取消恢复旧字节/runtime graph 与旧等价任务归属 │
+│ backup → temp/fsync/replace → 发布 graph → 清退旧 registry → 重启 app loops → 单次事件 │
+│ degraded 成功后解除；失败/取消恢复旧字节/runtime graph 与旧等价循环归属 │
 │ Chat 记录 → ID adapter → OrderedLLMRoute（全局原序）      │
 │ 总 deadline · revision circuit · probe 前捕获/完成后复核 · 安全 attempt │
 │ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │

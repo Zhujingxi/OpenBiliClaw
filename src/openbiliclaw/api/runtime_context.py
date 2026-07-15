@@ -1601,14 +1601,31 @@ class RuntimeContext:
         logger.info("Hot-reload complete — published model revision %s", bundle.revision)
 
     async def stop_background_tasks(self, app: FastAPI) -> None:
-        """Cancel the three app-owned loops and clear their task slots."""
+        """Clear app slots and drain all old-graph work without hiding caller cancel."""
+        tasks: list[Any] = []
         for attr in ("refresh_task", "account_sync_task", "auto_update_task"):
             task = getattr(app.state, attr, None)
+            setattr(app.state, attr, None)
             if task is not None:
                 task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            setattr(app.state, attr, None)
+                if task.done():
+                    # A finished slot can belong to an event loop already
+                    # closed by a short-lived TestClient request.  Gathering
+                    # that foreign-loop future raises even though no cleanup
+                    # remains.  Consume a completed failure directly instead.
+                    if not task.cancelled():
+                        task.exception()
+                else:
+                    tasks.append(task)
+
+        # Slot failures and child cancellations are cleanup results. The outer
+        # gather intentionally keeps its default exception policy so cancelling
+        # the caller still interrupts model save and enters transaction rollback.
+        slot_cleanup = asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(
+            slot_cleanup,
+            self.task_registry.cancel_all(exclude=frozenset({"guided_init"})),
+        )
 
     async def restart_background_tasks(
         self,

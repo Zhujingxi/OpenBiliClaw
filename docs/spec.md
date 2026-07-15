@@ -389,15 +389,15 @@ background ─ background admission (default 3) ──────┘
 │ build complete RuntimeContext candidate → canonical writer   │
 │ init guard + immediate reread → rebase / authority conflict  │
 │ legacy backup → temp/fsync/replace → app lifecycle activation │
-│ publish graph → restart tasks → clear degraded → one event   │
-│ failure/cancel → restore bytes/runtime graph + old-equivalent task ownership │
+│ publish graph → drain old registry → restart app loops → clear degraded → one event │
+│ failure/cancel → restore bytes/runtime graph + old-equivalent app-loop ownership │
 │ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
 │                                   ├→ total deadline + safe attempts │
 │                                   └→ revision-aware CircuitTable   │
 │ Embedding providers → shared settings adapter → OrderedEmbeddingRoute │
 │                                   ├→ finite/dimension validation + circuit │
 │                                   └→ fixed PNG exact probe + shared cache namespace │
-│ probe: revision capture → network unlocked → revision recheck │
+│ probe: gate/init → path-lock init/revision/credential capture → network unlocked → revision recheck │
 │ RuntimeModelBundle → 全 consumer 原子发布并激活对应后台任务        │
 │ 普通保存保留 raw；模型 API 权威；图形 UI/CLI 编辑器后续迁移        │
 ├──────────────────────────────────────────────────────────────┤

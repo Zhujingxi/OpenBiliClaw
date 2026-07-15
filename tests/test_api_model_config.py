@@ -580,6 +580,283 @@ def test_model_put_restarts_new_graph_tasks_before_emitting_reload_event(
         assert new_tasks[2] is not None
 
 
+def test_model_put_replaces_all_task_slots_when_one_old_slot_already_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A completed exceptional child is cleanup data, not a restart failure."""
+    app, _config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        assert client.portal is not None
+
+        async def install_failed_refresh_slot() -> tuple[object, object, object]:
+            old_refresh = app.state.refresh_task
+            old_refresh.cancel()
+            await asyncio.gather(old_refresh, return_exceptions=True)
+
+            async def fail_immediately() -> None:
+                raise RuntimeError("already failed old refresh loop")
+
+            failed = asyncio.create_task(fail_immediately())
+            await asyncio.sleep(0)
+            assert failed.done()
+            app.state.refresh_task = failed
+            return (
+                failed,
+                app.state.account_sync_task,
+                app.state.auto_update_task,
+            )
+
+        old_tasks = client.portal.call(install_failed_refresh_slot)
+        current = client.get("/api/model-config").json()
+        changed = replace(
+            _native_models(),
+            chat=replace(_native_models().chat, concurrency=4),
+        )
+
+        response = client.put(
+            "/api/model-config",
+            json=_put_payload(current["revision"], changed),
+        )
+
+        # Keep the pre-fix exceptional slot from masking the behavioral
+        # assertion during TestClient shutdown.
+        if app.state.refresh_task is old_tasks[0]:
+            app.state.refresh_task = None
+        assert response.status_code == 200, response.text
+        new_tasks = tuple(
+            getattr(app.state, name)
+            for name in ("refresh_task", "account_sync_task", "auto_update_task")
+        )
+        assert all(task is not None for task in new_tasks)
+        assert all(new is not old for new, old in zip(new_tasks, old_tasks, strict=True))
+        assert new_tasks[0] is not None and not new_tasks[0].done()
+        assert new_tasks[1] is not None and not new_tasks[1].done()
+        assert context.model_bundle is not None
+
+
+def test_model_put_cancels_detached_old_graph_work_before_reload_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Cutover drains registry-owned old work before announcing the new graph."""
+    app, _config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        assert client.portal is not None
+        detached_started = threading.Event()
+        detached_cancelled = threading.Event()
+        event_detached_states: list[bool] = []
+        event_task_states: list[tuple[bool, bool, bool]] = []
+
+        async def old_graph_detached_work() -> None:
+            detached_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                detached_cancelled.set()
+                raise
+
+        async def install_detached_work() -> asyncio.Task[Any]:
+            task = context.task_registry.track(
+                "old_graph_detached",
+                old_graph_detached_work(),
+            )
+            await asyncio.sleep(0)
+            return task
+
+        detached_task = client.portal.call(install_detached_work)
+        assert detached_started.wait(timeout=2)
+
+        async def publish(event: dict[str, Any]) -> bool:
+            if event.get("type") == "config_reloaded":
+                event_detached_states.append(detached_cancelled.is_set())
+                tasks = (
+                    app.state.refresh_task,
+                    app.state.account_sync_task,
+                    app.state.auto_update_task,
+                )
+                event_task_states.append(
+                    tuple(task is not None and not task.done() for task in tasks)
+                )
+            return True
+
+        monkeypatch.setattr(context.event_hub, "publish", publish)
+        current = client.get("/api/model-config").json()
+        changed = replace(
+            _native_models(),
+            chat=replace(_native_models().chat, timeout_seconds=124),
+        )
+
+        response = client.put(
+            "/api/model-config",
+            json=_put_payload(current["revision"], changed),
+        )
+        cancelled_before_cleanup = detached_cancelled.is_set()
+        detached_count_before_cleanup = context.task_registry.stats().get(
+            "old_graph_detached",
+            0,
+        )
+
+        async def cleanup_detached_work() -> None:
+            if not detached_task.done():
+                detached_task.cancel()
+            await asyncio.gather(detached_task, return_exceptions=True)
+
+        client.portal.call(cleanup_detached_work)
+
+        assert response.status_code == 200, response.text
+        assert cancelled_before_cleanup is True
+        assert detached_count_before_cleanup == 0
+        assert event_detached_states == [True]
+        assert event_task_states == [(True, True, True)]
+
+
+def test_model_save_cancellation_during_task_stop_rolls_back_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Caller cancellation is not mistaken for a cancelled child task."""
+    from openbiliclaw.api.model_config_routes import _AppModelRuntimeCoordinator
+    from openbiliclaw.model_config.service import (
+        CredentialAction,
+        ModelConfigSaveRequest,
+        ModelConfigService,
+    )
+
+    app, config_path = _make_production_app(monkeypatch, tmp_path)
+    context = app.state.runtime_context
+    reload_events: list[dict[str, Any]] = []
+
+    async def publish(event: dict[str, Any]) -> bool:
+        if event.get("type") == "config_reloaded":
+            reload_events.append(dict(event))
+        return True
+
+    monkeypatch.setattr(context.event_hub, "publish", publish)
+
+    async def run_cancelled_save() -> None:
+        async def idle_loop() -> None:
+            await asyncio.Future()
+
+        cleanup_tasks: list[asyncio.Task[Any]] = []
+        try:
+            child_cancelling = asyncio.Event()
+            child_release = asyncio.Event()
+
+            async def cancellation_delaying_refresh() -> None:
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    child_cancelling.set()
+                    await child_release.wait()
+                    raise
+
+            stubborn_refresh = context.task_registry.track(
+                "refresh_loop",
+                cancellation_delaying_refresh(),
+            )
+            app.state.refresh_task = stubborn_refresh
+            app.state.account_sync_task = context.task_registry.track(
+                "account_sync_loop",
+                idle_loop(),
+            )
+            app.state.auto_update_task = context.task_registry.track(
+                "auto_update_loop",
+                idle_loop(),
+            )
+            await asyncio.sleep(0)
+
+            before_disk = config_path.read_bytes()
+            before_state = context.capture_model_runtime_state()
+            before_consumers = _runtime_consumer_identities(context)
+            before_app_degraded = (
+                app.state.degraded,
+                app.state.degraded_reason,
+                list(app.state.degraded_issues),
+            )
+            before_tasks = (
+                stubborn_refresh,
+                app.state.account_sync_task,
+                app.state.auto_update_task,
+            )
+            lifecycle = _AppModelRuntimeCoordinator(
+                app,
+                context,
+                getattr(context.event_hub, "publish", None),
+            )
+            service = ModelConfigService(
+                config_path,
+                lifecycle,
+                precommit_guard=lambda: False,
+            )
+            snapshot = service.read()
+            changed = replace(
+                _native_models(),
+                chat=replace(_native_models().chat, timeout_seconds=122),
+            )
+            actions = {
+                item.id: CredentialAction("keep")
+                for item in (
+                    *changed.chat.connections,
+                    *changed.embedding.providers,
+                )
+            }
+            request = ModelConfigSaveRequest(
+                revision=snapshot.revision,
+                models=changed,
+                credential_actions=actions,
+            )
+
+            save_task = asyncio.create_task(service.save(request))
+            await asyncio.wait_for(child_cancelling.wait(), timeout=5)
+            assert save_task.cancel()
+            child_release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await save_task
+
+            assert config_path.read_bytes() == before_disk
+            assert _runtime_consumer_identities(context) == before_consumers
+            assert context.model_bundle is before_state.model_bundle
+            assert context.config is before_state.config
+            assert context.degraded is before_state.degraded
+            assert context.degraded_reason == before_state.degraded_reason
+            assert context.degraded_issues is before_state.degraded_issues
+            assert (
+                app.state.degraded,
+                app.state.degraded_reason,
+                app.state.degraded_issues,
+            ) == before_app_degraded
+            restored_tasks = (
+                app.state.refresh_task,
+                app.state.account_sync_task,
+                app.state.auto_update_task,
+            )
+            assert all(task is not None for task in restored_tasks)
+            assert all(
+                restored is not old
+                for restored, old in zip(restored_tasks, before_tasks, strict=True)
+            )
+            assert restored_tasks[0] is not None and not restored_tasks[0].done()
+            assert restored_tasks[1] is not None and not restored_tasks[1].done()
+            assert reload_events == []
+        finally:
+            for slot in ("refresh_task", "account_sync_task", "auto_update_task"):
+                task = getattr(app.state, slot, None)
+                setattr(app.state, slot, None)
+                if isinstance(task, asyncio.Task):
+                    task.cancel()
+                    cleanup_tasks.append(task)
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            await context.task_registry.cancel_all()
+
+    asyncio.run(run_cancelled_save())
+
+
 def test_model_put_restart_failure_rolls_back_disk_graph_tasks_and_event(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1296,6 +1573,129 @@ def test_probe_rechecks_init_after_gate_before_credential_or_network(
     assert response.status_code == 409
     assert response.json()["error"] == "init_running"
     assert calls == []
+
+
+def test_probe_rechecks_init_after_waiting_for_model_path_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Init may reserve while a probe queues behind a slow model save."""
+    from openbiliclaw.model_config import service as service_module
+    from openbiliclaw.model_config.service import ModelConfigService
+
+    app, _config_path = _make_production_app(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        context = app.state.runtime_context
+        build_entered = threading.Event()
+        build_release = threading.Event()
+        gate_entered = threading.Event()
+        capture_waiting = threading.Event()
+        network_calls: list[str] = []
+        credential_merges: list[tuple[str, ...]] = []
+        init_active = {"value": False}
+        context._init_coordinator = SimpleNamespace(
+            init_active=lambda: init_active["value"],
+        )
+        real_build = context.build_model_candidate
+        real_gate = context.llm_concurrency_gate
+        real_capture = ModelConfigService.capture_probe
+        real_apply = service_module._apply_credential_actions
+
+        class ImmediateProbeGate:
+            @asynccontextmanager
+            async def slot(self, *, caller: str):
+                assert caller == "api.config_probe"
+                gate_entered.set()
+                yield
+
+        async def build_then_wait(models: ModelConfig, revision: str) -> object:
+            candidate = await real_build(models, revision)
+            build_entered.set()
+            while not build_release.is_set():
+                await asyncio.sleep(0.001)
+            return candidate
+
+        async def capture_after_route_check(
+            self: ModelConfigService,
+            draft: ChatConnection | EmbeddingProviderConfig,
+            **kwargs: Any,
+        ) -> object:
+            capture_waiting.set()
+            return await real_capture(self, draft, **kwargs)
+
+        def track_credential_merge(
+            candidate: ModelConfig,
+            persisted: ModelConfig,
+            actions: Any,
+        ) -> ModelConfig:
+            credential_merges.append(tuple(sorted(actions)))
+            return real_apply(candidate, persisted, actions)
+
+        async def probe_network(
+            draft: ChatConnection | EmbeddingProviderConfig,
+            settings: EmbeddingModelSettings | None = None,
+        ) -> ModelConfigProbeResult:
+            del settings
+            network_calls.append(draft.id)
+            return ModelConfigProbeResult(
+                ok=True,
+                connection_id=draft.id,
+                capability="chat",
+            )
+
+        monkeypatch.setattr(context, "build_model_candidate", build_then_wait)
+        monkeypatch.setattr(context, "probe_model_draft", probe_network)
+        monkeypatch.setattr(ModelConfigService, "capture_probe", capture_after_route_check)
+        monkeypatch.setattr(service_module, "_apply_credential_actions", track_credential_merge)
+        current = client.get("/api/model-config").json()
+        changed = replace(
+            _native_models(),
+            chat=replace(_native_models().chat, timeout_seconds=123),
+        )
+        probe_payload = {
+            "kind": "chat",
+            "revision": current["revision"],
+            "connection": _chat_payload(_native_models().chat.connections[0]),
+        }
+
+        pool = ThreadPoolExecutor(max_workers=2)
+        save_future = None
+        probe_future = None
+        try:
+            save_future = pool.submit(
+                client.put,
+                "/api/model-config",
+                json=_put_payload(current["revision"], changed),
+            )
+            assert build_entered.wait(timeout=5)
+            credential_merges.clear()
+            context.llm_concurrency_gate = ImmediateProbeGate()
+            probe_future = pool.submit(
+                client.post,
+                "/api/model-config/probe",
+                json=probe_payload,
+            )
+            assert gate_entered.wait(timeout=5)
+            assert capture_waiting.wait(timeout=5)
+            init_active["value"] = True
+        finally:
+            init_active["value"] = True
+            build_release.set()
+        try:
+            assert save_future is not None and probe_future is not None
+            save_response = save_future.result(timeout=10)
+            probe_response = probe_future.result(timeout=10)
+        finally:
+            context.llm_concurrency_gate = real_gate
+            pool.shutdown(wait=True, cancel_futures=True)
+
+        assert save_response.status_code == 409
+        assert save_response.json()["error"] == "init_running"
+        assert probe_response.status_code == 409
+        assert probe_response.json()["error"] == "init_running"
+        assert credential_merges == []
+        assert network_calls == []
 
 
 def test_probe_completion_is_revalidated_before_history_or_live_circuit_mutation(

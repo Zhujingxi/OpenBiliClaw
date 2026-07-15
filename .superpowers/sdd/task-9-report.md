@@ -53,17 +53,22 @@ review.
   no side effect. `ModelConfigService.probe()` remains only as non-HTTP legacy
   compatibility for callers that do not attach history/circuit effects.
 - Added an app-owned model lifecycle coordinator. A successful save now
-  publishes the complete graph without an event, restarts background loops from
-  that graph, clears runtime/app degraded state, then publishes exactly one
-  `config_reloaded`. Failure or cancellation restores the old bytes and exact
-  normal/degraded runtime graph, then recreates old-equivalent background tasks
+  publishes the complete graph without an event, drains every registry-owned
+  old-graph task except `guided_init`, restarts app loops from the new graph,
+  clears runtime/app degraded state, then publishes exactly one
+  `config_reloaded`. A completed exceptional child is cleanup data rather than
+  a cutover failure, while cancellation of the save caller still propagates and
+  enters rollback. Failure or cancellation restores the old bytes and exact
+  normal/degraded runtime graph, then recreates old-equivalent app loops
   according to the previous ownership; it does not claim to preserve the same
-  `asyncio.Task` objects.
+  `asyncio.Task` objects or recreate cancelled detached old-graph one-shots.
 - Moved guided-init reservation into the canonical config writer and added a
   model-save precommit guard inside that same writer. A model commit and init
   reservation therefore cannot cross after their handler-level checks. Probes
-  also recheck init after maintenance-gate admission, before credential capture
-  or network work.
+  recheck init after maintenance-gate admission and again immediately after
+  acquiring the model path lock, before disk/credential capture. A probe queued
+  behind a slow save therefore cannot cross a later init reservation; network
+  work remains outside the lock.
 - Made a successful dedicated model save a complete degraded-mode recovery:
   full consumer graph, background loops, both degraded flags, and the reload
   event all transition in the lifecycle order above without requiring restart.
@@ -95,13 +100,32 @@ review.
 - Lifecycle RED showed only `config_reloaded` with no background-task restart;
   an injected restart failure also returned `200`. The production-app
   regression now proves `restart -> event`, while failure restores disk and the
-  exact old consumer graph, restarts old-equivalent task ownership, and emits no
+  exact old consumer graph, restarts old-equivalent app-loop ownership, and emits no
   success event.
+- The final lifecycle review REDs covered three cleanup edges: an already-done
+  exceptional app slot aborted cutover, a registry-owned detached old-graph
+  task was still alive when the reload event fired, and cancellation of the
+  save caller was swallowed while a child handled cancellation. The fixed
+  lifecycle clears all slots before awaiting, treats child outcomes as cleanup
+  results, drains the registry except `guided_init`, and preserves caller
+  cancellation through rollback. Rollback recreates only old-equivalent app
+  loops; detached old one-shots remain cancelled.
 - Init-race RED showed a save completing with `200` after init became active
   during candidate construction, and `try_start()` occurring outside the
   canonical writer. Both deterministic regressions now return/observe the
   guarded behavior. A separate gate barrier verifies a probe performs no
   credential or network work when init starts while it waits.
+- A second deterministic probe barrier held a slow save inside the model path
+  lock, admitted the probe through its maintenance gate, then activated init
+  while the probe waited for that lock. RED returned `200` and reached
+  credential/network work; GREEN returns the same safe `409 init_running` as
+  the outer guard and performs neither operation.
+- Broad verification found one compatibility edge after the cleanup rewrite:
+  short-lived `TestClient` requests can leave a completed app slot attached to
+  an already-closed event loop, and `asyncio.gather()` rejects even a completed
+  foreign-loop future. The final implementation consumes completed outcomes
+  directly and gathers only unfinished tasks; both existing repeated-save
+  regressions pass without weakening same-loop cancellation semantics.
 - A degraded-runtime integration regression forces initial registry failure,
   repairs through `PUT /api/model-config`, and verifies task restart precedes
   the single event, both degraded flags clear, the full graph exists, and a
@@ -109,16 +133,19 @@ review.
 
 ## Verification
 
-- Review race/lifecycle/init/degraded regression set: `9 passed` in 1.51s.
-- Required Task 9 matrix: `86 passed` in 6.25s.
-- Model API, production app, and degraded compatibility set: `442 passed` in
-  18.85s.
+- Final reviewer-blocker regression set: `4 passed` in 1.25s.
+- Closed-loop repeated-save compatibility reproductions: `2 passed` in focused
+  isolated runs.
+- Required Task 9 matrix: `90 passed` in 6.54s.
+- Model API, production app, and degraded compatibility set: `446 passed` in
+  19.40s.
 - Model domain, service, connection factory, ordered Chat/Embedding route, and
-  runtime bundle set: `460 passed` in 1.65s.
-- Full repository suite: `5,426 passed, 41 skipped` in 146.32s.
+  runtime bundle set: `460 passed` in 1.40s.
+- Background task registry set: `7 passed` in 0.75s.
+- Full repository suite: `5,430 passed, 41 skipped` in 145.52s.
 - MyPy strict check: success across 223 source files.
 - Repository-wide Ruff lint: passed.
-- All seven touched Python files pass Ruff format check.
+- All four touched Python files pass Ruff format check.
 - `git diff --check`: passed.
 - Fresh temporary-root `openbiliclaw config-show`: passed and displayed only
   default/redacted model state without starting the server.
