@@ -4,6 +4,14 @@
 
 ---
 
+## v0.3.171 / extension v0.3.171 / desktop v0.3.171：旧版补池兼容、长期避雷与源码更新修复（2026-07-16）
+
+后端源码走 `backend-v0.3.171`，浏览器插件走 `extension-v0.3.171`，桌面安装包走 `desktop-v0.3.171`。
+
+- **“立即应用”不再在 pip/venv 安装上误报“更新后依赖安装失败”**：用户从 0.3.168 应用 0.3.169 时，源码已成功快进，但更新器仅凭仓库存在 `uv.lock` 就无条件执行裸 `uv sync`；官方安装器明确支持的 pip/venv fallback 环境里没有 `uv`，因此稳定抛 `FileNotFoundError('uv')`，又被折叠成无细节的 `dependency_sync_failed`。现在先确认 daemon 的 PATH 里确有 `uv` 才走 `uv sync --no-install-project --inexact`，否则从 `pyproject.toml` 读取运行依赖并用当前后端 Python 的 `pip` 同步；两条路径都不重装正在运行、Windows 可能锁定的 editable console entry。同步命令、退出码与 stderr 写入本地日志，状态 API 的 `last_error` 同时给出工具/退出码/超时等安全摘要；重启统一改走 `python -m openbiliclaw.cli <原参数>`，不再把 Windows 的 `openbiliclaw.exe` 当 Python 脚本执行。新增无 `uv` 选择回归、dependency-only uv 参数、失败诊断和 Windows 模块重启测试；0.3.168→0.3.169 的依赖/lock diff 复核确认只有自身版本号变化，排除发布依赖损坏。
+- **Issue #113 混用旧桌面版与新源码时，补池不再被 `content_cache.item_key` 唯一索引击穿**：v0.3.166 及更早的写入器不知道 `item_key`，打开被新版迁移过的共享数据库后会把每条新候选都写成默认空串；旧的全量唯一索引于是只允许第一条入池，后续 B 站 / 抖音候选全部报 `UNIQUE constraint failed`。现在 canonical 非空 identity 继续由 partial unique index（`WHERE item_key != ''`）保护，同时增加普通 lookup index；初始化会临时移除旧全量 guard，补全空 identity、合并与已有 canonical 行的碰撞，再恢复 partial unique。旧版可以继续写入，当前版下次启动会自动修复，新增连续 legacy 写入与 canonical 冲突合并回归。
+- **对话里明确说“不想看”后，长期画像与候选池会在回复外真正收敛**：`SocraticDialogue` 的用户主动学习链使用 task-local background-admission bypass，所以即使 canonical 库存为空或后台 LLM 暂停，`dialogue_insight → preference → profile/purge` 也不会被 `maintenance` 门禁永久 park；所有调用仍受 runtime total gate 约束。`SoulEngine.learn_from_dialogue()` 在高置信或重复信号真正新增 `disliked_topics` 后计算新旧差集，偏好一落盘就先调度共享 `purge_pool_for_new_dislikes`，精确匹配立即标成 `purged_by_dislike`，embedding 召回 + LLM 精判与完整画像重建并行，不再被后者的数十秒耗时拖住。对话 system prompt 同时明确“OpenBiliClaw 本地长期画像 / 候选过滤”和“不能修改平台自身算法”的边界，不再错误回复成只能记住当前聊天上下文。回复依旧不等待学习与清池，现有等待钩子供测试和优雅关闭收敛。
+
 ## v0.3.170 / extension v0.3.170 / desktop v0.3.170：换一换尾延迟与库存维护隔离（2026-07-15）
 
 后端源码走 `backend-v0.3.170`，浏览器插件走 `extension-v0.3.170`，桌面安装包走 `desktop-v0.3.170`。
