@@ -75,6 +75,7 @@ output/
 # Local dev caches
 .deps/
 .playwright-mcp/
+.superpowers/
 
 # Logs
 *.log
