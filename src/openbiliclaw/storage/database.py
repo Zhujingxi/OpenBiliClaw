@@ -6678,7 +6678,15 @@ class Database:
             self.conn.execute("UPDATE content_cache SET content_id = bvid WHERE content_id = ''")
 
     def _ensure_content_identity_columns(self) -> None:
-        """Backfill canonical identity columns for cache and recommendation rows."""
+        """Backfill canonical identities without breaking legacy cache writers.
+
+        Desktop v0.3.166 and older omit ``content_cache.item_key``. A full
+        unique index therefore turns every legacy insert after the first into
+        ``UNIQUE constraint failed`` because the additive column defaults to an
+        empty string. Keep uniqueness for canonical, non-empty identities while
+        allowing legacy rows to remain blank until a current runtime starts and
+        repairs them here.
+        """
         cache_columns = {
             str(row["name"])
             for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
@@ -6695,6 +6703,25 @@ class Database:
             WHERE item_key = ''
             """
         ).fetchall()
+        identity_index = self.conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_content_cache_item_key'
+            """
+        ).fetchone()
+        index_sql = str(identity_index["sql"] or "") if identity_index is not None else ""
+        normalized_index_sql = " ".join(index_sql.lower().split())
+        expected_partial_predicate = "where item_key != ''"
+        index_needs_rebuild = identity_index is not None and not normalized_index_sql.endswith(
+            expected_partial_predicate
+        )
+        # Drop the uniqueness guard while blank identities are expanded. A
+        # blank legacy row can normalize to an identity already held by a
+        # current row; consolidation below must see both rows before the guard
+        # is restored.
+        if cache_rows or index_needs_rebuild:
+            self.conn.execute("DROP INDEX IF EXISTS idx_content_cache_item_key")
         for row in cache_rows:
             storage_key = str(row["bvid"] or "").strip()
             source_platform = str(row["source_platform"] or "").strip()
@@ -6731,6 +6758,22 @@ class Database:
             WHERE r.item_key = ''
             """
         )
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key
+            ON content_cache (item_key)
+            WHERE item_key != ''
+            """
+        )
+        if cache_rows:
+            logger.info(
+                "Repaired %d legacy content-cache row(s) with blank canonical identity",
+                len(cache_rows),
+            )
+        if index_needs_rebuild:
+            logger.info(
+                "Made content-cache identity index compatible with legacy blank-key writers"
+            )
 
     @staticmethod
     def _content_identity_metadata_missing(value: object) -> bool:
@@ -6918,6 +6961,9 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_content_cache_content_id
                 ON content_cache (content_id);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key
+                ON content_cache (item_key)
+                WHERE item_key != '';
+            CREATE INDEX IF NOT EXISTS idx_content_cache_item_key_lookup
                 ON content_cache (item_key);
             CREATE INDEX IF NOT EXISTS idx_recommendations_item_key
                 ON recommendations (item_key);

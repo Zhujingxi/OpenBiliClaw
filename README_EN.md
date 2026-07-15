@@ -623,7 +623,8 @@ guided init: signals → preferences → full profile commit → discover → ev
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning
+Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
+                                      │                      └new dislike: shared purge → content_cache
                                       └failure/timeout: rollback provisional history → safe error / failed turn
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)

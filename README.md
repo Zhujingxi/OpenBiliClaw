@@ -626,7 +626,8 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习
+Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
+                                      │                      └新避雷：共享清池 → content_cache
                                       └失败/超时：回滚临时历史 → 安全错因 / failed turn
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）

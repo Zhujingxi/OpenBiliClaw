@@ -279,6 +279,105 @@ def test_legacy_duplicate_item_keys_consolidate_without_losing_recommendations(
         assert legacy["item_key"] == "twitter:123"
 
 
+def test_legacy_writer_can_omit_item_key_until_current_runtime_repairs_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-writer-identity.db"
+    database = Database(path)
+    database.initialize()
+
+    index_row = database.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_content_cache_item_key'"
+    ).fetchone()
+    assert index_row is not None
+    assert "WHERE item_key != ''" in str(index_row["sql"])
+
+    # v0.3.166 and older writers do not know about item_key. They must be able
+    # to keep filling the pool after a newer runtime has migrated the shared DB.
+    database.conn.executemany(
+        """
+        INSERT INTO content_cache (bvid, title, source_platform, content_id)
+        VALUES (?, ?, 'bilibili', ?)
+        """,
+        [
+            ("BV1legacyA", "legacy A", "BV1legacyA"),
+            ("BV1legacyB", "legacy B", "BV1legacyB"),
+        ],
+    )
+    database.conn.commit()
+    blank_count = database.conn.execute(
+        "SELECT COUNT(*) FROM content_cache WHERE item_key = ''"
+    ).fetchone()[0]
+    assert blank_count == 2
+    database.close()
+
+    repaired = Database(path)
+    repaired.initialize()
+
+    rows = repaired.conn.execute(
+        "SELECT bvid, item_key FROM content_cache ORDER BY bvid"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("BV1legacyA", "bilibili:BV1legacyA"),
+        ("BV1legacyB", "bilibili:BV1legacyB"),
+    ]
+
+
+def test_identity_repair_merges_legacy_blank_row_with_existing_canonical_row(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-writer-duplicate.db"
+    database = Database(path)
+    database.initialize()
+    current = DiscoveredContent(
+        content_id="123",
+        source_platform="twitter",
+        content_url="https://x.com/u/status/123",
+        content_type="tweet",
+        title="current title",
+    )
+    database.cache_content(current.item_key, **current.to_cache_kwargs())
+    # Recreate the pre-fix full unique index found in databases migrated by a
+    # newer source checkout and then reopened by desktop v0.3.166.
+    database.conn.execute("DROP INDEX idx_content_cache_item_key")
+    database.conn.execute(
+        "CREATE UNIQUE INDEX idx_content_cache_item_key ON content_cache (item_key)"
+    )
+    database.conn.execute(
+        """
+        INSERT INTO content_cache (
+            bvid, item_key, title, source_platform, content_id, content_type
+        ) VALUES ('legacy-twitter-123', '', 'legacy title', 'twitter', '123', 'tweet')
+        """
+    )
+    database.conn.commit()
+    database.close()
+
+    repaired = Database(path)
+    repaired.initialize()
+
+    rows = repaired.conn.execute(
+        """
+        SELECT bvid, item_key, title, content_url
+        FROM content_cache
+        WHERE item_key = 'twitter:123'
+        """
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (
+            "twitter:123",
+            "twitter:123",
+            "current title",
+            "https://x.com/u/status/123",
+        )
+    ]
+    index_row = repaired.conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_content_cache_item_key'"
+    ).fetchone()
+    assert index_row is not None
+    assert "WHERE item_key != ''" in str(index_row["sql"])
+
+
 def test_ambiguous_legacy_raw_recommendation_does_not_cross_link(db: Database) -> None:
     for platform in ("twitter", "douyin"):
         item = DiscoveredContent(

@@ -1020,6 +1020,118 @@ async def test_learn_from_dialogue_updates_preference_for_single_high_confidence
 
 
 @pytest.mark.asyncio
+async def test_learn_from_dialogue_new_dislike_triggers_pool_purge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import openbiliclaw.soul.dislike_writeback as dislike_writeback
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    profile_build_started = asyncio.Event()
+    release_profile_build = asyncio.Event()
+    purge_started = asyncio.Event()
+
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+    ) -> list[dict[str, object]]:
+        del assistant_reply, core_memory
+        return [
+            {
+                "kind": "dislike",
+                "content": "电脑使用技巧",
+                "confidence": 0.95,
+                "evidence": user_message,
+            }
+        ]
+
+    async def fake_analyze_events(
+        *,
+        events: list[dict[str, object]],
+        existing_preference: dict[str, object],
+    ) -> dict[str, object]:
+        del existing_preference
+        assert events[0]["metadata"]["kind"] == "dislike"
+        return {
+            "interests": [],
+            "style": {},
+            "context": {},
+            "exploration_openness": 0.5,
+            "disliked_topics": ["电脑使用技巧"],
+            "favorite_up_users": [],
+        }
+
+    async def fake_build(
+        *,
+        history: list[dict[str, object]],
+        preference: dict[str, object],
+        awareness_notes: list[dict[str, object]],
+        active_insights: list[dict[str, object]],
+    ) -> SoulProfile:
+        del history, awareness_notes, active_insights
+        profile_build_started.set()
+        await release_profile_build.wait()
+        return SoulProfile.from_dict(
+            {
+                "personality_portrait": "你明确希望避开重复的电脑技巧内容。" * 12,
+                "core_traits": ["直接"],
+                "cognitive_style": ["明确表达边界"],
+                "motivational_drivers": ["减少重复内容"],
+                "current_phase": "正在校准推荐边界。",
+                "values": ["有效"],
+                "life_stage": "持续校准内容口味",
+                "deep_needs": ["推荐边界被尊重"],
+                "preferences": preference,
+            }
+        )
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_purge_pool_for_new_dislikes(**kwargs: object) -> list[str]:
+        calls.append(dict(kwargs))
+        purge_started.set()
+        return []
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", fake_extract)
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+    monkeypatch.setattr(
+        dislike_writeback,
+        "purge_pool_for_new_dislikes",
+        fake_purge_pool_for_new_dislikes,
+    )
+
+    learn_task = asyncio.create_task(
+        engine.learn_from_dialogue(
+            user_message="不要再给我推荐电脑使用技巧。",
+            assistant_reply="明白，我会避开这类内容。",
+            session="popup",
+        )
+    )
+    await asyncio.wait_for(profile_build_started.wait(), timeout=1)
+    await asyncio.wait_for(purge_started.wait(), timeout=1)
+    assert not learn_task.done()
+    release_profile_build.set()
+    result = await learn_task
+    await engine.wait_for_pending_edits()
+
+    assert result["preference_updated"] is True
+    assert result["profile_rebuilt"] is True
+    assert calls == [
+        {
+            "newly_added": ["电脑使用技巧"],
+            "all_dislikes": ["电脑使用技巧"],
+            "database": memory._database,
+            "embedding_service": engine._embedding_service,
+            "llm_service": engine._llm_service,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_learn_from_dialogue_updates_preference_for_repeated_lower_confidence_candidate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

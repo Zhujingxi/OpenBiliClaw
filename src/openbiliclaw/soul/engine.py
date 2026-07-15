@@ -243,9 +243,10 @@ class SoulEngine:
             speculator_idle_interval_minutes=speculator_idle_interval_minutes,
             profile_consolidator=self._profile_consolidator,
         )
-        # Detached post-edit work (the dislike pool purge runs an LLM+embedding
-        # recall that must not block the edit response). Tracked so it isn't
-        # garbage-collected mid-flight and can be awaited in tests / shutdown.
+        # Detached dislike writeback from manual edits, feedback batches, and
+        # dialogue learning. The purge runs an LLM+embedding recall that must
+        # not block the interactive response, so keep a strong task reference
+        # and expose a deterministic wait hook for tests / shutdown.
         self._background_edit_tasks: set[asyncio.Task[Any]] = set()
         self._init_cognition_context: dict[str, object] = {}
 
@@ -576,10 +577,9 @@ class SoulEngine:
         return {"ok": True, "target": target, "op": op}
 
     def _schedule_dislike_purge(self, **kwargs: Any) -> None:
-        """Run the dislike pool purge detached from the edit request.
+        """Run a learned-dislike pool purge outside the interactive request.
 
-        ``apply_user_edit`` is always invoked inside a running event loop, so a
-        task is scheduled there. Failures are swallowed inside
+        Every caller runs inside an event loop. Failures are swallowed inside
         ``_purge_for_new_dislikes``; the done-callback only drops the tracking
         reference.
         """
@@ -588,7 +588,7 @@ class SoulEngine:
         task.add_done_callback(self._background_edit_tasks.discard)
 
     async def wait_for_pending_edits(self) -> None:
-        """Await any detached post-edit work (the dislike pool purge).
+        """Await detached dislike-purge work from any learning path.
 
         Used by tests and graceful shutdown so the background purge can finish
         deterministically. No-op when nothing is pending.
@@ -606,10 +606,10 @@ class SoulEngine:
         embedding_service: Any | None,
         llm_service: Any | None,
     ) -> None:
-        """Reuse the confirmed-avoidance pool purge for a manual dislike add."""
+        """Reuse the confirmed-avoidance purge for a newly learned dislike."""
         db = database if database is not None else getattr(self._memory, "_database", None)
         if db is None:
-            logger.info("skip manual-dislike pool purge: no database available")
+            logger.info("skip learned-dislike pool purge: no database available")
             return
         embedding = embedding_service if embedding_service is not None else self._embedding_service
         llm = llm_service if llm_service is not None else self._llm_service
@@ -624,7 +624,7 @@ class SoulEngine:
                 all_dislikes=all_dislikes,
             )
         except Exception:
-            logger.exception("manual-dislike pool purge failed")
+            logger.exception("learned-dislike pool purge failed")
 
     def _sync_speculators_for_edit(self, *, target: str, op: str, value: object) -> None:
         """Keep the interest / avoidance speculators consistent with the edit.
@@ -869,9 +869,33 @@ class SoulEngine:
             ],
             existing_preference=existing_preference,
         )
+        old_disliked = {
+            str(item).strip()
+            for item in self._as_str_list(existing_preference.get("disliked_topics", []))
+            if str(item).strip()
+        }
+        new_disliked = {
+            str(item).strip()
+            for item in self._as_str_list(updated_preference.get("disliked_topics", []))
+            if str(item).strip()
+        }
+        newly_added_dislikes = sorted(new_disliked - old_disliked)
         preference_layer.data.clear()
         preference_layer.data.update(updated_preference)
         preference_layer.save()
+
+        if newly_added_dislikes:
+            # Start the deterministic purge as soon as the durable preference
+            # write succeeds. A full profile rebuild can take tens of seconds;
+            # it must not delay removing an explicitly rejected topic from the
+            # active pool. Semantic recall continues detached in parallel.
+            self._schedule_dislike_purge(
+                newly_added=newly_added_dislikes,
+                all_dislikes=sorted(new_disliked),
+                database=getattr(self._memory, "_database", None),
+                embedding_service=self._embedding_service,
+                llm_service=self._llm_service,
+            )
 
         profile_rebuilt = False
         if self._preference_changed_significantly(existing_preference, updated_preference):

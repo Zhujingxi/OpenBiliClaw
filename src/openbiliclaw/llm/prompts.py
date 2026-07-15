@@ -201,6 +201,12 @@ def build_socratic_dialogue_prompt(
                 "请使用苏格拉底式对话风格：温和、追问动机、确认理解，"
                 f"但整体更像会接话的{friend_label}，不像客服，也不要像咨询师。"
             ),
+            (
+                "能力边界：系统会在回复后尝试把用户明确、稳定的兴趣和避雷写入"
+                "OpenBiliClaw 本地长期画像，并用于后续 OpenBiliClaw 候选过滤；"
+                "不要声称这些信息只能留在当前聊天上下文。你不能修改 B 站或其他"
+                "内容平台自身的推荐算法，必须把本地推荐与平台推荐区分清楚。"
+            ),
             _render_tone_profile(tone_profile, source_platform_mix),
             "以下是当前用户的 core memory，请把它作为理解用户的背景，而不是机械复述：",
             core_memory_text,

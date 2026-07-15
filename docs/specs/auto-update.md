@@ -1,7 +1,7 @@
 # 后端自动更新 SPEC
 
 **Created:** 2026-05-31
-**Updated:** 2026-05-31
+**Updated:** 2026-07-15
 **Ambiguity score:** 0.10 (gate: <= 0.20)
 **Requirements:** 8 locked
 
@@ -44,8 +44,9 @@
 - 只在 git 源码安装且 worktree 干净时自动应用。
 - 自动应用前执行 `git fetch --force --tags origin`，解析目标 tag commit，并用 `git merge --ff-only <tag>` 快进当前分支到目标 tag。
 - 当前分支无法快进、远端不可信、worktree dirty、运行在 Docker/只读包/非 git 环境时，不自动修改文件，只上报明确状态。
-- 依赖同步沿用当前检测逻辑：存在 `uv.lock` 时执行 `uv sync`，否则执行 `python -m pip install -e .`。
-- 成功后重启当前进程；如果是 systemd、Docker 或外部 supervisor 管理，首版只支持当前 `os.execv` 重启，不主动操作外部 supervisor。
+- 依赖同步必须检查 daemon **实际可执行的工具**，不能把仓库内必然存在的 `uv.lock` 当成 `uv` 已安装的证据：PATH 可解析 `uv` 时执行 `uv sync --no-install-project --inexact`；否则解析 `pyproject.toml` 的 `[project].dependencies`，用当前 `sys.executable -m pip install` 同步运行依赖。两条路径都不得重装正在运行的 editable 项目（Windows console entry 可能被锁），并保留用户已有 extras。
+- 同步非零退出、工具缺失或 300 秒超时时，`reason` 保持稳定的 `dependency_sync_failed`；完整命令输出只进本地日志，`last_error` 只暴露工具名、退出码或超时等安全摘要。
+- 成功后通过 `sys.executable -m openbiliclaw.cli <原参数>` 重启当前 git-install CLI，避免 Windows 把 `sys.argv[0]` 的 `openbiliclaw.exe` 误当 Python 源文件；如果是 systemd、Docker 或外部 supervisor 管理，首版不主动操作外部 supervisor。
 
 ### 插件更新边界
 
@@ -297,6 +298,9 @@ Backend update UX is a passive settings/status row in v1, not a recommendation-p
 - [ ] Unknown remote prevents backend apply with `reason="untrusted_remote"` unless it exactly matches `scheduler.auto_update_allowed_remotes`.
 - [ ] Credentialed remote URLs always prevent backend apply with `reason="untrusted_remote"`; credentials are not stripped before allowlist matching.
 - [ ] Successful backend apply runs fetch, fast-forward merge to target tag, dependency sync and restart.
+- [ ] A checkout with `uv.lock` but no `uv` on daemon PATH selects the running Python's pip and installs `[project].dependencies`; it never tries the missing bare `uv` command.
+- [ ] An available `uv` selects `uv sync --no-install-project --inexact`, retaining the running editable project and installed extras.
+- [ ] Restart uses `sys.executable -m openbiliclaw.cli` plus the original CLI arguments, including when `sys.argv[0]` is a Windows `openbiliclaw.exe` launcher.
 - [ ] Concurrent apply requests are serialized; the second request returns `409 Conflict`, `state="applying"`, `reason="already_applying"`, and `accepted=false`.
 - [ ] When `auto_update_enabled=false` and a newer stable backend tag exists, status reports `state="update_available"` and `auto_update_enabled=false`.
 - [ ] When only newer backend prerelease tags exist and prerelease opt-in is disabled, status reports `state="up_to_date"` and `reason="prerelease_ignored"`.
