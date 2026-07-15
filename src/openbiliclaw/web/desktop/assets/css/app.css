@@ -864,9 +864,9 @@
     #messageChatLog .chat-bubble { max-width: min(100%, 560px); }
     #messageChatLog .chat-bubble.user { justify-self: end; margin-left: 0; }
     #messageChatLog .chat-bubble.agent { justify-self: start; margin-right: 0; }
-    .message-chat-view .chat-input { border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--elev-ring), 0 0 0 0px transparent; transition: box-shadow var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); }
+    .message-chat-view .chat-input { border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--elev-ring), 0 0 0 0px transparent; transition: box-shadow var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); display: flex; align-items: center; }
     .message-chat-view .chat-input:focus-within { border: 0; box-shadow: 0 0 0 1px var(--accent), 0 0 8px 3px color-mix(in oklab, var(--contrast-strong), transparent 35%); }
-    .message-chat-view .chat-input input { border: 0; background: transparent; padding: 13px var(--space-3); color: var(--fg); }
+    .message-chat-view .chat-input input { border: 0; background: transparent; padding: 13px var(--space-3); color: var(--fg); flex: 1; min-width: 0; }
     .message-chat-view .chat-input input:focus-visible { border-color: transparent; box-shadow: none; }
     .message-chat-view .chat-input .pill-btn.primary { margin: var(--space-1); }
     @media (max-width: 520px) { .message-card-actions { align-items: stretch; flex-direction: column; } .message-card-actions .card-feedback-icons, .message-primary-actions { width: 100%; justify-content: center; } .message-primary-actions .small-btn { flex: 1; } }
@@ -881,9 +881,9 @@
     .chat-page .content-page-head { margin-bottom: var(--space-5); }
     .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); align-content: start; overflow: auto; scrollbar-width: none; }
     .chat-page .chat-log::-webkit-scrollbar { display: none; }
-    .chat-page .chat-input { align-self: end; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--elev-ring), 0 0 0 0px transparent; transition: box-shadow var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); }
+    .chat-page .chat-input { align-self: end; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); box-shadow: var(--elev-ring), 0 0 0 0px transparent; transition: box-shadow var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard); display: flex; align-items: center; }
     .chat-page .chat-input:focus-within { border: 0; box-shadow: 0 0 0 1px var(--accent), 0 0 8px 3px color-mix(in oklab, var(--contrast-strong), transparent 35%); }
-    .chat-page .chat-input input { border: 0; background: transparent; padding: 13px var(--space-3); color: var(--fg); }
+    .chat-page .chat-input input { border: 0; background: transparent; padding: 13px var(--space-3); color: var(--fg); flex: 1; min-width: 0; }
     .chat-page .chat-input input:focus-visible { border-color: transparent; box-shadow: none; }
     .chat-page .chat-input .pill-btn.primary { margin: var(--space-1); }
     .settings-page .settings-grid { margin-top: 0; }
