@@ -571,7 +571,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
 - 🔒 **Fully Private** — all data in local SQLite, LLM calls use your own key, each instance is built for exactly one person
 - 🔌 **Local Embedding** — optional Ollama + bge-m3, CPU-only, no extra API key
-- 🔧 **Fully Controllable** — swap LLMs per module, edit your profile directly, write custom Skills to extend discovery
+- 🔧 **Fully Controllable** — the global Chat route fails over in connection order; edit your profile directly or write custom Skills to extend discovery
 
 ## 🏛️ Architecture Overview
 

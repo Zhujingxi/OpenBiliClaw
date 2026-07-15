@@ -395,7 +395,7 @@ def test_rate_limit_circuit_uses_retry_after_then_default_cooldown(kind: str) ->
     clock.advance(0.01)
     assert not table.should_skip("chat-a", "revision-a")
 
-    table.record_success("chat-a")
+    table.record_success("chat-a", "revision-a")
     table.record_failure(
         "chat-a",
         "revision-a",
@@ -418,7 +418,88 @@ def test_permanent_circuit_stays_open_until_revision_change_or_success(kind: str
 
     assert table.should_skip("chat-a", "revision-a")
     assert not table.should_skip("chat-a", "revision-b")
-    assert table.state_for("chat-a", "revision-a") is None
+    state = table.state_for("chat-a", "revision-a")
+    assert state is not None
+    assert state.failure_kind == kind
+
+
+@pytest.mark.asyncio
+async def test_shared_circuit_table_isolates_interleaved_route_revisions() -> None:
+    clock = FakeClock()
+    circuits = CircuitTable(clock=clock)
+    old_calls: list[str] = []
+    new_calls: list[str] = []
+    old_route = OrderedLLMRoute(
+        (
+            _connection(
+                "chat-a",
+                FakeAdapter(
+                    "old-chat-a",
+                    [
+                        LLMProviderError("authentication failed: HTTP 401"),
+                        LLMResponse(content="old-probe-ok"),
+                        LLMProviderError("authentication failed: HTTP 401"),
+                    ],
+                    old_calls,
+                ),
+            ),
+        ),
+        revision="revision-old",
+        timeout_seconds=30,
+        clock=clock,
+        circuits=circuits,
+    )
+    new_route = OrderedLLMRoute(
+        (
+            _connection(
+                "chat-a",
+                FakeAdapter(
+                    "new-chat-a",
+                    [LLMTimeoutError("request timed out"), LLMResponse(content="new-probe-ok")],
+                    new_calls,
+                ),
+            ),
+        ),
+        revision="revision-new",
+        timeout_seconds=30,
+        clock=clock,
+        circuits=circuits,
+    )
+
+    with pytest.raises(LLMRouteExhaustedError):
+        await old_route.complete([{"role": "user", "content": "old failure"}])
+    with pytest.raises(LLMRouteExhaustedError):
+        await new_route.complete([{"role": "user", "content": "new failure"}])
+
+    old_state = circuits.state_for("chat-a", "revision-old")
+    new_state = circuits.state_for("chat-a", "revision-new")
+    assert old_state is not None and old_state.failure_kind == "auth_failed"
+    assert new_state is not None and new_state.failure_kind == "timeout"
+
+    old_probe = await old_route.complete_connection(
+        "chat-a",
+        [{"role": "user", "content": "old probe"}],
+        ignore_circuit=True,
+    )
+    assert old_probe.content == "old-probe-ok"
+    assert circuits.state_for("chat-a", "revision-old") is None
+    assert circuits.state_for("chat-a", "revision-new") == new_state
+
+    with pytest.raises(LLMRouteExhaustedError):
+        await old_route.complete([{"role": "user", "content": "old failure again"}])
+    reopened_old_state = circuits.state_for("chat-a", "revision-old")
+    assert reopened_old_state is not None
+
+    new_probe = await new_route.complete_connection(
+        "chat-a",
+        [{"role": "user", "content": "new probe"}],
+        ignore_circuit=True,
+    )
+    assert new_probe.content == "new-probe-ok"
+    assert circuits.state_for("chat-a", "revision-new") is None
+    assert circuits.state_for("chat-a", "revision-old") == reopened_old_state
+    assert old_calls == ["old-chat-a", "old-chat-a", "old-chat-a"]
+    assert new_calls == ["new-chat-a", "new-chat-a"]
 
 
 @pytest.mark.parametrize("kind", ["timeout", "connection", "server_error"])
@@ -475,6 +556,95 @@ def test_failed_exact_probe_cannot_replace_a_permanent_circuit(
     state = table.state_for("chat-a", "revision-a")
     assert state is not None
     assert state.failure_kind == "auth_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_error", "probe_error", "expected_kind", "expected_count"),
+    [
+        (
+            LLMRateLimitError("rate limit", retry_after_seconds=120),
+            LLMTimeoutError("request timed out"),
+            "rate_limited",
+            0,
+        ),
+        (
+            LLMTimeoutError("request timed out"),
+            LLMRateLimitError("rate limit", retry_after_seconds=5),
+            "timeout",
+            1,
+        ),
+    ],
+)
+async def test_failed_exact_probe_never_shortens_an_open_timed_circuit(
+    first_error: LLMProviderError,
+    probe_error: LLMProviderError,
+    expected_kind: str,
+    expected_count: int,
+) -> None:
+    clock = FakeClock()
+    route, adapters, _call_log = _route(
+        ("chat-a",),
+        (first_error,),
+        clock=clock,
+    )
+    adapters[0].outcomes.append(probe_error)
+
+    with pytest.raises(LLMRouteExhaustedError):
+        await route.complete_connection(
+            "chat-a",
+            [{"role": "user", "content": "open"}],
+            ignore_circuit=True,
+        )
+    original = route.circuits.state_for("chat-a", route.revision)
+    assert original is not None and original.retry_at is not None
+
+    clock.advance(1)
+    with pytest.raises(LLMRouteExhaustedError):
+        await route.complete_connection(
+            "chat-a",
+            [{"role": "user", "content": "failed probe"}],
+            ignore_circuit=True,
+        )
+
+    retained = route.circuits.state_for("chat-a", route.revision)
+    assert retained == original
+    assert retained.failure_kind == expected_kind
+    assert retained.failure_count == expected_count
+
+
+@pytest.mark.asyncio
+async def test_failed_exact_probe_extends_timed_circuit_for_a_later_deadline() -> None:
+    clock = FakeClock()
+    route, adapters, _call_log = _route(
+        ("chat-a",),
+        (LLMTimeoutError("request timed out"),),
+        clock=clock,
+    )
+    adapters[0].outcomes.append(LLMRateLimitError("rate limit", retry_after_seconds=30))
+
+    with pytest.raises(LLMRouteExhaustedError):
+        await route.complete_connection(
+            "chat-a",
+            [{"role": "user", "content": "open"}],
+            ignore_circuit=True,
+        )
+    original = route.circuits.state_for("chat-a", route.revision)
+    assert original is not None and original.retry_at is not None
+
+    clock.advance(1)
+    with pytest.raises(LLMRouteExhaustedError):
+        await route.complete_connection(
+            "chat-a",
+            [{"role": "user", "content": "later probe"}],
+            ignore_circuit=True,
+        )
+
+    extended = route.circuits.state_for("chat-a", route.revision)
+    assert extended is not None and extended.retry_at is not None
+    assert extended.retry_at > original.retry_at
+    assert extended.failure_kind == "rate_limited"
+    assert extended.failure_count == 0
 
 
 @pytest.mark.asyncio

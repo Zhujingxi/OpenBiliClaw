@@ -151,19 +151,15 @@ class CircuitState:
 
 
 class CircuitTable:
-    """In-memory revision-aware circuit states keyed by stable connection ID."""
+    """In-memory circuit states keyed by stable connection ID and revision."""
 
     def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         self._clock = clock or time.monotonic
-        self._states: dict[str, CircuitState] = {}
+        self._states: dict[tuple[str, str], CircuitState] = {}
 
     def state_for(self, connection_id: str, revision: str) -> CircuitState | None:
-        """Return current-revision state, dropping stale revision state."""
-        state = self._states.get(connection_id)
-        if state is not None and state.revision != revision:
-            self._states.pop(connection_id, None)
-            return None
-        return state
+        """Return exactly one revision's state without touching any peer."""
+        return self._states.get((connection_id, revision))
 
     def should_skip(self, connection_id: str, revision: str) -> bool:
         """Return whether the current revision's circuit is still open."""
@@ -188,48 +184,69 @@ class CircuitTable:
             return
 
         now = self._clock()
+        key = (connection_id, revision)
         previous = self.state_for(connection_id, revision)
-        # A permanent auth/model circuit is released only by revision change or
-        # record_success(). Any later failure can only come from an exact probe
-        # and must not weaken that boundary into a timed cooldown.
-        if previous is not None and previous.permanent:
-            return
         if kind in _PERMANENT_CIRCUIT_KINDS:
-            self._states[connection_id] = CircuitState(
+            candidate = CircuitState(
                 revision=revision,
                 failure_kind=kind,
                 opened_at=now,
                 retry_at=None,
                 failure_count=0,
             )
-            return
-
-        if kind == "rate_limited":
+        elif kind == "rate_limited":
             delay = retry_after_seconds_from_exception(exc) or _RATE_LIMIT_COOLDOWN
-            self._states[connection_id] = CircuitState(
+            candidate = CircuitState(
                 revision=revision,
                 failure_kind=kind,
                 opened_at=now,
                 retry_at=now + delay,
                 failure_count=0,
             )
-            return
-
-        if kind in _TRANSIENT_CIRCUIT_KINDS:
+        elif kind in _TRANSIENT_CIRCUIT_KINDS:
             previous_count = previous.failure_count if previous is not None else 0
             count = previous_count + 1
             delay = _TRANSIENT_COOLDOWNS[min(count - 1, len(_TRANSIENT_COOLDOWNS) - 1)]
-            self._states[connection_id] = CircuitState(
+            candidate = CircuitState(
                 revision=revision,
                 failure_kind=kind,
                 opened_at=now,
                 retry_at=now + delay,
                 failure_count=count,
             )
+        else:
+            return
 
-    def record_success(self, connection_id: str) -> None:
-        """Close a connection circuit after normal or exact-probe success."""
-        self._states.pop(connection_id, None)
+        self._store_strongest_state(key, previous, candidate, now)
+
+    def _store_strongest_state(
+        self,
+        key: tuple[str, str],
+        previous: CircuitState | None,
+        candidate: CircuitState,
+        now: float,
+    ) -> None:
+        """Merge a failed exact probe without weakening an open circuit."""
+        if previous is not None:
+            # Permanent auth/model protection is released only by success for
+            # this exact revision. A failed exact probe cannot replace it.
+            if previous.permanent:
+                return
+            # Keep the entire prior state when it is still open and carries an
+            # equal or later deadline, so kind/count describe the protection
+            # that actually remains in force. Expired states advance normally.
+            if (
+                previous.retry_at is not None
+                and previous.retry_at > now
+                and candidate.retry_at is not None
+                and candidate.retry_at <= previous.retry_at
+            ):
+                return
+        self._states[key] = candidate
+
+    def record_success(self, connection_id: str, revision: str) -> None:
+        """Close only the successful connection revision's circuit."""
+        self._states.pop((connection_id, revision), None)
 
 
 class OrderedLLMRoute:
@@ -367,7 +384,7 @@ class OrderedLLMRoute:
             attempts.append(RouteAttempt.safe(connection, position, kind))
             self.circuits.record_failure(connection.id, self.revision, kind, exc)
             return None
-        self.circuits.record_success(connection.id)
+        self.circuits.record_success(connection.id, self.revision)
         return replace(
             response,
             connection_id=connection.id,

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -17,7 +19,12 @@ import openai
 import pytest
 
 from openbiliclaw.llm import anthropic_provider, gemini_provider, openai_provider
-from openbiliclaw.llm.base import LLMProviderError, LLMRateLimitError, LLMTimeoutError
+from openbiliclaw.llm.base import (
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMTimeoutError,
+    normalize_retry_after_seconds,
+)
 from openbiliclaw.model_config import (
     ChatConnection,
     CredentialConfig,
@@ -173,6 +180,16 @@ def _openai_rate_limit(message: str, *, retry_after: str) -> openai.RateLimitErr
         response=response,
         body={"error": {"message": message}},
     )
+
+
+def test_retry_after_http_date_parsing_is_deterministic_with_injected_now() -> None:
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    future = format_datetime(now + timedelta(seconds=120), usegmt=True)
+    stale = format_datetime(now - timedelta(seconds=1), usegmt=True)
+
+    assert normalize_retry_after_seconds(future, now=now) == 120.0
+    assert normalize_retry_after_seconds(stale, now=now) is None
+    assert normalize_retry_after_seconds("not-an-http-date", now=now) is None
 
 
 class _FakeEndpoint:

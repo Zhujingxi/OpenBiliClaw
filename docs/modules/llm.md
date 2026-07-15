@@ -170,6 +170,8 @@ probe = await route.complete_connection(
 | timeout / connection / server error | 15、30、60、120、240 秒，随后固定 300 秒；任意成功清零 |
 | invalid response / moderation | 本次 fallback，不打开跨请求 circuit |
 
+`CircuitTable` 以 `(connection_id, config_revision)` 精确二元组隔离状态：新旧 runtime 即使共享表，也不会通过查询、失败或成功互相删除状态；成功只关闭本 revision。失败的 exact probe 采用单调合并，永久 circuit 不被削弱，仍在 open 的 timed circuit 只会保留或延长 `retry_at`，并保留实际生效状态对应的 failure kind/count。
+
 路由耗尽时抛 `LLMRouteExhaustedError`。其 `attempts` 只包含 `connection_id`、`connection_type`、`preset`、`route_position`、`failure_kind` 与固定英文摘要，不保存原始异常、响应体、credential 或含 userinfo 的 URL。成功响应保留既有 `provider` / `model` 计价字段，同时写入四个 connection metadata 字段。
 
 ### Provider 类
