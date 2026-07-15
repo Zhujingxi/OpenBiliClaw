@@ -1,31 +1,38 @@
+"""Legacy outbound-network probe compatibility tests.
+
+Model probes are covered by ``test_api_model_config.py`` and are intentionally
+unavailable on this legacy endpoint.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.models import ConfigServiceProbeIn, ConfigServiceProbeResponse
 from openbiliclaw.config import Config, EmbeddingConfig, LLMConfig, LLMProviderConfig, save_config
-from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS, LLMProviderError, LLMResponse
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def test_config_probe_models_accept_llm_request() -> None:
+def test_legacy_probe_schema_accepts_only_network_proxy() -> None:
     payload = ConfigServiceProbeIn(
-        kind="llm",
-        config={"llm": {"default_provider": "openai"}},
+        kind="network_proxy",
+        config={"network": {"mode": "direct", "proxy": ""}},
     )
 
-    assert payload.kind == "llm"
-    assert payload.config["llm"]["default_provider"] == "openai"
+    assert payload.kind == "network_proxy"
+    with pytest.raises(ValidationError):
+        ConfigServiceProbeIn(kind="llm", config={})
 
 
 def test_config_probe_response_defaults_to_inline_error_shape() -> None:
-    result = ConfigServiceProbeResponse(ok=False, kind="embedding")
+    result = ConfigServiceProbeResponse(ok=False, kind="network_proxy")
 
     assert result.provider == ""
     assert result.model == ""
@@ -61,189 +68,22 @@ def _probe_base_config() -> Config:
     )
 
 
-def test_probe_llm_applies_unsaved_provider_payload_without_writing(
+@pytest.mark.parametrize("kind", ["llm", "llm_fallback", "embedding"])
+def test_legacy_probe_endpoint_rejects_model_probe_kinds_without_echoing_config(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    kind: str,
 ) -> None:
-    calls: list[tuple[str, str | None, dict[str, Any]]] = []
-
-    class FakeAdapter:
-        def __init__(self, connection: Any) -> None:
-            self.connection = connection
-
-        async def complete(
-            self,
-            messages: list[dict[str, str]],  # noqa: ARG002
-            **kwargs: Any,
-        ) -> LLMResponse:
-            calls.append((self.connection.type, self.connection.model, kwargs))
-            return LLMResponse(
-                content="OK",
-                provider=self.connection.type,
-                model=self.connection.model,
-            )
-
-    monkeypatch.setattr(
-        "openbiliclaw.llm.connection_factory.build_chat_adapter",
-        lambda connection, _options: FakeAdapter(connection),
-    )
-    client, config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
-    before = config_path.read_bytes()
+    client, _path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
+    secret = "submitted-model-probe-secret"
 
     response = client.post(
         "/api/config/probe-service",
-        json={
-            "kind": "llm",
-            "config": {
-                "llm": {
-                    "default_provider": "deepseek",
-                    "deepseek": {"api_key": "sk-new", "model": "deepseek-chat"},
-                }
-            },
-        },
+        json={"kind": kind, "config": {"llm": {"openai": {"api_key": secret}}}},
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is True
-    assert body["provider"] == "openai_compatible"
-    assert body["model"] == "deepseek-chat"
-    assert [(provider, model) for provider, model, _kwargs in calls] == [
-        ("openai_compatible", "deepseek-chat")
-    ]
-    assert calls[0][2]["max_tokens"] == LLM_CONNECTIVITY_PROBE_MAX_TOKENS
-    assert config_path.read_bytes() == before
-    assert not (tmp_path / "config.toml.bak").exists()
-
-
-def test_probe_llm_returns_inline_failure_for_unregistered_provider(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setattr(
-        "openbiliclaw.llm.connection_factory.build_chat_adapter",
-        lambda _connection, _options: (_ for _ in ()).throw(
-            LLMProviderError("Connection type is not registered.")
-        ),
-    )
-    client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
-
-    response = client.post(
-        "/api/config/probe-service",
-        json={"kind": "llm", "config": {"llm": {"default_provider": "deepseek"}}},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is False
-    assert body["provider"] == "openai_compatible"
-    assert "not registered" in body["error"]
-
-
-def test_probe_llm_returns_inline_failure_when_provider_raises(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class FailingAdapter:
-        async def complete(self, *_args: object, **_kwargs: object) -> LLMResponse:
-            raise LLMProviderError("bad key")
-
-    monkeypatch.setattr(
-        "openbiliclaw.llm.connection_factory.build_chat_adapter",
-        lambda _connection, _options: FailingAdapter(),
-    )
-    client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
-
-    response = client.post(
-        "/api/config/probe-service",
-        json={"kind": "llm", "config": {"llm": {"default_provider": "deepseek"}}},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is False
-    assert "bad key" in body["error"]
-
-
-def test_probe_embedding_returns_success_when_service_probe_passes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class FakeEmbeddingService:
-        async def probe(self) -> bool:
-            return True
-
-    monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_ordered_embedding_service",
-        lambda route_config, *, revision, runtime_options: FakeEmbeddingService(),
-    )
-    client, config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
-    before = config_path.read_bytes()
-
-    response = client.post(
-        "/api/config/probe-service",
-        json={
-            "kind": "embedding",
-            "config": {
-                "llm": {
-                    "embedding": {
-                        "provider": "openai",
-                        "api_key": "sk-embedding-new",
-                        "model": "text-embedding-3-small",
-                    }
-                }
-            },
-        },
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is True
-    assert body["kind"] == "embedding"
-    assert body["provider"] == "openai_compatible"
-    assert config_path.read_bytes() == before
-
-
-def test_probe_embedding_returns_failure_when_provider_is_empty(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
-
-    response = client.post(
-        "/api/config/probe-service",
-        json={"kind": "embedding", "config": {"llm": {"embedding": {"provider": ""}}}},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is False
-    assert "not configured" in body["error"].lower()
-
-
-def test_probe_embedding_returns_failure_when_service_probe_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class FakeEmbeddingService:
-        async def probe(self) -> bool:
-            return False
-
-    monkeypatch.setattr(
-        "openbiliclaw.llm.registry.build_ordered_embedding_service",
-        lambda route_config, *, revision, runtime_options: FakeEmbeddingService(),
-    )
-    client, _config_path = _client_for_config(monkeypatch, tmp_path, _probe_base_config())
-
-    response = client.post(
-        "/api/config/probe-service",
-        json={"kind": "embedding", "config": {"llm": {"embedding": {"provider": "openai"}}}},
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["ok"] is False
-    assert "no vector" in body["error"].lower()
+    assert response.status_code == 422
+    assert secret not in response.text
 
 
 # ── network_proxy probe ─────────────────────────────────────────────────────
@@ -303,7 +143,6 @@ def test_probe_network_proxy_ok_on_204(
     body = response.json()
     assert body["ok"] is True
     assert body["kind"] == "network_proxy"
-    # Probe must use the candidate proxy and never inherit process env.
     assert recorder["proxy"] == "socks5://127.0.0.1:1080"
     assert recorder["trust_env"] is False
 

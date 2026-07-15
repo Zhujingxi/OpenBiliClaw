@@ -622,6 +622,37 @@ class RuntimeContext:
             message="The exact model draft is incomplete.",
         )
 
+    def record_model_probe_success(
+        self,
+        connection_id: str,
+        capability: Literal["chat", "embedding"],
+        revision: str,
+    ) -> bool:
+        """Close one matching live circuit after an exact persisted probe.
+
+        Draft probing builds a temporary one-item route. A successful probe of
+        the currently persisted record must also release that stable ID's live
+        permanent/transient circuit, without touching peers, older revisions,
+        or brand-new unsaved IDs.
+        """
+        bundle = self.model_bundle
+        if bundle is None or bundle.revision != revision:
+            return False
+        if capability == "chat":
+            configured_ids = {item.id for item in bundle.models.chat.connections}
+            route = bundle.chat_route
+        else:
+            configured_ids = {item.id for item in bundle.models.embedding.providers}
+            route = getattr(bundle.embedding_service, "_provider", None)
+        if connection_id not in configured_ids:
+            return False
+        circuits = getattr(route, "circuits", None)
+        record_success = getattr(circuits, "record_success", None)
+        if not callable(record_success):
+            return False
+        record_success(connection_id, revision, clear_permanent=True)
+        return True
+
     def add_pool_inventory_commit_subscriber(self, callback: Any) -> None:
         """Register a stable post-commit observer once for this context."""
         if callback not in self._pool_inventory_commit_subscribers:

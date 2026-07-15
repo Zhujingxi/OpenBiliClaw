@@ -68,6 +68,7 @@ guided-init 的 `InitPrereqs.chat_ready()` 识别 production `OrderedLLMRoute.co
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
 | 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
 | 不可变模型 bundle 与事务恢复 | ✅ | `RuntimeContext.build_model_candidate()` 从 `Config.models` 构造完整 `RuntimeModelBundle` 和全部 consumer，不改变 live pointer；`swap_model_candidate()` 原子发布并只在成功后发送带 revision 的 `config_reloaded`，`restore_model_candidate()` 恢复精确旧身份且不发送成功事件。旧在途调用保留旧 route，新调用读取新 bundle。 |
+| 权威模型配置 API 与精确探测状态 | ✅ | `api/model_config_routes.py` 把 `ModelConfigService` 暴露为 revision-guarded GET/PUT、descriptor registry 和 exact draft probe。公开 snapshot 只含 credential 状态、迁移/override、按稳定 ID 绑定的 exact probe 与 live circuit 摘要；共享 Embedding 设置参与 probe fingerprint。成功探测当前持久化记录只关闭同 ID/capability/current-revision circuit，edited/unsaved draft 不改变 live circuit，也不覆盖已保存记录的最近探测摘要。 |
 | 全局 ordered route 热重载 | ✅ | runtime、Soul、Dialogue、Discovery、Recommendation、health/Ollama 与 OpenClaw 都使用同一个全局 ordered route；模块 override 已删除。热重载后的正向兴趣和避雷 speculator tick 仍 detached 到 `BackgroundTaskRegistry`，不阻塞配置响应。 |
 | 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
 | 原生保存 service 热重载 | ✅ | `saved_sync_service` 是可替换组件：每次构造新 `BilibiliAPIClient` 时同步创建 router + 六平台 extension adapters + `BilibiliNativeSaveAdapter` + `SavedSyncService`。重载先取消旧 registry inflight；所有新组件构造成功后才原子发布，任一构造失败保留完整旧组件与稳定 broker。 |
@@ -101,6 +102,7 @@ candidate = await context.build_model_candidate(models, revision)
 previous = await context.swap_model_candidate(candidate)
 await context.restore_model_candidate(previous)
 result = await context.probe_model_draft(connection_or_provider, embedding_settings)
+closed = context.record_model_probe_success(connection_id, capability, revision)
 ```
 
 - `build_runtime_model_bundle()` 构造全部 adapter、`OrderedLLMRoute`、ordered Embedding service、usage recorder 与主 `LLMService`；任一构造失败时不返回部分 bundle。
@@ -225,6 +227,7 @@ embedding_progress.reset()
 - `GET /api/health`：返回 `status="degraded"`、`reason="llm_registry_unavailable"` 和 blocking issues；当 `SoulEngine` 可用时会额外返回可选字段 `profile_ready`，表示 soul 画像是否已生成。v0.3.95+ 额外返回 `embedding_ready`（bool）。v0.3.137+ 该同一 live probe 也被 `/api/init-status` 复用：若 `[llm.embedding].provider` 已配置，初始化前置清单会下发 `embedding_required=true`，`can_start` 与 `POST /api/init` 都必须等真实 probe 通过；provider 留空则可降级初始化。v0.3.97+ 这是一次**实时探活**而非「服务是否构建」：经 `EmbeddingService.probe()` 绕过缓存真打一次 provider，探测缓存保存 `ready / failed / timed_out` 原始三态而非调用方布尔值，并由 `_EMBEDDING_PROBE_TIMEOUT_SECONDS`（默认 15s）上限兜住。普通 `/api/health` 仅把 loopback Ollama 的 `timed_out` 解释为冷加载中的乐观可用，避免外部 Homebrew / 官方 Ollama 默认 5 分钟卸载后让插件横幅误报停服；远程 Ollama 或非 Ollama provider 超时仍为 `false`。成功沿用 `_EMBEDDING_READY_TTL_SECONDS`（默认 30s），明确失败与超时使用 8s 短 TTL 重探；single-flight 锁继续让并发 health/init 共享同一次真实 probe，但各入口独立解释结果。provider 现已 404/500（如 `bge-m3` 没拉、Ollama 停了、随包缺 `llama-server`）、返回空向量或抛出异常仍会如实报 `false`，修好后下次探活即翻 `true`；服务对象不存在仍 `false`，老/无 `probe()` 的服务回退「构建即就绪」。`false` 表示语义去重 / MMR 多样性降级（可能刷到换皮重复内容），插件 popup 据此显示「一键启用本地 Ollama」横幅。
 - `GET /api/config`：返回完整配置、`degraded=true` 和同一组 issues。
 - `PUT /api/config`：允许保存修复配置，但跳过热重载并返回 `restart_required=true`。
+- `GET /api/model-config`、`PUT /api/model-config`、`GET /api/model-connection-types` 与 `POST /api/model-config/probe`：保持模型修复、迁移决定、descriptor 与精确探测入口可达；请求仍受 revision/init guard 与 secret-safe validation 保护。
 - `GET /api/runtime-status` 与 `/api/runtime-stream`：用于 popup 展示降级状态；stream 会先发送 `{type:"degraded", ...}` 并保持连接。
 
 其他 API 在降级模式下返回 503，避免在缺少 LLM registry、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。
@@ -499,7 +502,7 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 配置恢复是 runtime 和 API 的交界：`/api/config` 写盘前先校验新配置可构建 LLM registry，正常模式下写入后调用 `RuntimeContext.rebuild_from_config()` 与 `restart_background_tasks()`。热重载失败会恢复 `config.toml.bak`，并把 `rollback_applied` 返回给调用方；降级模式不做热重载，保存成功后返回 `restart_required=true`，要求用户重启 daemon 让新的 registry 生效。
 
-原生模型配置使用阶段 7 的 model-scoped 串行锁与全配置 canonical path boundary：首次读取后执行 revision guard、credential merge、migration resolution、validation，并在 canonical boundary 外构造 candidate；提交前再与 auth admin、guided-init source opt-in、autostart apply、`PUT /api/config` 共用同一路径事务，立即重读 base/local。普通字段并发变化会从最新原字节 rebase，模型 authority 的来源、内容或 local provenance 变化会 conflict。bounded 同步 disk gate 从不跨 `await`，异步所有权则持续覆盖 legacy backup、原子替换、短锁 pointer swap 和 rollback；另一 task 的同步 writer 在 swap 窗口快速失败。swap 异常或 `CancelledError` 都会先按事务前快照恢复文件与 `current_model_candidate`；取消随后原样传播。该流程仍使用独立 pre-model-refactor backup，不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild，也尚未由 API 路由暴露。协调范围仅限当前进程且没有跨进程文件锁：即时重读只能发现读取前已可见的外部变化，外部 writer 仍可在重读到替换之间的窄窗口竞争。
+原生模型配置使用阶段 7 的 model-scoped 串行锁与全配置 canonical path boundary，并由 `PUT /api/model-config` 暴露为唯一权威 HTTP 写路径：首次读取后执行 revision guard、credential merge、migration resolution、validation，并在 canonical boundary 外构造 candidate；提交前再与 auth admin、guided-init source opt-in、autostart apply、`PUT /api/config` 共用同一路径事务，立即重读 base/local。普通字段并发变化会从最新原字节 rebase，模型 authority 的来源、内容或 local provenance 变化会 conflict。bounded 同步 disk gate 从不跨 `await`，异步所有权则持续覆盖 legacy backup、原子替换、短锁 pointer swap 和 rollback；另一 task 的同步 writer 在 swap 窗口快速失败。swap 异常或 `CancelledError` 都会先按事务前快照恢复文件与 `current_model_candidate`；取消随后原样传播。该流程仍使用独立 pre-model-refactor backup，不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild。协调范围仅限当前进程且没有跨进程文件锁：即时重读只能发现读取前已可见的外部变化，外部 writer 仍可在重读到替换之间的窄窗口竞争。
 
 热重载成功后，所有可替换 LLM 入口都会拿到同一 `RuntimeModelBundle.chat_route`。稳定 gate 的 proposed target/inventory 直到全部新组件构造成功并进入 atomic publication 后才更新；晚期构造失败保留旧 target/state，不会让仍在运行的旧 runtime 提前进入新配置的 refill 模式：
 

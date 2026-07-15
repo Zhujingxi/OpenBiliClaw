@@ -376,8 +376,11 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│       模型连接 + 事务型有序 Chat / Embedding route（阶段 8）     │
-│ native [models] → strict parser/revision/safe endpoint ──┐    │
+│      模型配置 API + 事务型有序 Chat / Embedding route（阶段 9）  │
+│ GET/PUT model-config → strict secret-safe schema ────────┐    │
+│ descriptors + exact probe → safe probe/circuit summary ─┤    │
+│ legacy /api/config → read-only projection/write guard ──┤    │
+│ native [models] → strict parser/revision/safe endpoint ──┤    │
 │ legacy [llm] → effective base+local inspection/map ──────┤    │
 │                 → secret-safe report → closed resolution │    │
 │                 → authoritative final validation ────────┤    │
@@ -394,7 +397,7 @@ background ─ background admission (default 3) ──────┘
 │                                   ├→ finite/dimension validation + circuit │
 │                                   └→ fixed PNG exact probe + shared cache namespace │
 │ RuntimeModelBundle → 全 consumer 原子发布；失败恢复精确旧身份      │
-│ 普通保存保留 raw；模型编辑 API/UI/CLI 由后续任务迁移               │
+│ 普通保存保留 raw；模型 API 权威；图形 UI/CLI 编辑器后续迁移        │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │

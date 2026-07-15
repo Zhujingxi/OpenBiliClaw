@@ -601,7 +601,9 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Transactional ordered Chat/Embedding model routes (stage 8) │
+│ Dedicated API + transactional Chat/Embedding routes (stage 9) │
+│ strict GET/PUT snapshot/save · descriptors · exact draft probe │
+│ legacy /api/config is a credential-free projection with write guard │
 │ native/legacy + base/local → ModelConfigService path lock  │
 │ safe endpoint → redacted snapshot; credential + local fence │
 │ full bundle/consumer build → canonical writer reread/rebase/conflict │

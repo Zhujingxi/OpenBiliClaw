@@ -185,7 +185,7 @@ def _injected_soul_engine(gate: object) -> object:
 def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_path) -> None:
     from fastapi.testclient import TestClient
 
-    from openbiliclaw.config import Config
+    from openbiliclaw.config import Config, save_config
     from openbiliclaw.llm.base import LLMResponse
     from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
@@ -194,6 +194,8 @@ def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_pa
     controller = SimpleNamespace(llm_concurrency_gate=gate, event_hub=None)
     config = Config(data_dir=str(tmp_path))
     _use_native_ollama(config, model="test-model")
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(config, tmp_path / "config.toml", models_authoritative=True)
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
 
     class ProbeAdapter:
@@ -217,9 +219,29 @@ def test_injected_runtime_adopts_shared_soul_controller_gate(monkeypatch, tmp_pa
     assert ctx.llm_concurrency_gate is gate
     assert soul._llm_service.concurrency_gate is gate  # type: ignore[attr-defined]
     assert ctx.dialogue._build_service() is soul._llm_service  # type: ignore[attr-defined]
-    response = TestClient(app).post(
-        "/api/config/probe-service",
-        json={"kind": "llm", "config": {}},
+    client = TestClient(app)
+    snapshot = client.get("/api/model-config").json()
+    connection = config.models.chat.connections[0]
+    response = client.post(
+        "/api/model-config/probe",
+        json={
+            "kind": "chat",
+            "revision": snapshot["revision"],
+            "connection": {
+                "id": connection.id,
+                "name": connection.name,
+                "type": connection.type,
+                "model": connection.model,
+                "preset": connection.preset,
+                "base_url": connection.base_url,
+                "credential": {"action": "keep", "value": ""},
+                "api_mode": connection.api_mode,
+                "reasoning_effort": connection.reasoning_effort,
+                "http_referer": connection.http_referer,
+                "x_title": connection.x_title,
+                "num_ctx": connection.num_ctx,
+            },
+        },
     )
     assert response.json()["ok"] is True
 
@@ -9840,7 +9862,7 @@ class TestBackendAPI:
         assert data["llm"]["default_provider"] == "gemini"
         assert data["llm"]["fallback_provider"] == "openai"
         assert "fallback_enabled" not in data["llm"]  # removed legacy flag
-        assert data["llm"]["gemini"]["api_key"] == "test-gemini-key"
+        assert data["llm"]["gemini"]["api_key"] == ""
         assert data["llm"]["gemini"]["model"] == "gemini-2.5-flash"
 
         # Embedding fields
@@ -9875,9 +9897,8 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         data = response.json()
-        # Key should be masked (not equal to the original)
-        assert data["llm"]["openai"]["api_key"] != "sk-abcdef1234567890xyzw"
-        assert "****" in data["llm"]["openai"]["api_key"] or "*" in data["llm"]["openai"]["api_key"]
+        # Legacy model projection never returns credential material.
+        assert data["llm"]["openai"]["api_key"] == ""
 
     def test_put_config_updates_embedding_settings(
         self,
@@ -10124,18 +10145,18 @@ class TestBackendAPI:
         assert cfg.llm.embedding.api_key == "sk-dedicated-embedding-xyz1234567890"
         assert cfg.llm.embedding.base_url == "https://embed.example.com/v1"
 
-        # GET (default — masked). api_key contains '*' but never the raw key.
+        # GET compatibility projection never returns credential material.
         get_resp = client.get("/api/config")
         emb = get_resp.json()["llm"]["embedding"]
         assert emb["provider"] == "openai"
         assert emb["model"] == "text-embedding-3-small"
         assert emb["base_url"] == "https://embed.example.com/v1"
-        assert "*" in emb["api_key"]
+        assert emb["api_key"] == ""
         assert "sk-dedicated-embedding-xyz1234567890" not in emb["api_key"]
 
         # PUT again with the masked key echoed back — must NOT overwrite
         # the real key with asterisks.
-        masked_echo = emb["api_key"]
+        masked_echo = "sk-****-masked-echo"
         client.put(
             "/api/config",
             json={
@@ -10290,11 +10311,10 @@ class TestEmbeddingAndCompatProviderE2E:
         data = response.json()
 
         compat = data["llm"]["openai_compatible"]
-        # Shape: all expected fields are present, with the api_key masked
-        # but model / base_url surfaced verbatim.
+        # Shape retains non-secret fields; credential material is absent.
         assert compat["model"] == "llama-3.1-70b-versatile"
         assert compat["base_url"] == "https://api.groq.com/openai/v1"
-        assert "*" in compat["api_key"]
+        assert compat["api_key"] == ""
         assert "gsk-groq-secret-key-1234567890" not in compat["api_key"]
 
     def test_get_config_exposes_embedding_credentials_masked(self, monkeypatch, tmp_path) -> None:
@@ -10330,13 +10350,13 @@ class TestEmbeddingAndCompatProviderE2E:
         assert emb["model"] == "text-embedding-3-large"
         assert emb["base_url"] == "https://api.openai.com/v1"
         assert emb["similarity_threshold"] == 0.91
-        assert "*" in emb["api_key"]
+        assert emb["api_key"] == ""
         assert "sk-embed-secret-1234567890" not in emb["api_key"]
 
-    def test_get_config_with_reveal_keys_returns_raw_secrets(self, monkeypatch, tmp_path) -> None:
-        """``GET /api/config?reveal_keys=true`` returns unmasked keys
-        for both new fields (openai_compatible.api_key + embedding.api_key).
-        Used by the popup when the user clicks "show" to edit."""
+    def test_get_config_with_reveal_keys_never_returns_model_secrets(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The legacy reveal flag never bypasses model credential protection."""
         from openbiliclaw.config import (
             Config,
             EmbeddingConfig,
@@ -10356,8 +10376,8 @@ class TestEmbeddingAndCompatProviderE2E:
         client = self._make_client(monkeypatch, tmp_path, cfg)
 
         revealed = client.get("/api/config", params={"reveal_keys": "true"}).json()
-        assert revealed["llm"]["openai_compatible"]["api_key"] == "gsk-raw-1234567890"
-        assert revealed["llm"]["embedding"]["api_key"] == "sk-emb-raw-1234567890"
+        assert revealed["llm"]["openai_compatible"]["api_key"] == ""
+        assert revealed["llm"]["embedding"]["api_key"] == ""
 
     # ── PUT round-trip: openai_compatible ───────────────────────────
 
@@ -10393,12 +10413,12 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.llm.openai_compatible.model == "llama-3.1-70b-versatile"
         assert cfg.llm.openai_compatible.base_url == "https://api.groq.com/openai/v1"
 
-        # Subsequent GET round-trips with masking
+        # Subsequent GET round-trips non-secret fields only.
         get_resp = client.get("/api/config")
         compat = get_resp.json()["llm"]["openai_compatible"]
         assert compat["model"] == "llama-3.1-70b-versatile"
         assert compat["base_url"] == "https://api.groq.com/openai/v1"
-        assert "*" in compat["api_key"]
+        assert compat["api_key"] == ""
         assert "gsk-fresh-groq-key-1234567890" not in compat["api_key"]
 
     def test_put_openai_compatible_does_not_stomp_openai_block(self, monkeypatch, tmp_path) -> None:
@@ -10507,12 +10527,12 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.llm.embedding.similarity_threshold == 0.85
 
         # Round-trip via GET — base_url + provider + threshold come back
-        # raw, api_key masked.
+        # raw, while credential material is absent.
         emb = client.get("/api/config").json()["llm"]["embedding"]
         assert emb["provider"] == "openai_compatible"
         assert emb["base_url"] == "http://vllm.internal:8000/v1"
         assert emb["similarity_threshold"] == 0.85
-        assert "*" in emb["api_key"]
+        assert emb["api_key"] == ""
         assert "vllm-token-1234567890" not in emb["api_key"]
 
     def test_put_embedding_masked_echo_does_not_overwrite_real_key(
@@ -10543,9 +10563,9 @@ class TestEmbeddingAndCompatProviderE2E:
         )
         client = self._make_client(monkeypatch, tmp_path, cfg)
 
-        # Step 1 — popup loads the config and gets a masked key.
-        masked = client.get("/api/config").json()["llm"]["embedding"]["api_key"]
-        assert "*" in masked
+        # Step 1 — compatibility GET never returns the stored key.
+        assert client.get("/api/config").json()["llm"]["embedding"]["api_key"] == ""
+        masked = "sk-****-masked-echo"
 
         # Step 2 — popup re-submits with the masked key and a new model.
         client.put(
@@ -10628,16 +10648,14 @@ class TestEmbeddingAndCompatProviderE2E:
 
         data = client.get("/api/config").json()["llm"]
         assert data["default_provider"] == "openai"
-        # Two distinct masked secrets, each pointing at its own block.
+        # Both provider blocks remain distinct while neither exposes a key.
         assert data["openai"]["model"] == "gpt-5-nano"
         assert data["openai_compatible"]["model"] == "llama-3.1-70b-versatile"
         assert data["openai_compatible"]["base_url"] == "https://api.groq.com/openai/v1"
-        # api_keys are both masked but distinct (different last 4 chars
-        # in the mask), proving they're stored as separate values.
+        # Legacy credential fields are retained as blank compatibility fields.
         openai_mask = data["openai"]["api_key"]
         compat_mask = data["openai_compatible"]["api_key"]
-        assert "*" in openai_mask and "*" in compat_mask
-        assert openai_mask != compat_mask
+        assert openai_mask == compat_mask == ""
 
     def test_get_config_exposes_sources_and_advanced_settings(self, monkeypatch, tmp_path) -> None:
         """The config API should expose persisted advanced fields so the
@@ -14134,8 +14152,8 @@ class TestLlmFallbackConfigValidationAndProbe:
       default provider — previously the desktop UI silently dropped the
       fallback panel's api_key/model/base_url in that case and the save
       "succeeded".
-    - POST /api/config/probe-service kind="llm_fallback" probes the exact
-      fallback provider (no fallback chain) without writing config.toml.
+    - The legacy probe endpoint rejects model probe kinds. Exact Chat and
+      Embedding drafts belong to POST /api/model-config/probe.
     """
 
     def _client(self, monkeypatch, tmp_path, cfg):
@@ -14183,38 +14201,9 @@ class TestLlmFallbackConfigValidationAndProbe:
         # Not persisted.
         assert config_path.read_bytes() == before
 
-    def test_probe_llm_fallback_probes_exact_fallback_provider(self, monkeypatch, tmp_path) -> None:
-        from openbiliclaw.llm.base import LLMResponse
-        from openbiliclaw.llm.concurrency import LLMTrafficClass
-
-        calls: list[tuple[str, object]] = []
-        runtime_gate = None
-
-        class FakeAdapter:
-            def __init__(self, connection: object) -> None:
-                self.connection = connection
-
-            async def complete(self, messages, **kwargs):  # noqa: ARG002
-                assert runtime_gate is not None
-                status = runtime_gate.status_payload()
-                assert status["llm_total_active"] == 1
-                assert status["llm_background_active"] == 1
-                connection_id = str(getattr(self.connection, "id", ""))
-                model = str(getattr(self.connection, "model", ""))
-                calls.append((connection_id, model))
-                return LLMResponse(
-                    content="OK",
-                    provider=connection_id,
-                    model=model,
-                )
-
-        monkeypatch.setattr(
-            "openbiliclaw.llm.connection_factory.build_chat_adapter",
-            lambda connection, _options: FakeAdapter(connection),
-        )
+    def test_legacy_probe_rejects_llm_fallback_kind(self, monkeypatch, tmp_path) -> None:
         cfg = self._base_config()
         client, config_path = self._client(monkeypatch, tmp_path, cfg)
-        runtime_gate = client.app.state.runtime_context.llm_concurrency_gate
         before = config_path.read_bytes()
 
         response = client.post(
@@ -14225,18 +14214,10 @@ class TestLlmFallbackConfigValidationAndProbe:
             },
         )
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["ok"] is True, body
-        assert body["kind"] == "llm_fallback"
-        assert body["provider"] == "openai_compatible"
-        # Exact single-provider probe — never the fallback chain.
-        assert [connection_id for connection_id, _model in calls] == ["legacy-chat-deepseek"]
-        assert runtime_gate.classify("api.config_probe") is LLMTrafficClass.MAINTENANCE
-        assert runtime_gate.status_payload()["llm_total_active"] == 0
+        assert response.status_code == 422
         assert config_path.read_bytes() == before
 
-    def test_probe_llm_fallback_refuses_cleanly_when_unconfigured(
+    def test_legacy_probe_rejects_unconfigured_llm_fallback_kind(
         self, monkeypatch, tmp_path
     ) -> None:
         cfg = self._base_config()
@@ -14247,12 +14228,9 @@ class TestLlmFallbackConfigValidationAndProbe:
             json={"kind": "llm_fallback", "config": {"llm": {"fallback_provider": ""}}},
         )
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["ok"] is False
-        assert "not configured" in body["error"].lower()
+        assert response.status_code == 422
 
-    def test_probe_llm_fallback_refuses_cleanly_for_same_name(self, monkeypatch, tmp_path) -> None:
+    def test_legacy_probe_rejects_same_name_llm_fallback_kind(self, monkeypatch, tmp_path) -> None:
         cfg = self._base_config()
         client, _config_path = self._client(monkeypatch, tmp_path, cfg)
 
@@ -14261,10 +14239,7 @@ class TestLlmFallbackConfigValidationAndProbe:
             json={"kind": "llm_fallback", "config": {"llm": {"fallback_provider": "openai"}}},
         )
 
-        assert response.status_code == 200
-        body = response.json()
-        assert body["ok"] is False
-        assert "not configured" in body["error"].lower()
+        assert response.status_code == 422
 
 
 class TestKeywordGenerationMode:
