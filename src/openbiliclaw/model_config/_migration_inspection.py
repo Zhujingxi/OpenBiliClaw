@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from ._migration_types import CONFIRM_REMOVE_ACTIONS, MigrationAction, MigrationIssue
@@ -63,6 +63,7 @@ class IssueCollector:
     def __init__(self) -> None:
         self.issues: list[MigrationIssue] = []
         self._used_ids: set[str] = set()
+        self._by_semantics: dict[tuple[object, ...], MigrationIssue] = {}
 
     def add(
         self,
@@ -76,6 +77,20 @@ class IssueCollector:
         allowed_actions: tuple[MigrationAction, ...] = CONFIRM_REMOVE_ACTIONS,
     ) -> MigrationIssue:
         """Append one issue whose public fields contain no raw value."""
+        safe_provider = safe_identifier(provider)
+        actions = tuple(allowed_actions)
+        semantics: tuple[object, ...] = (
+            code,
+            field,
+            safe_provider,
+            credential_configured,
+            reason,
+            severity,
+            actions,
+        )
+        existing = self._by_semantics.get(semantics)
+        if existing is not None:
+            return existing
         issue_id = unique_id(
             slugify_id(f"legacy-issue-{code}-{field}"),
             self._used_ids,
@@ -84,13 +99,14 @@ class IssueCollector:
             id=issue_id,
             code=code,
             field=field,
-            provider=safe_identifier(provider),
+            provider=safe_provider,
             credential_configured=credential_configured,
             reason=reason,
             severity=severity,
-            allowed_actions=allowed_actions,
+            allowed_actions=actions,
         )
         self.issues.append(issue)
+        self._by_semantics[semantics] = issue
         return issue
 
 
@@ -134,9 +150,10 @@ def raw_table(
 class RawText:
     """Validated text plus whether an explicit raw value was valid/configured."""
 
-    value: str
+    value: str = field(repr=False)
     valid: bool
     configured: bool
+    issue_id: str = ""
 
 
 def text_field(
@@ -155,13 +172,13 @@ def text_field(
     value = raw[name]
     if not isinstance(value, str):
         configured = value_configured(value)
-        collector.add(
+        issue = collector.add(
             "invalid_legacy_value",
             field,
             credential_configured=configured if credential else False,
             reason=reason,
         )
-        return RawText(default, False, configured)
+        return RawText(default, False, configured, issue.id)
     stripped = value.strip()
     return RawText(stripped, True, bool(stripped))
 
@@ -289,16 +306,12 @@ def inspect_endpoint(
 
     value = raw_value.strip()
     if not value:
-        return inspect_endpoint(
-            "",
-            field=field,
-            collector=collector,
-            default=default,
-            required=required,
-            official_host=official_host,
-            official_paths=official_paths,
-            canonical_official=canonical_official,
+        issue = collector.add(
+            "invalid_legacy_value",
+            field,
+            reason="legacy_endpoint_is_invalid",
         )
+        return NormalizedEndpoint("", False, issue_id=issue.id)
 
     invalid_characters = (
         any(not char.isprintable() or char.isspace() for char in raw_value) or "\\" in raw_value
@@ -309,11 +322,14 @@ def inspect_endpoint(
         parsed = urlsplit(value)
         hostname_value = parsed.hostname
         port = parsed.port
-        hostname = (
+        parsed_hostname = (
             hostname_value.encode("idna").decode("ascii").lower()
             if hostname_value is not None
             else ""
         )
+        if parsed_hostname.endswith(".."):
+            raise ValueError("ambiguous trailing DNS dots")
+        hostname = parsed_hostname[:-1] if parsed_hostname.endswith(".") else parsed_hostname
     except (UnicodeError, ValueError):
         parsed = urlsplit("")
         hostname = ""
@@ -376,14 +392,24 @@ def normalized_ollama_endpoint(value: str) -> str:
     return normalized if normalized.endswith("/v1") else normalized + "/v1"
 
 
-def credential_from_raw(
+@dataclass(frozen=True)
+class InspectedCredential:
+    """One secret-hidden credential plus safe raw-inspection metadata."""
+
+    credential: CredentialConfig = field(default_factory=CredentialConfig, repr=False)
+    valid: bool = True
+    configured: bool = False
+    issue_id: str = ""
+
+
+def inspect_credential_from_raw(
     provider: str,
     raw: Mapping[str, object],
     env: Mapping[str, str],
     *,
     prefix: str,
     collector: IssueCollector,
-) -> CredentialConfig:
+) -> InspectedCredential:
     """Read an inline or approved environment credential without coercion."""
     inline = text_field(
         raw,
@@ -394,7 +420,12 @@ def credential_from_raw(
         credential=True,
     )
     if inline.value:
-        return CredentialConfig(source="inline", value=inline.value)
+        return InspectedCredential(
+            credential=CredentialConfig(source="inline", value=inline.value),
+            valid=inline.valid,
+            configured=inline.configured,
+            issue_id=inline.issue_id,
+        )
 
     env_names: tuple[str, ...] = ()
     if provider == "gemini":
@@ -404,8 +435,35 @@ def credential_from_raw(
     for name in env_names:
         value = env.get(name, "")
         if isinstance(value, str) and value.strip():
-            return CredentialConfig(source="env", value=name)
-    return CredentialConfig()
+            return InspectedCredential(
+                credential=CredentialConfig(source="env", value=name),
+                valid=inline.valid,
+                configured=True,
+                issue_id=inline.issue_id,
+            )
+    return InspectedCredential(
+        valid=inline.valid,
+        configured=inline.configured,
+        issue_id=inline.issue_id,
+    )
+
+
+def credential_from_raw(
+    provider: str,
+    raw: Mapping[str, object],
+    env: Mapping[str, str],
+    *,
+    prefix: str,
+    collector: IssueCollector,
+) -> CredentialConfig:
+    """Return only the credential value for callers that need no inspection metadata."""
+    return inspect_credential_from_raw(
+        provider,
+        raw,
+        env,
+        prefix=prefix,
+        collector=collector,
+    ).credential
 
 
 def unknown_credential_configured(value: object) -> bool:
@@ -425,6 +483,7 @@ def unknown_credential_configured(value: object) -> bool:
 
 __all__ = [
     "IssueCollector",
+    "InspectedCredential",
     "NormalizedEndpoint",
     "RawText",
     "bounded_float_field",
@@ -432,6 +491,7 @@ __all__ = [
     "exact_bool_field",
     "exact_int_field",
     "inspect_endpoint",
+    "inspect_credential_from_raw",
     "legacy_connection_id",
     "normalized_ollama_endpoint",
     "raw_table",

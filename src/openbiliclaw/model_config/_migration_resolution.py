@@ -10,6 +10,7 @@ from ._migration_types import (
     LegacyMigrationResult,
     MigrationResolution,
     MigrationResolutionError,
+    _EmbeddingProviderState,
 )
 from .registry import connection_type_registry
 from .types import ChatConnection, EmbeddingModelSettings, EmbeddingProviderConfig, ModelConfig
@@ -83,7 +84,9 @@ def apply_migration_resolutions(
     chat_additions: list[tuple[int, ChatConnection]] = []
     chat_removals: set[str] = set()
     embedding_removals: set[str] = set()
-    embedding_addition: tuple[EmbeddingProviderConfig, EmbeddingModelSettings] | None = None
+    embedding_addition: (
+        tuple[EmbeddingProviderConfig, _EmbeddingProviderState, EmbeddingModelSettings] | None
+    ) = None
 
     for issue in required:
         resolution = choices.get(issue.id)
@@ -109,18 +112,17 @@ def apply_migration_resolutions(
             if (
                 value is None
                 or value.embedding_provider is None
-                or value.embedding_space is None
+                or value.embedding_state is None
                 or embedding_addition is not None
                 or resolution.embedding_settings is None
+                or value.embedding_state.provider_id != value.embedding_provider.id
             ):
                 raise _resolution_error()
-            if not embedding_space_compatible(
+            embedding_addition = (
                 value.embedding_provider,
-                value.embedding_space,
+                value.embedding_state,
                 resolution.embedding_settings,
-            ):
-                raise _resolution_error()
-            embedding_addition = (value.embedding_provider, resolution.embedding_settings)
+            )
             continue
 
         if resolution.position is not None or resolution.embedding_settings is not None:
@@ -150,22 +152,35 @@ def apply_migration_resolutions(
         for provider in result.models.embedding.providers
         if provider.id not in embedding_removals
     )
+    embedding_providers = retained_embedding
+    embedding_settings = result.models.embedding.settings
+    if embedding_addition is not None:
+        provider, pending_state, embedding_settings = embedding_addition
+        embedding_providers = (*embedding_providers, provider)
+        if len(embedding_providers) > 10:
+            raise _resolution_error()
+
+        states_by_id: dict[str, _EmbeddingProviderState] = {}
+        for state in (*result._embedding_states, pending_state):
+            if not state.provider_id or state.provider_id in states_by_id:
+                raise _resolution_error()
+            states_by_id[state.provider_id] = state
+        for final_provider in embedding_providers:
+            final_state = states_by_id.get(final_provider.id)
+            if final_state is None or not embedding_space_compatible(
+                final_provider,
+                final_state.space,
+                embedding_settings,
+                endpoint_valid=final_state.endpoint_valid,
+            ):
+                raise _resolution_error()
+
     embedding = replace(
         result.models.embedding,
-        enabled=bool(retained_embedding),
-        providers=retained_embedding,
+        enabled=bool(embedding_providers),
+        settings=embedding_settings,
+        providers=embedding_providers,
     )
-    if embedding_addition is not None:
-        provider, settings = embedding_addition
-        providers = (*embedding.providers, provider)
-        if len(providers) > 10:
-            raise _resolution_error()
-        embedding = replace(
-            embedding,
-            enabled=True,
-            settings=settings,
-            providers=providers,
-        )
 
     all_ids = [connection.id for connection in chat_connections] + [
         provider.id for provider in embedding.providers

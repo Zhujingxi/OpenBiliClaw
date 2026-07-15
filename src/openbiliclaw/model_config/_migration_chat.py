@@ -12,8 +12,8 @@ from ._migration_constants import (
 )
 from ._migration_inspection import (
     IssueCollector,
-    credential_from_raw,
     exact_int_field,
+    inspect_credential_from_raw,
     inspect_endpoint,
     legacy_connection_id,
     normalized_ollama_endpoint,
@@ -67,13 +67,14 @@ def map_chat_connection(
         ).value
         or CHAT_DEFAULT_MODELS[provider]
     )
-    credential = credential_from_raw(
+    inspected_credential = inspect_credential_from_raw(
         provider,
         raw,
         env,
         prefix=prefix,
         collector=collector,
     )
+    credential = inspected_credential.credential
     connection_id = legacy_connection_id("chat", provider, used_ids)
     name = PROVIDER_LABELS[provider]
     removal_issue_ids: list[str] = []
@@ -129,7 +130,8 @@ def map_chat_connection(
             )
         if credential.source == "none":
             removal_issue_ids.append(
-                _missing_credential_issue(provider, "llm.openai.api_key", collector)
+                inspected_credential.issue_id
+                or _missing_credential_issue(provider, "llm.openai.api_key", collector)
             )
         if not endpoint.valid and endpoint.issue_id:
             removal_issue_ids.append(endpoint.issue_id)
@@ -173,7 +175,8 @@ def map_chat_connection(
 
     if provider != "ollama" and credential.source == "none":
         removal_issue_ids.append(
-            _missing_credential_issue(provider, f"llm.{provider}.api_key", collector)
+            inspected_credential.issue_id
+            or _missing_credential_issue(provider, f"llm.{provider}.api_key", collector)
         )
 
     if provider == "claude":
@@ -257,15 +260,7 @@ def map_chat_connection(
         )
 
     if provider == "ollama":
-        api_key = text_field(
-            raw,
-            "api_key",
-            field="llm.ollama.api_key",
-            collector=collector,
-            reason="legacy_credential_must_be_string",
-            credential=True,
-        )
-        if api_key.value:
+        if credential.source == "inline":
             collector.add(
                 "unused_credential",
                 "llm.ollama.api_key",

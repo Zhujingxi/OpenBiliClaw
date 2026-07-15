@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ._migration_constants import (
@@ -10,11 +11,12 @@ from ._migration_constants import (
     PROVIDER_LABELS,
 )
 from ._migration_inspection import (
+    InspectedCredential,
     IssueCollector,
     bounded_float_field,
-    credential_from_raw,
     exact_bool_field,
     exact_int_field,
+    inspect_credential_from_raw,
     inspect_endpoint,
     legacy_connection_id,
     normalized_ollama_endpoint,
@@ -29,6 +31,15 @@ from .types import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+@dataclass(frozen=True)
+class MappedEmbeddingProvider:
+    """One mapped provider plus private, secret-free inspection metadata."""
+
+    provider: EmbeddingProviderConfig = field(repr=False)
+    endpoint_valid: bool = True
+    credential_issue_id: str = ""
 
 
 def _embedding_type_and_preset(provider: str) -> tuple[str, str]:
@@ -95,20 +106,20 @@ def map_embedding_provider(
     collector: IssueCollector,
     *,
     prefix: str,
-) -> tuple[EmbeddingProviderConfig, bool]:
-    """Map one provider and return its endpoint usability separately."""
+    inspected_credential: InspectedCredential | None = None,
+) -> MappedEmbeddingProvider:
+    """Map one provider while retaining only safe inspection metadata."""
     connection_type, preset = _embedding_type_and_preset(provider)
-    credential = (
-        CredentialConfig()
-        if provider == "ollama"
-        else credential_from_raw(
+    inspection = inspected_credential
+    if inspection is None:
+        inspection = inspect_credential_from_raw(
             provider,
             credential_raw,
             env,
             prefix=prefix,
             collector=collector,
         )
-    )
+    credential = CredentialConfig() if provider == "ollama" else inspection.credential
     base_url_raw = endpoint_raw.get("base_url", "")
     if base_url_raw == "" and endpoint_raw is not credential_raw:
         base_url_raw = credential_raw.get("base_url", "")
@@ -118,8 +129,8 @@ def map_embedding_provider(
         field=f"{prefix}.base_url",
         collector=collector,
     )
-    return (
-        EmbeddingProviderConfig(
+    return MappedEmbeddingProvider(
+        provider=EmbeddingProviderConfig(
             id=legacy_connection_id("embedding", provider, used_ids),
             name=PROVIDER_LABELS[provider],
             type=connection_type,
@@ -127,7 +138,8 @@ def map_embedding_provider(
             base_url=base_url,
             credential=credential,
         ),
-        endpoint_valid,
+        endpoint_valid=endpoint_valid,
+        credential_issue_id=inspection.issue_id,
     )
 
 
@@ -180,10 +192,10 @@ def map_embedding_settings(
     )
 
 
-def embedding_space(provider: str) -> _EmbeddingSpace:
-    """Describe a fallback's actual default model and dimension behavior."""
-    model = EMBEDDING_DEFAULT_MODELS[provider]
-    if provider == "ollama":
+def _known_embedding_space(provider: str, model: str) -> _EmbeddingSpace:
+    """Describe capabilities that can be proved for a provider/model pair."""
+    lowered = model.lower()
+    if provider == "ollama" and lowered == "bge-m3":
         return _EmbeddingSpace(provider=provider, model=model, fixed_output_dimensionality=1024)
     if provider == "openai":
         return _EmbeddingSpace(
@@ -196,10 +208,9 @@ def embedding_space(provider: str) -> _EmbeddingSpace:
             provider=provider,
             model=model,
             output_dimensionality_configurable=True,
-            multimodal_capable="gemini-embedding-2" in model.lower(),
+            multimodal_capable="gemini-embedding-2" in lowered,
         )
     if provider == "dashscope":
-        lowered = model.lower()
         return _EmbeddingSpace(
             provider=provider,
             model=model,
@@ -214,6 +225,27 @@ def embedding_space(provider: str) -> _EmbeddingSpace:
             ),
         )
     return _EmbeddingSpace(provider=provider, model=model)
+
+
+def embedding_space(provider: str) -> _EmbeddingSpace:
+    """Describe a fallback's actual default model and dimension behavior."""
+    return _known_embedding_space(provider, EMBEDDING_DEFAULT_MODELS[provider])
+
+
+def active_embedding_space(
+    provider: str,
+    settings: EmbeddingModelSettings,
+) -> _EmbeddingSpace:
+    """Record the active provider's proved capability or exact current space."""
+    known = _known_embedding_space(provider, settings.model)
+    if known.output_dimensionality_configurable or known.fixed_output_dimensionality is not None:
+        return known
+    return _EmbeddingSpace(
+        provider=provider,
+        model=settings.model,
+        fixed_output_dimensionality=settings.output_dimensionality,
+        multimodal_capable=settings.multimodal_enabled,
+    )
 
 
 def embedding_provider_usable(
@@ -255,6 +287,8 @@ def embedding_space_compatible(
 
 
 __all__ = [
+    "MappedEmbeddingProvider",
+    "active_embedding_space",
     "embedding_provider_usable",
     "embedding_space",
     "embedding_space_compatible",

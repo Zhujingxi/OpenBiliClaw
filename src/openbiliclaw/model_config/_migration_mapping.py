@@ -14,6 +14,7 @@ from ._migration_constants import (
     PROVIDER_FIELDS,
 )
 from ._migration_embedding import (
+    active_embedding_space,
     embedding_provider_usable,
     embedding_space,
     embedding_space_compatible,
@@ -25,6 +26,7 @@ from ._migration_inspection import (
     credential_from_raw,
     exact_bool_field,
     exact_int_field,
+    inspect_credential_from_raw,
     raw_table,
     safe_identifier,
     text_field,
@@ -37,6 +39,7 @@ from ._migration_types import (
     UNROUTED_ACTIONS,
     LegacyMigrationResult,
     MigrationReport,
+    _EmbeddingProviderState,
     _PendingValue,
 )
 from .types import (
@@ -283,6 +286,7 @@ def _map_embedding_route(
     used_ids: set[str],
     collector: IssueCollector,
     pending: list[_PendingValue],
+    embedding_states: list[_EmbeddingProviderState],
 ) -> EmbeddingRouteConfig:
     embedding_name, _valid = _provider_name(
         embedding_raw,
@@ -308,15 +312,14 @@ def _map_embedding_route(
     )
     providers: list[EmbeddingProviderConfig] = []
 
-    embedding_api_key = text_field(
+    embedding_credential = inspect_credential_from_raw(
+        embedding_name,
         embedding_raw,
-        "api_key",
-        field="llm.embedding.api_key",
+        environment,
+        prefix="llm.embedding",
         collector=collector,
-        reason="legacy_credential_must_be_string",
-        credential=True,
     )
-    if embedding_api_key.value and embedding_name in {"", "ollama"}:
+    if embedding_credential.credential.source == "inline" and embedding_name in {"", "ollama"}:
         collector.add(
             "unused_credential",
             "llm.embedding.api_key",
@@ -331,22 +334,22 @@ def _map_embedding_route(
                 "unknown_provider",
                 "llm.embedding.provider",
                 provider=embedding_name,
-                credential_configured=embedding_api_key.configured,
+                credential_configured=embedding_credential.configured,
                 reason="legacy_embedding_provider_has_no_safe_mapping",
             )
         else:
             base_value = embedding_raw.get("base_url", "")
             borrow_primary = (
                 fallback_enabled
-                and embedding_api_key.valid
-                and not embedding_api_key.value
+                and embedding_credential.valid
+                and embedding_credential.credential.source == "none"
                 and isinstance(base_value, str)
                 and not base_value.strip()
             )
             primary_credentials = (
                 provider_tables.get(embedding_name, {}) if borrow_primary else embedding_raw
             )
-            primary_provider, endpoint_valid = map_embedding_provider(
+            primary_mapped = map_embedding_provider(
                 embedding_name,
                 embedding_raw,
                 primary_credentials,
@@ -354,19 +357,30 @@ def _map_embedding_route(
                 used_ids,
                 collector,
                 prefix="llm.embedding",
+                inspected_credential=None if borrow_primary else embedding_credential,
             )
+            primary_provider = primary_mapped.provider
             providers.append(primary_provider)
-            if not embedding_provider_usable(primary_provider, endpoint_valid):
-                issue = collector.add(
-                    "invalid_legacy_value",
-                    "llm.embedding.api_key",
-                    provider=embedding_name,
-                    credential_configured=False,
-                    reason="configured_embedding_provider_has_no_usable_configuration",
+            embedding_states.append(
+                _EmbeddingProviderState(
+                    provider_id=primary_provider.id,
+                    space=active_embedding_space(embedding_name, settings),
+                    endpoint_valid=primary_mapped.endpoint_valid,
                 )
+            )
+            if not embedding_provider_usable(primary_provider, primary_mapped.endpoint_valid):
+                issue_id = primary_mapped.credential_issue_id
+                if not issue_id:
+                    issue_id = collector.add(
+                        "invalid_legacy_value",
+                        "llm.embedding.api_key",
+                        provider=embedding_name,
+                        credential_configured=False,
+                        reason="configured_embedding_provider_has_no_usable_configuration",
+                    ).id
                 pending.append(
                     _PendingValue(
-                        issue_id=issue.id,
+                        issue_id=issue_id,
                         remove_embedding_provider_id=primary_provider.id,
                     )
                 )
@@ -397,7 +411,7 @@ def _map_embedding_route(
                     collector=collector,
                 )
             )
-            fallback_provider, endpoint_valid = map_embedding_provider(
+            fallback_mapped = map_embedding_provider(
                 fallback_name,
                 fallback_raw,
                 fallback_raw if fallback_enabled else {},
@@ -406,7 +420,13 @@ def _map_embedding_route(
                 collector,
                 prefix=f"llm.{fallback_name}",
             )
+            fallback_provider = fallback_mapped.provider
             fallback_space = embedding_space(fallback_name)
+            fallback_state = _EmbeddingProviderState(
+                provider_id=fallback_provider.id,
+                space=fallback_space,
+                endpoint_valid=fallback_mapped.endpoint_valid,
+            )
             if not fallback_enabled:
                 if fallback_provider.credential.source != "none":
                     collector.add(
@@ -420,9 +440,10 @@ def _map_embedding_route(
                 fallback_provider,
                 fallback_space,
                 settings,
-                endpoint_valid=endpoint_valid,
+                endpoint_valid=fallback_mapped.endpoint_valid,
             ):
                 providers.append(fallback_provider)
+                embedding_states.append(fallback_state)
             else:
                 issue = collector.add(
                     "embedding_space_mismatch",
@@ -436,7 +457,7 @@ def _map_embedding_route(
                     _PendingValue(
                         issue_id=issue.id,
                         embedding_provider=fallback_provider,
-                        embedding_space=fallback_space,
+                        embedding_state=fallback_state,
                     )
                 )
     return EmbeddingRouteConfig(
@@ -476,6 +497,7 @@ def migrate_legacy_llm(
     collector = IssueCollector()
     used_ids: set[str] = set()
     pending: list[_PendingValue] = []
+    embedding_states: list[_EmbeddingProviderState] = []
     provider_tables, embedding_raw, module_tables = _known_tables(raw, collector)
 
     chat_connections = _map_chat_routes(
@@ -495,6 +517,7 @@ def migrate_legacy_llm(
         used_ids,
         collector,
         pending,
+        embedding_states,
     )
     _report_unknown_top_level(raw, collector)
 
@@ -529,6 +552,7 @@ def migrate_legacy_llm(
         models=models,
         report=MigrationReport(tuple(collector.issues)),
         _pending=tuple(pending),
+        _embedding_states=tuple(embedding_states),
     )
 
 

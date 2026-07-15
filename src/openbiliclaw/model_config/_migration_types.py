@@ -103,13 +103,22 @@ class _EmbeddingSpace:
 
 
 @dataclass(frozen=True)
+class _EmbeddingProviderState:
+    """Private, secret-free compatibility facts for one mapped provider."""
+
+    provider_id: str
+    space: _EmbeddingSpace
+    endpoint_valid: bool = True
+
+
+@dataclass(frozen=True)
 class _PendingValue:
     """Private payload attached to one blocking migration issue."""
 
     issue_id: str
     chat_connection: ChatConnection | None = field(default=None, repr=False)
     embedding_provider: EmbeddingProviderConfig | None = field(default=None, repr=False)
-    embedding_space: _EmbeddingSpace | None = field(default=None, repr=False)
+    embedding_state: _EmbeddingProviderState | None = field(default=None, repr=False)
     remove_chat_connection_id: str = field(default="", repr=False)
     remove_embedding_provider_id: str = field(default="", repr=False)
 
@@ -121,10 +130,14 @@ class LegacyMigrationResult:
     models: ModelConfig
     report: MigrationReport
     _pending: tuple[_PendingValue, ...] = field(default=(), repr=False, compare=False)
+    _embedding_states: tuple[_EmbeddingProviderState, ...] = field(
+        default=(), repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
-        """Prevent callers from mutating pending resolution order."""
+        """Prevent callers from mutating private migration metadata."""
         object.__setattr__(self, "_pending", tuple(self._pending))
+        object.__setattr__(self, "_embedding_states", tuple(self._embedding_states))
 
 
 class MigrationResolutionError(ValueError):
@@ -142,6 +155,7 @@ __all__ = [
     "MigrationResolution",
     "MigrationResolutionError",
     "UNROUTED_ACTIONS",
+    "_EmbeddingProviderState",
     "_EmbeddingSpace",
     "_PendingValue",
 ]

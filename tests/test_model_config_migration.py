@@ -24,6 +24,7 @@ from openbiliclaw.model_config import (
     migrate_legacy_llm,
     validate_model_config,
 )
+from openbiliclaw.model_config._migration_inspection import IssueCollector, RawText
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -134,15 +135,21 @@ def test_official_provider_hosts_keep_official_presets() -> None:
         ("openai", "https://api.openai.com:444/v1"),
         ("openai", "https://api.openai.com/v1/unexpected"),
         ("openai", " https://api.openai.com/v1"),
+        ("openai", "https://api.openai.com/v1 "),
+        ("openai", "   "),
         ("openai", "https://api.openai.com/v1?"),
         ("openai", "https://api.openai.com/v1#"),
         ("openai", "https://api.openai.com/v1//"),
         ("openai", r"https://api.openai.com\unexpected/v1"),
+        ("openai", "https://api.openai.com.:444/v1"),
+        ("openai", "https://api.openai.com./v1/unexpected"),
         ("claude", "https://user:password@api.anthropic.com/v1"),
         ("claude", "https://api.anthropic.com/v1?fake_token=secret-query"),
         ("claude", "https://api.anthropic.com/v1#secret-fragment"),
         ("claude", "https://api.anthropic.com:444/v1"),
         ("claude", "https://api.anthropic.com/v1/unexpected"),
+        ("claude", "https://api.anthropic.com.:444/v1"),
+        ("claude", "https://api.anthropic.com./v1/unexpected"),
     ],
 )
 def test_credential_bearing_or_noncanonical_official_urls_are_rejected_safely(
@@ -163,6 +170,26 @@ def test_credential_bearing_or_noncanonical_official_urls_are_rejected_safely(
     with pytest.raises(MigrationResolutionError) as raised:
         _apply(result, {issue.id: _resolution("cancel")})
     assert raw_url not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("provider", "raw_url", "expected_url"),
+    [
+        ("openai", "https://api.openai.com./v1", "https://api.openai.com/v1"),
+        ("claude", "https://api.anthropic.com./v1", "https://api.anthropic.com"),
+    ],
+)
+def test_single_dns_trailing_dot_is_canonicalized_before_official_classification(
+    provider: str,
+    raw_url: str,
+    expected_url: str,
+) -> None:
+    result = _migrate(legacy_provider(provider, base_url=raw_url))
+    connection = result.models.chat.connections[0]
+
+    assert connection.preset in {"openai", "anthropic"}
+    assert connection.base_url == expected_url
+    assert all(item.field != f"llm.{provider}.base_url" for item in result.report.issues)
 
 
 @pytest.mark.parametrize("provider", ["openai", "claude"])
@@ -809,6 +836,105 @@ def test_non_string_provider_fields_are_reported_and_never_retained() -> None:
     assert "model-secret" not in repr(result)
 
 
+@pytest.mark.parametrize(
+    ("provider", "field", "malformed"),
+    [
+        ("ollama", "api_key", ["nested-ollama-secret"]),
+        ("openai", "auth_mode", ["nested-auth-secret"]),
+    ],
+)
+def test_malformed_chat_credential_or_auth_has_one_stable_resolution(
+    provider: str,
+    field: str,
+    malformed: object,
+) -> None:
+    raw = legacy_provider(provider)
+    cast("dict[str, object]", raw[provider])[field] = malformed
+
+    first = _migrate(raw)
+    second = _migrate(raw)
+    field_name = f"llm.{provider}.{field}"
+    decisions = [item for item in first.report.issues if item.field == field_name]
+
+    assert len(decisions) == 1
+    assert decisions[0].allowed_actions == ("confirm_remove_after_backup", "cancel")
+    assert [item.id for item in first.report.issues] == [item.id for item in second.report.issues]
+    assert len([item for item in first.report.issues if item.severity == "blocking"]) == 1
+    resolved = _apply(
+        first,
+        {decisions[0].id: _resolution("confirm_remove_after_backup")},
+    )
+    assert validate_model_config(resolved, connection_type_registry()) == []
+    assert "nested-" not in repr(first)
+
+
+def test_malformed_embedding_credential_has_one_stable_removal_resolution() -> None:
+    raw: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "embedding": {
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "api_key": {"token": "nested-embedding-secret"},
+            "output_dimensionality": 1536,
+            "fallback_enabled": False,
+            "multimodal_enabled": False,
+        },
+    }
+
+    first = _migrate(raw)
+    second = _migrate(raw)
+    decisions = [item for item in first.report.issues if item.field == "llm.embedding.api_key"]
+
+    assert len(decisions) == 1
+    assert decisions[0].reason == "legacy_credential_must_be_string"
+    assert decisions[0].allowed_actions == ("confirm_remove_after_backup", "cancel")
+    assert [item.id for item in first.report.issues] == [item.id for item in second.report.issues]
+    assert len([item for item in first.report.issues if item.severity == "blocking"]) == 1
+    resolved = _apply(
+        first,
+        {decisions[0].id: _resolution("confirm_remove_after_backup")},
+    )
+    assert resolved.embedding.enabled is False
+    assert resolved.embedding.providers == ()
+    assert "nested-embedding-secret" not in repr(first)
+
+
+def test_issue_collector_deduplicates_only_identical_semantic_decisions() -> None:
+    collector = IssueCollector()
+    first = collector.add(
+        "invalid_legacy_value",
+        "llm.ollama.api_key",
+        provider="ollama",
+        credential_configured=True,
+        reason="legacy_credential_must_be_string",
+    )
+    duplicate = collector.add(
+        "invalid_legacy_value",
+        "llm.ollama.api_key",
+        provider="ollama",
+        credential_configured=True,
+        reason="legacy_credential_must_be_string",
+    )
+    distinct = collector.add(
+        "invalid_legacy_value",
+        "llm.ollama.api_key",
+        provider="openai",
+        credential_configured=True,
+        reason="legacy_credential_must_be_string",
+    )
+
+    assert duplicate is first
+    assert collector.issues == [first, distinct]
+
+
+def test_raw_text_hides_nested_inline_secret_from_repr() -> None:
+    secret = "raw-text-inline-secret-sentinel"
+    inspected = RawText(value=secret, valid=True, configured=True)
+
+    assert secret not in repr({"nested": (inspected,)})
+
+
 def test_exact_integer_fields_reject_booleans_and_fractional_floats() -> None:
     raw = legacy_provider("ollama")
     raw["concurrency"] = 1.5
@@ -1016,7 +1142,7 @@ def test_chat_resolution_rejects_ten_item_route_overflow() -> None:
         )
 
 
-def test_embedding_mismatch_resolution_requires_and_applies_explicit_shared_settings() -> None:
+def test_shared_settings_reject_incompatible_retained_ollama_provider() -> None:
     result = _migrate(legacy_embedding(primary_model="bge-m3"))
     issue = next(
         issue for issue in result.report.issues if issue.code == "embedding_space_mismatch"
@@ -1027,6 +1153,74 @@ def test_embedding_mismatch_resolution_requires_and_applies_explicit_shared_sett
         similarity_threshold=0.77,
         multimodal_enabled=False,
     )
+
+    before = result.models
+    with pytest.raises(MigrationResolutionError):
+        _apply(
+            result,
+            {
+                issue.id: _resolution(
+                    "apply_shared_embedding_settings",
+                    embedding_settings=settings,
+                )
+            },
+        )
+    assert result.models == before
+
+
+def test_shared_settings_reject_unproven_dimension_change_for_retained_remote() -> None:
+    raw: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "ollama": {"model": "bge-m3", "base_url": "http://127.0.0.1:11434/v1"},
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": "bge-m3",
+            "api_key": "remote-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 768,
+            "fallback_enabled": True,
+            "fallback_provider": "ollama",
+            "multimodal_enabled": False,
+        },
+    }
+    result = _migrate(raw)
+    issue = next(item for item in result.report.issues if item.code == "embedding_space_mismatch")
+    settings = replace(result.models.embedding.settings, output_dimensionality=1024)
+
+    with pytest.raises(MigrationResolutionError):
+        _apply(
+            result,
+            {
+                issue.id: _resolution(
+                    "apply_shared_embedding_settings",
+                    embedding_settings=settings,
+                )
+            },
+        )
+
+
+def test_shared_settings_apply_when_every_final_provider_is_compatible() -> None:
+    raw: dict[str, object] = {
+        "default_provider": "deepseek",
+        "fallback_provider": "openai",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai": {"api_key": "openai-secret", "model": "gpt-5-nano"},
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": "text-embedding-3-small",
+            "api_key": "remote-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 1536,
+            "similarity_threshold": 0.72,
+            "fallback_enabled": True,
+            "fallback_provider": "openai",
+            "multimodal_enabled": True,
+        },
+    }
+    result = _migrate(raw)
+    issue = next(item for item in result.report.issues if item.code == "embedding_space_mismatch")
+    settings = replace(result.models.embedding.settings, multimodal_enabled=False)
 
     resolved = _apply(
         result,
@@ -1039,7 +1233,8 @@ def test_embedding_mismatch_resolution_requires_and_applies_explicit_shared_sett
     )
 
     assert resolved.embedding.settings == settings
-    assert [provider.preset for provider in resolved.embedding.providers] == ["", "openai"]
+    assert [provider.preset for provider in resolved.embedding.providers] == ["custom", "openai"]
+    assert validate_model_config(resolved, connection_type_registry()) == []
 
 
 def test_embedding_mismatch_can_remove_the_pending_fallback() -> None:
