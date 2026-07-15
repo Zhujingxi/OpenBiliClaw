@@ -69,14 +69,14 @@ export function createLatestRequestGate() {
   };
 }
 
-export async function applyLatestSnapshotRequest({
+async function applyLatestRequestGeneration({
   gate,
+  generation,
   request,
   blocked,
   apply,
   onBlocked = null,
 }) {
-  const generation = gate.begin();
   let snapshot;
   try {
     snapshot = await request();
@@ -91,6 +91,14 @@ export async function applyLatestSnapshotRequest({
   }
   apply(snapshot);
   return true;
+}
+
+export async function applyLatestSnapshotRequest(options) {
+  const generation = options.gate.begin();
+  return applyLatestRequestGeneration({
+    ...options,
+    generation,
+  });
 }
 
 /**
@@ -129,11 +137,15 @@ export function createModelOperationGate() {
     },
     beginSave() {
       if (saveInFlight) return null;
+      const invalidatedProbe = probeInFlight;
       saveGeneration += 1;
       saveInFlight = true;
       probeGeneration += 1;
       probeInFlight = false;
-      return saveGeneration;
+      return {
+        generation: saveGeneration,
+        invalidatedProbe,
+      };
     },
     finishSave(candidate) {
       if (!saveInFlight || candidate !== saveGeneration) return false;
@@ -161,9 +173,10 @@ export function createModelOperationGate() {
 
 /**
  * Load the revisioned snapshot and the descriptor registry concurrently while
- * keeping their lifecycles independent. A newer snapshot request may supersede
- * this snapshot, but it must not discard the descriptor response needed by the
- * editor (and by guarded convenience actions).
+ * keeping their lifecycles independent. Ownership is checked again only after
+ * both resources settle, so a resource that applied early cannot authorize a
+ * later convenience save after its generation was superseded. Current failures
+ * are also surfaced only after the sibling has settled and finished rendering.
  */
 export async function loadIndependentModelResources({
   gate,
@@ -175,24 +188,45 @@ export async function loadIndependentModelResources({
   applySnapshot,
   installDescriptors,
 }) {
-  const snapshotLoad = applyLatestSnapshotRequest({
+  const snapshotGeneration = gate.begin();
+  const descriptorGeneration = descriptorGate.begin();
+  const snapshotLoad = applyLatestRequestGeneration({
     gate,
+    generation: snapshotGeneration,
     request: snapshotRequest,
     blocked,
     apply: applySnapshot,
     onBlocked: onSnapshotBlocked,
   });
-  const descriptorLoad = applyLatestSnapshotRequest({
+  const descriptorLoad = applyLatestRequestGeneration({
     gate: descriptorGate,
+    generation: descriptorGeneration,
     request: descriptorRequest,
     blocked: () => false,
     apply: installDescriptors,
   });
-  const [snapshotApplied, descriptorsInstalled] = await Promise.all([
+  const [snapshotOutcome, descriptorOutcome] = await Promise.allSettled([
     snapshotLoad,
     descriptorLoad,
   ]);
-  return { snapshotApplied, descriptorsInstalled };
+  const snapshotOwned = gate.isCurrent(snapshotGeneration);
+  const descriptorOwned = descriptorGate.isCurrent(descriptorGeneration);
+  const snapshotBlocked = blocked();
+  if (snapshotOutcome.status === "rejected" && snapshotOwned) {
+    throw snapshotOutcome.reason;
+  }
+  if (descriptorOutcome.status === "rejected" && descriptorOwned) {
+    throw descriptorOutcome.reason;
+  }
+  return {
+    snapshotApplied: snapshotOutcome.status === "fulfilled"
+      && snapshotOutcome.value
+      && snapshotOwned
+      && !snapshotBlocked,
+    descriptorsInstalled: descriptorOutcome.status === "fulfilled"
+      && descriptorOutcome.value
+      && descriptorOwned,
+  };
 }
 
 function normalizeOverridePath(path) {

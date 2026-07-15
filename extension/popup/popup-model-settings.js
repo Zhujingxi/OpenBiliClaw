@@ -427,6 +427,14 @@ function renderProbeStatus(record) {
   status.dataset.tone = probe.ok ? "success" : "error";
 }
 
+function beginModelSave() {
+  const save = modelOperations.beginSave();
+  if (save?.invalidatedProbe && state) {
+    renderProbeStatus(selectedRecord(state, state.activeRoute));
+  }
+  return save;
+}
+
 function renderRuntime() {
   if (state.activeRoute !== "runtime") return;
   byId("popupModelChatConcurrency").value = String(state.models.chat.concurrency);
@@ -733,8 +741,9 @@ function retainSelection(next, previous) {
 
 async function saveModels() {
   if (!state || modelOperations.saveInFlight) return;
-  const generation = modelOperations.beginSave();
-  if (generation === null) return;
+  const save = beginModelSave();
+  if (save === null) return;
+  const { generation } = save;
   snapshotRequestGate.invalidate();
   setModelEditorLocked(true);
   setStatus("正在验证并热重载模型 route…");
@@ -1022,10 +1031,11 @@ export async function enableLocalOllamaEmbeddingRoute() {
     descriptor,
     LOCAL_OLLAMA_EMBEDDING_DEFAULTS,
   );
-  const generation = modelOperations.beginSave();
-  if (generation === null) {
+  const save = beginModelSave();
+  if (save === null) {
     throw new Error("Another model save is already in progress.");
   }
+  const { generation } = save;
   snapshotRequestGate.invalidate();
   setModelEditorLocked(true);
   setStatus("正在启用本地 Ollama Embedding…");

@@ -173,6 +173,156 @@ test("pending popup model load retains a new dirty draft and reports the snapsho
   assert.equal(current.remoteUpdate.snapshot.models.chat.connections[0].id, "remote");
 });
 
+test("full load revalidates snapshot ownership after its snapshot already applied", async () => {
+  const snapshotGate = modelState.createLatestRequestGate();
+  const descriptorGate = modelState.createLatestRequestGate();
+  const firstSnapshot = deferred<any>();
+  const firstSnapshotApplied = deferred<void>();
+  const firstDescriptors = deferred<any>();
+  const reloadSnapshot = deferred<any>();
+  let current = modelState.hydrateModelConfig(snapshot(["initial"], "revision-initial"));
+  let puts = 0;
+
+  const fullLoad = modelState.loadIndependentModelResources({
+    gate: snapshotGate,
+    descriptorGate,
+    snapshotRequest: () => firstSnapshot.promise,
+    descriptorRequest: () => firstDescriptors.promise,
+    blocked: () => false,
+    applySnapshot: (value: any) => {
+      current = modelState.hydrateModelConfig(value);
+      firstSnapshotApplied.resolve();
+    },
+    installDescriptors: () => {},
+  });
+  firstSnapshot.resolve(snapshot(["load-a"], "revision-a"));
+  await firstSnapshotApplied.promise;
+
+  const reload = modelState.applyLatestSnapshotRequest({
+    gate: snapshotGate,
+    request: () => reloadSnapshot.promise,
+    blocked: () => false,
+    apply: (value: any) => {
+      current = modelState.hydrateModelConfig(value);
+    },
+  });
+  firstDescriptors.resolve({ connection_types: [{ id: "ollama" }], groups: [] });
+
+  const loaded = await fullLoad;
+  const operations = modelState.createModelOperationGate();
+  if (operations.canStartSaveAfterLoad({
+    startedSaveGeneration: operations.saveGeneration,
+    loadResult: loaded,
+    state: current,
+  })) {
+    puts += 1;
+    snapshotGate.invalidate();
+  }
+  reloadSnapshot.resolve(snapshot(["reload-b"], "revision-b"));
+
+  assert.deepEqual(loaded, {
+    snapshotApplied: false,
+    descriptorsInstalled: true,
+  });
+  assert.equal(puts, 0, "the superseded full load must not issue a convenience PUT");
+  assert.equal(await reload, true, "the still-current snapshot-only reload must not be invalidated");
+  assert.equal(current.revision, "revision-b");
+});
+
+test("full load revalidates descriptor ownership after its descriptor already applied", async () => {
+  const snapshotGate = modelState.createLatestRequestGate();
+  const descriptorGate = modelState.createLatestRequestGate();
+  const firstSnapshot = deferred<any>();
+  const firstDescriptors = deferred<any>();
+  const firstDescriptorsApplied = deferred<void>();
+  const replacementDescriptors = deferred<any>();
+  let installedTypes: string[] = [];
+
+  const fullLoad = modelState.loadIndependentModelResources({
+    gate: snapshotGate,
+    descriptorGate,
+    snapshotRequest: () => firstSnapshot.promise,
+    descriptorRequest: () => firstDescriptors.promise,
+    blocked: () => false,
+    applySnapshot: () => {},
+    installDescriptors: (value: any) => {
+      installedTypes = value.connection_types.map((item: any) => item.id);
+      firstDescriptorsApplied.resolve();
+    },
+  });
+  firstDescriptors.resolve({ connection_types: [{ id: "descriptor-a" }], groups: [] });
+  await firstDescriptorsApplied.promise;
+
+  const descriptorReload = modelState.applyLatestSnapshotRequest({
+    gate: descriptorGate,
+    request: () => replacementDescriptors.promise,
+    blocked: () => false,
+    apply: (value: any) => {
+      installedTypes = value.connection_types.map((item: any) => item.id);
+    },
+  });
+  firstSnapshot.resolve(snapshot(["load-a"], "revision-a"));
+
+  assert.deepEqual(await fullLoad, {
+    snapshotApplied: true,
+    descriptorsInstalled: false,
+  });
+  replacementDescriptors.resolve({
+    connection_types: [{ id: "descriptor-b" }],
+    groups: [],
+  });
+  assert.equal(await descriptorReload, true);
+  assert.deepEqual(installedTypes, ["descriptor-b"]);
+});
+
+test("full resource failure waits for a winning sibling before owning final status", async () => {
+  const snapshotGate = modelState.createLatestRequestGate();
+  const descriptorGate = modelState.createLatestRequestGate();
+  const failedSnapshot = deferred<any>();
+  const delayedDescriptors = deferred<any>();
+  const expectedError = new Error("current snapshot failed");
+  let completed = false;
+  let blocked = false;
+  let descriptorsInstalled = false;
+  let visibleStatus = "loading";
+
+  const completion = modelState.loadIndependentModelResources({
+    gate: snapshotGate,
+    descriptorGate,
+    snapshotRequest: () => failedSnapshot.promise,
+    descriptorRequest: () => delayedDescriptors.promise,
+    blocked: () => blocked,
+    applySnapshot: () => {},
+    installDescriptors: () => {
+      descriptorsInstalled = true;
+      visibleStatus = "synced by descriptor render";
+    },
+  }).then(
+    (value: any) => {
+      completed = true;
+      visibleStatus = "loaded";
+      return { value, error: null };
+    },
+    (error: Error) => {
+      completed = true;
+      visibleStatus = `error: ${error.message}`;
+      return { value: null, error };
+    },
+  );
+
+  failedSnapshot.reject(expectedError);
+  await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+  const failedFast = completed;
+  blocked = true;
+  delayedDescriptors.resolve({ connection_types: [{ id: "ollama" }], groups: [] });
+  const outcome = await completion;
+
+  assert.equal(failedFast, false, "a current failure must wait for its sibling to settle");
+  assert.equal(descriptorsInstalled, true, "the winning sibling still applies independently");
+  assert.equal(outcome.error, expectedError);
+  assert.equal(visibleStatus, "error: current snapshot failed");
+});
+
 test("overlapping popup model loads keep the latest descriptor registry", async () => {
   const snapshotGate = modelState.createLatestRequestGate();
   const descriptorGate = modelState.createLatestRequestGate();
@@ -287,13 +437,14 @@ test("one-click load guard refuses a PUT after an edit, save, or stale snapshot"
       })) puts += 1;
     })();
 
-    const normalSaveGeneration = operations.beginSave();
+    const normalSave = operations.beginSave();
+    assert.notEqual(normalSave, null);
     puts += 1;
     load.resolve({ snapshotApplied: true, descriptorsInstalled: true });
     await oneClick;
     assert.equal(puts, 1, "the normal save is the only PUT");
     assert.deepEqual(current, stateBefore);
-    assert.equal(operations.finishSave(normalSaveGeneration), true);
+    assert.equal(operations.finishSave(normalSave.generation), true);
   });
 
   await t.test("snapshot was superseded", async () => {
@@ -307,23 +458,35 @@ test("one-click load guard refuses a PUT after an edit, save, or stale snapshot"
   });
 });
 
-test("probe finishing during save stays stale and unlocks after the save settles", async () => {
+test("generic save failure clears an invalidated probe label and unlocks its button", async () => {
   assert.equal(typeof modelState.createModelOperationGate, "function");
   const operations = modelState.createModelOperationGate();
   const pendingProbe = deferred<{ ok: boolean }>();
   const pendingSave = deferred<void>();
   let attached = false;
+  let visibleProbeStatus = "probing";
 
   const probeGeneration = operations.beginProbe();
   const probeTask = (async () => {
     await pendingProbe.promise;
-    if (operations.isProbeCurrent(probeGeneration)) attached = true;
+    if (operations.isProbeCurrent(probeGeneration)) {
+      attached = true;
+      visibleProbeStatus = "passed";
+    }
     operations.finishProbe(probeGeneration);
   })();
-  const saveGeneration = operations.beginSave();
+  const save = operations.beginSave();
+  assert.notEqual(save, null);
+  assert.equal(save.invalidatedProbe, true);
+  if (save.invalidatedProbe) visibleProbeStatus = "not yet probed";
   const saveTask = (async () => {
-    await pendingSave.promise;
-    operations.finishSave(saveGeneration);
+    try {
+      await pendingSave.promise;
+    } catch {
+      // A generic save error updates the save status, not the accepted probe state.
+    } finally {
+      operations.finishSave(save.generation);
+    }
   })();
 
   pendingProbe.resolve({ ok: true });
@@ -335,8 +498,9 @@ test("probe finishing during save stays stale and unlocks after the save settles
     probeDisabled: true,
   });
 
-  pendingSave.resolve();
+  pendingSave.reject(new Error("generic save failure"));
   await saveTask;
+  assert.equal(visibleProbeStatus, "not yet probed");
   assert.deepEqual(operations.controlState(), {
     editorLocked: false,
     saveDisabled: false,
@@ -691,6 +855,10 @@ test("model controller owns load, descriptor, probe, and save completion races",
   assert.match(controller, /onSnapshotBlocked:/);
   assert.match(controller, /canStartSaveAfterLoad/);
   assert.match(controller, /modelOperations\.beginProbe\(\)/);
-  assert.match(controller, /modelOperations\.beginSave\(\)/);
+  assert.match(controller, /function beginModelSave\(\)/);
+  assert.match(controller, /const save = modelOperations\.beginSave\(\)/);
+  assert.match(controller, /save\?\.invalidatedProbe/);
+  assert.match(controller, /renderProbeStatus\(selectedRecord\(state, state\.activeRoute\)\)/);
+  assert.equal(controller.match(/const save = beginModelSave\(\)/g)?.length, 2);
   assert.match(controller, /modelOperations\.controlState\(\)/);
 });
