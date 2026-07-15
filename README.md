@@ -606,7 +606,8 @@ background ─ background admission (default 3) ──────┘
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 模型配置兼容基础（阶段 3，尚未接入运行链）             │
 │ native [models] strict parse/revision → Config.models    │
-│ legacy [llm] 只读 adapter/report/resolution → 内存候选   │
+│ legacy [llm] 精确 raw/URL 检查 → chat/embed 映射与报告   │
+│ 封闭 resolution → 权威校验 → 有效内存候选                │
 │ 普通保存保留 raw；无事务迁移/backup/runtime/API/UI       │
 ├────────────────────────────────────────────────┤
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

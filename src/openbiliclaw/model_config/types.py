@@ -31,11 +31,11 @@ class ChatConnection:
     type: str
     model: str
     preset: str = ""
-    base_url: str = ""
+    base_url: str = field(default="", repr=False)
     credential: CredentialConfig = field(default_factory=CredentialConfig)
     api_mode: str = ""
     reasoning_effort: str = ""
-    http_referer: str = ""
+    http_referer: str = field(default="", repr=False)
     x_title: str = ""
     num_ctx: int = 0
 
@@ -77,7 +77,7 @@ class EmbeddingProviderConfig:
     name: str
     type: str
     preset: str = ""
-    base_url: str = ""
+    base_url: str = field(default="", repr=False)
     credential: CredentialConfig = field(default_factory=CredentialConfig)
 
 

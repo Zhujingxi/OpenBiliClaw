@@ -3,49 +3,54 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from typing import Any
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from openbiliclaw import model_config as model_config_module
 from openbiliclaw.model_config import (
+    ChatConnection,
     CredentialConfig,
     EmbeddingModelSettings,
+    EmbeddingProviderConfig,
+    LegacyMigrationResult,
+    MigrationAction,
+    MigrationReport,
+    MigrationResolution,
+    MigrationResolutionError,
+    ModelConfig,
+    apply_migration_resolutions,
     compute_model_revision,
+    connection_type_registry,
+    migrate_legacy_llm,
+    validate_model_config,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-def _migrate(raw: dict[str, Any], env: dict[str, str] | None = None) -> Any:
-    migrate = getattr(model_config_module, "migrate_legacy_llm", None)
-    assert callable(migrate), "migrate_legacy_llm must be implemented"
-    return migrate(raw, env or {})
+
+def _migrate(raw: dict[str, object], env: dict[str, str] | None = None) -> LegacyMigrationResult:
+    return migrate_legacy_llm(raw, env or {})
 
 
 def _resolution(
-    action: str,
+    action: MigrationAction | str,
     *,
     position: int | None = None,
     embedding_settings: EmbeddingModelSettings | None = None,
-) -> Any:
-    resolution_type = getattr(model_config_module, "MigrationResolution", None)
-    assert isinstance(resolution_type, type), "MigrationResolution must be implemented"
-    return resolution_type(
-        action=action,
+) -> MigrationResolution:
+    return MigrationResolution(
+        action=cast("MigrationAction", action),
         position=position,
         embedding_settings=embedding_settings,
     )
 
 
-def _apply(result: Any, choices: dict[str, Any]) -> Any:
-    apply_resolutions = getattr(model_config_module, "apply_migration_resolutions", None)
-    assert callable(apply_resolutions), "apply_migration_resolutions must be implemented"
-    return apply_resolutions(result, choices)
-
-
-def _resolution_error_type() -> type[ValueError]:
-    error_type = getattr(model_config_module, "MigrationResolutionError", None)
-    assert isinstance(error_type, type) and issubclass(error_type, ValueError)
-    return error_type
+def _apply(
+    result: LegacyMigrationResult,
+    choices: dict[str, MigrationResolution],
+) -> ModelConfig:
+    return apply_migration_resolutions(result, choices)
 
 
 _CHAT_MODELS = {
@@ -59,8 +64,8 @@ _CHAT_MODELS = {
 }
 
 
-def legacy_provider(provider: str, *, base_url: str = "") -> dict[str, Any]:
-    provider_config: dict[str, Any] = {
+def legacy_provider(provider: str, *, base_url: str = "") -> dict[str, object]:
+    provider_config: dict[str, object] = {
         "model": _CHAT_MODELS[provider],
         "base_url": base_url,
     }
@@ -95,7 +100,7 @@ def legacy_provider(provider: str, *, base_url: str = "") -> dict[str, Any]:
     ],
 )
 def test_legacy_provider_mapping(
-    legacy: dict[str, Any], expected_type: str, expected_preset: str
+    legacy: dict[str, object], expected_type: str, expected_preset: str
 ) -> None:
     result = _migrate(legacy)
     connection = result.models.chat.connections[0]
@@ -107,8 +112,104 @@ def test_official_provider_hosts_keep_official_presets() -> None:
     openai = legacy_provider("openai", base_url="https://API.OpenAI.com/v1/")
     anthropic = legacy_provider("claude", base_url="https://api.anthropic.com/v1")
 
-    assert _migrate(openai).models.chat.connections[0].preset == "openai"
-    assert _migrate(anthropic).models.chat.connections[0].preset == "anthropic"
+    openai_connection = _migrate(openai).models.chat.connections[0]
+    anthropic_connection = _migrate(anthropic).models.chat.connections[0]
+
+    assert (openai_connection.preset, openai_connection.base_url) == (
+        "openai",
+        "https://api.openai.com/v1",
+    )
+    assert (anthropic_connection.preset, anthropic_connection.base_url) == (
+        "anthropic",
+        "https://api.anthropic.com",
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "raw_url"),
+    [
+        ("openai", "https://user:password@api.openai.com/v1"),
+        ("openai", "https://api.openai.com/v1?fake_token=secret-query"),
+        ("openai", "https://api.openai.com/v1#secret-fragment"),
+        ("openai", "https://api.openai.com:444/v1"),
+        ("openai", "https://api.openai.com/v1/unexpected"),
+        ("openai", " https://api.openai.com/v1"),
+        ("openai", "https://api.openai.com/v1?"),
+        ("openai", "https://api.openai.com/v1#"),
+        ("openai", "https://api.openai.com/v1//"),
+        ("openai", r"https://api.openai.com\unexpected/v1"),
+        ("claude", "https://user:password@api.anthropic.com/v1"),
+        ("claude", "https://api.anthropic.com/v1?fake_token=secret-query"),
+        ("claude", "https://api.anthropic.com/v1#secret-fragment"),
+        ("claude", "https://api.anthropic.com:444/v1"),
+        ("claude", "https://api.anthropic.com/v1/unexpected"),
+    ],
+)
+def test_credential_bearing_or_noncanonical_official_urls_are_rejected_safely(
+    provider: str,
+    raw_url: str,
+) -> None:
+    result = _migrate(legacy_provider(provider, base_url=raw_url))
+    connection = result.models.chat.connections[0]
+    issue = next(item for item in result.report.issues if item.field.endswith(".base_url"))
+
+    assert connection.preset == "custom"
+    assert connection.base_url == ""
+    assert issue.code == "invalid_legacy_value"
+    assert issue.reason == "legacy_endpoint_is_invalid"
+    assert raw_url not in repr(result)
+    assert raw_url not in repr(result.report)
+
+    with pytest.raises(MigrationResolutionError) as raised:
+        _apply(result, {issue.id: _resolution("cancel")})
+    assert raw_url not in str(raised.value)
+
+
+@pytest.mark.parametrize("provider", ["openai", "claude"])
+def test_valid_custom_provider_urls_are_normalized_but_hidden_from_repr(provider: str) -> None:
+    raw_url = "https://Relay.Example:8443/v1/endpoint/"
+    result = _migrate(legacy_provider(provider, base_url=raw_url))
+    connection = result.models.chat.connections[0]
+
+    assert connection.preset == "custom"
+    assert connection.base_url == "https://relay.example:8443/v1/endpoint/"
+    assert raw_url not in repr(result)
+    assert connection.base_url not in repr(connection)
+
+
+def test_explicit_null_endpoint_is_reported_instead_of_treated_as_absent() -> None:
+    legacy = legacy_provider("openai")
+    cast("dict[str, object]", legacy["openai"])["base_url"] = None
+
+    result = _migrate(legacy)
+    connection = result.models.chat.connections[0]
+    issue = next(item for item in result.report.issues if item.field == "llm.openai.base_url")
+
+    assert connection.preset == "custom"
+    assert connection.base_url == ""
+    assert issue.code == "invalid_legacy_value"
+    assert issue.reason == "legacy_endpoint_must_be_string"
+
+
+def test_connection_reprs_hide_credential_adjacent_url_fields() -> None:
+    secret_url = "https://user:secret-password@example.invalid/v1?token=secret"
+    chat = ChatConnection(
+        id="chat",
+        name="Chat",
+        type="openai_compatible",
+        model="model",
+        base_url=secret_url,
+        http_referer=secret_url,
+    )
+    embedding = EmbeddingProviderConfig(
+        id="embedding",
+        name="Embedding",
+        type="openai_compatible",
+        base_url=secret_url,
+    )
+
+    assert secret_url not in repr(chat)
+    assert secret_url not in repr(embedding)
 
 
 def test_codex_oauth_becomes_a_reference_without_copying_inline_token() -> None:
@@ -211,7 +312,7 @@ def test_routed_remote_provider_without_credential_is_a_blocking_decision() -> N
     assert issue.allowed_actions == ("confirm_remove_after_backup", "cancel")
 
 
-def legacy_with_three_configured_providers() -> dict[str, Any]:
+def legacy_with_three_configured_providers() -> dict[str, object]:
     return {
         "default_provider": "deepseek",
         "fallback_provider": "openrouter",
@@ -249,7 +350,7 @@ def legacy_embedding(
     *,
     primary_model: str = "bge-m3",
     fallback_provider: str = "openai",
-) -> dict[str, Any]:
+) -> dict[str, object]:
     return {
         "default_provider": "openai",
         "openai": {"api_key": "openai-secret", "model": "gpt-5-nano"},
@@ -368,7 +469,218 @@ def test_embedding_fallback_without_effective_credential_is_not_mapped() -> None
     assert "embedding_space_mismatch" in result.report.issue_codes
 
 
-def legacy_with_module_override(module: str, provider: str) -> dict[str, Any]:
+@pytest.mark.parametrize(
+    ("fallback_provider", "shared_model", "env"),
+    [
+        ("ollama", "bge-m3", {}),
+        ("gemini", "gemini-embedding-001", {"GOOGLE_API_KEY": "ambient-secret"}),
+    ],
+)
+def test_disabled_embedding_fallback_is_never_admitted(
+    fallback_provider: str,
+    shared_model: str,
+    env: dict[str, str],
+) -> None:
+    legacy: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai_compatible": {
+            "api_key": "primary-secret",
+            "model": "unused-chat-model",
+            "base_url": "https://embedding.example/v1",
+        },
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": shared_model,
+            "api_key": "primary-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 1024,
+            "fallback_enabled": False,
+            "fallback_provider": fallback_provider,
+            "multimodal_enabled": False,
+        },
+    }
+
+    result = _migrate(legacy, env)
+
+    assert len(result.models.embedding.providers) == 1
+    assert result.models.embedding.providers[0].preset == "custom"
+    if fallback_provider == "gemini":
+        unused = next(
+            item
+            for item in result.report.issues
+            if item.provider == "gemini" and item.credential_configured
+        )
+        assert unused.code in {"unused_credential", "unrouted_credential"}
+        assert "ambient-secret" not in repr(result)
+
+
+def test_invalid_embedding_fallback_enabled_type_is_reported_and_never_enabled() -> None:
+    legacy: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai_compatible": {
+            "api_key": "primary-secret",
+            "model": "unused-chat-model",
+            "base_url": "https://embedding.example/v1",
+        },
+        "ollama": {"model": "bge-m3", "base_url": "http://127.0.0.1:11434/v1"},
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": "bge-m3",
+            "api_key": "primary-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 1024,
+            "fallback_enabled": "true",
+            "fallback_provider": "ollama",
+            "multimodal_enabled": False,
+        },
+    }
+
+    result = _migrate(legacy)
+    issue = next(
+        item for item in result.report.issues if item.field == "llm.embedding.fallback_enabled"
+    )
+
+    assert issue.code == "invalid_legacy_value"
+    assert issue.reason == "embedding_fallback_enabled_must_be_boolean"
+    assert len(result.models.embedding.providers) == 1
+
+
+def test_embedding_fallback_requires_exact_effective_output_dimension() -> None:
+    legacy: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai_compatible": {
+            "api_key": "primary-secret",
+            "model": "unused-chat-model",
+            "base_url": "https://embedding.example/v1",
+        },
+        "ollama": {"model": "bge-m3", "base_url": "http://127.0.0.1:11434/v1"},
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": "bge-m3",
+            "api_key": "primary-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 768,
+            "fallback_enabled": True,
+            "fallback_provider": "ollama",
+            "multimodal_enabled": False,
+        },
+    }
+
+    result = _migrate(legacy)
+
+    assert len(result.models.embedding.providers) == 1
+    assert "embedding_space_mismatch" in result.report.issue_codes
+
+
+def test_embedding_fallback_requires_model_specific_multimodal_capability() -> None:
+    legacy: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai_compatible": {
+            "api_key": "primary-secret",
+            "model": "unused-chat-model",
+            "base_url": "https://embedding.example/v1",
+        },
+        "gemini": {"api_key": "gemini-secret", "model": "gemini-2.5-flash"},
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": "gemini-embedding-001",
+            "api_key": "primary-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 1024,
+            "fallback_enabled": True,
+            "fallback_provider": "gemini",
+            "multimodal_enabled": True,
+        },
+    }
+
+    result = _migrate(legacy)
+
+    assert len(result.models.embedding.providers) == 1
+    assert "embedding_space_mismatch" in result.report.issue_codes
+
+
+def test_embedding_fallback_requires_a_usable_provider_configuration() -> None:
+    legacy: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai": {"api_key": "primary-secret", "model": "gpt-5-nano"},
+        "openai_compatible": {
+            "api_key": "fallback-secret",
+            "model": "unused-chat-model",
+            "base_url": "",
+        },
+        "embedding": {
+            "provider": "openai",
+            "model": "text-embedding-3-small",
+            "api_key": "primary-embedding-secret",
+            "output_dimensionality": 1536,
+            "fallback_enabled": True,
+            "fallback_provider": "openai_compatible",
+            "multimodal_enabled": False,
+        },
+    }
+
+    result = _migrate(legacy)
+
+    assert len(result.models.embedding.providers) == 1
+    assert "embedding_space_mismatch" in result.report.issue_codes
+
+
+@pytest.mark.parametrize(
+    ("fallback_provider", "model", "multimodal", "env"),
+    [
+        (
+            "gemini",
+            "gemini-embedding-001",
+            False,
+            {"GOOGLE_API_KEY": "gemini-env-secret"},
+        ),
+        (
+            "dashscope",
+            "qwen3-vl-embedding",
+            True,
+            {"DASHSCOPE_API_KEY": "dashscope-env-secret"},
+        ),
+    ],
+)
+def test_compatible_official_embedding_fallback_does_not_require_a_base_url(
+    fallback_provider: str,
+    model: str,
+    multimodal: bool,
+    env: dict[str, str],
+) -> None:
+    legacy: dict[str, object] = {
+        "default_provider": "deepseek",
+        "deepseek": {"api_key": "deepseek-secret", "model": "deepseek-v4-flash"},
+        "openai_compatible": {
+            "api_key": "primary-secret",
+            "model": "unused-chat-model",
+            "base_url": "https://embedding.example/v1",
+        },
+        "embedding": {
+            "provider": "openai_compatible",
+            "model": model,
+            "api_key": "primary-embedding-secret",
+            "base_url": "https://embedding.example/v1",
+            "output_dimensionality": 1024,
+            "fallback_enabled": True,
+            "fallback_provider": fallback_provider,
+            "multimodal_enabled": multimodal,
+        },
+    }
+
+    result = _migrate(legacy, env)
+
+    assert len(result.models.embedding.providers) == 2
+    assert result.models.embedding.providers[1].type in {"gemini_api", "dashscope_api"}
+    assert all(secret not in repr(result) for secret in env.values())
+
+
+def legacy_with_module_override(module: str, provider: str) -> dict[str, object]:
     legacy = legacy_provider("deepseek")
     legacy[module] = {"provider": provider, "model": "module-only-model"}
     return legacy
@@ -425,6 +737,118 @@ def test_unknown_provider_fields_and_stale_embedding_fields_are_reported() -> No
     assert "llm.embedding.retired_option" in fields
     assert "opaque-value" not in repr(result.report)
     assert "opaque-embedding-value" not in repr(result.report)
+
+
+@pytest.mark.parametrize("section", ["openai", "embedding", "evaluation"])
+def test_known_legacy_sections_must_be_tables_without_echoing_the_raw_value(
+    section: str,
+) -> None:
+    raw = legacy_provider("deepseek")
+    if section == "openai":
+        raw["default_provider"] = "openai"
+    raw[section] = "secret-section-payload"
+
+    result = _migrate(raw)
+    issue = next(item for item in result.report.issues if item.field == f"llm.{section}")
+
+    assert issue.code == "invalid_legacy_value"
+    assert issue.reason == "legacy_section_must_be_table"
+    assert issue.credential_configured is True
+    assert "secret-section-payload" not in repr(result)
+    assert "secret-section-payload" not in repr(result.report)
+
+
+def test_non_string_provider_selector_is_reported_without_coercion() -> None:
+    result = _migrate(
+        {
+            "default_provider": ["openai", "secret-selector"],
+            "openai": {"api_key": "openai-secret", "model": "gpt-5-nano"},
+        }
+    )
+    issue = next(item for item in result.report.issues if item.field == "llm.default_provider")
+
+    assert issue.code == "invalid_legacy_value"
+    assert issue.reason == "legacy_provider_name_must_be_string"
+    assert result.models.chat.connections == ()
+    assert "secret-selector" not in repr(result)
+
+
+def test_non_string_provider_fields_are_reported_and_never_retained() -> None:
+    raw: dict[str, object] = {
+        "default_provider": "openai",
+        "openai": {
+            "api_key": {"token": "credential-object-secret"},
+            "model": ["model-secret"],
+            "base_url": 12345,
+            "auth_mode": True,
+        },
+    }
+
+    result = _migrate(raw)
+    issues = {item.field: item for item in result.report.issues}
+    connection = result.models.chat.connections[0]
+
+    assert {
+        "llm.openai.api_key",
+        "llm.openai.model",
+        "llm.openai.base_url",
+        "llm.openai.auth_mode",
+    }.issubset(issues)
+    diagnostic_keys = [(item.field, item.code, item.reason) for item in result.report.issues]
+    assert len(diagnostic_keys) == len(set(diagnostic_keys))
+    assert all(issues[field].code == "invalid_legacy_value" for field in issues)
+    malformed_credential = next(
+        item
+        for item in result.report.issues
+        if item.field == "llm.openai.api_key" and item.reason == "legacy_credential_must_be_string"
+    )
+    assert malformed_credential.credential_configured is True
+    assert connection.credential.source == "none"
+    assert connection.base_url == ""
+    assert "credential-object-secret" not in repr(result)
+    assert "model-secret" not in repr(result)
+
+
+def test_exact_integer_fields_reject_booleans_and_fractional_floats() -> None:
+    raw = legacy_provider("ollama")
+    raw["concurrency"] = 1.5
+    raw["timeout"] = True
+    cast("dict[str, object]", raw["ollama"])["num_ctx"] = 2048.5
+    raw["embedding"] = {
+        "provider": "ollama",
+        "model": "bge-m3",
+        "output_dimensionality": 768.5,
+        "fallback_enabled": False,
+    }
+
+    result = _migrate(raw)
+    fields = {item.field for item in result.report.issues}
+
+    assert result.models.chat.concurrency == 4
+    assert result.models.chat.timeout_seconds == 300
+    assert result.models.chat.connections[0].num_ctx == 0
+    assert result.models.embedding.settings.output_dimensionality == 1024
+    assert {
+        "llm.concurrency",
+        "llm.timeout",
+        "llm.ollama.num_ctx",
+        "llm.embedding.output_dimensionality",
+    }.issubset(fields)
+
+
+def test_malformed_unknown_provider_data_preserves_only_safe_metadata() -> None:
+    result = _migrate(
+        {
+            "default_provider": "vendor-x",
+            "vendor-x": "unknown-provider-secret",
+        }
+    )
+    issue = next(item for item in result.report.issues if item.code == "unknown_provider")
+
+    assert issue.field == "llm.default_provider"
+    assert issue.provider == "vendor-x"
+    assert issue.credential_configured is True
+    assert "unknown-provider-secret" not in repr(result)
 
 
 def test_legacy_ids_and_revision_are_stable_and_globally_unique() -> None:
@@ -484,6 +908,7 @@ def test_unrouted_credential_can_be_inserted_at_an_explicit_one_based_position()
         "openai",
         "openrouter",
     ]
+    assert validate_model_config(resolved, connection_type_registry()) == []
 
 
 def test_unrouted_credential_can_be_acknowledged_for_backup_removal() -> None:
@@ -496,6 +921,79 @@ def test_unrouted_credential_can_be_acknowledged_for_backup_removal() -> None:
     )
 
     assert resolved == result.models
+
+
+def test_backup_removal_drops_an_active_routed_connection_with_missing_credential() -> None:
+    result = _migrate(
+        {
+            "default_provider": "deepseek",
+            "fallback_provider": "openai",
+            "deepseek": {
+                "api_key": "deepseek-secret",
+                "model": "deepseek-v4-flash",
+            },
+            "openai": {"api_key": "", "model": "gpt-5-nano"},
+        }
+    )
+    issue = next(item for item in result.report.issues if item.field == "llm.openai.api_key")
+
+    resolved = _apply(
+        result,
+        {issue.id: _resolution("confirm_remove_after_backup")},
+    )
+
+    assert [item.preset for item in resolved.chat.connections] == ["deepseek"]
+    assert validate_model_config(resolved, connection_type_registry()) == []
+
+
+def test_backup_removal_fails_closed_when_it_would_remove_the_only_chat_connection() -> None:
+    result = _migrate(
+        {
+            "default_provider": "openai",
+            "openai": {"api_key": "", "model": "gpt-5-nano"},
+        }
+    )
+    issue = next(item for item in result.report.issues if item.field == "llm.openai.api_key")
+
+    with pytest.raises(MigrationResolutionError):
+        _apply(
+            result,
+            {issue.id: _resolution("confirm_remove_after_backup")},
+        )
+
+
+def test_backup_removal_disables_an_unusable_active_embedding_provider() -> None:
+    result = _migrate(
+        {
+            "default_provider": "deepseek",
+            "deepseek": {
+                "api_key": "deepseek-secret",
+                "model": "deepseek-v4-flash",
+            },
+            "embedding": {
+                "provider": "openai",
+                "model": "text-embedding-3-small",
+                "api_key": "",
+                "output_dimensionality": 1536,
+                "fallback_enabled": False,
+                "multimodal_enabled": False,
+            },
+        }
+    )
+    issue = next(
+        item
+        for item in result.report.issues
+        if item.reason == "configured_embedding_provider_has_no_usable_configuration"
+    )
+
+    resolved = _apply(
+        result,
+        {issue.id: _resolution("confirm_remove_after_backup")},
+    )
+
+    assert resolved.embedding.enabled is False
+    assert resolved.embedding.providers == ()
+    assert validate_model_config(resolved, connection_type_registry()) == []
 
 
 def test_chat_resolution_rejects_ten_item_route_overflow() -> None:
@@ -511,7 +1009,7 @@ def test_chat_resolution_rejects_ten_item_route_overflow() -> None:
         ),
     )
 
-    with pytest.raises(_resolution_error_type()):
+    with pytest.raises(MigrationResolutionError):
         _apply(
             full_result,
             {issue.id: _resolution("add_to_chat_route", position=10)},
@@ -558,6 +1056,51 @@ def test_embedding_mismatch_can_remove_the_pending_fallback() -> None:
     assert resolved == result.models
 
 
+def test_shared_settings_cannot_activate_an_unusable_embedding_fallback() -> None:
+    legacy = legacy_embedding(primary_model="bge-m3")
+    legacy["default_provider"] = "deepseek"
+    legacy["deepseek"] = {
+        "api_key": "deepseek-secret",
+        "model": "deepseek-v4-flash",
+    }
+    cast("dict[str, object]", legacy["openai"])["api_key"] = ""
+    result = _migrate(legacy)
+    issue = next(item for item in result.report.issues if item.code == "embedding_space_mismatch")
+    settings = EmbeddingModelSettings(
+        model="text-embedding-3-small",
+        output_dimensionality=1536,
+        similarity_threshold=0.77,
+        multimodal_enabled=False,
+    )
+
+    with pytest.raises(MigrationResolutionError):
+        _apply(
+            result,
+            {
+                issue.id: _resolution(
+                    "apply_shared_embedding_settings",
+                    embedding_settings=settings,
+                )
+            },
+        )
+
+
+def test_resolution_rejects_a_structurally_invalid_final_model() -> None:
+    result = _migrate(legacy_provider("deepseek"))
+    connection = replace(result.models.chat.connections[0], model="")
+    invalid = replace(
+        result,
+        models=replace(
+            result.models,
+            chat=replace(result.models.chat, connections=(connection,)),
+        ),
+        report=MigrationReport(),
+    )
+
+    with pytest.raises(MigrationResolutionError):
+        _apply(invalid, {})
+
+
 @pytest.mark.parametrize(
     "choice_factory",
     [
@@ -566,11 +1109,11 @@ def test_embedding_mismatch_can_remove_the_pending_fallback() -> None:
     ],
 )
 def test_missing_or_extra_resolution_choices_are_blocking(
-    choice_factory: Any,
+    choice_factory: Callable[[], dict[str, MigrationResolution]],
 ) -> None:
     result = _migrate(legacy_with_three_configured_providers())
 
-    with pytest.raises(_resolution_error_type()):
+    with pytest.raises(MigrationResolutionError):
         _apply(result, choice_factory())
 
 
@@ -591,7 +1134,7 @@ def test_unknown_or_invalid_unrouted_resolution_is_blocking_and_value_free(
     issue = next(issue for issue in result.report.issues if issue.code == "unrouted_credential")
     resolution = _resolution(action, position=position)
 
-    with pytest.raises(_resolution_error_type()) as raised:
+    with pytest.raises(MigrationResolutionError) as raised:
         _apply(result, {issue.id: resolution})
 
     assert "openai-secret" not in str(raised.value)
@@ -619,7 +1162,7 @@ def test_embedding_resolution_rejects_missing_or_invalid_settings(
         embedding_settings=settings,
     )
 
-    with pytest.raises(_resolution_error_type()):
+    with pytest.raises(MigrationResolutionError):
         _apply(result, {issue.id: resolution})
 
 
@@ -628,7 +1171,7 @@ def test_module_override_acceptance_is_closed_and_cancel_remains_blocking() -> N
     issue = next(issue for issue in result.report.issues if issue.code == "module_override_removed")
 
     assert _apply(result, {issue.id: _resolution("accept_global_route")}) == result.models
-    with pytest.raises(_resolution_error_type()):
+    with pytest.raises(MigrationResolutionError):
         _apply(result, {issue.id: _resolution("cancel")})
-    with pytest.raises(_resolution_error_type()):
+    with pytest.raises(MigrationResolutionError):
         _apply(result, {issue.id: _resolution("confirm_remove_after_backup")})

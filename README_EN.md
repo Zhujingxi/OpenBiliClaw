@@ -603,7 +603,8 @@ background ─ background admission (default 3) ──────┘
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Model-config compatibility foundation (stage 3; runtime not wired) │
 │ native [models] strict parse/revision → Config.models      │
-│ legacy [llm] read-only adapter/report/resolution → memory  │
+│ legacy [llm] exact raw/URL inspection → chat/embed + report │
+│ closed resolution → authoritative validation → valid memory │
 │ raw-preserving saves; no transaction/backup/runtime/API/UI │
 ├────────────────────────────────────────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │

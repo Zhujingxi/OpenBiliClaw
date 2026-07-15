@@ -378,7 +378,9 @@ background ─ background admission (default 3) ──────┘
 ├──────────────────────────────────────────────────────────────┤
 │             模型配置兼容基础（阶段 3，尚未接入运行链）          │
 │ native [models] → strict parser/revision ────────────────┐    │
-│ legacy [llm] → read-only adapter/report/resolutions ─────┤    │
+│ legacy [llm] → exact raw/URL inspection → chat/embed map ┤    │
+│                 → secret-safe report → closed resolution │    │
+│                 → authoritative final validation ────────┤    │
 │                                                         └→ Config.models（内存）│
 │ 普通保存保留 raw [models]/[llm]；不含事务迁移/backup/runtime/API/UI │
 ├──────────────────────────────────────────────────────────────┤
