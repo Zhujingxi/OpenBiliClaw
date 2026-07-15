@@ -1,73 +1,156 @@
-# Task 4 report — runtime-wide LLM concurrency gate
+# Task 4 report — protocol adapters from connection records
 
 ## Result
 
-Implemented one runtime-owned total/background LLM gate for API, OpenClaw and each CLI composition. Total defaults to 4, background derives as `max(1, total - 1)`, explicit positive totals remain unchanged, and candidate evaluation remains configured at 3.
+Implemented the explicit construction boundary requested by
+`.superpowers/sdd/task-4-brief.md`:
 
-## RED evidence
+- `build_chat_adapter(connection, runtime_options) -> LLMProvider`
+- `build_embedding_adapter(provider, settings, runtime_options) -> SupportsEmbedding`
 
-Initial new concurrency suite:
+The factory builds one adapter from one immutable model-configuration record. It
+does not assemble an ordered route, change the active runtime registry, add a
+circuit breaker, or expose a new API/UI/CLI configuration surface.
+
+## Production changes
+
+- Added frozen, secret-safe `AdapterRuntimeOptions`. Its optional environment
+  mapping is the exact source for `env` credentials; proxy and `trust_env` are
+  intentionally not caller-controlled.
+- Added `OpenAIProtocolProvider` with frozen `OpenAIProtocolOptions`. OpenAI,
+  DeepSeek, OpenRouter, custom OpenAI-compatible, and Codex OAuth records use
+  this exact class. API mode, reasoning body, and attribution headers are
+  per-instance immutable hooks.
+- Removed the legacy `DeepSeekProvider`'s temporary mutation of
+  `_reasoning_effort`; concurrent calls now carry their effective effort as a
+  local per-request value while retaining the public constructor/API.
+- Added one `AnthropicCompatibleProvider` for official and custom Anthropic
+  Messages endpoints, including prompt-cache system blocks, normalized usage,
+  retry, timeout, rate-limit, and secret-safe error handling.
+- Extended native Gemini and Ollama providers with optional stable provider
+  names. Factory-created adapters use connection IDs in responses and errors.
+  Ollama retains `num_ctx` and is forced direct in the new factory.
+- Added strict Codex OAuth endpoint validation. The endpoint must be exactly
+  `https://api.openai.com/v1` (or blank, which canonicalizes to it) before any
+  token loader is called; scheme, host, explicit port, extra path, query,
+  fragment, and userinfo variants fail closed.
+- Added `EmbeddingProtocolAdapter`, which retains the exact shared
+  `EmbeddingModelSettings` object supplied by the caller and passes its model
+  and output dimensionality to the selected native provider.
+- Re-exported the construction API from `llm.registry` without changing
+  `build_llm_registry()` or `build_embedding_service()` behavior.
+
+## Credential and transport contract
+
+- `inline` uses only the stored value.
+- `env` reads only the configured variable name from the exact supplied mapping
+  or the process environment when no mapping is supplied.
+- `oauth` accepts only the Codex credential reference on a `codex_oauth`
+  connection.
+- `none` is accepted only when the code-defined connection descriptor omits the
+  credential field (currently local Ollama).
+- Missing or invalid values raise fixed, secret-safe factory errors and do not
+  include friendly names, type/preset labels, references, or secret values.
+- The factory resolves endpoint-aware proxy policy internally through
+  `openbiliclaw.network`; Ollama bypasses inherited proxies unconditionally.
+
+## TDD evidence
+
+Initial RED, after adding adapter-selection, hook, credential, OAuth, proxy,
+embedding, and concurrency tests before production code:
 
 ```text
-PYTHONPATH=src .../.venv/bin/pytest tests/test_llm_concurrency.py -q
-ModuleNotFoundError: No module named 'openbiliclaw.llm.concurrency'
+.venv/bin/pytest tests/test_llm_connection_factory.py tests/test_llm_providers.py -q
+35 failed, 62 passed, 1 warning in 19.22s
 ```
 
-Composition identity test:
+All new failures were caused by the absent connection factory/protocol adapter
+classes. A final self-review found one hard-coded Gemini 5xx label. Its focused
+regression first failed with:
 
 ```text
-tests/test_soul_dialogue.py::test_dialogue_reuses_soul_engine_service_identity
-RuntimeError: Dialogue service is not configured.
+Expected: gemini-a server error: 503
+Actual:   gemini server error: 503
 ```
 
-The test suite was written first for total/background capacity, total=1 degradation, queued total/background cancellation, exact caller classification, warning-once unknown callers, bypass-never-total, shared service identity, composition derivation, status fields and UI defaults.
+After the one-line provider-name fix, that regression passed.
 
-## GREEN evidence
+One compatibility regression was also caught during GREEN: constructing a
+legacy `OllamaProvider` with the new default forced an explicit HTTP client and
+broke its existing constructor test. Root cause was a changed legacy default;
+the fix restored legacy `trust_env=True` while the new factory explicitly
+passes `trust_env=False` for Ollama. Both the legacy regression and factory
+direct-transport test then passed.
 
-- Required backend matrix plus refresh regression: `1005 passed`.
-- Concurrency/service initial focused matrix: `81 passed`.
-- Extension: `npm test` — `711 passed`; `npm run typecheck` and `npm run build` succeeded.
-- Ruff: `All checks passed!`.
-- MyPy: `Success: no issues found in 188 source files`.
-- `git diff --check`: clean.
-- Repository-wide `pytest -q` was attempted with a 120-second ceiling; it reached 24% with no failures before timeout. The complete affected matrix above passed.
+## Final verification
 
-## Boundary and inventory review
+Required focused matrix, rerun after the final review fix:
 
-- Inventoried all production `LLMService(...)` constructors: Soul, dialogue legacy fallback, API runtime, OpenClaw, and five CLI sites.
-- Normal, structured, multimodal, dialogue and tool calls all converge on `_provider_slot`; legacy bypass skips background admission only.
-- `PrioritySemaphore` moved without behavioral changes beyond read-only capacity/active/waiting properties and remains re-exported by `llm.service`.
-- API/OpenClaw main service, Soul internal service and refresh controller share the same gate object; CLI uses `_RUNTIME_COMPONENTS` identity caching.
-- No Task 5 inventory reservation API/state (`update_inventory`, refill waiter reservation, zero-inventory maintenance parking) was added.
-- No Soul prompt, token, pricing, usage recording or cost semantics changed.
+```text
+.venv/bin/pytest tests/test_llm_connection_factory.py tests/test_llm_providers.py tests/test_network_proxy_isolation.py -q
+121 passed, 1 warning in 18.87s
+```
 
-## Self-review and concerns
+Static and formatting checks:
 
-- Background acquires background before total and releases in reverse; cancellation at either queue is covered and counters return to zero.
-- Unknown/empty caller tags are maintenance-limited and warning-once per gate.
-- With explicit total 1, background capacity is 1: safe/no deadlock, but no interactive reservation is mathematically possible; documented.
-- Full-suite timeout is the only incomplete verification item; no failure was observed, and all directly affected suites plus refresh passed.
+```text
+.venv/bin/ruff check src/openbiliclaw/llm tests/test_llm_connection_factory.py tests/test_llm_providers.py
+All checks passed!
 
-## Review-fix follow-up
+.venv/bin/mypy src/openbiliclaw/llm
+Success: no issues found in 22 source files
 
-Review RED evidence:
+.venv/bin/ruff format --check src/openbiliclaw/llm tests/test_llm_connection_factory.py tests/test_llm_providers.py
+24 files already formatted
 
-- Resize tests failed with `AttributeError: LLMConcurrencyGate has no attribute reconfigure`.
-- API rebuild identity test showed old/new services held different gate objects.
-- Live `/api/config/probe-service` test observed the direct provider call outside both total and background admission.
+git diff --check
+clean
+```
 
-Fixes add cancellation-safe in-place semaphore resize, a stable `RuntimeContext.llm_concurrency_gate`, exact `api.config_probe` maintenance admission, the absent API fallback of 4, authoritative config-doc defaults, and explicit API/OpenClaw/CLI identity/derivation coverage. Lowering capacity never revokes active work; increasing capacity wakes priority waiters. Task 5 reservation state and Soul prompt/token/cost semantics remain untouched.
+The single requested full-suite run completed successfully:
 
-Follow-up GREEN evidence: affected backend matrix `1009 passed`; Ruff passed; full MyPy passed for 188 source files; `git diff --check` passed. No frontend file changed in the review-fix commit, so the already-green Task 4 extension build was not rerun.
+```text
+.venv/bin/pytest -q
+5086 passed, 41 skipped, 2752 warnings in 150.04s
+```
 
-Final re-review RED showed the explicit `create_app(soul_engine=..., runtime_controller=...)` path always created a fresh context gate: shared and Soul-only identity assertions failed, while compatibility doubles never received the new gate. The fix validates Soul service/Soul-declared/controller gate identities before mutation, adopts a one-sided or common object without reconfiguring foreign capacity, rejects conflicts, and only creates a configured compatibility gate when all sources are absent. The real injected Soul dialogue service and live probe path now share the adopted object; the existing stable RuntimeContext rebuild coverage applies unchanged to that adopted field.
+Warnings are existing dependency/framework deprecations (Google GenAI,
+Starlette/FastAPI); no Task 4 failure remains.
 
-Final re-review GREEN evidence: API/concurrency/service/refresh matrix `598 passed`; the four exact adoption/conflict/probe tests passed after the final assignment cleanup; Ruff, full MyPy (188 files), `git diff --check`, and the Task 5 boundary scan passed.
+## Test coverage and isolation
 
-The final injection-edge RED found that explicit real `SocraticDialogue._llm_service` was not an ownership source: dialogue-only injection produced a fresh gate, and an explicit service could remain outside the adopted identity set. The final fix collects declared/service identities from Soul, dialogue, controller and recommendation, plus visible nested Soul/recommendation/discovery services in controller/account-sync injections; it validates all non-null identities before mutation, then injects the chosen gate into gate-less targets. Dialogue-common, dialogue-only, dialogue-conflict, gate-less real dialogue service and attr-less compatibility double tests cover the contract.
+Fake SDK/client surfaces cover:
 
-Dialogue-edge GREEN evidence: API/concurrency/service/dialogue/refresh matrix `607 passed`; Ruff and full MyPy (188 files) passed; `git diff --check` and the Task 5 boundary scan passed.
+- exact adapter types for all four OpenAI-compatible presets and both
+  Anthropic presets;
+- DeepSeek body/max-token hooks, OpenRouter attribution headers, Responses API
+  selection, custom base URLs, native Gemini construction, and Ollama
+  `num_ctx`/direct transport;
+- deeply immutable options and concurrent calls with different reasoning
+  overrides, headers, and API modes, including the legacy DeepSeek regression;
+- exact inline/environment credential selection, fixed missing-credential
+  errors, descriptor-gated no-credential behavior, and secret-free repr/error
+  paths;
+- malicious Codex endpoint variants rejected before token lookup;
+- endpoint-aware proxy resolution inside the factory;
+- every registry embedding capability (OpenAI/custom, Gemini, DashScope,
+  Ollama), exact shared-settings identity, shared model propagation, and OpenAI
+  output dimensionality.
 
-The nested-discovery RED proved the audit guessed `controller.discovery_engine.llm_service`, while production stores `ContentDiscoveryEngine._llm_service`: gate-less nested services stayed unwired and conflicts escaped validation. The corrected private attribute passes gate-less/common/conflict production-shaped tests, and a parameterized structural audit now locks the exact real attribute names for Soul, Dialogue, Recommendation, Discovery and AccountSync owners.
+No test contacts a model service, a local Ollama daemon, or the real Codex
+credential store.
 
-Nested-discovery GREEN evidence: relevant API/discovery/concurrency/dialogue/refresh matrix `645 passed`; Ruff and full MyPy (188 files) passed; `git diff --check` and Task 5 boundary scan passed.
+## Documentation and boundary review
+
+Updated the LLM module feature table, public construction API, credential and
+network contracts, design decisions, changelog, architecture/spec diagrams,
+and matching README diagrams. No CLI/config/installer docs changed because the
+task adds no such surface.
+
+Legacy provider constructors and registry/service builders remain available.
+No ordered route, fallback orchestration, circuit state, runtime cutover,
+migration transaction/backup, model configuration API, or UI was added.
+
+## Commit
+
+Planned commit message: `refactor: build llm protocol connections`.

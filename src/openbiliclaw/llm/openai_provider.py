@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -37,7 +39,29 @@ _BILLING_BACKOFF_MARKERS = (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
+
+
+@dataclass(frozen=True)
+class OpenAIProtocolOptions:
+    """Immutable request hooks for one OpenAI-protocol connection."""
+
+    connection_id: str
+    preset: str
+    api_mode: Literal["chat_completions", "responses"]
+    default_reasoning_effort: str = ""
+    extra_headers: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Freeze caller-owned mappings and normalize hook selectors."""
+        object.__setattr__(self, "connection_id", self.connection_id.strip())
+        object.__setattr__(self, "preset", self.preset.strip().lower())
+        object.__setattr__(
+            self,
+            "default_reasoning_effort",
+            self.default_reasoning_effort.strip(),
+        )
+        object.__setattr__(self, "extra_headers", MappingProxyType(dict(self.extra_headers)))
 
 
 def _generic_json_schema_response_format() -> dict[str, Any]:
@@ -123,16 +147,13 @@ class OpenAIProvider(LLMProvider):
         reasoning_effort: str | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        # ``reasoning_effort`` is consumed by ``DeepSeekProvider``; the
-        # base OpenAI provider accepts it for signature compatibility
-        # but doesn't act on it (vanilla GPT-4o has no thinking knob).
-        del reasoning_effort
         if self._api_flavor == "responses":
             return await self._complete_via_responses(
                 messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
+                reasoning_effort=reasoning_effort,
                 model=model,
             )
         effective_model = (model or "").strip() or self._model
@@ -149,7 +170,7 @@ class OpenAIProvider(LLMProvider):
         extra_headers = self._extra_headers()
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
-        extra_body = self._extra_body()
+        extra_body = self._extra_body(reasoning_effort)
         if extra_body:
             kwargs["extra_body"] = extra_body
 
@@ -232,6 +253,7 @@ class OpenAIProvider(LLMProvider):
         temperature: float,
         max_tokens: int,
         json_mode: bool,
+        reasoning_effort: str | None,
         model: str | None,
     ) -> LLMResponse:
         """Serve ``complete()`` through the ``/v1/responses`` endpoint.
@@ -262,7 +284,7 @@ class OpenAIProvider(LLMProvider):
         extra_headers = self._extra_headers()
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
-        extra_body = self._extra_body()
+        extra_body = self._extra_body(reasoning_effort)
         if extra_body:
             kwargs["extra_body"] = extra_body
 
@@ -581,13 +603,14 @@ class OpenAIProvider(LLMProvider):
         """Return optional provider-specific request headers."""
         return {}
 
-    def _extra_body(self) -> dict[str, Any]:
+    def _extra_body(self, reasoning_effort: str | None = None) -> dict[str, Any]:
         """Return optional provider-specific request body fields.
 
         Used for non-standard keys like DeepSeek's ``thinking`` and
         ``reasoning_effort``. Keys returned here are passed verbatim via
         ``extra_body`` of the OpenAI SDK.
         """
+        del reasoning_effort
         return {}
 
     def _empty_content_error(self, choice: Any) -> LLMResponseError:
@@ -634,6 +657,119 @@ _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR = {
     "max": 32768,
     "high": 16384,
 }
+
+
+class OpenAIProtocolProvider(OpenAIProvider):
+    """One immutable-hook adapter for every OpenAI-protocol connection."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str,
+        *,
+        options: OpenAIProtocolOptions,
+        timeout: float = 300.0,
+        embedding_output_dimensionality: int = 0,
+        proxy: str = "",
+        trust_env: bool = True,
+    ) -> None:
+        self.options = options
+        self.supports_embedding = options.preset in {"openai", "custom"}
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            provider_name=options.connection_id,
+            timeout=timeout,
+            embedding_output_dimensionality=embedding_output_dimensionality,
+            api_flavor=options.api_mode,
+            proxy=proxy,
+            trust_env=trust_env,
+        )
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        json_mode: bool = False,
+        reasoning_effort: str | None = None,
+        model: str | None = None,
+    ) -> LLMResponse:
+        if self.options.preset != "deepseek":
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort=reasoning_effort,
+                model=model,
+            )
+
+        effort = (
+            self.options.default_reasoning_effort
+            if reasoning_effort is None
+            else reasoning_effort.strip()
+        )
+        if effort:
+            floor = _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR.get(effort, 16384)
+            if max_tokens < floor:
+                logger.debug(
+                    "%s: bumping max_tokens from %s to %s for effort=%s",
+                    self.name,
+                    max_tokens,
+                    floor,
+                    effort,
+                )
+                max_tokens = floor
+        try:
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort=effort,
+                model=model,
+            )
+        except LLMResponseError:
+            if effort:
+                logger.warning(
+                    "%s: empty content with reasoning enabled; retrying with thinking disabled",
+                    self.name,
+                )
+            else:
+                logger.warning("%s: empty content; retrying once", self.name)
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort="",
+                model=model,
+            )
+
+    def _supports_embedding_dimensions(self, model: str) -> bool:
+        return self.options.preset == "openai" and model.startswith("text-embedding-3-")
+
+    def _extra_headers(self) -> dict[str, str]:
+        return dict(self.options.extra_headers)
+
+    def _extra_body(self, reasoning_effort: str | None = None) -> dict[str, Any]:
+        if self.options.preset != "deepseek":
+            return {}
+        effort = (
+            self.options.default_reasoning_effort
+            if reasoning_effort is None
+            else reasoning_effort.strip()
+        )
+        if not effort:
+            return {"thinking": {"type": "disabled"}}
+        return {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": effort,
+        }
 
 
 class DeepSeekProvider(OpenAIProvider):
@@ -684,71 +820,55 @@ class DeepSeekProvider(OpenAIProvider):
         reasoning_effort: str | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        # v0.3.51+: per-call ``reasoning_effort`` override. ``None`` =
-        # use provider default (configured in config.toml). Empty
-        # string = explicitly disable thinking for this call (used by
-        # structured tasks like discovery's eval_batch — observed in
-        # 2026-05-05 logs as 8-16 min/batch with reasoning, expected
-        # ~30s without).
-        previous_effort = self._reasoning_effort
-        applied_effort = reasoning_effort if reasoning_effort is not None else previous_effort
-        # Temporarily mutate the instance attribute so ``_extra_body``
-        # and the empty-content retry path see the per-call value.
-        self._reasoning_effort = applied_effort
-        try:
-            effort = applied_effort
-            if effort:
-                floor = _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR.get(effort, 16384)
-                if max_tokens < floor:
-                    logger.debug(
-                        "deepseek: bumping max_tokens from %s to %s for effort=%s",
-                        max_tokens,
-                        floor,
-                        effort,
-                    )
-                    max_tokens = floor
-            try:
-                return await super().complete(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=json_mode,
-                    model=model,
-                )
-            except LLMResponseError:
-                if not effort:
-                    logger.warning("deepseek: empty content; retrying once")
-                    return await super().complete(
-                        messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        json_mode=json_mode,
-                        model=model,
-                    )
-                # Max-effort reasoning occasionally burns through the entire
-                # output budget before the model emits any ``content``. Retry
-                # once with thinking disabled so structured pipelines get a
-                # usable response instead of hard-failing.
-                logger.warning(
-                    "deepseek: empty content with reasoning_effort=%s; "
-                    "retrying with thinking disabled",
+        effort = self._reasoning_effort if reasoning_effort is None else reasoning_effort.strip()
+        if effort:
+            floor = _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR.get(effort, 16384)
+            if max_tokens < floor:
+                logger.debug(
+                    "deepseek: bumping max_tokens from %s to %s for effort=%s",
+                    max_tokens,
+                    floor,
                     effort,
                 )
-                self._reasoning_effort = ""
+                max_tokens = floor
+        try:
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort=effort,
+                model=model,
+            )
+        except LLMResponseError:
+            if not effort:
+                logger.warning("deepseek: empty content; retrying once")
                 return await super().complete(
                     messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
+                    reasoning_effort="",
                     model=model,
                 )
-        finally:
-            self._reasoning_effort = previous_effort
+            logger.warning(
+                "deepseek: empty content with reasoning_effort=%s; retrying with thinking disabled",
+                effort,
+            )
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort="",
+                model=model,
+            )
 
-    def _extra_body(self) -> dict[str, Any]:
-        if not self._reasoning_effort:
+    def _extra_body(self, reasoning_effort: str | None = None) -> dict[str, Any]:
+        effort = self._reasoning_effort if reasoning_effort is None else reasoning_effort.strip()
+        if not effort:
             return {"thinking": {"type": "disabled"}}
         return {
             "thinking": {"type": "enabled"},
-            "reasoning_effort": self._reasoning_effort,
+            "reasoning_effort": effort,
         }

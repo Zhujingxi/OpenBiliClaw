@@ -11,6 +11,18 @@ from openbiliclaw import network
 
 from .base import LLMProvider, LLMProviderError, LLMRegistry
 from .claude_provider import ClaudeProvider
+from .connection_factory import (
+    AdapterRuntimeOptions as AdapterRuntimeOptions,
+)
+from .connection_factory import (
+    SupportsEmbedding as SupportsEmbedding,
+)
+from .connection_factory import (
+    build_chat_adapter as build_chat_adapter,
+)
+from .connection_factory import (
+    build_embedding_adapter as build_embedding_adapter,
+)
 from .dashscope_provider import DashScopeEmbeddingProvider
 from .gemini_provider import GeminiProvider, gemini_sdk_available
 from .ollama_provider import OllamaProvider

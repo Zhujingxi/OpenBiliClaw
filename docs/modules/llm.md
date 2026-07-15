@@ -23,6 +23,7 @@
 | 2.1 Provider 实现 | ✅ | OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带 retry + 超时 |
 | 2.2 Provider Registry | ✅ | 自动注册 + 可配置 fallback + health check |
 | 2.3 Prompt 管理与 Service | ✅ | Prompt 构建器 + LLMService 门面 |
+| 模型连接 protocol factory（阶段 4） | ✅ | `build_chat_adapter()` 从单条 `ChatConnection` 构造按稳定 ID 命名的 Chat adapter；`build_embedding_adapter()` 从 `EmbeddingProviderConfig` + 同一个不可变共享 `EmbeddingModelSettings` 构造 embedding adapter。工厂尚未组成 ordered route/circuit，也未切换现有 runtime、API 或 UI |
 | v0.3.164+ OpenAI-compatible JSON-object 合约 | ✅ | `LLMService.complete_structured_task()` 与 `complete_multimodal_structured_task()` 共享最小兼容层：已有大写 `JSON` 仅归一为小写 `json`；完全没有该 token 时只追加 `json`。这满足部分 OpenAI-compatible 端点对 `response_format=json_object` 的字面消息约束，不改变业务规则、画像、阈值、user 内容或 core-memory 排序；非结构化 `complete_with_core_memory()` 完全不改写 prompt。 |
 | v0.3.162+ LLM 失败可操作说明 | ✅ | `llm.base.describe_llm_failure()` 沿异常 cause/context 链翻译上层错误；新增 authentication / unauthorized / invalid API key / 401 鉴权桶，并将 insufficient quota / quota / exhausted / 429 归入「额度用尽或被限流」桶，API 与 CLI 继续消费同一函数，不新增 init reason code |
 | v0.3.164 LLM 失败安全边界 | ✅ | `describe_llm_failure()` 识别 moderation、鉴权、额度/限流、provider/service 超时与空响应；`safe_llm_failure_message()` 为 API / CLI / OpenClaw 的公共边界提供固定安全兜底，未知异常不回传上游文本 |
@@ -72,6 +73,60 @@
 | Issue #113 CA 环境防护 | ✅ | `network.set_outbound_proxy(..., mode="system")` 在任何继承环境的 SDK 客户端构造前检查 `SSL_CERT_FILE` / `SSL_CERT_DIR` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`。只移除指向不存在目标的失效覆盖，让 httpx / OpenSSL 回退到默认可信 CA store；有效私有 CA、`HTTPS_PROXY` 等代理变量和 TLS 验证均保持不变，避免 Windows 遗留 CA 路径导致所有客户端在发请求前直接 `FileNotFoundError`。 |
 
 ## 公开 API
+
+### Connection-record adapter factory
+
+```python
+from openbiliclaw.llm.connection_factory import (
+    AdapterRuntimeOptions,
+    build_chat_adapter,
+    build_embedding_adapter,
+)
+from openbiliclaw.model_config import (
+    ChatConnection,
+    CredentialConfig,
+    EmbeddingModelSettings,
+    EmbeddingProviderConfig,
+)
+
+runtime_options = AdapterRuntimeOptions(timeout_seconds=300.0)
+chat = build_chat_adapter(
+    ChatConnection(
+        id="chat-primary",
+        name="My OpenAI connection",
+        type="openai_compatible",
+        preset="openai",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        credential=CredentialConfig(source="env", value="OPENAI_API_KEY"),
+    ),
+    runtime_options,
+)
+
+settings = EmbeddingModelSettings(
+    model="text-embedding-3-small",
+    output_dimensionality=1024,
+)
+embedding = build_embedding_adapter(
+    EmbeddingProviderConfig(
+        id="embedding-primary",
+        name="OpenAI embedding",
+        type="openai_compatible",
+        preset="openai",
+        base_url="https://api.openai.com/v1",
+        credential=CredentialConfig(source="env", value="OPENAI_API_KEY"),
+    ),
+    settings,
+    runtime_options,
+)
+assert chat.name == "chat-primary"
+assert embedding.name == "embedding-primary"
+assert embedding.settings is settings
+```
+
+`AdapterRuntimeOptions` 是 frozen、secret-safe 的构造参数，仅包含 timeout、可选的精确环境映射和可选 Codex token loader；proxy / `trust_env` 不对调用方开放。Factory 始终按最终 endpoint 调用 `openbiliclaw.network.proxy_for_endpoint()` / `trust_env_for_endpoint()`，Ollama 则固定直连。Credential 在构造期一次解析：`inline` 使用存储值，`env` 只读取记录指定的变量名，`oauth` 只接受 `credential_ref=codex`，`none` 只接受 descriptor 没有 credential 字段的本地类型。Codex OAuth 在调用 token loader 前要求 endpoint 精确等于 `https://api.openai.com/v1`（空值会规范成该地址）；显式端口、额外 path、query、fragment 或 userinfo 均失败关闭。
+
+OpenAI / DeepSeek / OpenRouter / custom Chat 记录都精确构造 `OpenAIProtocolProvider`；其 `OpenAIProtocolOptions` 为 frozen dataclass，headers 映射也做只读冻结，因此不同连接或并发调用之间不会串用 reasoning、attribution header 或 API mode。Anthropic 官方 / custom 都精确构造 `AnthropicCompatibleProvider` 并透传已校验的 custom base URL；Gemini 使用原生 `google-genai`，Ollama 保留 native `num_ctx` 路径。现有 `OpenAIProvider` / `DeepSeekProvider` / `OpenRouterProvider` / `ClaudeProvider` 构造 API 与 legacy registry 路径仍保留，待后续 runtime cutover 后再单独移除。
 
 ### Provider 类
 
@@ -443,12 +498,12 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 3. **Protocol DI**：`SupportsComplete` Protocol 解耦了调用方和具体实现，测试时可注入 Fake
 4. **Prompt 集中管理**：所有 prompt 在 `prompts.py` 中定义，不散落在各模块
 5. **统一上下文注入**：`complete_with_core_memory()` / `complete_structured_task()` 默认负责把核心记忆注入到 Soul 相关任务里；已在 `user_input` 自带完整结构化上下文的高频任务可传 `inject_core_memory=False`，或通过 `llm.task_options.without_core_memory_kwargs()` 在兼容旧 stub 的前提下关闭注入，避免动态 core memory 破坏 provider prompt-cache 前缀
-6. **OpenAI-compatible 复用**：DeepSeek、OpenRouter 这类兼容 OpenAI 协议的 provider 复用同一套重试、超时和错误归一化逻辑，只在子类中注入默认地址或额外请求头
+6. **OpenAI-compatible 复用**：connection-record factory 对 OpenAI、DeepSeek、OpenRouter 和 custom 只构造 `OpenAIProtocolProvider`，以每实例 frozen `OpenAIProtocolOptions` 注入 API mode、reasoning body 与额外请求头；legacy 子类构造 API 暂时保留，但 DeepSeek per-call override 也不再临时修改实例字段
 7. **Gemini 独立适配**：Gemini 走官方 `google-genai` SDK，不强行复用 OpenAI-compatible 抽象；provider 内部负责把统一 `messages` 渲染成 quickstart 风格的单文本 prompt
 8. **Gemini 可选依赖降级**：环境里缺少 `google-genai` 时，`llm` 包和 registry 仍可正常导入；只有真正实例化 Gemini provider 时才会给出明确缺依赖错误。守卫捕获的是 `ImportError` 而非仅 `ModuleNotFoundError`（issue #80）——SDK 装上了但其原生传递依赖加载失败（如 Termux/Android 下 `cryptography` 的 manylinux 轮子 dlopen 失败）同样降级而不是让 CLI 启动即崩，实例化报错会附带底层 import 失败详情
 9. **Prompt 风格集中收口**：推荐、画像和聊天的“老B友”语气由共享 `ToneProfile` 驱动，不允许各模块各自发散成不同人格
 10. **Prompt-cache 约定**：高频结构化 builder 的 system prompt 必须保持静态；user prompt 按“tone / 画像 / 长期偏好 / 来源上下文 / 本批内容或历史”从稳定到易变排序，并使用确定性 JSON。使用完整 `profile_summary` 的高频链路优先经 `profile_prompt_layers()` 分层渲染，稳定层放前、recent 层放后；调用方不得再把同一份动态画像通过 core memory 追加进 system prompt，便于 DeepSeek / Claude / OpenAI / Gemini 的 provider-side prompt cache 复用前缀
 11. **结构化输出只在 helper 处放宽**：业务模块不再各自手写 JSON 截取逻辑；容错集中在 `json_utils.py`，模块侧用 predicate 收紧语义，避免一个 provider 的异常 shape 修复污染其他任务。
 12. **分模块 override 不隐式改意图**：`[llm.<module>]` 命中时必须精确调用用户指定的 chat provider；只有 provider 拼错或不是 chat-capable 时才降级到默认链并 INFO 一次。模型覆盖通过 per-call `model=` 完成，避免污染 provider 实例状态或影响其他模块。
-13. **Codex OAuth 只做认证层**：`auth_mode="codex_oauth"` 不注册新 provider，而是给现有 `OpenAIProvider` 注入动态 token provider。该模式只允许 OpenAI 官方 `base_url`，防止 ChatGPT OAuth token 泄露给 OpenAI-compatible 代理。
+13. **Codex OAuth 只做认证层**：legacy `auth_mode="codex_oauth"` 不注册新 provider，而是给现有 `OpenAIProvider` 注入动态 token provider。connection-record factory 则只接受 `codex_oauth + credential_ref="codex"`，并在 token lookup 前验证精确官方 endpoint。两条路径都不会把 token 发送给 OpenAI-compatible 代理。
 14. **失败分类先于批响应解析**：共享 classifier 保持 rate-limit / no-provider / auth / invalid-response 的特定语义优先级，并额外识别连接失败与 HTTP 500/502/503/504；调用方只把 provider transient 交给协调器退避，不把 JSON shape 错误误判成网络失败。

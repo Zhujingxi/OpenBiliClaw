@@ -601,11 +601,12 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model-config compatibility foundation (stage 3; runtime not wired) │
+│ Model-connection foundation (stage 4; runtime route not wired) │
 │ native [models] strict parse/revision → Config.models      │
 │ legacy [llm] exact raw/URL inspection → chat/embed + report │
 │ closed resolution → authoritative validation → valid memory │
-│ raw-preserving saves; no transaction/backup/runtime/API/UI │
+│ one record → ID-named protocol adapter; shared embedding settings │
+│ no ordered route/circuit/cutover/transaction/backup/API/UI │
 ├────────────────────────────────────────────────┤
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │

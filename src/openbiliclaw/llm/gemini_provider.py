@@ -73,10 +73,12 @@ class GeminiProvider(LLMProvider):
         embedding_output_dimensionality: int | None = None,
         proxy: str = "",
         trust_env: bool = True,
+        provider_name: str = "gemini",
     ) -> None:
         if not gemini_sdk_available():
             _raise_missing_sdk()
         assert genai is not None
+        self._provider_name = provider_name
         self._model = model
         self._embedding_output_dimensionality = (
             embedding_output_dimensionality
@@ -128,7 +130,7 @@ class GeminiProvider(LLMProvider):
 
     @property
     def name(self) -> str:
-        return "gemini"
+        return self._provider_name
 
     async def complete(
         self,
@@ -168,7 +170,7 @@ class GeminiProvider(LLMProvider):
 
         content = response.text or ""
         if not content.strip():
-            raise LLMResponseError("gemini returned empty content")
+            raise LLMResponseError(f"{self._provider_name} returned empty content")
 
         usage = None
         if response.usage_metadata is not None:
@@ -187,7 +189,7 @@ class GeminiProvider(LLMProvider):
         return LLMResponse(
             content=content,
             model=response.model_version or effective_model,
-            provider="gemini",
+            provider=self._provider_name,
             usage=usage,
             raw=response,
         )
@@ -206,24 +208,24 @@ class GeminiProvider(LLMProvider):
                 await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
 
         if last_error is None:
-            raise LLMProviderError("gemini request failed")
+            raise LLMProviderError(f"{self._provider_name} request failed")
         raise last_error
 
     def _map_error(self, exc: Exception) -> LLMProviderError:
         if isinstance(exc, LLMProviderError):
             return exc
         if isinstance(exc, TimeoutError):
-            return LLMTimeoutError("gemini request timed out")
+            return LLMTimeoutError(f"{self._provider_name} request timed out")
 
         status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         message = (getattr(exc, "message", None) or str(exc)).lower()
         if status_code == 429 or "rate limit" in message or "resource_exhausted" in message:
-            return LLMRateLimitError("gemini rate limit exceeded")
+            return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
         if (errors is not None and isinstance(exc, errors.ServerError)) or (
             status_code and int(status_code) >= 500
         ):
-            return LLMProviderError(f"gemini server error: {status_code}")
-        return LLMProviderError(f"gemini request failed: {exc}")
+            return LLMProviderError(f"{self._provider_name} server error: {status_code}")
+        return LLMProviderError(f"{self._provider_name} request failed: {exc}")
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         if isinstance(exc, LLMRateLimitError):

@@ -13,6 +13,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+from openbiliclaw.llm import openai_provider as openai_provider_module
 from openbiliclaw.llm.base import (
     LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
     LLMProviderError,
@@ -544,6 +545,50 @@ async def test_deepseek_provider_sends_disabled_thinking_for_empty_reasoning_eff
     assert response.content == "deepseek-ok"
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
     assert provider._reasoning_effort == "max"
+
+
+@pytest.mark.asyncio
+async def test_protocol_provider_parallel_reasoning_overrides_do_not_mutate_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert hasattr(openai_provider_module, "OpenAIProtocolProvider"), (
+        "OpenAI protocol provider is not implemented"
+    )
+    assert hasattr(openai_provider_module, "OpenAIProtocolOptions"), (
+        "OpenAI protocol options are not implemented"
+    )
+    protocol_provider = openai_provider_module.OpenAIProtocolProvider
+    protocol_options = openai_provider_module.OpenAIProtocolOptions
+    provider = protocol_provider(
+        api_key="test-key",
+        model="deepseek-test",
+        base_url="https://api.deepseek.com",
+        options=protocol_options(
+            connection_id="deepseek-a",
+            preset="deepseek",
+            api_mode="chat_completions",
+            default_reasoning_effort="max",
+        ),
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        await __import__("asyncio").sleep(0)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await __import__("asyncio").gather(
+        provider.complete([{"role": "user", "content": "one"}], reasoning_effort=""),
+        provider.complete([{"role": "user", "content": "two"}], reasoning_effort="high"),
+    )
+
+    assert {str(call["extra_body"]) for call in calls} == {
+        "{'thinking': {'type': 'disabled'}}",
+        "{'thinking': {'type': 'enabled'}, 'reasoning_effort': 'high'}",
+    }
+    assert provider.options.default_reasoning_effort == "max"
 
 
 @pytest.mark.asyncio

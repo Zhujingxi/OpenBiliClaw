@@ -41,13 +41,16 @@ class OllamaProvider(OpenAIProvider):
         base_url: str = "http://127.0.0.1:11434/v1",
         timeout: float = 300.0,
         num_ctx: int = 0,
+        provider_name: str = "ollama",
+        trust_env: bool = True,
     ) -> None:
         super().__init__(
             api_key=api_key,
             model=model,
             base_url=base_url,
-            provider_name="ollama",
+            provider_name=provider_name,
             timeout=timeout,
+            trust_env=trust_env,
         )
         self._embed_timeout = timeout
         # v0.3.x+: when >0, chat completions route through Ollama's *native*
@@ -115,7 +118,7 @@ class OllamaProvider(OpenAIProvider):
         # Exhausted all attempts — re-raise the last error so the
         # registry's fallback chain can route to the next provider.
         if last_error is None:  # pragma: no cover — defensive
-            raise LLMProviderError("ollama: complete failed without exception")
+            raise LLMProviderError(f"{self._provider_name}: complete failed without exception")
         raise last_error
 
     async def _complete_native(
@@ -158,8 +161,9 @@ class OllamaProvider(OpenAIProvider):
             # under the JSON constraint. Retry once unconstrained — the
             # prompt itself already asks for JSON.
             logger.warning(
-                "ollama: empty content with format=json on /api/chat; "
-                "retrying without the format constraint"
+                "%s: empty content with format=json on /api/chat; "
+                "retrying without the format constraint",
+                self._provider_name,
             )
             payload.pop("format", None)
             data = await self._post_chat(payload)
@@ -171,11 +175,11 @@ class OllamaProvider(OpenAIProvider):
                     data.get("done_reason") or data.get("finish_reason") or "unknown"
                 )
                 raise LLMResponseError(
-                    "ollama returned reasoning but no final content "
+                    f"{self._provider_name} returned reasoning but no final content "
                     f"(finish_reason={finish_reason}); "
                     "disable thinking/reasoning or increase max_tokens"
                 )
-            raise LLMResponseError("ollama returned empty content")
+            raise LLMResponseError(f"{self._provider_name} returned empty content")
 
         usage = None
         prompt_tokens = int(data.get("prompt_eval_count", 0) or 0)
@@ -210,11 +214,11 @@ class OllamaProvider(OpenAIProvider):
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 raise LLMProviderError(
-                    f"ollama: /api/chat returned HTTP {exc.response.status_code}"
+                    f"{self._provider_name}: /api/chat returned HTTP {exc.response.status_code}"
                 ) from exc
             decoded = response.json()
         if not isinstance(decoded, dict):
-            raise LLMResponseError("ollama: /api/chat returned a non-object body")
+            raise LLMResponseError(f"{self._provider_name}: /api/chat returned a non-object body")
         return decoded
 
     def _native_root(self) -> str:

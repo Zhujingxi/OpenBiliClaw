@@ -376,13 +376,15 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│             模型配置兼容基础（阶段 3，尚未接入运行链）          │
+│             模型连接基础（阶段 4，尚未接入运行 route）          │
 │ native [models] → strict parser/revision ────────────────┐    │
 │ legacy [llm] → exact raw/URL inspection → chat/embed map ┤    │
 │                 → secret-safe report → closed resolution │    │
 │                 → authoritative final validation ────────┤    │
 │                                                         └→ Config.models（内存）│
-│ 普通保存保留 raw [models]/[llm]；不含事务迁移/backup/runtime/API/UI │
+│ Config.models 记录 → connection_factory → ID-named protocol adapter │
+│ OpenAI presets 共用 frozen hooks；Embedding 保留共享 settings 身份  │
+│ 普通保存保留 raw；不含 ordered route/circuit/cutover/事务/API/UI   │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │

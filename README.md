@@ -604,11 +604,12 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型配置兼容基础（阶段 3，尚未接入运行链）             │
+│ 模型连接基础（阶段 4，尚未接入运行 route）             │
 │ native [models] strict parse/revision → Config.models    │
 │ legacy [llm] 精确 raw/URL 检查 → chat/embed 映射与报告   │
 │ 封闭 resolution → 权威校验 → 有效内存候选                │
-│ 普通保存保留 raw；无事务迁移/backup/runtime/API/UI       │
+│ 单记录 → ID 命名 protocol adapter；Embedding 共享 settings │
+│ 无 ordered route/circuit/cutover/事务迁移/backup/API/UI  │
 ├────────────────────────────────────────────────┤
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │  来源族注册表：alias · strategy · URL host             │
