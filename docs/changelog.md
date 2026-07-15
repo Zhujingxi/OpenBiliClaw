@@ -4,11 +4,16 @@
 
 ---
 
+## v0.3.170 / extension v0.3.170 / desktop v0.3.170：换一换尾延迟与库存维护隔离（2026-07-15）
+
+后端源码走 `backend-v0.3.170`，浏览器插件走 `extension-v0.3.170`，桌面安装包走 `desktop-v0.3.170`。
+
+- **「换一换」偶发 8–12 秒停顿改为隔离、分批的 SQLite 路径**：真实日志证明 MMR worker 已完成后，主协程会被同事件循环里的同步 pool maintenance 卡住；现在 recommendation serve 与后台维护分别使用 database-owned 单线程 worker 和独立短生命周期连接。`PoolServeSnapshot` 在一次读事务中合并 readiness、候选、平台补位、最近已看与 curator 信号，最近浏览身份每个快照只解析一次，并复用按最新 view event id 自动失效的缓存；recommendation + shown 用独立短事务原子提交，API 直接复用 `ServeResult.pool_counts_after` 广播并在响应外通过 serve worker 精确复读。维护每事务最多修改 50 行、每 tick 最多 8 批，批间释放写锁并让出 event loop，75ms 写锁冲突直接延后；readiness 未变化的普通 tick 跳过 ranked 重维护、每 10 分钟安全巡检，suppressed 恢复改用内存 source/topic 计数，移除逐行 window-function 重扫。日志拆出 snapshot / embedding / selector worker / event-loop resume / persist / status publish / maintenance 各阶段，详细候选与维护明细降到 DEBUG；新增并发 heartbeat 回归、固定候选顺序回归和 `scripts/benchmark_reshuffle_latency.py`（health 使用独立预热连接）。80MB 生产数据库与 608MB embedding cache 的隔离副本实测换批 P50 约 0.47–0.50 秒、最大约 0.59 秒；强制重维护并发 health 187 次，P99 40.1ms、最大 94.4ms。
+
 ## v0.3.169 / extension v0.3.169 / desktop v0.3.169：初始化全链路收口、模型路由与经典主题（2026-07-15）
 
 后端源码走 `backend-v0.3.169`，浏览器插件走 `extension-v0.3.169`，桌面安装包走 `desktop-v0.3.169`。
 
-- **「换一换」偶发 8–12 秒停顿改为隔离、分批的 SQLite 路径**：真实日志证明 MMR worker 已完成后，主协程会被同事件循环里的同步 pool maintenance 卡住；现在 recommendation serve 与后台维护分别使用 database-owned 单线程 worker 和独立短生命周期连接。`PoolServeSnapshot` 在一次读事务中合并 readiness、候选、平台补位、最近已看与 curator 信号，最近浏览身份每个快照只解析一次，并复用按最新 view event id 自动失效的缓存；recommendation + shown 用独立短事务原子提交，API 直接复用 `ServeResult.pool_counts_after` 广播并在响应外通过 serve worker 精确复读。维护每事务最多修改 50 行、每 tick 最多 8 批，批间释放写锁并让出 event loop，75ms 写锁冲突直接延后；readiness 未变化的普通 tick 跳过 ranked 重维护、每 10 分钟安全巡检，suppressed 恢复改用内存 source/topic 计数，移除逐行 window-function 重扫。日志拆出 snapshot / embedding / selector worker / event-loop resume / persist / status publish / maintenance 各阶段，详细候选与维护明细降到 DEBUG；新增并发 heartbeat 回归、固定候选顺序回归和 `scripts/benchmark_reshuffle_latency.py`（health 使用独立预热连接）。80MB 生产数据库与 608MB embedding cache 的隔离副本实测换批 P50 约 0.47–0.50 秒、最大约 0.59 秒；强制重维护并发 health 187 次，P99 40.1ms、最大 94.4ms。
 - **桌面 Web 新用户默认使用经典配色，老用户平滑保留动态色相（PR #118）**：新增可在「设置 → 前端」切换的经典固定色板与动态主题色；首屏脚本会在 CSS 加载前迁移并持久化 `obc.accentStyle`，已有 `obc.themeHue` 的用户继续使用动态主题，避免重载闪色。首次经典模式引导改为独立、8 秒自动收起且 hover / focus 暂停的提示，不再占用业务 Toast 队列；主题单选支持方向键 / Home / End，设置下拉框回归原生语义，经典模式恢复可见焦点环，粗指针保存按钮保持 44px 触控区域。`classic.css` 同步进入桌面静态资源版本指纹；纯桌面 Web 变更，移动 Web、扩展与 CLI 行为不变。
 - **初始化探针不再误判 DeepSeek 或偷跑 `llama3`**：通用 chat health check 固定以 `reasoning_effort=""` 发最小探针，DeepSeek 不再把一次 `hi` 放大为 16K/32K thinking 请求并在 30 秒门禁内假超时；DeepSeek 的每次推理档位改为请求局部参数，不再临时修改共享 provider 状态，并且 `[llm.deepseek].base_url` 现在真正传入 SDK 与 endpoint 代理裁决，第三方中转不再被静默忽略。Ollama chat 只在 `[llm.ollama].model` 明确非空时注册，仅有 `base_url`、只配置 bge-m3 embedding、或只把 Ollama 写成 default/fallback 都不会再隐式构造 `llama3`；配置保存与安装器会直接提示缺少模型，readiness / registry 全量健康检查也跳过非 chat-capable provider。
 - **多 Provider reasoning effort 默认收敛为 `medium`，渠道短任务仍为空**：OpenAI 官方 GPT-5/o-series（Chat + Responses）、Claude 4.6+、Gemini 2.5/3、DeepSeek V4 与 OpenRouter 都接入各自原生 effort/thinking schema；新配置默认 `medium`，DeepSeek 按官方规则将其归一为 native `high`。`LLMService` 仍按 caller 把 discovery、recommendation、sources、YouTube 搜索、B 站扩展搜索及轻量 eval 的未指定 effort 解析为 `""`：DeepSeek 真关闭，OpenAI/Claude/Gemini 在不可关闭型号下降到最低安全档，OpenRouter 为避免 mandatory reasoning 型号 400 而省略字段。普通 GPT-4、任意泛 OpenAI-compatible 网关和 Ollama 不猜能力、不发送伪参数；显式 caller effort 始终优先。
