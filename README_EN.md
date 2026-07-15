@@ -576,14 +576,18 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 ## 🏛️ Architecture Overview
 
 ```text
-interactive ─────────────────────────────────────────┐
+interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ provider
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
+             │  ├─ low-stock supply includes explore queries / source extraction
              │  └─ while queued: guarantee 2, may borrow all 3
              │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
              └─ maintenance: at most 1 while refill waits;
                 parked when canonical available = 0
+
+guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
+                                                              └→ optional probes after terminal state
 ```
 
 ```
@@ -601,6 +605,7 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Init barrier: profile commit → discover/evaluate/copy → ready │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │

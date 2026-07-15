@@ -119,9 +119,7 @@ class PreferenceAnalyzer:
             )
 
     @staticmethod
-    async def _emit_progress(
-        callback: ProgressCallback | None, done: int, total: int
-    ) -> None:
+    async def _emit_progress(callback: ProgressCallback | None, done: int, total: int) -> None:
         """Fire a progress observer, swallowing any error at WARNING.
 
         The observer only watches chunk completion — it must never abort the
@@ -538,24 +536,69 @@ class PreferenceAnalyzer:
         # Each top-level chunk completing is a natural progress point. A shared
         # counter (bumped between the resilient run and the callback await, with
         # no interleaving await) yields a strictly increasing done 1..N even
-        # under concurrent gather.
+        # under concurrent gather. Per-chunk start/done/abort lines (with the
+        # 1-based index + wall time) go to the logger so ``openbiliclaw.log``
+        # shows exactly which chunk is in flight — a chunk that logs "started"
+        # without a matching "done" is the one that stalled or was cancelled by
+        # the init timeout.
+        import time as _time
+
         total_chunks = len(chunks)
         done_chunks = 0
 
         async def _run_and_report(
+            index: int,
             chunk: list[dict[str, object]],
         ) -> list[tuple[dict[str, object], dict[str, object]]]:
             nonlocal done_chunks
-            result = await _run_chunk_resilient(chunk)
+            started = _time.monotonic()
+            logger.info(
+                "preference chunk %d/%d started: events=%d",
+                index,
+                total_chunks,
+                len(chunk),
+            )
+            try:
+                result = await _run_chunk_resilient(chunk)
+            except _asyncio.CancelledError:
+                logger.info(
+                    "preference chunk %d/%d cancelled after %.1fs",
+                    index,
+                    total_chunks,
+                    _time.monotonic() - started,
+                )
+                raise
+            except BaseException as exc:
+                logger.warning(
+                    "preference chunk %d/%d failed after %.1fs: %s",
+                    index,
+                    total_chunks,
+                    _time.monotonic() - started,
+                    exc,
+                )
+                raise
             done_chunks += 1
+            logger.info(
+                "preference chunk %d/%d done in %.1fs (%d/%d complete)",
+                index,
+                total_chunks,
+                _time.monotonic() - started,
+                done_chunks,
+                total_chunks,
+            )
             await self._emit_progress(progress_callback, done_chunks, total_chunks)
             return result
 
         outcome_groups: list[list[tuple[dict[str, object], dict[str, object]]]] = []
         for batch_start in range(0, len(chunks), MAX_CONCURRENT_PREFERENCE_CHUNKS):
-            batch = chunks[batch_start : batch_start + MAX_CONCURRENT_PREFERENCE_CHUNKS]
+            batch = list(
+                enumerate(
+                    chunks[batch_start : batch_start + MAX_CONCURRENT_PREFERENCE_CHUNKS],
+                    start=batch_start + 1,
+                )
+            )
             outcome_groups.extend(
-                await _asyncio.gather(*(_run_and_report(chunk) for chunk in batch))
+                await _asyncio.gather(*(_run_and_report(idx, chunk) for idx, chunk in batch))
             )
         outcomes = [item for group in outcome_groups for item in group]
 

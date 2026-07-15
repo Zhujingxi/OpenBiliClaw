@@ -3461,11 +3461,6 @@ def test_init_includes_xhs_bootstrap_events(
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
     )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     # v0.3.21+: init now uses split enqueue/collect APIs so the
     # XHS task can run in parallel with B站 fetches. The test fakes
@@ -3625,11 +3620,6 @@ def test_init_includes_douyin_bootstrap_events_in_analysis_and_profile(
         cli_module,
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
     )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_xhs_bootstrap_task", fail_xhs_enqueue, raising=False)
@@ -4065,11 +4055,6 @@ def test_init_youtube_env_skip_overrides_yes_flag(
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine())
     monkeypatch.setattr(cli_module, "_run_with_progress", passthrough_progress)
     monkeypatch.setattr(cli_module, "_run_init_discovery_backfill_async", fake_discovery_backfill)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_yt_bootstrap_task", fake_enqueue_youtube)
 
@@ -4290,11 +4275,6 @@ def test_init_no_xhs_flag_skips_enqueue(
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
     )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(
         cli_module,
@@ -4358,7 +4338,12 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
             return SoulProfile(
                 personality_portrait="稳定用户画像" * 30,
                 core_traits=["理性"],
-                preferences=PreferenceLayer(),
+                preferences=PreferenceLayer(
+                    interests=[
+                        InterestTag(name="人工智能", category="科技", weight=0.96),
+                        InterestTag(name="篮球战术", category="体育", weight=0.72),
+                    ]
+                ),
             )
 
     class FakeDatabase:
@@ -4426,19 +4411,6 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
     )
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(
-            preferences=PreferenceLayer(
-                interests=[
-                    InterestTag(name="人工智能", category="科技", weight=0.96),
-                    InterestTag(name="篮球战术", category="体育", weight=0.72),
-                ]
-            )
-        ),
-        raising=False,
-    )
 
     result = runner.invoke(app, ["init"])
 
@@ -7155,7 +7127,6 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
         raising=False,
     )
     monkeypatch.setattr(cli_module, "_maybe_update_init_source_shares", lambda counts: None)
-    monkeypatch.setattr(cli_module, "_build_draft_profile_for_discover", lambda memory: object())
 
     class _Memory:
         async def propagate_event(self, event: dict[str, Any]) -> None:
@@ -7452,3 +7423,35 @@ def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -
     assert captured["include_bili"] is False
     assert captured["include_reddit"] is True
     assert "Reddit" in result.output
+
+
+@pytest.mark.asyncio
+async def test_run_with_progress_heartbeat_reports_status_and_honest_eta(monkeypatch) -> None:
+    """Heartbeat appends the live sub-progress and never pins the ETA at ~0s.
+
+    Guards the desktop.log stall-visibility fix: past ``eta_seconds`` the tick
+    reads "已超预估" (not a lying "预计还需 ~0s") and carries the
+    ``status_provider`` suffix so a frozen "已完成 X/N 批" localises the hang.
+    """
+    import asyncio as _asyncio
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+
+    async def _work() -> str:
+        await _asyncio.sleep(0.16)
+        return "ok"
+
+    result = await cli_module._run_with_progress(
+        _work(),
+        label="分析偏好（分片批处理）",
+        eta_seconds=0,
+        tick_seconds=0.05,
+        status_provider=lambda: "已完成 2/5 批",
+    )
+
+    out = buf.getvalue()
+    assert result == "ok"
+    assert "已超预估" in out
+    assert "已完成 2/5 批" in out
+    assert "预计还需 ~0s" not in out

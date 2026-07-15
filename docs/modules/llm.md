@@ -1,8 +1,8 @@
 # LLM 多模型支持
 
-> 运行时并发由单一 `LLMConcurrencyGate` 管理：所有 provider 请求受总 gate（默认 4）约束，后台还受 `max(1, total-1)`（默认 3）约束。后台 admission 依据 canonical durable inventory 把工作分为 `refill.expression > refill.evaluation > refill.supply > maintenance`；有 refill waiter 时保证下一批新准入至少两个 refill 槽并可借满三个，库存为零时 park 新 maintenance。对话与 `api.sentiment` 是交互流量；未知 caller 只告警一次并按 maintenance 处理。旧 `bypass_semaphore=True` 只绕过后台 gate，`PrioritySemaphore` 仍从 `llm.service` 兼容导出。
+> 运行时并发由单一 `LLMConcurrencyGate` 管理：所有 provider 请求受总 gate（默认 4）约束，后台还受 `max(1, total-1)`（默认 3）约束。后台 admission 依据 canonical durable inventory 把工作分为 `refill.expression > refill.evaluation > refill.supply > maintenance`；有 refill waiter 时保证下一批新准入至少两个 refill 槽并可借满三个，库存为零时 park 新 maintenance。对话、`api.sentiment` 与用户主动发起的 `api.config_probe` 是交互流量；未知 caller 只告警一次并按 maintenance 处理。旧 `bypass_semaphore=True` 只绕过后台 gate，`PrioritySemaphore` 仍从 `llm.service` 兼容导出。
 
-热重载不会替换 gate 对象，而是原地 `reconfigure()`：升容立即按优先级唤醒等待者；降容不撤销已进入 provider 的工作，并在 active 降到新容量以下前停止新准入。配置探测也使用 `api.config_probe` 后台分类经过同一 gate。
+热重载不会替换 gate 对象，而是原地 `reconfigure()`：升容立即按优先级唤醒等待者；降容不撤销已进入 provider 的工作，并在 active 降到新容量以下前停止新准入。配置探测使用 `api.config_probe` 交互分类，只经过 total gate：即使 canonical inventory 为空，用户仍能测试并修复阻塞初始化的模型配置，但探测不会绕过总 provider 并发上限。
 
 > 统一的多 LLM Provider 接口，支持 OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter / OpenAI-compatible，带显式备选 Provider、retry 和健康检查。
 
@@ -70,6 +70,7 @@
 | v0.3.165 海外网络三模式 | ✅ | `OpenAIProvider` / `ClaudeProvider` / `GeminiProvider`（含 DeepSeek / OpenRouter 子类与 embedding 实例）同时接收 `proxy` 与 `trust_env`。registry 统一读取 `[network].mode`：`direct` 注入忽略环境代理的 SDK transport，`system` 保留 SDK 环境继承，`custom` 注入指定代理并强制 `trust_env=False`。**Ollama 工厂不读该策略**——本地 / CN 直连由 `tests/test_network_proxy_isolation.py` 守卫 |
 | v0.3.166 国内网关代理豁免 | ✅ | registry 的 `_outbound_proxy(base_url)` / `_outbound_trust_env(base_url)` 改为按 endpoint 粒度裁决，委托 `network.is_domestic_endpoint()`。国内大模型网关（DeepSeek `api.deepseek.com`、商汤 `.cn`、通义 `aliyuncs.com`、智谱 / 文心 / 混元 / 火山 / Kimi / MiniMax / 阶跃 / 百川 / 硅基流动 / 无问芯穹 / PPIO 等）与 localhost / 内网自建端点，即使 `[network].mode` 为 `system` / `custom` 也强制直连（`proxy=""`、`trust_env=False`），避免把国内请求绕道境外梯子导致超时；识别覆盖 `.cn` 顶级域 + 非 `.cn` 厂商域名白名单 + loopback / 私有 / link-local IP。豁免按 endpoint 生效，墙外网关仍走全局代理策略。DeepSeek 子类以固定 `https://api.deepseek.com` 参与裁决 |
 | Issue #113 CA 环境防护 | ✅ | `network.set_outbound_proxy(..., mode="system")` 在任何继承环境的 SDK 客户端构造前检查 `SSL_CERT_FILE` / `SSL_CERT_DIR` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`。只移除指向不存在目标的失效覆盖，让 httpx / OpenSSL 回退到默认可信 CA store；有效私有 CA、`HTTPS_PROXY` 等代理变量和 TLS 验证均保持不变，避免 Windows 遗留 CA 路径导致所有客户端在发请求前直接 `FileNotFoundError`。 |
+| Issue #113 task-local 后台准入 bypass | ✅ | 内部 scope 通过 `ContextVar` 只影响当前异步上下文；scope 内 `LLMService.complete_with_core_memory()` 跳过库存敏感的后台 admission，但仍经过总 provider gate，退出 scope 后自动恢复。guided init 仅在阶段 2/3 使用，并行 discovery 不继承该 scope；既有公开 API 签名不变。 |
 
 ## 公开 API
 
@@ -297,10 +298,10 @@ stats = cache.stats()
 
 | 流量类 | total priority | 说明 |
 |---|---|---|
-| interactive | 0 | `soul.dialogue*`、`api.sentiment`，仅经过 total gate |
+| interactive | 0 | `soul.dialogue*`、`api.sentiment`、`api.config_probe`，仅经过 total gate |
 | refill.expression | 1 | 推荐文案回填，补货最高优先 |
 | refill.evaluation | 2 | 候选 batch / single 评估 |
-| refill.supply | 3 | 仅在 durable inventory 低于目标时动态升级的关键词/原料生成 |
+| refill.supply | 3 | durable inventory 低于目标时动态升级的关键词 / 原料生成；包含 `discovery.explore.queries` 与 `sources.*.extract`，防止 supply 等库存、库存又等 supply 的循环 |
 | maintenance | 4 | Soul、评测、purge 与健康库存下的 discovery；未知 caller 也落此类 |
 
 当 refill waiter 存在时，新 maintenance 最多一个；没有 runnable refill 时 maintenance 可借用所有空闲后台槽，保持 work-conserving。`empty` 只 park 新 maintenance，绝不会取消或抢占已经进入 provider 的 maintenance。状态输出同时包含 refill/maintenance active、waiting、priority-active 与 inventory state。

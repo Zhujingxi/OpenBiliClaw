@@ -47,8 +47,8 @@ def _status(
         or [
             {"n": 1, "label": "拉取数据", "status": "pending", "reason": None},
             {"n": 2, "label": "分析偏好", "status": "pending", "reason": None},
-            {"n": 3, "label": "生成画像", "status": "pending", "reason": None},
-            {"n": 4, "label": "发现内容池", "status": "pending", "reason": None},
+            {"n": 3, "label": "生成并保存完整画像", "status": "pending", "reason": None},
+            {"n": 4, "label": "生成首轮可用推荐", "status": "pending", "reason": None},
         ],
         "partial_success": partial_success,
         "can_start": can_start,
@@ -106,8 +106,8 @@ class GuidedInitStub:
             stages=[
                 {"n": 1, "label": "拉取数据", "status": "running", "reason": None},
                 {"n": 2, "label": "分析偏好", "status": "pending", "reason": None},
-                {"n": 3, "label": "生成画像", "status": "pending", "reason": None},
-                {"n": 4, "label": "发现内容池", "status": "pending", "reason": None},
+                {"n": 3, "label": "生成并保存完整画像", "status": "pending", "reason": None},
+                {"n": 4, "label": "生成首轮可用推荐", "status": "pending", "reason": None},
             ],
         )
 
@@ -117,8 +117,8 @@ class GuidedInitStub:
             stages=[
                 {"n": 1, "label": "拉取数据", "status": "ok", "reason": None},
                 {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
-                {"n": 3, "label": "生成画像", "status": "ok", "reason": None},
-                {"n": 4, "label": "发现内容池", "status": "ok", "reason": None},
+                {"n": 3, "label": "生成并保存完整画像", "status": "ok", "reason": None},
+                {"n": 4, "label": "生成首轮可用推荐", "status": "ok", "reason": None},
             ],
         )
 
@@ -130,8 +130,18 @@ class GuidedInitStub:
             stages=[
                 {"n": 1, "label": "拉取数据", "status": "ok", "reason": None},
                 {"n": 2, "label": "分析偏好", "status": "failed", "reason": "analyze_failed"},
-                {"n": 3, "label": "生成画像", "status": "failed", "reason": "analyze_failed"},
-                {"n": 4, "label": "发现内容池", "status": "failed", "reason": "analyze_failed"},
+                {
+                    "n": 3,
+                    "label": "生成并保存完整画像",
+                    "status": "failed",
+                    "reason": "analyze_failed",
+                },
+                {
+                    "n": 4,
+                    "label": "生成首轮可用推荐",
+                    "status": "failed",
+                    "reason": "analyze_failed",
+                },
             ],
         )
 
@@ -145,10 +155,10 @@ class GuidedInitStub:
             stages=[
                 {"n": 1, "label": "拉取数据", "status": "ok", "reason": None},
                 {"n": 2, "label": "分析偏好", "status": "ok", "reason": None},
-                {"n": 3, "label": "生成画像", "status": "ok", "reason": None},
+                {"n": 3, "label": "生成并保存完整画像", "status": "ok", "reason": None},
                 {
                     "n": 4,
-                    "label": "发现内容池",
+                    "label": "生成首轮可用推荐",
                     "status": "warning",
                     "reason": "discovery_timeout",
                 },
@@ -411,7 +421,7 @@ def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
     assert "首轮初始化" in chromium_page.locator('[data-panel="3"]').inner_text()
 
 
-def test_setup_wizard_e2e_waits_for_first_pool_before_finishing(
+def test_setup_wizard_e2e_partial_success_finishes_without_second_pool_wait(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
 ) -> None:
@@ -432,27 +442,10 @@ def test_setup_wizard_e2e_waits_for_first_pool_before_finishing(
     stub.set_discovery_timeout()
     stub.runtime_status.update({"initialized": True, "pool_available_count": 0})
     chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
-    chromium_page.wait_for_timeout(100)
-
-    assert chromium_page.locator('[data-panel="2"]').evaluate(
-        "el => el.classList.contains('active')"
-    )
-    assert chromium_page.locator('[data-panel="3"]').evaluate(
-        "el => !el.classList.contains('active')"
-    )
-    assert "首轮内容" in chromium_page.locator("#initProgressLabel").inner_text()
-    assert "超过 10 分钟" in chromium_page.locator("#initReason").inner_text()
-    assert "后台继续补池" in chromium_page.locator("#initReason").inner_text()
-    assert chromium_page.locator("#initReason").get_attribute("role") == "status"
-
-    stub.runtime_status.update({"pool_available_count": 12, "last_replenished_count": 12})
-    chromium_page.evaluate(
-        """() => window.__emitRuntimeEvent({
-            type: "refresh.pool_updated",
-            pool_available_count: 12
-        })"""
-    )
     chromium_page.wait_for_selector('[data-panel="3"].active')
+    assert "超过 10 分钟" in chromium_page.locator("#doneInit").inner_text()
+    assert "后台继续补池" in chromium_page.locator("#doneInit").inner_text()
+    assert chromium_page.locator("#finish").is_enabled()
 
 
 def test_setup_wizard_e2e_save_llm_does_not_start_guided_init(
@@ -525,7 +518,7 @@ def test_desktop_web_e2e_shows_init_cta_and_starts_same_init_endpoint(
     assert chromium_page.locator("#loadMoreBtn").is_visible()
 
 
-def test_desktop_web_e2e_waits_for_pool_before_init_completed_state(
+def test_desktop_web_e2e_partial_success_does_not_restore_init_card(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
 ) -> None:
@@ -540,21 +533,6 @@ def test_desktop_web_e2e_waits_for_pool_before_init_completed_state(
     stub.set_discovery_timeout()
     stub.runtime_status.update({"initialized": True, "pool_available_count": 0})
     chromium_page.evaluate("""() => window.__emitRuntimeEvent({ type: "init_completed" })""")
-    chromium_page.wait_for_timeout(100)
-
-    assert chromium_page.locator('.init-onboarding[data-init-phase="completed"]').count() == 0
-    assert chromium_page.locator(".init-onboarding").is_visible()
-    assert "首轮内容" in chromium_page.locator(".init-progress").inner_text()
-    assert "超过 10 分钟" in chromium_page.locator(".init-reason").inner_text()
-    assert "后台继续补池" in chromium_page.locator(".init-reason").inner_text()
-
-    stub.runtime_status.update({"pool_available_count": 12, "last_replenished_count": 12})
-    chromium_page.evaluate(
-        """() => window.__emitRuntimeEvent({
-            type: "refresh.pool_updated",
-            pool_available_count: 12
-        })"""
-    )
     chromium_page.wait_for_function("() => document.querySelector('.init-onboarding') === null")
     assert chromium_page.locator("#loadMoreBtn").is_visible()
 
@@ -791,25 +769,21 @@ def test_setup_wizard_e2e_resumes_running_init_on_page_load(
     assert stub.init_posts == []
 
 
-def test_setup_wizard_e2e_waiting_state_offers_escape_to_web(
+def test_setup_wizard_e2e_partial_success_enters_completion_screen(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
 ) -> None:
-    """Initialized backend + empty first pool → waiting state with a /web way out."""
+    """Terminal partial success never becomes a frontend-owned 95% wait."""
     base_url, stub = guided_init_server
     _install_fake_runtime_stream(chromium_page)
-    stub.set_initialized()
+    stub.set_discovery_timeout()
     stub.runtime_status.update({"initialized": True, "pool_available_count": 0})
 
     chromium_page.goto(f"{base_url}/setup/")
 
-    chromium_page.wait_for_selector('[data-panel="2"].active')
+    chromium_page.wait_for_selector('[data-panel="3"].active')
     chromium_page.wait_for_function(
-        "() => document.querySelector('#initProgressLabel')?.innerText.includes('整理首轮内容池')"
+        "() => document.querySelector('#doneTitle')?.innerText.includes('画像已就绪')"
     )
-    escape = chromium_page.locator("#initEscape")
-    chromium_page.wait_for_function(
-        "() => document.querySelector('#initEscape')?.classList.contains('show')"
-    )
-    assert escape.locator("a").get_attribute("href") == "/web"
-    assert chromium_page.locator("#startInit").is_disabled()
+    assert "后台继续补池" in chromium_page.locator("#doneInit").inner_text()
+    assert chromium_page.locator("#finish").is_enabled()

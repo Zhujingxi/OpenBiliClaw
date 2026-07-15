@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
@@ -23,11 +24,27 @@ logger = logging.getLogger(__name__)
 DEFAULT_LLM_CONCURRENCY = DEFAULT_TOTAL_LLM_CONCURRENCY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Iterator, Mapping
 
     from openbiliclaw.memory.manager import MemoryManager
 
     from .base import LLMResponse
+
+
+_BACKGROUND_ADMISSION_BYPASS: ContextVar[bool] = ContextVar(
+    "openbiliclaw_background_admission_bypass",
+    default=False,
+)
+
+
+@contextmanager
+def _background_admission_bypass() -> Iterator[None]:
+    """Bypass background admission within the current task context."""
+    token = _BACKGROUND_ADMISSION_BYPASS.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND_ADMISSION_BYPASS.reset(token)
 
 
 class SupportsComplete(Protocol):
@@ -364,7 +381,10 @@ class LLMService:
             )
 
         try:
-            async with self._provider_slot(caller=caller, bypass_background=bypass_semaphore):
+            async with self._provider_slot(
+                caller=caller,
+                bypass_background=(bypass_semaphore or _BACKGROUND_ADMISSION_BYPASS.get()),
+            ):
                 response = await _do_llm_call()
         except LLMProviderError as exc:
             raise LLMProviderExecutionError(str(exc)) from exc
