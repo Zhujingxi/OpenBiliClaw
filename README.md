@@ -605,16 +605,16 @@ background ─ background admission (default 3) ──────┘
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 模型连接 + 事务型有序 Chat / Embedding route（阶段 7）   │
-│ native [models] / legacy [llm] → ModelConfigService path lock │
-│ legacy [llm] 精确 raw/URL 检查 → chat/embed 映射与报告   │
-│ revision + credential action + resolution + local fence  │
-│ 完整 candidate build → legacy backup → temp/fsync/replace │
-│ RuntimeContext 短锁 swap；失败/取消恢复旧字节与精确对象身份 │
+│ native/legacy + base/local → ModelConfigService path lock │
+│ safe endpoint → 脱敏 snapshot；credential + local fence  │
+│ 完整 candidate build → canonical writer 即时重读/rebase/conflict │
+│ legacy backup → temp/fsync/replace → RuntimeContext swap  │
+│ 失败/取消恢复旧字节与精确对象身份；Task 8 前仍不切生产入口 │
 │ Chat 记录 → ID adapter → OrderedLLMRoute（全局原序）      │
 │ 总 deadline · revision circuit · exact probe · 安全 attempt │
 │ Embedding 共享设置 → ID adapter → OrderedEmbeddingRoute  │
 │ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
-│ Task 8 待办：production consumer/API/UI composition 与旧构造器删除 │
+│ 进程内 writer 协调；无跨进程文件锁；Task 8 仍负责 composition │
 ├────────────────────────────────────────────────┤
 │ LLMService 全路径 → 同一 route；caller 仅并发/usage    │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

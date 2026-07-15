@@ -602,16 +602,16 @@ background ─ background admission (default 3) ──────┘
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Transactional ordered Chat/Embedding model routes (stage 7) │
-│ native [models] / legacy [llm] → ModelConfigService path lock │
-│ legacy [llm] exact raw/URL inspection → chat/embed + report │
-│ revision + credential action + resolution + local fence    │
-│ complete candidate build → legacy backup → temp/fsync/replace │
-│ short RuntimeContext swap; failure/cancel restores bytes + identity │
+│ native/legacy + base/local → ModelConfigService path lock  │
+│ safe endpoint → redacted snapshot; credential + local fence │
+│ candidate build → canonical writer reread/rebase/conflict  │
+│ legacy backup → temp/fsync/replace → RuntimeContext swap   │
+│ failure/cancel restores bytes + exact identity             │
 │ Chat record → ID adapter → OrderedLLMRoute (global order)  │
 │ total deadline · revision circuits · exact probe · safe attempts │
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
-│ Task 8: production consumer/API/UI composition + old constructor removal │
+│ in-process writer boundary; no cross-process lock; Task 8 composition │
 ├────────────────────────────────────────────────┤
 │ LLMService paths → one route; caller is concurrency/usage only │
 │   LLM adapters · Source adapters (SourceAdapter) │

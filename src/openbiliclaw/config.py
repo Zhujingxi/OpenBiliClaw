@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import urlparse
 
+from openbiliclaw.config_write import coordinated_config_disk_write
 from openbiliclaw.model_config import (
     MigrationReport,
     ModelConfig,
@@ -2787,6 +2788,61 @@ def _toml_header_root(line: str) -> str | None:
     return roots[0] if len(roots) == 1 else None
 
 
+def _toml_quote_is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    cursor = index - 1
+    while cursor >= 0 and text[cursor] == "\\":
+        backslashes += 1
+        cursor -= 1
+    return backslashes % 2 == 1
+
+
+def _toml_multiline_state_after(line: str, state: str | None) -> str | None:
+    """Advance basic/literal multiline state through one valid TOML line."""
+    index = 0
+    limit = len(line)
+    while index < limit:
+        if state == "basic":
+            if line.startswith('"""', index) and not _toml_quote_is_escaped(line, index):
+                state = None
+                index += 3
+                continue
+            index += 1
+            continue
+        if state == "literal":
+            if line.startswith("'''", index):
+                state = None
+                index += 3
+                continue
+            index += 1
+            continue
+
+        if line[index] == "#":
+            break
+        if line.startswith('"""', index):
+            state = "basic"
+            index += 3
+            continue
+        if line.startswith("'''", index):
+            state = "literal"
+            index += 3
+            continue
+        if line[index] == '"':
+            index += 1
+            while index < limit:
+                if line[index] == '"' and not _toml_quote_is_escaped(line, index):
+                    index += 1
+                    break
+                index += 1
+            continue
+        if line[index] == "'":
+            closing = line.find("'", index + 1)
+            index = limit if closing < 0 else closing + 1
+            continue
+        index += 1
+    return state
+
+
 def render_model_config_document(original: bytes, models: ModelConfig) -> bytes:
     """Replace model authority while preserving every unrelated source byte.
 
@@ -2808,8 +2864,10 @@ def render_model_config_document(original: bytes, models: ModelConfig) -> bytes:
     skipping_model_block = False
     trailing_trivia: list[str] = []
     marker_added = False
+    multiline_state: str | None = None
     for line in lines:
-        root = _toml_header_root(line)
+        root = _toml_header_root(line) if multiline_state is None else None
+        multiline_state = _toml_multiline_state_after(line, multiline_state)
         if root is not None:
             if skipping_model_block:
                 if root not in _MODEL_DOCUMENT_ROOTS:
@@ -3048,8 +3106,27 @@ def save_config(
     autostart_authoritative: bool = False,
     models_authoritative: bool = False,
 ) -> Path:
-    """Persist config, rewriting model data only when explicitly authoritative."""
+    """Persist config through the canonical bounded disk-write section."""
     path = Path(config_path) if config_path is not None else _default_config_path()
+    with coordinated_config_disk_write(path):
+        return _save_config_unlocked(
+            config,
+            path,
+            config_path_was_default=config_path is None,
+            autostart_authoritative=autostart_authoritative,
+            models_authoritative=models_authoritative,
+        )
+
+
+def _save_config_unlocked(
+    config: Config,
+    path: Path,
+    *,
+    config_path_was_default: bool,
+    autostart_authoritative: bool,
+    models_authoritative: bool,
+) -> Path:
+    """Render and write while the caller owns the canonical disk section."""
     path_existed = path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -3065,7 +3142,7 @@ def save_config(
     # config.local.toml is merged ONLY when load_config runs with no explicit path
     # (production / default path). For a save to any other explicit file it was
     # never merged, so its overrides must not gate this render (review r11).
-    consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
+    consult_local = config_path_was_default or path.resolve() == _default_config_path().resolve()
     preserve_model_absence = path_existed or (consult_local and _local_model_table_exists())
     path.write_text(
         _render_config_toml(

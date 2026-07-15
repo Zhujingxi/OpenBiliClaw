@@ -10,6 +10,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias
 
+from openbiliclaw.config_write import (
+    coordinated_config_disk_write,
+    coordinated_config_write,
+)
+
 from ._service_storage import (
     AtomicWriteError as _AtomicWriteError,
 )
@@ -34,6 +39,7 @@ from ._service_storage import (
 from ._service_storage import (
     split_local_candidate as _split_local_candidate,
 )
+from .endpoints import InvalidModelEndpointError, validated_native_base_url
 from .migration import (
     MigrationReport,
     MigrationResolution,
@@ -460,6 +466,31 @@ def _validate_candidate(models: ModelConfig) -> None:
         raise ModelConfigValidationError(tuple(_field_error(issue) for issue in issues))
 
 
+def _validate_public_endpoints(models: ModelConfig) -> None:
+    errors: list[ModelConfigFieldError] = []
+    records: tuple[tuple[RouteRecord, str], ...] = tuple(
+        (record, f"models.chat.connections[{index}]")
+        for index, record in enumerate(models.chat.connections)
+    ) + tuple(
+        (record, f"models.embedding.providers[{index}]")
+        for index, record in enumerate(models.embedding.providers)
+    )
+    for record, path in records:
+        try:
+            validated_native_base_url(record.base_url)
+        except InvalidModelEndpointError:
+            errors.append(
+                ModelConfigFieldError(
+                    path=f"{path}.base_url",
+                    code="invalid_endpoint",
+                    message="Base URL must be a safe HTTP or HTTPS endpoint.",
+                    connection_id=record.id.strip() or None,
+                )
+            )
+    if errors:
+        raise ModelConfigValidationError(tuple(errors))
+
+
 async def _restore_transaction(
     state: _DiskState,
     path: Path,
@@ -467,7 +498,8 @@ async def _restore_transaction(
     previous: object | None,
 ) -> bool:
     """Restore both authorities; shield the short runtime-pointer swap."""
-    disk_restored = _restore_disk(state, path)
+    with coordinated_config_disk_write(path):
+        disk_restored = _restore_disk(state, path)
     try:
         await asyncio.shield(coordinator.restore_model_candidate(previous))
     except Exception:
@@ -500,7 +532,7 @@ class ModelConfigService:
 
     def _read_state(self) -> _DiskState:
         try:
-            return _read_disk_state(self.path, self.local_path, self._environment)
+            state = _read_disk_state(self.path, self.local_path, self._environment)
         except _StorageError as exc:
             raise _validation_error(
                 exc.path,
@@ -508,6 +540,8 @@ class ModelConfigService:
                 exc.message,
                 source=exc.source,
             ) from None
+        _validate_public_endpoints(state.models)
+        return state
 
     @staticmethod
     def _snapshot(state: _DiskState) -> ModelConfigSnapshot:
@@ -615,108 +649,145 @@ class ModelConfigService:
                 )
                 return ModelConfigSaveResult(ok=False, snapshot=snapshot, errors=(error,))
 
-            # Capture the exact old identity before persistence.  The coordinator's
-            # own short swap lock makes this the restoration token; no post-write
-            # property read is needed if the swap raises after changing its pointer.
-            previous = self.coordinator.current_model_candidate
+            # Candidate construction can await while ordinary writers finish.
+            # Join the canonical boundary only at commit time, then re-read and
+            # rebase under its bounded disk gate immediately before replacement.
+            async with coordinated_config_write(self.path):
+                with coordinated_config_disk_write(self.path):
+                    latest = self._read_state()
+                    latest_snapshot = self._snapshot(latest)
+                    if (
+                        latest.revision != state.revision
+                        or latest.authority_fingerprint != state.authority_fingerprint
+                    ):
+                        return ModelConfigSaveResult(
+                            ok=False,
+                            snapshot=latest_snapshot,
+                            conflict=True,
+                        )
 
-            try:
-                payload = _render_document(state.original, persisted)
-            except _StorageError as exc:
-                error = ModelConfigFieldError(
-                    exc.path,
-                    exc.code,
-                    exc.message,
-                    source=exc.source,
-                )
-                return ModelConfigSaveResult(ok=False, snapshot=snapshot, errors=(error,))
+                    persisted, effective = self._split_local_candidate(latest, requested)
+                    _validate_candidate(effective)
+                    rebased_revision = compute_model_revision(effective)
+                    if rebased_revision != revision:
+                        return ModelConfigSaveResult(
+                            ok=False,
+                            snapshot=latest_snapshot,
+                            conflict=True,
+                        )
+                    try:
+                        payload = _render_document(latest.original, persisted)
+                    except _StorageError as exc:
+                        error = ModelConfigFieldError(
+                            exc.path,
+                            exc.code,
+                            exc.message,
+                            source=exc.source,
+                        )
+                        return ModelConfigSaveResult(
+                            ok=False,
+                            snapshot=latest_snapshot,
+                            errors=(error,),
+                        )
 
-            backup_path: Path | None = None
-            if state.source == "legacy":
+                    # Capture the exact old runtime identity while ordinary API
+                    # transactions are excluded.  The disk gate is released
+                    # before awaiting the coordinator; the async owner remains
+                    # active through swap or rollback.
+                    previous = self.coordinator.current_model_candidate
+                    backup_path: Path | None = None
+                    if latest.base_source == "legacy":
+                        try:
+                            backup_path = _create_legacy_backup(
+                                self.path,
+                                latest.original,
+                                latest.mode,
+                            )
+                        except OSError:
+                            error = ModelConfigFieldError(
+                                "models.migration",
+                                "migration_backup_failed",
+                                "The legacy configuration backup could not be created safely.",
+                            )
+                            return ModelConfigSaveResult(
+                                ok=False,
+                                snapshot=latest_snapshot,
+                                errors=(error,),
+                            )
+
+                    try:
+                        _atomic_write(self.path, payload, latest.mode)
+                    except OSError as exc:
+                        replaced = isinstance(exc, _AtomicWriteError) and exc.replaced
+                        rollback_ok = _restore_disk(latest, self.path) if replaced else False
+                        if not replaced or rollback_ok:
+                            _remove_backup(backup_path)
+                        error = ModelConfigFieldError(
+                            "models",
+                            "config_write_failed",
+                            "The model configuration could not be written atomically.",
+                        )
+                        return ModelConfigSaveResult(
+                            ok=False,
+                            snapshot=latest_snapshot,
+                            rollback_applied=rollback_ok,
+                            errors=(error,),
+                        )
+
                 try:
-                    backup_path = _create_legacy_backup(
+                    await self.coordinator.swap_model_candidate(runtime_candidate)
+                except asyncio.CancelledError:
+                    rollback_ok = await _restore_transaction(
+                        latest,
                         self.path,
-                        state.original,
-                        state.mode,
+                        self.coordinator,
+                        previous,
                     )
-                except OSError:
+                    if rollback_ok:
+                        _remove_backup(backup_path)
+                    raise
+                except Exception:
+                    rollback_ok = await _restore_transaction(
+                        latest,
+                        self.path,
+                        self.coordinator,
+                        previous,
+                    )
+                    if rollback_ok:
+                        _remove_backup(backup_path)
                     error = ModelConfigFieldError(
-                        "models.migration",
-                        "migration_backup_failed",
-                        "The legacy configuration backup could not be created safely.",
+                        "models",
+                        "runtime_swap_failed",
+                        "The model runtime could not be swapped; restoration was attempted.",
                     )
-                    return ModelConfigSaveResult(ok=False, snapshot=snapshot, errors=(error,))
+                    return ModelConfigSaveResult(
+                        ok=False,
+                        snapshot=latest_snapshot,
+                        rollback_applied=rollback_ok,
+                        errors=(error,),
+                    )
 
-            try:
-                _atomic_write(self.path, payload, state.mode)
-            except OSError as exc:
-                replaced = isinstance(exc, _AtomicWriteError) and exc.replaced
-                rollback_ok = _restore_disk(state, self.path) if replaced else False
-                if not replaced or rollback_ok:
-                    _remove_backup(backup_path)
-                error = ModelConfigFieldError(
-                    "models",
-                    "config_write_failed",
-                    "The model configuration could not be written atomically.",
+                saved = replace(
+                    latest,
+                    models=effective,
+                    persisted_models=persisted,
+                    revision=revision,
+                    source="native",
+                    base_source="native",
+                    authority_fingerprint="",
+                    migration_state="none",
+                    migration=None,
+                    migration_result=None,
+                    original=payload,
+                    existed=True,
+                    local_legacy=False,
                 )
                 return ModelConfigSaveResult(
-                    ok=False,
-                    snapshot=snapshot,
-                    rollback_applied=rollback_ok,
-                    errors=(error,),
+                    ok=True,
+                    snapshot=self._snapshot(saved),
+                    reloaded=True,
+                    backup_path=backup_path,
                 )
-
-            try:
-                await self.coordinator.swap_model_candidate(runtime_candidate)
-            except asyncio.CancelledError:
-                rollback_ok = await _restore_transaction(
-                    state,
-                    self.path,
-                    self.coordinator,
-                    previous,
-                )
-                if rollback_ok:
-                    _remove_backup(backup_path)
-                raise
-            except Exception:
-                rollback_ok = await _restore_transaction(
-                    state,
-                    self.path,
-                    self.coordinator,
-                    previous,
-                )
-                if rollback_ok:
-                    _remove_backup(backup_path)
-                error = ModelConfigFieldError(
-                    "models",
-                    "runtime_swap_failed",
-                    "The model runtime could not be swapped; restoration was attempted.",
-                )
-                return ModelConfigSaveResult(
-                    ok=False,
-                    snapshot=snapshot,
-                    rollback_applied=rollback_ok,
-                    errors=(error,),
-                )
-
-            saved = _DiskState(
-                models=effective,
-                persisted_models=persisted,
-                revision=revision,
-                source="native",
-                migration_state="none",
-                original=payload,
-                mode=state.mode,
-                existed=True,
-                local_models=state.local_models,
-                overrides=state.overrides,
-            )
-            return ModelConfigSaveResult(
-                ok=True,
-                snapshot=self._snapshot(saved),
-                reloaded=True,
-                backup_path=backup_path,
-            )
 
     async def probe(
         self,

@@ -149,6 +149,7 @@ from openbiliclaw.api.models import (
     ZhihuSourceConfigOut,
     validate_saved_item_key,
 )
+from openbiliclaw.config_write import coordinated_config_write
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
@@ -196,7 +197,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
-_CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
 # Guided-init liveness heartbeat period (init-progress spec Phase 0). A stage-2
@@ -1549,7 +1549,7 @@ def create_app(
         """Local-only enable/disable + set/change of the password gate.
 
         Lives here (not in register_auth_routes) so it shares ``PUT /api/config``'s
-        ``_CONFIG_SAVE_LOCK`` + snapshot/rollback — its full-file ``save_config``
+        canonical path boundary + snapshot/rollback — its full-file ``save_config``
         must not race with a concurrent settings save (review r1#3). Callable only
         by a trusted-local client (extension / local UI / CLI), never a remote
         session ("change the lock only from inside the house"); applied live (no
@@ -1584,7 +1584,8 @@ def create_app(
         password = str(password) if password is not None else None
         ttl = body.get("session_ttl_hours")
 
-        async with _CONFIG_SAVE_LOCK:
+        config_path = _cfg_path()
+        async with coordinated_config_write(config_path):
             cfg = _load()  # re-read inside the lock to avoid clobbering a concurrent save
             auth = cfg.api.auth
             was_enabled = auth.enabled
@@ -1611,7 +1612,6 @@ def create_app(
             # while running — is caught by revoke_and_set_fingerprint comparing the
             # new fingerprint to the stored one inside its transaction (r4#2).
             force_bump = (auth.enabled != was_enabled) or bool(password and password.strip())
-            config_path = _cfg_path()
             config_existed = config_path.exists()
             backup_path = _snapshot_config_file(config_path)
 
@@ -2659,11 +2659,11 @@ def create_app(
             return
 
         try:
-            from openbiliclaw.config import Config, save_config
+            from openbiliclaw.config import Config, _default_config_path, save_config
 
             cfg = cast("Config", cfg)
 
-            async with _CONFIG_SAVE_LOCK:
+            async with coordinated_config_write(_default_config_path()):
                 save_config(cfg)
         except Exception:
             logger.warning("guided init source opt-in save_config failed", exc_info=True)
@@ -9688,9 +9688,7 @@ def create_app(
         publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
         if callable(publish):
             with suppress(Exception):
-                delivered = bool(
-                    await publish({"type": "extension_reload", "source": "dev"})
-                )
+                delivered = bool(await publish({"type": "extension_reload", "source": "dev"}))
         return {"ok": True, "delivered": delivered}
 
     def _autostart_status_out(
@@ -9812,8 +9810,8 @@ def create_app(
             )
             return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
 
-        async with _CONFIG_SAVE_LOCK:
-            config_path = _cfg_path()
+        config_path = _cfg_path()
+        async with coordinated_config_write(config_path):
             config_existed = config_path.exists()
             backup_path = _snapshot_config_file(config_path)
 
@@ -11164,7 +11162,8 @@ def create_app(
                 content=response.model_dump(mode="json"),
             )
 
-        async with _CONFIG_SAVE_LOCK:
+        config_path = _default_config_path()
+        async with coordinated_config_write(config_path):
             # gui-init D1 / spec §5b: re-check inside the lock. The middleware
             # gated this path on init_active before the handler ran, but a run
             # could have been reserved in between; saving + rebuilding config
@@ -11174,7 +11173,6 @@ def create_app(
                     {"error": "init_running", "detail": "初始化进行中，请稍后再保存配置"},
                     status_code=409,
                 )
-            config_path = _default_config_path()
             try:
                 backup_path = _snapshot_config_file(config_path)
             except Exception as exc:

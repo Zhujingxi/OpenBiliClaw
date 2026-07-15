@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from .endpoints import InvalidModelEndpointError, validated_native_base_url
 from .types import CredentialConfig, ModelConfig, ModelConfigIssue
 
 if TYPE_CHECKING:
@@ -174,6 +175,18 @@ def _validate_record(
             )
         )
         return issues
+
+    try:
+        validated_native_base_url(_text(record, "base_url"))
+    except InvalidModelEndpointError:
+        issues.append(
+            _issue(
+                f"{path}.base_url",
+                "invalid_endpoint",
+                "Base URL must be a safe HTTP or HTTPS endpoint.",
+                connection_id,
+            )
+        )
 
     if capability not in definition.capabilities:
         issues.append(

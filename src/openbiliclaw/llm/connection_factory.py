@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import ipaddress
 import os
-import unicodedata
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, cast
-from urllib.parse import urlsplit
 
 from openbiliclaw import network
+from openbiliclaw.model_config.endpoints import (
+    InvalidModelEndpointError,
+    validated_native_base_url,
+)
 from openbiliclaw.model_config.registry import connection_type_registry
 
 from .anthropic_provider import AnthropicCompatibleProvider
@@ -181,6 +182,8 @@ def build_chat_adapter(
             trust_env=trust_env,
         )
 
+    endpoint_override = _safe_native_endpoint(connection.base_url)
+
     api_key = _resolve_credential(
         connection.credential,
         connection_type=connection.type,
@@ -188,7 +191,7 @@ def build_chat_adapter(
         runtime_options=runtime_options,
     )
     if connection.type == "openai_compatible":
-        endpoint = _openai_endpoint(connection.preset, connection.base_url)
+        endpoint = _openai_endpoint(connection.preset, endpoint_override)
         proxy, trust_env = _transport_for(endpoint)
         return OpenAIProtocolProvider(
             api_key=api_key,
@@ -206,7 +209,7 @@ def build_chat_adapter(
             trust_env=trust_env,
         )
     if connection.type == "anthropic_compatible":
-        endpoint = _anthropic_endpoint(connection.preset, connection.base_url)
+        endpoint = _anthropic_endpoint(connection.preset, endpoint_override)
         proxy, trust_env = _transport_for(endpoint)
         return AnthropicCompatibleProvider(
             connection_id=connection.id,
@@ -218,7 +221,7 @@ def build_chat_adapter(
             trust_env=trust_env,
         )
     if connection.type == "gemini_api":
-        endpoint = connection.base_url.strip()
+        endpoint = endpoint_override
         proxy, trust_env = _transport_for(endpoint or _GEMINI_OFFICIAL_ENDPOINT)
         return GeminiProvider(
             api_key=api_key,
@@ -230,7 +233,7 @@ def build_chat_adapter(
             provider_name=connection.id,
         )
     if connection.type == "ollama":
-        endpoint = _ollama_endpoint(connection.base_url)
+        endpoint = _ollama_endpoint(endpoint_override)
         return OllamaProvider(
             api_key=api_key,
             model=connection.model,
@@ -251,6 +254,7 @@ def build_embedding_adapter(
     """Construct one embedding adapter bound to the exact shared settings."""
     _require_capability(provider.type, provider.preset, "embedding")
     timeout = _timeout(runtime_options)
+    endpoint_override = _safe_native_endpoint(provider.base_url)
     api_key = _resolve_credential(
         provider.credential,
         connection_type=provider.type,
@@ -260,7 +264,7 @@ def build_embedding_adapter(
     native: _EmbeddingProvider
 
     if provider.type == "openai_compatible":
-        endpoint = _openai_endpoint(provider.preset, provider.base_url)
+        endpoint = _openai_endpoint(provider.preset, endpoint_override)
         proxy, trust_env = _transport_for(endpoint)
         native = OpenAIProtocolProvider(
             api_key=api_key,
@@ -277,7 +281,7 @@ def build_embedding_adapter(
             trust_env=trust_env,
         )
     elif provider.type == "gemini_api":
-        endpoint = provider.base_url.strip()
+        endpoint = endpoint_override
         proxy, trust_env = _transport_for(endpoint or _GEMINI_OFFICIAL_ENDPOINT)
         native = GeminiProvider(
             api_key=api_key,
@@ -293,7 +297,7 @@ def build_embedding_adapter(
         native = DashScopeEmbeddingProvider(
             api_key=api_key,
             model=settings.model,
-            base_url=provider.base_url,
+            base_url=endpoint_override,
             timeout=timeout,
             embedding_output_dimensionality=settings.output_dimensionality,
         )
@@ -301,7 +305,7 @@ def build_embedding_adapter(
         native = OllamaProvider(
             api_key=api_key,
             model=settings.model,
-            base_url=_ollama_endpoint(provider.base_url),
+            base_url=_ollama_endpoint(endpoint_override),
             timeout=timeout,
             provider_name=provider.id,
             trust_env=False,
@@ -407,7 +411,9 @@ def _api_mode(value: str) -> Literal["chat_completions", "responses"]:
 def _openai_endpoint(preset: str, base_url: str) -> str:
     normalized_preset = preset.strip().lower()
     if normalized_preset == "custom":
-        return _validated_custom_endpoint(base_url)
+        if not base_url:
+            raise LLMProviderError("connection endpoint is invalid")
+        return base_url
     endpoint = base_url.strip() or _OPENAI_PRESET_ENDPOINTS.get(normalized_preset, "")
     if not endpoint:
         raise LLMProviderError("connection configuration is invalid")
@@ -415,82 +421,21 @@ def _openai_endpoint(preset: str, base_url: str) -> str:
 
 
 def _anthropic_endpoint(preset: str, base_url: str) -> str:
-    endpoint = base_url.strip()
+    endpoint = base_url
     if preset == "anthropic":
         return endpoint or _ANTHROPIC_OFFICIAL_ENDPOINT
     if preset == "custom":
-        return _validated_custom_endpoint(base_url)
+        if not endpoint:
+            raise LLMProviderError("connection endpoint is invalid")
+        return endpoint
     raise LLMProviderError("connection configuration is invalid")
 
 
-def _validated_custom_endpoint(value: str) -> str:
-    """Return one safe HTTP(S) endpoint without changing its path or port."""
-    candidate = value
-    invalid_text = (
-        not candidate
-        or candidate != candidate.strip()
-        or "\\" in candidate
-        or "?" in candidate
-        or "#" in candidate
-        or any(unicodedata.category(character) == "Cc" for character in candidate)
-    )
-    if invalid_text:
-        raise LLMProviderError("connection endpoint is invalid")
-    parsed = None
-    hostname = None
-    port = None
+def _safe_native_endpoint(value: str) -> str:
     try:
-        parsed = urlsplit(candidate)
-        hostname = parsed.hostname
-        port = parsed.port
-    except (TypeError, ValueError, UnicodeError):
-        parsed = None
-        hostname = None
-        port = None
-    if parsed is None:
+        return validated_native_base_url(value)
+    except InvalidModelEndpointError:
         raise LLMProviderError("connection endpoint is invalid") from None
-    invalid_structure = (
-        parsed.scheme.lower() not in {"http", "https"}
-        or not parsed.netloc
-        or hostname is None
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.netloc.endswith(":")
-        or (port is not None and port <= 0)
-        or not _valid_endpoint_hostname(hostname)
-    )
-    if invalid_structure:
-        raise LLMProviderError("connection endpoint is invalid")
-    return candidate
-
-
-def _valid_endpoint_hostname(hostname: str) -> bool:
-    if hostname.endswith(".."):
-        return False
-    normalized = hostname[:-1] if hostname.endswith(".") else hostname
-    if not normalized:
-        return False
-    try:
-        ipaddress.ip_address(normalized)
-    except ValueError:
-        try:
-            ascii_name = normalized.encode("idna").decode("ascii")
-        except UnicodeError:
-            return False
-        if len(ascii_name) > 253:
-            return False
-        labels = ascii_name.split(".")
-        return all(
-            0 < len(label) <= 63
-            and not label.startswith("-")
-            and not label.endswith("-")
-            and all(
-                character.isascii() and (character.isalnum() or character == "-")
-                for character in label
-            )
-            for label in labels
-        )
-    return True
 
 
 def _ollama_endpoint(base_url: str) -> str:

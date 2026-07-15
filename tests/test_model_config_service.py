@@ -14,12 +14,20 @@ import pytest
 
 import openbiliclaw.model_config._service_storage as storage_module
 import openbiliclaw.model_config.service as service_module
-from openbiliclaw.config import ConfigError, render_model_config_document
+from openbiliclaw.config import (
+    Config,
+    ConfigError,
+    load_config,
+    render_model_config_document,
+    save_config,
+)
+from openbiliclaw.config_write import ConfigWriteBusyError
 from openbiliclaw.model_config import (
     ChatConnection,
     ChatRouteConfig,
     CredentialConfig,
     EmbeddingModelSettings,
+    EmbeddingProviderConfig,
     EmbeddingRouteConfig,
     MigrationResolution,
     ModelConfig,
@@ -146,6 +154,167 @@ def _second_connection(connection_id: str = "secondary") -> ChatConnection:
         base_url="https://secondary.example.test/v1",
         credential=CredentialConfig(source="env", value="SECONDARY_API_KEY"),
         api_mode="chat_completions",
+    )
+
+
+_ENDPOINT_CASES = (
+    "chat-openai",
+    "chat-anthropic",
+    "chat-gemini",
+    "chat-ollama",
+    "chat-codex",
+    "embedding-openai",
+    "embedding-gemini",
+    "embedding-dashscope",
+    "embedding-ollama",
+)
+
+
+def _models_with_endpoint_case(case: str, endpoint: str) -> ModelConfig:
+    models = _models()
+    if case.startswith("chat-"):
+        connection_type, preset, credential = {
+            "chat-openai": ("openai_compatible", "openai", CredentialConfig()),
+            "chat-anthropic": ("anthropic_compatible", "anthropic", CredentialConfig()),
+            "chat-gemini": ("gemini_api", "", CredentialConfig()),
+            "chat-ollama": ("ollama", "", CredentialConfig()),
+            "chat-codex": (
+                "codex_oauth",
+                "",
+                CredentialConfig(source="oauth", value="codex"),
+            ),
+        }[case]
+        if connection_type not in {"ollama", "codex_oauth"}:
+            credential = CredentialConfig(source="inline", value="test-token-endpoint")
+        connection = ChatConnection(
+            id="primary",
+            name="Primary",
+            type=connection_type,
+            preset=preset,
+            model="chat-model",
+            base_url=endpoint,
+            credential=credential,
+            api_mode="chat_completions" if connection_type == "openai_compatible" else "",
+        )
+        return replace(models, chat=replace(models.chat, connections=(connection,)))
+
+    connection_type, preset, credential = {
+        "embedding-openai": ("openai_compatible", "openai", CredentialConfig()),
+        "embedding-gemini": ("gemini_api", "", CredentialConfig()),
+        "embedding-dashscope": ("dashscope_api", "", CredentialConfig()),
+        "embedding-ollama": ("ollama", "", CredentialConfig()),
+    }[case]
+    if connection_type != "ollama":
+        credential = CredentialConfig(source="inline", value="test-token-endpoint")
+    provider = EmbeddingProviderConfig(
+        id="embedding-primary",
+        name="Embedding Primary",
+        type=connection_type,
+        preset=preset,
+        base_url=endpoint,
+        credential=credential,
+    )
+    return replace(
+        models,
+        embedding=replace(models.embedding, enabled=True, providers=(provider,)),
+    )
+
+
+def _safe_endpoint_for_case(case: str) -> str:
+    if case == "chat-codex":
+        return ""
+    if case.endswith("ollama"):
+        return "http://127.0.0.1:11434/v1"
+    return "https://gateway.example.test/v1"
+
+
+def _assert_exception_chain_omits(exc: BaseException, *sentinels: str) -> None:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        rendered = f"{current!s}\n{current!r}"
+        for sentinel in sentinels:
+            assert sentinel not in rendered
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+
+@pytest.mark.parametrize("case", _ENDPOINT_CASES)
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://endpoint-user:endpoint-password@gateway.example.test/v1",
+        "https://gateway.example.test/v1?endpoint-query-secret=value",
+    ],
+)
+def test_read_fails_closed_for_every_unsafe_native_endpoint_without_disclosure(
+    tmp_path: Path,
+    case: str,
+    endpoint: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    _write_native(path, _models_with_endpoint_case(case, endpoint))
+    service = ModelConfigService(path, FakeCoordinator())
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        service.read()
+
+    assert any(error.code == "invalid_endpoint" for error in raised.value.errors)
+    _assert_exception_chain_omits(
+        raised.value,
+        endpoint,
+        "endpoint-user",
+        "endpoint-password",
+        "endpoint-query-secret",
+        "test-token-endpoint",
+    )
+
+
+@pytest.mark.parametrize("case", _ENDPOINT_CASES)
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://endpoint-user:endpoint-password@gateway.example.test/v1",
+        "https://gateway.example.test/v1?endpoint-query-secret=value",
+    ],
+)
+async def test_save_rejects_every_unsafe_native_endpoint_before_build_or_write(
+    tmp_path: Path,
+    case: str,
+    endpoint: str,
+) -> None:
+    path = tmp_path / "config.toml"
+    safe = _models_with_endpoint_case(case, _safe_endpoint_for_case(case))
+    _write_native(path, safe)
+    coordinator = FakeCoordinator()
+    service = ModelConfigService(path, coordinator)
+    snapshot = service.read()
+    before = path.read_bytes()
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        await service.save(
+            ModelConfigSaveRequest(
+                revision=snapshot.revision,
+                models=_models_with_endpoint_case(case, endpoint),
+            )
+        )
+
+    assert any(error.code == "invalid_endpoint" for error in raised.value.errors)
+    assert coordinator.build_calls == 0
+    assert path.read_bytes() == before
+    _assert_exception_chain_omits(
+        raised.value,
+        endpoint,
+        "endpoint-user",
+        "endpoint-password",
+        "endpoint-query-secret",
+        "test-token-endpoint",
     )
 
 
@@ -403,6 +572,40 @@ async def test_swap_cancellation_restores_disk_and_runtime_then_propagates(
     assert coordinator.restore_calls == 1
 
 
+async def test_sync_writer_fails_fast_while_model_swap_owns_transaction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    models = _models()
+    _write_native(path, models)
+    coordinator = BlockingSwapCoordinator()
+    service = ModelConfigService(path, coordinator)
+
+    save_task = asyncio.create_task(
+        service.save(
+            ModelConfigSaveRequest(
+                revision=service.read().revision,
+                models=replace(models, chat=replace(models.chat, timeout_seconds=120)),
+            )
+        )
+    )
+    await coordinator.swap_entered.wait()
+    ordinary = load_config(path)
+    ordinary.language = "en-US"
+
+    with pytest.raises(ConfigWriteBusyError):
+        save_config(ordinary, path)
+
+    coordinator.swap_release.set()
+    result = await save_task
+
+    assert result.ok is True
+    saved = load_config(path)
+    assert saved.language != "en-US"
+    assert saved.models is not None
+    assert saved.models.chat.timeout_seconds == 120
+
+
 async def test_swap_failure_restores_absent_original_as_absent(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     coordinator = FakeCoordinator()
@@ -566,6 +769,116 @@ async def test_global_per_resolved_path_lock_serializes_services_and_stales_seco
     assert first.ok is True
     assert second.conflict is True
     assert second_coordinator.build_calls == 0
+
+
+async def test_model_save_rebases_over_concurrent_ordinary_unrelated_write(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    models = _models()
+    save_config(
+        Config(language="zh-CN", models=models),
+        path,
+        models_authoritative=True,
+    )
+    coordinator = FakeCoordinator()
+    coordinator.build_entered = asyncio.Event()
+    coordinator.build_release = asyncio.Event()
+    service = ModelConfigService(path, coordinator)
+    revision = service.read().revision
+    save_task = asyncio.create_task(
+        service.save(
+            ModelConfigSaveRequest(
+                revision=revision,
+                models=replace(models, chat=replace(models.chat, timeout_seconds=120)),
+            )
+        )
+    )
+    await coordinator.build_entered.wait()
+
+    ordinary = load_config(path)
+    ordinary.language = "en-US"
+    save_config(ordinary, path)
+    coordinator.build_release.set()
+    result = await save_task
+
+    assert result.ok is True
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert parsed["general"]["language"] == "en-US"
+    assert parsed["models"]["chat"]["timeout_seconds"] == 120
+
+
+async def test_model_save_conflicts_when_authority_changes_during_candidate_build(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    models = _models()
+    save_config(Config(models=models), path, models_authoritative=True)
+    coordinator = FakeCoordinator()
+    coordinator.build_entered = asyncio.Event()
+    coordinator.build_release = asyncio.Event()
+    service = ModelConfigService(path, coordinator)
+    revision = service.read().revision
+    save_task = asyncio.create_task(
+        service.save(
+            ModelConfigSaveRequest(
+                revision=revision,
+                models=replace(models, chat=replace(models.chat, timeout_seconds=120)),
+            )
+        )
+    )
+    await coordinator.build_entered.wait()
+
+    winning_models = replace(models, chat=replace(models.chat, timeout_seconds=222))
+    ordinary = load_config(path)
+    ordinary.models = winning_models
+    save_config(ordinary, path, models_authoritative=True)
+    coordinator.build_release.set()
+    result = await save_task
+
+    assert result.ok is False
+    assert result.conflict is True
+    assert result.latest_revision == service.read().revision
+    assert coordinator.swap_calls == 0
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert parsed["models"]["chat"]["timeout_seconds"] == 222
+
+
+async def test_model_save_conflicts_when_same_revision_moves_to_local_authority(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    models = _models()
+    _write_native(path, models)
+    coordinator = FakeCoordinator()
+    coordinator.build_entered = asyncio.Event()
+    coordinator.build_release = asyncio.Event()
+    service = ModelConfigService(path, coordinator)
+    revision = service.read().revision
+    save_task = asyncio.create_task(
+        service.save(
+            ModelConfigSaveRequest(
+                revision=revision,
+                models=replace(models, chat=replace(models.chat, timeout_seconds=120)),
+            )
+        )
+    )
+    await coordinator.build_entered.wait()
+
+    local_path.write_text(
+        "\n".join(render_model_config(models)) + "\n",
+        encoding="utf-8",
+    )
+    path.write_text('[general]\nlanguage = "en-US"\n', encoding="utf-8")
+    coordinator.build_release.set()
+    result = await save_task
+
+    assert result.ok is False
+    assert result.conflict is True
+    assert result.latest_revision == revision
+    assert coordinator.swap_calls == 0
+    assert "models" not in tomllib.loads(path.read_text(encoding="utf-8"))
 
 
 async def test_pending_migration_requires_closed_resolutions_before_build(
@@ -814,6 +1127,162 @@ async def test_edit_outside_local_override_persists_base_without_baking_local(
     assert service.read().models.chat.concurrency == 9
 
 
+async def test_local_only_legacy_is_effective_and_blocks_explicit_save(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    path.write_text('[general]\nlanguage = "zh-CN"\n', encoding="utf-8")
+    local_path.write_text(
+        """
+[llm]
+default_provider = "deepseek"
+concurrency = 7
+timeout = 121
+
+[llm.deepseek]
+api_key = "test-token-local-only"
+model = "local-only-model"
+base_url = "https://api.deepseek.com"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    coordinator = FakeCoordinator()
+    service = ModelConfigService(path, coordinator)
+
+    snapshot = service.read()
+
+    assert snapshot.source == "legacy"
+    assert snapshot.migration_state == "ready"
+    assert snapshot.migration is not None
+    assert snapshot.models.chat.concurrency == 7
+    assert snapshot.models.chat.timeout_seconds == 121
+    assert snapshot.models.chat.connections[0].model == "local-only-model"
+    assert set(snapshot.override_paths) >= {
+        "llm.default_provider",
+        "llm.concurrency",
+        "llm.timeout",
+        "llm.deepseek.model",
+    }
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        await service.save(ModelConfigSaveRequest(revision=snapshot.revision))
+
+    assert raised.value.errors[0].code == "local_override_blocks_migration"
+    assert raised.value.errors[0].source == str(local_path.resolve())
+    assert coordinator.build_calls == 0
+
+
+def test_base_and_local_legacy_use_one_merged_migration_result(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    path.write_text(
+        """
+[llm]
+default_provider = "deepseek"
+concurrency = 4
+
+[llm.deepseek]
+api_key = "test-token-base"
+model = "base-model"
+base_url = "https://api.deepseek.com"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    local_path.write_text(
+        """
+[llm]
+concurrency = 8
+
+[llm.deepseek]
+model = "local-model"
+
+[llm.openai]
+api_key = "test-token-local-unrouted"
+model = "gpt-local"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    snapshot = ModelConfigService(path, FakeCoordinator()).read()
+
+    assert snapshot.source == "legacy"
+    assert snapshot.migration_state == "pending"
+    assert snapshot.models.chat.concurrency == 8
+    assert snapshot.models.chat.connections[0].model == "local-model"
+    assert snapshot.migration is not None
+    assert any(
+        issue.code == "unrouted_credential" and issue.provider == "openai"
+        for issue in snapshot.migration.issues
+    )
+    assert set(snapshot.override_paths) >= {
+        "llm.concurrency",
+        "llm.deepseek.model",
+        "llm.openai.api_key",
+        "llm.openai.model",
+    }
+    assert "test-token-local-unrouted" not in repr(snapshot)
+
+
+def test_local_native_authority_wins_over_base_and_local_legacy_tables(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    path.write_text(
+        """
+[llm]
+default_provider = "deepseek"
+
+[llm.deepseek]
+api_key = "test-token-base-legacy"
+model = "base-legacy-model"
+""".lstrip(),
+        encoding="utf-8",
+    )
+    local_native = replace(_models(), chat=replace(_models().chat, concurrency=6))
+    local_path.write_text(
+        "\n".join(render_model_config(local_native)) + '\n\n[llm]\ndefault_provider = "ollama"\n',
+        encoding="utf-8",
+    )
+
+    snapshot = ModelConfigService(path, FakeCoordinator()).read()
+
+    assert snapshot.source == "native"
+    assert snapshot.migration_state == "none"
+    assert snapshot.migration is None
+    assert snapshot.models.chat.concurrency == 6
+    assert snapshot.models.chat.connections[0].model == "chat-model"
+    assert snapshot.override_paths
+    assert all(path.startswith("models.") for path in snapshot.override_paths)
+
+
+def test_local_native_patch_wins_and_ignored_local_legacy_has_no_provenance(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    local_path = tmp_path / "config.local.toml"
+    _write_native(path, _models())
+    local_path.write_text(
+        """
+[models.chat]
+concurrency = 9
+
+[llm]
+default_provider = "ollama"
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    snapshot = ModelConfigService(path, FakeCoordinator()).read()
+
+    assert snapshot.source == "native"
+    assert snapshot.models.chat.concurrency == 9
+    assert snapshot.override_paths == ("models.chat.concurrency",)
+
+
 def test_stable_id_mutations_are_one_based_and_preserve_move_identity(tmp_path: Path) -> None:
     service = ModelConfigService(tmp_path / "config.toml", FakeCoordinator())
     first = _models()
@@ -970,6 +1439,59 @@ def test_document_renderer_preserves_boundary_trivia_and_unusual_non_model_root(
     rendered = render_model_config_document(native + boundary, _models())
 
     assert rendered == native + boundary
+
+
+def test_document_renderer_ignores_headers_inside_multiline_basic_string() -> None:
+    unrelated = (
+        b"[unrelated]\n"
+        b'value = """\n' + rb'text \""" remains inside the value' + b"\n"
+        b"[models]\n"
+        b"[llm]\n"
+        b"[[models.chat.connections]]\n"
+        b'"""\n'
+        b'keep = "exact" # keep-inline\n\n'
+    )
+    legacy = (
+        b"[llm]\n"
+        b'default_provider = "deepseek"\n\n'
+        b"[llm.deepseek]\n"
+        b'api_key = "test-token-old"\n'
+        b'model = "deepseek-chat"\n\n'
+    )
+    suffix = b"[after]\nanswer = 42 # exact\n"
+    original = unrelated + legacy + suffix
+
+    rendered = render_model_config_document(original, _models())
+
+    expected_models = ("\n".join(render_model_config(_models())) + "\n").encode()
+    assert rendered == unrelated + expected_models + b"\n" + suffix
+
+
+def test_document_renderer_ignores_headers_inside_multiline_literal_string() -> None:
+    unrelated = (
+        b"[unrelated]\n"
+        b"value = '''\n"
+        b"text '' remains inside the value\n"
+        b"[models]\n"
+        b"[llm]\n"
+        b"[[models.chat.connections]]\n"
+        b"'''\n"
+        b'keep = "exact" # keep-inline\n\n'
+    )
+    legacy = (
+        b"[llm]\n"
+        b'default_provider = "deepseek"\n\n'
+        b"[llm.deepseek]\n"
+        b'api_key = "test-token-old"\n'
+        b'model = "deepseek-chat"\n\n'
+    )
+    suffix = b"[after]\nanswer = 42 # exact\n"
+    original = unrelated + legacy + suffix
+
+    rendered = render_model_config_document(original, _models())
+
+    expected_models = ("\n".join(render_model_config(_models())) + "\n").encode()
+    assert rendered == unrelated + expected_models + b"\n" + suffix
 
 
 async def test_atomic_write_orders_file_fsync_replace_and_directory_fsync(

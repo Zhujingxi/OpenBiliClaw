@@ -18,6 +18,7 @@ from openbiliclaw.config import (
     load_config,
     save_config,
 )
+from openbiliclaw.config_write import coordinated_config_write
 from openbiliclaw.llm import connection_factory
 from openbiliclaw.llm.base import LLMProviderError
 from openbiliclaw.logging_setup import configure_logging
@@ -208,6 +209,32 @@ async def test_put_config_serializes_concurrent_saves(
     assert second.status_code == 200
     assert load_config(config_path).llm.openai.model == "gpt-5-mini"
     assert load_config(tmp_path / "config.toml.bak").llm.openai.model == "gpt-4.1-mini"
+
+
+@pytest.mark.asyncio
+async def test_put_config_waits_on_the_canonical_path_write_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(_valid_config(), config_path)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        async with coordinated_config_write(config_path):
+            request_task = asyncio.create_task(
+                client.put("/api/config", json={"language": "en-US"})
+            )
+            await asyncio.sleep(0.05)
+            assert request_task.done() is False
+        response = await request_task
+
+    assert response.status_code == 200
+    assert load_config(config_path).language == "en-US"
 
 
 async def test_runtime_model_candidate_swap_is_staged_and_identity_preserving() -> None:

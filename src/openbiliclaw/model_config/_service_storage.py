@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import stat
 import tempfile
@@ -49,6 +50,8 @@ class DiskState:
     persisted_models: ModelConfig = field(repr=False)
     revision: str
     source: str
+    base_source: str
+    authority_fingerprint: str = field(repr=False)
     migration_state: str
     migration: MigrationReport | None = None
     migration_result: LegacyMigrationResult | None = field(
@@ -185,6 +188,33 @@ def _select_models(
     )
 
 
+def _authority_fingerprint(
+    raw: Mapping[str, object],
+    local_raw: Mapping[str, object],
+    *,
+    base_source: str,
+    effective_source: str,
+) -> str:
+    """Hash base persistence and effective local authority without disclosure."""
+    base_key = "models" if base_source == "native" else "llm" if base_source == "legacy" else ""
+    local_key = (
+        "models"
+        if effective_source == "native" and "models" in local_raw
+        else "llm"
+        if effective_source == "legacy" and "llm" in local_raw
+        else ""
+    )
+    payload = (
+        base_source,
+        base_key,
+        raw.get(base_key) if base_key else None,
+        effective_source,
+        local_key,
+        local_raw.get(local_key) if local_key else None,
+    )
+    return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()
+
+
 def _read_toml(path: Path, *, missing_ok: bool) -> tuple[bytes, dict[str, object]]:
     try:
         payload = path.read_bytes()
@@ -212,7 +242,7 @@ def read_disk_state(
     """Read base and local layers once and return effective provenance."""
     try:
         original, raw = _read_toml(path, missing_ok=True)
-        selection = _select_models(raw, environment)
+        base_selection = _select_models(raw, environment)
     except OSError:
         raise StorageError(
             "models",
@@ -226,7 +256,8 @@ def read_disk_state(
             "Model configuration is not valid TOML.",
         ) from None
 
-    effective_models = selection.models
+    effective_selection = base_selection
+    local_raw: dict[str, object] = {}
     local_models: Mapping[str, object] | None = None
     local_legacy = False
     overrides: tuple[StorageOverride, ...] = ()
@@ -240,9 +271,23 @@ def read_disk_state(
                 "Local model overrides could not be read safely.",
                 source=str(local_path),
             ) from None
+        try:
+            effective_selection = _select_models(
+                _deep_merge(raw, local_raw),
+                environment,
+            )
+        except (ModelConfigParseError, TypeError, ValueError):
+            raise StorageError(
+                "models",
+                "config_parse_failed",
+                "Local model overrides do not form a valid model configuration.",
+                source=str(local_path),
+            ) from None
+
         local_models_value = local_raw.get("models")
-        if local_models_value is not None:
-            if not isinstance(local_models_value, Mapping):
+        local_llm_value = local_raw.get("llm")
+        if effective_selection.source == "native" and local_models_value is not None:
+            if not isinstance(local_models_value, Mapping):  # pragma: no cover - selection guard
                 raise StorageError(
                     "models",
                     "config_parse_failed",
@@ -250,17 +295,6 @@ def read_disk_state(
                     source=str(local_path),
                 )
             local_models = dict(local_models_value)
-            try:
-                effective_models = parse_model_config(
-                    _deep_merge(_models_raw(selection.models), local_models)
-                )
-            except (ModelConfigParseError, TypeError, ValueError):
-                raise StorageError(
-                    "models",
-                    "config_parse_failed",
-                    "Local model overrides do not form a valid model configuration.",
-                    source=str(local_path),
-                ) from None
             overrides = tuple(
                 StorageOverride(
                     path="models." + ".".join(item_path),
@@ -268,10 +302,8 @@ def read_disk_state(
                 )
                 for item_path in _leaf_paths(local_models)
             )
-        elif selection.source == "legacy" and "llm" in local_raw:
-            local_llm = local_raw["llm"]
-            base_llm = raw.get("llm")
-            if not isinstance(local_llm, Mapping) or not isinstance(base_llm, Mapping):
+        elif effective_selection.source == "legacy" and local_llm_value is not None:
+            if not isinstance(local_llm_value, Mapping):  # pragma: no cover - selection guard
                 raise StorageError(
                     "llm",
                     "config_parse_failed",
@@ -279,15 +311,12 @@ def read_disk_state(
                     source=str(local_path),
                 )
             local_legacy = True
-            merged = dict(raw)
-            merged["llm"] = _deep_merge(base_llm, local_llm)
-            effective_models = _select_models(merged, environment).models
             overrides = tuple(
                 StorageOverride(
                     path="llm." + ".".join(item_path),
                     source=str(local_path),
                 )
-                for item_path in _leaf_paths(local_llm)
+                for item_path in _leaf_paths(local_llm_value)
             )
 
     try:
@@ -297,13 +326,20 @@ def read_disk_state(
         mode = 0o600
         existed = False
     return DiskState(
-        models=effective_models,
-        persisted_models=selection.models,
-        revision=compute_model_revision(effective_models),
-        source=selection.source,
-        migration_state=selection.migration_state,
-        migration=selection.migration,
-        migration_result=selection.migration_result,
+        models=effective_selection.models,
+        persisted_models=base_selection.models,
+        revision=compute_model_revision(effective_selection.models),
+        source=effective_selection.source,
+        base_source=base_selection.source,
+        authority_fingerprint=_authority_fingerprint(
+            raw,
+            local_raw,
+            base_source=base_selection.source,
+            effective_source=effective_selection.source,
+        ),
+        migration_state=effective_selection.migration_state,
+        migration=effective_selection.migration,
+        migration_result=effective_selection.migration_result,
         original=original,
         mode=mode,
         existed=existed,

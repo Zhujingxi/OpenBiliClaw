@@ -1452,6 +1452,143 @@ def test_factory_resolves_endpoint_aware_proxy_policy_internally(
     assert fake_openai_clients[0].kwargs["base_url"] == "https://gateway.example.test/v1"
 
 
+@pytest.mark.parametrize(
+    ("capability", "record"),
+    [
+        (
+            "chat",
+            ChatConnection(
+                id="chat-openai",
+                name="OpenAI",
+                type="openai_compatible",
+                preset="openai",
+                model="chat-model",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+                credential=_inline("credential-secret"),
+                api_mode="chat_completions",
+            ),
+        ),
+        (
+            "chat",
+            ChatConnection(
+                id="chat-anthropic",
+                name="Anthropic",
+                type="anthropic_compatible",
+                preset="anthropic",
+                model="chat-model",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+                credential=_inline("credential-secret"),
+            ),
+        ),
+        (
+            "chat",
+            ChatConnection(
+                id="chat-gemini",
+                name="Gemini",
+                type="gemini_api",
+                model="chat-model",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+                credential=_inline("credential-secret"),
+            ),
+        ),
+        (
+            "chat",
+            ChatConnection(
+                id="chat-ollama",
+                name="Ollama",
+                type="ollama",
+                model="chat-model",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+            ),
+        ),
+        (
+            "embedding",
+            EmbeddingProviderConfig(
+                id="embedding-openai",
+                name="OpenAI",
+                type="openai_compatible",
+                preset="openai",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+                credential=_inline("credential-secret"),
+            ),
+        ),
+        (
+            "embedding",
+            EmbeddingProviderConfig(
+                id="embedding-gemini",
+                name="Gemini",
+                type="gemini_api",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+                credential=_inline("credential-secret"),
+            ),
+        ),
+        (
+            "embedding",
+            EmbeddingProviderConfig(
+                id="embedding-dashscope",
+                name="DashScope",
+                type="dashscope_api",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+                credential=_inline("credential-secret"),
+            ),
+        ),
+        (
+            "embedding",
+            EmbeddingProviderConfig(
+                id="embedding-ollama",
+                name="Ollama",
+                type="ollama",
+                base_url="https://gateway.example.test/v1?endpoint-secret=value",
+            ),
+        ),
+    ],
+)
+def test_every_native_endpoint_is_rejected_before_credentials_transport_or_sdk_callbacks(
+    capability: str,
+    record: ChatConnection | EmbeddingProviderConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _factory()
+    callbacks: list[str] = []
+
+    def credential_callback(*_: object, **__: object) -> str:
+        callbacks.append("credential")
+        return "must-not-be-resolved"
+
+    def transport_callback(_: str) -> tuple[str, bool]:
+        callbacks.append("transport")
+        return "", False
+
+    def sdk_callback(*_: object, **__: object) -> object:
+        callbacks.append("sdk")
+        return object()
+
+    monkeypatch.setattr(factory, "_resolve_credential", credential_callback)
+    monkeypatch.setattr(factory, "_transport_for", transport_callback)
+    for name in (
+        "OpenAIProtocolProvider",
+        "AnthropicCompatibleProvider",
+        "GeminiProvider",
+        "OllamaProvider",
+        "DashScopeEmbeddingProvider",
+    ):
+        monkeypatch.setattr(factory, name, sdk_callback)
+
+    with pytest.raises(LLMProviderError, match="^connection endpoint is invalid$") as raised:
+        if capability == "chat":
+            factory.build_chat_adapter(cast("ChatConnection", record), _runtime_options())
+        else:
+            factory.build_embedding_adapter(
+                cast("EmbeddingProviderConfig", record),
+                EmbeddingModelSettings(model="embedding-model"),
+                _runtime_options(),
+            )
+
+    assert callbacks == []
+    _assert_error_chain_omits(raised.value, "endpoint-secret")
+    _assert_error_chain_omits(raised.value, "credential-secret")
+
+
 @pytest.mark.parametrize("protocol", ["openai", "anthropic"])
 @pytest.mark.parametrize(
     "endpoint",

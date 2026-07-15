@@ -377,14 +377,15 @@ background ─ background admission (default 3) ──────┘
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
 │       模型连接 + 事务型有序 Chat / Embedding route（阶段 7）     │
-│ native [models] → strict parser/revision ────────────────┐    │
-│ legacy [llm] → exact raw/URL inspection → chat/embed map ┤    │
+│ native [models] → strict parser/revision/safe endpoint ──┐    │
+│ legacy [llm] → effective base+local inspection/map ──────┤    │
 │                 → secret-safe report → closed resolution │    │
 │                 → authoritative final validation ────────┤    │
 │                                                         └→ ModelConfigService path lock │
 │ redacted snapshot/revision → credential action → local fence │
-│ build complete RuntimeContext candidate → legacy backup      │
-│ same-dir temp/file fsync/replace/dir fsync → pointer swap     │
+│ build complete RuntimeContext candidate → canonical writer   │
+│ immediate reread → unrelated rebase / authority conflict     │
+│ legacy backup → temp/file fsync/replace/dir fsync → swap      │
 │ swap failure/cancel → restore old bytes, mode, exact identity │
 │ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
 │                                   ├→ total deadline + safe attempts │
