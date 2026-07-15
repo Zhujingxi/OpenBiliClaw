@@ -34,7 +34,7 @@ from openbiliclaw.soul.speculator import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
     from openbiliclaw.storage.database import PoolMaintenanceResult
@@ -43,6 +43,16 @@ logger = logging.getLogger(__name__)
 
 _MAX_DISCOVERY_BACKFILL_PER_REFRESH = 60
 _DEFAULT_CANDIDATE_EVAL_BATCH_SIZE = 45
+# CALIBRATION PROVENANCE: production pools are normally 300-500 rows. Eight
+# batches of 50 can converge one full pool in a tick while committing/releasing
+# the writer lock between batches. Larger backlogs continue on the next tick.
+_POOL_MAINTENANCE_BATCH_SIZE = 50
+_POOL_MAINTENANCE_MAX_BATCHES_PER_TICK = 8
+# Even when readiness counts remain stable, time-based stale eligibility and
+# same-count topic/source replacement can change maintenance outcomes. A
+# 10-minute safety pass bounds that drift while avoiding full ranked scans on
+# every 60-second scheduler tick.
+_POOL_MAINTENANCE_SAFETY_SCAN_SECONDS = 10 * 60
 
 
 class InitialPoolUnavailableError(RuntimeError):
@@ -407,11 +417,14 @@ class ContinuousRefreshController:
     _manual_refresh_started_at: str = ""
     _manual_refresh_finished_at: str = ""
     _pending_replenishment_reasons: set[str] = field(default_factory=set, init=False)
-    # Last-tick fingerprint of pool maintenance state, used to demote
-    # the per-minute "reactivated=N" / "trim dropped=N top=X" log lines
-    # to DEBUG when nothing actually changed since the previous tick.
-    # INFO fires only when the count or top-group rotates.
-    _last_pool_maintenance_fingerprint: tuple[int, int, str] = (-1, -1, "")
+    # A cheap readiness fingerprint skips repeated ranked maintenance scans.
+    # Forced/post-refresh paths bypass it, and a periodic safety pass still
+    # catches stale-time or same-count composition changes.
+    _last_pool_maintenance_fingerprint: tuple[int, int, int, int, int] | None = field(
+        default=None,
+        init=False,
+    )
+    _last_pool_maintenance_scan_at: datetime | None = field(default=None, init=False)
     _warned_pool_count_fallbacks: set[str] = field(default_factory=set, init=False)
     # Last pool_available count emitted via the runtime event stream so
     # popup-side ``mergeRuntimeStatusEvent`` only re-renders when the
@@ -482,15 +495,7 @@ class ContinuousRefreshController:
         nickname = self._xhs_self_nickname()
         try:
             readiness = self.database.count_pool_readiness(xhs_self_nickname=nickname)
-            available = int(readiness.get("available", 0))
-            counts = {
-                "available": max(0, available),
-                "raw": max(0, int(readiness.get("raw", available))),
-                "pending": max(0, int(readiness.get("pending", 0))),
-                "admitted_pending_copy": max(0, int(readiness.get("admitted_pending_copy", 0))),
-                "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
-                "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
-            }
+            counts = self._normalize_pool_readiness(readiness)
         except Exception:
             available = int(self.database.count_pool_candidates(xhs_self_nickname=nickname))
             counts = {
@@ -501,6 +506,35 @@ class ContinuousRefreshController:
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
+        self._update_llm_inventory_state(counts["available"])
+        return counts
+
+    @staticmethod
+    def _normalize_pool_readiness(readiness: Mapping[str, int]) -> dict[str, int]:
+        """Normalize durable readiness fields for runtime/API payloads."""
+        available = int(readiness.get("available", 0))
+        return {
+            "available": max(0, available),
+            "raw": max(0, int(readiness.get("raw", available))),
+            "pending": max(0, int(readiness.get("pending", 0))),
+            "admitted_pending_copy": max(
+                0,
+                int(readiness.get("admitted_pending_copy", 0)),
+            ),
+            "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
+            "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
+        }
+
+    async def _pool_readiness_counts_async(self) -> dict[str, int]:
+        """Read readiness off-loop when the production DB worker is available."""
+        try:
+            readiness = await self._read_isolated_pool_readiness()
+        except Exception:
+            logger.debug("isolated runtime pool status read failed", exc_info=True)
+            readiness = None
+        if readiness is None:
+            return await asyncio.to_thread(self._pool_readiness_counts)
+        counts = self._normalize_pool_readiness(readiness)
         self._update_llm_inventory_state(counts["available"])
         return counts
 
@@ -822,7 +856,7 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return _result({"refreshed": False, "strategies": [], "reason": "not_initialized"})
 
-        pool_at_cap = await self._enforce_pool_cap_async()
+        pool_at_cap = await self._enforce_pool_cap_async(force_scan=True)
         await self._publish_pool_status_if_changed()
         if pool_at_cap:
             return _result({"refreshed": False, "strategies": [], "reason": "pool_at_cap"})
@@ -846,38 +880,69 @@ class ContinuousRefreshController:
         raw material cap. Raw rows may exceed it until ``_raw_material_ceiling``.
         """
         self._last_pool_maintenance_succeeded = False
-        raw_ceiling = self._raw_material_ceiling()
+        kwargs = self._pool_maintenance_kwargs()
+        bounded = callable(getattr(self.database, "maintain_pool_inventory_async", None))
+        last_at_target = False
         try:
-            result = self.database.maintain_pool_inventory(
-                target=self.pool_target_count,
-                raw_ceiling=raw_ceiling,
-                source_share_quotas=self._source_target_counts(),
-                raw_source_share_quotas=self._raw_source_target_counts(),
-                max_per_topic_group=max(3, self.pool_target_count // 10),
-                max_per_explore_cluster=3,
-                stale_max_age_days=14,
-                xhs_self_nickname=self._xhs_self_nickname(),
-            )
+            for _batch_index in range(_POOL_MAINTENANCE_MAX_BATCHES_PER_TICK if bounded else 1):
+                call_kwargs = dict(kwargs)
+                if bounded:
+                    call_kwargs["max_mutations"] = _POOL_MAINTENANCE_BATCH_SIZE
+                maintain = cast("Any", self.database.maintain_pool_inventory)
+                result = maintain(**call_kwargs)
+                last_at_target = self._record_pool_maintenance_result(result)
+                if not bool(getattr(result, "has_more", False)):
+                    break
+            return last_at_target
         except Exception:
-            logger.exception("atomic pool maintenance failed")
+            logger.exception("bounded pool maintenance failed")
             pool_available = self.database.count_pool_candidates(
                 xhs_self_nickname=self._xhs_self_nickname()
             )
             self._update_llm_inventory_state(pool_available)
             return pool_available >= self.pool_target_count
 
+    def _pool_maintenance_kwargs(self) -> dict[str, object]:
+        """Build the canonical arguments shared by sync and async runners."""
+        return {
+            "target": self.pool_target_count,
+            "raw_ceiling": self._raw_material_ceiling(),
+            "source_share_quotas": self._source_target_counts(),
+            "raw_source_share_quotas": self._raw_source_target_counts(),
+            "max_per_topic_group": max(3, self.pool_target_count // 10),
+            "max_per_explore_cluster": 3,
+            "stale_max_age_days": 14,
+            "xhs_self_nickname": self._xhs_self_nickname(),
+        }
+
+    def _record_pool_maintenance_result(self, result: PoolMaintenanceResult) -> bool:
+        """Publish one batch's metrics and update the in-memory inventory gate."""
         log_fn = logger.error if result.rolled_back else logger.info
         log_fn(
-            "pool_maintenance available_before=%s available_after=%s target=%s "
-            "protected_available=%s recovered_suppressed=%s trimmed_stale=%s "
-            "trimmed_explore_cluster=%s trimmed_ready_reserve=%s trimmed_evaluated=%s "
-            "trimmed_raw=%s trimmed_by_source=%s deferred_topic_trim=%s "
-            "deferred_source_trim=%s deferred_stale_trim=%s "
-            "deferred_explore_cluster_trim=%s raw_before=%s raw_after=%s "
-            "raw_ceiling=%s untrimmed_raw_excess=%s rolled_back=%s reason=%s",
+            "pool_maintenance available=%s->%s target=%s raw=%s->%s/%s "
+            "mutations=%s has_more=%s lock_wait_ms=%.1f total_ms=%.1f "
+            "rolled_back=%s reason=%s",
             result.available_before,
             result.available_after,
             result.target,
+            result.raw_before,
+            result.raw_after,
+            result.raw_ceiling,
+            getattr(result, "mutation_count", 0),
+            getattr(result, "has_more", False),
+            float(getattr(result, "lock_wait_ms", 0.0)),
+            float(getattr(result, "total_ms", 0.0)),
+            result.rolled_back,
+            result.reason,
+        )
+        logger.debug(
+            "pool_maintenance_detail protected_available=%s recovered_suppressed=%s "
+            "trimmed_stale=%s trimmed_explore_cluster=%s trimmed_ready_reserve=%s "
+            "trimmed_evaluated=%s trimmed_raw=%s trimmed_by_source=%s "
+            "deferred_topic_trim=%s deferred_source_trim=%s deferred_stale_trim=%s "
+            "deferred_explore_cluster_trim=%s untrimmed_raw_excess=%s "
+            "recovery_ms=%.1f stale_ms=%.1f explore_ms=%.1f topic_ms=%.1f "
+            "source_ms=%.1f raw_ms=%.1f write_ms=%.1f",
             result.protected_available,
             result.recovered_suppressed,
             result.trimmed_stale,
@@ -890,12 +955,14 @@ class ContinuousRefreshController:
             result.deferred_source_trim,
             result.deferred_stale_trim,
             result.deferred_explore_cluster_trim,
-            result.raw_before,
-            result.raw_after,
-            result.raw_ceiling,
             result.untrimmed_raw_excess,
-            result.rolled_back,
-            result.reason,
+            float(getattr(result, "recovery_ms", 0.0)),
+            float(getattr(result, "stale_trim_ms", 0.0)),
+            float(getattr(result, "explore_trim_ms", 0.0)),
+            float(getattr(result, "topic_trim_ms", 0.0)),
+            float(getattr(result, "source_trim_ms", 0.0)),
+            float(getattr(result, "raw_trim_ms", 0.0)),
+            float(getattr(result, "write_ms", 0.0)),
         )
         if result.rolled_back:
             self._update_llm_inventory_state(result.available_before)
@@ -904,16 +971,117 @@ class ContinuousRefreshController:
         self._update_llm_inventory_state(result.available_after)
         return result.at_target
 
-    async def _enforce_pool_cap_async(self) -> bool:
+    @staticmethod
+    def _pool_maintenance_fingerprint(
+        counts: dict[str, int],
+    ) -> tuple[int, int, int, int, int]:
+        """Return the stable inventory fields that gate heavy maintenance."""
+        return (
+            max(0, int(counts.get("available", 0))),
+            max(0, int(counts.get("raw", 0))),
+            max(0, int(counts.get("pending", 0))),
+            max(0, int(counts.get("pending_eval", 0))),
+            max(0, int(counts.get("evaluated_pending", 0))),
+        )
+
+    async def _read_isolated_pool_readiness(self) -> dict[str, int] | None:
+        """Read readiness on the serve worker when the database supports it."""
+        reader = getattr(self.database, "count_pool_readiness_isolated_async", None)
+        if not callable(reader):
+            return None
+        counts = await reader(xhs_self_nickname=self._xhs_self_nickname())
+        return {str(key): max(0, int(value)) for key, value in counts.items()}
+
+    async def _enforce_pool_cap_async(self, *, force_scan: bool = False) -> bool:
         """Run SQLite-heavy pool maintenance without blocking the API loop.
 
-        ``maintain_pool_inventory`` intentionally owns one atomic write
-        transaction and performs several ranked pool scans.  Mature databases
-        can make that work noticeable even with the supporting indexes, so all
-        async refresh paths dispatch it to a worker thread.  Startup maintenance
-        remains synchronous because the API is not accepting traffic yet.
+        Production uses the database-owned, single-thread maintenance worker.
+        Each call mutates at most 50 rows, commits, and returns ``has_more``;
+        this coroutine explicitly yields between batches. The interactive
+        serve worker is separate, so a blocked maintenance batch cannot queue a
+        recommendation read behind it.
         """
-        return await asyncio.to_thread(self._enforce_pool_cap)
+        runner = getattr(self.database, "maintain_pool_inventory_async", None)
+        if not callable(runner):
+            # Test doubles and legacy adapters retain the old off-loop bridge.
+            return await asyncio.to_thread(self._enforce_pool_cap)
+
+        self._last_pool_maintenance_succeeded = False
+        if not force_scan:
+            try:
+                pre_counts = await self._read_isolated_pool_readiness()
+            except Exception:
+                logger.debug("pool maintenance fingerprint read failed", exc_info=True)
+                pre_counts = None
+            if pre_counts is not None:
+                fingerprint = self._pool_maintenance_fingerprint(pre_counts)
+                last_scan = self._last_pool_maintenance_scan_at
+                safety_due = (
+                    last_scan is None
+                    or (self._now() - last_scan).total_seconds()
+                    >= _POOL_MAINTENANCE_SAFETY_SCAN_SECONDS
+                )
+                if fingerprint == self._last_pool_maintenance_fingerprint and not safety_due:
+                    assert last_scan is not None
+                    pool_available = fingerprint[0]
+                    self._last_pool_maintenance_succeeded = True
+                    self._update_llm_inventory_state(pool_available)
+                    logger.debug(
+                        "pool maintenance skipped unchanged fingerprint=%s safety_age_s=%.1f",
+                        fingerprint,
+                        (self._now() - last_scan).total_seconds(),
+                    )
+                    return pool_available >= self.pool_target_count
+
+        kwargs = self._pool_maintenance_kwargs()
+        last_at_target = False
+        has_more = False
+        for _batch_index in range(_POOL_MAINTENANCE_MAX_BATCHES_PER_TICK):
+            try:
+                result = await runner(
+                    **kwargs,
+                    max_mutations=_POOL_MAINTENANCE_BATCH_SIZE,
+                )
+            except Exception as exc:
+                if "Deferred" in type(exc).__name__ or "writer busy" in str(exc).lower():
+                    logger.info("pool maintenance deferred: %s", exc)
+                else:
+                    logger.exception("bounded pool maintenance worker failed")
+                readiness_reader = getattr(
+                    self.database,
+                    "count_pool_readiness_isolated_async",
+                    None,
+                )
+                if callable(readiness_reader):
+                    counts = await readiness_reader(xhs_self_nickname=self._xhs_self_nickname())
+                    pool_available = max(0, int(counts.get("available", 0)))
+                else:
+                    pool_available = await asyncio.to_thread(
+                        self.database.count_pool_candidates,
+                        xhs_self_nickname=self._xhs_self_nickname(),
+                    )
+                self._update_llm_inventory_state(pool_available)
+                return pool_available >= self.pool_target_count
+
+            last_at_target = self._record_pool_maintenance_result(result)
+            has_more = bool(getattr(result, "has_more", False))
+            if not has_more:
+                break
+            await asyncio.sleep(0)
+        if has_more:
+            self._last_pool_maintenance_fingerprint = None
+        elif self._last_pool_maintenance_succeeded:
+            try:
+                after_counts = await self._read_isolated_pool_readiness()
+            except Exception:
+                logger.debug("post-maintenance fingerprint read failed", exc_info=True)
+                after_counts = None
+            if after_counts is not None:
+                self._last_pool_maintenance_fingerprint = self._pool_maintenance_fingerprint(
+                    after_counts
+                )
+                self._last_pool_maintenance_scan_at = self._now()
+        return last_at_target
 
     def run_startup_maintenance(self) -> None:
         """Run the host's pre-service pool repair at most once per controller."""
@@ -2405,7 +2573,7 @@ class ContinuousRefreshController:
             # re-fetches. No separately committed destructive pass belongs
             # in this refresh plan.
             try:
-                await self._enforce_pool_cap_async()
+                await self._enforce_pool_cap_async(force_scan=True)
             except Exception:
                 logger.exception("post-refresh enforce_pool_cap failed")
 
@@ -2470,7 +2638,7 @@ class ContinuousRefreshController:
         steady-state ticks don't spam the WebSocket stream.
         """
         try:
-            pool_counts = self._pool_readiness_counts()
+            pool_counts = await self._pool_readiness_counts_async()
             current = int(pool_counts["available"])
         except Exception:
             return

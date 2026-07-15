@@ -6,6 +6,7 @@ content cache, and recommendation history.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -13,11 +14,14 @@ import re
 import secrets
 import sqlite3
 import statistics
+import threading
 import time
 import unicodedata
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
@@ -79,7 +83,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PoolMaintenanceResult:
-    """Observable outcome of one atomic recommendation-pool maintenance pass."""
+    """Observable outcome of one bounded recommendation-pool maintenance pass."""
 
     available_before: int
     available_after: int
@@ -102,6 +106,17 @@ class PoolMaintenanceResult:
     untrimmed_raw_excess: int
     rolled_back: bool
     reason: str = ""
+    mutation_count: int = 0
+    has_more: bool = False
+    lock_wait_ms: float = 0.0
+    recovery_ms: float = 0.0
+    stale_trim_ms: float = 0.0
+    explore_trim_ms: float = 0.0
+    topic_trim_ms: float = 0.0
+    source_trim_ms: float = 0.0
+    raw_trim_ms: float = 0.0
+    write_ms: float = 0.0
+    total_ms: float = 0.0
 
     @property
     def at_target(self) -> bool:
@@ -114,6 +129,34 @@ class PoolMaintenanceInvariantError(RuntimeError):
 
 class PoolMaintenanceSnapshotUnavailableError(RuntimeError):
     """Raised when maintenance cannot acquire a canonical pre-change snapshot."""
+
+
+class PoolMaintenanceDeferredError(PoolMaintenanceSnapshotUnavailableError):
+    """Raised when interactive SQLite work owns the writer lock.
+
+    Maintenance intentionally uses a short busy timeout. A lock collision is
+    therefore a normal "try next tick" outcome rather than a 30-second wait.
+    """
+
+
+@dataclass(frozen=True)
+class PoolServeSnapshot:
+    """One consistent, connection-isolated read for the recommendation hot path."""
+
+    readiness: dict[str, int]
+    candidate_rows: tuple[dict[str, Any], ...]
+    loaded_count: int
+    platform_topups: tuple[tuple[str, int], ...]
+    recent_viewed_bvids: frozenset[str]
+    curator_signals: tuple[dict[str, Any], ...]
+    feedback_signals: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PoolServePersistResult:
+    """IDs committed by the recommendation hot path's isolated write."""
+
+    recommendation_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -144,6 +187,20 @@ class _RawTrimPlan:
 # pragmatic middle ground.
 _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
+# CALIBRATION PROVENANCE: the recommendation endpoint has a 3s hard tail
+# target. Recommendation persistence inherits the existing eight-attempt retry
+# loop, so each attempt waits at most 250ms (about 2.14s including retry sleeps)
+# rather than waiting 2.5s eight separate times. Maintenance waits only 75ms:
+# it is retryable background work and must yield to user traffic instead of
+# inheriting the process-wide 30s timeout. Revisit against production P99 lock
+# telemetry if the endpoint SLO changes.
+_INTERACTIVE_DB_BUSY_TIMEOUT_MS = 250
+_MAINTENANCE_DB_BUSY_TIMEOUT_MS = 75
+# CALIBRATION PROVENANCE: 25-50 rows was the rollout range proposed for the
+# 100MB / 300-500 candidate production shape. Fifty amortizes ranked scans
+# while bounding every write transaction; the async runner releases the lock
+# and yields the loop between batches.
+_POOL_MAINTENANCE_BATCH_SIZE = 50
 _NATIVE_INTERNAL_RUNNER_PREFIX = "__openbiliclaw_"
 _LEGACY_NATIVE_SAVE_RUNNER_ID = f"{_NATIVE_INTERNAL_RUNNER_PREFIX}legacy_runner__"
 _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS = {
@@ -1059,6 +1116,23 @@ class Database:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._admission_min_score = _DEFAULT_ADMISSION_MIN_SCORE
+        self._preserve_read_transaction = False
+        # The two queues must remain separate: a slow/background maintenance
+        # batch must never sit in front of an interactive recommendation read.
+        # Executors are lazy so short-lived CLI/tests that never use async DB
+        # work do not create threads.
+        self._worker_init_lock = threading.Lock()
+        self._maintenance_executor: ThreadPoolExecutor | None = None
+        self._serve_executor: ThreadPoolExecutor | None = None
+        # Recent-view identity extraction parses up to 2,000 event payloads.
+        # Cache immutable snapshots by latest view-event id and share the cache
+        # with isolated worker wrappers; one cheap MAX(id) query keeps external
+        # writers visible without repeating JSON/URL parsing on every request.
+        self._recent_view_state_lock = threading.Lock()
+        self._recent_view_state_cache: dict[
+            tuple[int, int],
+            tuple[frozenset[str], frozenset[str]],
+        ] = {}
 
     def set_admission_min_score(self, value: object) -> None:
         """Set the unified recommendation-pool admission floor."""
@@ -1162,6 +1236,208 @@ class Database:
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
+    def _executor(self, *, maintenance: bool) -> ThreadPoolExecutor:
+        """Return the lazily-created single-thread SQLite worker."""
+        executor = self._maintenance_executor if maintenance else self._serve_executor
+        if executor is not None:
+            return executor
+        with self._worker_init_lock:
+            executor = self._maintenance_executor if maintenance else self._serve_executor
+            if executor is None:
+                prefix = (
+                    "openbiliclaw-pool-maintenance" if maintenance else "openbiliclaw-pool-serve"
+                )
+                executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=prefix)
+                if maintenance:
+                    self._maintenance_executor = executor
+                else:
+                    self._serve_executor = executor
+        return executor
+
+    async def maintain_pool_inventory_async(self, **kwargs: Any) -> PoolMaintenanceResult:
+        """Run one bounded maintenance batch on its dedicated worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=True)
+        return await loop.run_in_executor(executor, partial(self.maintain_pool_inventory, **kwargs))
+
+    async def load_pool_serve_snapshot_async(
+        self,
+        *,
+        limit: int,
+        xhs_self_nickname: str = "",
+        curator_history_limit: int = 30,
+    ) -> PoolServeSnapshot:
+        """Load a recommendation snapshot on the interactive SQLite worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            partial(
+                self.load_pool_serve_snapshot,
+                limit=limit,
+                xhs_self_nickname=xhs_self_nickname,
+                curator_history_limit=curator_history_limit,
+            ),
+        )
+
+    async def persist_pool_serve_async(
+        self,
+        items: list[dict[str, Any]],
+        shown_bvids: list[str],
+    ) -> PoolServePersistResult:
+        """Commit one serve batch on the interactive SQLite worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            self.persist_pool_serve,
+            items,
+            shown_bvids,
+        )
+
+    async def count_pool_readiness_isolated_async(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+    ) -> dict[str, int]:
+        """Read exact inventory without touching the process-shared connection."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            partial(
+                self.count_pool_readiness_isolated,
+                xhs_self_nickname=xhs_self_nickname,
+            ),
+        )
+
+    def _isolated_database(self, *, busy_timeout_ms: int) -> Database:
+        """Return a lightweight wrapper bound to a short-lived connection.
+
+        The wrapper reuses all connection-aware SQL already implemented by
+        ``Database`` without swapping ``self._conn`` (which would race the
+        process-shared connection). It owns no worker threads of its own.
+        """
+        conn = self.open_connection()
+        conn.execute(f"PRAGMA busy_timeout = {max(0, int(busy_timeout_ms))}")
+        isolated = Database(self._db_path)
+        isolated._conn = conn
+        isolated._admission_min_score = self._admission_min_score
+        isolated._recent_view_state_lock = self._recent_view_state_lock
+        isolated._recent_view_state_cache = self._recent_view_state_cache
+        return isolated
+
+    def load_pool_serve_snapshot(
+        self,
+        *,
+        limit: int,
+        xhs_self_nickname: str = "",
+        curator_history_limit: int = 30,
+    ) -> PoolServeSnapshot:
+        """Load all hot-path pool state through one isolated read snapshot."""
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        isolated._preserve_read_transaction = True
+        try:
+            isolated.conn.execute("BEGIN")
+            # View history is the most CPU-heavy part of a pool read: extracting
+            # source-aware identities parses up to 2,000 JSON events and URLs.
+            # Every helper below used to repeat that work, turning one snapshot
+            # into five identical scans and holding the GIL for hundreds of ms.
+            viewed_content_keys, recent_viewed_bvids = isolated._recent_viewed_state_on(
+                isolated.conn
+            )
+            readiness = isolated.count_pool_readiness(
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            rows = isolated.get_pool_candidates(
+                limit=max(0, int(limit)),
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            loaded_count = len(rows)
+
+            platforms = isolated.list_servable_pool_platforms(
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            present = {
+                str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
+                for row in rows
+            }
+            seen = {str(row.get("bvid", "")) for row in rows if row.get("bvid")}
+            topups: list[tuple[str, int]] = []
+            if len(platforms) > 1:
+                for platform in platforms:
+                    token = str(platform).strip().lower()
+                    if not token or token in present:
+                        continue
+                    added = 0
+                    for row in isolated.get_pool_candidates_for_platform(
+                        token,
+                        limit=5,
+                        xhs_self_nickname=xhs_self_nickname,
+                        _viewed_content_keys=viewed_content_keys,
+                    ):
+                        bvid = str(row.get("bvid", ""))
+                        if bvid and bvid in seen:
+                            continue
+                        if bvid:
+                            seen.add(bvid)
+                        rows.append(row)
+                        added += 1
+                    if added:
+                        topups.append((token, added))
+
+            viewed = frozenset(recent_viewed_bvids)
+            history_limit = max(1, int(curator_history_limit))
+            curator_signals = isolated.get_recent_recommendation_signals(limit=history_limit)
+            feedback_signals = isolated.get_feedback_signals(limit=history_limit)
+            isolated.conn.commit()
+            return PoolServeSnapshot(
+                readiness={key: max(0, int(value)) for key, value in readiness.items()},
+                candidate_rows=tuple(rows),
+                loaded_count=loaded_count,
+                platform_topups=tuple(topups),
+                recent_viewed_bvids=viewed,
+                curator_signals=tuple(curator_signals),
+                feedback_signals=tuple(feedback_signals),
+            )
+        except Exception:
+            isolated.conn.rollback()
+            raise
+        finally:
+            isolated._preserve_read_transaction = False
+            isolated.close()
+
+    def persist_pool_serve(
+        self,
+        items: list[dict[str, Any]],
+        shown_bvids: list[str],
+    ) -> PoolServePersistResult:
+        """Persist recommendation rows and shown state on an isolated connection."""
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        try:
+            ids = isolated.batch_insert_recommendations_and_mark_shown(
+                items,
+                shown_bvids,
+            )
+            return PoolServePersistResult(recommendation_ids=tuple(ids))
+        finally:
+            isolated.close()
+
+    def count_pool_readiness_isolated(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+    ) -> dict[str, int]:
+        """Read exact inventory using a short-lived connection."""
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        try:
+            return isolated.count_pool_readiness(xhs_self_nickname=xhs_self_nickname)
+        finally:
+            isolated.close()
+
     def _ensure_fresh_read(self) -> None:
         """Close any implicit transaction so the next SELECT sees the latest WAL state.
 
@@ -1170,7 +1446,7 @@ class Database:
         implicit transaction.  Committing closes that transaction so the next
         query starts a new one against the current WAL head.
         """
-        if self.conn.in_transaction:
+        if self.conn.in_transaction and not self._preserve_read_transaction:
             self.conn.commit()
 
     def _execute_write(
@@ -3002,6 +3278,7 @@ class Database:
         *,
         max_per_topic_group: int = 3,
         xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get fresh recommendation candidates directly from the discovery pool.
 
@@ -3131,9 +3408,14 @@ class Database:
             )
         cursor = self.conn.execute(sql, params)
         rows = [dict(row) for row in cursor.fetchall()]
+        viewed_content_keys = (
+            self.get_recent_viewed_content_keys()
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows = self._exclude_viewed_rows(
             rows,
-            self.get_recent_viewed_content_keys(),
+            viewed_content_keys,
             limit=len(rows),
         )
         return self._balance_pool_rows(rows, limit=limit)
@@ -3193,6 +3475,7 @@ class Database:
         limit: int = 5,
         *,
         xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch up to ``limit`` servable pool rows for one platform token.
 
@@ -3226,7 +3509,11 @@ class Database:
         """
         # Over-fetch so viewed / non-linkable drops still leave up to `limit`.
         cursor = self.conn.execute(sql, (*where_params, token, fetch_limit * 4 + 8))
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = (
+            self.get_recent_viewed_content_keys()
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -3245,7 +3532,12 @@ class Database:
                 break
         return rows
 
-    def list_servable_pool_platforms(self, *, xhs_self_nickname: str = "") -> list[str]:
+    def list_servable_pool_platforms(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+    ) -> list[str]:
         """Return the distinct platform tokens among currently-servable rows.
 
         Same servability gate as ``get_pool_candidates`` (via
@@ -3256,7 +3548,10 @@ class Database:
         ``"bilibili"`` when ``source_platform`` is blank, matching
         ``RecommendationEngine._platform_token``.
         """
-        rows = self._load_available_pool_candidate_rows(xhs_self_nickname=xhs_self_nickname)
+        rows = self._load_available_pool_candidate_rows(
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
+        )
         platforms: set[str] = set()
         for row in rows:
             token = str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
@@ -3264,7 +3559,11 @@ class Database:
         return sorted(platforms)
 
     def count_pool_candidates(
-        self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> int:
         """Return how many fresh candidates are immediately available for reshuffle.
 
@@ -3285,11 +3584,16 @@ class Database:
             self._load_available_pool_candidate_rows(
                 max_per_topic_group=max_per_topic_group,
                 xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=_viewed_content_keys,
             )
         )
 
     def _load_available_pool_candidate_rows(
-        self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate."""
         self._ensure_fresh_read()
@@ -3297,6 +3601,7 @@ class Database:
             self.conn,
             max_per_topic_group=max_per_topic_group,
             xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
         )
 
     def _load_available_pool_candidate_rows_on(
@@ -3305,6 +3610,7 @@ class Database:
         *,
         max_per_topic_group: int = 3,
         xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate.
 
@@ -3323,7 +3629,7 @@ class Database:
             cursor = conn.execute(
                 f"""
                 WITH ranked AS (
-                    SELECT bvid, source, source_platform, content_url,
+                    SELECT bvid, source, source_platform, content_url, topic_group,
                            candidate_tier, relevance_score, last_scored_at, view_count,
                            ROW_NUMBER() OVER (
                                PARTITION BY topic_group
@@ -3353,7 +3659,7 @@ class Database:
                         WHERE r.bvid = content_cache.bvid
                       )
                 )
-                SELECT bvid, source, source_platform, content_url,
+                SELECT bvid, source, source_platform, content_url, topic_group,
                        candidate_tier, relevance_score, last_scored_at, view_count
                 FROM ranked
                 WHERE group_rank <= ?
@@ -3369,7 +3675,7 @@ class Database:
         else:
             cursor = conn.execute(
                 f"""
-                SELECT bvid, source, source_platform, content_url,
+                SELECT bvid, source, source_platform, content_url, topic_group,
                        candidate_tier, relevance_score, last_scored_at, view_count
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
@@ -3399,7 +3705,11 @@ class Database:
                 """,
                 (*admission_params, *guard_params, delight_threshold),
             )
-        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -3438,6 +3748,8 @@ class Database:
     def _load_pool_raw_material_rows_on(
         self,
         conn: sqlite3.Connection,
+        *,
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Connection-aware raw content-cache rows governed by the ceiling."""
         admission_sql, admission_params = self._pool_admission_sql()
@@ -3464,7 +3776,11 @@ class Database:
             """,
             admission_params,
         )
-        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -3481,7 +3797,12 @@ class Database:
             len(self._load_pool_raw_material_rows()) + self._count_pending_discovery_raw_material()
         )
 
-    def _count_pool_raw_material_on(self, conn: sqlite3.Connection) -> int:
+    def _count_pool_raw_material_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        _viewed_content_keys: set[str] | None = None,
+    ) -> int:
         row = conn.execute(
             """
             SELECT COUNT(*) AS count
@@ -3489,7 +3810,12 @@ class Database:
             WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
             """
         ).fetchone()
-        return len(self._load_pool_raw_material_rows_on(conn)) + int(row["count"] if row else 0)
+        return len(
+            self._load_pool_raw_material_rows_on(
+                conn,
+                _viewed_content_keys=_viewed_content_keys,
+            )
+        ) + int(row["count"] if row else 0)
 
     def count_pool_raw_material_by_source(self) -> dict[str, int]:
         """Return raw fresh material grouped by source family.
@@ -3514,7 +3840,12 @@ class Database:
             counts[source_family] += int(row["count"])
         return dict(counts)
 
-    def count_pool_readiness(self, *, xhs_self_nickname: str = "") -> dict[str, int]:
+    def count_pool_readiness(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+    ) -> dict[str, int]:
         """Return pool inventory split by immediately servable and pending rows.
 
         ``available`` is the public "可换" count. ``raw`` is broad fresh
@@ -3567,7 +3898,11 @@ class Database:
             """,
             (*admission_params, *guard_params),
         )
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = (
+            self.get_recent_viewed_content_keys()
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         pending_count = 0
         for row in pending_cursor.fetchall():
             item = dict(row)
@@ -3594,13 +3929,17 @@ class Database:
         discovery_pending_count = pending_eval_count + evaluated_pending_count
 
         return {
-            "available": self.count_pool_candidates(xhs_self_nickname=xhs_self_nickname),
+            "available": self.count_pool_candidates(
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            ),
             "raw": raw_count + discovery_pending_count,
             "pending": pending_count + discovery_pending_count,
             "admitted_pending_copy": len(
                 self._load_admitted_pending_copy_rows_on(
                     self.conn,
                     xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
                 )
             ),
             "pending_eval": pending_eval_count,
@@ -3613,6 +3952,7 @@ class Database:
         *,
         xhs_self_nickname: str = "",
         limit: int | None = None,
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Load admitted, classified rows whose recommendation copy is incomplete."""
 
@@ -3659,7 +3999,11 @@ class Database:
             """,
             (*admission_params, *guard_params, delight_threshold),
         )
-        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             item = dict(row)
@@ -4153,9 +4497,13 @@ class Database:
         *,
         protected_ids: set[str],
         source_share_quotas: Mapping[str, int],
+        _viewed_content_keys: set[str] | None = None,
     ) -> _ContentTrimPlan:
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for row in self._load_pool_raw_material_rows_on(conn):
+        for row in self._load_pool_raw_material_rows_on(
+            conn,
+            _viewed_content_keys=_viewed_content_keys,
+        ):
             if not self._content_is_ready_reserve(row):
                 continue
             grouped[_pool_source_family(row["source"], row["source_platform"])].append(row)
@@ -4213,8 +4561,12 @@ class Database:
         protected_ids: set[str],
         raw_ceiling: int,
         raw_source_share_quotas: Mapping[str, int],
+        _viewed_content_keys: set[str] | None = None,
     ) -> _RawTrimPlan:
-        content_rows = self._load_pool_raw_material_rows_on(conn)
+        content_rows = self._load_pool_raw_material_rows_on(
+            conn,
+            _viewed_content_keys=_viewed_content_keys,
+        )
         candidate_rows = [
             dict(row)
             for row in conn.execute(
@@ -4366,22 +4718,37 @@ class Database:
         deficit: int,
         source_share_quotas: Mapping[str, int],
         xhs_self_nickname: str,
+        max_restore: int = _POOL_MAINTENANCE_BATCH_SIZE,
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[str]:
-        """Restore eligible paid-for rows until canonical availability fills its gap."""
+        """Restore a bounded set of paid-for rows without rescanning per row.
+
+        The former implementation re-ran the full servability window after
+        every restored row. A 300-row recovery therefore performed hundreds
+        of window-function scans while holding ``BEGIN IMMEDIATE``. We model
+        the availability/source counters in memory and let a later bounded
+        maintenance batch pick up any topic-cap displacement edge case.
+        """
         clean_deficit = max(0, int(deficit))
-        if clean_deficit <= 0:
+        clean_limit = max(0, int(max_restore))
+        if clean_deficit <= 0 or clean_limit <= 0:
             return []
 
         available_rows = self._load_available_pool_candidate_rows_on(
             conn,
             xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
         )
         desired_available = len(available_rows) + clean_deficit
         current_family_count: dict[str, int] = defaultdict(int)
+        current_topic_count: dict[str, int] = defaultdict(int)
         for row in available_rows:
             current_family_count[
                 _pool_source_family(row.get("source"), row.get("source_platform"))
             ] += 1
+            topic = str(row.get("topic_group", "") or "").strip().lower()
+            if topic:
+                current_topic_count[topic] += 1
 
         where_clause, where_params = self._pool_servable_where_clause_on(
             conn,
@@ -4400,7 +4767,11 @@ class Database:
                 where_params,
             ).fetchall()
         ]
-        viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         eligible_rows = [
             row
             for row in candidate_rows
@@ -4414,7 +4785,14 @@ class Database:
         ]
         restored_ids: list[str] = []
         remaining_rows = list(eligible_rows)
-        while remaining_rows:
+        simulated_available = len(available_rows)
+        # Public pool availability uses the default per-topic window of three.
+        availability_topic_cap = 3
+        while (
+            remaining_rows
+            and len(restored_ids) < clean_limit
+            and simulated_available < desired_available
+        ):
             row = min(
                 remaining_rows,
                 key=lambda candidate: (
@@ -4448,19 +4826,14 @@ class Database:
             )
             if cursor.rowcount:
                 restored_ids.append(bvid)
-            available_rows = self._load_available_pool_candidate_rows_on(
-                conn,
-                xhs_self_nickname=xhs_self_nickname,
-            )
-            current_family_count = defaultdict(int)
-            for available_row in available_rows:
-                current_family_count[
-                    _pool_source_family(
-                        available_row.get("source"), available_row.get("source_platform")
-                    )
-                ] += 1
-            if len(available_rows) >= desired_available:
-                break
+                topic = str(row.get("topic_group", "") or "").strip().lower()
+                if not topic or current_topic_count[topic] < availability_topic_cap:
+                    simulated_available += 1
+                    if topic:
+                        current_topic_count[topic] += 1
+                    current_family_count[
+                        _pool_source_family(row.get("source"), row.get("source_platform"))
+                    ] += 1
         return restored_ids
 
     def maintain_pool_inventory(
@@ -4475,8 +4848,15 @@ class Database:
         stale_max_age_days: int = 14,
         xhs_self_nickname: str = "",
         recover_suppressed: bool = True,
+        max_mutations: int = _POOL_MAINTENANCE_BATCH_SIZE,
     ) -> PoolMaintenanceResult:
-        """Maintain pool diversity and raw capacity in one short transaction."""
+        """Maintain pool diversity and raw capacity in one bounded transaction.
+
+        At most ``max_mutations`` rows are changed per call. The async runtime
+        commits each batch, yields the event loop, then schedules another batch
+        when ``PoolMaintenanceResult.has_more`` is true.
+        """
+        total_started = time.perf_counter()
         clean_target = max(0, int(target))
         clean_raw_ceiling = max(0, int(raw_ceiling))
         clean_topic_cap = max(0, int(max_per_topic_group))
@@ -4486,35 +4866,62 @@ class Database:
         clean_raw_source_quotas = self._clean_pool_quotas(
             raw_source_share_quotas or source_share_quotas
         )
+        mutation_budget = max(1, min(500, int(max_mutations)))
         conn: sqlite3.Connection | None = None
         snapshot_acquired = False
         available_before = 0
         raw_before = 0
         protected_ids: set[str] = set()
+        lock_wait_ms = 0.0
+        recovery_ms = 0.0
+        stale_trim_ms = 0.0
+        explore_trim_ms = 0.0
+        topic_trim_ms = 0.0
+        source_trim_ms = 0.0
+        raw_trim_ms = 0.0
+        write_ms = 0.0
         try:
             conn = self.open_connection()
+            if isinstance(conn, sqlite3.Connection):
+                conn.execute(f"PRAGMA busy_timeout = {_MAINTENANCE_DB_BUSY_TIMEOUT_MS}")
+            lock_started = time.perf_counter()
             conn.execute("BEGIN IMMEDIATE")
+            lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
+            # All maintenance reads share one write transaction, so the view
+            # event snapshot cannot change underneath us. Parse it once: the
+            # source-aware extractor is Python-heavy and repeated scans used
+            # to dominate otherwise bounded batches.
+            viewed_content_keys = self._recent_viewed_content_keys_on(conn)
             before_rows = self._load_available_pool_candidate_rows_on(
                 conn,
                 xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
             )
             available_before = len(before_rows)
             snapshot_acquired = True
-            raw_before = self._count_pool_raw_material_on(conn)
+            raw_before = self._count_pool_raw_material_on(
+                conn,
+                _viewed_content_keys=viewed_content_keys,
+            )
             protected_ids = {
                 str(row["bvid"]) for row in before_rows[: min(len(before_rows), clean_target)]
             }
             recovered_ids: list[str] = []
             if recover_suppressed:
+                phase_started = time.perf_counter()
                 recovered_ids = self._recover_suppressed_pool_inventory_on(
                     conn,
                     deficit=max(0, clean_target - available_before),
                     source_share_quotas=clean_source_quotas,
                     xhs_self_nickname=xhs_self_nickname,
+                    max_restore=mutation_budget,
+                    _viewed_content_keys=viewed_content_keys,
                 )
+                recovery_ms = (time.perf_counter() - phase_started) * 1000.0
                 recovered_available_rows = self._load_available_pool_candidate_rows_on(
                     conn,
                     xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
                 )
                 recovered_set = set(recovered_ids)
                 protected_ids.update(
@@ -4523,51 +4930,109 @@ class Database:
                     if str(row["bvid"]) in recovered_set
                 )
             initial_raw_rows = {
-                str(row["bvid"]): row for row in self._load_pool_raw_material_rows_on(conn)
+                str(row["bvid"]): row
+                for row in self._load_pool_raw_material_rows_on(
+                    conn,
+                    _viewed_content_keys=viewed_content_keys,
+                )
             }
 
+            phase_started = time.perf_counter()
             stale_plan = self._plan_stale_trim_on(
                 conn,
                 protected_ids=protected_ids,
                 max_age_days=clean_stale_days,
             )
+            stale_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            phase_started = time.perf_counter()
             explore_plan = self._plan_explore_cluster_trim_on(
                 conn,
                 protected_ids=protected_ids,
                 max_per_cluster=clean_explore_cap,
             )
+            explore_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            phase_started = time.perf_counter()
             topic_plan = self._plan_topic_trim_on(
                 conn,
                 protected_ids=protected_ids,
                 max_per_topic_group=clean_topic_cap,
             )
+            topic_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            phase_started = time.perf_counter()
             source_plan = self._plan_source_trim_on(
                 conn,
                 protected_ids=protected_ids,
                 source_share_quotas=clean_source_quotas,
+                _viewed_content_keys=viewed_content_keys,
             )
+            source_trim_ms = (time.perf_counter() - phase_started) * 1000.0
 
-            stale_ids = set(stale_plan.victim_bvids)
-            explore_ids = set(explore_plan.victim_bvids) - stale_ids
-            topic_ids = set(topic_plan.victim_bvids) - stale_ids - explore_ids
-            source_ids = set(source_plan.victim_bvids) - stale_ids - explore_ids - topic_ids
+            remaining_budget = max(0, mutation_budget - len(recovered_ids))
+            omitted_mutations = 0
+            claimed_content_ids: set[str] = set()
+
+            def _take_content(victim_bvids: Sequence[str]) -> set[str]:
+                nonlocal omitted_mutations, remaining_budget
+                eligible = [bvid for bvid in victim_bvids if bvid not in claimed_content_ids]
+                claimed_content_ids.update(eligible)
+                selected = eligible[:remaining_budget]
+                omitted_mutations += len(eligible) - len(selected)
+                remaining_budget -= len(selected)
+                return set(selected)
+
+            stale_ids = _take_content(stale_plan.victim_bvids)
+            explore_ids = _take_content(explore_plan.victim_bvids)
+            topic_ids = _take_content(topic_plan.victim_bvids)
+            source_ids = _take_content(source_plan.victim_bvids)
+
+            write_started = time.perf_counter()
             self._apply_content_status_on(conn, sorted(stale_ids), status="stale")
             self._apply_content_suppression_on(conn, sorted(explore_ids))
             self._apply_content_suppression_on(conn, sorted(topic_ids))
             self._apply_content_suppression_on(conn, sorted(source_ids))
+            write_ms += (time.perf_counter() - write_started) * 1000.0
 
-            raw_plan = self._plan_raw_trim_on(
+            phase_started = time.perf_counter()
+            full_raw_plan = self._plan_raw_trim_on(
                 conn,
                 protected_ids=protected_ids,
                 raw_ceiling=clean_raw_ceiling,
                 raw_source_share_quotas=clean_raw_source_quotas,
+                _viewed_content_keys=viewed_content_keys,
             )
+            selected_raw_content = full_raw_plan.content_bvids[:remaining_budget]
+            remaining_budget -= len(selected_raw_content)
+            candidate_statuses_by_id = dict(full_raw_plan.candidate_statuses)
+            selected_raw_candidate_ids = full_raw_plan.candidate_ids[:remaining_budget]
+            selected_raw_candidate_statuses = tuple(
+                (candidate_id, candidate_statuses_by_id[candidate_id])
+                for candidate_id in selected_raw_candidate_ids
+            )
+            omitted_mutations += (
+                len(full_raw_plan.content_bvids)
+                - len(selected_raw_content)
+                + len(full_raw_plan.candidate_ids)
+                - len(selected_raw_candidate_ids)
+            )
+            raw_plan = _RawTrimPlan(
+                content_bvids=selected_raw_content,
+                candidate_ids=selected_raw_candidate_ids,
+                candidate_statuses=selected_raw_candidate_statuses,
+                untrimmed_excess=full_raw_plan.untrimmed_excess,
+            )
+            raw_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            write_started = time.perf_counter()
             self._apply_raw_trim_on(conn, raw_plan)
+            write_ms += (time.perf_counter() - write_started) * 1000.0
             after_rows = self._load_available_pool_candidate_rows_on(
                 conn,
                 xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
             )
-            raw_after = self._count_pool_raw_material_on(conn)
+            raw_after = self._count_pool_raw_material_on(
+                conn,
+                _viewed_content_keys=viewed_content_keys,
+            )
             self._validate_pool_maintenance_invariant(
                 available_before=available_before,
                 available_after=len(after_rows),
@@ -4624,6 +5089,9 @@ class Database:
                     ).fetchone()[0]
                 )
 
+            commit_started = time.perf_counter()
+            conn.commit()
+            write_ms += (time.perf_counter() - commit_started) * 1000.0
             result = PoolMaintenanceResult(
                 available_before=available_before,
                 available_after=len(after_rows),
@@ -4643,10 +5111,26 @@ class Database:
                 raw_before=raw_before,
                 raw_after=raw_after,
                 raw_ceiling=clean_raw_ceiling,
-                untrimmed_raw_excess=raw_plan.untrimmed_excess,
+                untrimmed_raw_excess=max(0, raw_after - clean_raw_ceiling),
                 rolled_back=False,
+                mutation_count=(
+                    len(recovered_ids) + len(all_content_victims) + len(raw_plan.candidate_ids)
+                ),
+                has_more=(
+                    omitted_mutations > 0
+                    or raw_after > clean_raw_ceiling
+                    or (len(after_rows) < clean_target and len(recovered_ids) >= mutation_budget)
+                ),
+                lock_wait_ms=lock_wait_ms,
+                recovery_ms=recovery_ms,
+                stale_trim_ms=stale_trim_ms,
+                explore_trim_ms=explore_trim_ms,
+                topic_trim_ms=topic_trim_ms,
+                source_trim_ms=source_trim_ms,
+                raw_trim_ms=raw_trim_ms,
+                write_ms=write_ms,
+                total_ms=(time.perf_counter() - total_started) * 1000.0,
             )
-            conn.commit()
             if result.untrimmed_raw_excess > 0:
                 logger.error(
                     "pool maintenance retained protected/token-owned raw excess: %s",
@@ -4657,6 +5141,11 @@ class Database:
             if conn is not None:
                 conn.rollback()
             if not snapshot_acquired:
+                if "locked" in str(exc).lower():
+                    logger.info("pool maintenance deferred by SQLite writer: %s", exc)
+                    raise PoolMaintenanceDeferredError(
+                        "pool maintenance snapshot unavailable: writer busy"
+                    ) from exc
                 logger.error("pool maintenance snapshot unavailable: %s", exc)
                 raise PoolMaintenanceSnapshotUnavailableError(
                     "pool maintenance snapshot unavailable"
@@ -4684,6 +5173,15 @@ class Database:
                 untrimmed_raw_excess=max(0, raw_before - clean_raw_ceiling),
                 rolled_back=True,
                 reason=str(exc),
+                lock_wait_ms=lock_wait_ms,
+                recovery_ms=recovery_ms,
+                stale_trim_ms=stale_trim_ms,
+                explore_trim_ms=explore_trim_ms,
+                topic_trim_ms=topic_trim_ms,
+                source_trim_ms=source_trim_ms,
+                raw_trim_ms=raw_trim_ms,
+                write_ms=write_ms,
+                total_ms=(time.perf_counter() - total_started) * 1000.0,
             )
         finally:
             if conn is not None:
@@ -5195,6 +5693,32 @@ class Database:
         limit: int = 2000,
     ) -> set[str]:
         """Connection-aware recent viewed identity extraction."""
+        viewed_keys, _ = self._recent_viewed_state_on(conn, limit=limit)
+        return viewed_keys
+
+    def _recent_viewed_state_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        limit: int = 2000,
+    ) -> tuple[set[str], set[str]]:
+        """Return source-aware identities and BVIDs from one event scan."""
+        clean_limit = max(0, int(limit))
+        latest_row = conn.execute(
+            """
+            SELECT COALESCE(MAX(id), 0) AS latest_id
+            FROM events
+            WHERE event_type = 'view'
+            """
+        ).fetchone()
+        latest_id = int(latest_row["latest_id"] if latest_row else 0)
+        cache_key = (latest_id, clean_limit)
+        with self._recent_view_state_lock:
+            cached = self._recent_view_state_cache.get(cache_key)
+        if cached is not None:
+            cached_keys, cached_bvids = cached
+            return set(cached_keys), set(cached_bvids)
+
         cursor = conn.execute(
             """
             SELECT url, metadata
@@ -5203,12 +5727,22 @@ class Database:
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (clean_limit,),
         )
         viewed_keys: set[str] = set()
+        viewed_bvids: set[str] = set()
         for row in cursor.fetchall():
-            viewed_keys.update(self._extract_content_keys_from_view_event(dict(row)))
-        return viewed_keys
+            keys, bvid = self._extract_view_event_identities(dict(row))
+            viewed_keys.update(keys)
+            if bvid:
+                viewed_bvids.add(bvid)
+        with self._recent_view_state_lock:
+            self._recent_view_state_cache.clear()
+            self._recent_view_state_cache[cache_key] = (
+                frozenset(viewed_keys),
+                frozenset(viewed_bvids),
+            )
+        return viewed_keys, viewed_bvids
 
     @staticmethod
     def _explore_risk_cluster(row: dict[str, Any]) -> str:
@@ -5958,10 +6492,16 @@ class Database:
         )
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection and owned SQLite workers."""
         if self._conn:
             self._conn.close()
             self._conn = None
+        for attribute in ("_maintenance_executor", "_serve_executor"):
+            executor = getattr(self, attribute)
+            if executor is None:
+                continue
+            executor.shutdown(wait=True, cancel_futures=True)
+            setattr(self, attribute, None)
 
     def _ensure_llm_usage_cache_columns(self) -> None:
         """Backfill v0.3.28+ prompt-cache columns on existing llm_usage tables."""
@@ -11664,12 +12204,32 @@ class Database:
 
     @classmethod
     def _extract_content_keys_from_view_event(cls, row: dict[str, Any]) -> set[str]:
+        keys, _ = cls._extract_view_event_identities(row)
+        return keys
+
+    @classmethod
+    def _extract_view_event_identities(
+        cls,
+        row: dict[str, Any],
+    ) -> tuple[set[str], str]:
+        """Extract source-aware keys and BVID without decoding metadata twice."""
         metadata = cls._decode_event_metadata(row)
         url = str(row.get("url", "")).strip()
 
+        bvid = str(metadata.get("bvid", "")).strip()
+        bvid_match = _BVID_PATTERN.search(url)
+        if not bvid and bvid_match:
+            bvid = bvid_match.group(1)
         platform = _normalize_source_platform_key(metadata.get("source_platform", ""))
         if not platform:
-            platform = cls._infer_source_platform_from_url(url)
+            # Nearly all Bilibili view events already carry a BVID. Avoid the
+            # generic URL classifier (and its urlparse) when the same URL has
+            # an explicit BVID; fall back for cross-platform or malformed rows.
+            platform = (
+                _BILIBILI_SOURCE_FAMILY
+                if bvid and (not url or bvid_match is not None)
+                else cls._infer_source_platform_from_url(url)
+            )
 
         content_ids: set[str] = set()
         for key in _VIEW_CONTENT_ID_METADATA_KEYS:
@@ -11689,7 +12249,6 @@ class Database:
         if url_content_id:
             content_ids.add(url_content_id)
 
-        bvid = cls._extract_bvid_from_view_event(row)
         if bvid:
             content_ids.add(bvid)
             platform = platform or _BILIBILI_SOURCE_FAMILY
@@ -11700,7 +12259,7 @@ class Database:
                 keys.add(content_id)
             if platform:
                 keys.add(f"{platform}:{content_id}")
-        return keys
+        return keys, bvid
 
     @staticmethod
     def _infer_source_platform_from_url(url: str) -> str:
@@ -11710,6 +12269,9 @@ class Database:
     def _extract_content_id_from_url(platform: str, url: str) -> str:
         if not url:
             return ""
+        if platform == _BILIBILI_SOURCE_FAMILY:
+            match = _BVID_PATTERN.search(url)
+            return match.group(1) if match else ""
         parsed = urlparse(url)
         path_parts = [part for part in parsed.path.split("/") if part]
         if platform == _XHS_SOURCE_FAMILY:
@@ -11732,10 +12294,6 @@ class Database:
                     prefix_index = path_parts.index(prefix)
                     if len(path_parts) > prefix_index + 1:
                         return path_parts[prefix_index + 1]
-        if platform == _BILIBILI_SOURCE_FAMILY:
-            match = _BVID_PATTERN.search(url)
-            if match:
-                return match.group(1)
         if platform == _REDDIT_SOURCE_FAMILY:
             host = parsed.netloc.lower()
             if host == "redd.it" and path_parts:

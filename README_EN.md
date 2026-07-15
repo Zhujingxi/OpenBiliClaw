@@ -612,6 +612,8 @@ guided init: signals → preferences → full profile commit → discover → ev
 │             → pool accounting · viewed identity    │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
+│ Reshuffle hot path: PoolServeSnapshot → isolated serve DB worker → short rec+shown write │
+│ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │

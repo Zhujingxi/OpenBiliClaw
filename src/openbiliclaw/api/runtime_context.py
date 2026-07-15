@@ -337,23 +337,50 @@ class RuntimeContext:
         if callback not in self._pool_inventory_commit_subscribers:
             self._pool_inventory_commit_subscribers.append(callback)
 
-    async def _handle_pool_inventory_commit(self) -> None:
-        """Refresh current inventory, then notify stable observers."""
+    async def _handle_pool_inventory_commit(
+        self,
+        counts: dict[str, int] | None = None,
+    ) -> None:
+        """Synchronize committed inventory, reusing serve counts when supplied."""
         controller = self.runtime_controller
-        readiness = getattr(controller, "_pool_readiness_counts", None)
-        if callable(readiness):
-            try:
-                result = readiness()
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                logger.exception("post-commit inventory synchronization failed")
+        if counts is not None and "available" in counts:
+            update_inventory = getattr(controller, "_update_llm_inventory_state", None)
+            if callable(update_inventory):
+                update_inventory(max(0, int(counts.get("available", 0))))
+            else:
+                update = getattr(self.llm_concurrency_gate, "update_inventory", None)
+                if callable(update):
+                    update(
+                        available=max(0, int(counts.get("available", 0))),
+                        target=max(0, int(getattr(controller, "pool_target_count", 0))),
+                    )
         else:
-            self._sync_inventory_without_controller()
+            readiness = getattr(controller, "_pool_readiness_counts", None)
+            if callable(readiness):
+                try:
+                    result = readiness()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("post-commit inventory synchronization failed")
+            else:
+                self._sync_inventory_without_controller()
 
         for callback in tuple(self._pool_inventory_commit_subscribers):
             try:
-                result = callback()
+                signature = inspect.signature(callback)
+                accepts_counts = any(
+                    parameter.kind
+                    in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                    for parameter in signature.parameters.values()
+                ) or any(
+                    parameter.kind is inspect.Parameter.VAR_POSITIONAL
+                    for parameter in signature.parameters.values()
+                )
+            except (TypeError, ValueError):
+                accepts_counts = False
+            try:
+                result = callback(counts) if accepts_counts else callback()
                 if inspect.isawaitable(result):
                     await result
             except Exception:

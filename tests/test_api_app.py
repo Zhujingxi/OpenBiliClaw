@@ -5591,6 +5591,110 @@ class TestBackendAPI:
         assert hub.events[-1]["pool_available_count"] == 0
         assert hub.events[-1]["pool_pending_count"] == 5
 
+    def test_reshuffle_with_result_skips_duplicate_api_pool_precheck(self) -> None:
+        from fastapi.testclient import TestClient
+
+        counts = {
+            "available": 4,
+            "raw": 9,
+            "pending": 2,
+            "pending_eval": 1,
+            "evaluated_pending": 1,
+        }
+
+        class FakeEventHub:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def publish(self, event: dict[str, object]) -> bool:
+                self.events.append(event)
+                return True
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.count_calls = 0
+
+            def count_pool_candidates(self, **_kwargs: object) -> int:
+                self.count_calls += 1
+                return 9
+
+            async def count_pool_readiness_isolated_async(self) -> dict[str, int]:
+                return dict(counts)
+
+        class FakeRuntimeController:
+            def __init__(self, hub: FakeEventHub) -> None:
+                self.event_hub = hub
+                self.pool_target_count = 30
+
+            def get_runtime_status(self) -> dict[str, object]:
+                return {
+                    "initialized": True,
+                    "pool_available_count": 9,
+                    "pool_pending_count": 0,
+                }
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        class FakeRecommendationEngine:
+            def __init__(self) -> None:
+                self.callback: object | None = None
+
+            def set_pool_inventory_commit_callback(self, callback: object) -> None:
+                self.callback = callback
+
+            async def reshuffle_recommendations_with_result(
+                self,
+                *,
+                profile: object,
+                excluded_bvids: list[str],
+                limit: int,
+            ) -> object:
+                assert profile == {"profile": "ok"}
+                assert excluded_bvids == []
+                assert limit == 10
+                assert callable(self.callback)
+                callback_result = self.callback(dict(counts))
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+                return SimpleNamespace(
+                    items=[],
+                    pool_counts_after=dict(counts),
+                    timings=SimpleNamespace(
+                        pool_snapshot_ms=1.0,
+                        embedding_ms=2.0,
+                        selector_worker_ms=3.0,
+                        event_loop_resume_delay_ms=4.0,
+                        persist_ms=5.0,
+                    ),
+                )
+
+        hub = FakeEventHub()
+        database = FakeDatabase()
+        engine = FakeRecommendationEngine()
+        app = create_app(
+            memory_manager=object(),
+            database=database,
+            soul_engine=FakeSoulEngine(),
+            recommendation_engine=engine,
+            runtime_controller=FakeRuntimeController(hub),
+        )
+        count_calls_after_construction = database.count_calls
+        client = TestClient(app)
+
+        response = client.post("/api/recommendations/reshuffle")
+
+        assert response.status_code == 200
+        assert response.json() == {"items": []}
+        assert database.count_calls == count_calls_after_construction
+        assert any(
+            event.get("pool_available_count") == 4
+            and event.get("pool_raw_count") == 9
+            and event.get("pool_pending_count") == 2
+            for event in hub.events
+        )
+
     def test_append_recommendations_endpoint_excludes_existing_bvids(self) -> None:
         from fastapi.testclient import TestClient
 

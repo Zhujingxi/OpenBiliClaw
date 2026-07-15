@@ -4354,7 +4354,53 @@ async def test_reshuffle_exclusions_refill_beyond_the_old_candidate_window() -> 
 
 
 @pytest.mark.asyncio
-async def test_serve_notifies_inventory_only_after_detached_shown_commit() -> None:
+async def test_isolated_pool_snapshot_preserves_legacy_bvid_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolated_db = Database(tmp_path / "isolated.db")
+    legacy_db = Database(tmp_path / "legacy.db")
+    isolated_db.initialize()
+    legacy_db.initialize()
+    for index in range(18):
+        for db in (isolated_db, legacy_db):
+            _seed_visible(
+                db,
+                f"BV_ORDER_{index:02d}",
+                title=f"顺序候选 {index}",
+                source="search",
+                relevance_score=0.99 - index / 100,
+                topic_group=f"顺序组 {index}",
+                pool_topic_label=f"顺序主题 {index}",
+            )
+
+    isolated_engine = RecommendationEngine(llm=_DummyLLM(), database=isolated_db)
+    legacy_engine = RecommendationEngine(llm=_DummyLLM(), database=legacy_db)
+    monkeypatch.setattr(legacy_db, "load_pool_serve_snapshot_async", None)
+    monkeypatch.setattr(legacy_db, "persist_pool_serve_async", None)
+
+    isolated_result = await isolated_engine.serve_with_result(_build_profile(), limit=10)
+    isolated = isolated_result.items
+    legacy = await legacy_engine.serve(_build_profile(), limit=10)
+    await asyncio.sleep(0)
+
+    assert [item.content.bvid for item in isolated] == [item.content.bvid for item in legacy]
+    assert isolated_result.pool_counts_after == {
+        "available": 8,
+        "raw": 8,
+        "pending": 0,
+        "admitted_pending_copy": 0,
+        "pending_eval": 0,
+        "evaluated_pending": 0,
+    }
+    assert isolated_result.timings.pool_snapshot_ms > 0
+    assert isolated_result.timings.persist_ms > 0
+    isolated_db.close()
+    legacy_db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_notifies_inventory_only_after_isolated_shown_commit() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.initialize()
@@ -4380,7 +4426,7 @@ async def test_serve_notifies_inventory_only_after_detached_shown_commit() -> No
 
 
 @pytest.mark.asyncio
-async def test_serve_does_not_notify_inventory_when_detached_shown_write_fails(
+async def test_serve_does_not_notify_inventory_when_isolated_commit_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -4393,26 +4439,28 @@ async def test_serve_does_not_notify_inventory_when_detached_shown_write_fails(
             nonlocal callback_calls
             callback_calls += 1
 
-        def fail_mark(_bvids: list[str]) -> None:
+        async def fail_persist(
+            _rows: list[dict[str, object]],
+            _bvids: list[str],
+        ) -> None:
             raise RuntimeError("write failed")
 
-        monkeypatch.setattr(db, "mark_pool_items_shown", fail_mark)
+        monkeypatch.setattr(db, "persist_pool_serve_async", fail_persist)
         engine = RecommendationEngine(
             llm=_DummyLLM(),
             database=db,
             pool_inventory_commit_callback=on_commit,
         )
 
-        await engine.serve(_build_profile(), limit=1)
+        with pytest.raises(RuntimeError, match="write failed"):
+            await engine.serve(_build_profile(), limit=1)
         await asyncio.sleep(0)
         assert callback_calls == 0
         db.close()
 
 
 @pytest.mark.asyncio
-async def test_serve_sync_fallback_notifies_after_shown_commit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_serve_isolated_commit_notifies_after_shown_commit() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.initialize()
@@ -4425,22 +4473,15 @@ async def test_serve_sync_fallback_notifies_after_shown_commit(
                 db.count_pool_candidates()
             ),
         )
-        monkeypatch.setattr(
-            asyncio,
-            "get_running_loop",
-            lambda: (_ for _ in ()).throw(RuntimeError),
-        )
-
         recommendations = await engine.serve(_build_profile(), limit=1)
         assert len(recommendations) == 1
+        await asyncio.sleep(0)
         assert observed_counts == [0]
         db.close()
 
 
 @pytest.mark.asyncio
-async def test_serve_sync_fallback_does_not_fail_when_commit_callback_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_serve_isolated_commit_does_not_fail_when_commit_callback_fails() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.initialize()
@@ -4454,14 +4495,9 @@ async def test_serve_sync_fallback_does_not_fail_when_commit_callback_fails(
             database=db,
             pool_inventory_commit_callback=fail_callback,
         )
-        monkeypatch.setattr(
-            asyncio,
-            "get_running_loop",
-            lambda: (_ for _ in ()).throw(RuntimeError),
-        )
-
         recommendations = await engine.serve(_build_profile(), limit=1)
         assert len(recommendations) == 1
+        await asyncio.sleep(0)
         assert db.count_pool_candidates() == 0
         db.close()
 
@@ -4499,6 +4535,8 @@ async def test_serve_final_exclusion_blocks_platform_floor_reintroduction(
             "_pool_readiness_counts",
             lambda: {"available": 2, "raw": 2, "pending": 0},
         )
+        monkeypatch.setattr(db, "load_pool_serve_snapshot_async", None)
+        monkeypatch.setattr(db, "persist_pool_serve_async", None)
         monkeypatch.setattr(engine, "_load_pool_candidates", lambda *, limit: [allowed])
         monkeypatch.setattr(
             engine,

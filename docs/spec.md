@@ -221,6 +221,11 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
+
+reshuffle HTTP → PoolServeSnapshot → isolated serve DB worker/read transaction
+               → unchanged MMR → short atomic recommendation+shown write
+pool maintenance → isolated maintenance DB worker → ≤50 mutations/transaction
+                 → commit/release lock → unchanged skip / 10m safety sweep
 ```
 
 下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
@@ -282,7 +287,7 @@ guided init: signals → preferences → full profile commit
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ runtime status：available/raw/pending 库存 -> 插件/移动/桌面 │   │
 │  │ 补池：available-by-source deficit + raw-material headroom     │   │
-│  │ 推荐消费池后：refresh.pool_updated 快照 -> 三端库存提示收敛   │   │
+│  │ 推荐消费池后：ServeResult 扣减快照 -> 精确异步复读 -> 三端收敛 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 画像编辑：编辑面板 -> /api/profile/edit -> 覆盖层（插件/移动/桌面三端） │ │
@@ -306,6 +311,8 @@ guided init: signals → preferences → full profile commit
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
 │  │ OpenClaw refresh: first source/eval <=4 -> copy <=4/no split retry -> canonical subset; both hosts recover first │ │
+│  │ reshuffle: PoolServeSnapshot/serve worker -> MMR worker -> isolated atomic persist │ │
+│  │ maintenance worker: isolated connection -> <=50 mutations/batch -> commit/yield │ │
 │  │     内容元数据：时长/互动/发布时间 -> candidates -> content_cache -> API -> 四端 │ │
 │  │     Query inspiration cache: search preview -> inspiration/expansion -> keyword provenance │ │
 │  │     InspirationKeywordPipeline: axis library learning loop (yield backfill/lifecycle) + breadth config │ │
@@ -421,7 +428,7 @@ guided init: signals → preferences → full profile commit
 | 浏览器插件 | **Chrome Extension** (Manifest V3) | 行为采集 + 交互 UI + LUI |
 | Agent 框架 | **自研轻量框架**，按需扩展 | 灵活可控，支持 Skill 系统 |
 | 记忆存储 | **SQLite** + **向量索引** + **JSON** | 分层存储，匹配不同记忆类型需求 |
-| 任务调度 | **asyncio runtime loops** + `[scheduler]` 配置 | 按前端可换候选缺口、raw-material headroom、行为阈值和策略间隔执行内容发现；pending raw 评估有独立 loop；不依赖 cron |
+| 任务调度 | **asyncio runtime loops** + `[scheduler]` 配置 | 按前端可换候选缺口、raw-material headroom、行为阈值和策略间隔执行内容发现；pending raw 评估有独立 loop；推荐 serve 与 pool maintenance 使用分离的单线程 SQLite worker，维护按 ≤50 行事务分批让锁；不依赖 cron |
 | 运行模式 | **本地运行** | 用户自己的电脑上执行 |
 
 ---

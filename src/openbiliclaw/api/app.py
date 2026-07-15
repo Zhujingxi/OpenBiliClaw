@@ -5134,15 +5134,59 @@ def create_app(
             ]
         return payload
 
-    async def _publish_pool_status_snapshot(message: str = "推荐池已同步") -> None:
-        """Broadcast pool counts after recommendation endpoints consume inventory."""
+    async def _publish_pool_status_snapshot(
+        counts: dict[str, int] | None = None,
+        message: str = "推荐池已同步",
+    ) -> None:
+        """Broadcast pool counts, avoiding a rescan when serve supplied them."""
+        status_started = time.perf_counter()
         event_hub = getattr(ctx, "event_hub", None) or getattr(
             ctx.runtime_controller, "event_hub", None
         )
         publish = getattr(event_hub, "publish", None)
         if not callable(publish):
             return
-        pool_status = await asyncio.to_thread(_runtime_pool_status_payload)
+        pool_status: dict[str, object]
+        if counts is not None:
+            pool_status = {
+                "pool_available_count": max(0, int(counts.get("available", 0))),
+                "pool_raw_count": max(
+                    0,
+                    int(counts.get("raw", counts.get("available", 0))),
+                ),
+                "pool_pending_count": max(0, int(counts.get("pending", 0))),
+                "pool_pending_eval_count": max(0, int(counts.get("pending_eval", 0))),
+                "pool_evaluated_pending_count": max(
+                    0,
+                    int(counts.get("evaluated_pending", 0)),
+                ),
+            }
+        else:
+            isolated_reader = getattr(
+                ctx.database,
+                "count_pool_readiness_isolated_async",
+                None,
+            )
+            if callable(isolated_reader):
+                exact = await isolated_reader()
+                pool_status = {
+                    "pool_available_count": max(0, int(exact.get("available", 0))),
+                    "pool_raw_count": max(0, int(exact.get("raw", 0))),
+                    "pool_pending_count": max(0, int(exact.get("pending", 0))),
+                    "pool_pending_eval_count": max(
+                        0,
+                        int(exact.get("pending_eval", 0)),
+                    ),
+                    "pool_evaluated_pending_count": max(
+                        0,
+                        int(exact.get("evaluated_pending", 0)),
+                    ),
+                }
+            else:
+                pool_status = await asyncio.to_thread(_runtime_pool_status_payload)
+        controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
+        if controller_target is not None:
+            pool_status["pool_target_count"] = max(0, int(controller_target))
         event = {
             "type": "refresh.pool_updated",
             "phase": "done",
@@ -5153,6 +5197,17 @@ def create_app(
             result = publish(event)
             if asyncio.iscoroutine(result):
                 await result
+        logger.info(
+            "recommendation_status_publish status_publish_ms=%.1f exact=%s",
+            (time.perf_counter() - status_started) * 1000.0,
+            counts is None,
+        )
+
+    def _schedule_exact_pool_status_snapshot() -> None:
+        """Refresh exact counts after the HTTP response-critical work."""
+        task = asyncio.create_task(_publish_pool_status_snapshot())
+        _fire_and_forget_tasks.add(task)
+        task.add_done_callback(_fire_and_forget_tasks.discard)
 
     add_pool_commit_subscriber = getattr(ctx, "add_pool_inventory_commit_subscriber", None)
     if callable(add_pool_commit_subscriber):
@@ -5206,13 +5261,22 @@ def create_app(
                         return cast("dict[str, object]", result)
         return None
 
-    async def _trigger_replenishment_if_needed(*, force: bool = False) -> None:
+    async def _trigger_replenishment_if_needed(
+        *,
+        force: bool = False,
+        available_count: int | None = None,
+    ) -> None:
         """Fire a background Discovery refresh when the pool runs low."""
         if not force:
             curator = getattr(ctx.recommendation_engine, "_curator", None)
             if curator is None or not hasattr(curator, "needs_replenishment"):
                 return
-            if not curator.needs_replenishment():
+            count_gate = getattr(curator, "needs_replenishment_for_count", None)
+            if available_count is not None and callable(count_gate):
+                needs_replenishment = bool(count_gate(available_count))
+            else:
+                needs_replenishment = await asyncio.to_thread(curator.needs_replenishment)
+            if not needs_replenishment:
                 return
 
         nonlocal auto_replenishment_started_at, auto_replenishment_task
@@ -5240,15 +5304,27 @@ def create_app(
     async def reshuffle_recommendations(
         payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
     ) -> RecommendationReshuffleResponse:
+        request_started = time.perf_counter()
+        precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if await asyncio.to_thread(_pool_available_count) == 0:
-            await _trigger_replenishment_if_needed(force=True)
-            return RecommendationReshuffleResponse(items=[])
+        result_fn = getattr(
+            ctx.recommendation_engine,
+            "reshuffle_recommendations_with_result",
+            None,
+        )
+        if not callable(result_fn):
+            precheck_started = time.perf_counter()
+            if await asyncio.to_thread(_pool_available_count) == 0:
+                await _trigger_replenishment_if_needed(force=True)
+                return RecommendationReshuffleResponse(items=[])
+            precheck_ms = (time.perf_counter() - precheck_started) * 1000.0
+        profile_started = time.perf_counter()
         try:
             profile = await ctx.soul_engine.get_profile()
         except Exception:
             return RecommendationReshuffleResponse(items=[])
+        profile_ms = (time.perf_counter() - profile_started) * 1000.0
         excluded_bvids = list(
             dict.fromkeys(
                 bvid.strip()
@@ -5256,35 +5332,107 @@ def create_app(
                 if bvid and bvid.strip()
             )
         )
-        items = await ctx.recommendation_engine.reshuffle_recommendations(
-            profile=profile,
-            excluded_bvids=excluded_bvids,
-            limit=10,
+        if callable(result_fn):
+            serve_result = await result_fn(
+                profile=profile,
+                excluded_bvids=excluded_bvids,
+                limit=10,
+            )
+            items = serve_result.items
+            counts_after = dict(serve_result.pool_counts_after)
+            timings = serve_result.timings
+        else:
+            items = await ctx.recommendation_engine.reshuffle_recommendations(
+                profile=profile,
+                excluded_bvids=excluded_bvids,
+                limit=10,
+            )
+            counts_after = {}
+            timings = None
+        _schedule_exact_pool_status_snapshot()
+        available_after = counts_after.get("available")
+        await _trigger_replenishment_if_needed(
+            force=available_after == 0,
+            available_count=available_after,
         )
-        await _publish_pool_status_snapshot()
-        await _trigger_replenishment_if_needed()
+        logger.info(
+            "recommendation_request_timing action=reshuffle precheck_ms=%.1f "
+            "profile_ms=%.1f pool_snapshot_ms=%.1f embedding_ms=%.1f "
+            "selector_worker_ms=%.1f event_loop_resume_delay_ms=%.1f "
+            "persist_ms=%.1f status_publish_ms=0.0 total_ms=%.1f",
+            precheck_ms,
+            profile_ms,
+            float(getattr(timings, "pool_snapshot_ms", 0.0)),
+            float(getattr(timings, "embedding_ms", 0.0)),
+            float(getattr(timings, "selector_worker_ms", 0.0)),
+            float(getattr(timings, "event_loop_resume_delay_ms", 0.0)),
+            float(getattr(timings, "persist_ms", 0.0)),
+            (time.perf_counter() - request_started) * 1000.0,
+        )
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
     @app.post("/api/recommendations/append", response_model=RecommendationReshuffleResponse)
     async def append_recommendations(
         payload: RecommendationAppendIn,
     ) -> RecommendationReshuffleResponse:
+        request_started = time.perf_counter()
+        precheck_ms = 0.0
         if ctx.recommendation_engine is None or ctx.soul_engine is None:
             return RecommendationReshuffleResponse(items=[])
-        if await asyncio.to_thread(_pool_available_count) == 0:
-            await _trigger_replenishment_if_needed(force=True)
-            return RecommendationReshuffleResponse(items=[])
+        result_fn = getattr(
+            ctx.recommendation_engine,
+            "append_recommendations_with_result",
+            None,
+        )
+        if not callable(result_fn):
+            precheck_started = time.perf_counter()
+            if await asyncio.to_thread(_pool_available_count) == 0:
+                await _trigger_replenishment_if_needed(force=True)
+                return RecommendationReshuffleResponse(items=[])
+            precheck_ms = (time.perf_counter() - precheck_started) * 1000.0
+        profile_started = time.perf_counter()
         try:
             profile = await ctx.soul_engine.get_profile()
         except Exception:
             return RecommendationReshuffleResponse(items=[])
-        items = await ctx.recommendation_engine.append_recommendations(
-            profile=profile,
-            excluded_bvids=payload.excluded_bvids,
-            limit=10,
+        profile_ms = (time.perf_counter() - profile_started) * 1000.0
+        if callable(result_fn):
+            serve_result = await result_fn(
+                profile=profile,
+                excluded_bvids=payload.excluded_bvids,
+                limit=10,
+            )
+            items = serve_result.items
+            counts_after = dict(serve_result.pool_counts_after)
+            timings = serve_result.timings
+        else:
+            items = await ctx.recommendation_engine.append_recommendations(
+                profile=profile,
+                excluded_bvids=payload.excluded_bvids,
+                limit=10,
+            )
+            counts_after = {}
+            timings = None
+        _schedule_exact_pool_status_snapshot()
+        available_after = counts_after.get("available")
+        await _trigger_replenishment_if_needed(
+            force=available_after == 0,
+            available_count=available_after,
         )
-        await _publish_pool_status_snapshot()
-        await _trigger_replenishment_if_needed()
+        logger.info(
+            "recommendation_request_timing action=append precheck_ms=%.1f "
+            "profile_ms=%.1f pool_snapshot_ms=%.1f embedding_ms=%.1f "
+            "selector_worker_ms=%.1f event_loop_resume_delay_ms=%.1f "
+            "persist_ms=%.1f status_publish_ms=0.0 total_ms=%.1f",
+            precheck_ms,
+            profile_ms,
+            float(getattr(timings, "pool_snapshot_ms", 0.0)),
+            float(getattr(timings, "embedding_ms", 0.0)),
+            float(getattr(timings, "selector_worker_ms", 0.0)),
+            float(getattr(timings, "event_loop_resume_delay_ms", 0.0)),
+            float(getattr(timings, "persist_ms", 0.0)),
+            (time.perf_counter() - request_started) * 1000.0,
+        )
         return RecommendationReshuffleResponse(items=_serialize_recommendation_items(items))
 
     @app.post("/api/recommendations/refresh", response_model=RecommendationRefreshResponse)

@@ -162,6 +162,25 @@ class PoolCurator:
         signals = self._database.get_recent_recommendation_signals(
             limit=self._history_window,
         )
+        feedback_rows = self._database.get_feedback_signals(
+            limit=self._history_window,
+        )
+        return self.build_context_from_rows(
+            signals,
+            feedback_rows,
+            newly_confirmed_amplification_keys=newly_confirmed_amplification_keys,
+            rolling_window_hours=rolling_window_hours,
+        )
+
+    def build_context_from_rows(
+        self,
+        signals: list[dict[str, object]],
+        feedback_rows: list[dict[str, object]],
+        *,
+        newly_confirmed_amplification_keys: set[str] | frozenset[str] | None = None,
+        rolling_window_hours: int = 24,
+    ) -> ScoringContext:
+        """Build scoring context from a caller-owned consistent DB snapshot."""
         topic_keys = tuple(
             str(row.get("topic_key", "")).strip()
             for row in signals
@@ -178,9 +197,6 @@ class PoolCurator:
             if str(row.get("source", "")).strip()
         )
 
-        feedback_rows = self._database.get_feedback_signals(
-            limit=self._history_window,
-        )
         disliked_ups: set[int] = set()
         disliked_topics: set[str] = set()
         liked_topics: set[str] = set()
@@ -288,7 +304,19 @@ class PoolCurator:
 
     def needs_replenishment(self, *, threshold: int = _POOL_LOW_THRESHOLD) -> bool:
         """True when the pool is getting thin."""
-        return self._database.count_pool_candidates() < threshold
+        return self.needs_replenishment_for_count(
+            self._database.count_pool_candidates(),
+            threshold=threshold,
+        )
+
+    @staticmethod
+    def needs_replenishment_for_count(
+        available_count: int,
+        *,
+        threshold: int = _POOL_LOW_THRESHOLD,
+    ) -> bool:
+        """Pure inventory gate for callers that already own a pool snapshot."""
+        return max(0, int(available_count)) < max(0, int(threshold))
 
     def pool_count(self) -> int:
         """Current number of fresh pool candidates."""

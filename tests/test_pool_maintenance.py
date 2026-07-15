@@ -1,5 +1,6 @@
 """Regression tests for atomic, availability-safe pool maintenance."""
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +278,60 @@ def test_available_surplus_only_trims_down_to_target(tmp_path: Path) -> None:
     assert result.available_after == 10
     assert result.trimmed_ready_reserve == 6
     assert result.rolled_back is False
+
+
+def test_bounded_maintenance_batches_release_lock_and_eventually_converge(
+    tmp_path: Path,
+) -> None:
+    db = _database(tmp_path)
+    for index in range(130):
+        _seed_ready(db, f"BV_BATCH_{index:03d}", topic_group=f"batch-{index}")
+
+    results = []
+    for _ in range(10):
+        result = db.maintain_pool_inventory(
+            target=10,
+            raw_ceiling=10,
+            source_share_quotas={"bilibili": 10},
+            raw_source_share_quotas={"bilibili": 10},
+            max_mutations=25,
+        )
+        results.append(result)
+        assert result.mutation_count <= 25
+        assert result.rolled_back is False
+        if not result.has_more:
+            break
+
+    assert len(results) > 1
+    assert results[-1].has_more is False
+    assert results[-1].available_after == 10
+    assert results[-1].raw_after == 10
+    assert db.count_pool_candidates() == 10
+
+
+def test_maintenance_defers_quickly_when_interactive_writer_owns_lock(
+    tmp_path: Path,
+) -> None:
+    db = _database(tmp_path)
+    _seed_ready(db, "BV_WRITER", topic_group="writer")
+    writer = db.open_connection()
+    writer.execute("BEGIN IMMEDIATE")
+    started = time.perf_counter()
+    try:
+        with pytest.raises(
+            database_module.PoolMaintenanceDeferredError,
+            match="writer busy",
+        ):
+            db.maintain_pool_inventory(
+                target=1,
+                raw_ceiling=5,
+                source_share_quotas={"bilibili": 1},
+            )
+    finally:
+        writer.rollback()
+        writer.close()
+
+    assert (time.perf_counter() - started) < 0.5
 
 
 def test_invariant_failure_rolls_back_every_victim_update(

@@ -5,6 +5,7 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.saved_sync.models import SavedItemInput
@@ -2488,6 +2489,110 @@ class TestDatabase:
                 "evaluated_pending": 0,
             }
 
+            db.close()
+
+    def test_pool_serve_snapshot_parses_view_history_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", title="可换", source="search")
+            db.insert_event(
+                "view",
+                title="另一个视频",
+                url="https://www.bilibili.com/video/BVSEEN",
+                metadata={"bvid": "BVSEEN"},
+            )
+            original = Database._recent_viewed_state_on
+            calls = 0
+
+            def counted(
+                database: Database,
+                conn: sqlite3.Connection,
+                *,
+                limit: int = 2000,
+            ) -> tuple[set[str], set[str]]:
+                nonlocal calls
+                calls += 1
+                return original(database, conn, limit=limit)
+
+            with patch.object(Database, "_recent_viewed_state_on", counted):
+                snapshot = db.load_pool_serve_snapshot(limit=10)
+
+            assert snapshot.readiness["available"] == 1
+            assert [row["bvid"] for row in snapshot.candidate_rows] == ["BVREADY"]
+            assert calls == 1
+            db.close()
+
+    def test_pool_serve_snapshot_reuses_and_invalidates_view_history_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", title="可换", source="search")
+            db.insert_event(
+                "view",
+                title="看过一",
+                url="https://www.bilibili.com/video/BVSEEN1",
+                metadata={"bvid": "BVSEEN1"},
+            )
+            original = Database._extract_view_event_identities.__func__
+            calls = 0
+
+            def counted(
+                cls: type[Database],
+                row: dict[str, Any],
+            ) -> tuple[set[str], str]:
+                nonlocal calls
+                calls += 1
+                return original(cls, row)
+
+            with patch.object(
+                Database,
+                "_extract_view_event_identities",
+                classmethod(counted),
+            ):
+                db.load_pool_serve_snapshot(limit=10)
+                assert calls == 1
+                db.load_pool_serve_snapshot(limit=10)
+                assert calls == 1
+                db.insert_event(
+                    "view",
+                    title="看过二",
+                    url="https://www.bilibili.com/video/BVSEEN2",
+                    metadata={"bvid": "BVSEEN2"},
+                )
+                db.load_pool_serve_snapshot(limit=10)
+                assert calls == 3
+
+            db.close()
+
+    def test_pool_maintenance_parses_view_history_once_per_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(db, "BVREADY", title="可换", source="search")
+            original = Database._recent_viewed_content_keys_on
+            calls = 0
+
+            def counted(
+                database: Database,
+                conn: sqlite3.Connection,
+                *,
+                limit: int = 2000,
+            ) -> set[str]:
+                nonlocal calls
+                calls += 1
+                return original(database, conn, limit=limit)
+
+            with patch.object(Database, "_recent_viewed_content_keys_on", counted):
+                result = db.maintain_pool_inventory(
+                    target=1,
+                    raw_ceiling=2,
+                    source_share_quotas={"bilibili": 1},
+                    max_mutations=50,
+                )
+
+            assert result.available_after == 1
+            assert calls == 1
             db.close()
 
     def test_count_pool_readiness_reports_only_canonical_admitted_pending_copy(

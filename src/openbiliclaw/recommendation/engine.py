@@ -203,6 +203,26 @@ class Recommendation:
     feedback: str | None = None  # User feedback after seeing it
 
 
+@dataclass(frozen=True)
+class ServeTimings:
+    """Phase timings for one recommendation serve request."""
+
+    pool_snapshot_ms: float = 0.0
+    embedding_ms: float = 0.0
+    selector_worker_ms: float = 0.0
+    event_loop_resume_delay_ms: float = 0.0
+    persist_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class ServeResult:
+    """Recommendation items plus post-commit inventory and timings."""
+
+    items: list[Recommendation]
+    pool_counts_after: dict[str, int]
+    timings: ServeTimings = field(default_factory=ServeTimings)
+
+
 @dataclass
 class PersonalTopic:
     """A deeply personalized recommendation topic.
@@ -235,7 +255,7 @@ class RecommendationEngine:
         embedding_service: SupportsEmbeddingService | None = None,
         task_registry: BackgroundTaskRegistry | None = None,
         xhs_self_info_provider: Callable[[], dict[str, object] | None] | None = None,
-        pool_inventory_commit_callback: Callable[[], object] | None = None,
+        pool_inventory_commit_callback: Callable[..., object] | None = None,
         expression_batch_concurrency: int = _DEFAULT_EXPRESSION_BATCH_CONCURRENCY,
     ) -> None:
         self._llm = llm
@@ -274,6 +294,10 @@ class RecommendationEngine:
         # calls still avoid duplicate delight writes.
         self._expression_lock = asyncio.Lock()
         self._delight_lock = asyncio.Lock()
+        # Serialize the full snapshot→rank→commit lifecycle. Without this,
+        # two simultaneous reshuffles can read the same fresh rows before
+        # either short write commits and return duplicates.
+        self._serve_lock = asyncio.Lock()
         # Background-computed supergroup canonical map. Populated by
         # prewarm_supergroup_embeddings() during refresh ticks; consumed
         # by serve()'s _merge_topic_supergroups for instant lookup.
@@ -335,6 +359,40 @@ class RecommendationEngine:
         excluded_bvids: frozenset[str] = frozenset(),
         expression_mode: Literal["realtime", "precomputed"] = "precomputed",
     ) -> list[Recommendation]:
+        """Serve recommendations while preserving the legacy list API."""
+        result = await self.serve_with_result(
+            profile,
+            limit=limit,
+            excluded_bvids=excluded_bvids,
+            expression_mode=expression_mode,
+        )
+        return result.items
+
+    async def serve_with_result(
+        self,
+        profile: SoulProfile,
+        *,
+        limit: int = 5,
+        excluded_bvids: frozenset[str] = frozenset(),
+        expression_mode: Literal["realtime", "precomputed"] = "precomputed",
+    ) -> ServeResult:
+        """Serve one serialized batch with inventory/timing metadata."""
+        async with self._serve_lock:
+            return await self._serve_with_result_unlocked(
+                profile,
+                limit=limit,
+                excluded_bvids=excluded_bvids,
+                expression_mode=expression_mode,
+            )
+
+    async def _serve_with_result_unlocked(
+        self,
+        profile: SoulProfile,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+        expression_mode: Literal["realtime", "precomputed"],
+    ) -> ServeResult:
         """Unified recommendation entry point — always picks from the pool.
 
         All recommendation paths (generate, reshuffle, append) converge here.
@@ -350,11 +408,66 @@ class RecommendationEngine:
                 higher quality).
 
         Returns:
-            List of personalized recommendations.
+            Recommendations plus inventory and phase timings.
         """
         label = "realtime" if expression_mode == "realtime" else "pool"
         multiplier = 4 if excluded_bvids else 3
-        pool_readiness = await asyncio.to_thread(self._pool_readiness_counts)
+        candidate_limit = max(limit * multiplier, 40) + len(excluded_bvids)
+        pool_snapshot_started = time.perf_counter()
+        snapshot_loader = getattr(self._database, "load_pool_serve_snapshot_async", None)
+        curator_snapshot: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None
+        if callable(snapshot_loader):
+            history_limit = max(1, int(getattr(self._curator, "_history_window", 30)))
+            snapshot = await snapshot_loader(
+                limit=candidate_limit,
+                xhs_self_nickname=self._xhs_self_nickname(),
+                curator_history_limit=history_limit,
+            )
+            pool_readiness = dict(snapshot.readiness)
+            candidates = self._rows_to_discovered(list(snapshot.candidate_rows))
+            loaded_count = int(snapshot.loaded_count)
+            if snapshot.platform_topups:
+                logger.info(
+                    "serve platform floor topped up %s",
+                    ", ".join(f"{name}+{count}" for name, count in snapshot.platform_topups),
+                )
+            if excluded_bvids:
+                candidates = [item for item in candidates if item.bvid not in excluded_bvids]
+            after_exclude_count = len(candidates)
+            candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+            after_disliked_count = len(candidates)
+            if snapshot.recent_viewed_bvids:
+                candidates = [
+                    item for item in candidates if item.bvid not in snapshot.recent_viewed_bvids
+                ]
+            after_viewed_count = len(candidates)
+            curator_snapshot = (
+                list(snapshot.curator_signals),
+                list(snapshot.feedback_signals),
+            )
+        else:
+            # Compatibility path for test doubles and third-party adapters.
+            pool_readiness = await asyncio.to_thread(self._pool_readiness_counts)
+            if int(pool_readiness.get("available", 0)) > 0:
+                (
+                    candidates,
+                    loaded_count,
+                    after_exclude_count,
+                    after_disliked_count,
+                    after_viewed_count,
+                ) = await asyncio.to_thread(
+                    self._load_filtered_serve_candidates,
+                    profile,
+                    limit=candidate_limit,
+                    excluded_bvids=excluded_bvids,
+                )
+            else:
+                candidates = []
+                loaded_count = 0
+                after_exclude_count = 0
+                after_disliked_count = 0
+                after_viewed_count = 0
+        pool_snapshot_ms = (time.perf_counter() - pool_snapshot_started) * 1000.0
         servable_pool_count = pool_readiness["available"]
         raw_pool_count = pool_readiness["raw"]
         pending_pool_count = pool_readiness["pending"]
@@ -366,20 +479,11 @@ class RecommendationEngine:
                 pending_pool_count,
             )
             self._last_served_bvids = frozenset()
-            return []
-
-        (
-            candidates,
-            loaded_count,
-            after_exclude_count,
-            after_disliked_count,
-            after_viewed_count,
-        ) = await asyncio.to_thread(
-            self._load_filtered_serve_candidates,
-            profile,
-            limit=max(limit * multiplier, 40) + len(excluded_bvids),
-            excluded_bvids=excluded_bvids,
-        )
+            return ServeResult(
+                items=[],
+                pool_counts_after=pool_readiness,
+                timings=ServeTimings(pool_snapshot_ms=pool_snapshot_ms),
+            )
         if after_disliked_count < after_exclude_count:
             logger.info(
                 "serve(/%s) filtered %d candidate(s) by profile disliked_topics",
@@ -402,7 +506,11 @@ class RecommendationEngine:
                 after_viewed_count,
             )
             self._last_served_bvids = frozenset()
-            return []
+            return ServeResult(
+                items=[],
+                pool_counts_after=pool_readiness,
+                timings=ServeTimings(pool_snapshot_ms=pool_snapshot_ms),
+            )
 
         # Online supergroup merging — collapses semantically-equivalent
         # topic_groups within this batch (e.g. 动漫/动漫产业/动漫文化) so
@@ -430,18 +538,20 @@ class RecommendationEngine:
                 pending_pool_count,
             )
 
-        logger.info(
-            "Recommendation candidate summary (serve/%s): %s",
-            label,
-            json.dumps(
-                self._build_debug_summary(candidates, prev_bvids=prev_bvids),
-                ensure_ascii=False,
-            ),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Recommendation candidate summary (serve/%s): %s",
+                label,
+                json.dumps(
+                    self._build_debug_summary(candidates, prev_bvids=prev_bvids),
+                    ensure_ascii=False,
+                ),
+            )
 
         score_override, amplification_guard = await asyncio.to_thread(
             self._score_candidates_with_curator,
             candidates,
+            curator_snapshot,
         )
 
         # v0.3.44+: pre-fetch embeddings for MMR-based diversification.
@@ -467,7 +577,11 @@ class RecommendationEngine:
         # map when multimodal is off, so the default feed ranking is unchanged.
         visual_bonus = await self._visual_bonus_map(candidates, profile)
 
-        ranked = await self._select_diversified_batch_async(
+        (
+            ranked,
+            selector_worker_ms,
+            event_loop_resume_delay_ms,
+        ) = await self._select_diversified_batch_with_timing_async(
             candidates,
             limit=limit,
             score_override=score_override,
@@ -475,14 +589,15 @@ class RecommendationEngine:
             amplification_guard=amplification_guard,
             relevance_bonus=visual_bonus,
         )
-        logger.info(
-            "Recommendation picked summary (serve/%s): %s",
-            label,
-            json.dumps(
-                self._build_debug_summary(ranked, prev_bvids=prev_bvids),
-                ensure_ascii=False,
-            ),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Recommendation picked summary (serve/%s): %s",
+                label,
+                json.dumps(
+                    self._build_debug_summary(ranked, prev_bvids=prev_bvids),
+                    ensure_ascii=False,
+                ),
+            )
         # Snapshot for the next call. Use bvid only — title might
         # legitimately repeat across different bvids and we want the
         # carryover signal to be at the canonical-id level.
@@ -515,8 +630,10 @@ class RecommendationEngine:
                     rec.topic_label = self._fallback_topic_label(profile)
             recommendations.append(rec)
 
-        # Critical-path write: only the insert (we need the IDs for the
-        # response). Single transaction, single fsync.
+        # Critical-path write: one short transaction on the dedicated serve
+        # worker inserts history and marks the selected pool rows shown. This
+        # removes the old cross-thread shared-connection access and closes the
+        # duplicate window between insert and detached marking.
         recommendation_rows = [
             {
                 "bvid": rec.content.bvid,
@@ -528,10 +645,20 @@ class RecommendationEngine:
             }
             for rec in recommendations
         ]
-        ids = await asyncio.to_thread(
-            self._database.batch_insert_recommendations,
-            recommendation_rows,
-        )
+        ranked_bvids = [item.bvid for item in ranked]
+        persist_started = time.perf_counter()
+        isolated_persist = getattr(self._database, "persist_pool_serve_async", None)
+        if callable(isolated_persist):
+            persisted = await isolated_persist(recommendation_rows, ranked_bvids)
+            ids = list(persisted.recommendation_ids)
+            shown_committed = True
+        else:
+            ids = await asyncio.to_thread(
+                self._database.batch_insert_recommendations,
+                recommendation_rows,
+            )
+            shown_committed = False
+        persist_ms = (time.perf_counter() - persist_started) * 1000.0
         for rec, rec_id in zip(recommendations, ids, strict=True):
             rec.recommendation_id = rec_id
 
@@ -547,23 +674,33 @@ class RecommendationEngine:
                     topic=rec.topic_label,
                 )
 
-        # v0.3.45+: detach pool_status='shown' update from the response
-        # critical path. Under refresh-tick write contention (eg.
-        # _enforce_pool_cap reactivating 300+ rows) this UPDATE could
-        # wait 0.5-1.5s for the SQLite write lock, blowing the <1s
-        # budget. Within-session double-click protection is already
-        # provided by `_last_served_bvids` (in-memory) so it's safe to
-        # let the persistent flag commit slightly later.
-        ranked_bvids = [item.bvid for item in ranked]
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._mark_pool_shown_async(ranked_bvids))
-        except RuntimeError:
-            # serve() is normally invoked from an event loop; only the
-            # rare sync-test path falls through here.
-            self._database.mark_pool_items_shown(ranked_bvids)
-            await self._notify_pool_inventory_commit()
-        return recommendations
+        consumed = len(ids)
+        pool_counts_after = {key: max(0, int(value)) for key, value in pool_readiness.items()}
+        for key in ("available", "raw"):
+            if key in pool_counts_after:
+                pool_counts_after[key] = max(0, pool_counts_after[key] - consumed)
+
+        if shown_committed:
+            self._schedule_pool_inventory_commit(pool_counts_after)
+        else:
+            # Compatibility path for adapters without isolated writes.
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._mark_pool_shown_async(ranked_bvids))
+            except RuntimeError:
+                self._database.mark_pool_items_shown(ranked_bvids)
+                await self._notify_pool_inventory_commit(pool_counts_after)
+        return ServeResult(
+            items=recommendations,
+            pool_counts_after=pool_counts_after,
+            timings=ServeTimings(
+                pool_snapshot_ms=pool_snapshot_ms,
+                embedding_ms=_embed_elapsed_ms,
+                selector_worker_ms=selector_worker_ms,
+                event_loop_resume_delay_ms=event_loop_resume_delay_ms,
+                persist_ms=persist_ms,
+            ),
+        )
 
     async def _mark_pool_shown_async(self, bvids: list[str]) -> None:
         """Fire-and-forget pool-marking helper. Never raises."""
@@ -583,16 +720,41 @@ class RecommendationEngine:
                 len(bvids),
             )
 
-    def set_pool_inventory_commit_callback(self, callback: Callable[[], object] | None) -> None:
+    def set_pool_inventory_commit_callback(self, callback: Callable[..., object] | None) -> None:
         """Set the hook run only after the shown-state write commits."""
         self._pool_inventory_commit_callback = callback
 
-    async def _notify_pool_inventory_commit(self) -> None:
+    def _schedule_pool_inventory_commit(self, counts: dict[str, int]) -> None:
+        """Notify inventory observers after the response-critical DB commit."""
+        coro = self._notify_pool_inventory_commit(counts)
+        if self.task_registry is not None:
+            self.task_registry.track("recommendation.pool_commit", coro)
+            return
+        asyncio.create_task(coro)
+
+    async def _notify_pool_inventory_commit(
+        self,
+        counts: dict[str, int] | None = None,
+    ) -> None:
         callback = self._pool_inventory_commit_callback
         if callback is None:
             return
         try:
-            result = callback()
+            accepts_counts = False
+            try:
+                signature = inspect.signature(callback)
+                accepts_counts = any(
+                    parameter.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.VAR_POSITIONAL,
+                    )
+                    for parameter in signature.parameters.values()
+                )
+            except (TypeError, ValueError):
+                pass
+            result = callback(counts) if accepts_counts else callback()
             if inspect.isawaitable(result):
                 await result
         except Exception:
@@ -2022,10 +2184,25 @@ class RecommendationEngine:
 
         Delegates to :meth:`serve` with ``expression_mode="precomputed"``.
         """
+        result = await self.reshuffle_recommendations_with_result(
+            profile=profile,
+            excluded_bvids=excluded_bvids,
+            limit=limit,
+        )
+        return result.items
+
+    async def reshuffle_recommendations_with_result(
+        self,
+        *,
+        profile: SoulProfile,
+        excluded_bvids: list[str] | None = None,
+        limit: int = 5,
+    ) -> ServeResult:
+        """Return a reshuffle batch with post-commit inventory metadata."""
         excluded = frozenset(
             bvid.strip() for bvid in (excluded_bvids or []) if bvid and bvid.strip()
         )
-        return await self.serve(
+        return await self.serve_with_result(
             profile,
             limit=limit,
             excluded_bvids=excluded,
@@ -2043,8 +2220,23 @@ class RecommendationEngine:
 
         Delegates to :meth:`serve` with excluded BVIDs for pagination.
         """
+        result = await self.append_recommendations_with_result(
+            profile=profile,
+            excluded_bvids=excluded_bvids,
+            limit=limit,
+        )
+        return result.items
+
+    async def append_recommendations_with_result(
+        self,
+        *,
+        profile: SoulProfile,
+        excluded_bvids: list[str],
+        limit: int = 10,
+    ) -> ServeResult:
+        """Return an appended page with post-commit inventory metadata."""
         excluded = frozenset(b.strip() for b in excluded_bvids if b and b.strip())
-        return await self.serve(
+        return await self.serve_with_result(
             profile,
             limit=limit,
             excluded_bvids=excluded,
@@ -2345,9 +2537,7 @@ class RecommendationEngine:
         relevance_bonus: dict[str, float] | None = None,
     ) -> list[DiscoveredContent]:
         """Run CPU-heavy ranking in a worker thread to preserve responsiveness."""
-        started = time.monotonic()
-        result = await asyncio.to_thread(
-            cls._select_diversified_batch,
+        result, _, _ = await cls._select_diversified_batch_with_timing_async(
             candidates,
             limit=limit,
             score_override=score_override,
@@ -2357,15 +2547,49 @@ class RecommendationEngine:
             mmr_beta=mmr_beta,
             relevance_bonus=relevance_bonus,
         )
-        elapsed = time.monotonic() - started
-        if elapsed > 0.05:
+        return result
+
+    @classmethod
+    async def _select_diversified_batch_with_timing_async(
+        cls,
+        candidates: list[DiscoveredContent],
+        *,
+        limit: int,
+        score_override: dict[str, float] | None = None,
+        embeddings: dict[str, list[float]] | None = None,
+        amplification_guard: set[str] | frozenset[str] | None = None,
+        mmr_alpha: float = 0.5,
+        mmr_beta: float = 0.5,
+        relevance_bonus: dict[str, float] | None = None,
+    ) -> tuple[list[DiscoveredContent], float, float]:
+        """Return ranking plus worker CPU/wall and loop-resume delay timings."""
+
+        def _select() -> tuple[list[DiscoveredContent], float, float]:
+            worker_started = time.perf_counter()
+            selected = cls._select_diversified_batch(
+                candidates,
+                limit=limit,
+                score_override=score_override,
+                embeddings=embeddings,
+                amplification_guard=amplification_guard,
+                mmr_alpha=mmr_alpha,
+                mmr_beta=mmr_beta,
+                relevance_bonus=relevance_bonus,
+            )
+            worker_finished = time.perf_counter()
+            return selected, (worker_finished - worker_started) * 1000.0, worker_finished
+
+        result, worker_ms, worker_finished = await asyncio.to_thread(_select)
+        resume_delay_ms = max(0.0, (time.perf_counter() - worker_finished) * 1000.0)
+        if worker_ms > 50.0 or resume_delay_ms > 50.0:
             logger.warning(
-                "Recommendation diversity CPU selection took %.0fms in worker thread "
-                "(%d candidates)",
-                elapsed * 1000.0,
+                "Recommendation diversity timing selector_worker_ms=%.1f "
+                "event_loop_resume_delay_ms=%.1f candidates=%d",
+                worker_ms,
+                resume_delay_ms,
                 len(candidates),
             )
-        return result
+        return result, worker_ms, resume_delay_ms
 
     @classmethod
     def _select_diversified_batch(
@@ -2729,7 +2953,7 @@ class RecommendationEngine:
                 cls._normalize_topic_token(item.topic_group) or "unknown" for item in selected
             )
             top_share = picked_topics.most_common(1)[0][1] / len(selected)
-            logger.info(
+            logger.debug(
                 "MMR diversifier: picked %d/%d, alpha=%.2f beta=%.2f, "
                 "unique_topics=%d top_topic_share=%.0f%%",
                 len(selected),
@@ -3058,11 +3282,20 @@ class RecommendationEngine:
     def _score_candidates_with_curator(
         self,
         candidates: list[DiscoveredContent],
+        curator_snapshot: tuple[
+            list[dict[str, object]],
+            list[dict[str, object]],
+        ]
+        | None = None,
     ) -> tuple[dict[str, float] | None, frozenset[str]]:
         """Build curator context and scores outside the asyncio event loop."""
         if self._curator is None:
             return None, frozenset()
-        context = self._curator.build_context()
+        build_from_rows = getattr(self._curator, "build_context_from_rows", None)
+        if curator_snapshot is not None and callable(build_from_rows):
+            context = build_from_rows(*curator_snapshot)
+        else:
+            context = self._curator.build_context()
         return (
             self._curator.score_candidates(candidates, context),
             context.over_budget_amplification_keys,

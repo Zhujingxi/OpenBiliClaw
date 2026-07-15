@@ -23,7 +23,8 @@
 | 扩展原生保存 job ledger 与旧状态迁移 | ✅ | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；task URL 只允许平台 HTTPS host 与默认端口，输出移除 fragment/非导航 query（YouTube 仅保留身份参数 `v`；小红书仅保留打开公开笔记所需的单值非空 `xsec_token/xsec_source`，其它 key 仍剥离）。partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。命名迁移只把六个 canonical 平台的旧 `unsupported`/空 error code 改为 `unsupported_adapter_missing`，绝不改 Bilibili、未知平台或 `unsupported_content_type`。 |
 | 推荐链路 canonical identity | ✅ | `content_cache.item_key` 唯一索引、`recommendations.item_key` 普通索引；初始化按平台 + raw `content_id` 回填旧行，并在建唯一索引前确定性合并 canonical 重复行（优先 canonical storage key、填补非空元数据、重定向 recommendation 引用）。若 loser 仍被旧 `watch_later` / `favorites` 引用，consolidation 会先为真实 legacy schema 补 additive `item_key` 并写入 canonical key；后续 normalized saved migration 在 exact `bvid` 不存在时用该稳定键 join keeper，既保留 membership，也不绕过 Task 2 的单次 marker / no-resurrection 语义。B 站 `bvid` 主键保持 raw BV 兼容，非 B 站 `bvid` 存储键使用 namespaced identity，API 继续从独立字段输出 raw ID 与 authoritative URL。 |
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
-| 原子库存维护与历史恢复 | ✅ | `maintain_pool_inventory()` 在短连接 `BEGIN IMMEDIATE` 中先恢复仍合格的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；保护 canonical available 底线并在不变量失败时整体回滚。 |
+| 有界库存维护与历史恢复 | ✅ | `maintain_pool_inventory(max_mutations=50)` 在独立短连接 `BEGIN IMMEDIATE` 中先恢复仍合格的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；单事务最多修改 50 行，返回 `has_more` 供 runtime 分批收敛。维护连接只等写锁 75ms，交互写入优先；每批仍保护 canonical available 底线并在不变量失败时整体回滚。 |
+| 换批读写隔离 | ✅ | `PoolServeSnapshot` 在专属单线程 serve worker 的一次只读事务中统一读取 readiness、候选、平台补位、最近已看和 curator 信号；同一快照只解析一次最近浏览身份，B 站事件走 BVID 快路径，并按最新 view event id 缓存结果，写入新浏览事件后自动失效。`persist_pool_serve_async()` 用另一条短事务原子写入 recommendation + shown。serve 与 maintenance 使用不同 executor、不同 SQLite 连接，不把共享 `Database.conn` 直接跨线程并发访问。 |
 | 七平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
@@ -364,16 +365,26 @@ result = db.maintain_pool_inventory(
     source_share_quotas={"bilibili": 480, "zhihu": 120},
     raw_source_share_quotas={"bilibili": 960, "zhihu": 240},
     recover_suppressed=True,
+    max_mutations=50,
 )
 ```
 
-`PoolMaintenanceResult` 是 immutable 观测快照，记录维护前后 available/raw、保护量、各层 trim、来源拆分、延期 quota、不收敛 raw excess 与 rollback 原因。事务先通过连接感知的 `_load_available_pool_candidate_rows_on()` 读取唯一 canonical servability SQL，按现有 serve 排序保护 `min(available_before, target)`；topic/source/stale/explore 配额不能牺牲保护行，超额记入 deferred 字段。
+`PoolMaintenanceResult` 是 immutable 观测快照，记录维护前后 available/raw、保护量、各层 trim、来源拆分、延期 quota、不收敛 raw excess、`mutation_count/has_more`、锁等待与各阶段耗时、rollback 原因。事务先通过连接感知的 `_load_available_pool_candidate_rows_on()` 读取唯一 canonical servability SQL，按现有 serve 排序保护 `min(available_before, target)`；topic/source/stale/explore 配额不能牺牲保护行，超额记入 deferred 字段。runtime 每 tick 最多执行 8 个 50 行批次，每批提交后释放写锁并让出事件循环；更大积压留给后续 tick。普通 tick 在 readiness fingerprint 不变时跳过重扫描，每 10 分钟做一次安全巡检以覆盖时间驱动 stale 和同计数组成变化。
 
-当 canonical available 低于 target 且 `recover_suppressed=True`（默认）时，同一事务会在 victim planning 前复用已经付费完成评分和文案的历史行。候选必须仍为 `pool_status='suppressed'`、`recommended_at IS NULL`、未出现在 `recommendations`、未近期看过、非 dislike / shown / `purged_by_dislike`、达到统一 admission floor，且 expression / topic label / style / topic group 完整、链接可打开、不是 XHS 本人内容，也未被当前 delight guard 认领。恢复排序先看当前 source family 缺口，再按 relevance、`last_scored_at` 和 BVID；source quota 只影响顺序，不阻止其它来源填满全局缺口。每恢复一行就重新读取 canonical available，到 target 立即停止；新恢复且 canonical 可用的 ID 在后续 trim 中受保护。重复维护是 no-op，`recovered_suppressed` 只统计整笔维护结束后仍为 fresh 的净恢复数。
+当 canonical available 低于 target 且 `recover_suppressed=True`（默认）时，同一事务会在 victim planning 前复用已经付费完成评分和文案的历史行。候选必须仍为 `pool_status='suppressed'`、`recommended_at IS NULL`、未出现在 `recommendations`、未近期看过、非 dislike / shown / `purged_by_dislike`、达到统一 admission floor，且 expression / topic label / style / topic group 完整、链接可打开、不是 XHS 本人内容，也未被当前 delight guard 认领。恢复排序先看当前 source family 缺口，再按 relevance、`last_scored_at` 和 BVID；source quota 只影响顺序，不阻止其它来源填满全局缺口。恢复循环在内存维护 source/topic/available 计数，不再每恢复一行重跑完整 window-function servability 扫描；topic cap 的边界位移由下一 bounded batch 校正。新恢复且 canonical 可用的 ID 在本批后续 trim 中受保护；重复维护最终成为 no-op，`recovered_suppressed` 只统计本批结束后仍为 fresh 的净恢复数。
 
-若 `BEGIN IMMEDIATE` 或 canonical snapshot 读取在 `available_before` 建立前失败，`maintain_pool_inventory()` 抛出 `PoolMaintenanceSnapshotUnavailableError`，不会返回伪造的零库存结果。只有 snapshot 已取得后的 victim/invariant 失败才返回 `rolled_back=True`，其中 `available_before` 保留真实事务前值。
+若 `BEGIN IMMEDIATE` 遇到交互 writer，75ms 后抛出 `PoolMaintenanceDeferredError`，runtime 把本轮维护延后而不是等待进程默认的 30 秒。其它 canonical snapshot 读取在 `available_before` 建立前失败时抛出 `PoolMaintenanceSnapshotUnavailableError`，不会返回伪造的零库存结果。只有 snapshot 已取得后的 victim/invariant 失败才返回 `rolled_back=True`，其中 `available_before` 保留真实事务前值。
 
 raw ceiling 同时统计 `content_cache` 和 `discovery_candidates` active 行，victim 顺序为 unready content → 未领取 `pending_eval` → 未领取 `evaluated` → 非保护 ready reserve。候选不删除，而是 terminalize 为 `trimmed_capacity`，`eval_error='pool_raw_ceiling'`；`evaluating` 与任意 token-owned 行永不裁剪。若保护行加 active claim 已超过 ceiling，保留所有权与可用库存、报告 `untrimmed_raw_excess` 并记录 ERROR。提交前重新计算 canonical available，必须满足 `available_after >= min(available_before, target)`，否则整笔 `BEGIN IMMEDIATE` 回滚。
+
+### Recommendation Serve Snapshot
+
+```python
+snapshot = await db.load_pool_serve_snapshot_async(limit=40)
+persisted = await db.persist_pool_serve_async(recommendation_rows, selected_bvids)
+```
+
+两者都由 database-owned serve executor 串行执行，并为每次操作创建/关闭独立连接。snapshot 在显式只读事务内提供一致的 readiness、候选窗口、平台补位、最近已看与 curator/feedback rows；persist 把推荐历史和 shown 状态放进一次 `BEGIN IMMEDIATE`。后台维护有自己的 executor/连接，因此阻塞 maintenance worker 不会把交互读排在同一队列后面。交互写锁每次最多等待 250ms，沿既有 8 次有界重试最坏约 2.14s，保留 HTTP 3s 尾延迟预算。
 
 ### Admission Cleanup
 

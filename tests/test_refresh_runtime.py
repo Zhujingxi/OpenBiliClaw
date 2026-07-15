@@ -23,6 +23,7 @@ from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.llm.base import LLMRateLimitError
 from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
 from openbiliclaw.recommendation.delight import DEFAULT_DELIGHT_THRESHOLD
+from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.candidate_eval import CandidateEvalCoordinator, CandidateEvalSnapshot
 from openbiliclaw.runtime.events import RuntimeEventHub
 from openbiliclaw.runtime.presence import PresenceTracker
@@ -2957,6 +2958,120 @@ async def test_refresh_if_needed_runs_pool_maintenance_off_event_loop(
     assert result == {"refreshed": False, "strategies": [], "reason": "pool_at_cap"}
     assert maintenance_thread_ids
     assert maintenance_thread_ids[0] != event_loop_thread_id
+
+
+async def test_blocked_maintenance_worker_does_not_block_heartbeat_or_reshuffle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(tmp_path / "maintenance-worker.db")
+    database.initialize()
+    _seed_visible_pool_row(
+        database,
+        "BV_WORKER_A",
+        topic_group="worker-a",
+        relevance_score=0.9,
+    )
+    _seed_visible_pool_row(
+        database,
+        "BV_WORKER_B",
+        topic_group="worker-b",
+        relevance_score=0.8,
+    )
+    engine = RecommendationEngine(llm=object(), database=database)  # type: ignore[arg-type]
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=engine,
+        pool_target_count=1,
+    )
+    maintenance_started = threading.Event()
+    release_maintenance = threading.Event()
+    original_maintenance = database.maintain_pool_inventory
+
+    def blocked_maintenance(**kwargs: object) -> PoolMaintenanceResult:
+        maintenance_started.set()
+        if not release_maintenance.wait(timeout=2):
+            raise AssertionError("test did not release maintenance worker")
+        return original_maintenance(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(database, "maintain_pool_inventory", blocked_maintenance)
+    heartbeat_ticks = 0
+    heartbeat_done = asyncio.Event()
+
+    async def heartbeat() -> None:
+        nonlocal heartbeat_ticks
+        while not heartbeat_done.is_set():
+            heartbeat_ticks += 1
+            await asyncio.sleep(0.005)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    maintenance_task = asyncio.create_task(controller._enforce_pool_cap_async())
+    try:
+        started = await asyncio.wait_for(
+            asyncio.to_thread(maintenance_started.wait, 1),
+            timeout=1.2,
+        )
+        assert started is True
+
+        recommendations = await asyncio.wait_for(
+            engine.reshuffle_recommendations(profile=_build_profile(), limit=1),
+            timeout=1.0,
+        )
+        assert len(recommendations) == 1
+        assert maintenance_task.done() is False
+        await asyncio.sleep(0.04)
+        assert heartbeat_ticks >= 5
+    finally:
+        release_maintenance.set()
+        await asyncio.wait_for(maintenance_task, timeout=2)
+        heartbeat_done.set()
+        await heartbeat_task
+
+    assert database.count_pool_candidates() == 1
+    database.close()
+
+
+async def test_unchanged_pool_skips_heavy_maintenance_until_forced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = Database(tmp_path / "maintenance-fingerprint.db")
+    database.initialize()
+    _seed_visible_pool_row(
+        database,
+        "BV_STABLE_POOL",
+        topic_group="stable-pool",
+        relevance_score=0.9,
+    )
+    engine = RecommendationEngine(llm=object(), database=database)  # type: ignore[arg-type]
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=engine,
+        pool_target_count=1,
+    )
+    maintenance_calls = 0
+    original_runner = database.maintain_pool_inventory_async
+
+    async def counted_runner(**kwargs: object) -> PoolMaintenanceResult:
+        nonlocal maintenance_calls
+        maintenance_calls += 1
+        return await original_runner(**kwargs)
+
+    monkeypatch.setattr(database, "maintain_pool_inventory_async", counted_runner)
+
+    assert await controller._enforce_pool_cap_async(force_scan=True) is True
+    assert await controller._enforce_pool_cap_async() is True
+    assert maintenance_calls == 1
+
+    assert await controller._enforce_pool_cap_async(force_scan=True) is True
+    assert maintenance_calls == 2
+    database.close()
 
 
 async def test_force_refresh_skips_when_pool_at_cap() -> None:
