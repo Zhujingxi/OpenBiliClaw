@@ -189,12 +189,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.169 (2026-07-15)**
+📌 Latest: **v0.3.170 (2026-07-15)**
 
-- **First-run initialization now has a single owner** — background profiling pauses during setup, preference chunks use concurrency-aware deadlines and cancellation, and empty-inventory admission loops, ghost run locks, and post-completion event-loop stalls are removed.
-- **DeepSeek and Ollama connectivity checks no longer misreport failures** — probes disable unnecessary reasoning, Ollama registers only explicit chat models, embedding-only setups no longer launch `llama3`, and custom DeepSeek Base URLs are honored.
-- **Model reasoning effort now defaults to medium** — OpenAI, Claude, Gemini, DeepSeek, and OpenRouter use their native reasoning controls, while short discovery, recommendation, and source-extraction tasks retain low-latency settings.
-- **Desktop setup feedback is clearer and more resilient** — new users get the classic palette, all three setup surfaces show real batches, elapsed time, cancellation, and recovery actions, and narrow delight cards plus scroll autoload are fixed.
+- **Reshuffle no longer stalls behind pool maintenance** — maintenance now runs in a dedicated SQLite worker with bounded batches; real-data reshuffles reach roughly 0.5s P50.
+- **The app stays responsive during heavy maintenance** — snapshots, recommendation writes, and status publication leave the event-loop hot path, with health checks measuring 40.1ms P99.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
