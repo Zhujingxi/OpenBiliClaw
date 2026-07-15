@@ -325,7 +325,7 @@ openbiliclaw start
 ```
 
 - **Desktop**: open `http://127.0.0.1:8420/web` (or `http://127.0.0.1:8420/`, auto-redirects). Two-column editorial layout with recommendations, profile, chat, messages, and settings all on one page.
-- **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone.
+- **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone; top settings manage Saved Sync separately and edit ordered Chat / Embedding routes plus Runtime policy through a sequential list→detail flow.
 
 > During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable, `127.0.0.1` = local only).
 
@@ -571,7 +571,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
 - 🔒 **Fully Private** — all data in local SQLite, LLM calls use your own key, each instance is built for exactly one person
 - 🔌 **Local Embedding** — optional Ollama + bge-m3, CPU-only, no extra API key
-- 🔧 **Fully Controllable** — Desktop settings can add, remove, and reorder Chat / Embedding connections; the global Chat route fails over in order, and profiles and custom Skills remain directly editable
+- 🔧 **Fully Controllable** — Desktop, Mobile Web, and extension settings can add, remove, and reorder Chat / Embedding connections; Mobile uses a touch-friendly list→detail flow with move controls, the global Chat route fails over in order, and profiles and custom Skills remain directly editable
 
 ## 🏛️ Architecture Overview
 
@@ -601,9 +601,9 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model API + transactional Chat/Embedding routes + desktop/extension editors (stages 9–11) │
+│ Model API + transactional Chat/Embedding routes + desktop/extension/mobile editors (stages 9–12) │
 │ Chat/Embedding/Runtime tabs · one stable-ID ordered route │
-│ Desktop inspector · extension sequential list→detail · descriptor-driven fields │
+│ Desktop inspector · extension/mobile sequential list→detail · descriptor-driven fields │
 │ strict GET/PUT snapshot/save · descriptors · exact draft probe │
 │ legacy /api/config is a credential-free projection with write guard │
 │ native/legacy + base/local → ModelConfigService path lock  │
@@ -618,7 +618,7 @@ background ─ background admission (default 3) ──────┘
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
-│ guided-init reservation shares writer; no cross-process lock; mobile/CLI follow │
+│ guided-init reservation shares writer; no cross-process lock; CLI editor follows │
 ├────────────────────────────────────────────────┤
 │ LLMService paths → one route; caller is concurrency/usage only; cost by connection │
 │   LLM adapters · Source adapters (SourceAdapter) │

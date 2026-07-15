@@ -69,18 +69,143 @@ export function createLatestRequestGate() {
   };
 }
 
-export async function applyLatestSnapshotRequest({ gate, request, blocked, apply }) {
-  const generation = gate.begin();
-  let snapshot;
+async function applyLatestRequestGeneration({
+  gate,
+  generation,
+  request,
+  blocked,
+  apply,
+  onBlocked = null,
+}) {
+  let value;
   try {
-    snapshot = await request();
+    value = await request();
   } catch (error) {
     if (!gate.isCurrent(generation) || blocked()) return false;
     throw error;
   }
-  if (!gate.isCurrent(generation) || blocked()) return false;
-  apply(snapshot);
+  if (!gate.isCurrent(generation)) return false;
+  if (blocked()) {
+    if (typeof onBlocked === "function") onBlocked(value);
+    return false;
+  }
+  apply(value);
   return true;
+}
+
+export async function applyLatestSnapshotRequest(options) {
+  const generation = options.gate.begin();
+  return applyLatestRequestGeneration({ ...options, generation });
+}
+
+/** Coordinate one revisioned save with exact-probe request ownership. */
+export function createModelOperationGate() {
+  let saveGeneration = 0;
+  let saveInFlight = false;
+  let probeGeneration = 0;
+  let probeInFlight = false;
+
+  return {
+    get saveGeneration() {
+      return saveGeneration;
+    },
+    get saveInFlight() {
+      return saveInFlight;
+    },
+    get probeInFlight() {
+      return probeInFlight;
+    },
+    beginProbe() {
+      probeGeneration += 1;
+      probeInFlight = true;
+      return probeGeneration;
+    },
+    isProbeCurrent(candidate) {
+      return candidate === probeGeneration;
+    },
+    finishProbe(candidate) {
+      if (candidate !== probeGeneration) return false;
+      probeInFlight = false;
+      return true;
+    },
+    beginSave() {
+      if (saveInFlight) return null;
+      const invalidatedProbe = probeInFlight;
+      saveGeneration += 1;
+      saveInFlight = true;
+      probeGeneration += 1;
+      probeInFlight = false;
+      return { generation: saveGeneration, invalidatedProbe };
+    },
+    finishSave(candidate) {
+      if (!saveInFlight || candidate !== saveGeneration) return false;
+      saveInFlight = false;
+      return true;
+    },
+    controlState() {
+      return {
+        editorLocked: saveInFlight,
+        saveDisabled: saveInFlight,
+        probeDisabled: saveInFlight || probeInFlight,
+      };
+    },
+  };
+}
+
+/**
+ * Load snapshot and descriptors independently, then recheck ownership after
+ * both siblings settle. A locally blocked snapshot can still be retained as a
+ * remote update while the winning descriptor registry installs normally.
+ */
+export async function loadIndependentModelResources({
+  gate,
+  descriptorGate = createLatestRequestGate(),
+  snapshotRequest,
+  descriptorRequest,
+  blocked,
+  onSnapshotBlocked = null,
+  applySnapshot,
+  installDescriptors,
+}) {
+  const snapshotGeneration = gate.begin();
+  const descriptorGeneration = descriptorGate.begin();
+  const snapshotLoad = applyLatestRequestGeneration({
+    gate,
+    generation: snapshotGeneration,
+    request: snapshotRequest,
+    blocked,
+    apply: applySnapshot,
+    onBlocked: onSnapshotBlocked,
+  });
+  const descriptorLoad = applyLatestRequestGeneration({
+    gate: descriptorGate,
+    generation: descriptorGeneration,
+    request: descriptorRequest,
+    blocked: () => false,
+    apply: installDescriptors,
+  });
+  const [snapshotOutcome, descriptorOutcome] = await Promise.allSettled([
+    snapshotLoad,
+    descriptorLoad,
+  ]);
+  const snapshotOwned = gate.isCurrent(snapshotGeneration);
+  const descriptorOwned = descriptorGate.isCurrent(descriptorGeneration);
+  const snapshotBlocked = blocked();
+  if (snapshotOutcome.status === "rejected" && snapshotOwned) {
+    throw snapshotOutcome.reason;
+  }
+  if (descriptorOutcome.status === "rejected" && descriptorOwned) {
+    throw descriptorOutcome.reason;
+  }
+  return {
+    snapshotApplied: snapshotOutcome.status === "fulfilled"
+      && snapshotOutcome.value
+      && snapshotOwned
+      && !snapshotBlocked,
+    descriptorsInstalled: descriptorOutcome.status === "fulfilled"
+      && descriptorOutcome.value
+      && descriptorOwned,
+  };
 }
 
 function normalizeOverridePath(path) {

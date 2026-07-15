@@ -27,3 +27,10 @@ def test_app_launch_js_suite_passes() -> None:
         check=False,
     )
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+
+
+def test_mobile_app_shell_loads_the_model_settings_view() -> None:
+    app = (_REPO_ROOT / "src/openbiliclaw/web/js/app.js").read_text(encoding="utf-8")
+
+    assert 'import { openMobileSettings } from "./views/model-settings.js";' in app
+    assert "openMobileSettings(settings)" in app

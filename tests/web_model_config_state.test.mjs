@@ -730,6 +730,93 @@ test("a stale GET rejection is discarded but a current rejection propagates", as
   );
 });
 
+test("model operation gate serializes saves and invalidates pending probes", () => {
+  assert.equal(typeof modelConfigState.createModelOperationGate, "function");
+  const gate = modelConfigState.createModelOperationGate();
+
+  const probeGeneration = gate.beginProbe();
+  assert.equal(gate.probeInFlight, true);
+  assert.equal(gate.isProbeCurrent(probeGeneration), true);
+
+  const save = gate.beginSave();
+  assert.equal(save.invalidatedProbe, true);
+  assert.equal(gate.isProbeCurrent(probeGeneration), false);
+  assert.equal(gate.beginSave(), null);
+  assert.deepEqual(gate.controlState(), {
+    editorLocked: true,
+    saveDisabled: true,
+    probeDisabled: true,
+  });
+
+  assert.equal(gate.finishSave(save.generation), true);
+  assert.equal(gate.saveInFlight, false);
+});
+
+test("independent full load rechecks snapshot and descriptor ownership after settle", async () => {
+  assert.equal(typeof modelConfigState.loadIndependentModelResources, "function");
+  const snapshotGate = modelConfigState.createLatestRequestGate();
+  const descriptorGate = modelConfigState.createLatestRequestGate();
+  const firstSnapshot = deferred();
+  const firstDescriptors = deferred();
+  const latestDescriptors = deferred();
+  let visibleSnapshot = null;
+  let visibleDescriptors = null;
+
+  const load = modelConfigState.loadIndependentModelResources({
+    gate: snapshotGate,
+    descriptorGate,
+    snapshotRequest: () => firstSnapshot.promise,
+    descriptorRequest: () => firstDescriptors.promise,
+    blocked: () => false,
+    applySnapshot: (value) => { visibleSnapshot = value; },
+    installDescriptors: (value) => { visibleDescriptors = value; },
+  });
+  firstSnapshot.resolve({ revision: "revision-a" });
+  firstDescriptors.resolve({ connection_types: [{ id: "stale" }] });
+  await Promise.resolve();
+
+  const descriptorReload = modelConfigState.applyLatestSnapshotRequest({
+    gate: descriptorGate,
+    request: () => latestDescriptors.promise,
+    blocked: () => false,
+    apply: (value) => { visibleDescriptors = value; },
+  });
+  latestDescriptors.resolve({ connection_types: [{ id: "latest" }] });
+
+  assert.equal(await descriptorReload, true);
+  assert.deepEqual(await load, { snapshotApplied: true, descriptorsInstalled: false });
+  assert.deepEqual(visibleSnapshot, { revision: "revision-a" });
+  assert.equal(visibleDescriptors.connection_types[0].id, "latest");
+});
+
+test("blocked snapshot is retained as remote while descriptor sibling still installs", async () => {
+  const snapshotGate = modelConfigState.createLatestRequestGate();
+  const descriptorGate = modelConfigState.createLatestRequestGate();
+  const pendingSnapshot = deferred();
+  const pendingDescriptors = deferred();
+  let dirty = false;
+  let remoteSnapshot = null;
+  let visibleDescriptors = null;
+
+  const load = modelConfigState.loadIndependentModelResources({
+    gate: snapshotGate,
+    descriptorGate,
+    snapshotRequest: () => pendingSnapshot.promise,
+    descriptorRequest: () => pendingDescriptors.promise,
+    blocked: () => dirty,
+    onSnapshotBlocked: (value) => { remoteSnapshot = value; },
+    applySnapshot: () => assert.fail("a late snapshot cannot overwrite a dirty draft"),
+    installDescriptors: (value) => { visibleDescriptors = value; },
+  });
+  dirty = true;
+  pendingSnapshot.resolve({ revision: "remote" });
+  pendingDescriptors.resolve({ connection_types: [{ id: "openai_compatible" }] });
+
+  assert.deepEqual(await load, { snapshotApplied: false, descriptorsInstalled: true });
+  assert.deepEqual(remoteSnapshot, { revision: "remote" });
+  assert.equal(visibleDescriptors.connection_types[0].id, "openai_compatible");
+});
+
 test("a newer reload supersedes initial load while descriptors still install", async () => {
   const gate = modelConfigState.createLatestRequestGate();
   const initialGet = deferred();

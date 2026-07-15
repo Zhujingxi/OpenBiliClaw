@@ -11,6 +11,7 @@ const BASE_URL = `${location.protocol}//${location.host}/api`;
 const DEFAULT_READ_TIMEOUT_MS = 12_000;
 const QUICK_READ_TIMEOUT_MS = 5_000;
 const CONFIG_WRITE_TIMEOUT_MS = 60_000;
+const MODEL_WRITE_TIMEOUT_MS = 60_000;
 const SAVED_READ_TIMEOUT_MS = 10_000;
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
 const CSRF_HEADER = "X-OBC-Auth";
@@ -134,6 +135,40 @@ export async function fetchConfig(timeoutMs = DEFAULT_READ_TIMEOUT_MS) {
 export async function updateConfig(data, timeoutMs = CONFIG_WRITE_TIMEOUT_MS) {
   return requestJson("/config", {
     method: "PUT",
+    timeoutMs,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+// ── Model configuration ─────────────────────────────────────
+export async function fetchModelConfig(timeoutMs = DEFAULT_READ_TIMEOUT_MS) {
+  return requestJson("/model-config", { timeoutMs });
+}
+
+export async function fetchModelConnectionTypes(
+  capability = "",
+  timeoutMs = DEFAULT_READ_TIMEOUT_MS,
+) {
+  if (!capability) {
+    return requestJson("/model-connection-types", { timeoutMs });
+  }
+  const query = new URLSearchParams({ capability: String(capability) });
+  return requestJson(`/model-connection-types?${query}`, { timeoutMs });
+}
+
+export async function updateModelConfig(data, timeoutMs = MODEL_WRITE_TIMEOUT_MS) {
+  return requestJson("/model-config", {
+    method: "PUT",
+    timeoutMs,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function probeModelConnection(data, timeoutMs = MODEL_WRITE_TIMEOUT_MS) {
+  return requestJson("/model-config/probe", {
+    method: "POST",
     timeoutMs,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),

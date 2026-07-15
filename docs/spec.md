@@ -376,8 +376,8 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│ 模型配置 API + 事务型有序 Chat/Embedding route + 双端编辑器（阶段 9–11）│
-│ Desktop：ordered list + inspector；Extension：sequential list→detail │
+│ 模型配置 API + 事务型有序 Chat/Embedding route + 三端编辑器（阶段 9–12）│
+│ Desktop：ordered list + inspector；Extension/Mobile：sequential list→detail │
 │ Chat/Embedding/Runtime tabs；descriptor fields；Embedding 共享设置 │
 │ GET/PUT model-config → strict secret-safe schema ────────┐    │
 │ descriptors + exact probe → safe probe/circuit summary ─┤    │
@@ -402,7 +402,7 @@ background ─ background admission (default 3) ──────┘
 │                                   └→ fixed PNG exact probe + shared cache namespace │
 │ probe: gate/init → path-lock init/revision/credential capture → network unlocked → revision recheck │
 │ RuntimeModelBundle → 全 consumer 原子发布并激活对应后台任务        │
-│ 普通保存保留 raw；桌面/插件模型保存独立权威；移动端/CLI 后续迁移  │
+│ 普通保存保留 raw；桌面/插件/移动端模型保存独立权威；CLI 后续迁移 │
 ├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
