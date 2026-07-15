@@ -7,17 +7,26 @@
   <title>OpenBiliClaw 推荐首页</title>
   <script>
     (() => {
+      let accent = "classic";
       try {
-        const theme = window.localStorage?.getItem("obc.theme");
+        const storage = window.localStorage;
+        const theme = storage?.getItem("obc.theme");
         if (theme === "light" || theme === "dark") {
           document.documentElement.dataset.theme = theme;
         }
-        const hue = window.localStorage?.getItem("obc.themeHue");
+        const hue = storage?.getItem("obc.themeHue");
         if (hue) { document.documentElement.style.setProperty("--hue-primary", hue); }
-        const accent = window.localStorage?.getItem("obc.accentStyle");
-        // 默认 classic；只有显式存了 "modern" 才不设 data-accent（走默认 modern 样式）
-        if (accent !== "modern") document.documentElement.dataset.accent = "classic";
+        const storedAccent = storage?.getItem("obc.accentStyle");
+        const hasCustomHue = hue !== null && hue !== "";
+        // 迁移必须在样式加载前完成：老用户已有 hue 时保留 modern，新用户用 classic。
+        accent = storedAccent === "modern" || storedAccent === "classic"
+          ? storedAccent
+          : hasCustomHue ? "modern" : "classic";
+        if (storedAccent !== accent) {
+          try { storage?.setItem("obc.accentStyle", accent); } catch {}
+        }
       } catch {}
+      if (accent === "classic") document.documentElement.dataset.accent = "classic";
     })();
   </script>
   <link rel="stylesheet" href="/web/assets/css/app.css">
@@ -636,33 +645,33 @@
           <div class="settings-field full settings-theme-field">
             <span>外观主题</span>
             <div class="theme-segmented" id="themeModeSetting" role="radiogroup" aria-label="外观主题">
-              <button type="button" data-theme-choice="auto">跟随系统</button>
-              <button type="button" data-theme-choice="light">浅色</button>
-              <button type="button" data-theme-choice="dark">深色</button>
+              <button type="button" role="radio" data-theme-choice="auto">跟随系统</button>
+              <button type="button" role="radio" data-theme-choice="light">浅色</button>
+              <button type="button" role="radio" data-theme-choice="dark">深色</button>
             </div>
           </div>
           <div class="settings-field full">
             <span>色彩引擎</span>
-            <div class="theme-segmented theme-segmented-2col" role="radiogroup" aria-label="色彩引擎">
-              <button type="button" data-accent-choice="modern">动态主题色</button>
-              <button type="button" data-accent-choice="classic">经典配色</button>
+            <div class="theme-segmented theme-segmented-2col" id="themeAccentSetting" role="radiogroup" aria-label="色彩引擎">
+              <button type="button" role="radio" data-accent-choice="modern">动态主题色</button>
+              <button type="button" role="radio" data-accent-choice="classic">经典配色</button>
             </div>
           </div>
           <div class="settings-field full settings-hue-field">
             <span>主题色相</span>
             <div class="hue-swatches" id="themeHueSetting" role="radiogroup" aria-label="主题色相">
-              <button type="button" data-hue="0" class="hue-swatch" style="--swatch:oklch(80% 0.16 0)" title="烈焰红">烈焰红</button>
-              <button type="button" data-hue="30" class="hue-swatch" style="--swatch:oklch(80% 0.16 30)" title="珊瑚橙">珊瑚橙</button>
-              <button type="button" data-hue="60" class="hue-swatch" style="--swatch:oklch(80% 0.16 60)" title="柠檬黄">柠檬黄</button>
-              <button type="button" data-hue="90" class="hue-swatch" style="--swatch:oklch(80% 0.16 90)" title="嫩草绿">嫩草绿</button>
-              <button type="button" data-hue="120" class="hue-swatch" style="--swatch:oklch(80% 0.16 120)" title="薄荷绿">薄荷绿</button>
-              <button type="button" data-hue="150" class="hue-swatch" style="--swatch:oklch(80% 0.16 150)" title="自然绿">自然绿</button>
-              <button type="button" data-hue="180" class="hue-swatch" style="--swatch:oklch(80% 0.16 180)" title="青瓷色">青瓷色</button>
-              <button type="button" data-hue="210" class="hue-swatch" style="--swatch:oklch(80% 0.16 210)" title="极客蓝">极客蓝</button>
-              <button type="button" data-hue="240" class="hue-swatch" style="--swatch:oklch(80% 0.16 240)" title="星空蓝">星空蓝</button>
-              <button type="button" data-hue="270" class="hue-swatch" style="--swatch:oklch(80% 0.16 270)" title="暗夜紫">暗夜紫</button>
-              <button type="button" data-hue="300" class="hue-swatch" style="--swatch:oklch(80% 0.16 300)" title="梦幻紫">梦幻紫</button>
-              <button type="button" data-hue="330" class="hue-swatch" style="--swatch:oklch(80% 0.16 330)" title="元气粉">元气粉</button>
+              <button type="button" role="radio" data-hue="0" class="hue-swatch" style="--swatch:oklch(80% 0.16 0)" title="烈焰红">烈焰红</button>
+              <button type="button" role="radio" data-hue="30" class="hue-swatch" style="--swatch:oklch(80% 0.16 30)" title="珊瑚橙">珊瑚橙</button>
+              <button type="button" role="radio" data-hue="60" class="hue-swatch" style="--swatch:oklch(80% 0.16 60)" title="柠檬黄">柠檬黄</button>
+              <button type="button" role="radio" data-hue="90" class="hue-swatch" style="--swatch:oklch(80% 0.16 90)" title="嫩草绿">嫩草绿</button>
+              <button type="button" role="radio" data-hue="120" class="hue-swatch" style="--swatch:oklch(80% 0.16 120)" title="薄荷绿">薄荷绿</button>
+              <button type="button" role="radio" data-hue="150" class="hue-swatch" style="--swatch:oklch(80% 0.16 150)" title="自然绿">自然绿</button>
+              <button type="button" role="radio" data-hue="180" class="hue-swatch" style="--swatch:oklch(80% 0.16 180)" title="青瓷色">青瓷色</button>
+              <button type="button" role="radio" data-hue="210" class="hue-swatch" style="--swatch:oklch(80% 0.16 210)" title="极客蓝">极客蓝</button>
+              <button type="button" role="radio" data-hue="240" class="hue-swatch" style="--swatch:oklch(80% 0.16 240)" title="星空蓝">星空蓝</button>
+              <button type="button" role="radio" data-hue="270" class="hue-swatch" style="--swatch:oklch(80% 0.16 270)" title="暗夜紫">暗夜紫</button>
+              <button type="button" role="radio" data-hue="300" class="hue-swatch" style="--swatch:oklch(80% 0.16 300)" title="梦幻紫">梦幻紫</button>
+              <button type="button" role="radio" data-hue="330" class="hue-swatch" style="--swatch:oklch(80% 0.16 330)" title="元气粉">元气粉</button>
             </div>
             <div class="hue-slider-wrap">
               <input type="range" id="hueSlider" min="0" max="360" value="20" class="hue-slider" aria-label="自定义色相">
@@ -797,6 +806,14 @@
     </div>
   </section>
 
+  <aside class="theme-notice" id="themeNotice" role="region" aria-live="polite" aria-labelledby="themeNoticeTitle" aria-describedby="themeNoticeDescription" hidden>
+    <strong id="themeNoticeTitle">已启用经典配色</strong>
+    <p id="themeNoticeDescription">喜欢自定义色彩？可在“设置 → 前端”切换到动态主题色并调节色相。</p>
+    <div class="theme-notice-actions">
+      <button class="notice-btn secondary" id="themeNoticeDismiss" type="button">知道了</button>
+      <button class="notice-btn primary" id="themeNoticeSettings" type="button">前往设置</button>
+    </div>
+  </aside>
   <div class="toast-container" id="toastContainer" role="status" aria-live="polite"></div>
   <script src="/web/assets/js/mobile-qr.js" defer></script>
   <script src="/web/assets/js/pending-actions.js" defer></script>

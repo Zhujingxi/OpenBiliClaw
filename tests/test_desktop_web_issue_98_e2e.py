@@ -421,6 +421,43 @@ def _assert_delight_fits_available_width(geometry: dict[str, Any]) -> None:
     assert geometry["docScroll"] <= geometry["docClient"] + 1
 
 
+def test_default_classic_notice_stays_out_of_operational_toast_stack(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+
+    chromium_page.goto(f"{base_url}/web/")
+
+    expect(chromium_page.locator("#themeNotice")).to_be_visible()
+    expect(chromium_page.locator("#toastContainer .toast-item")).to_have_count(0)
+    assert chromium_page.evaluate("localStorage.getItem('obc.accentStyle')") == "classic"
+
+    chromium_page.evaluate("window.showToast('业务提示')")
+    toast = chromium_page.locator("#toastContainer .toast-item")
+    expect(toast).to_have_count(1)
+    expect(toast).to_have_text("业务提示")
+    notice_box = chromium_page.locator("#themeNotice").bounding_box()
+    toast_box = toast.bounding_box()
+    assert notice_box is not None
+    assert toast_box is not None
+    assert notice_box["y"] + notice_box["height"] < toast_box["y"]
+
+
+def test_existing_custom_hue_migrates_to_modern_without_classic_notice(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    chromium_page.add_init_script("localStorage.setItem('obc.themeHue', '210')")
+
+    chromium_page.goto(f"{base_url}/web/")
+
+    expect(chromium_page.locator("html")).not_to_have_attribute("data-accent", "classic")
+    expect(chromium_page.locator("#themeNotice")).to_be_hidden()
+    assert chromium_page.evaluate("localStorage.getItem('obc.accentStyle')") == "modern"
+
+
 def test_liked_delight_keeps_nonduplicate_desktop_actions_available(
     issue_98_server: tuple[str, Issue98Stub],
     chromium_page: Page,

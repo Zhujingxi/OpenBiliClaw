@@ -520,11 +520,20 @@
     // Number.isFinite guard so a persisted hue of 0 (烈焰红) survives reload instead of falling back to 20.
     state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
     const ACCENT_STORAGE_KEY = "obc.accentStyle";
+    const ACCENT_OPTIONS = ["modern", "classic"];
+    const THEME_NOTICE_DISMISSED_KEY = "obc.noticeDismissed";
+    // 8 秒覆盖约 55 个中文字的阅读与按钮扫视；hover / focus 会暂停。
+    // 校准：2026-07-15 桌面端人工走查，兼顾可读性与不长期遮挡内容。
+    const THEME_NOTICE_DURATION_MS = 8000;
     // 迁移：已有自定义色相的老用户默认 modern，保留色相；新用户默认 classic
     const _hasCustomHue = storageGet(THEME_HUE_STORAGE_KEY) !== "";
     const _storedAccent = storageGet(ACCENT_STORAGE_KEY);
-    state.accentStyle = _storedAccent === "modern" ? "modern" : "classic";
-    if (!_storedAccent && _hasCustomHue) state.accentStyle = "modern";
+    state.accentStyle = ACCENT_OPTIONS.includes(_storedAccent)
+      ? _storedAccent
+      : _hasCustomHue ? "modern" : "classic";
+    if (!ACCENT_OPTIONS.includes(_storedAccent)) {
+      storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+    }
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
@@ -1107,31 +1116,6 @@
         el.classList.remove("entering");
         return item;
       },
-      showNoticeToast(title, { subtitle = "" } = {}) {
-        if (localStorage.getItem("obc.noticeDismissed")) return null;
-        const el = document.createElement("div");
-        el.className = "toast-item entering is-notice";
-        el.innerHTML = `<span class="toast-notice-title"></span><span class="toast-notice-sub"></span><div class="toast-notice-actions"><button class="notice-btn secondary">知晓</button><button class="notice-btn primary">前往设置</button></div>`;
-        el.querySelector(".toast-notice-title").textContent = title;
-        el.querySelector(".toast-notice-sub").textContent = subtitle;
-        const dismissAndSave = () => {
-          try { localStorage.setItem("obc.noticeDismissed", "1"); } catch {}
-          this.dismiss(el);
-        };
-        el.querySelector(".notice-btn.secondary").addEventListener("click", (e) => { e.stopPropagation(); dismissAndSave(); });
-        el.querySelector(".notice-btn.primary").addEventListener("click", (e) => {
-          e.stopPropagation();
-          dismissAndSave();
-          openSettingsPage("frontend");
-        });
-        this.container.appendChild(el);
-        const item = { el, timer: null, remaining: 86400000, started: Date.now(), paused: false, exiting: false, reachedBottom: true };
-        this.items.push(item);
-        this._reposition();
-        void el.offsetHeight;
-        el.classList.remove("entering");
-        return item;
-      },
       _reposition() {
         let bottom = 0;
         for (const item of this.items) {
@@ -1182,6 +1166,46 @@
         item.timer = setTimeout(() => this.dismiss(item.el), Math.max(item.remaining, 2000));
       }
     };
+
+    function setupThemeNotice() {
+      if (state.accentStyle !== "classic" || storageGet(THEME_NOTICE_DISMISSED_KEY) === "1") return;
+      const notice = $("#themeNotice");
+      const dismissButton = $("#themeNoticeDismiss");
+      const settingsButton = $("#themeNoticeSettings");
+      if (!notice || !dismissButton || !settingsButton || notice.dataset.bound === "1") return;
+      notice.dataset.bound = "1";
+      let timer = 0;
+
+      const clearTimer = () => {
+        if (timer) window.clearTimeout(timer);
+        timer = 0;
+      };
+      const dismiss = () => {
+        clearTimer();
+        storageSet(THEME_NOTICE_DISMISSED_KEY, "1");
+        notice.classList.remove("is-visible");
+        window.setTimeout(() => { notice.hidden = true; }, 200);
+      };
+      const scheduleDismiss = () => {
+        clearTimer();
+        timer = window.setTimeout(dismiss, THEME_NOTICE_DURATION_MS);
+      };
+
+      dismissButton.addEventListener("click", dismiss);
+      settingsButton.addEventListener("click", () => {
+        dismiss();
+        openSettingsPage("frontend");
+      });
+      notice.addEventListener("mouseenter", clearTimer);
+      notice.addEventListener("mouseleave", scheduleDismiss);
+      notice.addEventListener("focusin", clearTimer);
+      notice.addEventListener("focusout", (event) => {
+        if (!notice.contains(event.relatedTarget)) scheduleDismiss();
+      });
+      notice.hidden = false;
+      window.requestAnimationFrame(() => notice.classList.add("is-visible"));
+      scheduleDismiss();
+    }
     function showToast(message) { toastManager.showToast(message); }
     window.showToast = showToast;// 用于终端测试ToastNotice
 
@@ -2308,60 +2332,6 @@
       document.getElementById("mobileMenu")?.classList.remove("is-open");
     }
 
-    function enhanceSelects() {
-      document.querySelectorAll(".settings-field select").forEach((nativeSelect) => {
-        if (nativeSelect.dataset.customEnhanced) return;
-        nativeSelect.dataset.customEnhanced = "1";
-        const wrapper = document.createElement("div");
-        wrapper.className = "custom-select";
-        nativeSelect.parentNode.insertBefore(wrapper, nativeSelect);
-        wrapper.appendChild(nativeSelect);
-        const trigger = document.createElement("button");
-        trigger.className = "custom-select-trigger";
-        trigger.type = "button";
-        trigger.textContent = nativeSelect.options[nativeSelect.selectedIndex]?.textContent || "";
-        wrapper.appendChild(trigger);
-        const dropdown = document.createElement("div");
-        dropdown.className = "custom-select-dropdown";
-        wrapper.appendChild(dropdown);
-        function buildOptions() {
-          dropdown.innerHTML = "";
-          Array.from(nativeSelect.options).forEach((opt) => {
-            const btn = document.createElement("button");
-            btn.className = "custom-select-option";
-            btn.type = "button";
-            btn.textContent = opt.textContent;
-            btn.dataset.value = opt.value;
-            if (opt.selected) btn.classList.add("is-selected");
-            btn.addEventListener("click", (e) => {
-              e.stopPropagation();
-              nativeSelect.value = opt.value;
-              nativeSelect.dispatchEvent(new Event("change", { bubbles: true }));
-              wrapper.classList.remove("is-open");
-              trigger.textContent = opt.textContent;
-              dropdown.querySelectorAll(".custom-select-option").forEach((b) => b.classList.remove("is-selected"));
-              btn.classList.add("is-selected");
-            });
-            dropdown.appendChild(btn);
-          });
-        }
-        buildOptions();
-        nativeSelect.addEventListener("change", () => {
-          trigger.textContent = nativeSelect.options[nativeSelect.selectedIndex]?.textContent || "";
-          dropdown.querySelectorAll(".custom-select-option").forEach((b) => b.classList.toggle("is-selected", b.dataset.value === nativeSelect.value));
-        });
-        trigger.addEventListener("click", (e) => {
-          e.stopPropagation();
-          const wasOpen = wrapper.classList.contains("is-open");
-          document.querySelectorAll(".custom-select.is-open").forEach((el) => el.classList.remove("is-open"));
-          if (!wasOpen) wrapper.classList.add("is-open");
-        });
-      });
-      document.addEventListener("click", () => {
-        document.querySelectorAll(".custom-select.is-open").forEach((el) => el.classList.remove("is-open"));
-      });
-    }
-
     function openMobilePanel(id, options = {}) {
       closeMobileMenu();
       if (id === "messagesDrawer") {
@@ -2469,9 +2439,30 @@
       setThemeMode(THEME_OPTIONS[(index + 1) % THEME_OPTIONS.length], { toast: true });
     }
 
+    function bindRovingChoiceGroup(selector, onChoose) {
+      const buttons = Array.from(document.querySelectorAll(selector));
+      buttons.forEach((button) => {
+        button.addEventListener("click", () => onChoose(button));
+        button.addEventListener("keydown", (event) => {
+          if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+          const enabled = buttons.filter((candidate) => !candidate.disabled);
+          if (!enabled.length) return;
+          const current = Math.max(0, enabled.indexOf(button));
+          let next = current;
+          if (event.key === "Home") next = 0;
+          else if (event.key === "End") next = enabled.length - 1;
+          else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (current - 1 + enabled.length) % enabled.length;
+          else next = (current + 1) % enabled.length;
+          event.preventDefault();
+          enabled[next].focus();
+          enabled[next].click();
+        });
+      });
+    }
+
     function applyAccentStyle(style = state.accentStyle) {
-      state.accentStyle = style;
-      if (style === "classic") {
+      state.accentStyle = ACCENT_OPTIONS.includes(style) ? style : "classic";
+      if (state.accentStyle === "classic") {
         document.documentElement.dataset.accent = "classic";
       } else {
         document.documentElement.removeAttribute("data-accent");
@@ -2481,8 +2472,8 @@
 
     function setAccentStyle(style, { persist = true, toast = false } = {}) {
       applyAccentStyle(style);
-      if (persist) storageSet(ACCENT_STORAGE_KEY, style);
-      if (toast) showToast(style === "classic" ? "已切换为经典配色，可在设置中调节主题色" : "已切换为动态主题色");
+      if (persist) storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
+      if (toast) showToast(state.accentStyle === "classic" ? "已切换为经典配色，使用固定色板" : "已切换为动态主题色，可自定义色相");
     }
 
     function renderThemeAccentControls() {
@@ -2526,11 +2517,13 @@
     function renderThemeHueControls() {
       // Number.isFinite so hue 0 (烈焰红) renders as active instead of falling back to 20.
       const hue = Number.isFinite(state.themeHue) ? state.themeHue : 20;
-      document.querySelectorAll("[data-hue]").forEach((button) => {
+      const buttons = Array.from(document.querySelectorAll("[data-hue]"));
+      const activeIndex = buttons.findIndex((button) => parseInt(button.dataset.hue, 10) === hue);
+      buttons.forEach((button, index) => {
         const isActive = parseInt(button.dataset.hue, 10) === hue;
         button.classList.toggle("is-active", isActive);
         button.setAttribute("aria-checked", isActive ? "true" : "false");
-        button.tabIndex = isActive ? 0 : -1;
+        button.tabIndex = isActive || (activeIndex < 0 && index === 0) ? 0 : -1;
       });
       const slider = $("#hueSlider");
       if (slider) slider.value = hue;
@@ -7436,15 +7429,9 @@
     syncTopbarHeight();
     window.addEventListener("resize", syncTopbarHeight);
     safeBind("#themeToggleBtn", "click", cycleThemeMode);
-    document.querySelectorAll("[data-theme-choice]").forEach((button) => {
-      button.addEventListener("click", () => setThemeMode(button.dataset.themeChoice, { toast: true }));
-    });
-    document.querySelectorAll("[data-hue]").forEach((button) => {
-      button.addEventListener("click", () => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
-    });
-    document.querySelectorAll("[data-accent-choice]").forEach((button) => {
-      button.addEventListener("click", () => setAccentStyle(button.dataset.accentChoice, { toast: true }));
-    });
+    bindRovingChoiceGroup("[data-theme-choice]", (button) => setThemeMode(button.dataset.themeChoice, { toast: true }));
+    bindRovingChoiceGroup("[data-hue]", (button) => setThemeHue(parseInt(button.dataset.hue, 10), { toast: true }));
+    bindRovingChoiceGroup("[data-accent-choice]", (button) => setAccentStyle(button.dataset.accentChoice, { toast: true }));
     safeBind("#hueSlider", "input", (event) => {
       const val = parseInt(event.target.value, 10);
       setThemeHue(val);
@@ -7611,12 +7598,10 @@
 
     restoreBackendEndpoint();
     restoreFrontendSettings();
-    enhanceSelects();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
     toastManager.init();
-    // 首次运行通知提示（知晓或前往后永久不再提示）
-    toastManager.showNoticeToast("嘿！OpenBiliClaw 默认用经典配色启动啦 (｡･ω･｡)🎨", { subtitle: "如果你喜欢折腾，可以去前端设置里换成动态主题色，还能调色相哦～" });
+    setupThemeNotice();
     try {
       renderAll();
     } catch (error) {

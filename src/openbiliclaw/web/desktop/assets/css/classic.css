@@ -2,8 +2,7 @@
    🏺 经典配色 — 还原 Pre-ThemePR 静态色板
    ═══════════════════════════════════════════════════
    通过覆写 CSS 变量将现代主题色（动态 oklch）还原为
-   Pre-ThemePR 的静态 #c96442 色板。
-   ─ 基础强调色（--accent）→ #c96442
+   Pre-ThemePR 的陶土色板（浅色模式略微加深以满足文字对比度）。
    ─ 非主要按钮 hover/active → 中性
    ─ 主要按钮（.primary）hover/active → accent 阶
    ─ 辉光 → none
@@ -14,14 +13,14 @@
    🌞 浅色 — 变量覆写
    ═══════════════════════════════════════════════════ */
 :root[data-accent="classic"] {
-  /* 强调色阶 → static #c96442 */
-  --accent: #c96442;
-  --accent-subtle: color-mix(in oklab, #c96442, #faf9f5 85%);
-  --accent-light: color-mix(in oklab, #c96442, #faf9f5 60%);
-  --accent-strong: color-mix(in oklab, #c96442, black 14%);
-  --accent-hover: color-mix(in oklab, #c96442, black 8%);
-  --accent-deep: color-mix(in oklab, #c96442, black 20%);
-  --accent-active: color-mix(in oklab, #c96442, black 14%);
+  /* 强调色阶：#b4583a 保留经典陶土观感，并让浅色文字达到 WCAG AA。 */
+  --accent: #b4583a;
+  --accent-subtle: color-mix(in oklab, #b4583a, #faf9f5 85%);
+  --accent-light: color-mix(in oklab, #b4583a, #faf9f5 60%);
+  --accent-strong: color-mix(in oklab, #b4583a, black 14%);
+  --accent-hover: color-mix(in oklab, #b4583a, black 8%);
+  --accent-deep: color-mix(in oklab, #b4583a, black 20%);
+  --accent-active: color-mix(in oklab, #b4583a, black 14%);
   --accent-on: #faf9f5;
   --badge-on: #ffffff;
 
@@ -316,17 +315,17 @@
 :root[data-accent="classic"] input:focus-visible,
 :root[data-accent="classic"] textarea:focus-visible,
 :root[data-accent="classic"] select:focus-visible {
-  border-color: var(--border-soft);
-  box-shadow: none;
+  border-color: var(--contrast-strong);
+  box-shadow: var(--focus-ring);
 }
 :root[data-accent="classic"] .search:focus-within {
-  border-color: var(--border-soft);
-  box-shadow: var(--elev-ring);
+  border-color: var(--contrast-strong);
+  box-shadow: var(--focus-ring);
 }
 :root[data-accent="classic"] .message-chat-view .chat-input:focus-within,
 :root[data-accent="classic"] .chat-page .chat-input:focus-within {
-  border: 0;
-  box-shadow: none;
+  border: 1px solid var(--contrast-strong);
+  box-shadow: var(--focus-ring);
 }
 
 /* ── .gh-star hover/active ── */

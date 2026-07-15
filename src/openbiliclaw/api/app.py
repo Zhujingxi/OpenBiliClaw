@@ -11395,7 +11395,11 @@ def create_app(
             import hashlib
 
             digest = hashlib.sha256()
-            for relative in ("assets/css/app.css", "assets/js/app.js"):
+            for relative in (
+                "assets/css/app.css",
+                "assets/css/classic.css",
+                "assets/js/app.js",
+            ):
                 path = _desktop_dir / relative
                 if not path.is_file():
                     continue
@@ -11413,6 +11417,10 @@ def create_app(
             html = html.replace(
                 'href="/web/assets/css/app.css"',
                 f'href="/web/assets/css/app.css?v={version}"',
+            )
+            html = html.replace(
+                'href="/web/assets/css/classic.css"',
+                f'href="/web/assets/css/classic.css?v={version}"',
             )
             html = html.replace(
                 'src="/web/assets/js/app.js"',
