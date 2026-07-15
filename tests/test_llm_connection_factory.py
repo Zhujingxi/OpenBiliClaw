@@ -11,10 +11,12 @@ import dataclasses
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
+import anthropic
+import httpx
 import pytest
 
-from openbiliclaw.llm import gemini_provider, openai_provider
-from openbiliclaw.llm.base import LLMProviderError
+from openbiliclaw.llm import anthropic_provider, gemini_provider, openai_provider
+from openbiliclaw.llm.base import LLMProviderError, LLMRateLimitError, LLMTimeoutError
 from openbiliclaw.model_config import (
     ChatConnection,
     CredentialConfig,
@@ -51,6 +53,22 @@ def _runtime_options(
 
 def _inline(secret: str = "test-secret") -> CredentialConfig:
     return CredentialConfig(source="inline", value=secret)
+
+
+def _assert_error_chain_omits(exc: BaseException, sentinel: str) -> None:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        assert sentinel not in str(current)
+        assert sentinel not in repr(current)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
 
 
 def _openai_connection(
@@ -158,6 +176,72 @@ class _FakeOpenAIClient:
         self.embeddings = self.embedding_endpoint
 
 
+class _FakeAnthropicMessages:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> object:
+        self.calls.append(dict(kwargs))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _anthropic_response(
+    *,
+    input_tokens: int = 2,
+    output_tokens: int = 3,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[SimpleNamespace(text="anthropic-ok")],
+        model="claude-test",
+        usage=SimpleNamespace(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_input_tokens=cache_read_input_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+        ),
+    )
+
+
+def _fake_anthropic_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[object],
+) -> tuple[Any, _FakeAnthropicMessages]:
+    messages = _FakeAnthropicMessages(outcomes)
+    client = SimpleNamespace(messages=messages)
+    monkeypatch.setattr(anthropic_provider, "AsyncAnthropic", lambda **_: client)
+    adapter = anthropic_provider.AnthropicCompatibleProvider(
+        connection_id="anthropic-a",
+        api_key="test-key",
+        model="claude-test",
+        base_url="https://api.anthropic.com",
+    )
+    return adapter, messages
+
+
+def _anthropic_status_error(
+    error_class: Any,
+    status_code: int,
+    sentinel: str,
+) -> Exception:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(
+        status_code,
+        request=request,
+        headers={"retry-after": "17", "x-fake-secret": sentinel},
+    )
+    return error_class(
+        sentinel,
+        response=response,
+        body={"error": {"message": sentinel}},
+    )
+
+
 @pytest.fixture
 def fake_openai_clients(monkeypatch: pytest.MonkeyPatch) -> list[_FakeOpenAIClient]:
     clients: list[_FakeOpenAIClient] = []
@@ -196,6 +280,31 @@ def test_openai_protocol_options_are_deeply_immutable() -> None:
         options.preset = "deepseek"
     with pytest.raises(TypeError):
         cast("dict[str, str]", options.extra_headers)["X-Title"] = "changed"
+
+
+def test_openai_protocol_options_repr_hides_hook_metadata() -> None:
+    options = _factory().OpenAIProtocolOptions(
+        connection_id="chat-safe-id",
+        preset="openrouter",
+        api_mode="responses",
+        default_reasoning_effort="sensitive-reasoning-effort",
+        extra_headers={
+            "HTTP-Referer": "https://private-attribution.example.test",
+            "X-Title": "Sensitive Project Title",
+        },
+    )
+
+    rendered = repr(options)
+
+    assert "chat-safe-id" in rendered
+    assert "responses" in rendered
+    assert "preset" not in rendered
+    assert "openrouter" not in rendered
+    assert "sensitive-reasoning-effort" not in rendered
+    assert "extra_headers" not in rendered
+    assert "HTTP-Referer" not in rendered
+    assert "private-attribution" not in rendered
+    assert "Sensitive Project Title" not in rendered
 
 
 @pytest.mark.asyncio
@@ -288,6 +397,251 @@ def test_anthropic_official_and_custom_use_one_adapter(
     assert sdk_calls[1]["base_url"] == "https://claude-gateway.example.test"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_kind", ["anthropic", "httpx"])
+async def test_anthropic_timeouts_are_fixed_retryable_and_chain_safe(
+    timeout_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-timeout-secret endpoint=https://private.example.test"
+    request = httpx.Request("POST", "https://private.example.test/v1/messages")
+    failures: list[object]
+    if timeout_kind == "anthropic":
+        failures = [anthropic.APITimeoutError(request) for _ in range(3)]
+    else:
+        failures = [httpx.ReadTimeout(sentinel, request=request) for _ in range(3)]
+    adapter, messages = _fake_anthropic_adapter(monkeypatch, failures)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMTimeoutError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "anthropic-a request timed out"
+    assert len(messages.calls) == 3
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_rate_limit_is_fixed_non_retryable_and_chain_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-rate-secret endpoint=https://private.example.test"
+    failures = [_anthropic_status_error(anthropic.RateLimitError, 429, sentinel) for _ in range(3)]
+    adapter, messages = _fake_anthropic_adapter(monkeypatch, failures)
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("rate limits must be returned to the coordinator without local retry")
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", unexpected_sleep)
+
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "anthropic-a rate limit exceeded"
+    assert len(messages.calls) == 1
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "error_class", "expected"),
+    [
+        (401, anthropic.AuthenticationError, "anthropic-a authentication failed"),
+        (403, anthropic.PermissionDeniedError, "anthropic-a permission denied"),
+    ],
+)
+async def test_anthropic_auth_errors_are_fixed_non_retryable_and_chain_safe(
+    status_code: int,
+    error_class: Any,
+    expected: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-auth-secret endpoint=https://private.example.test"
+    failures = [_anthropic_status_error(error_class, status_code, sentinel) for _ in range(3)]
+    adapter, messages = _fake_anthropic_adapter(monkeypatch, failures)
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("permanent authentication errors must not be retried")
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", unexpected_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == expected
+    assert len(messages.calls) == 1
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_permanent_client_error_is_fixed_and_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-client-secret endpoint=https://private.example.test"
+    failures = [_anthropic_status_error(anthropic.BadRequestError, 400, sentinel) for _ in range(3)]
+    adapter, messages = _fake_anthropic_adapter(monkeypatch, failures)
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("permanent 4xx errors must not be retried")
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", unexpected_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "anthropic-a request failed: HTTP 400"
+    assert len(messages.calls) == 1
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["server", "connection"])
+async def test_anthropic_transient_failures_retry_then_succeed(
+    failure_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-transient-secret endpoint=https://private.example.test"
+    request = httpx.Request("POST", "https://private.example.test/v1/messages")
+    failure = (
+        _anthropic_status_error(anthropic.APIStatusError, 503, sentinel)
+        if failure_kind == "server"
+        else anthropic.APIConnectionError(message=sentinel, request=request)
+    )
+    adapter, messages = _fake_anthropic_adapter(
+        monkeypatch,
+        [failure, _anthropic_response()],
+    )
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", no_sleep)
+
+    response = await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert response.content == "anthropic-ok"
+    assert len(messages.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["server", "connection"])
+async def test_anthropic_terminal_transient_error_is_fixed_and_chain_safe(
+    failure_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-terminal-secret endpoint=https://private.example.test"
+    request = httpx.Request("POST", "https://private.example.test/v1/messages")
+    failures = (
+        [_anthropic_status_error(anthropic.APIStatusError, 503, sentinel) for _ in range(3)]
+        if failure_kind == "server"
+        else [anthropic.APIConnectionError(message=sentinel, request=request) for _ in range(3)]
+    )
+    adapter, messages = _fake_anthropic_adapter(monkeypatch, failures)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    expected = (
+        "anthropic-a server error: HTTP 503"
+        if failure_kind == "server"
+        else "anthropic-a connection failed"
+    )
+    assert str(exc_info.value) == expected
+    assert len(messages.calls) == 3
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_unknown_error_is_fixed_non_retryable_and_chain_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-unknown-secret endpoint=https://private.example.test"
+    adapter, messages = _fake_anthropic_adapter(
+        monkeypatch,
+        [RuntimeError(sentinel)],
+    )
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("unknown errors are not classified as transient")
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", unexpected_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "anthropic-a request failed"
+    assert len(messages.calls) == 1
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cancellation_propagates_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, messages = _fake_anthropic_adapter(
+        monkeypatch,
+        [asyncio.CancelledError()],
+    )
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("cancelled requests must not be retried")
+
+    monkeypatch.setattr(anthropic_provider.asyncio, "sleep", unexpected_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert len(messages.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_anthropic_total_usage_includes_cache_token_categories(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter, _ = _fake_anthropic_adapter(
+        monkeypatch,
+        [
+            _anthropic_response(
+                input_tokens=10,
+                output_tokens=5,
+                cache_read_input_tokens=3,
+                cache_creation_input_tokens=4,
+            )
+        ],
+    )
+
+    response = await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert response.usage == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 22,
+        "cached_input_tokens": 3,
+        "cache_creation_input_tokens": 4,
+    }
+
+
 def test_gemini_chat_uses_native_sdk_and_connection_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -339,6 +693,162 @@ def test_gemini_server_error_uses_connection_id(
     mapped = adapter._map_error(upstream_error)
 
     assert str(mapped) == "gemini-a server error: 503"
+
+
+@pytest.mark.asyncio
+async def test_gemini_unknown_error_is_fixed_and_has_no_secret_bearing_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-gemini-secret endpoint=https://private.example.test"
+
+    async def fail_request(**_: object) -> object:
+        raise RuntimeError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=fail_request))
+    )
+    monkeypatch.setattr(
+        gemini_provider,
+        "genai",
+        SimpleNamespace(Client=lambda **_: client),
+    )
+    monkeypatch.setattr(gemini_provider.asyncio, "sleep", no_sleep)
+    adapter = gemini_provider.GeminiProvider(
+        api_key="test-key",
+        provider_name="gemini-a",
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "gemini-a request failed"
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+def test_gemini_error_categories_use_fixed_provider_id_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = "credential=fake-gemini-category endpoint=https://private.example.test"
+    monkeypatch.setattr(
+        gemini_provider,
+        "genai",
+        SimpleNamespace(Client=lambda **_: SimpleNamespace()),
+    )
+    adapter = gemini_provider.GeminiProvider(
+        api_key="test-key",
+        provider_name="gemini-a",
+    )
+    request = httpx.Request("POST", "https://private.example.test")
+
+    class StatusError(RuntimeError):
+        def __init__(self, status_code: int) -> None:
+            super().__init__(sentinel)
+            self.status_code = status_code
+
+    cases = [
+        (
+            httpx.ReadTimeout(sentinel, request=request),
+            LLMTimeoutError,
+            "gemini-a request timed out",
+        ),
+        (StatusError(429), LLMRateLimitError, "gemini-a rate limit exceeded"),
+        (StatusError(401), LLMProviderError, "gemini-a authentication failed"),
+        (StatusError(503), LLMProviderError, "gemini-a server error: 503"),
+    ]
+
+    for error, expected_type, expected_message in cases:
+        mapped = adapter._map_error(error)
+        assert isinstance(mapped, expected_type)
+        assert str(mapped) == expected_message
+        assert sentinel not in str(mapped)
+        assert sentinel not in repr(mapped)
+
+
+@pytest.mark.asyncio
+async def test_gemini_cancellation_propagates_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def cancel_request(**_: object) -> object:
+        raise asyncio.CancelledError
+
+    async def unexpected_sleep(_: float) -> None:
+        pytest.fail("cancelled requests must not be retried")
+
+    client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=cancel_request))
+    )
+    monkeypatch.setattr(
+        gemini_provider,
+        "genai",
+        SimpleNamespace(Client=lambda **_: client),
+    )
+    monkeypatch.setattr(gemini_provider.asyncio, "sleep", unexpected_sleep)
+    adapter = gemini_provider.GeminiProvider(api_key="test-key", provider_name="gemini-a")
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_openai_protocol_unknown_error_is_fixed_and_has_no_secret_bearing_chain(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-openai-secret endpoint=https://private.example.test"
+
+    async def fail_request(**_: object) -> object:
+        raise RuntimeError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai"),
+        _runtime_options(),
+    )
+    monkeypatch.setattr(fake_openai_clients[0].chat_endpoint, "create", fail_request)
+    monkeypatch.setattr(openai_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "chat-openai request failed"
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+@pytest.mark.asyncio
+async def test_openai_protocol_status_inspection_failure_is_fixed_and_chain_safe(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-status-secret endpoint=https://private.example.test"
+
+    class MaliciousStatusError(RuntimeError):
+        @property
+        def status_code(self) -> int:
+            raise RuntimeError(sentinel)
+
+    async def fail_request(**_: object) -> object:
+        raise MaliciousStatusError("upstream failure")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    adapter = _factory().build_chat_adapter(
+        _openai_connection("openai"),
+        _runtime_options(),
+    )
+    monkeypatch.setattr(fake_openai_clients[0].chat_endpoint, "create", fail_request)
+    monkeypatch.setattr(openai_provider.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        await adapter.complete([{"role": "user", "content": "hi"}])
+
+    assert str(exc_info.value) == "chat-openai request failed"
+    _assert_error_chain_omits(exc_info.value, sentinel)
 
 
 @pytest.mark.asyncio
@@ -408,6 +918,70 @@ def test_factory_resolves_only_the_selected_credential_source(
     assert fake_openai_clients[0].kwargs["api_key"] == secret
     assert secret not in repr(adapter)
     assert secret not in repr(options)
+
+
+def test_runtime_options_snapshot_caller_owned_environment(
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    environment = {"SNAPSHOT_MODEL_KEY": "initial-snapshot-secret"}
+    options = _runtime_options(environment=environment)
+    connection = _openai_connection(
+        "openai",
+        credential=CredentialConfig(source="env", value="SNAPSHOT_MODEL_KEY"),
+    )
+    environment["SNAPSHOT_MODEL_KEY"] = "mutated-secret"
+
+    _factory().build_chat_adapter(connection, options)
+    environment["SNAPSHOT_MODEL_KEY"] = "mutated-again-secret"
+    _factory().build_chat_adapter(connection, options)
+
+    assert [client.kwargs["api_key"] for client in fake_openai_clients] == [
+        "initial-snapshot-secret",
+        "initial-snapshot-secret",
+    ]
+    assert options.environment is not environment
+    with pytest.raises(TypeError):
+        cast("dict[str, str]", options.environment)["SNAPSHOT_MODEL_KEY"] = "changed"
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        cast("Mapping[str, str]", {1: "value"}),
+        cast("Mapping[str, str]", {"KEY": object()}),
+    ],
+)
+def test_runtime_options_reject_non_string_environment_entries_without_values(
+    environment: Mapping[str, str],
+) -> None:
+    sentinel = repr(environment)
+
+    with pytest.raises(
+        LLMProviderError,
+        match="^connection runtime options are invalid$",
+    ) as exc_info:
+        _factory().AdapterRuntimeOptions(environment=environment)
+
+    assert sentinel not in str(exc_info.value)
+
+
+def test_runtime_options_mapping_copy_failure_has_no_secret_bearing_chain() -> None:
+    sentinel = "credential=fake-env-secret endpoint=https://private.example.test"
+
+    class ExplodingEnvironment:
+        def keys(self) -> list[str]:
+            raise RuntimeError(sentinel)
+
+        def __getitem__(self, _: str) -> str:
+            raise AssertionError("copy must stop after the failed keys lookup")
+
+    environment = cast("Mapping[str, str]", ExplodingEnvironment())
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        _factory().AdapterRuntimeOptions(environment=environment)
+
+    assert str(exc_info.value) == "connection runtime options are invalid"
+    _assert_error_chain_omits(exc_info.value, sentinel)
 
 
 @pytest.mark.parametrize(
@@ -503,6 +1077,66 @@ def test_codex_oauth_rejects_non_official_endpoint_before_token_lookup(
     assert not fake_openai_clients
 
 
+def test_codex_malformed_endpoint_error_has_no_secret_bearing_chain(
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "fake-codex-endpoint-secret"
+    token_calls = 0
+
+    def token_loader() -> str:
+        nonlocal token_calls
+        token_calls += 1
+        return "must-not-be-loaded"
+
+    connection = ChatConnection(
+        id="codex-a",
+        name="Codex login",
+        type="codex_oauth",
+        model="gpt-test",
+        base_url=f"https://api.openai.com:{sentinel}/v1",
+        credential=CredentialConfig(source="oauth", value="codex"),
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        _factory().build_chat_adapter(
+            connection,
+            _runtime_options(codex_token_loader=token_loader),
+        )
+
+    assert str(exc_info.value) == "connection endpoint is not allowed"
+    assert token_calls == 0
+    assert not fake_openai_clients
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
+def test_codex_token_loader_error_has_no_secret_bearing_chain(
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    sentinel = "credential=fake-codex-token endpoint=https://private.example.test"
+
+    def token_loader() -> str:
+        raise RuntimeError(sentinel)
+
+    connection = ChatConnection(
+        id="codex-a",
+        name="Codex login",
+        type="codex_oauth",
+        model="gpt-test",
+        base_url="https://api.openai.com/v1",
+        credential=CredentialConfig(source="oauth", value="codex"),
+    )
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        _factory().build_chat_adapter(
+            connection,
+            _runtime_options(codex_token_loader=token_loader),
+        )
+
+    assert str(exc_info.value) == "connection credential is unavailable"
+    assert not fake_openai_clients
+    _assert_error_chain_omits(exc_info.value, sentinel)
+
+
 @pytest.mark.parametrize("endpoint", ["", "https://api.openai.com/v1"])
 def test_codex_oauth_accepts_only_the_exact_official_endpoint(
     endpoint: str,
@@ -562,6 +1196,128 @@ def test_factory_resolves_endpoint_aware_proxy_policy_internally(
     ]
     assert "proxy" not in dataclasses.asdict(_runtime_options())
     assert fake_openai_clients[0].kwargs["base_url"] == "https://gateway.example.test/v1"
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "ftp://gateway.example.test/v1",
+        "https:///missing-host",
+        "https://user:fake-password@gateway.example.test/v1",
+        "https://gateway.example.test/v1?fake-secret=value",
+        "https://gateway.example.test/v1?",
+        "https://gateway.example.test/v1#fake-secret",
+        "https://gateway.example.test/v1#",
+        "https://gateway.example.test/\\private",
+        " https://gateway.example.test/v1",
+        "https://gateway.example.test/v1 ",
+        "https://gateway.example.test/\x00v1",
+        "https://gateway.example.test:not-a-port/v1",
+        "https://gateway.example.test:70000/v1",
+        "https://gateway.example.test:/v1",
+        "https://gateway..example.test/v1",
+        "https://gateway.example.test../v1",
+        "https://-gateway.example.test/v1",
+        "https://[::1/v1",
+    ],
+)
+def test_custom_endpoint_is_rejected_before_callbacks(
+    protocol: str,
+    endpoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    from openbiliclaw import network
+    from openbiliclaw.llm import anthropic_provider
+
+    network_calls: list[str] = []
+    anthropic_calls: list[dict[str, object]] = []
+    httpx_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        network,
+        "proxy_for_endpoint",
+        lambda value: network_calls.append(value) or "",
+    )
+    monkeypatch.setattr(
+        network,
+        "trust_env_for_endpoint",
+        lambda value: network_calls.append(value) or False,
+    )
+    monkeypatch.setattr(
+        anthropic_provider,
+        "AsyncAnthropic",
+        lambda **kwargs: anthropic_calls.append(dict(kwargs)) or SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        anthropic_provider.httpx,
+        "AsyncClient",
+        lambda **kwargs: httpx_calls.append(dict(kwargs)) or object(),
+    )
+    connection = (
+        _openai_connection("custom", base_url=endpoint)
+        if protocol == "openai"
+        else _anthropic_connection("custom", base_url=endpoint)
+    )
+
+    with pytest.raises(
+        LLMProviderError,
+        match="^connection endpoint is invalid$",
+    ) as exc_info:
+        _factory().build_chat_adapter(connection, _runtime_options())
+
+    _assert_error_chain_omits(exc_info.value, endpoint)
+    for marker in ("fake-password", "fake-secret", "not-a-port"):
+        if marker in endpoint:
+            _assert_error_chain_omits(exc_info.value, marker)
+    assert not network_calls
+    assert not fake_openai_clients
+    assert not anthropic_calls
+    assert not httpx_calls
+
+
+@pytest.mark.parametrize("protocol", ["openai", "anthropic"])
+def test_custom_endpoint_retains_valid_path_and_port(
+    protocol: str,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_openai_clients: list[_FakeOpenAIClient],
+) -> None:
+    from openbiliclaw import network
+    from openbiliclaw.llm import anthropic_provider
+
+    endpoint = "https://gateway.example.test:8443/custom/v1"
+    seen: list[str] = []
+    anthropic_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        network,
+        "proxy_for_endpoint",
+        lambda value: seen.append(value) or "",
+    )
+    monkeypatch.setattr(
+        network,
+        "trust_env_for_endpoint",
+        lambda value: seen.append(value) or True,
+    )
+    monkeypatch.setattr(
+        anthropic_provider,
+        "AsyncAnthropic",
+        lambda **kwargs: anthropic_calls.append(dict(kwargs)) or SimpleNamespace(),
+    )
+    connection = (
+        _openai_connection("custom", base_url=endpoint)
+        if protocol == "openai"
+        else _anthropic_connection("custom", base_url=endpoint)
+    )
+
+    _factory().build_chat_adapter(connection, _runtime_options())
+
+    assert seen == [endpoint, endpoint]
+    if protocol == "openai":
+        assert fake_openai_clients[0].kwargs["base_url"] == endpoint
+        assert not anthropic_calls
+    else:
+        assert anthropic_calls[0]["base_url"] == endpoint
+        assert not fake_openai_clients
 
 
 @pytest.mark.parametrize(

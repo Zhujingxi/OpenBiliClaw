@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, NoReturn
 
+import httpx
+
 from .base import (
     LLMProvider,
     LLMProviderError,
@@ -195,37 +197,65 @@ class GeminiProvider(LLMProvider):
         )
 
     async def _request_with_retry(self, **kwargs: Any) -> Any:
-        last_error: Exception | None = None
+        last_error: LLMProviderError | None = None
 
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
                 return await self._client.aio.models.generate_content(**kwargs)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 mapped = self._map_error(exc)
                 last_error = mapped
-                if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
-                    raise mapped from exc
-                await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
+            if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
+                break
+            await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
 
         if last_error is None:
             raise LLMProviderError(f"{self._provider_name} request failed")
-        raise last_error
+        raise last_error from None
 
     def _map_error(self, exc: Exception) -> LLMProviderError:
-        if isinstance(exc, LLMProviderError):
-            return exc
-        if isinstance(exc, TimeoutError):
-            return LLMTimeoutError(f"{self._provider_name} request timed out")
-
-        status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-        message = (getattr(exc, "message", None) or str(exc)).lower()
-        if status_code == 429 or "rate limit" in message or "resource_exhausted" in message:
+        if isinstance(exc, LLMRateLimitError):
             return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
+        if isinstance(exc, (LLMTimeoutError, TimeoutError, httpx.TimeoutException)):
+            return LLMTimeoutError(f"{self._provider_name} request timed out")
+        if isinstance(exc, LLMResponseError):
+            return LLMResponseError(f"{self._provider_name} returned an invalid response")
+        if isinstance(exc, LLMProviderError):
+            return LLMProviderError(f"{self._provider_name} request failed")
+
+        status_code = self._safe_status_code(exc)
+        error_type = type(exc).__name__.lower().replace("_", "")
+        if status_code == 429 or "ratelimit" in error_type or "resourceexhausted" in error_type:
+            return LLMRateLimitError(f"{self._provider_name} rate limit exceeded")
+        if status_code in {401, 403}:
+            return LLMProviderError(f"{self._provider_name} authentication failed")
         if (errors is not None and isinstance(exc, errors.ServerError)) or (
-            status_code and int(status_code) >= 500
+            status_code is not None and status_code >= 500
         ):
             return LLMProviderError(f"{self._provider_name} server error: {status_code}")
-        return LLMProviderError(f"{self._provider_name} request failed: {exc}")
+        if status_code is not None:
+            return LLMProviderError(f"{self._provider_name} request failed: HTTP {status_code}")
+        return LLMProviderError(f"{self._provider_name} request failed")
+
+    @staticmethod
+    def _safe_status_code(exc: Exception) -> int | None:
+        for attribute in ("code", "status_code"):
+            try:
+                value = getattr(exc, attribute, None)
+            except Exception:
+                continue
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value.strip())
+                except ValueError:
+                    continue
+        return None
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         if isinstance(exc, LLMRateLimitError):

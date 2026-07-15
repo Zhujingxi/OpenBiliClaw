@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import unicodedata
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, cast
+from urllib.parse import urlsplit
 
 from openbiliclaw import network
 from openbiliclaw.model_config.registry import connection_type_registry
@@ -52,6 +56,23 @@ class AdapterRuntimeOptions:
         repr=False,
         compare=False,
     )
+
+    def __post_init__(self) -> None:
+        """Freeze the exact caller-supplied environment snapshot."""
+        if self.environment is None:
+            return
+        try:
+            snapshot = dict(self.environment)
+        except Exception:
+            snapshot = None
+        if snapshot is None:
+            raise LLMProviderError("connection runtime options are invalid") from None
+        if any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in snapshot.items()
+        ):
+            raise LLMProviderError("connection runtime options are invalid")
+        object.__setattr__(self, "environment", MappingProxyType(snapshot))
 
 
 class _EmbeddingProvider(Protocol):
@@ -306,7 +327,7 @@ def _resolve_credential(
         try:
             value = loader()
         except Exception:
-            raise LLMProviderError("connection credential is unavailable") from None
+            value = ""
     elif credential.source == "none" and _descriptor_allows_no_credential(
         connection_type,
         capability,
@@ -314,7 +335,7 @@ def _resolve_credential(
         return "ollama"
     else:
         raise LLMProviderError("connection credential is unavailable")
-    if not value or not value.strip():
+    if not isinstance(value, str) or not value.strip():
         raise LLMProviderError("connection credential is unavailable")
     return value
 
@@ -330,9 +351,12 @@ def _validate_codex_before_token_lookup(connection: ChatConnection) -> str:
     if connection.credential.source != "oauth" or connection.credential.value != "codex":
         raise LLMProviderError("connection credential is unavailable")
     try:
-        return validated_codex_api_base_url(connection.base_url)
+        endpoint = validated_codex_api_base_url(connection.base_url)
     except Exception:
+        endpoint = None
+    if endpoint is None:
         raise LLMProviderError("connection endpoint is not allowed") from None
+    return endpoint
 
 
 def _timeout(runtime_options: AdapterRuntimeOptions) -> float:
@@ -357,6 +381,8 @@ def _api_mode(value: str) -> Literal["chat_completions", "responses"]:
 
 def _openai_endpoint(preset: str, base_url: str) -> str:
     normalized_preset = preset.strip().lower()
+    if normalized_preset == "custom":
+        return _validated_custom_endpoint(base_url)
     endpoint = base_url.strip() or _OPENAI_PRESET_ENDPOINTS.get(normalized_preset, "")
     if not endpoint:
         raise LLMProviderError("connection configuration is invalid")
@@ -367,9 +393,79 @@ def _anthropic_endpoint(preset: str, base_url: str) -> str:
     endpoint = base_url.strip()
     if preset == "anthropic":
         return endpoint or _ANTHROPIC_OFFICIAL_ENDPOINT
-    if preset == "custom" and endpoint:
-        return endpoint
+    if preset == "custom":
+        return _validated_custom_endpoint(base_url)
     raise LLMProviderError("connection configuration is invalid")
+
+
+def _validated_custom_endpoint(value: str) -> str:
+    """Return one safe HTTP(S) endpoint without changing its path or port."""
+    candidate = value
+    invalid_text = (
+        not candidate
+        or candidate != candidate.strip()
+        or "\\" in candidate
+        or "?" in candidate
+        or "#" in candidate
+        or any(unicodedata.category(character) == "Cc" for character in candidate)
+    )
+    if invalid_text:
+        raise LLMProviderError("connection endpoint is invalid")
+    parsed = None
+    hostname = None
+    port = None
+    try:
+        parsed = urlsplit(candidate)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError, UnicodeError):
+        parsed = None
+        hostname = None
+        port = None
+    if parsed is None:
+        raise LLMProviderError("connection endpoint is invalid") from None
+    invalid_structure = (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.endswith(":")
+        or (port is not None and port <= 0)
+        or not _valid_endpoint_hostname(hostname)
+    )
+    if invalid_structure:
+        raise LLMProviderError("connection endpoint is invalid")
+    return candidate
+
+
+def _valid_endpoint_hostname(hostname: str) -> bool:
+    if hostname.endswith(".."):
+        return False
+    normalized = hostname[:-1] if hostname.endswith(".") else hostname
+    if not normalized:
+        return False
+    try:
+        ipaddress.ip_address(normalized)
+    except ValueError:
+        try:
+            ascii_name = normalized.encode("idna").decode("ascii")
+        except UnicodeError:
+            return False
+        if len(ascii_name) > 253:
+            return False
+        labels = ascii_name.split(".")
+        return all(
+            0 < len(label) <= 63
+            and not label.startswith("-")
+            and not label.endswith("-")
+            and all(
+                character.isascii() and (character.isalnum() or character == "-")
+                for character in label
+            )
+            for label in labels
+        )
+    return True
 
 
 def _ollama_endpoint(base_url: str) -> str:

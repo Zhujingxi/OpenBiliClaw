@@ -47,10 +47,10 @@ class OpenAIProtocolOptions:
     """Immutable request hooks for one OpenAI-protocol connection."""
 
     connection_id: str
-    preset: str
+    preset: str = field(repr=False)
     api_mode: Literal["chat_completions", "responses"]
-    default_reasoning_effort: str = ""
-    extra_headers: Mapping[str, str] = field(default_factory=dict)
+    default_reasoning_effort: str = field(default="", repr=False)
+    extra_headers: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         """Freeze caller-owned mappings and normalize hook selectors."""
@@ -687,6 +687,66 @@ class OpenAIProtocolProvider(OpenAIProvider):
             proxy=proxy,
             trust_env=trust_env,
         )
+
+    async def _request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._safe_protocol_send(self._create_chat_completion, **kwargs)
+
+    async def _responses_request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._safe_protocol_send(self._create_response, **kwargs)
+
+    async def _safe_protocol_send(
+        self,
+        send: Callable[..., Awaitable[Any]],
+        **kwargs: Any,
+    ) -> Any:
+        last_error: LLMProviderError | None = None
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                return await send(**kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                mapped = self._map_error(exc)
+                last_error = mapped
+            if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
+                break
+            await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
+        if last_error is None:  # pragma: no cover - loop invariant guard
+            raise LLMProviderError(f"{self.name} request failed")
+        raise last_error from None
+
+    def _map_error(self, exc: Exception) -> LLMProviderError:
+        if isinstance(exc, LLMRateLimitError):
+            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+        if isinstance(exc, (LLMTimeoutError, TimeoutError, httpx.TimeoutException)):
+            return LLMTimeoutError(f"{self.name} request timed out")
+        if isinstance(exc, LLMResponseError):
+            return LLMResponseError(f"{self.name} returned an invalid response")
+        if isinstance(exc, LLMProviderError):
+            return LLMProviderError(f"{self.name} request failed")
+
+        status_code = self._safe_protocol_status_code(exc)
+        error_type = type(exc).__name__.lower().replace("_", "")
+        if status_code == 429 or "ratelimit" in error_type:
+            return LLMRateLimitError(f"{self.name} rate limit exceeded")
+        if status_code in {401, 403}:
+            return LLMProviderError(f"{self.name} authentication failed")
+        if status_code is not None and status_code >= 500:
+            return LLMProviderError(f"{self.name} server error: {status_code}")
+        if status_code is not None:
+            return LLMProviderError(f"{self.name} request failed: HTTP {status_code}")
+        if isinstance(exc, (httpx.TransportError, ConnectionError)) or (
+            "connectionerror" in error_type
+        ):
+            return LLMProviderError(f"{self.name} connection failed")
+        return LLMProviderError(f"{self.name} request failed")
+
+    def _safe_protocol_status_code(self, exc: Exception) -> int | None:
+        try:
+            value = getattr(exc, "status_code", None)
+        except Exception:
+            return None
+        return self._status_code_int(value)
 
     async def complete(
         self,
