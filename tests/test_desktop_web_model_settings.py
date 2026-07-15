@@ -46,6 +46,11 @@ def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
     for key in ("ArrowUp", "ArrowDown", "Home", "End"):
         assert key in model_js.split("function moveTypeOptionFocus", 1)[1]
     assert 'addEventListener("keydown", moveTypeOptionFocus)' in model_js
+    assert "function focusSelectedTypeOption" in model_js
+    change_type = model_js.split("function changeType(typeId)", 1)[1].split(
+        "function updateField", 1
+    )[0]
+    assert "focusSelectedTypeOption();" in change_type
     assert ".model-connection-type-groups" in CSS
     assert "grid-template-columns: 1fr" in CSS
 
@@ -122,6 +127,61 @@ def test_model_and_general_saves_have_separate_owners() -> None:
     assert "generalSettingsActions" in APP_JS
 
 
+def test_model_save_locks_the_complete_editor_for_one_guarded_transaction() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    save = model_js.split("async function saveModels()", 1)[1].split(
+        "async function fetchModelSnapshot", 1
+    )[0]
+    render = model_js.split("function render()", 1)[1].split("function focusMovedRow", 1)[0]
+
+    assert 'id="modelEditorBoundary"' in INDEX
+    assert "let saveInFlight = false;" in model_js
+    assert "let saveGeneration = 0;" in model_js
+    assert "function setModelEditorLocked" in model_js
+    assert "function modelMutationBlocked" in model_js
+    assert model_js.count("modelMutationBlocked()") >= 10
+    assert "if (!state || saveInFlight) return;" in save
+    assert "const generation = ++saveGeneration;" in save
+    assert "setModelEditorLocked(true);" in save
+    assert "generation === saveGeneration" in save
+    assert "setModelEditorLocked(false);" in save
+    assert 'byId("modelSaveButton").disabled = saveInFlight;' in render
+    reloaded = model_js.split('window.addEventListener("openbiliclaw:config-reloaded"', 1)[1].split(
+        "});", 1
+    )[0]
+    assert "saveInFlight" in reloaded
+
+
+def test_model_save_invalidates_already_started_snapshot_reloads() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    save = model_js.split("async function saveModels()", 1)[1].split(
+        "async function fetchModelSnapshot", 1
+    )[0]
+    fetch_snapshot = model_js.split("async function fetchModelSnapshot", 1)[1].split(
+        "async function loadModelSettings", 1
+    )[0]
+
+    assert "createLatestRequestGate" in model_js
+    assert "applyLatestSnapshotRequest" in model_js
+    assert "snapshotRequestGate.invalidate();" in save
+    assert "blocked: () => saveInFlight" in fetch_snapshot
+
+
+def test_initial_snapshot_load_uses_the_same_latest_request_gate_as_reload() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    initial_load = model_js.split("async function loadModelSettings()", 1)[1].split(
+        "function confirmLeave", 1
+    )[0]
+
+    assert "applyLatestSnapshotRequest" in initial_load
+    assert "gate: snapshotRequestGate" in initial_load
+    assert "blocked: () => saveInFlight" in initial_load
+    assert "let descriptorsReady;" in initial_load
+    assert "Promise.all([snapshotLoad, descriptorsReady])" in initial_load
+    assert "connectionTypes = descriptors;" in initial_load
+    assert "if (state && !saveInFlight) render();" in initial_load
+
+
 def test_model_editor_owns_dirty_remote_probe_error_and_migration_lifecycle() -> None:
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
 
@@ -150,6 +210,25 @@ def test_probe_revision_conflict_renders_the_replaced_or_retained_state_complete
     assert "state = receiveRemoteSnapshot(state, error.details.latest);" in conflict
     assert "render();" in conflict.split("}", 1)[0]
     assert "renderRemoteUpdate();" not in conflict.split("}", 1)[0]
+
+
+def test_probe_completion_is_generation_guarded_and_scoped_to_its_stable_record() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    probe = model_js.split("async function probeSelected()", 1)[1].split(
+        "function retainSelection", 1
+    )[0]
+
+    assert "let probeGeneration = 0;" in model_js
+    for marker in (
+        "createProbeSignature",
+        "applyProbeResult",
+        "probeSignatureMatches",
+        "const generation = ++probeGeneration;",
+        "generation !== probeGeneration",
+        "probeRequestVisible(signature)",
+    ):
+        assert marker in probe
+    assert "record.probe =" not in probe
 
 
 def test_local_model_overrides_are_visible_and_lock_only_shadowed_controls() -> None:
@@ -201,5 +280,8 @@ def test_extension_documentation_separates_legacy_popup_from_native_desktop_edit
     )
 
     assert "插件 side panel 仍展示 legacy 默认/备选 Provider" in EXTENSION_DOC
+    assert "插件 side panel 的 legacy 模型 tab" in EXTENSION_DOC
+    assert "Task 11" in EXTENSION_DOC
     assert "桌面 Web 已改用 `/api/model-config`" in EXTENSION_DOC
+    assert "v0.3.157+ 与桌面 Web 对齐" not in EXTENSION_DOC
     assert stale_desktop_claim not in EXTENSION_DOC

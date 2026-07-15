@@ -275,6 +275,7 @@
         </div>
 
         <div class="settings-panel model-settings-panel" data-settings-panel="models">
+          <fieldset class="model-editor-boundary" id="modelEditorBoundary" aria-label="模型路由编辑器" aria-busy="false">
           <div class="model-route-tabs" id="modelRouteTabs" role="tablist" aria-label="模型类型">
             <button class="model-route-tab is-active" type="button" role="tab" aria-selected="true" data-model-route="chat">Chat route</button>
             <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="embedding">Embedding route</button>
@@ -357,6 +358,7 @@
             <span class="settings-probe-status" id="modelSaveStatus" aria-live="polite">正在读取模型配置…</span>
             <button class="pill-btn primary" id="modelSaveButton" type="button">保存模型路由</button>
           </div>
+          </fieldset>
         </div>
 
         <div class="settings-panel" data-settings-panel="sources" hidden>

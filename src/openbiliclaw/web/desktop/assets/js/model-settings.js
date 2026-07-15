@@ -4,12 +4,17 @@ if (sharedStateVersion) sharedStateUrl.searchParams.set("v", sharedStateVersion)
 
 const {
   appendRouteItem,
+  applyLatestSnapshotRequest,
+  applyProbeResult,
   applyPreset,
   changeConnectionType,
   changePreset,
+  createLatestRequestGate,
+  createProbeSignature,
   hydrateModelConfig,
   mapServerFieldErrors,
   moveRouteItem,
+  probeSignatureMatches,
   receiveRemoteSnapshot,
   removeRouteItem,
   selectRouteItem,
@@ -37,6 +42,10 @@ const ROUTE_OVERRIDE_PATHS = {
 let state = null;
 let connectionTypes = { connection_types: [], groups: [] };
 let draggedId = "";
+let probeGeneration = 0;
+let saveInFlight = false;
+let saveGeneration = 0;
+const snapshotRequestGate = createLatestRequestGate();
 
 const byId = (id) => document.getElementById(id);
 const disabledMarkup = (disabled) => (disabled ? ' disabled aria-disabled="true"' : "");
@@ -60,6 +69,27 @@ function routeLocked(kind) {
   return kind === "chat" || kind === "embedding"
     ? modelControlLocked(ROUTE_OVERRIDE_PATHS[kind])
     : null;
+}
+
+function modelMutationBlocked() {
+  return !state || saveInFlight;
+}
+
+function setModelEditorLocked(locked) {
+  const boundary = byId("modelEditorBoundary");
+  if (!boundary) return;
+  boundary.disabled = locked;
+  boundary.inert = locked;
+  boundary.setAttribute("aria-busy", locked ? "true" : "false");
+  byId("modelSaveButton").disabled = locked;
+}
+
+function probeRequestVisible(signature) {
+  return Boolean(
+    state
+    && state.activeRoute === signature.kind
+    && state.selected?.[signature.kind] === signature.id,
+  );
 }
 
 function modelApiPath(url) {
@@ -307,6 +337,16 @@ function moveTypeOptionFocus(event) {
   options[index].focus();
 }
 
+function focusSelectedTypeOption() {
+  const record = selectedRecord(state, state.activeRoute);
+  if (!record) return;
+  window.requestAnimationFrame(() => {
+    byId("modelConnectionTypeGroups")
+      ?.querySelector(`[data-model-type="${CSS.escape(record.type)}"]`)
+      ?.focus();
+  });
+}
+
 function renderDescriptorField(record, descriptor, field) {
   if (field.name === "credential") return "";
   if (field.capabilities?.length && !field.capabilities.includes(state.activeRoute)) return "";
@@ -474,7 +514,7 @@ function render() {
   renderRouteList();
   renderInspector();
   renderRuntime();
-  byId("modelSaveButton").disabled = false;
+  byId("modelSaveButton").disabled = saveInFlight;
   setStatus(state.dirty ? "有未保存的模型更改。" : `模型配置已同步 · ${state.revision.slice(0, 12)}`);
 }
 
@@ -499,6 +539,7 @@ function focusSelectedRouteControl() {
 }
 
 function moveSelected(delta) {
+  if (modelMutationBlocked()) return;
   if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
@@ -509,6 +550,7 @@ function moveSelected(delta) {
 }
 
 function selectRecord(id, openDetail = true) {
+  if (modelMutationBlocked()) return;
   state = selectRouteItem(state, state.activeRoute, id);
   byId("modelRouteLayout").classList.toggle("is-detail", openDetail);
   renderRouteList();
@@ -517,6 +559,7 @@ function selectRecord(id, openDetail = true) {
 }
 
 function addConnection() {
+  if (modelMutationBlocked()) return;
   if (routeLocked(state.activeRoute)) return;
   const descriptor = descriptorsFor(state.activeRoute)[0];
   if (!descriptor) return;
@@ -552,6 +595,7 @@ function addConnection() {
 }
 
 function removeSelected() {
+  if (modelMutationBlocked()) return;
   if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record || !window.confirm(`移除 ${record.name || record.id}？`)) return;
@@ -565,6 +609,7 @@ function removeSelected() {
 }
 
 function changeType(typeId) {
+  if (modelMutationBlocked()) return;
   if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   const descriptor = descriptorFor(typeId);
@@ -592,9 +637,11 @@ function changeType(typeId) {
     state = applyPreset(state, state.activeRoute, record.id, preset, { previousPreset });
   }
   render();
+  focusSelectedTypeOption();
 }
 
 function updateField(field, target) {
+  if (modelMutationBlocked()) return;
   if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
@@ -633,6 +680,7 @@ function updateField(field, target) {
 }
 
 function updateCredential(action, value = "", rerender = true) {
+  if (modelMutationBlocked()) return;
   if (routeLocked(state.activeRoute)) return;
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
@@ -644,28 +692,33 @@ function updateCredential(action, value = "", rerender = true) {
 }
 
 async function probeSelected() {
-  const record = selectedRecord(state, state.activeRoute);
-  if (!record || state.activeRoute === "runtime") return;
+  if (!state || saveInFlight) return;
+  const kind = state.activeRoute;
+  const record = selectedRecord(state, kind);
+  if (!record || kind === "runtime") return;
+  const generation = ++probeGeneration;
+  const signature = createProbeSignature(state, kind, record.id);
   const button = byId("modelProbeButton");
   const status = byId("modelProbeStatus");
   const payload = toModelConfigPayload(state);
-  const selectedDraft = state.activeRoute === "chat"
+  const selectedDraft = kind === "chat"
     ? payload.models.chat.connections.find((item) => item.id === record.id)
     : payload.models.embedding.providers.find((item) => item.id === record.id);
-  const body = state.activeRoute === "chat"
+  const body = kind === "chat"
     ? {
-      kind: state.activeRoute,
-      revision: state.revision,
+      kind,
+      revision: signature.revision,
       connection: selectedDraft,
     }
     : {
-      kind: state.activeRoute,
-      revision: state.revision,
+      kind,
+      revision: signature.revision,
       provider: selectedDraft,
       settings: payload.models.embedding.settings,
     };
   button.disabled = true;
   status.textContent = "正在探测精确草稿…";
+  delete status.dataset.tone;
   const started = performance.now();
   try {
     const result = await requestModelJson(MODEL_PROBE_API, {
@@ -673,18 +726,32 @@ async function probeSelected() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    record.probe = { ...result, latency_ms: Math.round(performance.now() - started) };
-    renderProbeStatus(record);
+    if (generation !== probeGeneration) return;
+    const applied = applyProbeResult(state, signature, {
+      ...result,
+      latency_ms: Math.round(performance.now() - started),
+    });
+    state = applied.state;
     renderRouteList();
+    if (probeRequestVisible(signature)) {
+      renderProbeStatus(selectedRecord(state, signature.kind));
+    }
   } catch (error) {
+    if (generation !== probeGeneration) return;
     if (error.status === 409 && error.details?.latest) {
       state = receiveRemoteSnapshot(state, error.details.latest);
       render();
     }
-    status.textContent = error.details?.error || error.message || "Probe failed";
-    status.dataset.tone = "error";
+    if (probeRequestVisible(signature)) {
+      if (probeSignatureMatches(state, signature)) {
+        status.textContent = error.details?.error || error.message || "Probe failed";
+        status.dataset.tone = "error";
+      } else {
+        renderProbeStatus(selectedRecord(state, signature.kind));
+      }
+    }
   } finally {
-    button.disabled = false;
+    if (generation === probeGeneration) button.disabled = saveInFlight;
   }
 }
 
@@ -699,9 +766,11 @@ function retainSelection(next, previous) {
 }
 
 async function saveModels() {
-  if (!state) return;
-  const button = byId("modelSaveButton");
-  button.disabled = true;
+  if (!state || saveInFlight) return;
+  const generation = ++saveGeneration;
+  saveInFlight = true;
+  snapshotRequestGate.invalidate();
+  setModelEditorLocked(true);
   setStatus("正在验证并热重载模型 route…");
   try {
     const result = await requestModelJson(MODEL_CONFIG_API, {
@@ -727,28 +796,53 @@ async function saveModels() {
       setStatus(error.details?.error || error.message || "模型保存失败。", "error");
     }
   } finally {
-    button.disabled = false;
+    if (generation === saveGeneration) {
+      saveInFlight = false;
+      setModelEditorLocked(false);
+    }
   }
 }
 
 async function fetchModelSnapshot(remote = false) {
-  const snapshot = await requestModelJson(MODEL_CONFIG_API);
-  if (remote && state) state = receiveRemoteSnapshot(state, snapshot);
-  else state = retainSelection(hydrateModelConfig(snapshot), state);
-  render();
+  if (saveInFlight) return;
+  await applyLatestSnapshotRequest({
+    gate: snapshotRequestGate,
+    request: () => requestModelJson(MODEL_CONFIG_API),
+    blocked: () => saveInFlight,
+    apply: (snapshot) => {
+      if (remote && state) state = receiveRemoteSnapshot(state, snapshot);
+      else state = retainSelection(hydrateModelConfig(snapshot), state);
+      render();
+    },
+  });
 }
 
 async function loadModelSettings() {
   setStatus("正在读取模型配置…");
   try {
-    const [snapshot, descriptors] = await Promise.all([
-      requestModelJson(MODEL_CONFIG_API),
-      requestModelJson(CONNECTION_TYPES_API),
-    ]);
-    connectionTypes = descriptors;
-    state = hydrateModelConfig(snapshot);
-    state.activeRoute = "chat";
-    render();
+    let descriptorsReady;
+    const snapshotLoad = applyLatestSnapshotRequest({
+      gate: snapshotRequestGate,
+      request: async () => {
+        const snapshotReady = requestModelJson(MODEL_CONFIG_API);
+        descriptorsReady = requestModelJson(CONNECTION_TYPES_API).then((descriptors) => {
+          connectionTypes = descriptors;
+          if (state && !saveInFlight) render();
+        });
+        const [snapshot] = await Promise.all([
+          snapshotReady,
+          descriptorsReady,
+        ]);
+        return snapshot;
+      },
+      blocked: () => saveInFlight,
+      apply: (snapshot) => {
+        state = hydrateModelConfig(snapshot);
+        state.activeRoute = "chat";
+      },
+    });
+    await Promise.all([snapshotLoad, descriptorsReady]);
+    if (state && !saveInFlight) render();
   } catch (error) {
     setStatus(error.message || "无法读取模型配置。", "error");
   }
@@ -761,7 +855,7 @@ function confirmLeave() {
 function bindEvents() {
   document.querySelectorAll("[data-model-route]").forEach((tab) => {
     tab.addEventListener("click", () => {
-      if (!state) return;
+      if (modelMutationBlocked()) return;
       state.activeRoute = tab.dataset.modelRoute;
       byId("modelRouteLayout").classList.remove("is-detail");
       render();
@@ -778,6 +872,7 @@ function bindEvents() {
   byId("modelSaveButton").addEventListener("click", () => void saveModels());
   byId("modelProbeButton").addEventListener("click", () => void probeSelected());
   byId("modelReloadRemote").addEventListener("click", () => {
+    if (modelMutationBlocked()) return;
     if (!state?.remoteUpdate || !window.confirm("放弃当前草稿并加载远端模型配置？")) return;
     state = retainSelection(hydrateModelConfig(state.remoteUpdate.snapshot), state);
     render();
@@ -817,14 +912,14 @@ function bindEvents() {
   byId("modelRouteList").addEventListener("keydown", (event) => {
     const row = event.target.closest("[data-model-record-id]");
     if (!row || !event.altKey || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
-    if (routeLocked(state.activeRoute)) return;
+    if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     event.preventDefault();
     selectRecord(row.dataset.modelRecordId, false);
     moveSelected(event.key === "ArrowUp" ? -1 : 1);
   });
   byId("modelRouteList").addEventListener("dragstart", (event) => {
     const row = event.target.closest("[data-model-record-id]");
-    if (!row || routeLocked(state.activeRoute)) {
+    if (!row || modelMutationBlocked() || routeLocked(state.activeRoute)) {
       event.preventDefault();
       return;
     }
@@ -835,7 +930,7 @@ function bindEvents() {
   byId("modelRouteList").addEventListener("dragover", (event) => event.preventDefault());
   byId("modelRouteList").addEventListener("drop", (event) => {
     event.preventDefault();
-    if (routeLocked(state.activeRoute)) return;
+    if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const target = event.target.closest("[data-model-record-id]");
     if (!target || !draggedId) return;
     const targetIndex = activeItems().findIndex((item) => item.id === target.dataset.modelRecordId);
@@ -850,6 +945,7 @@ function bindEvents() {
     document.querySelectorAll(".model-route-row.is-dragging").forEach((row) => row.classList.remove("is-dragging"));
   });
   byId("modelEmbeddingEnabled").addEventListener("change", (event) => {
+    if (modelMutationBlocked()) return;
     if (modelControlLocked("models.embedding.enabled")) {
       renderEmbeddingSettings();
       return;
@@ -879,6 +975,7 @@ function bindEvents() {
     ["modelEmbeddingSimilarity", "similarity_threshold", "number", "models.embedding.settings.similarity_threshold"],
   ]) {
     byId(id).addEventListener("input", (event) => {
+      if (modelMutationBlocked()) return;
       if (modelControlLocked(path)) return;
       const value = kind === "number" ? Number(event.target.value) : event.target.value;
       state = updateRouteSetting(state, "embedding", field, value);
@@ -886,21 +983,25 @@ function bindEvents() {
     });
   }
   byId("modelEmbeddingMultimodal").addEventListener("change", (event) => {
+    if (modelMutationBlocked()) return;
     if (modelControlLocked("models.embedding.settings.multimodal_enabled")) return;
     state = updateRouteSetting(state, "embedding", "multimodal_enabled", event.target.checked);
     setStatus("有未保存的模型更改。");
   });
   byId("modelChatConcurrency").addEventListener("input", (event) => {
+    if (modelMutationBlocked()) return;
     if (modelControlLocked("models.chat.concurrency")) return;
     state = updateRouteSetting(state, "chat", "concurrency", Number(event.target.value));
     setStatus("有未保存的模型更改。");
   });
   byId("modelChatTimeout").addEventListener("input", (event) => {
+    if (modelMutationBlocked()) return;
     if (modelControlLocked("models.chat.timeout_seconds")) return;
     state = updateRouteSetting(state, "chat", "timeout_seconds", Number(event.target.value));
     setStatus("有未保存的模型更改。");
   });
   byId("modelMigrationPanel").addEventListener("click", (event) => {
+    if (modelMutationBlocked()) return;
     const button = event.target.closest("[data-migration-action]");
     if (!button) return;
     state = setMigrationResolution(
@@ -918,6 +1019,7 @@ function bindEvents() {
   });
   window.addEventListener("openbiliclaw:config-reloaded", (event) => {
     if (event.detail?.type && event.detail.type !== CONFIG_RELOADED_TYPE) return;
+    if (saveInFlight) return;
     void fetchModelSnapshot(true).catch(() => {});
   });
 }

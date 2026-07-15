@@ -37,23 +37,36 @@ def _valid_embedding_settings(value: object) -> bool:
 
 def _insert_chat_connections(
     existing: tuple[ChatConnection, ...],
-    additions: list[tuple[int, ChatConnection]],
+    additions: list[tuple[int | None, ChatConnection]],
 ) -> tuple[ChatConnection, ...]:
     final_count = len(existing) + len(additions)
     if not 1 <= final_count <= 10:
         raise _resolution_error()
-    positions = [position for position, _connection in additions]
-    if len(positions) != len(set(positions)):
-        raise _resolution_error()
-    if any(position < 1 or position > final_count for position in positions):
-        raise _resolution_error()
 
-    by_position = {position: connection for position, connection in additions}
+    explicit: dict[int, ChatConnection] = {}
+    automatic: list[ChatConnection] = []
+    for position, connection in additions:
+        if position is None:
+            automatic.append(connection)
+            continue
+        if type(position) is not int or position < 1 or position > final_count:
+            raise _resolution_error()
+        if position in explicit:
+            raise _resolution_error()
+        explicit[position] = connection
+
+    available = [position for position in range(1, final_count + 1) if position not in explicit]
+    if len(available) < len(automatic):
+        raise _resolution_error()
+    automatic_positions = available[-len(automatic) :] if automatic else []
+    by_position = dict(explicit)
+    by_position.update(zip(automatic_positions, automatic, strict=True))
+
     remaining = iter(existing)
     resolved: list[ChatConnection] = []
     for position in range(1, final_count + 1):
-        connection = by_position.get(position)
-        resolved.append(connection if connection is not None else next(remaining))
+        positioned = by_position.get(position)
+        resolved.append(positioned if positioned is not None else next(remaining))
     return tuple(resolved)
 
 
@@ -84,7 +97,7 @@ def apply_migration_resolutions(
     pending: dict[str, list[_PendingValue]] = {}
     for item in result._pending:
         pending.setdefault(item.issue_id, []).append(item)
-    chat_additions: list[tuple[int, ChatConnection]] = []
+    chat_additions: list[tuple[int | None, ChatConnection]] = []
     chat_removals: set[str] = set()
     embedding_removals: set[str] = set()
     embedding_addition: (
@@ -100,7 +113,9 @@ def apply_migration_resolutions(
 
         values = pending.get(issue.id, [])
         if resolution.action == "add_to_chat_route":
-            if type(resolution.position) is not int or resolution.embedding_settings is not None:
+            if (
+                resolution.position is not None and type(resolution.position) is not int
+            ) or resolution.embedding_settings is not None:
                 raise _resolution_error()
             chat_candidates = [
                 value.chat_connection for value in values if value.chat_connection is not None

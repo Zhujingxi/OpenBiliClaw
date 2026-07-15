@@ -53,6 +53,36 @@ function valuesEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+export function createLatestRequestGate() {
+  let generation = 0;
+  return {
+    begin() {
+      generation += 1;
+      return generation;
+    },
+    invalidate() {
+      generation += 1;
+    },
+    isCurrent(candidate) {
+      return candidate === generation;
+    },
+  };
+}
+
+export async function applyLatestSnapshotRequest({ gate, request, blocked, apply }) {
+  const generation = gate.begin();
+  let snapshot;
+  try {
+    snapshot = await request();
+  } catch (error) {
+    if (!gate.isCurrent(generation) || blocked()) return false;
+    throw error;
+  }
+  if (!gate.isCurrent(generation) || blocked()) return false;
+  apply(snapshot);
+  return true;
+}
+
 function normalizeOverridePath(path) {
   return String(path || "")
     .replace(/\[(\d+)\]/g, ".$1")
@@ -64,7 +94,7 @@ function buildOverrideLocks(overrides) {
     path: String(override?.path || ""),
     source: String(override?.source || ""),
   }));
-  return Object.fromEntries(OVERRIDE_CONTROL_PATHS.map((path) => {
+  const locks = Object.fromEntries(OVERRIDE_CONTROL_PATHS.map((path) => {
     const normalizedPath = normalizeOverridePath(path);
     const lock = entries.find((override) => {
       const overridePath = normalizeOverridePath(override.path);
@@ -75,6 +105,10 @@ function buildOverrideLocks(overrides) {
     });
     return [path, lock ? clone(lock) : null];
   }));
+  if (!locks["models.embedding.enabled"] && locks["models.embedding.providers"]) {
+    locks["models.embedding.enabled"] = clone(locks["models.embedding.providers"]);
+  }
+  return locks;
 }
 
 function routeKey(kind) {
@@ -520,22 +554,9 @@ export function receiveRemoteSnapshot(state, snapshot) {
 
 export function setMigrationResolution(state, issueId, resolution) {
   const next = clone(state);
-  next.migration_resolutions[String(issueId)] = clone(resolution);
-  const issueOrder = (next.migration?.issues || []).map((issue) => String(issue.id));
-  for (const id of Object.keys(next.migration_resolutions)) {
-    if (!issueOrder.includes(id)) issueOrder.push(id);
-  }
-  let position = next.models.chat.connections.length + 1;
-  for (const id of issueOrder) {
-    const selected = next.migration_resolutions[id];
-    if (!selected) continue;
-    if (selected.action === "add_to_chat_route") {
-      selected.position = position;
-      position += 1;
-    } else {
-      delete selected.position;
-    }
-  }
+  const selected = clone(resolution);
+  delete selected.position;
+  next.migration_resolutions[String(issueId)] = selected;
   return markChanged(next);
 }
 
@@ -577,6 +598,57 @@ function embeddingPayload(item) {
   };
 }
 
+function embeddingSettingsPayload(settings) {
+  return {
+    model: String(settings?.model || ""),
+    output_dimensionality: Math.max(
+      0,
+      Number(settings?.output_dimensionality) || 0,
+    ),
+    similarity_threshold: Number(settings?.similarity_threshold),
+    multimodal_enabled: Boolean(settings?.multimodal_enabled),
+  };
+}
+
+export function createProbeSignature(state, kind, id) {
+  const index = findIndex(state, kind, id);
+  const item = routeItems(state, kind)[index];
+  const draft = kind === "chat"
+    ? chatPayload(item)
+    : {
+      provider: embeddingPayload(item),
+      settings: embeddingSettingsPayload(state.models.embedding.settings),
+    };
+  return {
+    revision: String(state.revision || ""),
+    kind,
+    id: String(id),
+    fingerprint: JSON.stringify(draft),
+  };
+}
+
+export function probeSignatureMatches(state, signature) {
+  if (!signature || typeof signature !== "object") return false;
+  try {
+    return valuesEqual(
+      createProbeSignature(state, signature.kind, signature.id),
+      signature,
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+export function applyProbeResult(state, signature, result) {
+  const next = clone(state);
+  if (!probeSignatureMatches(next, signature)) {
+    return { state: next, accepted: false };
+  }
+  const index = findIndex(next, signature.kind, signature.id);
+  routeItems(next, signature.kind)[index].probe = clone(result);
+  return { state: next, accepted: true };
+}
+
 export function toModelConfigPayload(state) {
   return {
     revision: state.revision,
@@ -589,15 +661,7 @@ export function toModelConfigPayload(state) {
       },
       embedding: {
         enabled: Boolean(state.models.embedding.enabled),
-        settings: {
-          model: String(state.models.embedding.settings.model || ""),
-          output_dimensionality: Math.max(
-            0,
-            Number(state.models.embedding.settings.output_dimensionality) || 0,
-          ),
-          similarity_threshold: Number(state.models.embedding.settings.similarity_threshold),
-          multimodal_enabled: Boolean(state.models.embedding.settings.multimodal_enabled),
-        },
+        settings: embeddingSettingsPayload(state.models.embedding.settings),
         providers: state.models.embedding.providers.map(embeddingPayload),
       },
     },

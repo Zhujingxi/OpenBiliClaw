@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import * as modelConfigState from "../src/openbiliclaw/web/shared/model-config-state.js";
 import {
   appendRouteItem,
   applyPreset,
@@ -80,6 +81,16 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
     migration: { state: "none", confirmed: true, issues: [] },
     overrides: [],
   };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 const CHAT_DESCRIPTOR_FIELDS = [
@@ -512,7 +523,59 @@ test("selection, reorder, route policy, and embedding enabled retain exact probe
   );
 });
 
-test("migration chat additions receive unique append positions and reindex in issue order", () => {
+test("in-flight probe results require the exact revision and draft but follow stable IDs", () => {
+  assert.equal(typeof modelConfigState.createProbeSignature, "function");
+  assert.equal(typeof modelConfigState.applyProbeResult, "function");
+
+  const initial = hydrateModelConfig(snapshot(["a", "b"]));
+  const signature = modelConfigState.createProbeSignature(initial, "chat", "a");
+  let reordered = selectRouteItem(initial, "chat", "b");
+  reordered = moveRouteItem(reordered, "chat", "a", 1);
+
+  const accepted = modelConfigState.applyProbeResult(reordered, signature, {
+    ok: true,
+    connection_id: "a",
+  });
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.state.selected.chat, "b");
+  assert.equal(
+    accepted.state.models.chat.connections.find((item) => item.id === "a").probe.ok,
+    true,
+  );
+  assert.equal(
+    accepted.state.models.chat.connections.find((item) => item.id === "b").probe,
+    null,
+  );
+
+  const edited = updateRouteField(initial, "chat", "a", "model", "new-model");
+  const rejectedEdit = modelConfigState.applyProbeResult(edited, signature, { ok: true });
+  assert.equal(rejectedEdit.accepted, false);
+  assert.equal(rejectedEdit.state.models.chat.connections[0].probe, null);
+
+  const revised = hydrateModelConfig(snapshot(["a", "b"], "revision-b"));
+  const rejectedRevision = modelConfigState.applyProbeResult(revised, signature, { ok: true });
+  assert.equal(rejectedRevision.accepted, false);
+  assert.equal(rejectedRevision.state.models.chat.connections[0].probe, null);
+});
+
+test("embedding probe signatures include the shared model settings", () => {
+  assert.equal(typeof modelConfigState.createProbeSignature, "function");
+  assert.equal(typeof modelConfigState.applyProbeResult, "function");
+
+  const initial = hydrateModelConfig(snapshot());
+  const signature = modelConfigState.createProbeSignature(
+    initial,
+    "embedding",
+    "embedding-a",
+  );
+  const changed = updateRouteSetting(initial, "embedding", "model", "other-vector-space");
+  const result = modelConfigState.applyProbeResult(changed, signature, { ok: true });
+
+  assert.equal(result.accepted, false);
+  assert.equal(result.state.models.embedding.providers[0].probe, null);
+});
+
+test("desktop migration choices omit positions after route removals and reorders", () => {
   const source = snapshot(["a", "b", "c"]);
   source.migration = {
     state: "pending",
@@ -526,16 +589,13 @@ test("migration chat additions receive unique append positions and reindex in is
   let state = hydrateModelConfig(source);
   state = setMigrationResolution(state, "first", { action: "add_to_chat_route" });
   state = setMigrationResolution(state, "second", { action: "add_to_chat_route" });
-  assert.equal(state.migration_resolutions.first.position, 4);
-  assert.equal(state.migration_resolutions.second.position, 5);
+  state = removeRouteItem(state, "chat", "b");
+  state = moveRouteItem(state, "chat", "c", 0);
 
-  state = setMigrationResolution(state, "first", { action: "discard" });
-  assert.equal("position" in state.migration_resolutions.first, false);
-  assert.equal(state.migration_resolutions.second.position, 4);
-
-  state = setMigrationResolution(state, "first", { action: "add_to_chat_route" });
-  assert.equal(state.migration_resolutions.first.position, 4);
-  assert.equal(state.migration_resolutions.second.position, 5);
+  assert.deepEqual(toModelConfigPayload(state).migration_resolutions, {
+    first: { action: "add_to_chat_route" },
+    second: { action: "add_to_chat_route" },
+  });
 });
 
 test("hydration derives editable control locks from local override ancestors", () => {
@@ -565,6 +625,153 @@ test("hydration derives editable control locks from local override ancestors", (
       "models.embedding.settings",
     );
   }
+});
+
+test("an embedding provider override also locks enabled but not shared settings", () => {
+  const source = snapshot();
+  source.overrides = [
+    { path: "models.embedding.providers", source: "config.local.toml" },
+  ];
+
+  const state = hydrateModelConfig(source);
+  assert.deepEqual(state.overrideLocks["models.embedding.enabled"], {
+    path: "models.embedding.providers",
+    source: "config.local.toml",
+  });
+  assert.deepEqual(state.overrideLocks["models.embedding.providers"], {
+    path: "models.embedding.providers",
+    source: "config.local.toml",
+  });
+  assert.equal(state.overrideLocks["models.embedding.settings.model"], null);
+});
+
+test("a GET started before a successful PUT cannot replace the saved snapshot", async () => {
+  const gate = modelConfigState.createLatestRequestGate();
+  const pendingGet = deferred();
+  const pendingPut = deferred();
+  let saveInFlight = false;
+  let visibleSnapshot = { revision: "draft" };
+
+  const reload = modelConfigState.applyLatestSnapshotRequest({
+    gate,
+    request: () => pendingGet.promise,
+    blocked: () => saveInFlight,
+    apply: (snapshotValue) => {
+      visibleSnapshot = snapshotValue;
+    },
+  });
+
+  saveInFlight = true;
+  gate.invalidate();
+  const save = pendingPut.promise.then((snapshotValue) => {
+    visibleSnapshot = snapshotValue;
+    saveInFlight = false;
+  });
+  pendingPut.resolve({ revision: "saved" });
+  await save;
+  pendingGet.resolve({ revision: "stale" });
+
+  assert.equal(await reload, false);
+  assert.deepEqual(visibleSnapshot, { revision: "saved" });
+});
+
+test("a later GET supersedes an earlier GET", async () => {
+  const gate = modelConfigState.createLatestRequestGate();
+  const firstGet = deferred();
+  const secondGet = deferred();
+  let visibleSnapshot = null;
+  const apply = (snapshotValue) => {
+    visibleSnapshot = snapshotValue;
+  };
+
+  const firstReload = modelConfigState.applyLatestSnapshotRequest({
+    gate,
+    request: () => firstGet.promise,
+    blocked: () => false,
+    apply,
+  });
+  const secondReload = modelConfigState.applyLatestSnapshotRequest({
+    gate,
+    request: () => secondGet.promise,
+    blocked: () => false,
+    apply,
+  });
+  secondGet.resolve({ revision: "latest" });
+  assert.equal(await secondReload, true);
+  firstGet.resolve({ revision: "older" });
+
+  assert.equal(await firstReload, false);
+  assert.deepEqual(visibleSnapshot, { revision: "latest" });
+});
+
+test("a stale GET rejection is discarded but a current rejection propagates", async () => {
+  const gate = modelConfigState.createLatestRequestGate();
+  const staleGet = deferred();
+  const staleReload = modelConfigState.applyLatestSnapshotRequest({
+    gate,
+    request: () => staleGet.promise,
+    blocked: () => false,
+    apply: () => assert.fail("a rejected request cannot apply"),
+  });
+  gate.invalidate();
+  staleGet.reject(new Error("stale network error"));
+  assert.equal(await staleReload, false);
+
+  await assert.rejects(
+    modelConfigState.applyLatestSnapshotRequest({
+      gate,
+      request: async () => {
+        throw new Error("current network error");
+      },
+      blocked: () => false,
+      apply: () => assert.fail("a rejected request cannot apply"),
+    }),
+    /current network error/,
+  );
+});
+
+test("a newer reload supersedes initial load while descriptors still install", async () => {
+  const gate = modelConfigState.createLatestRequestGate();
+  const initialGet = deferred();
+  const descriptorGet = deferred();
+  const reloadGet = deferred();
+  let visibleSnapshot = null;
+  let installedDescriptors = null;
+
+  const initialLoad = modelConfigState.applyLatestSnapshotRequest({
+    gate,
+    request: async () => {
+      const [snapshotValue, descriptorValue] = await Promise.all([
+        initialGet.promise,
+        descriptorGet.promise,
+      ]);
+      installedDescriptors = descriptorValue;
+      return snapshotValue;
+    },
+    blocked: () => false,
+    apply: (snapshotValue) => {
+      visibleSnapshot = snapshotValue;
+    },
+  });
+  const reload = modelConfigState.applyLatestSnapshotRequest({
+    gate,
+    request: () => reloadGet.promise,
+    blocked: () => false,
+    apply: (snapshotValue) => {
+      visibleSnapshot = snapshotValue;
+    },
+  });
+
+  reloadGet.resolve({ revision: "newer-reload" });
+  assert.equal(await reload, true);
+  initialGet.resolve({ revision: "stale-initial" });
+  descriptorGet.resolve({ connection_types: [{ id: "openai_compatible" }] });
+  assert.equal(await initialLoad, false);
+
+  assert.deepEqual(visibleSnapshot, { revision: "newer-reload" });
+  assert.deepEqual(installedDescriptors, {
+    connection_types: [{ id: "openai_compatible" }],
+  });
 });
 
 test("connection type chooses the first preset compatible with the active route", () => {

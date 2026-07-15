@@ -279,6 +279,20 @@ def test_model_api_models_are_strict_and_hide_credential_value_from_repr() -> No
         ChatRouteIn(connections=[connection], concurrency=4, timeout_seconds=9)
 
 
+def test_model_save_request_preserves_omitted_migration_position_for_backend_append() -> None:
+    from openbiliclaw.api.model_config_models import ModelConfigPutIn
+    from openbiliclaw.api.model_config_routes import _save_request
+
+    payload = _put_payload("revision", _native_models())
+    payload["migration_resolutions"] = {
+        "legacy-unrouted": {"action": "add_to_chat_route"},
+    }
+
+    request = _save_request(ModelConfigPutIn.model_validate(payload))
+
+    assert request.migration_resolutions["legacy-unrouted"].position is None
+
+
 def test_get_model_config_preserves_order_and_returns_only_public_credential_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -388,6 +402,47 @@ def test_get_model_config_reports_legacy_migration_state_and_issues(
     ]
     assert "legacy-secret" not in json.dumps(body)
     assert "unrouted-legacy-secret" not in json.dumps(body)
+
+
+def test_put_model_config_auto_appends_migration_addition_after_route_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = Config()
+    config.llm.default_provider = "openai"
+    config.llm.fallback_provider = "deepseek"
+    config.llm.openai.api_key = "routed-secret"
+    config.llm.openai.model = "gpt-4o-mini"
+    config.llm.deepseek.api_key = ""
+    config.llm.deepseek.model = "deepseek-chat"
+    config.llm.openrouter.api_key = "unrouted-secret"
+    config.llm.openrouter.model = "openai/gpt-4o-mini"
+    config_path = tmp_path / "config.toml"
+    save_config(config, config_path)
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    client = TestClient(
+        create_app(memory_manager=object(), database=object(), soul_engine=object())
+    )
+    before = client.get("/api/model-config").json()
+    add_issue = next(
+        issue
+        for issue in before["migration"]["issues"]
+        if issue["code"] == "unrouted_credential" and issue["provider"] == "openrouter"
+    )
+    remove_issue = next(
+        issue for issue in before["migration"]["issues"] if issue["field"] == "llm.deepseek.api_key"
+    )
+    payload = _put_payload(before["revision"], load_config(config_path).models)
+    payload["migration_resolutions"] = {
+        add_issue["id"]: {"action": "add_to_chat_route"},
+        remove_issue["id"]: {"action": "confirm_remove_after_backup"},
+    }
+
+    response = client.put("/api/model-config", json=payload)
+
+    assert response.status_code == 200, response.text
+    connections = response.json()["snapshot"]["models"]["chat"]["connections"]
+    assert [item["preset"] for item in connections] == ["openai", "openrouter"]
 
 
 def test_get_model_config_reports_runtime_circuit_and_latest_exact_probe(

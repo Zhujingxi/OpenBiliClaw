@@ -32,9 +32,13 @@ def test_desktop_web_model_probe_has_one_exact_selected_row_owner() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
         encoding="utf-8"
     )
+    probe = js.split("async function probeSelected()", 1)[1].split("function retainSelection", 1)[0]
 
-    assert "selectedRecord" in js
-    assert "kind: state.activeRoute" in js
+    assert "const kind = state.activeRoute;" in probe
+    assert "const record = selectedRecord(state, kind);" in probe
+    assert "createProbeSignature(state, kind, record.id)" in probe
+    assert "applyProbeResult(state, signature" in probe
+    assert "probeRequestVisible(signature)" in probe
     assert "llm_fallback" not in js
     assert "probeConfigService" not in js
 

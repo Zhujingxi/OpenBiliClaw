@@ -14,6 +14,7 @@ from openbiliclaw.model_config import (
     EmbeddingProviderConfig,
     LegacyMigrationResult,
     MigrationAction,
+    MigrationIssue,
     MigrationReport,
     MigrationResolution,
     MigrationResolutionError,
@@ -25,6 +26,7 @@ from openbiliclaw.model_config import (
     validate_model_config,
 )
 from openbiliclaw.model_config._migration_inspection import IssueCollector, RawText
+from openbiliclaw.model_config._migration_types import _PendingValue
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1133,6 +1135,144 @@ def test_unrouted_credential_can_be_inserted_at_an_explicit_one_based_position()
     assert validate_model_config(resolved, connection_type_registry()) == []
 
 
+def _mixed_chat_resolution_result(*, include_z: bool = False) -> LegacyMigrationResult:
+    base = _migrate(legacy_provider("deepseek"))
+    template = base.models.chat.connections[0]
+    route = tuple(replace(template, id=item_id, name=item_id) for item_id in ("a", "b", "c"))
+    candidates = {
+        item_id: replace(template, id=item_id, name=item_id) for item_id in ("x", "y", "z")
+    }
+    add_actions = ("add_to_chat_route", "confirm_remove_after_backup", "cancel")
+    remove_actions = ("confirm_remove_after_backup", "cancel")
+    issues = (
+        MigrationIssue(
+            id="add-x",
+            code="unrouted_credential",
+            field="llm.x",
+            allowed_actions=add_actions,
+        ),
+        MigrationIssue(
+            id="remove-b",
+            code="invalid_legacy_value",
+            field="llm.b.api_key",
+            allowed_actions=remove_actions,
+        ),
+        MigrationIssue(
+            id="add-y",
+            code="unrouted_credential",
+            field="llm.y",
+            allowed_actions=add_actions,
+        ),
+    )
+    pending = (
+        _PendingValue(issue_id="add-x", chat_connection=candidates["x"]),
+        _PendingValue(issue_id="remove-b", remove_chat_connection_id="b"),
+        _PendingValue(issue_id="add-y", chat_connection=candidates["y"]),
+    )
+    if include_z:
+        issues = (
+            *issues,
+            MigrationIssue(
+                id="add-z",
+                code="unrouted_credential",
+                field="llm.z",
+                allowed_actions=add_actions,
+            ),
+        )
+        pending = (*pending, _PendingValue(issue_id="add-z", chat_connection=candidates["z"]))
+    return replace(
+        base,
+        models=replace(base.models, chat=replace(base.models.chat, connections=route)),
+        report=MigrationReport(issues=issues),
+        _pending=pending,
+    )
+
+
+def test_auto_chat_addition_appends_after_removals_are_applied() -> None:
+    result = _mixed_chat_resolution_result()
+
+    resolved = _apply(
+        result,
+        {
+            "add-x": _resolution("add_to_chat_route"),
+            "remove-b": _resolution("confirm_remove_after_backup"),
+            "add-y": _resolution("confirm_remove_after_backup"),
+        },
+    )
+
+    assert [item.id for item in resolved.chat.connections] == ["a", "c", "x"]
+
+
+def test_multiple_auto_chat_additions_append_in_issue_order_after_removals() -> None:
+    result = _mixed_chat_resolution_result()
+
+    resolved = _apply(
+        result,
+        {
+            "add-x": _resolution("add_to_chat_route"),
+            "remove-b": _resolution("confirm_remove_after_backup"),
+            "add-y": _resolution("add_to_chat_route"),
+        },
+    )
+
+    assert [item.id for item in resolved.chat.connections] == ["a", "c", "x", "y"]
+
+
+def test_auto_and_explicit_chat_additions_share_remaining_tail_slots() -> None:
+    result = _mixed_chat_resolution_result()
+
+    resolved = _apply(
+        result,
+        {
+            "add-x": _resolution("add_to_chat_route", position=2),
+            "remove-b": _resolution("confirm_remove_after_backup"),
+            "add-y": _resolution("add_to_chat_route"),
+        },
+    )
+
+    assert [item.id for item in resolved.chat.connections] == ["a", "x", "c", "y"]
+
+
+def test_explicit_position_splits_multiple_auto_tail_slots_deterministically() -> None:
+    result = _mixed_chat_resolution_result(include_z=True)
+
+    resolved = _apply(
+        result,
+        {
+            "add-x": _resolution("add_to_chat_route", position=4),
+            "remove-b": _resolution("confirm_remove_after_backup"),
+            "add-y": _resolution("add_to_chat_route"),
+            "add-z": _resolution("add_to_chat_route"),
+        },
+    )
+
+    assert [item.id for item in resolved.chat.connections] == ["a", "c", "y", "x", "z"]
+
+
+@pytest.mark.parametrize(
+    ("x_position", "y_position"),
+    [
+        pytest.param(5, None, id="range-is-checked-after-removal"),
+        pytest.param(2, 2, id="explicit-collision-after-removal"),
+    ],
+)
+def test_explicit_positions_validate_against_the_post_removal_route(
+    x_position: int,
+    y_position: int | None,
+) -> None:
+    result = _mixed_chat_resolution_result()
+
+    with pytest.raises(MigrationResolutionError):
+        _apply(
+            result,
+            {
+                "add-x": _resolution("add_to_chat_route", position=x_position),
+                "remove-b": _resolution("confirm_remove_after_backup"),
+                "add-y": _resolution("add_to_chat_route", position=y_position),
+            },
+        )
+
+
 def test_unrouted_credential_can_be_acknowledged_for_backup_removal() -> None:
     result = _migrate(legacy_with_three_configured_providers())
     issue = next(issue for issue in result.report.issues if issue.code == "unrouted_credential")
@@ -1413,7 +1553,6 @@ def test_missing_or_extra_resolution_choices_are_blocking(
     [
         pytest.param("cancel", None, id="cancel"),
         pytest.param("remove_embedding_fallback", None, id="wrong-issue-action"),
-        pytest.param("add_to_chat_route", None, id="missing-position"),
         pytest.param("add_to_chat_route", 0, id="invalid-position"),
     ],
 )
