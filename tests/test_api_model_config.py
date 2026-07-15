@@ -487,6 +487,102 @@ def test_codex_oauth_public_state_reports_reference_and_login_without_tokens(
     assert "oauth-secret-token" not in json.dumps(credential)
 
 
+@pytest.mark.parametrize("connection_id", ["primary-openai", "new-codex-route"])
+def test_put_codex_oauth_keep_resolves_imported_reference_for_switched_and_new_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    connection_id: str,
+) -> None:
+    monkeypatch.setattr(
+        "openbiliclaw.llm.connection_factory.load_codex_access_token",
+        lambda: "oauth-secret-token",
+    )
+    client, config_path = _make_client(monkeypatch, tmp_path)
+    before = client.get("/api/model-config").json()
+    models = _native_models()
+    codex = ChatConnection(
+        id=connection_id,
+        name="Imported Codex",
+        type="codex_oauth",
+        model="gpt-5-codex",
+        credential=CredentialConfig(source="oauth", value="codex"),
+    )
+    candidate = replace(
+        models,
+        chat=replace(models.chat, connections=(codex, *models.chat.connections[1:])),
+    )
+
+    response = client.put(
+        "/api/model-config",
+        json=_put_payload(before["revision"], candidate),
+    )
+
+    assert response.status_code == 200, response.text
+    persisted = load_config(config_path).models.chat.connections[0]
+    assert persisted.id == connection_id
+    assert persisted.credential == CredentialConfig(source="oauth", value="codex")
+    after = client.get("/api/model-config")
+    assert after.status_code == 200
+    public = after.json()["models"]["chat"]["connections"][0]["credential"]
+    assert public["source"] == "oauth"
+    assert public["credential_ref"] == "codex"
+    assert "access_token" not in json.dumps(after.json())
+
+
+def test_put_non_oauth_keep_rejects_a_persisted_oauth_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    oauth_models = ModelConfig(
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="codex-main",
+                    name="Codex",
+                    type="codex_oauth",
+                    model="gpt-5-codex",
+                    credential=CredentialConfig(source="oauth", value="codex"),
+                ),
+            ),
+        ),
+        embedding=EmbeddingRouteConfig(
+            enabled=False,
+            settings=EmbeddingModelSettings(model="bge-m3"),
+        ),
+    )
+    client, config_path = _make_client(monkeypatch, tmp_path, oauth_models)
+    before = client.get("/api/model-config").json()
+    switched = replace(
+        oauth_models,
+        chat=replace(
+            oauth_models.chat,
+            connections=(
+                ChatConnection(
+                    id="codex-main",
+                    name="API key route",
+                    type="openai_compatible",
+                    preset="custom",
+                    model="gateway-model",
+                    base_url="https://gateway.example.test/v1",
+                    credential=CredentialConfig(),
+                    api_mode="chat_completions",
+                ),
+            ),
+        ),
+    )
+
+    response = client.put(
+        "/api/model-config",
+        json=_put_payload(before["revision"], switched),
+    )
+
+    assert response.status_code == 400
+    assert {error["code"] for error in response.json()["errors"]} == {"invalid_oauth_reference"}
+    persisted = load_config(config_path).models.chat.connections[0]
+    assert persisted.type == "codex_oauth"
+    assert persisted.credential == CredentialConfig(source="oauth", value="codex")
+
+
 def test_put_model_config_keeps_existing_secrets_saves_order_and_emits_one_revision_event(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

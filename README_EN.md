@@ -571,7 +571,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
 - 🔒 **Fully Private** — all data in local SQLite, LLM calls use your own key, each instance is built for exactly one person
 - 🔌 **Local Embedding** — optional Ollama + bge-m3, CPU-only, no extra API key
-- 🔧 **Fully Controllable** — the global Chat route fails over in connection order; edit your profile directly or write custom Skills to extend discovery
+- 🔧 **Fully Controllable** — Desktop settings can add, remove, and reorder Chat / Embedding connections; the global Chat route fails over in order, and profiles and custom Skills remain directly editable
 
 ## 🏛️ Architecture Overview
 
@@ -601,7 +601,9 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Dedicated API + transactional Chat/Embedding routes (stage 9) │
+│ Model API + transactional Chat/Embedding routes + desktop editor (stages 9–10) │
+│ Chat/Embedding/Runtime tabs · ordered list + selected inspector │
+│ descriptor type search · shared Embedding settings · narrow list→detail │
 │ strict GET/PUT snapshot/save · descriptors · exact draft probe │
 │ legacy /api/config is a credential-free projection with write guard │
 │ native/legacy + base/local → ModelConfigService path lock  │
@@ -616,7 +618,7 @@ background ─ background admission (default 3) ──────┘
 │ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
 │ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
-│ guided-init reservation shares writer; no cross-process lock; UI/CLI follows │
+│ guided-init reservation shares writer; no cross-process lock; plugin/CLI follow │
 ├────────────────────────────────────────────────┤
 │ LLMService paths → one route; caller is concurrency/usage only; cost by connection │
 │   LLM adapters · Source adapters (SourceAdapter) │

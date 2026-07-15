@@ -456,7 +456,7 @@ def _apply_credential_actions(
         connection_type: str,
     ) -> CredentialConfig:
         action = actions.get(connection_id)
-        if connection_type == "codex_oauth" and action is None:
+        if connection_type == "codex_oauth" and (action is None or action.action == "keep"):
             return CredentialConfig(source="oauth", value="codex")
         if action is None or action.action == "keep":
             previous = persisted_credentials.get(connection_id)

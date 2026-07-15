@@ -313,7 +313,7 @@ POST /api/model-config/probe
 - `kind="chat"`：提交一条完整 `connection`；临时构造单项 `OrderedLLMRoute` 并发送最小 chat completion。
 - `kind="embedding"`：提交一条完整 `provider` 与共享 `settings`；临时构造单项 `OrderedEmbeddingRoute`，绕过产品 L1/L2 cache，并在启用多模态时验证固定 PNG 与文本维度一致。
 
-`keep` 只允许当前 revision 已存在的同一稳定 ID。服务先在 model path lock 内重读 revision 并解析该 revision 的凭据，再释放锁执行网络；网络完成后再次重读，只有 revision、持久化记录和 Embedding 共享 settings 仍完全一致，结果才会进入 GET probe summary，成功才可关闭同 ID/capability/revision 的 live circuit。若 gate 等待期间或网络调用期间配置变化，返回 `409 revision_conflict` 与最新脱敏 snapshot；旧 secret 不会借给新 revision，新结果也不会附着到旧/新错误身份。
+普通 API-key/env 类型的 `keep` 只允许当前 revision 已存在的同一稳定 ID。`codex_oauth + keep` 是唯一例外：保存服务把它解析为导入的 `oauth/codex` 引用，所以新建 OAuth 记录或从 API-key 类型切换时无需提交 token；反向切到非 OAuth 类型而保留该引用会以 `invalid_oauth_reference` 失败。服务先在 model path lock 内重读 revision 并解析该 revision 的凭据，再释放锁执行网络；网络完成后再次重读，只有 revision、持久化记录和 Embedding 共享 settings 仍完全一致，结果才会进入 GET probe summary，成功才可关闭同 ID/capability/revision 的 live circuit。若 gate 等待期间或网络调用期间配置变化，返回 `409 revision_conflict` 与最新脱敏 snapshot；旧 secret 不会借给新 revision，新结果也不会附着到旧/新错误身份。
 
 旧 `POST /api/config/probe-service` 不再接受 `llm`、`llm_fallback` 或 `embedding`；它仅保留通用设置页的 `kind="network_proxy"` 出站代理探测。详见 [配置参考](config.md)。
 

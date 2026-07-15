@@ -54,6 +54,7 @@ guided-init 的 `InitPrereqs.chat_ready()` 识别 production `OrderedLLMRoute.co
 | 桌面 Web 探针反馈文案 | ✅ | 消息抽屉与画像页的正向/避雷探针共用一个 domain-aware feedback helper；inline 结果与 toast 使用同一条文本，明确显示经折叠空白且最长 24 字符的探针主题（超长以省略号收束），并通过 `textContent` / `showToast(text)` 写入，避免把主题插入 HTML。 |
 | 三端 probe 反馈语义 | ✅ | 桌面、移动和插件的兴趣/避雷 probe 统一使用 confirm/defer/reject/chat 语义，所有操作均有可见文字；推荐区不新增画像或对话纠偏引导入口。 |
 | 桌面 Web 前端偏好键 | ✅ | `/web` 的纯前端偏好继续走 `storageGet` / `storageSet`，不写 `config.toml`：`obc.theme` 保存主题三态，`openbiliclaw.webui.autoLoadOnScroll` 保存滚动自动加载开关；设置页保存状态行会同时回显主题、换一批忽略当前和滚动自动加载状态。 |
+| 桌面 Web 权威模型编辑器 | ✅ | 「设置 → Models」使用独立 ES module 控制器和 DOM-free 状态模块：Chat/Embedding/Runtime tab、稳定 ID 有序列表、最多 10 项、选中项 inspector、descriptor-driven 分组搜索类型选择、Embedding 唯一共享 settings、拖拽/按钮/键盘排序、窄屏 list→detail、exact draft probe、migration resolution 与 revision 冲突提示。模型 `PUT /api/model-config` 与通用 `PUT /api/config` 完全分离；干净 reload 保留仍存在的 tab/selection，脏草稿不被远端 snapshot 覆盖。 |
 | 扩展捕捉 E2E 控制事件 | ✅ | local-only `/api/extension/e2e/run` 会通过 runtime stream 投递 `extension_e2e_run`，要求已安装扩展在真实平台页执行白名单 DOM 操作；`/api/extension/e2e/result` 回收插件执行结果，后端再按运行窗口匹配 `/api/events` 中自然捕捉到的事件。 |
 | 兴趣探针投递保护 | ✅ | `interest.probe` 只有成功投递到 runtime stream 后才写入 `probed_domains` / `probed_axes` / `probed_distance_bands` 冷却状态；事件 payload 会带 `probe_mode` 与 `challenge`，前端离线时不会消耗 active probe。普通 `near` 探针与挑战探针使用独立 active 额度，运行时选择时仍统一仲裁。 |
 | 避雷探针投递与仲裁 | ✅ | `avoidance.probe` 与 `interest.probe` 共用 proactive push 循环；每轮最多投递一个 probe，并用 `last_probe_kind` 在正向/负向都有候选时轮流选择，避免探针频率翻倍。 |
@@ -87,6 +88,8 @@ guided-init 的 `InitPrereqs.chat_ready()` 识别 production `OrderedLLMRoute.co
   root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
 
 ## 公开 API
+
+桌面静态入口把 `/web/shared/model-config-state.js` 作为可复用、无 DOM 的状态边界，并让 `/web/assets/js/model-settings.js` 只负责 descriptor/API/DOM 编排。两者与 desktop CSS/app shell 一起进入静态资源 hash，`/web` HTML 引用会附带同一 cache-busting revision；shared mount 位于通用 `/web` mount 之前，避免被 SPA 静态目录吞掉。
 
 模型 runtime bundle 与 coordinator 边界：
 

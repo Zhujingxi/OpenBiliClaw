@@ -31,8 +31,8 @@ def test_desktop_web_settings_wires_multimodal_discovery_controls() -> None:
     assert 'setInput("multimodalBatchSize", discovery.multimodal_batch_size)' in js
     assert "discovery: {" in js
     assert 'candidate_eval_concurrency: getIntInput("candidateEvalConcurrency", 3)' in js
-    assert 'setInput("llmConcurrency", llm.concurrency ?? 4)' in js
-    assert 'concurrency: getIntInput("llmConcurrency", 4)' in js
+    assert 'setInput("llmConcurrency", llm.concurrency ?? 4)' not in js
+    assert 'concurrency: getIntInput("llmConcurrency", 4)' not in js
     assert "multimodal_evaluation_enabled:" in js
     assert 'multimodal_batch_size: getIntInput("multimodalBatchSize", 8)' in js
     assert 'multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384)' in js

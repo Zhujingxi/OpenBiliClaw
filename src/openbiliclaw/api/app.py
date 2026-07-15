@@ -11454,13 +11454,27 @@ def create_app(
     _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
     if _desktop_dir.is_dir():
         _desktop_index_path = _desktop_dir / "index.html"
+        _shared_web_dir = _desktop_dir.parent / "shared"
+
+        if _shared_web_dir.is_dir():
+            app.mount(
+                "/web/shared",
+                _StaticFiles(directory=_shared_web_dir),
+                name="desktop-web-shared",
+            )
 
         def _desktop_asset_version() -> str:
             import hashlib
 
             digest = hashlib.sha256()
-            for relative in ("assets/css/app.css", "assets/js/app.js"):
-                path = _desktop_dir / relative
+            assets = (
+                (_desktop_dir, "assets/css/app.css"),
+                (_desktop_dir, "assets/js/app.js"),
+                (_desktop_dir, "assets/js/model-settings.js"),
+                (_desktop_dir.parent, "shared/model-config-state.js"),
+            )
+            for root, relative in assets:
+                path = root / relative
                 if not path.is_file():
                     continue
                 stat = path.stat()
@@ -11481,6 +11495,10 @@ def create_app(
             html = html.replace(
                 'src="/web/assets/js/app.js"',
                 f'src="/web/assets/js/app.js?v={version}"',
+            )
+            html = html.replace(
+                'src="/web/assets/js/model-settings.js"',
+                f'src="/web/assets/js/model-settings.js?v={version}"',
             )
             return Response(
                 html,

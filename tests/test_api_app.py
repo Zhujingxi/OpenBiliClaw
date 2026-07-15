@@ -1070,6 +1070,11 @@ class TestBackendAPI:
         assert response.headers.get("cache-control") == "no-store"
         assert 'href="/web/assets/css/app.css?v=' in response.text
         assert 'src="/web/assets/js/app.js?v=' in response.text
+        assert 'src="/web/assets/js/model-settings.js?v=' in response.text
+
+        shared = client.get("/web/shared/model-config-state.js")
+        assert shared.status_code == 200
+        assert "export function hydrateModelConfig" in shared.text
 
     def test_mobile_web_index_exposes_home_screen_metadata(self) -> None:
         from fastapi.testclient import TestClient

@@ -265,7 +265,9 @@ def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
     never submitted for providers that don't show the field."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
     desktop_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
-    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    model_js = Path("src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
 
     # /setup/ wizard: Claude shows optional Base URL with a relay hint;
     # openai_compatible shows the protocol selector; base_url is only
@@ -277,14 +279,15 @@ def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
     assert 'provider === "openai_compatible" || provider === "claude"' in setup_html
     assert 'pcfg.api_flavor = $("#apiFlavor").value' in setup_html
 
-    # Desktop settings: flavor select for both the default and the fallback
-    # provider panels, wired into load + save paths.
-    assert 'id="llmApiFlavor"' in desktop_html
-    assert 'id="llmFallbackApiFlavor"' in desktop_html
-    assert "llmProviderConfig.api_flavor" in app_js
-    assert "llmFallbackConfig.api_flavor" in app_js
-    assert 'setSelect("llmApiFlavor"' in app_js
-    assert 'setSelect("llmFallbackApiFlavor"' in app_js
+    # Desktop settings render api_mode for every selected route record from
+    # the backend descriptor instead of duplicating primary/fallback controls.
+    assert 'id="modelDescriptorFields"' in desktop_html
+    assert "/api/model-connection-types" in model_js
+    assert "descriptor.fields" in model_js
+    assert "field.choices" in model_js
+    assert "data-model-field" in model_js
+    assert 'id="llmApiFlavor"' not in desktop_html
+    assert 'id="llmFallbackApiFlavor"' not in desktop_html
 
 
 def test_setup_wizard_config_save_401_points_to_login_instead_of_dead_end() -> None:
