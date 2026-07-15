@@ -10,6 +10,8 @@ from .registry import (
     apply_preset_defaults,
     connection_type_registry,
 )
+from .revision import compute_model_revision
+from .serialization import ModelConfigParseError, parse_model_config, render_model_config
 from .types import (
     ChatConnection,
     ChatRouteConfig,
@@ -69,9 +71,13 @@ __all__ = [
     "IssueSeverity",
     "ModelConfig",
     "ModelConfigIssue",
+    "ModelConfigParseError",
     "PresetDefinition",
     "apply_preset_defaults",
     "connection_type_registry",
+    "compute_model_revision",
     "default_model_config",
+    "parse_model_config",
+    "render_model_config",
     "validate_model_config",
 ]

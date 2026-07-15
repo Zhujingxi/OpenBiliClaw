@@ -6,14 +6,28 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import os
+import re
 import shutil
 import tomllib
+from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, fields
+from datetime import date, datetime, time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import urlparse
+
+from openbiliclaw.model_config import (
+    ModelConfig,
+    ModelConfigParseError,
+    default_model_config,
+    parse_model_config,
+    render_model_config,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -815,6 +829,19 @@ class ApiConfig:
     auth: ApiAuthConfig = field(default_factory=ApiAuthConfig)
 
 
+@dataclass(frozen=True)
+class ModelConfigMeta:
+    """In-memory provenance for ``Config.models``; never written to TOML."""
+
+    source: str = "default"
+    migration: str = "none"
+    override_paths: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Freeze override path order even when a caller supplies a list."""
+        object.__setattr__(self, "override_paths", tuple(self.override_paths))
+
+
 @dataclass
 class Config:
     """Root configuration for OpenBiliClaw."""
@@ -823,6 +850,12 @@ class Config:
     data_dir: str = "data"
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    models: ModelConfig = field(default_factory=default_model_config)
+    model_meta: ModelConfigMeta = field(
+        default_factory=ModelConfigMeta,
+        repr=False,
+        compare=False,
+    )
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
     # Overseas-outbound proxy (LLM SDKs / YouTube / updater). CN-direct clients
     # never use it — see NetworkConfig docstring.
@@ -847,6 +880,16 @@ class Config:
         if not p.is_absolute():
             p = _project_root() / p
         return p
+
+    @property
+    def models_meta(self) -> ModelConfigMeta:
+        """Compatibility alias for callers that pluralize model metadata."""
+        return self.model_meta
+
+    @property
+    def model_config_meta(self) -> ModelConfigMeta:
+        """Explicit alias matching the metadata type name."""
+        return self.model_meta
 
 
 def _project_root() -> Path:
@@ -912,6 +955,17 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+def _override_leaf_paths(value: object, prefix: str) -> tuple[str, ...]:
+    """Return stable leaf paths contributed by a higher-precedence table."""
+    if not isinstance(value, Mapping):
+        return (prefix,)
+    paths: list[str] = []
+    for key, item in value.items():
+        if isinstance(key, str):
+            paths.extend(_override_leaf_paths(item, f"{prefix}.{key}"))
+    return tuple(paths)
 
 
 def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
@@ -1048,13 +1102,64 @@ def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
     return NetworkConfig(mode=mode, proxy=proxy)
 
 
-def _build_config(raw: dict[str, Any]) -> Config:
+def _raw_table(value: object) -> dict[str, Any]:
+    """Return a shallow string-keyed table or an empty table for legacy junk."""
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(key, str)}
+
+
+def _legacy_provider_config(value: object) -> LLMProviderConfig:
+    """Build a known legacy provider view while tolerating extension keys."""
+    raw = _raw_table(value)
+    allowed = {item.name for item in fields(LLMProviderConfig)}
+    return LLMProviderConfig(**{key: item for key, item in raw.items() if key in allowed})
+
+
+def _module_llm_config(value: object) -> ModuleLLMConfig:
+    raw = _raw_table(value)
+    return ModuleLLMConfig(
+        **{key: item for key, item in raw.items() if key in {"provider", "model"}}
+    )
+
+
+def _models_from_raw(
+    raw: Mapping[str, object],
+    *,
+    override_paths: tuple[str, ...] = (),
+) -> tuple[ModelConfig, ModelConfigMeta]:
+    """Select native models without performing legacy conversion."""
+    if "models" in raw:
+        models_raw = raw["models"]
+        if not isinstance(models_raw, Mapping):
+            raise ModelConfigParseError("models: expected a table")
+        return parse_model_config(models_raw), ModelConfigMeta(
+            source="native",
+            migration="none",
+            override_paths=override_paths,
+        )
+    source = "legacy" if "llm" in raw else "default"
+    return default_model_config(), ModelConfigMeta(
+        source=source,
+        migration="none",
+        override_paths=override_paths,
+    )
+
+
+def _build_config(
+    raw: dict[str, Any],
+    *,
+    model_override_paths: tuple[str, ...] = (),
+) -> Config:
     """Build a Config dataclass from raw dict."""
-    general = raw.get("general", {})
+    general = _raw_table(raw.get("general", {}))
     api_raw = raw.get("api", {}) if isinstance(raw.get("api"), dict) else {}
-    llm_raw = raw.get("llm", {})
-    bili_raw = raw.get("bilibili", {})
-    sources_raw = raw.get("sources", {})
+    llm_value = raw.get("llm", {})
+    if not isinstance(llm_value, Mapping):
+        raise TypeError("[llm] must be a table")
+    llm_raw = _raw_table(llm_value)
+    bili_raw = _raw_table(raw.get("bilibili", {}))
+    sources_raw = _raw_table(raw.get("sources", {}))
     sched_raw = dict(raw.get("scheduler", {}))
     discovery_raw = raw.get("discovery", {})
     if not isinstance(discovery_raw, dict):
@@ -1065,22 +1170,22 @@ def _build_config(raw: dict[str, Any]) -> Config:
     saved_sync_raw = raw.get("saved_sync", {})
     if not isinstance(saved_sync_raw, dict):
         saved_sync_raw = {}
-    store_raw = raw.get("storage", {})
-    logging_raw = raw.get("logging", {})
+    store_raw = _raw_table(raw.get("storage", {}))
+    logging_raw = _raw_table(raw.get("logging", {}))
 
-    embedding_raw = llm_raw.get("embedding", {})
+    embedding_raw = _raw_table(llm_raw.get("embedding", {}))
     llm = LLMConfig(
         default_provider=llm_raw.get("default_provider", "deepseek"),
         concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
         timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
         fallback_provider=llm_raw.get("fallback_provider", ""),
-        openai=LLMProviderConfig(**llm_raw.get("openai", {})),
-        claude=LLMProviderConfig(**llm_raw.get("claude", {})),
-        gemini=LLMProviderConfig(**llm_raw.get("gemini", {})),
-        deepseek=LLMProviderConfig(**llm_raw.get("deepseek", {})),
-        ollama=LLMProviderConfig(**llm_raw.get("ollama", {})),
-        openrouter=LLMProviderConfig(**llm_raw.get("openrouter", {})),
-        openai_compatible=LLMProviderConfig(**llm_raw.get("openai_compatible", {})),
+        openai=_legacy_provider_config(llm_raw.get("openai", {})),
+        claude=_legacy_provider_config(llm_raw.get("claude", {})),
+        gemini=_legacy_provider_config(llm_raw.get("gemini", {})),
+        deepseek=_legacy_provider_config(llm_raw.get("deepseek", {})),
+        ollama=_legacy_provider_config(llm_raw.get("ollama", {})),
+        openrouter=_legacy_provider_config(llm_raw.get("openrouter", {})),
+        openai_compatible=_legacy_provider_config(llm_raw.get("openai_compatible", {})),
         embedding=EmbeddingConfig(
             **{
                 k: v
@@ -1099,22 +1204,15 @@ def _build_config(raw: dict[str, Any]) -> Config:
                 )
             }
         ),
-        soul=ModuleLLMConfig(
-            **{k: v for k, v in llm_raw.get("soul", {}).items() if k in ("provider", "model")}
-        ),
-        discovery=ModuleLLMConfig(
-            **{k: v for k, v in llm_raw.get("discovery", {}).items() if k in ("provider", "model")}
-        ),
-        recommendation=ModuleLLMConfig(
-            **{
-                k: v
-                for k, v in llm_raw.get("recommendation", {}).items()
-                if k in ("provider", "model")
-            }
-        ),
-        evaluation=ModuleLLMConfig(
-            **{k: v for k, v in llm_raw.get("evaluation", {}).items() if k in ("provider", "model")}
-        ),
+        soul=_module_llm_config(llm_raw.get("soul", {})),
+        discovery=_module_llm_config(llm_raw.get("discovery", {})),
+        recommendation=_module_llm_config(llm_raw.get("recommendation", {})),
+        evaluation=_module_llm_config(llm_raw.get("evaluation", {})),
+    )
+
+    models, model_meta = _models_from_raw(
+        raw,
+        override_paths=model_override_paths,
     )
 
     browser_raw = bili_raw.pop("browser", {})
@@ -1226,7 +1324,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
 
     api_auth = _build_api_auth(api_raw)
 
-    return Config(
+    config = Config(
         language=general.get("language", "zh"),
         data_dir=general.get("data_dir", "data"),
         api=ApiConfig(
@@ -1235,6 +1333,8 @@ def _build_config(raw: dict[str, Any]) -> Config:
             auth=api_auth,
         ),
         llm=llm,
+        models=models,
+        model_meta=model_meta,
         bilibili=bilibili,
         network=_build_network_config(raw),
         sources=sources,
@@ -1350,6 +1450,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
         logging=LoggingConfig(**logging_raw),
         soul=soul,
     )
+    if "llm" in raw:
+        config.__dict__["_legacy_llm_snapshot"] = deepcopy(llm)
+    return config
 
 
 def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
@@ -2174,6 +2277,7 @@ def load_config_with_diagnostics(
     """
     diagnostics = ConfigDiagnostics()
     raw: dict[str, Any] = {}
+    model_override_paths: tuple[str, ...] = ()
 
     if config_path:
         path = Path(config_path)
@@ -2193,13 +2297,19 @@ def load_config_with_diagnostics(
             if path.exists():
                 with open(path, "rb") as f:
                     file_data = tomllib.load(f)
+                if filename == "config.local.toml":
+                    override_paths: list[str] = []
+                    for section in ("models", "llm"):
+                        if section in file_data:
+                            override_paths.extend(_override_leaf_paths(file_data[section], section))
+                    model_override_paths = tuple(override_paths)
                 raw = _deep_merge(raw, file_data)
 
     raw = _apply_env_overrides(raw)
     # Removed-key notices are collected from the RAW [discovery] table before
     # _build_discovery ever runs — the values are ignored, never fail-fast.
     diagnostics.issues.extend(_removed_discovery_key_issues(raw))
-    config = _build_config(raw)
+    config = _build_config(raw, model_override_paths=model_override_paths)
     diagnostics.issues.extend(_collect_config_issues(config))
     return config, diagnostics
 
@@ -2437,59 +2547,155 @@ def _autostart_lines(
     return lines
 
 
-def save_config(
-    config: Config,
-    config_path: str | Path | None = None,
-    *,
-    autostart_authoritative: bool = False,
-) -> Path:
-    """Persist a Config dataclass to TOML."""
-    path = Path(config_path) if config_path is not None else _default_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Capture the on-disk [api.auth] table so the renderer can preserve credential
-    # provenance: env-overridden fields (review r4#1) and an unchanged plaintext
-    # `password` convenience key (review r8). Read on every save (not just when
-    # env-managed) so a normal settings/cookie write can't drop a plaintext
-    # password and flip the reconcile fingerprint basis.
-    on_disk_auth = _read_on_disk_auth(path) if path.exists() else None
-    on_disk_autostart = _read_on_disk_autostart(path) if path.exists() else None
-    # config.local.toml is merged ONLY when load_config runs with no explicit path
-    # (production / default path). For a save to any other explicit file it was
-    # never merged, so its overrides must not gate this render (review r11).
-    consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
-    path.write_text(
-        _render_config_toml(
-            config,
-            on_disk_auth=on_disk_auth,
-            on_disk_autostart=on_disk_autostart,
-            autostart_authoritative=autostart_authoritative,
-            consult_local=consult_local,
-        ),
-        encoding="utf-8",
+def _read_on_disk_model_tables(
+    path: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return raw native and legacy model tables from one concrete file."""
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None, None
+    models = data.get("models")
+    llm = data.get("llm")
+    return (
+        dict(models) if isinstance(models, Mapping) else None,
+        dict(llm) if isinstance(llm, Mapping) else None,
     )
-    return path
 
 
-def _render_config_toml(
-    config: Config,
+def _local_model_table_exists() -> bool:
+    """Return whether the default-path local layer owns either model table."""
+    path = _project_root() / "config.local.toml"
+    models, llm = _read_on_disk_model_tables(path)
+    return models is not None or llm is not None
+
+
+def _legacy_model_values_are_overridden(*, consult_local: bool) -> bool:
+    """Return whether a higher layer makes legacy values non-authoritative."""
+    if any(key.startswith("OPENBILICLAW_LLM_") for key in os.environ):
+        return True
+    if not consult_local:
+        return False
+    _, local_llm = _read_on_disk_model_tables(_project_root() / "config.local.toml")
+    return local_llm is not None
+
+
+def _refresh_legacy_llm_snapshot(config: Config, path: Path) -> None:
+    """Remember the legacy values actually persisted by the completed save."""
+    _, raw_llm = _read_on_disk_model_tables(path)
+    if raw_llm is None:
+        config.__dict__.pop("_legacy_llm_snapshot", None)
+        return
+    persisted = _build_config({"llm": raw_llm}).llm
+    config.__dict__["_legacy_llm_snapshot"] = deepcopy(persisted)
+
+
+_BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _generic_toml_key(value: str) -> str:
+    if _BARE_TOML_KEY.fullmatch(value):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _generic_toml_path(parts: tuple[str, ...]) -> str:
+    return ".".join(_generic_toml_key(part) for part in parts)
+
+
+def _is_array_of_tables(value: object) -> TypeGuard[list[Mapping[str, object]]]:
+    return (
+        isinstance(value, list) and bool(value) and all(isinstance(item, Mapping) for item in value)
+    )
+
+
+def _generic_toml_value(value: object, path: str) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, bool):
+        return _toml_bool(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        return repr(value)
+    if isinstance(value, datetime | date | time):
+        return value.isoformat()
+    if isinstance(value, list | tuple):
+        return (
+            "["
+            + ", ".join(
+                _generic_toml_value(item, f"{path}[{index}]") for index, item in enumerate(value)
+            )
+            + "]"
+        )
+    if isinstance(value, Mapping):
+        items: list[str] = []
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError(f"{path}: TOML keys must be strings")
+            items.append(f"{_generic_toml_key(key)} = {_generic_toml_value(item, f'{path}.{key}')}")
+        return "{ " + ", ".join(items) + " }"
+    raise TypeError(f"{path}: unsupported TOML value type {type(value).__name__}")
+
+
+def _emit_generic_toml_table(
+    lines: list[str],
+    table_path: tuple[str, ...],
+    table: Mapping[str, object],
     *,
-    on_disk_auth: dict[str, Any] | None = None,
-    on_disk_autostart: dict[str, Any] | None = None,
-    autostart_authoritative: bool = False,
-    consult_local: bool = False,
-) -> str:
-    """Render a Config dataclass into TOML."""
+    array_item: bool = False,
+) -> None:
+    rendered_path = _generic_toml_path(table_path)
+    lines.append(f"[[{rendered_path}]]" if array_item else f"[{rendered_path}]")
+
+    scalar_items: list[tuple[str, object]] = []
+    child_tables: list[tuple[str, Mapping[str, object]]] = []
+    array_tables: list[tuple[str, list[Mapping[str, object]]]] = []
+    for key, value in table.items():
+        if not isinstance(key, str):
+            raise TypeError(f"{rendered_path}: TOML keys must be strings")
+        if isinstance(value, Mapping):
+            child_tables.append((key, value))
+        elif _is_array_of_tables(value):
+            array_tables.append((key, value))
+        else:
+            scalar_items.append((key, value))
+
+    for key, value in scalar_items:
+        value_path = f"{rendered_path}.{key}"
+        lines.append(f"{_generic_toml_key(key)} = {_generic_toml_value(value, value_path)}")
+
+    for key, child in child_tables:
+        lines.append("")
+        _emit_generic_toml_table(lines, (*table_path, key), child)
+
+    for key, records in array_tables:
+        for index, record in enumerate(records):
+            if not isinstance(record, Mapping):
+                raise TypeError(f"{rendered_path}.{key}[{index}]: expected a TOML table")
+            lines.append("")
+            _emit_generic_toml_table(
+                lines,
+                (*table_path, key),
+                record,
+                array_item=True,
+            )
+
+
+def _render_raw_model_table(name: str, raw: Mapping[str, object]) -> list[str]:
+    """Render one parsed model table without knowing or filtering its schema."""
+    lines: list[str] = []
+    _emit_generic_toml_table(lines, (name,), raw)
+    return lines
+
+
+def _render_legacy_llm_lines(config: Config) -> list[str]:
     lines = [
-        "[general]",
-        f"language = {_toml_string(config.language)}",
-        f"data_dir = {_toml_string(config.data_dir)}",
-        "",
-        "[api]",
-        f"host = {_toml_string(config.api.host)}",
-        f"port = {config.api.port}",
-        "",
-        *_api_auth_lines(config, on_disk_auth, consult_local=consult_local),
-        "",
         "[llm]",
         f"default_provider = {_toml_string(config.llm.default_provider)}",
         f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
@@ -2533,9 +2739,219 @@ def _render_config_toml(
             "[llm.evaluation]",
             f"provider = {_toml_string(config.llm.evaluation.provider)}",
             f"model = {_toml_string(config.llm.evaluation.model)}",
-            "",
         ]
     )
+    return lines
+
+
+_LEGACY_PROVIDER_RENDER_FIELDS: dict[str, tuple[str, ...]] = {
+    "openai": ("api_key", "model", "base_url", "auth_mode", "api_flavor"),
+    "claude": ("api_key", "model", "base_url"),
+    "gemini": ("api_key", "model"),
+    "deepseek": ("api_key", "model", "base_url", "reasoning_effort"),
+    "ollama": ("api_key", "model", "base_url"),
+    "openrouter": ("api_key", "model", "base_url", "http_referer", "x_title"),
+    "openai_compatible": ("api_key", "model", "base_url", "api_flavor"),
+}
+_LEGACY_EMBEDDING_RENDER_FIELDS = (
+    "provider",
+    "model",
+    "api_key",
+    "base_url",
+    "output_dimensionality",
+    "similarity_threshold",
+    "fallback_enabled",
+    "fallback_provider",
+    "multimodal_enabled",
+)
+_LEGACY_MODULE_NAMES = ("soul", "discovery", "recommendation", "evaluation")
+
+
+def _changed_legacy_table(
+    result: dict[str, Any],
+    name: str,
+    current: object,
+    persisted: object,
+    field_names: tuple[str, ...],
+) -> None:
+    changed = [
+        field_name
+        for field_name in field_names
+        if getattr(current, field_name) != getattr(persisted, field_name)
+    ]
+    if not changed:
+        return
+    table_value = result.get(name)
+    table = table_value if isinstance(table_value, dict) else {}
+    if table is not table_value:
+        result[name] = table
+    for field_name in changed:
+        value = getattr(current, field_name)
+        if field_name == "output_dimensionality":
+            value = max(0, int(value))
+        table[field_name] = value
+
+
+def _legacy_llm_with_known_changes(
+    config: Config,
+    raw: Mapping[str, object],
+) -> dict[str, Any]:
+    """Overlay deliberate legacy edits while retaining every unknown raw value."""
+    result: dict[str, Any] = deepcopy(dict(raw))
+    persisted = _build_config({"llm": dict(raw)}).llm
+    snapshot = getattr(config, "_legacy_llm_snapshot", None)
+    baseline = snapshot if isinstance(snapshot, LLMConfig) else persisted
+
+    top_level_values = {
+        "default_provider": (config.llm.default_provider, baseline.default_provider),
+        "concurrency": (
+            _normalize_llm_concurrency(config.llm.concurrency),
+            baseline.concurrency,
+        ),
+        "timeout": (_normalize_llm_timeout(config.llm.timeout), baseline.timeout),
+        "fallback_provider": (
+            config.llm.fallback_provider,
+            baseline.fallback_provider,
+        ),
+    }
+    for key, (current, before) in top_level_values.items():
+        if current != before:
+            result[key] = current
+
+    for provider_name, field_names in _LEGACY_PROVIDER_RENDER_FIELDS.items():
+        _changed_legacy_table(
+            result,
+            provider_name,
+            getattr(config.llm, provider_name),
+            getattr(baseline, provider_name),
+            field_names,
+        )
+    _changed_legacy_table(
+        result,
+        "embedding",
+        config.llm.embedding,
+        baseline.embedding,
+        _LEGACY_EMBEDDING_RENDER_FIELDS,
+    )
+    for module_name in _LEGACY_MODULE_NAMES:
+        _changed_legacy_table(
+            result,
+            module_name,
+            getattr(config.llm, module_name),
+            getattr(baseline, module_name),
+            ("provider", "model"),
+        )
+    return result
+
+
+def _model_section_lines(
+    config: Config,
+    *,
+    on_disk_models: Mapping[str, object] | None,
+    on_disk_llm: Mapping[str, object] | None,
+    models_authoritative: bool,
+    preserve_model_absence: bool,
+    preserve_legacy_values: bool,
+) -> list[str]:
+    if models_authoritative:
+        return render_model_config(config.models)
+
+    lines: list[str] = []
+    if on_disk_models is not None:
+        lines.extend(_render_raw_model_table("models", on_disk_models))
+    if on_disk_llm is not None:
+        if lines:
+            lines.append("")
+        llm_raw = on_disk_llm
+        if on_disk_models is None and not preserve_legacy_values:
+            llm_raw = _legacy_llm_with_known_changes(config, on_disk_llm)
+        lines.extend(_render_raw_model_table("llm", llm_raw))
+    if lines or preserve_model_absence:
+        return lines
+    return _render_legacy_llm_lines(config)
+
+
+def save_config(
+    config: Config,
+    config_path: str | Path | None = None,
+    *,
+    autostart_authoritative: bool = False,
+    models_authoritative: bool = False,
+) -> Path:
+    """Persist config, rewriting model data only when explicitly authoritative."""
+    path = Path(config_path) if config_path is not None else _default_config_path()
+    path_existed = path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Capture the on-disk [api.auth] table so the renderer can preserve credential
+    # provenance: env-overridden fields (review r4#1) and an unchanged plaintext
+    # `password` convenience key (review r8). Read on every save (not just when
+    # env-managed) so a normal settings/cookie write can't drop a plaintext
+    # password and flip the reconcile fingerprint basis.
+    on_disk_auth = _read_on_disk_auth(path) if path_existed else None
+    on_disk_autostart = _read_on_disk_autostart(path) if path_existed else None
+    on_disk_models, on_disk_llm = _read_on_disk_model_tables(path) if path_existed else (None, None)
+    # config.local.toml is merged ONLY when load_config runs with no explicit path
+    # (production / default path). For a save to any other explicit file it was
+    # never merged, so its overrides must not gate this render (review r11).
+    consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
+    preserve_model_absence = path_existed or (consult_local and _local_model_table_exists())
+    preserve_legacy_values = _legacy_model_values_are_overridden(consult_local=consult_local)
+    path.write_text(
+        _render_config_toml(
+            config,
+            on_disk_auth=on_disk_auth,
+            on_disk_autostart=on_disk_autostart,
+            on_disk_models=on_disk_models,
+            on_disk_llm=on_disk_llm,
+            autostart_authoritative=autostart_authoritative,
+            models_authoritative=models_authoritative,
+            preserve_model_absence=preserve_model_absence,
+            preserve_legacy_values=preserve_legacy_values,
+            consult_local=consult_local,
+        ),
+        encoding="utf-8",
+    )
+    _refresh_legacy_llm_snapshot(config, path)
+    return path
+
+
+def _render_config_toml(
+    config: Config,
+    *,
+    on_disk_auth: dict[str, Any] | None = None,
+    on_disk_autostart: dict[str, Any] | None = None,
+    on_disk_models: Mapping[str, object] | None = None,
+    on_disk_llm: Mapping[str, object] | None = None,
+    autostart_authoritative: bool = False,
+    models_authoritative: bool = False,
+    preserve_model_absence: bool = False,
+    preserve_legacy_values: bool = False,
+    consult_local: bool = False,
+) -> str:
+    """Render a Config dataclass into TOML."""
+    lines = [
+        "[general]",
+        f"language = {_toml_string(config.language)}",
+        f"data_dir = {_toml_string(config.data_dir)}",
+        "",
+        "[api]",
+        f"host = {_toml_string(config.api.host)}",
+        f"port = {config.api.port}",
+        "",
+        *_api_auth_lines(config, on_disk_auth, consult_local=consult_local),
+        "",
+    ]
+    lines.extend(
+        _model_section_lines(
+            config,
+            on_disk_models=on_disk_models,
+            on_disk_llm=on_disk_llm,
+            models_authoritative=models_authoritative,
+            preserve_model_absence=preserve_model_absence,
+            preserve_legacy_values=preserve_legacy_values,
+        )
+    )
+    lines.append("")
     lines.extend(
         [
             "[bilibili]",

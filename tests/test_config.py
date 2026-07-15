@@ -27,6 +27,7 @@ from openbiliclaw.config import (
     save_config,
     validate_runtime_config,
 )
+from openbiliclaw.model_config import default_model_config
 
 
 def _write_example_config(project_root: Path) -> None:
@@ -99,6 +100,20 @@ class TestConfigDefaults:
         assert config.api.auth.extension_access_enabled is False
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
+        assert config.models == default_model_config()
+        assert config.model_meta.source == "default"
+        assert config.model_meta.migration == "none"
+        assert config.model_meta.override_paths == ()
+
+    def test_model_metadata_is_not_persisted(self, tmp_path: Path) -> None:
+        config = Config()
+        target = tmp_path / "config.toml"
+
+        save_config(config, target, models_authoritative=True)
+
+        rendered = target.read_text(encoding="utf-8")
+        assert "model_meta" not in rendered
+        assert "override_paths" not in rendered
 
     def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
         from openbiliclaw.llm.concurrency import background_llm_concurrency
@@ -338,6 +353,58 @@ manage_ollama = false
 
         assert loaded.autostart.enabled is True
         assert loaded.autostart.manage_ollama is True
+
+    def test_model_preservation_keeps_comment_auth_and_autostart_semantics(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "config.toml"
+        target.write_text(
+            """
+[models]
+schema_version = 1
+
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+
+[[models.chat.connections]]
+id = "local"
+name = "Local"
+type = "ollama"
+model = "qwen3"
+base_url = "http://127.0.0.1:11434"
+num_ctx = 8192
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = "bge-m3"
+
+[api.auth]
+enabled = true
+password = "operator-password"
+
+[autostart]
+enabled = true
+manage_ollama = false
+""".strip(),
+            encoding="utf-8",
+        )
+        stale = load_config(target)
+        stale.autostart.enabled = False
+        stale.autostart.manage_ollama = True
+        stale.saved_sync.auto_sync_enabled = True
+
+        save_config(stale, target)
+
+        rendered = target.read_text(encoding="utf-8")
+        reloaded = load_config(target)
+        assert "# Overseas routing mode: direct" in rendered
+        assert 'password = "operator-password"' in rendered
+        assert reloaded.autostart.enabled is True
+        assert reloaded.autostart.manage_ollama is True
+        assert reloaded.saved_sync.auto_sync_enabled is True
 
     def test_load_config_missing_file(self) -> None:
         """Should return defaults when no config file exists."""
@@ -1507,7 +1574,7 @@ def test_save_config_does_not_bake_in_auth_env_overrides(
     assert loaded.api.auth.session_ttl_hours == 12
 
     # an unrelated change is saved while env-managed
-    loaded.llm.openai.api_key = "sk-unrelated"
+    loaded.saved_sync.auto_sync_enabled = True
     save_config(loaded, path)
 
     # with the env vars gone, the file must still hold the ORIGINAL on-disk values,
@@ -1517,7 +1584,7 @@ def test_save_config_does_not_bake_in_auth_env_overrides(
     reloaded = load_config(path)
     assert reloaded.api.auth.trust_loopback is True
     assert reloaded.api.auth.session_ttl_hours == 0
-    assert reloaded.llm.openai.api_key == "sk-unrelated"  # unrelated change persisted
+    assert reloaded.saved_sync.auto_sync_enabled is True  # unrelated change persisted
 
 
 def test_save_config_omits_env_auth_field_absent_on_disk(
@@ -1806,14 +1873,14 @@ def test_save_config_does_not_bake_in_config_local_auth_overrides(
     assert merged.api.auth.trust_loopback is False
     assert merged.api.auth.session_ttl_hours == 12
 
-    merged.llm.openai.api_key = "sk-unrelated"  # unrelated change
+    merged.saved_sync.auto_sync_enabled = True  # unrelated change
     save_config(merged)  # writes config.toml (no explicit path → default)
 
     # config.toml must keep its OWN base values, not config.local's overrides
     text = (tmp_path / "config.toml").read_text(encoding="utf-8")
     assert "trust_loopback = true" in text
     assert "session_ttl_hours = 5" in text
-    assert "sk-unrelated" in text  # the unrelated change persisted
+    assert "auto_sync_enabled = true" in text  # the unrelated change persisted
 
     # removing config.local → the base config.toml values govern (no stale local)
     (tmp_path / "config.local.toml").unlink()
