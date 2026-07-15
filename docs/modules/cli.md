@@ -519,6 +519,8 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 
 > Issue #113（v0.3.168+）：共享流水线仅在阶段 2 偏好分析和阶段 3 画像任务的 task-local scope 内绕过库存敏感的后台 admission，避免首次空库存与画像生成互相等待；阶段 4 只在完整画像落盘后开始且不继承 bypass，并同步完成发现、评估、推荐文案与 canonical 可用性校验。正向兴趣 / 避雷探针移到 init wrapper 恢复 runtime 后调度，普通后台任务、LLM 总并发 gate 及 Soul 公开 API 不变。
 
+> 阶段 2 的 ETA 心跳会附带实时分片进度 `已完成 X/N 批`，超过原始预估后明确显示“已超预估、仍在处理”，不再长期显示“预计还需 ~0s”。分片完成行在 CLI 与 API 初始化路径都会写到 stdout，便于桌面端 `desktop.log` 直接定位进度；更细的分片起止、耗时和取消记录写入 `openbiliclaw.log`。
+
 安装渠道里的首选路径是 `scripts/agent_bootstrap.py` 自动运行 init：Bash / PowerShell 人类一行安装会先在终端向导里按顺序确认 LLM、embedding、B 站 Cookie 和各来源 opt-in；Docker / AI agent / CI 非交互安装则通过显式 flags 和 `BOOTSTRAP_STATUS` 推进，不会阻塞读 stdin。bootstrap 随后会对默认 LLM provider 与 embedding 服务各做一次轻量真实调用；两者都可用才触发本命令。若 bootstrap 返回 `service_check_failed`，说明 `openbiliclaw init` 尚未运行，应先修 API key / base_url / model / Ollama，再重跑 bootstrap。直接执行 `openbiliclaw init` 仍保留为高级手动 fallback 和重复初始化入口。
 
 默认初始化信号上限：B 站观看历史最多 500 条、收藏最多 500 条（跨收藏夹总预算，单个收藏夹会按页补齐）、关注 UP 最多 100 人；小红书 / 抖音 / YouTube 的 `bootstrap_profile` 每个 scope 默认最多 300 条；知乎 `bootstrap_events` 的浏览历史、收藏夹条目、动态点赞、动态收藏四个分支默认各最多 300 条；Reddit `bootstrap_events` 的 saved、upvoted、subscribed 三个分支默认各最多 300 条。交互式 `init` 会让用户确认 B 站收藏 / 关注上限，收藏回车使用 500、关注回车使用 100；脚本化场景可传 `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`，传 `0` 表示跳过对应信号。

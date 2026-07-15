@@ -953,6 +953,32 @@ async def test_chunked_analysis_batches_initial_chunk_fanout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunked_analysis_logs_per_chunk_lifecycle(caplog) -> None:
+    """Each chunk logs an indexed start + done line so ``openbiliclaw.log``
+    pinpoints which chunk is in flight (a started-without-done line is the one
+    that stalled or was cancelled by the init timeout)."""
+    import logging
+
+    service = ConcurrentChunkStructuredService()
+    events = [
+        {"event_type": "view", "title": f"事件 {idx}", "metadata": {"source_platform": "bilibili"}}
+        for idx in range(3)
+    ]
+
+    with caplog.at_level(logging.INFO, logger="openbiliclaw.soul.preference_analyzer"):
+        await PreferenceAnalyzer(service).analyze_events(
+            events=events,
+            existing_preference={},
+            event_chunk_size=1,
+        )
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    for idx in range(1, 4):
+        assert any(f"preference chunk {idx}/3 started" in m for m in messages), idx
+        assert any(f"preference chunk {idx}/3 done" in m for m in messages), idx
+
+
+@pytest.mark.asyncio
 async def test_chunked_analysis_splits_by_prompt_budget_before_llm_call() -> None:
     from openbiliclaw.llm.prompts import build_preference_analysis_prompt
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
@@ -1398,9 +1424,7 @@ def test_normalize_style_clean_payload_logs_no_warning(
 async def test_chunked_analysis_reports_progress_per_chunk() -> None:
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
 
-    service = FakeStructuredService(
-        LLMResponse(content='{"interests": []}', provider="openai")
-    )
+    service = FakeStructuredService(LLMResponse(content='{"interests": []}', provider="openai"))
     analyzer = PreferenceAnalyzer(service)
     calls: list[tuple[int, int]] = []
 
@@ -1422,9 +1446,7 @@ async def test_chunked_analysis_reports_progress_per_chunk() -> None:
 async def test_single_path_reports_one_progress_tick() -> None:
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
 
-    service = FakeStructuredService(
-        LLMResponse(content='{"interests": []}', provider="openai")
-    )
+    service = FakeStructuredService(LLMResponse(content='{"interests": []}', provider="openai"))
     analyzer = PreferenceAnalyzer(service)
     calls: list[tuple[int, int]] = []
 
@@ -1445,9 +1467,7 @@ async def test_single_path_reports_one_progress_tick() -> None:
 async def test_progress_callback_error_does_not_break_analysis() -> None:
     from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
 
-    service = FakeStructuredService(
-        LLMResponse(content='{"interests": []}', provider="openai")
-    )
+    service = FakeStructuredService(LLMResponse(content='{"interests": []}', provider="openai"))
     analyzer = PreferenceAnalyzer(service)
 
     async def _boom(done: int, total: int) -> None:

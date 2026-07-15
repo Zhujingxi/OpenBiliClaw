@@ -7423,3 +7423,35 @@ def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -
     assert captured["include_bili"] is False
     assert captured["include_reddit"] is True
     assert "Reddit" in result.output
+
+
+@pytest.mark.asyncio
+async def test_run_with_progress_heartbeat_reports_status_and_honest_eta(monkeypatch) -> None:
+    """Heartbeat appends the live sub-progress and never pins the ETA at ~0s.
+
+    Guards the desktop.log stall-visibility fix: past ``eta_seconds`` the tick
+    reads "已超预估" (not a lying "预计还需 ~0s") and carries the
+    ``status_provider`` suffix so a frozen "已完成 X/N 批" localises the hang.
+    """
+    import asyncio as _asyncio
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+
+    async def _work() -> str:
+        await _asyncio.sleep(0.16)
+        return "ok"
+
+    result = await cli_module._run_with_progress(
+        _work(),
+        label="分析偏好（分片批处理）",
+        eta_seconds=0,
+        tick_seconds=0.05,
+        status_provider=lambda: "已完成 2/5 批",
+    )
+
+    out = buf.getvalue()
+    assert result == "ok"
+    assert "已超预估" in out
+    assert "已完成 2/5 批" in out
+    assert "预计还需 ~0s" not in out

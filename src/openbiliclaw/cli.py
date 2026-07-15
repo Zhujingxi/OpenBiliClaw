@@ -406,6 +406,7 @@ async def _run_with_progress(
     label: str,
     eta_seconds: int,
     tick_seconds: int = 20,
+    status_provider: Callable[[], str] | None = None,
 ) -> Any:
     """Run a coroutine while printing periodic progress updates.
 
@@ -416,6 +417,14 @@ async def _run_with_progress(
     "started, ETA Xs" line, ticks every ``tick_seconds`` with
     elapsed/ETA while the work runs, and prints a final completion
     line with actual wall time.
+
+    ``status_provider`` (optional) returns a short live-status suffix —
+    e.g. ``"已完成 3/12 批"`` — appended to every heartbeat so a stalled
+    inner batch shows a *frozen* sub-progress next to the growing
+    elapsed clock, pinpointing where it hung. The ETA half never lies:
+    once ``elapsed`` passes ``eta_seconds`` the heartbeat switches from a
+    ``预计还需 ~Ns`` countdown (which would otherwise pin at ``~0s`` and
+    read as "about to finish") to an explicit "已超预估、仍在处理" notice.
     """
     import time as _time
     from contextlib import suppress as _suppress
@@ -427,8 +436,17 @@ async def _run_with_progress(
         while True:
             await asyncio.sleep(tick_seconds)
             elapsed = int(_time.monotonic() - start)
-            remaining = max(0, eta_seconds - elapsed)
-            console.print(f"  [dim]· {label}: 已用 {elapsed}s / 预计还需 ~{remaining}s[/dim]")
+            if elapsed < eta_seconds:
+                eta_part = f"预计还需 ~{eta_seconds - elapsed}s"
+            else:
+                eta_part = f"已超预估(~{eta_seconds}s)，仍在处理"
+            status = ""
+            if status_provider is not None:
+                with _suppress(Exception):
+                    text = status_provider()
+                    if text:
+                        status = f" · {text}"
+            console.print(f"  [dim]· {label}: 已用 {elapsed}s / {eta_part}{status}[/dim]")
 
     ticker_task = asyncio.create_task(_ticker())
     try:
@@ -6296,16 +6314,29 @@ async def run_guided_init(
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
 
     # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
-    # instead of sitting static (init-progress spec Phase 1). API path maps each
-    # chunk onto coordinator.stage_progress; CLI path (no coordinator) prints an
-    # equivalent line alongside the existing eta countdown (spec Phase 4).
+    # instead of sitting static (init-progress spec Phase 1). We ALWAYS echo the
+    # completion line to stdout (desktop.log captures stdout, not the logger's
+    # openbiliclaw.log — so without this the desktop log shows only the eta
+    # heartbeat and a stall is invisible) and, on the API path, also fan the
+    # count onto coordinator.stage_progress for the GUI. ``_chunk_progress`` is
+    # a live mirror the heartbeat reads so every tick shows "已完成 X/N 批";
+    # when a chunk hangs that count freezes next to the growing clock.
+    _chunk_progress = {"done": 0, "total": 0}
+
     async def _stage2_progress(done: int, total: int) -> None:
+        _chunk_progress["done"] = done
+        _chunk_progress["total"] = total
+        console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
         if coordinator is not None and run_id is not None:
             await coordinator.stage_progress(
                 run_id, 2, done=done, total=total, note=f"第 {done}/{total} 批"
             )
-        else:
-            console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
+
+    def _chunk_status() -> str:
+        total = _chunk_progress["total"]
+        if total <= 0:
+            return "分片准备中"
+        return f"已完成 {_chunk_progress['done']}/{total} 批"
 
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
@@ -6320,6 +6351,7 @@ async def run_guided_init(
                     ),
                     label="分析偏好（分片批处理）",
                     eta_seconds=180,
+                    status_provider=_chunk_status,
                 ),
                 timeout=(
                     profile_analysis_timeout_seconds
