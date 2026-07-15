@@ -6,6 +6,7 @@ import {
   changeConnectionType,
   changePreset,
   createLatestRequestGate,
+  createModelOperationGate,
   createProbeSignature,
   hydrateModelConfig,
   loadIndependentModelResources,
@@ -43,12 +44,11 @@ const ROUTE_OVERRIDE_PATHS = {
 let state = null;
 let connectionTypes = { connection_types: [], groups: [] };
 let draggedId = "";
-let probeGeneration = 0;
-let saveInFlight = false;
-let saveGeneration = 0;
 let initialized = false;
 let notify = () => {};
+const modelOperations = createModelOperationGate();
 const snapshotRequestGate = createLatestRequestGate();
+const descriptorRequestGate = createLatestRequestGate();
 
 const byId = (id) => document.getElementById(id);
 const disabledMarkup = (disabled) => (disabled ? ' disabled aria-disabled="true"' : "");
@@ -75,16 +75,19 @@ function routeLocked(kind) {
 }
 
 function modelMutationBlocked() {
-  return !state || saveInFlight;
+  return !state || modelOperations.saveInFlight;
 }
 
 function setModelEditorLocked(locked) {
+  const controls = modelOperations.controlState();
+  const editorLocked = Boolean(locked || controls.editorLocked);
   const boundary = byId("popupModelEditorBoundary");
   if (!boundary) return;
-  boundary.disabled = locked;
-  boundary.inert = locked;
-  boundary.setAttribute("aria-busy", locked ? "true" : "false");
-  byId("popupModelSaveButton").disabled = locked;
+  boundary.disabled = editorLocked;
+  boundary.inert = editorLocked;
+  boundary.setAttribute("aria-busy", editorLocked ? "true" : "false");
+  byId("popupModelSaveButton").disabled = editorLocked || controls.saveDisabled;
+  byId("popupModelProbeButton").disabled = editorLocked || controls.probeDisabled;
 }
 
 function probeRequestVisible(signature) {
@@ -480,7 +483,9 @@ function render() {
   renderRouteList();
   renderInspector();
   renderRuntime();
-  byId("popupModelSaveButton").disabled = saveInFlight;
+  const controls = modelOperations.controlState();
+  byId("popupModelSaveButton").disabled = controls.saveDisabled;
+  byId("popupModelProbeButton").disabled = controls.probeDisabled;
   setStatus(state.dirty ? "有未保存的模型更改。" : `模型配置已同步 · ${state.revision.slice(0, 12)}`);
 }
 
@@ -657,13 +662,12 @@ function updateCredential(action, value = "", rerender = true) {
 }
 
 async function probeSelected() {
-  if (!state || saveInFlight) return;
+  if (!state || modelOperations.saveInFlight) return;
   const kind = state.activeRoute;
   const record = selectedRecord(state, kind);
   if (!record || kind === "runtime") return;
-  const generation = ++probeGeneration;
+  const generation = modelOperations.beginProbe();
   const signature = createProbeSignature(state, kind, record.id);
-  const button = byId("popupModelProbeButton");
   const status = byId("popupModelProbeStatus");
   const payload = toModelConfigPayload(state);
   const selectedDraft = kind === "chat"
@@ -681,13 +685,13 @@ async function probeSelected() {
       provider: selectedDraft,
       settings: payload.models.embedding.settings,
     };
-  button.disabled = true;
+  setModelEditorLocked(false);
   status.textContent = "正在探测精确草稿…";
   delete status.dataset.tone;
   const started = performance.now();
   try {
     const result = await probeModelConnection(body);
-    if (generation !== probeGeneration) return;
+    if (!modelOperations.isProbeCurrent(generation)) return;
     const applied = applyProbeResult(state, signature, {
       ...result,
       latency_ms: Math.round(performance.now() - started),
@@ -698,7 +702,7 @@ async function probeSelected() {
       renderProbeStatus(selectedRecord(state, signature.kind));
     }
   } catch (error) {
-    if (generation !== probeGeneration) return;
+    if (!modelOperations.isProbeCurrent(generation)) return;
     if (error.status === 409 && error.details?.latest) {
       state = receiveRemoteSnapshot(state, error.details.latest);
       render();
@@ -712,7 +716,8 @@ async function probeSelected() {
       }
     }
   } finally {
-    if (generation === probeGeneration) button.disabled = saveInFlight;
+    modelOperations.finishProbe(generation);
+    setModelEditorLocked(false);
   }
 }
 
@@ -727,9 +732,9 @@ function retainSelection(next, previous) {
 }
 
 async function saveModels() {
-  if (!state || saveInFlight) return;
-  const generation = ++saveGeneration;
-  saveInFlight = true;
+  if (!state || modelOperations.saveInFlight) return;
+  const generation = modelOperations.beginSave();
+  if (generation === null) return;
   snapshotRequestGate.invalidate();
   setModelEditorLocked(true);
   setStatus("正在验证并热重载模型 route…");
@@ -752,21 +757,21 @@ async function saveModels() {
       setStatus(error.details?.error || error.message || "模型保存失败。", "error");
     }
   } finally {
-    if (generation === saveGeneration) {
-      saveInFlight = false;
+    if (modelOperations.finishSave(generation)) {
       setModelEditorLocked(false);
     }
   }
 }
 
 async function fetchModelSnapshot(remote = false) {
-  if (saveInFlight) return;
+  if (modelOperations.saveInFlight) return;
   await applyLatestSnapshotRequest({
     gate: snapshotRequestGate,
     request: () => fetchModelConfig(),
-    blocked: () => saveInFlight,
+    blocked: () => modelOperations.saveInFlight,
     apply: (snapshot) => {
-      if (remote && state) state = receiveRemoteSnapshot(state, snapshot);
+      if (state?.dirty) state = receiveRemoteSnapshot(state, snapshot);
+      else if (remote && state) state = receiveRemoteSnapshot(state, snapshot);
       else state = retainSelection(hydrateModelConfig(snapshot), state);
       render();
     },
@@ -778,19 +783,25 @@ async function loadModelSettings() {
   try {
     const loaded = await loadIndependentModelResources({
       gate: snapshotRequestGate,
+      descriptorGate: descriptorRequestGate,
       snapshotRequest: () => fetchModelConfig(),
       descriptorRequest: () => fetchModelConnectionTypes(),
-      blocked: () => saveInFlight,
+      blocked: () => modelOperations.saveInFlight || Boolean(state?.dirty),
+      onSnapshotBlocked: (snapshot) => {
+        if (!state?.dirty || modelOperations.saveInFlight) return;
+        state = receiveRemoteSnapshot(state, snapshot, { force: true });
+        render();
+      },
       applySnapshot: (snapshot) => {
         state = retainSelection(hydrateModelConfig(snapshot), state);
         render();
       },
       installDescriptors: (descriptors) => {
         connectionTypes = descriptors;
-        if (state && !saveInFlight) render();
+        if (state && !modelOperations.saveInFlight) render();
       },
     });
-    return loaded.descriptorsInstalled && Boolean(state);
+    return loaded;
   } catch (error) {
     setStatus(error.message || "无法读取模型配置。", "error");
     return false;
@@ -968,7 +979,7 @@ function bindEvents() {
   });
   window.addEventListener("openbiliclaw:config-reloaded", (event) => {
     if (event.detail?.type && event.detail.type !== CONFIG_RELOADED_TYPE) return;
-    if (saveInFlight) return;
+    if (modelOperations.saveInFlight) return;
     void fetchModelSnapshot(true).catch(() => {});
   });
 }
@@ -987,11 +998,23 @@ const LOCAL_OLLAMA_EMBEDDING_DEFAULTS = Object.freeze({
  */
 export async function enableLocalOllamaEmbeddingRoute() {
   if (!initialized) initPopupModelSettings();
+  if (modelOperations.saveInFlight) {
+    throw new Error("Another model save is already in progress.");
+  }
   if (state?.dirty) {
     throw new Error("Unsaved model changes must be saved or reloaded first.");
   }
+  const startedSaveGeneration = modelOperations.saveGeneration;
   const loaded = await loadModelSettings();
-  if (!loaded || !state) throw new Error("Unable to load the authoritative model route.");
+  if (!state || !modelOperations.canStartSaveAfterLoad({
+    startedSaveGeneration,
+    loadResult: loaded,
+    state,
+  })) {
+    throw new Error(
+      "The authoritative model route changed or became dirty while loading; no changes were written.",
+    );
+  }
 
   const descriptor = descriptorFor("ollama");
   const prepared = prepareLocalOllamaEmbedding(
@@ -999,8 +1022,10 @@ export async function enableLocalOllamaEmbeddingRoute() {
     descriptor,
     LOCAL_OLLAMA_EMBEDDING_DEFAULTS,
   );
-  const generation = ++saveGeneration;
-  saveInFlight = true;
+  const generation = modelOperations.beginSave();
+  if (generation === null) {
+    throw new Error("Another model save is already in progress.");
+  }
   snapshotRequestGate.invalidate();
   setModelEditorLocked(true);
   setStatus("正在启用本地 Ollama Embedding…");
@@ -1026,8 +1051,7 @@ export async function enableLocalOllamaEmbeddingRoute() {
     }
     throw error;
   } finally {
-    if (generation === saveGeneration) {
-      saveInFlight = false;
+    if (modelOperations.finishSave(generation)) {
       setModelEditorLocked(false);
     }
   }

@@ -69,7 +69,13 @@ export function createLatestRequestGate() {
   };
 }
 
-export async function applyLatestSnapshotRequest({ gate, request, blocked, apply }) {
+export async function applyLatestSnapshotRequest({
+  gate,
+  request,
+  blocked,
+  apply,
+  onBlocked = null,
+}) {
   const generation = gate.begin();
   let snapshot;
   try {
@@ -78,9 +84,79 @@ export async function applyLatestSnapshotRequest({ gate, request, blocked, apply
     if (!gate.isCurrent(generation) || blocked()) return false;
     throw error;
   }
-  if (!gate.isCurrent(generation) || blocked()) return false;
+  if (!gate.isCurrent(generation)) return false;
+  if (blocked()) {
+    if (typeof onBlocked === "function") onBlocked(snapshot);
+    return false;
+  }
   apply(snapshot);
   return true;
+}
+
+/**
+ * Coordinate model PUT and exact-probe ownership without retaining request
+ * payloads. Starting a save invalidates every in-flight probe and advances a
+ * monotonic generation used by convenience actions that load before saving.
+ */
+export function createModelOperationGate() {
+  let saveGeneration = 0;
+  let saveInFlight = false;
+  let probeGeneration = 0;
+  let probeInFlight = false;
+
+  return {
+    get saveGeneration() {
+      return saveGeneration;
+    },
+    get saveInFlight() {
+      return saveInFlight;
+    },
+    get probeInFlight() {
+      return probeInFlight;
+    },
+    beginProbe() {
+      probeGeneration += 1;
+      probeInFlight = true;
+      return probeGeneration;
+    },
+    isProbeCurrent(candidate) {
+      return candidate === probeGeneration;
+    },
+    finishProbe(candidate) {
+      if (candidate !== probeGeneration) return false;
+      probeInFlight = false;
+      return true;
+    },
+    beginSave() {
+      if (saveInFlight) return null;
+      saveGeneration += 1;
+      saveInFlight = true;
+      probeGeneration += 1;
+      probeInFlight = false;
+      return saveGeneration;
+    },
+    finishSave(candidate) {
+      if (!saveInFlight || candidate !== saveGeneration) return false;
+      saveInFlight = false;
+      return true;
+    },
+    canStartSaveAfterLoad({ startedSaveGeneration, loadResult, state }) {
+      return Boolean(
+        loadResult?.snapshotApplied === true
+        && loadResult?.descriptorsInstalled === true
+        && startedSaveGeneration === saveGeneration
+        && !saveInFlight
+        && !state?.dirty,
+      );
+    },
+    controlState() {
+      return {
+        editorLocked: saveInFlight,
+        saveDisabled: saveInFlight,
+        probeDisabled: saveInFlight || probeInFlight,
+      };
+    },
+  };
 }
 
 /**
@@ -91,9 +167,11 @@ export async function applyLatestSnapshotRequest({ gate, request, blocked, apply
  */
 export async function loadIndependentModelResources({
   gate,
+  descriptorGate = createLatestRequestGate(),
   snapshotRequest,
   descriptorRequest,
   blocked,
+  onSnapshotBlocked = null,
   applySnapshot,
   installDescriptors,
 }) {
@@ -102,13 +180,14 @@ export async function loadIndependentModelResources({
     request: snapshotRequest,
     blocked,
     apply: applySnapshot,
+    onBlocked: onSnapshotBlocked,
   });
-  const descriptorLoad = Promise.resolve()
-    .then(descriptorRequest)
-    .then((descriptors) => {
-      installDescriptors(descriptors);
-      return true;
-    });
+  const descriptorLoad = applyLatestSnapshotRequest({
+    gate: descriptorGate,
+    request: descriptorRequest,
+    blocked: () => false,
+    apply: installDescriptors,
+  });
   const [snapshotApplied, descriptorsInstalled] = await Promise.all([
     snapshotLoad,
     descriptorLoad,
@@ -563,9 +642,12 @@ export function mapServerFieldErrors(state, errors) {
   return next;
 }
 
-export function receiveRemoteSnapshot(state, snapshot) {
+export function receiveRemoteSnapshot(state, snapshot, options = {}) {
   const remoteRevision = String(snapshot?.revision || "");
-  if (!remoteRevision || remoteRevision === state.revision) return clone(state);
+  if (
+    !remoteRevision
+    || (!options.force && remoteRevision === state.revision)
+  ) return clone(state);
   if (!state.dirty) {
     const hydrated = hydrateModelConfig(snapshot);
     for (const kind of ["chat", "embedding"]) {
