@@ -518,7 +518,7 @@
     state.themeHue = Number.isFinite(_storedHue) ? _storedHue : 20;
     const ACCENT_STORAGE_KEY = "obc.accentStyle";
     // 迁移：已有自定义色相的老用户默认 modern，保留色相；新用户默认 classic
-    const _hasCustomHue = storageGet(THEME_HUE_STORAGE_KEY) !== null;
+    const _hasCustomHue = storageGet(THEME_HUE_STORAGE_KEY) !== "";
     const _storedAccent = storageGet(ACCENT_STORAGE_KEY);
     state.accentStyle = _storedAccent === "modern" ? "modern" : "classic";
     if (!_storedAccent && _hasCustomHue) state.accentStyle = "modern";
@@ -1097,6 +1097,31 @@
         el.addEventListener("mouseleave", () => { const i = this.items.find(it => it.el === el); if (i) this._resume(i); });
         this.container.appendChild(el);
         const item = { el, timer: null, remaining: duration, started: Date.now(), paused: false, exiting: false };
+        this.items.push(item);
+        this._reposition();
+        void el.offsetHeight;
+        el.classList.remove("entering");
+        return item;
+      },
+      showNoticeToast(title, { subtitle = "" } = {}) {
+        if (localStorage.getItem("obc.noticeDismissed")) return null;
+        const el = document.createElement("div");
+        el.className = "toast-item entering is-notice";
+        el.innerHTML = `<span class="toast-notice-title"></span><span class="toast-notice-sub"></span><div class="toast-notice-actions"><button class="notice-btn secondary">知晓</button><button class="notice-btn primary">前往设置</button></div>`;
+        el.querySelector(".toast-notice-title").textContent = title;
+        el.querySelector(".toast-notice-sub").textContent = subtitle;
+        const dismissAndSave = () => {
+          try { localStorage.setItem("obc.noticeDismissed", "1"); } catch {}
+          this.dismiss(el);
+        };
+        el.querySelector(".notice-btn.secondary").addEventListener("click", (e) => { e.stopPropagation(); dismissAndSave(); });
+        el.querySelector(".notice-btn.primary").addEventListener("click", (e) => {
+          e.stopPropagation();
+          dismissAndSave();
+          openSettingsPage("frontend");
+        });
+        this.container.appendChild(el);
+        const item = { el, timer: null, remaining: 86400000, started: Date.now(), paused: false, exiting: false, reachedBottom: true };
         this.items.push(item);
         this._reposition();
         void el.offsetHeight;
@@ -7558,6 +7583,8 @@
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
     startChatPlaceholderRotation();
     toastManager.init();
+    // 首次运行通知提示（知晓或前往后永久不再提示）
+    toastManager.showNoticeToast("嘿！OpenBiliClaw 默认用经典配色启动啦 (｡･ω･｡)🎨", { subtitle: "如果你喜欢折腾，可以去前端设置里换成动态主题色，还能调色相哦～" });
     try {
       renderAll();
     } catch (error) {
