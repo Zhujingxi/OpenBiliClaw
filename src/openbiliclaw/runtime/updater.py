@@ -50,6 +50,9 @@ DEFAULT_ALLOWED_REMOTES = (
     "git@github.com:whiteguo233/OpenBiliClaw.git",
 )
 _OBSERVE_VIA = "runtime-stream"
+_TLS_VERIFICATION_GUIDANCE = (
+    "TLS 证书校验失败;请修复系统证书链,或显式设置 SSL_CERT_FILE 指向可信 CA 证书包后重试"
+)
 
 
 @dataclass(frozen=True)
@@ -432,6 +435,41 @@ def _dirty_paths_besides_uv_lock(porcelain: str) -> list[str]:
     return dirty
 
 
+def _staged_paths_besides_uv_lock(porcelain: str) -> list[str]:
+    """Return staged paths while preserving untracked and uv.lock exemptions."""
+    staged: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip() or line.startswith(("??", "!!")):
+            continue
+        index_status = line[0] if line else " "
+        if index_status == " ":
+            continue
+        path = line[3:].strip().strip('"')
+        if " -> " in path:
+            path = path.rsplit(" -> ", maxsplit=1)[1].strip().strip('"')
+        if path == "uv.lock":
+            continue
+        if path == "ollama-models" or path.startswith("ollama-models/"):
+            continue
+        staged.append(path)
+    return staged
+
+
+def _apply_tag_rejection(tag: str, *, allow_prerelease: bool) -> tuple[str, str]:
+    candidate = _parse_backend_candidate(tag, include_prerelease=True)
+    if candidate is None:
+        return (
+            "invalid_target_tag",
+            f"目标 tag {tag!r} 不是允许的 backend 发布 tag;请先重新检查更新",
+        )
+    if candidate.prerelease and not allow_prerelease:
+        return (
+            "prerelease_not_allowed",
+            f"目标 tag {tag!r} 是预发布版本;请先在配置中启用 allow_prerelease",
+        )
+    return "", ""
+
+
 def _merge_or_rebase_in_progress(root: Path, git_dir_text: str) -> bool:
     git_dir = Path(git_dir_text)
     if not git_dir.is_absolute():
@@ -627,6 +665,20 @@ class AutoUpdateService:
                     accepted=False,
                 )
 
+            tag_reason, tag_detail = _apply_tag_rejection(
+                target_tag,
+                allow_prerelease=self.allow_prerelease,
+            )
+            if tag_reason:
+                self._state = "blocked"
+                self._reason = tag_reason
+                self._update_error = tag_detail
+                return 409, self._apply_response(
+                    state="blocked",
+                    reason=tag_reason,
+                    accepted=False,
+                )
+
             try:
                 guard_reason = await self._check_apply_guards(target_tag)
             except FileNotFoundError as exc:
@@ -772,28 +824,18 @@ class AutoUpdateService:
         ``v*`` / bare-semver fallback; ``desktop`` tracks ``desktop-v*``
         installer tags only.
         """
-        selection = await self._fetch_latest_candidate_once(channel=channel, verify_tls=True)
-        if selection.error_reason != "tls_verification_failed":
-            return selection
-        logger.warning(
-            "Auto-update tag check TLS verification failed; retrying without "
-            "certificate verification"
-        )
-        return await self._fetch_latest_candidate_once(channel=channel, verify_tls=False)
+        return await self._fetch_latest_candidate_once(channel=channel)
 
     async def _fetch_latest_candidate_once(
         self,
         *,
         channel: str,
-        verify_tls: bool,
     ) -> _BackendTagSelection:
-        # GitHub is overseas for many users → honor [network].proxy alongside
-        # the TLS-verify toggle. Empty proxy leaves construction unchanged.
+        # GitHub is overseas for many users → honor [network].proxy while
+        # keeping certificate verification mandatory.
         from openbiliclaw.network import outbound_httpx_kwargs
 
-        async with httpx.AsyncClient(
-            timeout=30, verify=verify_tls, **outbound_httpx_kwargs()
-        ) as client:
+        async with httpx.AsyncClient(timeout=30, verify=True, **outbound_httpx_kwargs()) as client:
             tag_names: list[str] = []
             for page in range(1, _MAX_TAG_PAGES + 1):
                 try:
@@ -803,10 +845,10 @@ class AutoUpdateService:
                         params={"per_page": _TAGS_PER_PAGE, "page": page},
                     )
                 except Exception as exc:
-                    if verify_tls and _is_tls_verification_error(exc):
+                    if _is_tls_verification_error(exc):
                         return _BackendTagSelection(
                             error_reason="tls_verification_failed",
-                            error_detail=_describe_exc(exc),
+                            error_detail=f"{_describe_exc(exc)};{_TLS_VERIFICATION_GUIDANCE}",
                         )
                     detail = _describe_exc(exc)
                     logger.warning("Auto-update tag check failed: %s", detail)
@@ -994,6 +1036,9 @@ class AutoUpdateService:
             )
             return "unsupported_install_mode"
         dirty = _dirty_paths_besides_uv_lock(status.stdout)
+        for path in _staged_paths_besides_uv_lock(status.stdout):
+            if path not in dirty:
+                dirty.append(path)
         if dirty:
             logger.warning(
                 "Auto-update apply refused: worktree has uncommitted changes: %s",

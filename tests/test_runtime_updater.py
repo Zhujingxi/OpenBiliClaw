@@ -188,19 +188,21 @@ async def test_fetch_latest_version_returns_empty_and_warns_on_http_error(
 
 
 @pytest.mark.asyncio
-async def test_fetch_latest_version_retries_without_tls_verify_on_cert_error() -> None:
+async def test_fetch_latest_version_fails_closed_on_tls_verification_error() -> None:
+    # Deliberate spec invariant 3 rewrite: the updater must never retry with
+    # verify=False after a certificate failure.
     _FakeAsyncClient.error_by_verify = {
         True: httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
     }
     _FakeAsyncClient.pages = {1: [{"name": "backend-v0.3.92"}]}
 
     service = updater.AutoUpdateService()
+    backend = await service.check_now()
 
-    assert await service._fetch_latest_version() == "backend-v0.3.92"
-    assert [kwargs.get("verify", True) for kwargs in _FakeAsyncClient.init_kwargs] == [
-        True,
-        False,
-    ]
+    assert backend["state"] == "error"
+    assert backend["reason"] == "tls_verification_failed"
+    assert "SSL_CERT_FILE" in str(backend["last_error"])
+    assert [kwargs.get("verify", True) for kwargs in _FakeAsyncClient.init_kwargs] == [True]
 
 
 @pytest.mark.asyncio
@@ -464,6 +466,73 @@ def test_update_status_payloads_include_install_mode(
 )
 def test_dirty_paths_besides_uv_lock(porcelain: str, expected: list[str]) -> None:
     assert updater._dirty_paths_besides_uv_lock(porcelain) == expected
+
+
+@pytest.mark.parametrize(
+    ("porcelain", "expected_reason"),
+    [
+        ("A  src/new_file.py\n", "dirty_worktree"),
+        ("M  src/changed.py\n", "dirty_worktree"),
+        ("?? src/untracked.py\n", ""),
+        ("A  uv.lock\n", ""),
+    ],
+)
+@pytest.mark.asyncio
+async def test_staged_changes_are_dirty_but_untracked_files_remain_clean(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    porcelain: str,
+    expected_reason: str,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(command, 0, porcelain, "")
+        if command == ["git", "rev-parse", "--git-dir"]:
+            return subprocess.CompletedProcess(command, 0, ".git\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.140") == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected_reason"),
+    [
+        ("extension-v0.3.171", "invalid_target_tag"),
+        ("desktop-v0.3.171", "invalid_target_tag"),
+        ("not-a-release", "invalid_target_tag"),
+        ("backend-v0.3.171-rc1", "prerelease_not_allowed"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_apply_tag_channel_validation_precedes_git_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tag: str,
+    expected_reason: str,
+) -> None:
+    service = updater.AutoUpdateService(allow_prerelease=False)
+    calls: list[list[str]] = []
+
+    async def _run_command(command, _root, *, timeout):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag=tag)
+
+    assert status_code == 409
+    assert payload["reason"] == expected_reason
+    assert calls == []
 
 
 @pytest.mark.asyncio

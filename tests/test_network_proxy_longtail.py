@@ -180,6 +180,8 @@ async def test_codex_refresh_inherits_environment_only_in_system_mode(
 async def test_updater_tag_fetch_uses_proxy_and_keeps_verify(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Deliberate auto-update hardening invariant 3 rewrite: proxy routing must
+    # coexist with mandatory TLS verification, never a verify=False escape hatch.
     from openbiliclaw.runtime import updater as updater_mod
 
     recorder: dict[str, Any] = {}
@@ -193,8 +195,7 @@ async def test_updater_tag_fetch_uses_proxy_and_keeps_verify(
     inst = updater_mod.AutoUpdateService.__new__(updater_mod.AutoUpdateService)
     # The client is constructed (recording its kwargs) before the .get call,
     # whose failure the method catches and turns into an error selection.
-    await inst._fetch_latest_candidate_once(channel="backend", verify_tls=False)
+    await inst._fetch_latest_candidate_once(channel="backend")
 
     assert recorder.get("proxy") == _PROXY
-    # Proxy support must coexist with the TLS-verify toggle.
-    assert recorder.get("verify") is False
+    assert recorder.get("verify") is True
