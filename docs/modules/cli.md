@@ -686,7 +686,7 @@ openbiliclaw discover
 
 ### `openbiliclaw setup-embedding`
 
-打开与 `init` 共用的原生 Embedding route 编辑器；它等价于交互式管理 `models add/edit/remove --kind embedding`，不再写 `[llm.embedding]`，也不自动安装或启动 Ollama：
+打开与 `init` 共用的原生 Embedding route 编辑器；引导选择为 `add/edit/disable`，分别新增 Provider、编辑现有 Provider 或关闭整个 Embedding route。它不再写 `[llm.embedding]`，也不自动安装或启动 Ollama：
 
 ```text
 $ openbiliclaw setup-embedding

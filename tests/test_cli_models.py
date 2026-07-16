@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import functools
 import importlib
 import tomllib
 from dataclasses import replace
+from types import FunctionType
 from typing import TYPE_CHECKING, cast
 
 import pytest
 import typer
+from typer import _click as click
 from typer.testing import CliRunner
 
 from openbiliclaw import cli as cli_module
@@ -42,8 +45,41 @@ _EXCEPTION_SECRET = "test-secret-exception-chain-never-retain"
 
 
 def _exception_artifacts(error: BaseException) -> str:
-    """Collect surfaced exception state, including CLI-model traceback locals."""
+    """Collect every reachable exception-frame value and callable closure."""
     artifacts: list[str] = []
+    visited_values: set[int] = set()
+
+    def visit(value: object, label: str) -> None:
+        identity = id(value)
+        if identity in visited_values:
+            return
+        visited_values.add(identity)
+        try:
+            artifacts.append(f"{label}={value!r}")
+        except Exception:
+            artifacts.append(f"{label}=<unrepresentable>")
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(key, f"{label}.key")
+                visit(item, f"{label}[{key!r}]")
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            for index, item in enumerate(value):
+                visit(item, f"{label}[{index}]")
+        elif isinstance(value, FunctionType):
+            for index, cell in enumerate(value.__closure__ or ()):
+                try:
+                    visit(cell.cell_contents, f"{label}.closure[{index}]")
+                except ValueError:
+                    continue
+        elif isinstance(value, functools.partial):
+            visit(value.func, f"{label}.func")
+            visit(value.args, f"{label}.args")
+            visit(value.keywords or {}, f"{label}.keywords")
+        elif isinstance(value, click.Context):
+            visit(value.params, f"{label}.params")
+            visit(value.args, f"{label}.args")
+            visit(value._protected_args, f"{label}._protected_args")
+
     pending: list[BaseException] = [error]
     seen: set[int] = set()
     while pending:
@@ -51,15 +87,17 @@ def _exception_artifacts(error: BaseException) -> str:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        artifacts.extend((repr(current), repr(current.args)))
+        visit(current, "exception")
+        visit(current.args, "exception.args")
         for related in (current.__context__, current.__cause__):
             if related is not None:
                 pending.append(related)
         traceback = current.__traceback__
         while traceback is not None:
             frame = traceback.tb_frame
-            if frame.f_code.co_filename.endswith("openbiliclaw/cli_models.py"):
-                artifacts.extend(f"{name}={value!r}" for name, value in frame.f_locals.items())
+            artifacts.append(f"frame={frame.f_code.co_filename}:{frame.f_code.co_name}")
+            for name, value in frame.f_locals.items():
+                visit(value, f"frame.{frame.f_code.co_name}.{name}")
             traceback = traceback.tb_next
     return "\n".join(artifacts)
 
@@ -114,28 +152,39 @@ class FakeCoordinator:
 class ConflictOnceService(ModelConfigService):
     """Publish one concurrent route before returning the first save conflict."""
 
-    def __init__(self, path: Path, coordinator: FakeCoordinator) -> None:
+    def __init__(
+        self,
+        path: Path,
+        coordinator: FakeCoordinator,
+        *,
+        concurrent_models: ModelConfig | None = None,
+    ) -> None:
         super().__init__(path, coordinator)
         self.conflicts = 0
+        self.save_attempts = 0
+        self.concurrent_models = concurrent_models
 
     async def save(self, request: ModelConfigSaveRequest) -> ModelConfigSaveResult:
+        self.save_attempts += 1
         if self.conflicts == 0:
             self.conflicts += 1
-            current = _models()
-            concurrent = ChatConnection(
-                id="concurrent-route",
-                name="Concurrent Route",
-                type="ollama",
-                model="qwen2.5:7b",
-                base_url="http://127.0.0.1:11434/v1",
-            )
-            current = replace(
-                current,
-                chat=replace(
-                    current.chat,
-                    connections=(*current.chat.connections, concurrent),
-                ),
-            )
+            current = self.concurrent_models
+            if current is None:
+                current = _models()
+                concurrent = ChatConnection(
+                    id="concurrent-route",
+                    name="Concurrent Route",
+                    type="ollama",
+                    model="qwen2.5:7b",
+                    base_url="http://127.0.0.1:11434/v1",
+                )
+                current = replace(
+                    current,
+                    chat=replace(
+                        current.chat,
+                        connections=(*current.chat.connections, concurrent),
+                    ),
+                )
             _write_native(self.path, current)
             return ModelConfigSaveResult(
                 ok=False,
@@ -587,10 +636,47 @@ def test_models_save_failure_never_echoes_secret_bearing_exception(
     assert "test-secret-inline-never-print" not in result.output
 
 
-def test_model_command_exit_drops_api_key_from_reachable_traceback_locals(
+@pytest.mark.parametrize(
+    ("command_args", "failure_id"),
+    [
+        (
+            [
+                "models",
+                "add",
+                "--kind",
+                "chat",
+                "--id",
+                "route-new",
+                "--connection-type",
+                "openai_compatible",
+                "--preset",
+                "custom",
+                "--name",
+                "New Route",
+                "--model",
+                "new-model",
+                "--base-url",
+                "https://new.example.test/v1",
+                "--api-mode",
+                "chat_completions",
+                "--api-key",
+                _EXCEPTION_SECRET,
+            ],
+            "add",
+        ),
+        (
+            ["models", "edit", "route-a", "--api-key", _EXCEPTION_SECRET],
+            "edit",
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_model_api_key_is_absent_from_all_reachable_failure_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     runner: CliRunner,
+    command_args: list[str],
+    failure_id: str,
 ) -> None:
     path = _project_root(monkeypatch, tmp_path, _models())
     module = _models_module(runner)
@@ -598,15 +684,51 @@ def test_model_command_exit_drops_api_key_from_reachable_traceback_locals(
     coordinator.fail_build_with = _EXCEPTION_SECRET
     _install_service(module, monkeypatch, ModelConfigService(path, coordinator))
 
-    result = runner.invoke(
-        app,
-        ["models", "edit", "route-a", "--api-key", _EXCEPTION_SECRET],
-    )
+    result = runner.invoke(app, command_args)
 
     assert result.exit_code == 1
+    assert failure_id in {"add", "edit"}
     assert _EXCEPTION_SECRET not in result.output
     assert result.exception is not None
     assert _EXCEPTION_SECRET not in _exception_artifacts(result.exception)
+
+
+def test_model_api_key_vault_cleans_up_after_pre_callback_validation_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    monkeypatch.setattr(
+        module,
+        "_build_model_config_service",
+        lambda: pytest.fail("Click validation must stop before command invocation"),
+    )
+
+    invocations = (
+        (app, ["models", "add"]),
+        (module.models_app, ["add"]),
+    )
+    for target, prefix in invocations:
+        result = runner.invoke(
+            target,
+            [
+                *prefix,
+                "--kind",
+                "chat",
+                "--api-key",
+                _EXCEPTION_SECRET,
+                "--position",
+                "0",
+            ],
+        )
+
+        assert result.exit_code == 2
+        assert _EXCEPTION_SECRET not in result.output
+        assert result.exception is not None
+        assert _EXCEPTION_SECRET not in _exception_artifacts(result.exception)
+        vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
+        assert vault is not None
+        assert vault.pending_count() == 0
 
 
 def test_model_safe_boundary_drops_recursive_secret_exception_state(
@@ -747,6 +869,8 @@ def test_guided_runtime_setup_uses_native_chat_then_embedding_editors(
 def _prepare_guided_chat_edit(
     module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    stable_id: str = "route-a",
 ) -> None:
     monkeypatch.setattr(module, "_interactive_terminal", lambda: True)
     monkeypatch.setattr(
@@ -764,12 +888,13 @@ def _prepare_guided_chat_edit(
             model="guided-chat-a",
             base_url="https://guided-a.example.test/v1",
             api_mode="chat_completions",
+            api_key_env="GUIDED_CHAT_KEY",
         ),
     )
 
     def fake_prompt(label: str, **kwargs: object) -> str:
         values = {
-            "Stable connection ID": "route-a",
+            "Stable connection ID": stable_id,
             "Connection name": "Guided A",
         }
         return values.get(label, str(kwargs.get("default", "")))
@@ -813,6 +938,82 @@ def test_guided_chat_conflict_retry_preserves_concurrently_added_fallback(
     assert service.conflicts == 1
     assert [row["id"] for row in rows] == ["route-a", "route-b", "concurrent-route"]
     assert rows[0]["name"] == "Guided A"
+
+
+def test_guided_chat_edit_conflict_does_not_resurrect_deleted_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    initial = _models()
+    concurrent_b = replace(initial.chat.connections[1], name="Concurrent B")
+    concurrent_models = replace(
+        initial,
+        chat=replace(initial.chat, connections=(concurrent_b,)),
+    )
+    path = _project_root(monkeypatch, tmp_path, initial)
+    module = _models_module(runner)
+    service = ConflictOnceService(
+        path,
+        FakeCoordinator(),
+        concurrent_models=concurrent_models,
+    )
+    _install_service(module, monkeypatch, service)
+    _prepare_guided_chat_edit(module, monkeypatch, stable_id="route-a")
+
+    with pytest.raises(typer.Exit):
+        module.guided_chat_editor()
+
+    captured = capsys.readouterr()
+    rows = tomllib.loads(path.read_text(encoding="utf-8"))["models"]["chat"]["connections"]
+    assert service.save_attempts == 1
+    assert [row["id"] for row in rows] == ["route-b"]
+    assert rows[0]["name"] == "Concurrent B"
+    assert "concurrently" in captured.err
+
+
+def test_guided_chat_add_conflict_does_not_overwrite_concurrent_same_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    initial = _models()
+    other_writer = ChatConnection(
+        id="route-new",
+        name="Other Writer",
+        type="ollama",
+        model="other-writer-model",
+        base_url="http://127.0.0.1:11434/v1",
+    )
+    concurrent_models = replace(
+        initial,
+        chat=replace(
+            initial.chat,
+            connections=(*initial.chat.connections, other_writer),
+        ),
+    )
+    path = _project_root(monkeypatch, tmp_path, initial)
+    module = _models_module(runner)
+    service = ConflictOnceService(
+        path,
+        FakeCoordinator(),
+        concurrent_models=concurrent_models,
+    )
+    _install_service(module, monkeypatch, service)
+    _prepare_guided_chat_edit(module, monkeypatch, stable_id="route-new")
+
+    with pytest.raises(typer.Exit):
+        module.guided_chat_editor()
+
+    captured = capsys.readouterr()
+    rows = tomllib.loads(path.read_text(encoding="utf-8"))["models"]["chat"]["connections"]
+    assert service.save_attempts == 1
+    assert [row["id"] for row in rows] == ["route-a", "route-b", "route-new"]
+    assert rows[-1]["name"] == "Other Writer"
+    assert rows[-1]["model"] == "other-writer-model"
+    assert "concurrently" in captured.err
 
 
 def test_guided_chat_prompts_only_fields_exposed_by_selected_descriptor(

@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from openbiliclaw.cli_models import models_app
+from openbiliclaw.cli_models import SecretSafeTyperGroup, models_app
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
@@ -95,6 +95,7 @@ _force_utf8_stdout_on_windows()
 
 
 app = typer.Typer(
+    cls=SecretSafeTyperGroup,
     name="openbiliclaw",
     help="🦀 OpenBiliClaw — 你的 B 站专属 AI 朋友",
     add_completion=False,

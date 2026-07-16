@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import secrets
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from typing import TYPE_CHECKING, Literal, NoReturn, TypeAlias, cast
 
 import typer
+from typer import _click as click
+from typer.core import TyperGroup
 
 from openbiliclaw.model_config import (
     ChatConnection,
@@ -94,7 +99,155 @@ class EmbeddingSettingsOptions:
     multimodal_enabled: bool | None = None
 
 
+@dataclass(frozen=True, repr=False)
+class _InlineApiKeyHandle:
+    """Opaque one-shot capability passed through Click instead of a secret."""
+
+    token: str = dataclass_field(repr=False)
+
+    def __repr__(self) -> str:
+        return "<inline-api-key-handle>"
+
+
+class _InlineApiKeyVault:
+    """Process-local, concurrency-safe storage for pre-parser inline keys."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def __repr__(self) -> str:
+        return "<inline-api-key-vault>"
+
+    def store(self, value: str) -> _InlineApiKeyHandle:
+        while True:
+            token = secrets.token_urlsafe(32)
+            with self._lock:
+                if token not in self._entries:
+                    self._entries[token] = value
+                    return _InlineApiKeyHandle(token)
+
+    def claim(self, handle: _InlineApiKeyHandle) -> str | None:
+        with self._lock:
+            return self._entries.pop(handle.token, None)
+
+    def discard(self, handle: _InlineApiKeyHandle) -> None:
+        with self._lock:
+            self._entries.pop(handle.token, None)
+
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
+_INLINE_API_KEY_VAULT = _InlineApiKeyVault()
+_INLINE_API_KEY_HANDLE_PREFIX = "__openbiliclaw_inline_api_key_handle__:"
+
+
+def _encode_inline_api_key_handle(handle: _InlineApiKeyHandle) -> str:
+    return f"{_INLINE_API_KEY_HANDLE_PREFIX}{handle.token}"
+
+
+def _discard_inline_api_key_handle(handle: _InlineApiKeyHandle) -> None:
+    _INLINE_API_KEY_VAULT.discard(handle)
+
+
+class _InlineApiKeyHandleType(click.types.ParamType):
+    """Accept only values protected before Click begins argument parsing."""
+
+    name = "text"
+
+    def convert(
+        self,
+        value: object,
+        param: click.Parameter | None,
+        ctx: click.Context | None,
+    ) -> _InlineApiKeyHandle | None:
+        if value is None:
+            return None
+        if isinstance(value, _InlineApiKeyHandle):
+            handle = value
+        else:
+            encoded = str(value)
+            if not encoded.startswith(_INLINE_API_KEY_HANDLE_PREFIX):
+                self.fail("Inline API key protection was not initialized.", param, ctx)
+            handle = _InlineApiKeyHandle(encoded.removeprefix(_INLINE_API_KEY_HANDLE_PREFIX))
+        if ctx is not None:
+            ctx.call_on_close(functools.partial(_discard_inline_api_key_handle, handle))
+        return handle
+
+
+def _model_write_command_offset(args: Sequence[str]) -> int | None:
+    for index, value in enumerate(args[:-1]):
+        if value == "models" and args[index + 1] in {"add", "edit"}:
+            return index + 2
+    if args and args[0] in {"add", "edit"}:
+        return 1
+    return None
+
+
+def _protect_inline_api_key_args(args: list[str]) -> tuple[_InlineApiKeyHandle, ...]:
+    """Replace model --api-key values in-place before Click copies them."""
+    offset = _model_write_command_offset(args)
+    if offset is None:
+        return ()
+    handles: list[_InlineApiKeyHandle] = []
+    index = offset
+    while index < len(args):
+        value = args[index]
+        if value == "--api-key" and index + 1 < len(args):
+            if args[index + 1].startswith("--"):
+                index += 1
+                continue
+            handle = _INLINE_API_KEY_VAULT.store(args[index + 1])
+            args[index + 1] = _encode_inline_api_key_handle(handle)
+            handles.append(handle)
+            index += 2
+            continue
+        if value.startswith("--api-key="):
+            handle = _INLINE_API_KEY_VAULT.store(value.partition("=")[2])
+            args[index] = f"--api-key={_encode_inline_api_key_handle(handle)}"
+            handles.append(handle)
+        index += 1
+    return tuple(handles)
+
+
+class SecretSafeTyperGroup(TyperGroup):
+    """Scrub inline model keys before Click/Typer retain argument state."""
+
+    def main(
+        self,
+        args: Sequence[str] | None = None,
+        prog_name: str | None = None,
+        complete_var: str | None = None,
+        standalone_mode: bool = True,
+        windows_expand_args: bool = True,
+        **extra: object,
+    ) -> object:
+        if args is None:
+            protected_args = sys.argv
+            parent_args: Sequence[str] | None = None
+        else:
+            protected_args = args if isinstance(args, list) else list(args)
+            args = protected_args
+            parent_args = protected_args
+        handles = _protect_inline_api_key_args(protected_args)
+        try:
+            return super().main(
+                args=parent_args,
+                prog_name=prog_name,
+                complete_var=complete_var,
+                standalone_mode=standalone_mode,
+                windows_expand_args=windows_expand_args,
+                **extra,
+            )
+        finally:
+            for handle in handles:
+                _INLINE_API_KEY_VAULT.discard(handle)
+
+
 models_app = typer.Typer(
+    cls=SecretSafeTyperGroup,
     help="Inspect and edit ordered Chat and Embedding model routes.",
     no_args_is_help=True,
 )
@@ -104,6 +257,12 @@ _RESOLVE_OPTION = typer.Option(
     None,
     "--resolve",
     help="Resolve a blocking migration issue as ISSUE=ACTION[@POSITION].",
+)
+_INLINE_API_KEY_OPTION = typer.Option(
+    None,
+    "--api-key",
+    click_type=_InlineApiKeyHandleType(),
+    help="Inline API key (shell-visible).",
 )
 
 
@@ -864,6 +1023,15 @@ def _run_safe(
     raise typer.Exit(code=exit_code if exit_code is not None else 1) from None
 
 
+def _claim_inline_api_key(
+    value: str | _InlineApiKeyHandle | None,
+) -> tuple[str | None, bool]:
+    if isinstance(value, _InlineApiKeyHandle):
+        claimed = _INLINE_API_KEY_VAULT.claim(value)
+        return claimed, claimed is None
+    return value, False
+
+
 def _record_options(
     *,
     connection_type: str | None,
@@ -919,7 +1087,7 @@ def add_model(
     model: str | None = typer.Option(None, "--model"),
     base_url: str | None = typer.Option(None, "--base-url"),
     api_mode: str | None = typer.Option(None, "--api-mode"),
-    api_key: str | None = typer.Option(None, "--api-key", help="Inline API key (shell-visible)."),
+    api_key: str | None = _INLINE_API_KEY_OPTION,
     api_key_env: str | None = typer.Option(None, "--api-key-env"),
     credential_ref: str | None = typer.Option(None, "--credential-ref"),
     reasoning_effort: str | None = typer.Option(None, "--reasoning-effort"),
@@ -948,8 +1116,11 @@ def add_model(
 
     inline_api_key = [api_key]
     api_key = None
+    inline_api_key[0], inline_api_key_missing = _claim_inline_api_key(inline_api_key[0])
 
     def operation() -> None:
+        if inline_api_key_missing:
+            raise ModelsCliError("Inline API key handle expired; rerun the command.")
         route_kind = kind.strip().lower()
         if route_kind not in {"chat", "embedding"}:
             raise ModelsCliError("--kind must be chat or embedding.")
@@ -1046,7 +1217,7 @@ def edit_model(
     model: str | None = typer.Option(None, "--model"),
     base_url: str | None = typer.Option(None, "--base-url"),
     api_mode: str | None = typer.Option(None, "--api-mode"),
-    api_key: str | None = typer.Option(None, "--api-key", help="Inline API key (shell-visible)."),
+    api_key: str | None = _INLINE_API_KEY_OPTION,
     api_key_env: str | None = typer.Option(None, "--api-key-env"),
     credential_ref: str | None = typer.Option(None, "--credential-ref"),
     clear_credential: bool = typer.Option(False, "--clear-credential"),
@@ -1075,8 +1246,11 @@ def edit_model(
 
     inline_api_key = [api_key]
     api_key = None
+    inline_api_key[0], inline_api_key_missing = _claim_inline_api_key(inline_api_key[0])
 
     def operation() -> None:
+        if inline_api_key_missing:
+            raise ModelsCliError("Inline API key handle expired; rerun the command.")
         service = _build_model_config_service()
         interactive = _interactive_terminal()
         record_options = _record_options(
@@ -1416,6 +1590,7 @@ def _guided_chat_editor() -> None:
         existing_status=initial_public.credential if initial_public is not None else None,
         interactive=True,
     )
+    was_edit = initial_existing is not None
 
     def mutation(
         models: ModelConfig,
@@ -1423,10 +1598,20 @@ def _guided_chat_editor() -> None:
     ) -> tuple[ModelConfig, dict[str, CredentialAction]]:
         del latest
         exists = any(item.id == stable_id for item in models.chat.connections)
+        if was_edit and not exists:
+            raise ModelsCliError(
+                "Guided Chat edit target changed concurrently; no changes were saved."
+            )
+        if not was_edit and exists:
+            raise ModelsCliError("Guided Chat add ID changed concurrently; no changes were saved.")
         candidate = (
             service.edit(models, stable_id, intended_record)
-            if exists
-            else service.add(models, intended_record, position=1)
+            if was_edit
+            else service.add(
+                models,
+                intended_record,
+                position=1,
+            )
         )
         actions = {stable_id: intended_action} if intended_action is not None else {}
         return candidate, actions
@@ -1586,6 +1771,7 @@ def guided_embedding_editor() -> None:
 
 
 __all__ = [
+    "SecretSafeTyperGroup",
     "guided_chat_editor",
     "guided_embedding_editor",
     "models_app",

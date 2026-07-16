@@ -211,7 +211,11 @@ def test_cli_docs_distinguish_guided_embedding_disable_from_item_commands() -> N
     section = cli_doc.split("### `openbiliclaw setup-embedding`", 1)[1].split(
         "### `openbiliclaw recommend`", 1
     )[0]
+    introduction = section.split("```text", 1)[0]
 
+    assert "add/edit/disable" in introduction
+    assert "--kind" not in introduction
+    assert "models edit/remove" not in introduction
     assert "add/edit/disable" in section
     assert "`disable` 会清空整个 Embedding route" in section
     assert "`openbiliclaw models remove <id>`" in section
