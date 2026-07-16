@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai import models
-from pydantic_evals import Dataset
+from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import LLMJudge
 
 from openbiliclaw.infrastructure.ai.evaluators import (
@@ -276,3 +276,83 @@ def test_generic_chinese_recommendation_ngrams_do_not_count_as_grounding() -> No
         ["这个视频教程很实用"],
         "这个视频很符合你的兴趣。",
     )
+
+
+def test_one_meaningful_latin_unit_remains_enough_for_short_facts() -> None:
+    assert is_grounded_in(["Geometry"], "A Geometry guide.")
+
+
+def _chinese_recommendation_input() -> dict[str, object]:
+    content_id = "00000000-0000-0000-0000-000000000301"
+    return {
+        "profile": {
+            "revision": 3,
+            "narrative": "喜欢简洁实用的三维建模教程",
+            "facets": [],
+            "confidence": 0.9,
+            "created_at": "2026-07-17T00:00:00Z",
+        },
+        "content": {
+            "id": content_id,
+            "source_id": "bilibili",
+            "external_id": "BV1chinese",
+            "url": "https://www.bilibili.com/video/BV1chinese",
+            "title": "几何节点实战教程",
+            "summary": "从案例出发演示节点建模方法。",
+            "media_type": "video",
+            "metadata": {},
+        },
+        "assessment": {
+            "id": "00000000-0000-0000-0000-000000000302",
+            "content_id": content_id,
+            "profile_revision": 3,
+            "relevance": 0.9,
+            "quality": 0.8,
+            "novelty": 0.6,
+            "risk": 0.1,
+            "topics": ["程序化建模"],
+            "explanation": "内容与建模兴趣相关。",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("explanation", "expected_grounded"),
+    [
+        ("这个视频很符合你对实用建模教程的兴趣。", True),
+        ("这个视频详细讲解量子物理和烹饪技巧，也提到建模。", False),
+    ],
+)
+async def test_offline_recommendation_grounding_uses_meaningful_chinese_coverage(
+    explanation: str,
+    expected_grounded: bool,
+) -> None:
+    dataset = Dataset(
+        name="chinese_recommendation_grounding_v1",
+        cases=[
+            Case(
+                name="reviewed_chinese_facts",
+                inputs=_chinese_recommendation_input(),
+                expected_output={
+                    "explanation": "这个视频很符合你对实用建模教程的兴趣。"
+                },
+                metadata={
+                    "rubric": "解释必须基于输入事实，长度适中，并提及建模。",
+                    "min_characters": 10,
+                    "max_characters": 100,
+                    "required_concepts": ["建模"],
+                    "minimum_concept_matches": 1,
+                },
+            )
+        ],
+        evaluators=[RecommendationExplanationInvariants()],
+    )
+    report = await dataset.evaluate(
+        lambda inputs: {"explanation": explanation},
+        progress=False,
+    )
+
+    assertions = report.cases[0].assertions
+    assert assertions["recommendation_grounded"].value is expected_grounded
+    assert assertions["recommendation_length_valid"].value is True
+    assert assertions["recommendation_concepts_present"].value is True

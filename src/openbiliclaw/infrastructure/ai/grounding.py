@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from itertools import combinations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -96,6 +97,18 @@ def grounding_overlap(facts: Iterable[str], candidate: str) -> frozenset[str]:
 
 
 def is_grounded_in(facts: Iterable[str], candidate: str) -> bool:
-    """Return whether candidate shares at least one meaningful token with facts."""
+    """Apply bounded overlap evidence, with stronger coverage required for CJK."""
 
-    return bool(grounding_overlap(facts, candidate))
+    overlap = grounding_overlap(facts, candidate)
+    cjk_units = {
+        token
+        for token in overlap
+        if re.fullmatch(r"[\u3400-\u4dbf\u4e00-\u9fff]+", token)
+    }
+    if overlap - cjk_units:
+        return True
+    if any(len(unit) >= 3 for unit in cjk_units):
+        return True
+    return any(
+        set(left).isdisjoint(right) for left, right in combinations(cjk_units, 2)
+    )

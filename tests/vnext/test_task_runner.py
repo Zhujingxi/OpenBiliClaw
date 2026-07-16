@@ -481,6 +481,7 @@ async def test_recommendation_validator_accepts_reviewed_chinese_paraphrase() ->
     [
         "这个视频很符合你的兴趣。",
         "这个视频详细讲解量子物理和烹饪技巧，很符合你的兴趣。",
+        "这个视频详细讲解量子物理和烹饪技巧，也提到建模。",
     ],
 )
 async def test_recommendation_validator_rejects_unrelated_chinese_copy(
