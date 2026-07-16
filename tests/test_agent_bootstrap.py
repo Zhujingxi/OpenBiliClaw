@@ -1246,9 +1246,11 @@ cookie = "test-reused-cookie"
 def _write_ordered_embedding_route(
     project_dir: Path,
     *,
+    chat_credential: str = 'api_key_env = "DEEPSEEK_API_KEY"',
     openai_credential: str = 'api_key_env = "TARGET_OPENAI_EMBEDDING_KEY"',
     custom_credential: str = 'api_key_env = "TARGET_CUSTOM_EMBEDDING_KEY"',
     include_remote: bool = True,
+    bilibili_cookie: str = "",
 ) -> None:
     remote_providers = (
         f"""[[models.embedding.providers]]
@@ -1282,7 +1284,7 @@ type = "openai_compatible"
 preset = "deepseek"
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
-api_key_env = "DEEPSEEK_API_KEY"
+{chat_credential}
 api_mode = "chat_completions"
 [models.embedding]
 enabled = true
@@ -1298,7 +1300,7 @@ type = "ollama"
 base_url = "http://127.0.0.1:11434/v1"
 {remote_providers}
 [bilibili]
-cookie = ""
+cookie = "{bilibili_cookie}"
 """,
         encoding="utf-8",
     )
@@ -1418,6 +1420,80 @@ def test_run_embedding_key_only_rejects_route_without_credential_provider(
     assert "requires an existing credential-capable embedding provider" in output
     assert "test-unused-embedding-key" not in output
     assert config_path.read_bytes() == before
+
+
+def test_run_embedding_key_only_preflight_blocks_all_reuse_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = tmp_path / "target"
+    source = tmp_path / "source"
+    target.mkdir()
+    source.mkdir()
+    _write_ordered_embedding_route(target, include_remote=False)
+    _write_ordered_embedding_route(
+        source,
+        chat_credential='api_key = "test-reused-chat-key"',
+        openai_credential='api_key = "test-reused-openai-key"',
+        custom_credential='api_key = "test-reused-custom-key"',
+        bilibili_cookie="test-reused-bilibili-cookie",
+    )
+    source_cookie = source / "data" / "bilibili_cookie.json"
+    source_cookie.parent.mkdir()
+    source_cookie.write_text(
+        json.dumps({"cookie": "test-reused-cookie-file"}),
+        encoding="utf-8",
+    )
+    config_path = target / "config.toml"
+    before = config_path.read_bytes()
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(target),
+            "--mode",
+            "local",
+            "--reuse-from",
+            str(source),
+            "--embedding-api-key",
+            "test-new-embedding-key",
+            "--skip-install",
+            "--skip-start",
+            "--skip-init",
+            "--skip-ollama-setup",
+        ]
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: config_path,
+    )
+
+    assert bootstrap.run(args) == 2
+
+    output = capsys.readouterr().out
+    assert "requires an existing credential-capable embedding provider" in output
+    assert "secrets_reused" not in output
+    assert {
+        "config_unchanged": config_path.read_bytes() == before,
+        "target_data_created": (target / "data").exists(),
+        "target_cookie_created": (target / "data" / "bilibili_cookie.json").exists(),
+    } == {
+        "config_unchanged": True,
+        "target_data_created": False,
+        "target_cookie_created": False,
+    }
+    assert "test-new-embedding-key" not in output
+    assert "test-reused-chat-key" not in output
+    assert "test-reused-openai-key" not in output
+    assert "test-reused-custom-key" not in output
+    assert "test-reused-bilibili-cookie" not in output
+    assert "test-reused-cookie-file" not in output
 
 
 def test_reuse_config_secrets_skips_incompatible_source_route(

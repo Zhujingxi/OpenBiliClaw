@@ -2350,6 +2350,36 @@ def should_auto_wire_embedding(
     return not effective_provider.strip()
 
 
+_EMBEDDING_KEY_TARGET_ERROR = (
+    "--embedding-api-key requires an existing credential-capable embedding provider"
+)
+
+
+def _embedding_provider_accepts_credential(provider: Any, registry: Any) -> bool:
+    return "credential" in registry.definition(provider.type).allowed_fields(
+        "embedding", provider.preset
+    )
+
+
+def _validate_key_only_embedding_target(
+    project_dir: Path,
+    *,
+    provider: str | None,
+    endpoints: list[str] | None,
+    api_key: str | None,
+) -> None:
+    """Reject an unusable key-only edit before bootstrap mutates configuration."""
+    if api_key is None or provider is not None or endpoints:
+        return
+    _ensure_project_model_imports(project_dir)
+    from openbiliclaw.model_config import connection_type_registry
+
+    registry = connection_type_registry()
+    providers = _load_typed_models(project_dir).embedding.providers
+    if not any(_embedding_provider_accepts_credential(item, registry) for item in providers):
+        raise RuntimeError(_EMBEDDING_KEY_TARGET_ERROR)
+
+
 def apply_embedding_config(
     project_dir: Path,
     *,
@@ -2504,10 +2534,7 @@ def apply_embedding_config(
         updated_providers: list[Any] = []
         credential_updates = 0
         for item in current:
-            accepts_credential = "credential" in registry.definition(item.type).allowed_fields(
-                "embedding", item.preset
-            )
-            if accepts_credential:
+            if _embedding_provider_accepts_credential(item, registry):
                 item = replace(
                     item,
                     credential=CredentialConfig(source="inline", value=api_key),
@@ -2515,9 +2542,7 @@ def apply_embedding_config(
                 credential_updates += 1
             updated_providers.append(item)
         if not credential_updates:
-            raise RuntimeError(
-                "--embedding-api-key requires an existing credential-capable embedding provider"
-            )
+            raise RuntimeError(_EMBEDDING_KEY_TARGET_ERROR)
         providers = tuple(updated_providers)
         enabled = models.embedding.enabled
     else:
@@ -3444,6 +3469,17 @@ def run(args: argparse.Namespace) -> int:
             args.llm_base_url = legacy_preset["base_url"]
         if args.llm_model is None and legacy_preset.get("model"):
             args.llm_model = legacy_preset["model"]
+
+    try:
+        _validate_key_only_embedding_target(
+            project_dir,
+            provider=args.embedding_provider,
+            endpoints=args.embedding_endpoint,
+            api_key=args.embedding_api_key,
+        )
+    except (KeyError, RuntimeError, ValueError) as exc:
+        emit(BootstrapResult("error", str(exc), {"step": "models.embedding"}))
+        return 2
 
     chat_summary: dict[str, Any] | None = None
     selected_chat: tuple[str, str] | None = None

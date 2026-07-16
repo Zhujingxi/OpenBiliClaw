@@ -202,8 +202,9 @@ When `--embedding-api-key` is supplied without `--embedding-provider` or
 provider whose descriptor accepts credentials. Stable IDs, names, types,
 presets, endpoints, shared settings, and order are preserved; credentialless
 providers such as Ollama remain unchanged. If the route has no
-credential-capable provider, bootstrap reports an error without rewriting the
-configuration.
+credential-capable provider, bootstrap reports an error before route writes or
+credential reuse; neither the configuration nor the Bilibili cookie file is
+rewritten.
 
 **You must surface the reuse to the user, not skip the corresponding
 question silently.** Specifically for `bilibili.cookie`:
