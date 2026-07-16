@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,10 @@ logger = logging.getLogger(__name__)
 _RATE_LIMIT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
 _TRANSIENT_BACKOFF_SECONDS = (15.0, 30.0, 60.0, 120.0, 300.0)
 _NO_PROGRESS_BACKOFF_SECONDS = (60.0, 120.0, 300.0)
+# A 30s first delay is roughly 60–100 times the observed 0.3–0.5s empty refresh cost,
+# preserving quick recovery from source jitter. The 600s cap guarantees self-healing
+# within ten minutes after a source recovers.
+_SUPPLY_UNPRODUCTIVE_BACKOFF_SECONDS = (30.0, 60.0, 120.0, 300.0, 600.0)
 _MAX_CANDIDATE_EVAL_WORKERS = 3
 _MAX_CANDIDATE_EVAL_BATCH_SIZE = 30
 
@@ -41,6 +46,21 @@ def effective_candidate_eval_workers(configured: int, llm_concurrency: int) -> i
     desired = max(1, min(_MAX_CANDIDATE_EVAL_WORKERS, int(configured)))
     global_limit = max(1, int(llm_concurrency))
     return min(desired, max(1, global_limit - 1))
+
+
+def _supply_result_is_productive(result: Any) -> bool:
+    """Treat only recognized mapping results without refresh output as unproductive."""
+
+    if not isinstance(result, Mapping):
+        return True
+    try:
+        return bool(result.get("refreshed"))
+    except Exception:
+        logger.debug(
+            "candidate supply returned an unreadable result; treating it as productive",
+            exc_info=True,
+        )
+        return True
 
 
 class CandidateEvalCoordinator:
@@ -92,6 +112,8 @@ class CandidateEvalCoordinator:
         self._transient_streak = 0
         self._zero_cache_streak = 0
         self._no_progress_level = 0
+        self._supply_streak = 0
+        self._supply_cooldown_until = 0.0
 
         self.state = "idle"
         self.last_wake_reason = ""
@@ -151,6 +173,13 @@ class CandidateEvalCoordinator:
                     self._fill_open_slots()
                     snapshot = self._snapshot()
                     if not self._workers and snapshot.pending_eval <= 0:
+                        supply_cooldown_remaining = self._supply_cooldown_until - now
+                        if supply_cooldown_remaining > 0:
+                            self.state = "supply_cooldown"
+                            await self._wait_for_activity(
+                                min(self.safety_wake_seconds, supply_cooldown_remaining)
+                            )
+                            continue
                         self._request_supply("candidate_supply")
                         self.state = "waiting_supply" if self._supply_task else "idle"
                     elif self._workers:
@@ -362,12 +391,26 @@ class CandidateEvalCoordinator:
             return
         self._supply_task = None
         try:
-            task.result()
+            result = task.result()
         except asyncio.CancelledError:
             return
         except Exception as exc:
             logger.warning("candidate evaluation supply request failed: %s", exc)
             self.last_error = str(exc)
+            self._record_supply_result(productive=False)
+            return
+        self._record_supply_result(productive=_supply_result_is_productive(result))
+
+    def _record_supply_result(self, *, productive: bool) -> None:
+        if productive:
+            self._supply_streak = 0
+            self._supply_cooldown_until = 0.0
+            return
+        delay = _SUPPLY_UNPRODUCTIVE_BACKOFF_SECONDS[
+            min(self._supply_streak, len(_SUPPLY_UNPRODUCTIVE_BACKOFF_SECONDS) - 1)
+        ]
+        self._supply_streak += 1
+        self._supply_cooldown_until = self.time_fn() + delay
 
     async def _cancel_supply_task(self) -> None:
         task = self._supply_task

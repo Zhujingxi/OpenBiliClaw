@@ -589,6 +589,54 @@ async def test_three_zero_cache_batches_trigger_supply_and_backoff() -> None:
     await task
 
 
+@pytest.mark.asyncio
+async def test_unproductive_supply_backs_off_exponentially() -> None:
+    now = [100.0]
+    supply_calls: list[float] = []
+    pipeline = _FakeStagedPipeline(candidate_count=0)
+
+    async def request_supply(reason: str) -> dict[str, object]:
+        assert reason == "candidate_supply"
+        supply_calls.append(now[0])
+        return {"refreshed": False, "reason": "below_threshold"}
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=lambda: CandidateEvalSnapshot(
+            available=0,
+            target=600,
+            pending_eval=0,
+            evaluating=0,
+            evaluated_pending_admission=0,
+            admitted_pending_copy=0,
+        ),
+        profile_provider=lambda: object(),
+        supply_callback=request_supply,
+        safety_wake_seconds=0.001,
+        time_fn=lambda: now[0],
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    simulated_hour_end = now[0] + 3600.0
+    async with asyncio.timeout(2):
+        while True:
+            while coordinator._supply_cooldown_until <= now[0]:
+                await asyncio.sleep(0)
+            if coordinator._supply_cooldown_until > simulated_hour_end:
+                break
+            now[0] = coordinator._supply_cooldown_until
+            coordinator.notify("clock_advanced")
+
+    await coordinator.stop()
+    await task
+
+    intervals = [
+        later - earlier
+        for earlier, later in zip(supply_calls, supply_calls[1:], strict=False)
+    ]
+    assert len(supply_calls) <= 10
+    assert intervals == sorted(intervals)
+
+
 class _SqliteSoakEngine:
     def __init__(self, database: Database) -> None:
         self.database = database
