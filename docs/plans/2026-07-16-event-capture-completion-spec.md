@@ -27,7 +27,8 @@
 4. **枚举双白名单**:不新增顶层 event_type;`comment_kind` ∈ `{"", "comment", "danmaku"}`;`retracted_action` ∈ `{"like", "favorite", "share", "follow"}`——两者越界值均按缺失处理并 log WARNING(CLAUDE.md pitfall #4),折价钩子对越界 `retracted_action` 直接跳过。
 5. **正文净化双防线(两端都做全套)**:`comment_text` 在**扩展侧与服务端各自**截断 ≤200 字符**且**剥离 Unicode category-C;两端各有边界测试,服务端为最终防线。
 6. **tap 失败静默降级**:xhs action tap、bili interact tap 的任何解析异常不得抛出到页面、不得吞掉既有事件;X tap 既有行为(engagement 类型、tweet_id 提取、retraction 映射)零回归。验证面:tap 单测异常路径 + 既有 `x-graphql-tap.test.ts` 全绿。
-7. **tap 权威即 DOM 全抑制**:平台声明 `strongSignalSource:"tap"` 后,kernel 对该平台 DOM 路径的**正向强信号(like/favorite)与撤销**都必须抑制(现状 `kernel.ts:301-306` 只抑制撤销分支——本 spec 需扩展 kernel,并核对 X 现有正向去重机制后统一到同一契约)。验证面:kernel×xhs 集成测试断言 DOM like/favorite/retraction 零发射。
+7. **tap 权威按动作粒度 DOM 抑制(r3)**:adapter 声明 `tapAuthoritativeActions`(动作集合,如 X: `{like, favorite, share, comment, retraction}`;xhs: `{like, favorite, retraction}`;bilibili: `{comment}`——reply/add tap 上线后),kernel 对声明动作的 DOM 发射全部抑制——消除"网络提交 + DOM 点击"双计与"仅打开评论区/转发菜单即记事件"的假动作(codex r2 findings 2/4;现状 `kernel.ts:301-306` 只抑制撤销分支)。未声明动作与非 tap 平台行为不变。验证面:kernel 抑制矩阵测试(平台 × 动作)。
+7b. **网络成功 = 业务码成功(r3)**:新增 tap 路径(bili reply/dm、xhs action、X 正文提取)发射前必须校验**业务码**(B站 `code===0`、xhs 业务 success 字段、X GraphQL 响应无 `errors`),HTTP 2xx 但业务失败一律不发(codex r2 finding 3)。X tap 既有动作(like/retraction 等)的发射时序**本期不动**(改动会影响既有事件量,超出范围,spec 记为已知差异)。验证面:各 tap 的业务失败 fixture 用例。
 8. **阈值有出处**:弹幕强度 0.6、折后强度 0.2、正文截断 200、折价回溯窗口 30 天等常量必须带校准注释,provider/模型更换后重开校准(CLAUDE.md pitfall #3)。
 9. **构建与双浏览器完整性**:新增 MAIN-world 入口必须同时登记 `extension/scripts/build.mjs` entrypoints、Chrome manifest 与 Firefox manifest;`npm run build` 产物存在性是验收的一部分(CLAUDE.md pitfall #6 的扩展版:多安装形态必须同步)。
 
@@ -79,20 +80,22 @@
 
 依赖:Phase 2/3 共享 `comment_text` 服务端契约(Wave B 首任务)与 `bili-interact-tap`(一个 tap 文件、两组端点),建议同一执行者连续完成;Phase 1 的 kernel 抑制契约改动影响所有 tap-authoritative 平台,必须带 X 回归测试;Phase 0/1/4 相互独立。
 
-**Wave A(可独立交付)**:Phase 0。**Wave B**:Phase 2 + 3。**Wave C**:Phase 1 + 4。任一 Wave 完成即可安全停下发布。
+**Wave A(可独立交付)**:Phase 0。**Wave B**:Phase 2 + 3。**Wave C**:Phase 1 + 4。任一 Wave 完成即可安全停下发布——**前提是该 Wave 的文档义务(模块文档/changelog/架构图/隐私政策中与其相关的子集)已随 Wave 完成**(r3,codex r2 finding 6:文档 gate 逐 Wave 执行,不许推迟到全部 Wave 之后)。
 
 ## Phase designs
 
 ### Phase 0 — retraction 确定性折价
 
-**折价作用面(r2 明确)**:
-- **面 1(内存,主路径)**:`ProfileUpdatePipeline.discount_buffered_positive(identity_key: str, retracted_action: str) -> int` —— 对缓冲区内尚未被 `_update_layer` 消费、payload url 归一化后同 identity key 且事件类型 == retracted_action 的 BEHAVIOR_EVENT/ENGAGEMENT 信号,patch 其 payload(`retracted=true`、`signal_strength=min(现值,0.2)`)。retraction 与原 like 同批到达(常见:手滑点赞马上取消)或原 like 尚未 flush 时,此面生效。
-- **面 2(DB,离线重读路径)**:`Database.mark_positive_events_retracted(identity_urls: list[str], retracted_action: str, *, within_hours: int = 24 * 30) -> int` —— 单事务 JSON patch(`metadata.retracted=true`、`metadata.signal_strength=min(现值,0.2)`),覆盖 `openbiliclaw init` 全量重建与 12h 画像整理等重读 events 表的路径。不删行、不改 event_type/url(不变量 3)。
-- **明确不覆盖**:已被分析批消费并固化进 profile 层的旧证据(out of scope,历史不回溯)。spec 承诺的是"从 retraction 到达起,该证据不再以满强度进入任何后续 LLM 消费"。
+**折价作用面(r3 修订钩子时序与乱序)**:
+- **面 1(内存,主路径)**:`ProfileUpdatePipeline.discount_buffered_positive(identity_key: str, retracted_action: str) -> int` —— 对缓冲区内尚未被 `_update_layer` 消费、payload url 归一化后同 identity key 且事件类型 == retracted_action 的 BEHAVIOR_EVENT/ENGAGEMENT 信号,patch 其 payload(`retracted=true`、`signal_strength=min(现值,0.2)`)。**钩子时序(r3):折价调用必须在 `_ingest_profile_update_events(accepted_events)`(`api/app.py:4423`)之后执行**——此时同批 like 已入缓冲,可被折价;放在 ingest 之前会错过同批正向信号(codex r2 blocker 1)。
+- **面 1b(乱序 tombstone,r3 新增)**:retraction 先于(或跨批早于)对应正向事件到达时,面 1 无信号可折。pipeline 维护 retraction tombstone 集(identity key → 时间戳;TTL 24h、容量上限 500,超限逐出最旧——校准注释:24h 覆盖扩展缓冲补发与 account_sync 双周期,500 远超个人真实撤销频率):`discount_buffered_positive` 登记 tombstone;`ingest_batch` 入场时对匹配 tombstone 的同类型正向信号直接折价入场。
+- **面 2(DB,离线重读路径)**:`Database.mark_positive_events_retracted(identity_urls: list[str], retracted_action: str) -> int` —— 单事务 JSON patch(`metadata.retracted=true`、`metadata.signal_strength=min(现值,0.2)`),覆盖 `openbiliclaw init` 全量重建、12h 认知/画像整理等重读 events 表的路径。**无时间窗口(r3)**:identity key(tweet_id/bvid/note_id/mid)全局唯一,不存在"重名 url 误伤";用户今天撤销数月前的 like 正是应标注的场景(r2 finding 10:原 30 天窗口与"同 key 正向行被标注"承诺矛盾且校准解释不成立)。不删行、不改 event_type/url(不变量 3)。
+- **消费面覆盖(r3 扩展,r2 finding 5)**:"(已撤销)"渲染标记与折后强度必须覆盖**所有重读 events 的 LLM 消费面**——至少含 preference 渲染与 12h 认知循环(`cognition_cycle.py:247` 重读 events 的 awareness 输入);实现时 grep events 重读点形成清单并逐一确认(共用渲染函数则自动生效,不共用则各自补标记),清单写入 PR。
+- **明确不覆盖**:已被分析批消费并固化进 profile 层的旧证据(out of scope,历史不回溯)。spec 承诺:"从 retraction 到达起,该证据不再以满强度进入任何后续重读型 LLM 消费;缓冲中未消费的信号被折价"。
 
 **identity key(r2 扩展)**:复用并扩展 PR #85 `_dedup_key` 的归一化(tweet_id / bvid / mid),**新增 xhs note_id**(24-hex,来自 `xiaohongshu.com/(explore|discovery/item|search_result)/<id>`)——否则 Wave C 的 xhs 撤销无法折价对应正向事件。归一化函数从 `runtime/account_sync.py:41-87` 提升到共享模块(如 `sources/identity_keys.py`),account_sync 原地引用。
 
-**ingest 钩子**:`/api/events` 接收路径(`api/app.py:4407` propagate 之后、`4423` pipeline ingest **之前**)对 `feedback_type=="retraction"` 事件:校验 `retracted_action` ∈ 白名单(不变量 4,越界跳过 + WARNING)→ 依序调用面 2(DB)与面 1(缓冲)。同步调用(低频),异常 WARNING 不阻断接收。
+**ingest 钩子**:`/api/events` 接收路径,在 `_ingest_profile_update_events(accepted_events)`(`api/app.py:4423`)**之后**对批内每条 `feedback_type=="retraction"` 事件:校验 `retracted_action` ∈ 白名单(不变量 4,越界跳过 + WARNING)→ 依序调用面 2(DB)与面 1(缓冲折价 + tombstone 登记)。同步调用(低频),异常 WARNING 不阻断接收。
 
 **偏好层消费**:事件渲染时 `metadata.retracted` 为真的事件追加"(已撤销)"标记(折后 0.2 经既有 preserved keys 自然生效);system prompt 常量追加一句静态撤销语义规则(紧跟 `llm/prompts.py:252`)。**回放不变性作用域 = 事件渲染文本**(不变量 2):system prompt 的版本性变更不违门。
 
@@ -102,9 +105,9 @@
 
 ### Phase 1 — xhs 强信号 tap 化
 
-**kernel 抑制契约先行**:扩展 `strongSignalSource:"tap"` 的语义为"该平台强信号(like/favorite 正向 + 撤销)一律 tap 权威,DOM 路径全抑制"——修改 `kernel.ts` 正向发射路径(321-327 附近)增加与撤销分支(301-306)一致的 tap 检查;实现前先核对 X 现在如何避免正向双发(twitter adapter / kernel 现状),把 X 收敛进同一契约并带回归测试(不变量 6/7)。
+**kernel 抑制契约先行(r3 动作粒度)**:adapter 新增 `tapAuthoritativeActions: Set<ActionType>` 声明,kernel 在 DOM 动作发射前(正向路径 `kernel.ts:321-327` 与撤销路径 301-306 统一)检查该集合,命中即抑制。X 声明 `{like, favorite, share, comment, retraction}`(其 tap 已发全部五类——`x-graphql-tap.ts:76` CreateRetweet 即 share;DOM 侧 `twitter.ts:84-85` 的 share/reply 点击当前会双计且"打开菜单即记事件",本契约一并消除);xhs 声明 `{like, favorite, retraction}`;bilibili 在 reply/add tap 上线后声明 `{comment}`。既有 `strongSignalSource` 字段语义收敛进新契约(保留或替换由实现决定,带迁移测试)。实现前核对 X 现状正向 DOM 发射行为并写入 PR(不变量 6/7)。
 
-**xhs action tap**:新 MAIN-world tap `extension/src/main/xhs-action-tap.ts`(独立文件、postMessage source `obc-xhs-action`,与 token sniffer 互不串扰):监听 like/collect/uncollect/dislike 写端点**成功**(2xx)调用,解析 note_id,产出 `{type: like|favorite|retraction, note_id, retracted_action?}`。端点清单以真实抓包 fixture 固化;未知端点忽略。消息桥在 `extension/src/content/xiaohongshu.ts` 构造事件(url 由 note_id 拼 explore 链接)。
+**xhs action tap**:新 MAIN-world tap `extension/src/main/xhs-action-tap.ts`(独立文件、postMessage source `obc-xhs-action`,与 token sniffer 互不串扰):监听 like/collect/uncollect/dislike 写端点调用,**HTTP 2xx 且响应业务成功字段通过(以真实抓包 fixture 固化判定,不变量 7b)**才发,解析 note_id,产出 `{type: like|favorite|retraction, note_id, retracted_action?}`。端点清单以真实抓包 fixture 固化;未知端点忽略。消息桥在 `extension/src/content/xiaohongshu.ts` 构造事件(url 由 note_id 拼 explore 链接)。
 
 **构建完整性(不变量 9)**:tap 入口登记 `extension/scripts/build.mjs:13` entrypoints + Chrome/Firefox 双 manifest;`npm run build` 后断言产物存在。
 
@@ -112,13 +115,15 @@
 
 **验收门**:`cd extension && npm test && npm run typecheck && npm run build`(产物含 xhs-action-tap);真实端到端:本机登录 xhs 点赞/取消各一次,`/api/events` 收到 like 与 retraction 各一条且无 DOM 双发(记录在 PR)。
 
+**回滚契约(r3,codex r2 finding 7)**:xhs tap 化(tap + 消息桥 + manifest/build 登记 + adapter 声明)必须作为**单个原子提交**交付,PR 记录哈希;线上双发或漏采时回滚 = `git revert <该提交>`,tap 与 DOM authority 同步回退,禁止只回退 adapter 声明而留 tap 运行的半吊子状态。bili-interact-tap 同规则。
+
 ### Phase 2 — 评论正文采集(网络层,提交成功后)
 
 **契约先行**:`sources/event_format.py` 定义 `metadata.comment_text`(`_sanitize_comment_text`:截断 200 + 剥离 category-C)与 `metadata.comment_kind` 白名单(不变量 4/5);`preference_analyzer` preserved keys 增加 `comment_text`/`comment_kind`,渲染「评论:『…』」。扩展侧新增共享净化工具(`extension/src/shared/text-sanitize.ts`:同规格截断 + category-C 剥离),X tap 与 bili tap 共用,**两端都有边界测试**(不变量 5)。
 
-**采集两路(均为提交成功后)**:
-- X tap:`parseXMutation` CreateTweet 分支提取 `variables.tweet_text` → `XEngagement.text?: string`(经共享净化)→ `buildEventFromEngagement` 写 `comment_text`。既有字段零回归。
-- B站:`bili-interact-tap`(见 Phase 3,同一文件)监听 `POST /x/v2/reply/add` 成功响应,提取评论正文 + 视频标识 → comment 事件(`comment_kind="comment"`、`comment_text`)。
+**采集两路(均为提交成功后,业务码校验按不变量 7b)**:
+- X tap:`parseXMutation` CreateTweet 分支提取 `variables.tweet_text` → `XEngagement.text?: string`(经共享净化)→ `buildEventFromEngagement` 写 `comment_text`;**正文路径校验响应 GraphQL 无 `errors` 才附带正文**(X tap 既有动作发射时序不动,不变量 7b)。既有字段零回归。
+- B站:`bili-interact-tap`(见 Phase 3,同一文件)监听 `POST /x/v2/reply/add`,**HTTP 2xx 且响应 `code===0`** 才发,提取评论正文 + 视频标识 → comment 事件(`comment_kind="comment"`、`comment_text`)。DOM 侧:bilibili adapter 声明 `tapAuthoritativeActions: {comment}`,点击"评论"按钮不再发 comment 事件(消除打开评论区即记事件 + 提交双计,codex r2 finding 2)。
 - 其余平台:显式 out-of-scope。
 
 **验收门**:`cd extension && npm test`、`pytest tests/test_event_format.py tests/test_preference_analyzer.py -q`;X tap 既有用例零回归。
@@ -126,8 +131,8 @@
 ### Phase 3 — B站弹幕采集(与 Phase 2 共享 bili-interact-tap)
 
 新 MAIN-world tap `extension/src/main/bili-interact-tap.ts`(document_start、MAIN world、匹配 bilibili.com 播放页,登记 build.mjs + 双 manifest):
-- `POST */x/v2/dm/post` 成功 → `{kind:"danmaku", text, oid/bvid}` → comment 事件(`comment_kind="danmaku"`、`comment_text` 经净化、`signal_strength=0.6`——低于 comment 0.75 因弹幕更随意,持平 follow 0.6,校准注释按不变量 8)。
-- `POST */x/v2/reply/add` 成功 → Phase 2 的 comment 事件。
+- `POST */x/v2/dm/post` HTTP 2xx 且 `code===0` → `{kind:"danmaku", text, oid/bvid}` → comment 事件(`comment_kind="danmaku"`、`comment_text` 经净化、`signal_strength=0.6`——低于 comment 0.75 因弹幕更随意,持平 follow 0.6,校准注释按不变量 8)。
+- `POST */x/v2/reply/add` HTTP 2xx 且 `code===0` → Phase 2 的 comment 事件。
 - 服务端:`default_signal_strength_for_event` 对 `comment_kind=="danmaku"` 返回 0.6(metadata 剥离时兜底,对齐 `event_format.py:301-302` 先例)。
 - 错误行为:解析失败静默丢弃该条;tap 不改写任何请求。
 
