@@ -571,7 +571,10 @@ function selectRecord(id, openDetail = true) {
   byId("modelRouteLayout").classList.toggle("is-detail", openDetail);
   renderRouteList();
   renderInspector();
-  if (openDetail) focusNarrowDetail();
+  if (openDetail) {
+    window.scrollTo({ top: 0, behavior: "auto" });
+    focusNarrowDetail();
+  }
 }
 
 function addConnection() {

@@ -37,6 +37,7 @@ def _live_config(*, embedding_enabled: bool = False) -> Config:
                         id="openai-compatible",
                         name="Compatible API",
                         type="openai_compatible",
+                        preset="custom",
                         model="test-compatible-model",
                         base_url="https://compatible.example/v1",
                         credential=CredentialConfig(
@@ -70,7 +71,7 @@ def test_live_summary_has_no_fabricated_metric_literals() -> None:
 
 def test_every_live_service_uses_global_route() -> None:
     source = Path("tests/test_refill_real_provider_integration.py").read_text(encoding="utf-8")
-    assert source.count("LLMService(") == 3
+    assert source.count("LLMService(") == 4
 
 
 def test_deterministic_uses_real_service_and_isolated_user_scenarios() -> None:

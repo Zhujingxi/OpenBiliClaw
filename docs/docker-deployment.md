@@ -63,7 +63,7 @@ OpenBiliClaw 不爬登录态——它复用**你**当前浏览器的登录会话
 
 三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查**——它和桌面安装包是同一套首启向导：先选 Chat 连接类型、按需选 preset，创建或编辑第一条稳定-ID Chat 记录，同时保留已有 fallback、Embedding route 与共享 settings；完整路由管理使用设置页或 `openbiliclaw models ...`。随后选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit）并校验前置条件。
 
-> ⚠️ **容器内「开始初始化」按钮不可用**：Docker 运行时后端会拒绝网页发起的图形化初始化（`unsupported_runtime`），向导页会直接给出替代命令。在 `/setup/` 完成配置和前置检查后，初始化本身在宿主机执行：
+> ⚠️ **容器内改为复制宿主机命令**：Docker 运行时后端会拒绝网页发起的图形化初始化（`unsupported_runtime`）；`/setup/`、`/web` 和插件会直接展示可复制的替代命令，不会先发送一个注定失败的请求。CLI 上次初始化失败时，重开页面仍会显示真实失败原因并回到恢复步骤。在 `/setup/` 完成配置和前置检查后，初始化本身在宿主机执行：
 >
 > ```bash
 > docker exec -it openbiliclaw-backend openbiliclaw init

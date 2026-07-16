@@ -10,9 +10,9 @@ from dataclasses import replace
 from types import FunctionType
 from typing import TYPE_CHECKING, cast
 
+import click
 import pytest
 import typer
-from typer import _click as click
 from typer.testing import CliRunner
 
 from openbiliclaw import cli as cli_module

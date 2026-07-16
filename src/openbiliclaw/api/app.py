@@ -2593,6 +2593,17 @@ def create_app(
                         if candidate.startswith("画像分析失败："):
                             account_profile_error = candidate[:500]
 
+        last_failure_reason = ""
+        last_failure_detail = ""
+        if not initialized and not running:
+            run_status = str(run.get("status") or "")
+            if run_status in ("failed", "cancelled"):
+                last_failure_reason = str(run.get("reason") or run_status)
+                last_failure_detail = str(run.get("detail") or "")
+            if account_profile_error and not last_failure_detail:
+                last_failure_reason = "analyze_failed"
+                last_failure_detail = account_profile_error
+
         embedding_check, embedding_detail = await _diagnose_embedding(bool(embedding))
         pull_progress = _embedding_pull_progress_view()
         pull_status = str(pull_progress.get("status_text") or "")
@@ -2646,6 +2657,10 @@ def create_app(
         else:
             reason, detail = "none", ""
 
+        start_mode: Literal["web", "cli_only", "local_only"] = (
+            "cli_only" if not supported else "web" if trusted else "local_only"
+        )
+
         return InitStatusOut(
             initialized=initialized,
             running=running,
@@ -2657,6 +2672,7 @@ def create_app(
             partial_success=bool(run["partial_success"]),
             can_start=can_start,
             can_manage=trusted,
+            start_mode=start_mode,
             prerequisites=InitPrerequisitesOut(
                 bilibili_logged_in=(bili == "ok"),
                 bilibili_check=bili,
@@ -2675,6 +2691,8 @@ def create_app(
             ),
             reason=reason,
             detail=detail,
+            last_failure_reason=last_failure_reason,
+            last_failure_detail=last_failure_detail,
             last_activity=str(run.get("last_activity") or ""),
         )
 

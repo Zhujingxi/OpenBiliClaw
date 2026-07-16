@@ -864,7 +864,7 @@ test("getPopupState distinguishes offline uninitialized refreshing empty and rea
   assert.equal(ready.items[0]?.bvid, "BV1ready");
 });
 
-test("getPopupState does not show init prompt while refresh or pool signals are active", () => {
+test("getPopupState trusts profile readiness over refresh or pool signals", () => {
   assert.deepEqual(
     getPopupState({
       online: true,
@@ -894,8 +894,8 @@ test("getPopupState does not show init prompt while refresh or pool signals are 
       },
     }),
     {
-      kind: "empty",
-      message: "这会儿还没新东西，先运行 init、discover 或 recommend",
+      kind: "uninitialized",
+      message: "还没完成初始化，先运行 openbiliclaw init",
       items: [],
     },
   );
@@ -965,6 +965,7 @@ test("normalizeRuntimeStatus fills stable fallback fields", () => {
     last_update_error: "",
     backend_update_state: "unknown",
     backend_update_reason: "none",
+    last_account_sync_error: "",
   });
 });
 
@@ -1004,6 +1005,7 @@ test("normalizeRuntimeStatus preserves backend update summary fields", () => {
       last_update_error: "",
       backend_update_state: "update_available",
       backend_update_reason: "none",
+      last_account_sync_error: "",
     },
   );
 });

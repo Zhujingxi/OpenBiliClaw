@@ -124,6 +124,9 @@ def _status(
     reason: str = "none",
     detail: str = "",
     partial_success: bool = False,
+    start_mode: str = "web",
+    last_failure_reason: str = "",
+    last_failure_detail: str = "",
     enabled_platforms: list[str] | None = None,
     stages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -144,6 +147,7 @@ def _status(
         "partial_success": partial_success,
         "can_start": can_start,
         "can_manage": True,
+        "start_mode": start_mode,
         "prerequisites": {
             "bilibili_logged_in": True,
             "bilibili_check": "ok",
@@ -153,6 +157,8 @@ def _status(
         },
         "reason": reason,
         "detail": detail,
+        "last_failure_reason": last_failure_reason,
+        "last_failure_detail": last_failure_detail,
     }
 
 
@@ -743,7 +749,7 @@ def test_web_e2e_surfaces_timeout_cause_and_recovery_actions(
         assert chromium_page.locator('[data-init-action="settings"]').is_visible()
 
 
-def test_desktop_web_e2e_matches_popup_when_runtime_has_post_init_signals(
+def test_desktop_web_e2e_keeps_recovery_visible_with_preprofile_pool_signals(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
 ) -> None:
@@ -762,9 +768,59 @@ def test_desktop_web_e2e_matches_popup_when_runtime_has_post_init_signals(
 
     chromium_page.goto(f"{base_url}/web/")
 
-    chromium_page.wait_for_selector(".empty-state")
-    assert chromium_page.locator(".init-onboarding").count() == 0
-    assert chromium_page.locator("#loadMoreBtn").is_visible()
+    chromium_page.wait_for_selector(".init-onboarding")
+    assert chromium_page.locator(".init-onboarding").is_visible()
+    assert chromium_page.locator('[data-init-action="start"]').is_visible()
+
+
+def test_desktop_web_e2e_docker_recovery_copies_command_without_post(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    base_url, stub = guided_init_server
+    stub.current_status = _status(
+        can_start=False,
+        start_mode="cli_only",
+        reason="unsupported_runtime",
+        last_failure_reason="analyze_failed",
+        last_failure_detail=ANALYZE_TIMEOUT_DETAIL,
+    )
+    _install_fake_runtime_stream(chromium_page)
+
+    chromium_page.goto(f"{base_url}/web/")
+    chromium_page.wait_for_selector(".init-cli-command")
+    assert "超过 6 分钟" in chromium_page.locator(".init-onboarding").inner_text()
+    progress = chromium_page.locator(".init-onboarding .init-progress p")
+    assert progress.is_visible()
+    assert "超过 6 分钟" in progress.inner_text()
+    assert progress.get_attribute("role") == "alert"
+    assert "docker exec -it" in chromium_page.locator(".init-cli-command").inner_text()
+    chromium_page.locator('[data-init-action="start"]').click()
+    chromium_page.wait_for_timeout(100)
+    assert stub.init_posts == []
+
+
+def test_setup_wizard_e2e_resumes_failed_docker_init_on_recovery_step(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    base_url, stub = guided_init_server
+    stub.current_status = _status(
+        can_start=False,
+        start_mode="cli_only",
+        reason="unsupported_runtime",
+        last_failure_reason="analyze_failed",
+        last_failure_detail=ANALYZE_TIMEOUT_DETAIL,
+    )
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.wait_for_selector('[data-panel="2"].active')
+    assert "超过 6 分钟" in chromium_page.locator("#initReason").inner_text()
+    assert chromium_page.locator("#startInit").inner_text() == "复制初始化命令"
+    assert "docker exec -it" in chromium_page.locator("#initCliCommand").inner_text()
+    chromium_page.locator("#startInit").click()
+    chromium_page.wait_for_timeout(100)
+    assert stub.init_posts == []
 
 
 def test_setup_wizard_e2e_watchdog_polls_when_runtime_stream_is_silent(
@@ -852,7 +908,7 @@ def test_desktop_web_e2e_surfaces_init_start_conflict(
     [
         ("bilibili_not_logged_in", "还没检测到 B 站登录"),
         ("llm_not_ready", "AI 服务还没配好"),
-        ("unsupported_runtime", "docker exec -it openbiliclaw-backend openbiliclaw init"),
+        ("unsupported_runtime", "复制下方命令"),
         ("already_initialized", "已经初始化过了"),
     ],
 )
@@ -876,7 +932,28 @@ def test_desktop_web_e2e_surfaces_post_init_prereq_race_errors(
         "(expected) => document.querySelector('.init-reason')?.innerText.includes(expected)",
         arg=expected,
     )
+    if code == "unsupported_runtime":
+        assert "docker exec -it" in chromium_page.locator(".init-cli-command").inner_text()
     assert chromium_page.locator('[data-init-action="start"]').is_enabled()
+
+
+def test_setup_wizard_e2e_switches_to_cli_recovery_on_runtime_race(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    base_url, stub = guided_init_server
+    stub.post_init_error = (409, {"error": "unsupported_runtime"})
+
+    chromium_page.goto(f"{base_url}/setup/")
+    _save_setup_model(chromium_page)
+    chromium_page.locator("#next1").click()
+    chromium_page.wait_for_selector('[data-panel="2"].active')
+    chromium_page.locator("#startInit").click()
+
+    chromium_page.wait_for_selector("#initCliCommand.show")
+    assert stub.init_posts == [{"sources": ["bilibili"]}]
+    assert "docker exec -it" in chromium_page.locator("#initCliCommand").inner_text()
+    assert chromium_page.locator("#startInit").inner_text() == "复制初始化命令"
 
 
 def test_desktop_web_e2e_retries_status_after_terminal_event_fetch_failure(

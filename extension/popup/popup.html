@@ -3169,6 +3169,20 @@
       text-align: center;
     }
 
+    .init-cli-command {
+      margin: 8px 0;
+      padding: 8px 10px;
+      border: 1px solid rgba(90, 169, 255, 0.25);
+      border-radius: 10px;
+      background: rgba(90, 169, 255, 0.08);
+      color: var(--text-main);
+      overflow-wrap: anywhere;
+    }
+
+    .init-cli-command code {
+      font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
     /* Liveness / expectation line under the progress bar (init-progress
        Phase 2): quiet while fresh, amber once >90s without backend activity. */
     .init-stall-hint {
@@ -5248,6 +5262,7 @@
               <p id="initProgressLabel" class="init-progress-label" role="status" aria-live="polite" aria-atomic="true"></p>
             </div>
             <p id="initStallHint" class="init-stall-hint" hidden></p>
+            <p id="initCliCommand" class="init-cli-command" hidden><code>docker exec -it openbiliclaw-backend openbiliclaw init</code></p>
             <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
             <p id="initStartReason" class="init-start-reason" hidden role="status" aria-live="polite" aria-atomic="true"></p>
           </div>

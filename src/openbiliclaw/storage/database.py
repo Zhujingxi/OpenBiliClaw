@@ -10888,6 +10888,72 @@ class Database:
             params,
         )
 
+    def record_external_init_failure(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+        detail: str,
+        stage: int,
+    ) -> bool:
+        """Persist a terminal CLI/bootstrap failure for GUI recovery surfaces.
+
+        CLI initialization runs in a separate process from the API runtime, so
+        it cannot reuse the in-memory :class:`InitCoordinator`. Recording only
+        the terminal result keeps the latest failure diagnosable after the
+        command exits without pretending that cross-process live progress is
+        available. An active GUI run wins; in that case this method is a no-op.
+        """
+        labels = ("拉取数据", "分析偏好", "生成画像", "发现内容池")
+        failed_stage = max(1, min(int(stage), len(labels)))
+        stages = []
+        for index, label in enumerate(labels, start=1):
+            if index < failed_stage:
+                status = "ok"
+            elif index == failed_stage:
+                status = "failed"
+            else:
+                status = "pending"
+            stages.append(
+                {
+                    "n": index,
+                    "label": label,
+                    "status": status,
+                    "reason": reason if index == failed_stage else None,
+                }
+            )
+
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT 1 FROM init_runs WHERE status IN ('starting','running') LIMIT 1"
+            ).fetchone()
+            if active is not None:
+                conn.rollback()
+                return False
+            conn.execute(
+                """
+                INSERT INTO init_runs (
+                    run_id, status, stage, stages_json, partial_success,
+                    error_reason, error_detail, sequence,
+                    started_at, updated_at, finished_at
+                ) VALUES (?, 'failed', ?, ?, 0, ?, ?, 1,
+                          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    run_id,
+                    failed_stage,
+                    json.dumps(stages, ensure_ascii=False),
+                    reason,
+                    detail.strip(),
+                ),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
     def reconcile_init_runs_on_boot(self) -> int:
         """Fail any run left ``starting``/``running`` by a crash/restart.
 
