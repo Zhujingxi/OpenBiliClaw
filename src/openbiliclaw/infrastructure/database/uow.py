@@ -22,8 +22,8 @@ from openbiliclaw.infrastructure.database.repositories import (
     SQLAlchemyProfileRepository,
     SQLAlchemySettingsRepository,
     SQLAlchemySourceAccountRepository,
-    SQLAlchemySourceTaskRepository,
 )
+from openbiliclaw.infrastructure.sources.browser_tasks import SQLAlchemyBrowserTaskRepository
 
 
 class UnitOfWork:
@@ -41,7 +41,7 @@ class UnitOfWork:
         self.interactions = SQLAlchemyInteractionRepository(self.session)
         self.collections = SQLAlchemyCollectionRepository(self.session)
         self.chat = SQLAlchemyChatRepository(self.session)
-        self.source_tasks = SQLAlchemySourceTaskRepository(self.session)
+        self.source_tasks = SQLAlchemyBrowserTaskRepository(self.session)
         self.job_runs = SQLAlchemyJobRunRepository(self.session)
         self.ai_runs = SQLAlchemyAIRunRepository(self.session)
 

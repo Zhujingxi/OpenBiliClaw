@@ -28,7 +28,6 @@ from openbiliclaw.infrastructure.database.models import (
     ProfileRevisionModel,
     SettingModel,
     SourceAccountModel,
-    SourceTaskModel,
 )
 from openbiliclaw.infrastructure.security.credentials import EncryptedCredential
 
@@ -149,14 +148,6 @@ class ChatRepository(Protocol):
     """Persistence port for chat turns."""
 
     def add(self, turn: ChatTurn) -> None: ...
-
-
-class SourceTaskRepository(Protocol):
-    """Persistence port on which Task 19 builds lease-safe source work."""
-
-    def add_pending(
-        self, *, source_id: str, operation: str, payload: dict[str, object]
-    ) -> UUID: ...
 
 
 class JobRunRepository(Protocol):
@@ -503,32 +494,6 @@ class SQLAlchemyChatRepository:
                 ai_run_id=str(turn.ai_run_id) if turn.ai_run_id else None,
             )
         )
-
-
-class SQLAlchemySourceTaskRepository:
-    """Low-level adapter reserved for the Task 19 source-task service."""
-
-    def __init__(self, session: Session) -> None:
-        self._session = session
-
-    def add_pending(self, *, source_id: str, operation: str, payload: dict[str, object]) -> UUID:
-        task_id = uuid4()
-        now = _utc_now()
-        self._session.add(
-            SourceTaskModel(
-                id=str(task_id),
-                source_id=source_id,
-                operation=operation,
-                status="pending",
-                request_payload=payload,
-                result_payload=None,
-                lease_token=None,
-                lease_expires_at=None,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        return task_id
 
 
 class SQLAlchemyJobRunRepository:

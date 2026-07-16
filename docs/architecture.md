@@ -1,11 +1,16 @@
 # 架构设计
 
-## vNext 领域、持久化与类型化 AI 基础（未接入生产）
+## vNext 领域、来源、持久化与类型化 AI 基础（未接入生产）
 
-backend-first vNext 已交付三层隔离基础：`src/openbiliclaw/features/` 的冻结 Pydantic 领域契约与纯策略，`src/openbiliclaw/infrastructure/` 的 SQLAlchemy repository / Unit of Work、Alembic schema、类型化系统设置和 Fernet 凭据密文适配，以及仅经 LiteLLM 的 PydanticAI typed-task 边界。领域层仍不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage；依赖方向由 infrastructure 指向 feature contracts。
+backend-first vNext 已交付四组隔离基础：`src/openbiliclaw/features/` 的冻结 Pydantic 领域契约与纯策略，七平台 capability manifest / 显式 registry / generic source task service，`src/openbiliclaw/infrastructure/` 的只读来源 normalizer、SQLAlchemy repository / Unit of Work、Alembic schema、类型化系统设置和 Fernet 凭据密文适配，以及仅经 LiteLLM 的 PydanticAI typed-task 边界。领域 domain 仍不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage；来源原始 HTTP/CLI/SDK/DOM row 只存在于各自 infrastructure source package。
 
 ```text
-Future source adapters
+retained transports (HTTP / CLI / logged-in extension tab)
+        │ raw rows stay inside each source package
+        ▼
+7 explicit SourceManifest + Connector adapters
+        ├─► immutable ActivityEvent / ContentItem
+        └─► generic SourceTaskService ─► source_tasks (lease claim/complete)
         │ normalized domain objects
         ▼
 features: Activity ──► Profile ─────┐
@@ -34,18 +39,20 @@ future application use cases ──► reusable TaskSpec + PydanticAI Agent
                                                      │ limits/cache
                                                      └─► LiteLLM PostgreSQL
 
-Implemented: domain contracts/policies; isolated schema/migration; repository/UoW;
-             typed settings; credential cipher; typed AI tasks/runner/embedding/health;
-             LiteLLM + PostgreSQL Compose and offline eval datasets
-Deferred: production composition, data migration, source/job services, application
+Implemented: domain contracts/policies; seven source manifests/connectors/settings;
+             lease-safe generic source tasks; isolated schema/migration; repository/UoW;
+             credential cipher; typed AI tasks/runner/embedding/health; LiteLLM Compose/evals
+Deferred: production source composition/extension rewiring, data migration, job services, application
           use cases, /api/v1, frontend cutover, least-privilege LiteLLM virtual key
 ```
 
 vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO`；`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
 
+七个平台 registry 只在 composition time 显式构造，不扫描动态插件。connector manifest 按当前真实链路保留 activity import、search、trending、recommended、creator、community、related、explore 的平台子集；缺失能力直接拒绝。generic task payload/result 只接受 JSON 且递归拒绝 credential-shaped key，浏览器 Cookie 留在扩展已登录 tab。task claim 以来源、状态和 lease expiry 条件更新，旧 token 不得完成重领任务，相同结果 callback 可幂等重试。详细矩阵见 [vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。
+
 AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。四个 task 的 PydanticAI output validator 分别约束 evidence provenance、keyword uniqueness/limit、candidate content/profile identity 和 explanation grounding；中文 grounding 使用排除通用话术的重叠 CJK 2/3-gram，并要求 shared trigram coverage 或两个独立 unit，candidate 的 application row ID 不由模型生成。四份 versioned Pydantic Evals dataset 使用 task-specific offline invariant evaluator，推荐解释另配置只供显式 eval 使用的 `LLMJudge` rubric；deterministic guard 不替代该主观事实忠实度评测。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。Compose 已可独立启动 LiteLLM/PostgreSQL、在 loopback `/ui` 配置 provider，并让源码/预构建路径挂载同一 policy，但未启动验证，也尚无生产 use case 构造 typed runner。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
 
-本节不是运行时切换声明。当前生产 API、runtime、CLI 和前端没有构造这套 vNext persistence/AI；Docker installer 只负责生成 Compose 基础设施密钥。下面的 v0.3 系统概览与 `storage/database.py` 仍描述唯一真实业务执行和用户数据路径。只有后续完成 composition root、数据迁移与切换验证后，vNext 才能成为运行时权威。
+本节不是运行时切换声明。当前生产 API、runtime、CLI 和前端没有构造这套 vNext persistence/AI/source registry，扩展也尚未改用 generic claim/complete；Docker installer 只负责生成 Compose 基础设施密钥。下面的 v0.3 系统概览与 `storage/database.py` 仍描述唯一真实业务执行和用户数据路径。只有后续完成 composition root、HTTP/扩展接线、数据迁移与切换验证后，vNext 才能成为运行时权威。
 
 ## 当前 v0.3 系统概览
 

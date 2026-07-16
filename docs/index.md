@@ -42,6 +42,7 @@
 | vNext 领域契约 | [modules/vnext-domain.md](modules/vnext-domain.md) | `src/openbiliclaw/features/*/domain.py` | 🚧 已冻结领域边界，尚未接入运行时 / API |
 | vNext 持久化与设置 | [modules/vnext-persistence.md](modules/vnext-persistence.md) | `src/openbiliclaw/infrastructure/database/` + `infrastructure/security/` + `features/system/` + `alembic/` | 🚧 SQLAlchemy/Alembic、typed settings 与 Fernet 基础已实现；legacy storage/runtime 仍是生产权威 |
 | vNext 类型化 AI | [modules/vnext-ai.md](modules/vnext-ai.md) | `src/openbiliclaw/infrastructure/ai/` + `evals/datasets/` + LiteLLM Compose | 🚧 PydanticAI typed tasks、三稳定别名、secret-safe ai_runs 与 LiteLLM 基础已实现；尚未接入生产 use case |
+| vNext 七平台来源 | [modules/vnext-sources.md](modules/vnext-sources.md) | `features/sources/` + `infrastructure/sources/` | 🚧 能力 manifest、显式 registry、只读 normalizer 与 lease-safe generic task 已实现；尚未接入 API / 扩展 |
 | LLM 多模型支持 | [modules/llm.md](modules/llm.md) | `src/openbiliclaw/llm/` | ✅ 全局 ordered Chat/Embedding route + immutable runtime bundle + connection usage 归因 |
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
 | 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / 通用 Web 多源 discovery |

@@ -63,6 +63,7 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.8",
     "mypy>=1.13",
+    "import-linter>=2.1",
 ]
 local-llm = [
     "ollama>=0.4",
@@ -172,3 +173,9 @@ name = "Features do not depend on HTTP"
 type = "forbidden"
 source_modules = ["openbiliclaw.features"]
 forbidden_modules = ["openbiliclaw.api"]
+
+[[tool.importlinter.contracts]]
+name = "Source features do not depend on infrastructure"
+type = "forbidden"
+source_modules = ["openbiliclaw.features.sources"]
+forbidden_modules = ["openbiliclaw.infrastructure"]

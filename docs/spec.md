@@ -207,19 +207,20 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ## 3. 系统架构
 
-### 3.1 vNext 领域、持久化与类型化 AI 基础（尚非运行时权威）
+### 3.1 vNext 领域、来源、持久化与类型化 AI 基础（尚非运行时权威）
 
-v0.4.0 先冻结 feature-oriented 领域契约和确定性策略，再在其外侧加入隔离的 SQLAlchemy/Alembic persistence、类型化系统设置、凭据加密和只经 LiteLLM 的 typed AI 基础。连线标出已实现的依赖方向与后续 use case 的预期关系，不表示生产请求已切换；v0.3 API、runtime、legacy storage 和四端客户端仍是当前实际路径。
+v0.4.0 先冻结 feature-oriented 领域契约和确定性策略，再加入七平台 capability connector / generic source task、隔离的 SQLAlchemy/Alembic persistence、类型化系统设置、凭据加密和只经 LiteLLM 的 typed AI 基础。连线标出已实现的依赖方向与后续 use case 的预期关系，不表示生产请求已切换；v0.3 API、runtime、legacy storage 和四端客户端仍是当前实际路径。
 
 ```text
-Future source adapters
-        │
+HTTP / CLI / logged-in browser transports
+        │ raw rows contained by source package
         ▼
-SourceManifest + SourceConnector
+7 explicit SourceManifest + SourceConnector adapters
         ├────────► ActivityEvent ──► ProfileSignal ──► ProfileSnapshot / ProfileDelta
         └────────► ContentItem ──► CandidateAssessment ──► FeedEntry ──► Interaction
                          ├────────► CollectionItem
                          └────────► ChatTurn
+        └────────► SourceTaskService ─ lease claim/complete ─► source_tasks
         │
         │ typed repository contracts
         ▼
@@ -241,10 +242,11 @@ Future application use cases
         └─ AIHealthService ─ alias-only redacted status
                                              LiteLLM ─► dedicated PostgreSQL
 
-Implemented now: domain contracts/policies, schema/migration, repositories/UoW,
+Implemented now: domain contracts/policies, seven source manifests/connectors/settings,
+                 generic lease-safe source tasks, schema/migration, repositories/UoW,
                  typed settings, encrypted source credentials, typed AI tasks,
                  embedding/health clients, offline eval datasets, LiteLLM Compose
-Deferred: production composition, legacy data migration, source/job services,
+Deferred: production source/API/extension composition, legacy data migration, job services,
           application use cases, /api/v1, frontend cutover, LiteLLM virtual key
 Authoritative now: v0.3 legacy storage/runtime shown in section 3.2
 ```

@@ -584,12 +584,14 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
-### vNext Domain, Persistence, and Typed AI Foundation (not cut over)
+### vNext Domain, Seven Sources, Persistence, and Typed AI Foundation (not cut over)
 
-v0.4.0 now includes framework-independent domain contracts, isolated SQLAlchemy/Alembic persistence, typed settings, Fernet credential encryption, and a PydanticAI typed-task boundary routed only through LiteLLM. **The current API, business runtime, CLI, and frontend do not use them yet.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live business path.
+v0.4.0 now includes framework-independent domain contracts, seven capability-based source connectors and lease-safe generic source tasks, isolated SQLAlchemy/Alembic persistence, typed settings, Fernet credential encryption, and a PydanticAI typed-task boundary routed only through LiteLLM. **The current API, business runtime, CLI, and frontend do not use them yet, and the extension has not switched to the generic task route.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live business path.
 
 ```text
-SourceManifest + SourceConnector ──normalized──► Activity / Profile / Content / Feed
+7 explicit SourceManifest + Connectors ──normalized──► Activity / Profile / Content / Feed
+             │ generic lease claim/complete
+             └───────────────────────────────────────► source_tasks
                                    │ typed repositories
                                    ▼
                      SQLAlchemy repositories + UnitOfWork
@@ -603,12 +605,13 @@ future use cases ─► typed TaskSpec / PydanticAI ─► TaskRunner ─► Lit
                        ├─ obc-interactive / obc-analysis│ routing/fallback/retry/cache
                        └─ obc-embedding ◄─ embeddings ──┘
 
-Implemented: domain/persistence foundations, typed AI/embedding/health,
+Implemented: domain/seven-source/task/persistence foundations, typed AI/embedding/health,
              offline eval datasets, and LiteLLM Compose
-Not wired: production use cases/runtime/API, legacy data migration, or frontend cutover
+Not wired: production source composition, HTTP/extension task routes, use cases/runtime/API,
+           legacy data migration, or frontend cutover
 ```
 
-Application code only knows the stable aliases `obc-interactive`, `obc-analysis`, and `obc-embedding`; LiteLLM alone owns provider routing/fallback, network retries, limits, and caching. See [vNext Typed AI](docs/modules/vnext-ai.md).
+Application code only knows the stable aliases `obc-interactive`, `obc-analysis`, and `obc-embedding`; LiteLLM alone owns provider routing/fallback, network retries, limits, and caching. See [vNext Sources and Generic Browser Tasks](docs/modules/vnext-sources.md) for the capability matrix and [vNext Typed AI](docs/modules/vnext-ai.md) for the model boundary.
 
 ### Current v0.3 Runtime Architecture
 
