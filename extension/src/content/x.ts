@@ -27,6 +27,7 @@ import type {
 import type { BehaviorEvent } from "../shared/types.js";
 import { installNativeSaveExecutor } from "./native-save/runtime.ts";
 import { saveX } from "./native-save/x.ts";
+import { COMMENT_TEXT_MAX_CHARS, sanitizeUserText } from "../shared/text-sanitize.ts";
 
 // Keep CapturedXRequest referenced so the type import survives tree-shaking
 // (the tap and this file share the same engagement contract).
@@ -72,6 +73,13 @@ export function buildEventFromEngagement(engagement: XEngagement): BehaviorEvent
       metadata.retracted_action = engagement.retracted_action;
     }
     metadata.signal_strength = RETRACTION_SIGNAL_STRENGTH;
+  } else if (engagement.type === "comment" && typeof engagement.text === "string") {
+    // Extension-side sanitization (first layer); the backend repeats it.
+    const cleaned = sanitizeUserText(engagement.text, COMMENT_TEXT_MAX_CHARS);
+    if (cleaned) {
+      metadata.comment_text = cleaned;
+      metadata.comment_kind = "comment";
+    }
   }
 
   const href = currentHref();

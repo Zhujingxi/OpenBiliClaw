@@ -65,6 +65,12 @@ export interface XEngagement {
   user_id?: string;
   /** Present for retraction only — the withdrawn positive action. */
   retracted_action?: RetractedAction;
+  /**
+   * Present for a comment (reply CreateTweet) only, and only when the
+   * mutation actually succeeded (no GraphQL errors) — the raw reply body.
+   * The content script sanitizes it before recording (never trust MAIN world).
+   */
+  text?: string;
 }
 
 // GraphQL operation name → event type. Engagement + opens only; discovery
@@ -165,6 +171,21 @@ const RETRACTION_ID_KEYS = ["tweet_id", "tweetId", "source_tweet_id"] as const;
 const REPLY_KEYS = ["reply"] as const;
 const IN_REPLY_TO_KEYS = ["in_reply_to_tweet_id", "in_reply_to_status_id"] as const;
 const USER_ID_KEYS = ["user_id", "userId", "id_str"] as const;
+const TWEET_TEXT_KEYS = ["tweet_text"] as const;
+
+/**
+ * True when a GraphQL response carries a non-empty top-level `errors` array —
+ * i.e. the mutation failed at the business layer despite an HTTP 2xx. Used to
+ * gate reply-body attachment (invariant 7b: network success = business
+ * success). Best effort: an unparseable body is treated as no errors so the
+ * existing comment event (tweet_id) is unaffected.
+ */
+function hasGraphqlErrors(responseBody: string): boolean {
+  const parsed = safeJsonParse(responseBody);
+  if (!parsed || typeof parsed !== "object") return false;
+  const errors = (parsed as { errors?: unknown }).errors;
+  return Array.isArray(errors) && errors.length > 0;
+}
 
 /** Pull a form-encoded field (e.g. follow's `user_id`). */
 function findFormField(body: string, name: string): string {
@@ -234,7 +255,15 @@ export function parseXMutation(captured: CapturedXRequest): XEngagement | null {
     if (reply === null) return null;
     const inReplyTo = findFirstString(reply, IN_REPLY_TO_KEYS);
     if (!inReplyTo) return null;
-    return { type, tweet_id: inReplyTo };
+    const engagement: XEngagement = { type, tweet_id: inReplyTo };
+    // Attach the reply body only when the mutation succeeded (invariant 7b).
+    // The comment event's existing emission timing is unchanged — a failed
+    // reply still fires the comment event, just without the body text.
+    const text = findFirstString(reqJson, TWEET_TEXT_KEYS);
+    if (text && !hasGraphqlErrors(responseBody)) {
+      engagement.text = text;
+    }
+    return engagement;
   }
 
   // TweetDetail is a GET — the focalTweetId lives in the URL's `variables`.
