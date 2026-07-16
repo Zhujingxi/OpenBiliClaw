@@ -1,25 +1,36 @@
 # 架构设计
 
-## vNext 领域基础（未接线）
+## vNext 领域与持久化基础（未接入生产）
 
-backend-first vNext 当前只交付 `src/openbiliclaw/features/*/domain.py` 领域边界。该边界使用冻结 Pydantic 契约表达活动证据、证据画像、候选评估、Feed 交互、本地集合、聊天与来源能力，并以纯函数实现画像合并和 Feed 低水位缺口；它不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。
+backend-first vNext 已交付两层隔离基础：`src/openbiliclaw/features/` 的冻结 Pydantic 领域契约与纯策略，以及 `src/openbiliclaw/infrastructure/` 的 SQLAlchemy repository / Unit of Work、Alembic schema、类型化系统设置和 Fernet 凭据密文适配。领域层仍不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage；依赖方向由 infrastructure 指向 feature contracts。
 
 ```text
-features.sources.SourceManifest + SourceConnector
-          ├─ import_activity() ──► tuple[features.activity.ActivityEvent, ...]
-          └─ discover() ─────────► tuple[features.feed.ContentItem, ...]
+Future source adapters
+        │ normalized domain objects
+        ▼
+features: Activity ──► Profile ─────┐
+          Content  ──► Assessment ──┼─► Feed / Interaction / Collection
+          Chat / Sources / System ──┘
+        │ repository ports / typed settings
+        ▼
+infrastructure.database
+        ├─ SQLAlchemy mappings + repositories + UnitOfWork
+        ├─ Alembic 0001 ──► data/vnext/openbiliclaw.db
+        └─ settings / source_accounts / activity / profile / content / feed
+           / collections / chat / source_tasks / job_runs / ai_runs
+        │
+        └─ infrastructure.security.CredentialCipher
+              OPENBILICLAW_SECRET_KEY ──► derived Fernet key ──► opaque ciphertext only
 
-features.activity：ActivityEvent + ProfileSignal（事件投影 use case 待接入）
-features.profile ：ProfileSnapshot + ProfileDelta + apply_profile_delta()
-features.feed    ：ContentItem + CandidateAssessment + FeedEntry + Interaction
-features.library ：CollectionItem（引用 content_id）
-features.chat    ：ChatTurn（独立的持久化对话契约）
-
-已实现：冻结契约、递归不可变 JSON metadata、确定性纯策略
-未实现：repository / AI runner / source adapter / use case / job / /api/v1 接线
+Implemented: domain contracts and policies; isolated schema and migration;
+             repository/UoW; DatabaseSettings/UserSettings; credential cipher
+Deferred: runtime composition, installer key lifecycle, data migration, AI/source/job
+          services, use cases, /api/v1, frontend cutover
 ```
 
-因此本节不是运行时切换声明。下面的 v0.3 系统概览仍描述当前实际执行路径；vNext persistence、AI、adapter、use case、API 和前端切换会在后续任务逐层接入。
+vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO`；`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
+
+本节不是运行时切换声明。当前生产 API、runtime、CLI、安装器和前端没有构造这套 vNext persistence；下面的 v0.3 系统概览与 `storage/database.py` 仍描述唯一真实执行和用户数据路径。只有后续完成 composition root、数据迁移与切换验证后，vNext 才能成为运行时权威。
 
 ## 当前 v0.3 系统概览
 

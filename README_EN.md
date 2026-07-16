@@ -576,18 +576,24 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
-### vNext Domain Foundation (contracts only)
+### vNext Domain and Persistence Foundation (not cut over)
 
-v0.4.0 now includes the framework-independent domain contracts, but they are **not yet wired into the current API, runtime, database, or frontend**. Later backend-first tasks will add persistence, AI, source adapters, use cases, and `/api/v1` above this boundary. Until that cutover, the v0.3 architecture below remains the live path.
+v0.4.0 now includes the framework-independent domain contracts plus isolated SQLAlchemy/Alembic persistence, typed settings, and Fernet credential encryption foundations. **The current API, runtime, CLI, installer, and frontend do not use them yet.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live path.
 
 ```text
-SourceManifest + SourceConnector ──normalized results──► ActivityEvent | ContentItem
-Activity: ActivityEvent + ProfileSignal (event-projection use case deferred)
-Profile: ProfileSnapshot + ProfileDelta + apply_profile_delta()
-Feed: ContentItem + CandidateAssessment + FeedEntry + Interaction
-Library: CollectionItem (content_id reference)    Chat: ChatTurn (standalone contract)
+SourceManifest + SourceConnector ──normalized──► Activity / Profile / Content / Feed
+                                   │ typed repositories
+                                   ▼
+                     SQLAlchemy repositories + UnitOfWork
+                                   │
+            Alembic 0001 ──► data/vnext/openbiliclaw.db (isolated)
+                                   ├─ typed DatabaseSettings / UserSettings
+                                   └─ Fernet credential ciphertext
 
-Current state: frozen Pydantic contracts + pure policies; no runtime/storage/API wiring
+Implemented: domain contracts, schema/migration, repositories/UoW,
+             typed settings and credential encryption foundations
+Not wired: production runtime/API, installer key lifecycle, legacy data migration,
+           or frontend cutover
 ```
 
 ### Current v0.3 Runtime Architecture

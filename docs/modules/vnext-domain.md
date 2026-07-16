@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-本模块是 backend-first vNext 的第一层基础，只定义无框架依赖的不可变领域契约与纯策略；当前 legacy runtime、存储、CLI 和公开 API 尚未切换到这些类型。领域模块不得导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。
+本模块是 backend-first vNext 的第一层基础，只定义无框架依赖的不可变领域契约与纯策略；相邻的 [vNext 持久化模块](vnext-persistence.md) 已提供 SQLAlchemy/Alembic adapter，但当前 legacy runtime、存储、CLI 和公开 API 尚未切换到这些类型。领域模块本身仍不得导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。
 
 ## 已实现功能
 
@@ -14,7 +14,8 @@
 | 本地收藏 | ✅ | `CollectionItem` 只表达 favorites / watch-later 本地集合成员关系 |
 | 持久化聊天 | ✅ | `ChatTurn` 表达 user / assistant 对话轮次 |
 | 来源能力 | ✅ | `SourceManifest` 声明能力；`SourceConnector` 只返回规范化活动或内容对象 |
-| 运行时接线 | 🚧 | 持久化、AI、来源 adapter、use case、API 与现有前端切换由后续任务实现 |
+| 相邻持久化 adapter | ✅ | 独立 vNext SQLAlchemy/Alembic 基础已实现，但不属于本领域模块且未接入生产路径 |
+| 运行时接线 | 🚧 | AI、来源 adapter、use case、API、数据迁移与现有前端切换由后续任务实现 |
 
 ## 公开 API
 
