@@ -1,4 +1,4 @@
-name: profile_delta_foundation
+name: profile_delta_foundation_v1
 cases:
   - name: adds_evidence_backed_interest
     inputs:
@@ -24,5 +24,9 @@ cases:
       removals: []
     metadata:
       rubric: "Every inferred facet is supported by supplied evidence and no user override is removed."
+      min_changes: 1
+      max_changes: 3
+      required_concepts:
+        - "procedural modeling"
 evaluators:
-  - EqualsExpected
+  - ProfileDeltaInvariants

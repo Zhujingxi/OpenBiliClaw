@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import TypeVar
 from uuid import UUID  # noqa: TC003 - Pydantic resolves this annotation at runtime
 
@@ -14,6 +13,7 @@ from openbiliclaw.features.feed.domain import (  # noqa: TC001 - Pydantic resolv
     ContentItem,
 )
 from openbiliclaw.features.profile.domain import ProfileDelta, ProfileSnapshot
+from openbiliclaw.infrastructure.ai.grounding import is_grounded_in
 from openbiliclaw.infrastructure.ai.spec import CachePolicy, TaskLane, TaskSpec
 
 
@@ -182,18 +182,14 @@ def validate_recommendation_grounding(
         raise ModelRetry("recommendation assessment content does not match input content")
     if task_input.assessment.profile_revision != task_input.profile.revision:
         raise ModelRetry("recommendation assessment profile does not match input profile")
-    facts = " ".join(
-        (
-            task_input.content.title,
-            task_input.profile.narrative,
-            *task_input.assessment.topics,
-        )
+    facts = (
+        task_input.content.title,
+        task_input.content.summary,
+        task_input.profile.narrative,
+        task_input.assessment.explanation,
+        *task_input.assessment.topics,
     )
-    grounding_terms = {
-        token.casefold() for token in re.findall(r"[A-Za-z0-9\u4e00-\u9fff]{4,}", facts)
-    }
-    explanation = output.explanation.casefold()
-    if grounding_terms and not any(term in explanation for term in grounding_terms):
+    if not is_grounded_in(facts, output.explanation):
         raise ModelRetry("recommendation explanation is not grounded in supplied facts")
     return output
 

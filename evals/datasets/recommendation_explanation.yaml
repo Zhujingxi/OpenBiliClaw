@@ -1,4 +1,4 @@
-name: recommendation_explanation_foundation
+name: recommendation_explanation_foundation_v1
 cases:
   - name: concise_grounded_explanation
     inputs:
@@ -32,5 +32,23 @@ cases:
       explanation: "This practical Geometry Nodes walkthrough fits your interest in hands-on procedural modeling."
     metadata:
       rubric: "The explanation is concise and introduces no claims absent from the supplied facts."
+      min_characters: 30
+      max_characters: 180
+      required_concepts:
+        - "geometry nodes"
+        - "procedural modeling"
+        - "practical"
+      minimum_concept_matches: 1
 evaluators:
-  - EqualsExpected
+  - RecommendationExplanationInvariants
+  - LLMJudge:
+      rubric: >-
+        Judge whether the recommendation is clear, concise, useful, and grounded only in the
+        supplied profile, content, and assessment. Fail any explanation that invents facts or
+        merely copies generic recommendation language.
+      model: "openai:obc-analysis"
+      include_input: true
+      include_expected_output: false
+      assertion:
+        evaluation_name: recommendation_quality
+        include_reason: true

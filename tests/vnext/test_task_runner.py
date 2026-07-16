@@ -16,6 +16,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_evals import Dataset
 from sqlalchemy import select
 
+from openbiliclaw.infrastructure.ai.evaluators import TASK_EVALUATOR_TYPES
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
 from openbiliclaw.infrastructure.ai.spec import CachePolicy, TaskLane, TaskSpec
 from openbiliclaw.infrastructure.ai.tasks import (
@@ -340,11 +341,12 @@ async def test_cache_policy_is_forwarded_to_litellm_without_local_caching(
         ("recommendation_explanation", RECOMMENDATION_EXPLANATION_TASK),
     ],
 )
-def test_eval_dataset_cases_match_contracts_and_execute_real_evaluators(
+def test_eval_dataset_cases_match_contracts_and_configure_real_evaluators(
     dataset_name: str, spec: TaskSpec[Any, Any]
 ) -> None:
-    dataset = Dataset[dict[str, object], dict[str, object], dict[str, str]].from_file(
-        REPOSITORY_ROOT / "evals" / "datasets" / f"{dataset_name}.yaml"
+    dataset = Dataset[dict[str, object], dict[str, object], dict[str, object]].from_file(
+        REPOSITORY_ROOT / "evals" / "datasets" / f"{dataset_name}.yaml",
+        custom_evaluator_types=TASK_EVALUATOR_TYPES,
     )
 
     assert dataset.cases
@@ -352,9 +354,6 @@ def test_eval_dataset_cases_match_contracts_and_execute_real_evaluators(
     for case in dataset.cases:
         spec.input_type.model_validate(case.inputs)
         spec.output_type.model_validate(case.expected_output)
-    report = dataset.evaluate_sync(lambda inputs: {})
-    assert report.cases
-    assert report.cases[0].assertions["EqualsExpected"].value is False
 
 
 @pytest.mark.parametrize(
@@ -409,8 +408,9 @@ async def test_builtin_task_semantic_validators_trigger_model_retry(
     spec: TaskSpec[Any, Any],
     invalid_output: dict[str, object],
 ) -> None:
-    dataset = Dataset[dict[str, object], dict[str, object], dict[str, str]].from_file(
-        REPOSITORY_ROOT / "evals" / "datasets" / f"{dataset_name}.yaml"
+    dataset = Dataset[dict[str, object], dict[str, object], dict[str, object]].from_file(
+        REPOSITORY_ROOT / "evals" / "datasets" / f"{dataset_name}.yaml",
+        custom_evaluator_types=TASK_EVALUATOR_TYPES,
     )
     requests = 0
 
@@ -429,3 +429,77 @@ async def test_builtin_task_semantic_validators_trigger_model_retry(
         await runner.run(spec, dataset.cases[0].inputs)
 
     assert requests == spec.semantic_retry_limit + 1
+
+
+def _chinese_recommendation_input() -> dict[str, object]:
+    content_id = "00000000-0000-0000-0000-000000000301"
+    return {
+        "profile": {
+            "revision": 3,
+            "narrative": "喜欢简洁实用的三维建模教程",
+            "facets": [],
+            "confidence": 0.9,
+            "created_at": "2026-07-17T00:00:00Z",
+        },
+        "content": {
+            "id": content_id,
+            "source_id": "bilibili",
+            "external_id": "BV1chinese",
+            "url": "https://www.bilibili.com/video/BV1chinese",
+            "title": "几何节点实战教程",
+            "summary": "从案例出发演示节点建模方法。",
+            "media_type": "video",
+            "metadata": {},
+        },
+        "assessment": {
+            "id": "00000000-0000-0000-0000-000000000302",
+            "content_id": content_id,
+            "profile_revision": 3,
+            "relevance": 0.9,
+            "quality": 0.8,
+            "novelty": 0.6,
+            "risk": 0.1,
+            "topics": ["程序化建模"],
+            "explanation": "内容与建模兴趣相关。",
+        },
+    }
+
+
+async def test_recommendation_validator_accepts_reviewed_chinese_paraphrase() -> None:
+    output = await TaskRunner(
+        model_resolver=lambda alias: TestModel(
+            custom_output_args={"explanation": "这个视频很符合你对实用建模教程的兴趣。"}
+        ),
+        recorder=RecordingSpy(),
+    ).run(RECOMMENDATION_EXPLANATION_TASK, _chinese_recommendation_input())
+
+    assert output.explanation == "这个视频很符合你对实用建模教程的兴趣。"
+
+
+@pytest.mark.parametrize(
+    "explanation",
+    [
+        "这个视频很符合你的兴趣。",
+        "这个视频详细讲解量子物理和烹饪技巧，很符合你的兴趣。",
+    ],
+)
+async def test_recommendation_validator_rejects_unrelated_chinese_copy(
+    explanation: str,
+) -> None:
+    requests = 0
+
+    class CountingModel(TestModel):
+        async def request(self, messages: Any, model_settings: Any, parameters: Any) -> Any:
+            nonlocal requests
+            requests += 1
+            return await super().request(messages, model_settings, parameters)
+
+    with pytest.raises(Exception, match="maximum output retries"):
+        await TaskRunner(
+            model_resolver=lambda alias: CountingModel(
+                custom_output_args={"explanation": explanation}
+            ),
+            recorder=RecordingSpy(),
+        ).run(RECOMMENDATION_EXPLANATION_TASK, _chinese_recommendation_input())
+
+    assert requests == RECOMMENDATION_EXPLANATION_TASK.semantic_retry_limit + 1

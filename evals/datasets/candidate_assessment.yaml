@@ -1,4 +1,4 @@
-name: candidate_assessment_foundation
+name: candidate_assessment_foundation_v1
 cases:
   - name: relevant_practical_tutorial
     inputs:
@@ -30,5 +30,14 @@ cases:
       explanation: "Matches the profile's preference for practical procedural modeling tutorials."
     metadata:
       rubric: "Scores are finite and grounded only in the supplied profile and content facts."
+      score_ranges:
+        relevance: [0.7, 1.0]
+        quality: [0.6, 1.0]
+        novelty: [0.3, 0.9]
+        risk: [0.0, 0.3]
+      required_topics:
+        - "procedural modeling"
+        - "geometry nodes"
+      minimum_topic_matches: 1
 evaluators:
-  - EqualsExpected
+  - CandidateAssessmentInvariants

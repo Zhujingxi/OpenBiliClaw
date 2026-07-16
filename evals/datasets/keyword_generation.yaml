@@ -1,4 +1,4 @@
-name: keyword_generation_foundation
+name: keyword_generation_foundation_v1
 cases:
   - name: profile_to_source_neutral_queries
     inputs:
@@ -17,5 +17,16 @@ cases:
         - "procedural material breakdown"
     metadata:
       rubric: "Queries are distinct, profile-grounded, and do not assume a specific source platform."
+      min_keywords: 2
+      max_keywords: 4
+      required_concepts:
+        - "procedural"
+        - "modeling"
+        - "geometry"
+        - "3d"
+      minimum_relevant_keywords: 2
+      forbidden_source_terms:
+        - "bilibili"
+        - "youtube"
 evaluators:
-  - EqualsExpected
+  - KeywordGenerationInvariants
