@@ -630,8 +630,7 @@ async def test_unproductive_supply_backs_off_exponentially() -> None:
     await task
 
     intervals = [
-        later - earlier
-        for earlier, later in zip(supply_calls, supply_calls[1:], strict=False)
+        later - earlier for earlier, later in zip(supply_calls, supply_calls[1:], strict=False)
     ]
     assert len(supply_calls) <= 10
     assert intervals == sorted(intervals)
