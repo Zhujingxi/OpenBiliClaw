@@ -113,23 +113,49 @@ class _InlineApiKeyVault:
     """Process-local, concurrency-safe storage for pre-parser inline keys."""
 
     def __init__(self) -> None:
-        self._entries: dict[str, str] = {}
+        self._entries: dict[str, str | None] = {}
         self._lock = threading.Lock()
 
     def __repr__(self) -> str:
         return "<inline-api-key-vault>"
 
-    def store(self, value: str) -> _InlineApiKeyHandle:
-        while True:
-            token = secrets.token_urlsafe(32)
+    def new_handle(self) -> _InlineApiKeyHandle:
+        """Generate a capability without accepting or retaining a secret value."""
+        return _InlineApiKeyHandle(secrets.token_urlsafe(32))
+
+    def reserve(self, handle: _InlineApiKeyHandle) -> bool:
+        """Reserve a unique capability after its caller has recorded it for cleanup."""
+        with self._lock:
+            if handle.token in self._entries:
+                return False
+            self._entries[handle.token] = None
+            return True
+
+    def store(
+        self,
+        handle: _InlineApiKeyHandle,
+        secret_holder: list[str | None],
+    ) -> None:
+        """Transfer a mutable secret holder into a reserved capability."""
+        secret_value = secret_holder[0]
+        try:
+            if secret_value is None:
+                raise RuntimeError("Inline API key holder was cleared before storage.")
             with self._lock:
-                if token not in self._entries:
-                    self._entries[token] = value
-                    return _InlineApiKeyHandle(token)
+                if handle.token not in self._entries:
+                    raise RuntimeError("Inline API key handle was not reserved.")
+                self._entries[handle.token] = secret_value
+        except BaseException:
+            self.discard(handle)
+            raise
+        finally:
+            secret_value = None
+            secret_holder[0] = None
 
     def claim(self, handle: _InlineApiKeyHandle) -> str | None:
         with self._lock:
-            return self._entries.pop(handle.token, None)
+            value = self._entries.pop(handle.token, None)
+        return value if isinstance(value, str) else None
 
     def discard(self, handle: _InlineApiKeyHandle) -> None:
         with self._lock:
@@ -142,6 +168,7 @@ class _InlineApiKeyVault:
 
 _INLINE_API_KEY_VAULT = _InlineApiKeyVault()
 _INLINE_API_KEY_HANDLE_PREFIX = "__openbiliclaw_inline_api_key_handle__:"
+_INLINE_API_KEY_REDACTION = "__openbiliclaw_inline_api_key_redacted__"
 
 
 def _encode_inline_api_key_handle(handle: _InlineApiKeyHandle) -> str:
@@ -213,29 +240,57 @@ def _protect_inline_api_key_args(
     args: list[str],
     *,
     offset: int | None,
-) -> tuple[_InlineApiKeyHandle, ...]:
+    handles: list[_InlineApiKeyHandle],
+) -> None:
     """Replace model --api-key values in-place before Click copies them."""
     if offset is None:
-        return ()
-    handles: list[_InlineApiKeyHandle] = []
+        return
+    secret_holder: list[str | None] = [None]
     index = offset
-    while index < len(args):
-        value = args[index]
-        if value == "--api-key" and index + 1 < len(args):
-            if args[index + 1].startswith("--"):
+    try:
+        while index < len(args):
+            secret_index: int | None = None
+            equals_form = False
+            if args[index] == "--api-key" and index + 1 < len(args):
+                secret_index = index + 1
+                secret_holder[0] = args[secret_index]
+                args[secret_index] = _INLINE_API_KEY_REDACTION
+            elif args[index].startswith("--api-key="):
+                secret_index = index
+                equals_form = True
+                secret_holder[0] = args[index].partition("=")[2]
+                args[index] = f"--api-key={_INLINE_API_KEY_REDACTION}"
+            if secret_index is None:
                 index += 1
                 continue
-            handle = _INLINE_API_KEY_VAULT.store(args[index + 1])
-            args[index + 1] = _encode_inline_api_key_handle(handle)
-            handles.append(handle)
+
+            while True:
+                handle = _INLINE_API_KEY_VAULT.new_handle()
+                handles.append(handle)
+                if _INLINE_API_KEY_VAULT.reserve(handle):
+                    break
+                handles.pop()
+            _INLINE_API_KEY_VAULT.store(handle, secret_holder)
+            encoded = _encode_inline_api_key_handle(handle)
+            args[secret_index] = f"--api-key={encoded}" if equals_form else encoded
+            index = secret_index + 1
+    finally:
+        secret_holder[0] = None
+
+
+def _redact_inline_api_key_args(args: list[str], *, offset: int | None) -> None:
+    """Erase recognized model credential values from a retained argument view."""
+    if offset is None:
+        return
+    index = offset
+    while index < len(args):
+        if args[index] == "--api-key" and index + 1 < len(args):
+            args[index + 1] = _INLINE_API_KEY_REDACTION
             index += 2
             continue
-        if value.startswith("--api-key="):
-            handle = _INLINE_API_KEY_VAULT.store(value.partition("=")[2])
-            args[index] = f"--api-key={_encode_inline_api_key_handle(handle)}"
-            handles.append(handle)
+        if args[index].startswith("--api-key="):
+            args[index] = f"--api-key={_INLINE_API_KEY_REDACTION}"
         index += 1
-    return tuple(handles)
 
 
 class SecretSafeTyperGroup(TyperGroup):
@@ -264,15 +319,20 @@ class SecretSafeTyperGroup(TyperGroup):
             from_sys_argv = False
             protected_args = args if isinstance(args, list) else list(args)
         args = protected_args
-        handles = _protect_inline_api_key_args(
-            protected_args,
-            offset=self._model_argument_offset(protected_args),
-        )
-        if from_sys_argv:
-            sys.argv[1:] = protected_args
+        handles: list[_InlineApiKeyHandle] = []
+        model_offset: int | None = None
+        parent_args: Sequence[str] | None = None if from_sys_argv else protected_args
         try:
+            model_offset = self._model_argument_offset(protected_args)
+            _protect_inline_api_key_args(
+                protected_args,
+                offset=model_offset,
+                handles=handles,
+            )
+            if from_sys_argv:
+                sys.argv[1:] = protected_args
             return super().main(
-                args=protected_args,
+                args=parent_args,
                 prog_name=prog_name,
                 complete_var=complete_var,
                 standalone_mode=standalone_mode,
@@ -280,8 +340,15 @@ class SecretSafeTyperGroup(TyperGroup):
                 **extra,
             )
         finally:
-            for handle in handles:
-                _INLINE_API_KEY_VAULT.discard(handle)
+            try:
+                try:
+                    _redact_inline_api_key_args(protected_args, offset=model_offset)
+                finally:
+                    if from_sys_argv:
+                        sys.argv[1:] = protected_args
+            finally:
+                for handle in handles:
+                    _INLINE_API_KEY_VAULT.discard(handle)
 
 
 class _DirectModelSecretSafeTyperGroup(SecretSafeTyperGroup):

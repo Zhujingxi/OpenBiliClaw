@@ -37,12 +37,43 @@ from openbiliclaw.model_config.service import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
     from types import ModuleType
     from typing import Any
 
 
 _EXCEPTION_SECRET = "test-secret-exception-chain-never-retain"
+_DASH_PREFIXED_EXCEPTION_SECRET = "--secret-token-never-retain"
+_PARTIAL_FIRST_EXCEPTION_SECRET = "partial-first-secret-never-retain"
+_PARTIAL_SECOND_EXCEPTION_SECRET = "partial-second-secret-never-retain"
+_MODEL_CLI_SECRET_SENTINELS = (
+    _EXCEPTION_SECRET,
+    _DASH_PREFIXED_EXCEPTION_SECRET,
+)
+_PARTIAL_FAILURE_SECRET_SENTINELS = (
+    _PARTIAL_FIRST_EXCEPTION_SECRET,
+    _PARTIAL_SECOND_EXCEPTION_SECRET,
+)
+
+
+class _SanitizerAbort(BaseException):
+    """Deterministic KeyboardInterrupt-like sanitizer failure for regression tests."""
+
+
+class _FailingFinalWriteArgv(list[str]):
+    """Raise on the cleanup write after accepting the pre-parser argv write."""
+
+    def __init__(self, values: Iterable[str]) -> None:
+        super().__init__(values)
+        self.slice_writes = 0
+
+    def __setitem__(self, key: int | slice, value: str | Iterable[str]) -> None:
+        if isinstance(key, slice):
+            self.slice_writes += 1
+            if self.slice_writes == 2:
+                raise _SanitizerAbort("forced final argv write abort")
+        super().__setitem__(key, value)
 
 
 def _exception_artifacts(error: BaseException) -> str:
@@ -735,7 +766,7 @@ def test_model_api_key_vault_cleans_up_after_pre_callback_validation_exit(
 @pytest.mark.parametrize("target_kind", ["root", "subgroup"])
 @pytest.mark.parametrize("argument_source", ["explicit", "sys_argv"])
 @pytest.mark.parametrize("subcommand", ["add", "addd"])
-@pytest.mark.parametrize("option_form", ["split", "equals"])
+@pytest.mark.parametrize("option_form", ["split", "equals", "dash_prefixed"])
 def test_model_group_scrubs_api_key_before_all_parser_failures(
     monkeypatch: pytest.MonkeyPatch,
     runner: CliRunner,
@@ -749,6 +780,8 @@ def test_model_group_scrubs_api_key_before_all_parser_failures(
     command_args = (["models"] if target_kind == "root" else []) + [subcommand]
     if option_form == "split":
         command_args.extend(["--api-key", _EXCEPTION_SECRET])
+    elif option_form == "dash_prefixed":
+        command_args.extend(["--api-key", _DASH_PREFIXED_EXCEPTION_SECRET])
     else:
         command_args.append(f"--api-key={_EXCEPTION_SECRET}")
     command_args.extend(["--kind", "chat", "--position", "0"])
@@ -773,13 +806,138 @@ def test_model_group_scrubs_api_key_before_all_parser_failures(
 
     assert exit_code == 2
     assert exception is not None
-    assert _EXCEPTION_SECRET not in output
-    assert _EXCEPTION_SECRET not in _exception_artifacts(exception)
-    assert all(_EXCEPTION_SECRET not in value for value in retained_args)
-    assert all(_EXCEPTION_SECRET not in value for value in sys.argv)
+    artifacts = _exception_artifacts(exception)
+    assert not any(value in output for value in _MODEL_CLI_SECRET_SENTINELS)
+    assert not any(value in artifacts for value in _MODEL_CLI_SECRET_SENTINELS)
+    assert not any(
+        secret in value for secret in _MODEL_CLI_SECRET_SENTINELS for value in retained_args
+    )
+    assert not any(secret in value for secret in _MODEL_CLI_SECRET_SENTINELS for value in sys.argv)
     vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
     assert vault is not None
     assert vault.pending_count() == 0
+
+
+@pytest.mark.parametrize("argument_source", ["explicit", "sys_argv"])
+def test_model_group_cleans_partial_vault_when_sanitizer_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    argument_source: str,
+) -> None:
+    module = _models_module(runner)
+    vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
+    assert vault is not None
+    assert vault.pending_count() == 0
+    token_calls = 0
+
+    def fail_second_token(_size: int) -> str:
+        nonlocal token_calls
+        token_calls += 1
+        if token_calls == 1:
+            return "partial-first-handle"
+        raise _SanitizerAbort("forced sanitizer abort")
+
+    monkeypatch.setattr(module.secrets, "token_urlsafe", fail_second_token)
+    command_args = [
+        "addd",
+        "--api-key",
+        _PARTIAL_FIRST_EXCEPTION_SECRET,
+        "--api-key",
+        _PARTIAL_SECOND_EXCEPTION_SECRET,
+    ]
+
+    if argument_source == "explicit":
+        with pytest.raises(_SanitizerAbort) as caught:
+            runner.invoke(module.models_app, command_args)
+        retained_args = command_args
+    else:
+        monkeypatch.setattr(sys, "argv", ["model-cli-test", *command_args])
+        command_args.clear()
+        command = typer.main.get_command(module.models_app)
+        with runner.isolation(), pytest.raises(_SanitizerAbort) as caught:
+            command.main(args=None, prog_name="model-cli-test")
+        retained_args = sys.argv[1:]
+
+    try:
+        artifacts = _exception_artifacts(caught.value)
+        assert not any(value in artifacts for value in _PARTIAL_FAILURE_SECRET_SENTINELS)
+        assert not any(
+            secret in value
+            for secret in _PARTIAL_FAILURE_SECRET_SENTINELS
+            for value in retained_args
+        )
+        assert not any(
+            secret in value for secret in _PARTIAL_FAILURE_SECRET_SENTINELS for value in sys.argv
+        )
+        assert vault.pending_count() == 0
+    finally:
+        vault.discard(module._InlineApiKeyHandle("partial-first-handle"))
+
+
+@pytest.mark.parametrize("failure_site", ["redaction", "sys_argv_writeback"])
+def test_model_group_discards_handles_when_final_cleanup_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    failure_site: str,
+) -> None:
+    module = _models_module(runner)
+    vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
+    assert vault is not None
+    assert vault.pending_count() == 0
+    monkeypatch.setattr(module.secrets, "token_urlsafe", lambda _size: "finalizer-handle")
+
+    if failure_site == "redaction":
+
+        def abort_redaction(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            raise _SanitizerAbort("forced final redaction abort")
+
+        monkeypatch.setattr(module, "_redact_inline_api_key_args", abort_redaction)
+        retained_args: list[str] = [
+            "addd",
+            "--api-key",
+            _EXCEPTION_SECRET,
+        ]
+        with pytest.raises(_SanitizerAbort) as caught:
+            runner.invoke(module.models_app, retained_args)
+    else:
+        retained_args = _FailingFinalWriteArgv(
+            ["model-cli-test", "addd", "--api-key", _EXCEPTION_SECRET]
+        )
+        monkeypatch.setattr(sys, "argv", retained_args)
+        command = typer.main.get_command(module.models_app)
+        with runner.isolation(), pytest.raises(_SanitizerAbort) as caught:
+            command.main(args=None, prog_name="model-cli-test")
+
+    try:
+        assert _EXCEPTION_SECRET not in _exception_artifacts(caught.value)
+        assert all(_EXCEPTION_SECRET not in value for value in retained_args)
+        assert vault.pending_count() == 0
+    finally:
+        vault.discard(module._InlineApiKeyHandle("finalizer-handle"))
+
+
+def test_model_group_preserves_none_vs_explicit_base_main_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    forwarded_args: list[object] = []
+
+    def capture_base_main(_self: object, *args: object, **kwargs: object) -> None:
+        del args
+        forwarded_args.append(kwargs.get("args"))
+
+    monkeypatch.setattr(module.TyperGroup, "main", capture_base_main)
+    command = typer.main.get_command(module.models_app)
+    monkeypatch.setattr(sys, "argv", ["model-cli-test", "addd"])
+
+    command.main(args=None, prog_name="model-cli-test")
+    explicit_args = ["addd"]
+    command.main(args=explicit_args, prog_name="model-cli-test")
+
+    assert forwarded_args == [None, explicit_args]
+    assert forwarded_args[1] is explicit_args
 
 
 def test_root_group_preserves_unrelated_api_key_option(
