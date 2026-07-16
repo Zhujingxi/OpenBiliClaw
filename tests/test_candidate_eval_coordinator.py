@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -715,6 +716,50 @@ async def test_legacy_supply_result_shape_is_not_throttled(result: object) -> No
 
     assert coordinator._supply_streak == 0
     assert coordinator._supply_cooldown_until == 0.0
+
+
+def test_supply_starvation_warns_once_per_episode(caplog: pytest.LogCaptureFixture) -> None:
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    caplog.set_level(logging.WARNING, logger="openbiliclaw.runtime.candidate_eval")
+
+    for _ in range(6):
+        coordinator._record_supply_result(productive=False)
+    warnings = [
+        record
+        for record in caplog.records
+        if record.message.startswith("candidate supply starved:")
+    ]
+    assert len(warnings) == 1
+
+    coordinator._record_supply_result(productive=True)
+    for _ in range(5):
+        coordinator._record_supply_result(productive=False)
+    warnings = [
+        record
+        for record in caplog.records
+        if record.message.startswith("candidate supply starved:")
+    ]
+    assert len(warnings) == 2
+
+
+def test_supply_starvation_status_payload_tracks_cooldown() -> None:
+    now = [100.0]
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    coordinator.time_fn = lambda: now[0]
+
+    initial = coordinator.status_payload()
+    assert initial["candidate_eval_supply_streak"] == 0
+    assert initial["candidate_eval_supply_cooldown_until"] == 0.0
+
+    coordinator._record_supply_result(productive=False)
+    cooling = coordinator.status_payload()
+    assert cooling["candidate_eval_supply_streak"] == 1
+    assert cooling["candidate_eval_supply_cooldown_until"] == 130.0
+
+    coordinator._record_supply_result(productive=True)
+    recovered = coordinator.status_payload()
+    assert recovered["candidate_eval_supply_streak"] == 0
+    assert recovered["candidate_eval_supply_cooldown_until"] == 0.0
 
 
 class _SqliteSoakEngine:

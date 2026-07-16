@@ -114,6 +114,7 @@ class CandidateEvalCoordinator:
         self._no_progress_level = 0
         self._supply_streak = 0
         self._supply_cooldown_until = 0.0
+        self._supply_starvation_warned = False
 
         self.state = "idle"
         self.last_wake_reason = ""
@@ -130,7 +131,7 @@ class CandidateEvalCoordinator:
         self._supply_cooldown_until = 0.0
         resume_notification = self._resume_notification(reason)
         if resume_notification:
-            self._supply_streak = 0
+            self._reset_supply_backoff()
         if self._paused and resume_notification:
             self._paused = False
             self._backoff_until = 0.0
@@ -218,6 +219,8 @@ class CandidateEvalCoordinator:
             "candidate_eval_in_flight": len(self._workers),
             "candidate_eval_pending": snapshot.pending_eval,
             "candidate_eval_backoff_until": self._backoff_until,
+            "candidate_eval_supply_streak": self._supply_streak,
+            "candidate_eval_supply_cooldown_until": self._supply_cooldown_until,
             "candidate_eval_last_error": self.last_error,
             "candidate_eval_last_batch_seconds": self.last_batch_seconds,
             "candidate_eval_last_cached": self.last_cached,
@@ -308,8 +311,7 @@ class CandidateEvalCoordinator:
             elif self.last_cached > 0:
                 self._zero_cache_streak = 0
                 self._no_progress_level = 0
-                self._supply_streak = 0
-                self._supply_cooldown_until = 0.0
+                self._reset_supply_backoff()
             if self._zero_cache_streak >= 3:
                 delay = _NO_PROGRESS_BACKOFF_SECONDS[
                     min(self._no_progress_level, len(_NO_PROGRESS_BACKOFF_SECONDS) - 1)
@@ -409,14 +411,28 @@ class CandidateEvalCoordinator:
 
     def _record_supply_result(self, *, productive: bool) -> None:
         if productive:
-            self._supply_streak = 0
-            self._supply_cooldown_until = 0.0
+            self._reset_supply_backoff()
             return
         delay = _SUPPLY_UNPRODUCTIVE_BACKOFF_SECONDS[
             min(self._supply_streak, len(_SUPPLY_UNPRODUCTIVE_BACKOFF_SECONDS) - 1)
         ]
         self._supply_streak += 1
         self._supply_cooldown_until = self.time_fn() + delay
+        if delay == _SUPPLY_UNPRODUCTIVE_BACKOFF_SECONDS[-1] and not (
+            self._supply_starvation_warned
+        ):
+            self._supply_starvation_warned = True
+            logger.warning(
+                "candidate supply starved: %d consecutive unproductive replenishments, "
+                "cooling down %.0fs",
+                self._supply_streak,
+                delay,
+            )
+
+    def _reset_supply_backoff(self) -> None:
+        self._supply_streak = 0
+        self._supply_cooldown_until = 0.0
+        self._supply_starvation_warned = False
 
     async def _cancel_supply_task(self) -> None:
         task = self._supply_task
