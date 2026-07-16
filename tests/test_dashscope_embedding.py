@@ -319,12 +319,51 @@ def test_dashscope_honors_output_dimensionality() -> None:
     assert provider._dimension_for_model("tongyi-embedding-vision-plus") is None
 
 
-def test_base_url_strips_compatible_mode_suffix() -> None:
+@pytest.mark.parametrize(
+    ("base_url", "expected_root"),
+    [
+        (
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://dashscope.aliyuncs.com",
+        ),
+        (
+            "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1",
+            "https://workspace.cn-beijing.maas.aliyuncs.com",
+        ),
+    ],
+)
+def test_base_url_strips_supported_api_prefixes(base_url: str, expected_root: str) -> None:
     provider = DashScopeEmbeddingProvider(
         api_key="sk-test",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        base_url=base_url,
     )
-    assert provider._base_url == "https://dashscope.aliyuncs.com"
+    assert provider._base_url == expected_root
+
+
+@pytest.mark.asyncio
+async def test_workspace_native_base_url_does_not_duplicate_api_path() -> None:
+    provider = DashScopeEmbeddingProvider(
+        api_key="sk-test",
+        base_url="https://workspace.cn-beijing.maas.aliyuncs.com/api/v1",
+    )
+    payload = {"output": {"embeddings": [{"index": 0, "type": "text", "embedding": [0.1]}]}}
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.post = AsyncMock(return_value=_mock_response(payload))
+
+    with patch(
+        "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
+        return_value=mock_client,
+    ):
+        assert await provider.embed("hi") == [0.1]
+
+    url = mock_client.post.await_args.args[0]
+    assert url == (
+        "https://workspace.cn-beijing.maas.aliyuncs.com/api/v1/services/embeddings/"
+        "multimodal-embedding/multimodal-embedding"
+    )
+    assert "/api/api/v1/" not in url
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,8 @@ def test_desktop_web_model_probe_allows_the_backend_probe_deadline() -> None:
 
     assert "const MODEL_PROBE_TIMEOUT_MS = 60_000;" in js
     assert "timeoutMs: MODEL_PROBE_TIMEOUT_MS" in probe
+    assert "探测不会写入配置" in probe
+    assert "是否已写入" not in probe
 
 
 def test_desktop_web_settings_exposes_and_wires_network_proxy() -> None:

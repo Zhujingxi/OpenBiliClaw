@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com"
 _EMBED_PATH = "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
+_BASE_URL_SUFFIXES = ("/compatible-mode/v1", "/api/v1", "/compatible-mode")
 
 # qwen3-vl-embedding documented MRL dimensions (default 2560).
 _QWEN3_VL_DIMENSIONS: frozenset[int] = frozenset({2560, 2048, 1536, 1024, 768, 512, 256})
@@ -65,11 +66,15 @@ class DashScopeEmbeddingProvider(LLMProvider):
         self._api_key = key
         self._model = (model or "qwen3-vl-embedding").strip() or "qwen3-vl-embedding"
         root = (base_url or _DEFAULT_BASE_URL).strip().rstrip("/")
-        if root.endswith("/v1"):
-            # Users may paste the OpenAI-compat chat base_url; strip to API root.
-            root = root[: -len("/v1")].rstrip("/")
-        if root.endswith("/compatible-mode"):
-            root = root[: -len("/compatible-mode")].rstrip("/")
+        # Alibaba documents workspace-scoped native DashScope base URLs as
+        # ``...maas.aliyuncs.com/api/v1``. Strip that prefix as one unit before
+        # appending _EMBED_PATH; removing only ``/v1`` would produce the broken
+        # ``/api/api/v1/services/...`` URL. Keep accepting compatible-mode URLs
+        # as a convenience, but always call the native multimodal endpoint.
+        for suffix in _BASE_URL_SUFFIXES:
+            if root.endswith(suffix):
+                root = root[: -len(suffix)].rstrip("/")
+                break
         self._base_url = root or _DEFAULT_BASE_URL
         self._timeout = max(5.0, float(timeout))
         self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))

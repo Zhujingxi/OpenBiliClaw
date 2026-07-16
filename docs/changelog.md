@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.168`，浏览器插件走 `extension-v0.3.168`，桌面安装包走 `desktop-v0.3.168`。
 
+- **DashScope 业务空间 Embedding 地址恢复可用**：`dashscope_api` 现在把阿里控制台给出的 `https://<workspace>.cn-beijing.maas.aliyuncs.com/api/v1` 作为原生 base URL 整体规范化，再拼接 multimodal-embedding 路径，不再错误生成 `/api/api/v1/services/...`；连接类型帮助与配置文档同步明确公共根地址、业务空间 `/api/v1` 和 OpenAI compatible-mode 的边界，桌面精确探测超时也明确说明不会写配置，不再误导用户“刷新确认是否已写入”。
 - **桌面设置页扩宽并收紧为工程化表单布局**：设置页从推荐内容共用的 `1120px` 上限独立扩到 `1480px`，标题、表单、tab、卡片圆角与 sticky 保存条同步减重；普通设置 panel 和模型编辑器各层使用清晰的单层边界。连接类型的名称、说明和类型码改为分栏块级排版，不再挤成一行；模型列表 / inspector 改按左侧栏挤压后的真实内容容器宽度响应，`940px` 以下进入列表→详情、`720px` 以下通用设置收为单列，移动窄屏保存状态不再继承横排的 `240px` flex 基准，修复宽窗口窄内容栏及手机视口下的文字黏连、异常留白与视觉重叠。空 Chat / Embedding 路由同时改为本地化短标题、按类型区分的紧凑添加按钮与明确空状态，避免再把英文内部结构名、长 fallback 说明和大胶囊按钮堆在同一卡片顶部。
 - **桌面 DeepSeek 精确探测不再被通用短请求超时提前取消**：桌面模型编辑器的 `POST /api/model-config/probe` 显式使用与插件、移动 Web 一致的 60 秒窗口，不再继承桌面普通读取请求的 15 秒默认值；后端仍在 30 秒内给出有界结果。DeepSeek 草稿即使正式配置为 `high` / `max`，连通探测也固定发送 8-token 非思考请求，只验证凭据、端点、模型和基础响应，不再让长推理拖垮测试；正式业务调用继续使用原配置。推理控件同步收紧为 `disabled / high / max`：界面的 `disabled` 保存为空 `reasoning_effort`，adapter 按官方协议发送 `thinking.type=disabled`，不再让用户输入无效的 `reasoning_effort=off`；descriptor 选项也在保存与探测前做服务端校验。
 - **模型配置损坏时仍可打开完整前端自救**：原生 Chat route 因缺少 credential 等原因构造失败后，degraded middleware 不再把桌面首页 `/`、`/web...` 与首次设置 `/setup...` 当成业务 API 返回 503；所有非 `/api/` 页面和静态资源保持可达，模型配置、探测、健康检查等恢复 API 继续按白名单放行，推荐/发现/画像等业务 API 仍安全失败关闭。桌面、setup、移动页面及其关键资源均加入降级回归覆盖。

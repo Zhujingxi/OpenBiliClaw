@@ -1029,7 +1029,7 @@
 
     async function requestJsonStrict(path, options = {}) {
       const base = options.baseUrl || getApiBase() || DEFAULT_API_BASE;
-      const { baseUrl, timeoutMs = 60000, signal, ...fetchOptions } = options;
+      const { baseUrl, timeoutMs = 60000, timeoutMessage = "", signal, ...fetchOptions } = options;
       // Same-origin: send the session cookie + CSRF header on EVERY request
       // (incl. GET) so state-changing GETs like /api/recommendations are
       // covered (§4.8). Cross-origin: attach the bearer token instead.
@@ -1054,7 +1054,9 @@
         }
         return details;
       } catch (error) {
-        if (error?.name === "AbortError") throw new Error(`${path} 请求超时，请稍后刷新确认是否已写入。`);
+        if (error?.name === "AbortError") {
+          throw new Error(timeoutMessage || `${path} 请求超时，请稍后刷新确认是否已写入。`);
+        }
         throw error;
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);

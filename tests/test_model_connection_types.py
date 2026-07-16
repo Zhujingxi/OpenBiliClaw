@@ -26,6 +26,15 @@ def test_registry_groups_protocol_local_and_oauth_types() -> None:
     assert by_id["dashscope_api"]["capabilities"] == ["embedding"]
 
 
+def test_dashscope_descriptor_explains_workspace_native_base_url() -> None:
+    definition = connection_type_registry().definition("dashscope_api")
+    base_url = next(field for field in definition.fields if field.name == "base_url")
+
+    assert base_url.label == "DashScope base URL"
+    assert "/api/v1" in base_url.help
+    assert "/api/v1" in definition.help
+
+
 def test_deepseek_preset_is_not_an_embedding_choice() -> None:
     registry = connection_type_registry()
     assert registry.presets_for("openai_compatible", "chat") == (

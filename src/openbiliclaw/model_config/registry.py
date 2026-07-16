@@ -376,7 +376,16 @@ def _dashscope_api() -> ConnectionTypeDefinition:
         category="api_protocol",
         capabilities=("embedding",),
         fields=(
-            _field("base_url", "API endpoint", capabilities=("embedding",)),
+            _field(
+                "base_url",
+                "DashScope base URL",
+                capabilities=("embedding",),
+                help=(
+                    "Use the service root or native /api/v1 base URL, for example "
+                    "https://dashscope.aliyuncs.com or a workspace-scoped "
+                    "https://<workspace>.cn-beijing.maas.aliyuncs.com/api/v1 URL."
+                ),
+            ),
             _field(
                 "credential",
                 "API credential",
@@ -385,7 +394,10 @@ def _dashscope_api() -> ConnectionTypeDefinition:
                 capabilities=("embedding",),
             ),
         ),
-        help="Alibaba DashScope native multimodal embedding API.",
+        help=(
+            "Alibaba DashScope native multimodal embedding API. Workspace-scoped "
+            "native /api/v1 base URLs are supported."
+        ),
     )
 
 

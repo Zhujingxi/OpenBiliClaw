@@ -289,11 +289,16 @@ multimodal_enabled = true
 id = "dashscope-main"
 name = "DashScope"
 type = "dashscope_api"
-base_url = "https://dashscope.aliyuncs.com"
+base_url = "https://dashscope.aliyuncs.com/api/v1"
 api_key_env = "DASHSCOPE_API_KEY"
 ```
 
-DashScope 多模态向量走原生 multimodal-embedding 接口，不走 OpenAI compatible-mode。
+DashScope 多模态向量走原生 multimodal-embedding 接口，不走 OpenAI compatible-mode。`base_url`
+既可填写公共服务根地址，也可直接粘贴阿里控制台给出的业务空间原生
+`https://<workspace>.cn-beijing.maas.aliyuncs.com/api/v1`；运行时会规范化后只拼接一次
+`/api/v1/services/...`。若使用 OpenAI-compatible 文本向量模型，应改选
+`openai_compatible`，并填写 `/compatible-mode/v1` 地址。
+
 #### 权威模型配置与精确探测 API
 
 模型后端使用四个独立 HTTP 接口；桌面 Web、移动 Web 与浏览器插件直接接入。CLI 不经过 HTTP 或 API 私有转换 helper，而是用公开 DTO 显式还原领域值并调用同一个 `ModelConfigService`。

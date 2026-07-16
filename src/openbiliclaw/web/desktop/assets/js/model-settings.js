@@ -102,13 +102,18 @@ async function requestModelJson(url, options = {}) {
   if (bridge?.requestJsonStrict) {
     return bridge.requestJsonStrict(modelApiPath(url), options);
   }
+  const {
+    timeoutMs = 60000,
+    timeoutMessage = "",
+    ...fetchOptions
+  } = options;
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), options.timeoutMs || 60000);
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       credentials: "same-origin",
-      headers: { "X-OBC-Auth": "1", ...(options.headers || {}) },
+      headers: { "X-OBC-Auth": "1", ...(fetchOptions.headers || {}) },
       signal: controller.signal,
     });
     const data = await response.json().catch(() => null);
@@ -119,6 +124,11 @@ async function requestModelJson(url, options = {}) {
       throw error;
     }
     return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(timeoutMessage || `${url} 请求超时，请稍后重试。`);
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeoutId);
   }
@@ -730,6 +740,7 @@ async function probeSelected() {
     const result = await requestModelJson(MODEL_PROBE_API, {
       method: "POST",
       timeoutMs: MODEL_PROBE_TIMEOUT_MS,
+      timeoutMessage: "模型连接探测超时；探测不会写入配置，请检查 API endpoint 与网络后重试。",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
