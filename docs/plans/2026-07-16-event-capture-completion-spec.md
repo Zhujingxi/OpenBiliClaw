@@ -29,7 +29,7 @@
 6. **tap 失败静默降级**:xhs action tap、bili interact tap 的任何解析异常不得抛出到页面、不得吞掉既有事件;X tap 既有行为(engagement 类型、tweet_id 提取、retraction 映射)零回归。验证面:tap 单测异常路径 + 既有 `x-graphql-tap.test.ts` 全绿。
 7. **tap 权威按动作粒度 DOM 抑制(r3)**:adapter 声明 `tapAuthoritativeActions`(动作集合,如 X: `{like, favorite, share, comment, retraction}`;xhs: `{like, favorite, retraction}`;bilibili: `{comment}`——reply/add tap 上线后),kernel 对声明动作的 DOM 发射全部抑制——消除"网络提交 + DOM 点击"双计与"仅打开评论区/转发菜单即记事件"的假动作(codex r2 findings 2/4;现状 `kernel.ts:301-306` 只抑制撤销分支)。未声明动作与非 tap 平台行为不变。验证面:kernel 抑制矩阵测试(平台 × 动作)。
 7b. **网络成功 = 业务码成功(r3)**:新增 tap 路径(bili reply/dm、xhs action、X 正文提取)发射前必须校验**业务码**(B站 `code===0`、xhs 业务 success 字段、X GraphQL 响应无 `errors`),HTTP 2xx 但业务失败一律不发(codex r2 finding 3)。X tap 既有动作(like/retraction 等)的发射时序**本期不动**(改动会影响既有事件量,超出范围,spec 记为已知差异)。验证面:各 tap 的业务失败 fixture 用例。
-8. **阈值有出处**:弹幕强度 0.6、折后强度 0.2、正文截断 200、折价回溯窗口 30 天等常量必须带校准注释,provider/模型更换后重开校准(CLAUDE.md pitfall #3)。
+8. **阈值有出处**:弹幕强度 0.6、折后强度 0.2、正文截断 200、tombstone TTL 24h/cap 500 等常量必须带校准注释,provider/模型更换后重开校准(CLAUDE.md pitfall #3)。DB 折价无时间窗口(见 Phase 0 面 2)。
 9. **构建与双浏览器完整性**:新增 MAIN-world 入口必须同时登记 `extension/scripts/build.mjs` entrypoints、Chrome manifest 与 Firefox manifest;`npm run build` 产物存在性是验收的一部分(CLAUDE.md pitfall #6 的扩展版:多安装形态必须同步)。
 
 ## Current diagnosis
@@ -87,15 +87,15 @@
 ### Phase 0 — retraction 确定性折价
 
 **折价作用面(r3 修订钩子时序与乱序)**:
-- **面 1(内存,主路径)**:`ProfileUpdatePipeline.discount_buffered_positive(identity_key: str, retracted_action: str) -> int` —— 对缓冲区内尚未被 `_update_layer` 消费、payload url 归一化后同 identity key 且事件类型 == retracted_action 的 BEHAVIOR_EVENT/ENGAGEMENT 信号,patch 其 payload(`retracted=true`、`signal_strength=min(现值,0.2)`)。**钩子时序(r3):折价调用必须在 `_ingest_profile_update_events(accepted_events)`(`api/app.py:4423`)之后执行**——此时同批 like 已入缓冲,可被折价;放在 ingest 之前会错过同批正向信号(codex r2 blocker 1)。
-- **面 1b(乱序 tombstone,r3 新增)**:retraction 先于(或跨批早于)对应正向事件到达时,面 1 无信号可折。pipeline 维护 retraction tombstone 集(identity key → 时间戳;TTL 24h、容量上限 500,超限逐出最旧——校准注释:24h 覆盖扩展缓冲补发与 account_sync 双周期,500 远超个人真实撤销频率):`discount_buffered_positive` 登记 tombstone;`ingest_batch` 入场时对匹配 tombstone 的同类型正向信号直接折价入场。
+- **面 1(内存,主路径;r4 原子化)**:折价作为 `ProfileUpdatePipeline.ingest_batch()` 开头的**原子预处理阶段**,在任何阈值消费(`_update_layer`)之前执行:(a) 扫描本批 retraction 信号,对**批内**同 identity key、事件类型 == retracted_action、且事件时间早于 retraction 时间的正向信号折价(`retracted=true`、`signal_strength=min(现值,0.2)`);(b) 对**既有缓冲**中的匹配信号同样折价;(c) 登记 tombstone。API 层不再负责时序编排(codex r2 blocker 1 / r3 blocker 1:钩子放 ingest 前错过同批,放 ingest 后可能已被阈值消费——只有入口原子化才闭环)。必须有 threshold-ready 同批测试:批内正向信号数恰好触发阈值消费且含同批 retraction 时,消费发生前折价已生效。
+- **面 1b(乱序 tombstone,r4 带 action 与因果时间)**:tombstone 结构为 `(identity_key, action) → retraction 事件时间戳`(TTL 24h、容量上限 500,超限逐出最旧——校准注释:24h 覆盖扩展缓冲补发与 account_sync 双周期,500 远超个人真实撤销频率)。`ingest_batch` 入场时,正向信号命中同 `(key, action)` tombstone **且其事件时间早于 tombstone 时间戳**才折价——撤销之后的重新点赞(`like→retract→like` 的第二个 like)不折;事件时间缺失时保守不折(codex r3 finding 2)。必须测试:同 key 跨动作(like tombstone 不折 favorite)、`like→retract→like` 序列。
 - **面 2(DB,离线重读路径)**:`Database.mark_positive_events_retracted(identity_urls: list[str], retracted_action: str) -> int` —— 单事务 JSON patch(`metadata.retracted=true`、`metadata.signal_strength=min(现值,0.2)`),覆盖 `openbiliclaw init` 全量重建、12h 认知/画像整理等重读 events 表的路径。**无时间窗口(r3)**:identity key(tweet_id/bvid/note_id/mid)全局唯一,不存在"重名 url 误伤";用户今天撤销数月前的 like 正是应标注的场景(r2 finding 10:原 30 天窗口与"同 key 正向行被标注"承诺矛盾且校准解释不成立)。不删行、不改 event_type/url(不变量 3)。
 - **消费面覆盖(r3 扩展,r2 finding 5)**:"(已撤销)"渲染标记与折后强度必须覆盖**所有重读 events 的 LLM 消费面**——至少含 preference 渲染与 12h 认知循环(`cognition_cycle.py:247` 重读 events 的 awareness 输入);实现时 grep events 重读点形成清单并逐一确认(共用渲染函数则自动生效,不共用则各自补标记),清单写入 PR。
 - **明确不覆盖**:已被分析批消费并固化进 profile 层的旧证据(out of scope,历史不回溯)。spec 承诺:"从 retraction 到达起,该证据不再以满强度进入任何后续重读型 LLM 消费;缓冲中未消费的信号被折价"。
 
 **identity key(r2 扩展)**:复用并扩展 PR #85 `_dedup_key` 的归一化(tweet_id / bvid / mid),**新增 xhs note_id**(24-hex,来自 `xiaohongshu.com/(explore|discovery/item|search_result)/<id>`)——否则 Wave C 的 xhs 撤销无法折价对应正向事件。归一化函数从 `runtime/account_sync.py:41-87` 提升到共享模块(如 `sources/identity_keys.py`),account_sync 原地引用。
 
-**ingest 钩子**:`/api/events` 接收路径,在 `_ingest_profile_update_events(accepted_events)`(`api/app.py:4423`)**之后**对批内每条 `feedback_type=="retraction"` 事件:校验 `retracted_action` ∈ 白名单(不变量 4,越界跳过 + WARNING)→ 依序调用面 2(DB)与面 1(缓冲折价 + tombstone 登记)。同步调用(低频),异常 WARNING 不阻断接收。
+**API 层钩子(r4 职责收窄)**:`/api/events` 接收路径只负责面 2(DB 标注)——对批内每条 `feedback_type=="retraction"` 事件校验 `retracted_action` ∈ 白名单(不变量 4,越界跳过 + WARNING)后调用 `mark_positive_events_retracted`;面 1/1b 的内存折价完全由 `ingest_batch` 原子阶段自治(白名单校验在 pipeline 侧同样执行)。同步调用(低频),异常 WARNING 不阻断接收。
 
 **偏好层消费**:事件渲染时 `metadata.retracted` 为真的事件追加"(已撤销)"标记(折后 0.2 经既有 preserved keys 自然生效);system prompt 常量追加一句静态撤销语义规则(紧跟 `llm/prompts.py:252`)。**回放不变性作用域 = 事件渲染文本**(不变量 2):system prompt 的版本性变更不违门。
 
@@ -162,6 +162,6 @@
 - `docs/modules/soul.md` — retraction 双面折价机制与回放不变性。
 - `docs/modules/storage.md` — `mark_positive_events_retracted` 公开 API。
 - `docs/architecture.md` + `docs/spec.md` §3 图 + **`README.md` / `README_EN.md` 顶部架构图(无条件,CLAUDE.md 强制)** — 扩展侧数据流新增两个 tap 节点。
-- **`docs/privacy.md` + 商店披露文案** — 「个人通讯」采集范围扩展到用户提交成功的评论/弹幕正文(仅送本机后端);r1 review finding 10。
+- **`docs/privacy.md` + `docs/chrome-webstore-listing.md`(r4:仓库既有商店 listing 文档,一并更新)+ 商店后台隐私披露表单操作项记录进 PR** — 「个人通讯」采集范围扩展到用户提交成功的评论/弹幕正文(仅送本机后端);r1 finding 10 / r3 finding 4。
 - `docs/changelog.md` — 当前版本块新增条目。
 - CLI / config 无变化,不触发对应文档。

@@ -2,8 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-16-event-capture-completion-spec.md`](./2026-07-16-event-capture-completion-spec.md)
-> **Status:** r3 — codex 第二轮 10 findings 已修订,待第三轮 review
-> **Execution order:** Wave A(Task 0→1→2)→ Wave B(Task 3→4→5)→ Wave C(Task 6→7→8→9)。**Task 10(文档)按 Wave 拆分执行:每个 Wave 的最后一步是完成该 Wave 对应的文档子集,Wave 才算可交付**(codex r2 finding 6)。Wave 间可独立交付;Wave 内按序。
+> **Status:** r4 — codex 第三轮 6 findings 已修订,待第四轮 review
+> **Execution order(r4 重排,codex r3 finding 3):** Wave A(Task 0→1→2)→ **Task 6(kernel 动作粒度抑制契约——Wave B 与 Wave C 的共享前置,必须先于两者合入)** → Wave B(Task 3→4→5)→ Wave C(Task 7→8→9)→ Task 10。文档按 Wave 拆分:每个 Wave 的最后一步完成其文档子集,Wave 才算可交付。Wave A 可独立交付;Wave B/C 各自依赖 Task 6,彼此独立。
 > **Tech:** Python 3.11+/仓库 `.venv/bin/python`(勿用裸 `python`);测试 `PYTHONPATH=$PWD/src <venv>/python -m pytest <file> -q`;lint `ruff format/check src/ tests/`;类型 `mypy src/`(strict)。扩展:`cd extension && npm test && npm run typecheck && npm run build`(node --test)。
 
 **Invariants that MUST hold — re-read before each task:**
@@ -17,7 +17,7 @@
 - tap 权威按动作粒度 DOM 抑制:adapter `tapAuthoritativeActions` 声明的动作(X 含 share/comment)DOM 零发射;未声明动作与非 tap 平台不变。
 - 网络成功 = 业务码成功:新增 tap 路径 HTTP 2xx 且业务码通过才发(B站 `code===0`、xhs 业务字段、X 正文路径无 GraphQL errors);X tap 既有动作发射时序本期不动。
 - 原子回滚:每个 tap 化(tap+桥+manifest/build+adapter 声明)单提交交付,回滚即整体 revert。
-- 阈值有出处:0.6 / 0.2 / 200 / 30 天窗口常量带校准注释。
+- 阈值有出处:0.6 / 0.2 / 200 / tombstone TTL 24h/cap 500 常量带校准注释;DB 折价无时间窗口。
 - 构建与双浏览器完整性:新 MAIN-world 入口登记 build.mjs entrypoints + Chrome/Firefox 双 manifest,build 产物存在性纳入验收。
 
 ---
@@ -45,26 +45,25 @@
 - Numeric gate:identity 四键型 + DB 标记 5 用例全过,0 失败;`test_database.py`/`test_account_sync.py` 零回归。
 - Reproduce with `PYTHONPATH=$PWD/src <venv>/python -m pytest tests/test_identity_keys.py tests/test_event_retraction_discount.py tests/test_database.py tests/test_account_sync.py -q`; record in PR.
 
-### Task 1: pipeline 缓冲折价 + 乱序 tombstone + ingest 钩子
+### Task 1: `ingest_batch` 原子折价阶段 + 乱序 tombstone + API 层 DB 钩子
 
-**Files:** 修改 `src/openbiliclaw/soul/pipeline.py`(`discount_buffered_positive` + tombstone 集)、`src/openbiliclaw/api/app.py`(`/api/events` 接收路径,`_ingest_profile_update_events` 即 `4423` **之后**——先让同批 like 入缓冲再折价,codex r2 blocker 1);测试并入 `tests/test_event_retraction_discount.py` + `tests/test_pipeline_advanced.py`。
+**Files:** 修改 `src/openbiliclaw/soul/pipeline.py`(`ingest_batch` 开头新增原子折价预处理 + tombstone 集;`pipeline.py:669-681` 阈值消费必须发生在折价之后)、`src/openbiliclaw/api/app.py`(接收路径只加 DB 面钩子);测试并入 `tests/test_event_retraction_discount.py` + `tests/test_pipeline_advanced.py`。
 
-**Interfaces:** Consumes: retraction 事件(url + `metadata.retracted_action`)。Produces: (a) 缓冲区内同 identity key 且类型匹配的未消费信号 payload 被 patch(`retracted=true`、强度 ≤0.2);(b) tombstone 登记(identity key → ts;TTL 24h、cap 500 逐出最旧,常量带校准注释),`ingest_batch` 入场对匹配 tombstone 的同类型正向信号直接折价;(c) DB 标记调用;`retracted_action` 白名单校验(`{"like","favorite","share","follow"}` 之外跳过 + WARNING,不变量 4)。
+**Interfaces:** Consumes: 批内/缓冲内信号 + retraction 信号(url + `retracted_action`)。Produces: (a) **原子预处理(阈值消费前)**:批内与既有缓冲中同 identity key、类型匹配、**事件时间早于 retraction 时间**的正向信号被 patch(`retracted=true`、强度 ≤0.2);(b) tombstone `(identity_key, action) → retraction 事件时间戳`(TTL 24h、cap 500 逐出最旧,校准注释),入场折价仅当正向信号事件时间早于 tombstone 时间(`like→retract→like` 第二个 like 不折;事件时间缺失保守不折);(c) API 层 DB 标记调用;两侧均做 `retracted_action` 白名单校验(`{"like","favorite","share","follow"}` 之外跳过 + WARNING,不变量 4)。
 
 **Steps:**
 
-- [ ] Failing test:pipeline 缓冲一条 like 信号后调 `discount_buffered_positive` → payload 带 `retracted=true` 且强度 0.2;已被 `_update_layer` 消费的信号不受影响。
-- [ ] Confirm FAIL → 实现(缓冲遍历 + identity key 匹配,复用 Task 0 共享模块)→ PASS。
-- [ ] Failing test(乱序):retraction 先到 → tombstone 登记;随后 `ingest_batch` 同 key like → 入场即折价;TTL 过期/cap 逐出后不再折价。
+- [ ] Failing test(原子性,codex r3 blocker 1):批内正向信号数恰好触发阈值消费(threshold-ready)且含同批 retraction → 断言 `_update_layer` 收到的信号已折价。
+- [ ] Confirm FAIL → 在 `ingest_batch` 开头实现原子折价阶段(批内 + 既有缓冲,复用 Task 0 identity 模块)→ PASS。
+- [ ] Failing test(乱序 + 因果):retraction 先到 → tombstone 登记;随后同 `(key, action)` 且事件时间更早的 like → 入场折价;`like→retract→like` 第二个 like(事件时间晚于 retraction)不折;同 key 跨动作(like tombstone 不折 favorite);TTL 过期/cap 逐出后不折。
 - [ ] Confirm FAIL → 实现 tombstone → PASS。
-- [ ] Failing test(钩子时序):同一 POST 批内先 like 后 retraction → 缓冲中该 like 被折价(证明钩子在 pipeline ingest 之后);先前入库的同 tweet_id like 行带 `retracted=true`。
-- [ ] 实现 ingest 钩子:白名单校验 → DB 面 → 缓冲面 + tombstone;同步调用,异常 WARNING 不阻断响应。
-- [ ] 补用例:bili bvid 键型;`retracted_action` 缺失/越界(如 `"view"`)跳过 + WARNING 断言。
+- [ ] Failing test(DB 面):POST X retraction 后,先前入库同 tweet_id like 行带 `retracted=true`;实现 API 层钩子(白名单 → `mark_positive_events_retracted`;异常 WARNING 不阻断响应)。
+- [ ] 补用例:bili bvid 键型;`retracted_action` 缺失/越界(如 `"view"`)跳过 + WARNING 断言(pipeline 侧与 API 侧各一)。
 - [ ] Run `pytest tests/test_api_app.py tests/test_pipeline_advanced.py -q` 回归 + ruff + mypy。
 
 **Acceptance:**
 
-- Numeric gate:缓冲 2 态 + 乱序 3 态 + 同批时序 + ingest 双面 + 键型 + 白名单 ≥9 用例全过;`test_api_app.py`/`test_pipeline_advanced.py` 零回归。
+- Numeric gate:原子性 threshold-ready 用例 + 乱序/因果 5 态 + DB 面 + 键型 + 双侧白名单 ≥10 用例全过;`test_api_app.py`/`test_pipeline_advanced.py` 零回归。
 - Reproduce with `PYTHONPATH=$PWD/src <venv>/python -m pytest tests/test_event_retraction_discount.py tests/test_api_app.py tests/test_pipeline_advanced.py -q`。
 
 ### Task 2: 全消费面渲染标记 + 静态 prompt 指引 + 渲染回放不变性
@@ -134,7 +133,7 @@
 
 **Files:** 新增 `extension/src/main/bili-interact-tap.ts`、`extension/tests/bili-interact-tap.test.ts`;修改 `extension/scripts/build.mjs`(entrypoints)、Chrome manifest 与 Firefox manifest(MAIN world、document_start、匹配 bilibili.com)、`extension/src/content/bilibili.ts`(消息桥 `obc-bili-interact` → 事件构造,正文经 `sanitizeUserText`)。
 
-**Interfaces:** Consumes: `POST */x/v2/dm/post`、`POST */x/v2/reply/add`(**HTTP 2xx 且响应 `code===0` 才算成功**,不变量 7b;字段以真实抓包 fixture 固化,fixture 注明来源)。Produces: comment 事件——弹幕:`comment_kind="danmaku"`、`signal_strength=0.6`;评论:`comment_kind="comment"`;均带净化后 `comment_text` 与视频/稿件 url。**bilibili adapter 声明 `tapAuthoritativeActions: {comment}`**(依赖 Task 6 契约;消除"打开评论区即记 comment"假事件与提交双计,codex r2 finding 2)——因此 Wave B 的本任务依赖 Wave C 的 Task 6 先合入,或本任务顺序调到 Task 6 之后(执行者按依赖图调整,PR 说明)。
+**Interfaces:** Consumes: `POST */x/v2/dm/post`、`POST */x/v2/reply/add`(**HTTP 2xx 且响应 `code===0` 才算成功**,不变量 7b;字段以真实抓包 fixture 固化,fixture 注明来源)。Produces: comment 事件——弹幕:`comment_kind="danmaku"`、`signal_strength=0.6`;评论:`comment_kind="comment"`;均带净化后 `comment_text` 与视频/稿件 url。**bilibili adapter 声明 `tapAuthoritativeActions: {comment}`**(消除"打开评论区即记 comment"假事件与提交双计,codex r2 finding 2)。依赖:Task 6(kernel 契约)已按 r4 执行序作为 Wave B 前置先行合入,本任务直接使用该契约。
 
 **Steps:**
 
@@ -145,7 +144,7 @@
 - [ ] build.mjs entrypoints + Chrome/Firefox 双 manifest 登记;`npm run build` 后断言 `dist/main/bili-interact-tap.js` 存在(不变量 9)。
 - [ ] **原子交付**:tap + 桥 + manifest/build + adapter 声明合为单提交,哈希记录在 PR(回滚 = 整体 revert)。
 - [ ] `npm test && npm run typecheck && npm run build`。
-- [ ] **Wave B 文档 gate**:更新 `docs/modules/extension.md`(bili-interact-tap + comment_text)、`docs/privacy.md`(个人通讯范围)、`docs/architecture.md` + `docs/spec.md` + README 双语架构图(新 tap 节点)、`docs/changelog.md`——Wave B 至此才算可交付。
+- [ ] **Wave B 文档 gate**:更新 `docs/modules/extension.md`(bili-interact-tap + comment_text)、`docs/privacy.md`(个人通讯范围)、**`docs/chrome-webstore-listing.md`(商店 listing 隐私描述,r4)+ PR 记录商店后台隐私披露表单需更新的操作项**、`docs/architecture.md` + `docs/spec.md` + README 双语架构图(新 tap 节点)、`docs/changelog.md`——Wave B 至此才算可交付。
 
 **Acceptance:**
 
@@ -158,7 +157,7 @@
 
 ### Task 6: kernel 动作粒度抑制契约(`tapAuthoritativeActions`)
 
-**Files:** 修改 `extension/src/shared/platforms/types.ts`(adapter 新字段 `tapAuthoritativeActions: Set<ActionType>`)、`extension/src/content/kernel.ts`(正向路径 321-327 与撤销路径 301-306 统一为集合检查)、`extension/src/shared/platforms/twitter.ts`(声明 `{like, favorite, share, comment, retraction}`——其 tap 已发全部五类,消除 DOM share/comment 双计与"打开菜单即记事件",codex r2 findings 2/4);测试 `extension/tests/kernel.test.ts`、`extension/tests/twitter-adapter.test.ts`。
+**Files:** 修改 `extension/src/shared/types.ts`(`PlatformAdapter` 接口所在文件,r4 修正路径;新字段 `tapAuthoritativeActions`,动作类型沿用 `inferActionType` 返回的字符串动作域,实现时确认是否已有具名类型)、`extension/src/content/kernel.ts`(正向路径 321-327 与撤销路径 301-306 统一为集合检查)、`extension/src/shared/platforms/twitter.ts`(声明 `{like, favorite, share, comment, retraction}`——其 tap 已发全部五类,消除 DOM share/comment 双计与"打开菜单即记事件",codex r2 findings 2/4);测试 `extension/tests/kernel.test.ts`、`extension/tests/twitter-adapter.test.ts`。
 
 **Interfaces:** Consumes: adapter `tapAuthoritativeActions`。Produces: 声明动作 DOM 零发射;未声明动作与非 tap 平台完全不变;既有 `strongSignalSource` 语义收敛(保留或替换由实现决定,带迁移测试)。
 
