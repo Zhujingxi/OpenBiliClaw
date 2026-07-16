@@ -820,6 +820,38 @@ class MemoryManager:
 
     # --- Cross-layer operations ---
 
+    def _reconcile_retracted_positive(
+        self, event_type: str, url: str, metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Discount a late-arriving positive already undone by a stored retraction.
+
+        Phase 0 face 2b: when a positive is persisted after its retraction is
+        already in the events table (account_sync backfilling an old like), mark
+        it retracted at insert time if its event time precedes the retraction.
+        A re-like (event time after the retraction) is left untouched. Any
+        failure is swallowed — reconciliation must never block persistence.
+        """
+        from openbiliclaw.sources.event_format import (
+            RETRACTABLE_ACTIONS,
+            apply_retraction_discount,
+            parse_event_timestamp,
+        )
+
+        action = event_type.strip().lower()
+        if action not in RETRACTABLE_ACTIONS or not url:
+            return metadata
+        event_time = parse_event_timestamp(metadata)
+        if event_time is None:
+            return metadata
+        try:
+            retraction_time = self._database.latest_retraction_time_for(url, action)
+        except Exception:
+            logger.warning("retraction reconciliation lookup failed", exc_info=True)
+            return metadata
+        if retraction_time is not None and event_time < retraction_time:
+            return apply_retraction_discount(metadata)
+        return metadata
+
     async def propagate_event(self, event: dict[str, Any]) -> None:
         """Record a behavioral event in the SQLite event layer.
 
@@ -843,6 +875,9 @@ class MemoryManager:
                 signal_strength = default_signal_strength_for_event(event_type, metadata)
                 if signal_strength is not None:
                     metadata["signal_strength"] = signal_strength
+            metadata = self._reconcile_retracted_positive(
+                event_type, str(event.get("url", "")), metadata
+            )
 
         self._database.insert_event(
             event_type,
@@ -874,6 +909,9 @@ class MemoryManager:
                     signal_strength = default_signal_strength_for_event(event_type, metadata)
                     if signal_strength is not None:
                         metadata["signal_strength"] = signal_strength
+                metadata = self._reconcile_retracted_positive(
+                    event_type, str(item.get("url", "")), metadata
+                )
                 item["metadata"] = metadata
             normalized.append(item)
         inserted = await asyncio.to_thread(self._database.insert_events_batch, normalized)

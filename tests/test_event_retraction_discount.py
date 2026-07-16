@@ -10,13 +10,21 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import pytest
+
+from openbiliclaw.memory.manager import MemoryManager
+from openbiliclaw.soul.pipeline import (
+    _BUFFERED_LAYERS,
+    LayerThreshold,
+    ProfileUpdatePipeline,
+    signals_from_events,
+)
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
     from pathlib import Path
-
 
 # Epoch-ms helpers so event time vs retraction_at causality is explicit.
 _T0 = datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC)
@@ -202,3 +210,260 @@ def test_mark_retracted_rejects_out_of_whitelist_action(tmp_path: Path) -> None:
         ["https://x.com/i/status/123"], "view", retraction_at=_T0 + timedelta(hours=1)
     )
     assert marked == 0
+
+
+# --- Task 1: in-memory pipeline atomic discount + tombstone ------------------
+
+
+class _CapturingAnalyzer:
+    """Duck-typed PreferenceAnalyzer that records the events it is asked to analyze."""
+
+    def __init__(self) -> None:
+        self.registry = object()
+        self.seen_events: list[list[dict[str, Any]]] = []
+
+    async def analyze_events(
+        self,
+        *,
+        events: list[dict[str, Any]],
+        existing_preference: dict[str, Any],
+        **_: Any,
+    ) -> dict[str, Any]:
+        self.seen_events.append([dict(e) for e in events])
+        return dict(existing_preference)
+
+
+def _make_pipeline(tmp_path: Path, analyzer: Any, *, min_signals: int) -> ProfileUpdatePipeline:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    interval = 0 if min_signals == 1 else 10**9
+    thresholds = {
+        layer: LayerThreshold(
+            min_signals=min_signals, min_interval_seconds=interval, max_buffer_size=1000
+        )
+        for layer in _BUFFERED_LAYERS
+    }
+    return ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=analyzer,
+        profile_builder=object(),
+        thresholds=thresholds,
+    )
+
+
+def _like_event(url: str, at: datetime, strength: float = 0.85) -> dict[str, Any]:
+    return {
+        "event_type": "like",
+        "url": url,
+        "title": "a like",
+        "context": "点赞了",
+        "metadata": {
+            "source_platform": "twitter",
+            "signal_strength": strength,
+            "timestamp": _ms(at),
+        },
+    }
+
+
+def _favorite_event(url: str, at: datetime) -> dict[str, Any]:
+    return {
+        "event_type": "favorite",
+        "url": url,
+        "title": "a favorite",
+        "metadata": {"signal_strength": 1.0, "timestamp": _ms(at)},
+    }
+
+
+def _retraction_event(url: str, action: str, at: datetime) -> dict[str, Any]:
+    return {
+        "event_type": "feedback",
+        "url": url,
+        "metadata": {
+            "feedback_type": "retraction",
+            "retracted_action": action,
+            "signal_strength": 0.2,
+            "timestamp": _ms(at),
+        },
+    }
+
+
+def _find_payload(pipeline: ProfileUpdatePipeline, url: str, event_type: str) -> dict[str, Any]:
+    for buf in pipeline._buffers.values():
+        for sig in buf.signals:
+            payload = sig.get("payload") if isinstance(sig, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("url") == url and payload.get("event_type") == event_type:
+                return payload
+    raise AssertionError(f"no buffered {event_type} for {url}")
+
+
+@pytest.mark.asyncio
+async def test_discount_applied_before_threshold_consumption(tmp_path: Path) -> None:
+    """Threshold-ready batch with a same-batch retraction: the consumed like
+    must already be discounted (atomic preprocessing precedes _update_layer)."""
+    analyzer = _CapturingAnalyzer()
+    pipeline = _make_pipeline(tmp_path, analyzer, min_signals=1)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    signals = signals_from_events(
+        [
+            _like_event(url, now - timedelta(hours=1)),
+            _retraction_event("https://x.com/u/status/123", "like", now),
+        ]
+    )
+    await pipeline.ingest_batch(signals)
+
+    consumed_likes = [
+        e
+        for batch in analyzer.seen_events
+        for e in batch
+        if e.get("event_type") == "like" and e.get("url") == url
+    ]
+    assert consumed_likes, "the like should have been consumed by the interest update"
+    for like in consumed_likes:
+        assert like["metadata"]["retracted"] is True
+        assert like["metadata"]["signal_strength"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_tombstone_discounts_later_earlier_like(tmp_path: Path) -> None:
+    """Retraction first (own batch) → tombstone; a subsequently-ingested like
+    with an earlier event time is discounted on entry."""
+    pipeline = _make_pipeline(tmp_path, _CapturingAnalyzer(), min_signals=1000)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    await pipeline.ingest_batch(
+        signals_from_events([_retraction_event(url, "like", now - timedelta(minutes=30))])
+    )
+    await pipeline.ingest_batch(signals_from_events([_like_event(url, now - timedelta(hours=1))]))
+    payload = _find_payload(pipeline, url, "like")
+    assert payload["metadata"]["retracted"] is True
+    assert payload["metadata"]["signal_strength"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_relike_after_retraction_is_not_discounted(tmp_path: Path) -> None:
+    """like -> retract -> like: the second like (event time after retraction)
+    must NOT be discounted."""
+    pipeline = _make_pipeline(tmp_path, _CapturingAnalyzer(), min_signals=1000)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    await pipeline.ingest_batch(
+        signals_from_events([_retraction_event(url, "like", now - timedelta(minutes=30))])
+    )
+    await pipeline.ingest_batch(signals_from_events([_like_event(url, now)]))
+    payload = _find_payload(pipeline, url, "like")
+    assert "retracted" not in payload["metadata"]
+    assert payload["metadata"]["signal_strength"] == 0.85
+
+
+@pytest.mark.asyncio
+async def test_tombstone_is_action_scoped(tmp_path: Path) -> None:
+    """A like-tombstone must not discount a favorite on the same identity key."""
+    pipeline = _make_pipeline(tmp_path, _CapturingAnalyzer(), min_signals=1000)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    await pipeline.ingest_batch(
+        signals_from_events([_retraction_event(url, "like", now - timedelta(minutes=30))])
+    )
+    await pipeline.ingest_batch(
+        signals_from_events([_favorite_event(url, now - timedelta(hours=1))])
+    )
+    payload = _find_payload(pipeline, url, "favorite")
+    assert "retracted" not in payload["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_missing_event_time_is_conservatively_not_discounted(tmp_path: Path) -> None:
+    """A positive with no event time cannot be causally ordered → not discounted."""
+    pipeline = _make_pipeline(tmp_path, _CapturingAnalyzer(), min_signals=1000)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    await pipeline.ingest_batch(signals_from_events([_retraction_event(url, "like", now)]))
+    like = _like_event(url, now - timedelta(hours=1))
+    del like["metadata"]["timestamp"]
+    await pipeline.ingest_batch(signals_from_events([like]))
+    payload = _find_payload(pipeline, url, "like")
+    assert "retracted" not in payload["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_expired_tombstone_does_not_discount(tmp_path: Path) -> None:
+    """A retraction older than the 24h TTL is evicted and no longer discounts."""
+    pipeline = _make_pipeline(tmp_path, _CapturingAnalyzer(), min_signals=1000)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    await pipeline.ingest_batch(
+        signals_from_events([_retraction_event(url, "like", now - timedelta(hours=25))])
+    )
+    await pipeline.ingest_batch(signals_from_events([_like_event(url, now - timedelta(hours=26))]))
+    payload = _find_payload(pipeline, url, "like")
+    assert "retracted" not in payload["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_out_of_whitelist_retracted_action_is_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A retraction naming a non-whitelisted action is ignored (no tombstone)."""
+    pipeline = _make_pipeline(tmp_path, _CapturingAnalyzer(), min_signals=1000)
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    with caplog.at_level("WARNING"):
+        await pipeline.ingest_batch(signals_from_events([_retraction_event(url, "view", now)]))
+    await pipeline.ingest_batch(signals_from_events([_like_event(url, now - timedelta(hours=1))]))
+    payload = _find_payload(pipeline, url, "like")
+    assert "retracted" not in payload["metadata"]
+
+
+# --- Task 1: late-arriving positive reconciliation (face 2b) -----------------
+
+
+@pytest.mark.asyncio
+async def test_late_positive_reconciled_against_stored_retraction(tmp_path: Path) -> None:
+    """A positive persisted AFTER a retraction is already stored (account_sync
+    backfill) is marked retracted at insert time when its event time is earlier."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    # Retraction already in the events table (persistent tombstone).
+    memory._database.insert_event(
+        "feedback",
+        url=url,
+        metadata={
+            "feedback_type": "retraction",
+            "retracted_action": "like",
+            "timestamp": _ms(now),
+        },
+    )
+    # Late backfill of the earlier like.
+    await memory.propagate_event(_like_event(url, now - timedelta(hours=1)))
+    rows = memory._database.query_events(event_types=["like"], limit=10)
+    assert len(rows) == 1
+    meta = json.loads(rows[0]["metadata"])
+    assert meta["retracted"] is True
+    assert meta["signal_strength"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_late_relike_after_retraction_not_reconciled(tmp_path: Path) -> None:
+    """A re-like whose event time is after the stored retraction is not marked."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    now = datetime.now(UTC)
+    url = "https://x.com/i/status/123"
+    memory._database.insert_event(
+        "feedback",
+        url=url,
+        metadata={
+            "feedback_type": "retraction",
+            "retracted_action": "like",
+            "timestamp": _ms(now - timedelta(hours=1)),
+        },
+    )
+    await memory.propagate_event(_like_event(url, now))
+    rows = memory._database.query_events(event_types=["like"], limit=10)
+    meta = json.loads(rows[0]["metadata"])
+    assert "retracted" not in meta

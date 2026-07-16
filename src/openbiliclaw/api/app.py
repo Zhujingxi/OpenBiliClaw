@@ -828,6 +828,43 @@ def _latest_e2e_event_id(ctx: Any) -> int:
     return 0
 
 
+def apply_retraction_db_marks(database: Any, events: list[dict[str, Any]]) -> int:
+    """Discount stored positives undone by retractions in this batch (Phase 0 face 2).
+
+    For every ``feedback``/``retraction`` event with a whitelisted
+    ``retracted_action`` and a usable event time, mark matching stored positive
+    rows (identity key + causally-earlier event time) via
+    ``Database.mark_positive_events_retracted``. Out-of-whitelist actions are
+    logged and skipped (invariant 4); per-event failures are swallowed at
+    WARNING so a bad retraction never blocks event ingest. Returns rows marked.
+    """
+    from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS, parse_event_timestamp
+
+    marker = getattr(database, "mark_positive_events_retracted", None)
+    if not callable(marker):
+        return 0
+    total = 0
+    for event in events:
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
+            continue
+        action = str(metadata.get("retracted_action") or "").strip().lower()
+        if action not in RETRACTABLE_ACTIONS:
+            logger.warning("api retraction: skipping out-of-whitelist retracted_action %r", action)
+            continue
+        url = str(event.get("url") or "")
+        retraction_at = parse_event_timestamp(metadata)
+        if not url or retraction_at is None:
+            continue
+        try:
+            total += marker([url], action, retraction_at=retraction_at)
+        except Exception:
+            logger.warning("api retraction DB mark failed", exc_info=True)
+    return total
+
+
 def _query_e2e_events(ctx: Any, *, after_event_id: int, limit: int = 1000) -> list[dict[str, Any]]:
     memory_manager = getattr(ctx, "memory_manager", None)
     query_events = getattr(memory_manager, "query_events", None)
@@ -4417,6 +4454,11 @@ def create_app(
             accepted += 1
             accepted_events.append(event)
         if accepted_events:
+            # Phase 0 face 2: mark stored positives undone by any retraction in
+            # this batch so offline reread paths (init rebuild / 12h cognition)
+            # see the discount. In-memory face is handled by the pipeline.
+            with suppress(Exception):
+                apply_retraction_db_marks(ctx.database, accepted_events)
             await _backfill_pending_discovery_events_to_profile_pipeline(
                 max_event_id=latest_event_id_before_ingest
             )
