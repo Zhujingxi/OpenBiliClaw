@@ -588,16 +588,8 @@ def _build_soul_engine() -> Any:
     from openbiliclaw.soul.engine import SoulEngine
 
     class _UnavailableLLM:
-        default_provider = ""
-
-        def is_chat_capable(self, _name: str) -> bool:
-            return False
-
         async def complete(self, *args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError("LLM registry is unavailable for this command.")
-
-        async def complete_provider(self, *args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError("LLM registry is unavailable for this command.")
+            raise RuntimeError("LLM route is unavailable for this command.")
 
     cfg = load_config()
     memory = _build_memory_manager()
@@ -990,7 +982,7 @@ def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
 def _sync_outbound_proxy() -> None:
     """Mirror [network].proxy into the process-level source of truth for CLI.
 
-    Runs once per CLI invocation so any command that builds an LLM registry or
+    Runs once per CLI invocation so any command that builds model routes or
     the updater routes overseas traffic through the configured proxy. Guarded
     so a missing/broken config never blocks a command from starting.
     """

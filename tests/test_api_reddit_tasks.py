@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.models import RedditSourceConfigOut
-from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+from openbiliclaw.config import Config, save_config
 from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
 from openbiliclaw.storage.database import Database
@@ -192,12 +192,7 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
 ) -> None:
     project_root = tmp_path / "runtime"
     credential_file = tmp_path / "rdt-cli" / "credential.json"
-    cfg = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
-        )
-    )
+    cfg = Config()
     _use_native_ollama(cfg)
     cfg.sources.reddit.enabled = True
     cfg.sources.reddit.backend = "extension"
@@ -236,12 +231,7 @@ def test_reddit_source_status_uses_local_rdt_credential_without_command_probe(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "runtime"
-    cfg = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
-        )
-    )
+    cfg = Config()
     _use_native_ollama(cfg)
     cfg.sources.reddit.enabled = True
     save_config(cfg, project_root / "config.toml")
@@ -274,12 +264,7 @@ def test_put_config_preserves_reddit_extension_backend(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "runtime"
-    cfg = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
-        )
-    )
+    cfg = Config()
     _use_native_ollama(cfg)
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))

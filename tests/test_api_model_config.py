@@ -374,13 +374,22 @@ def test_get_model_config_reports_legacy_migration_state_and_issues(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.openai.api_key = "legacy-secret"
-    config.llm.openai.model = "gpt-4o-mini"
-    config.llm.deepseek.api_key = "unrouted-legacy-secret"
-    config.llm.deepseek.model = "deepseek-chat"
-    save_config(config, tmp_path / "config.toml")
+    (tmp_path / "config.toml").write_text(
+        """
+[llm]
+default_provider = "openai"
+
+[llm.openai]
+api_key = "legacy-secret"
+model = "gpt-4o-mini"
+
+[llm.deepseek]
+api_key = "unrouted-legacy-secret"
+model = "deepseek-chat"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     client = TestClient(
         create_app(memory_manager=object(), database=object(), soul_engine=object())
@@ -408,17 +417,28 @@ def test_put_model_config_auto_appends_migration_addition_after_route_removal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.fallback_provider = "deepseek"
-    config.llm.openai.api_key = "routed-secret"
-    config.llm.openai.model = "gpt-4o-mini"
-    config.llm.deepseek.api_key = ""
-    config.llm.deepseek.model = "deepseek-chat"
-    config.llm.openrouter.api_key = "unrouted-secret"
-    config.llm.openrouter.model = "openai/gpt-4o-mini"
     config_path = tmp_path / "config.toml"
-    save_config(config, config_path)
+    config_path.write_text(
+        """
+[llm]
+default_provider = "openai"
+fallback_provider = "deepseek"
+
+[llm.openai]
+api_key = "routed-secret"
+model = "gpt-4o-mini"
+
+[llm.deepseek]
+api_key = ""
+model = "deepseek-chat"
+
+[llm.openrouter]
+api_key = "unrouted-secret"
+model = "openai/gpt-4o-mini"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     client = TestClient(
         create_app(memory_manager=object(), database=object(), soul_engine=object())
@@ -2412,6 +2432,60 @@ def test_legacy_config_put_cannot_overwrite_native_model_route(
     assert load_config(config_path).language == "en"
     assert b'language = "en"' in config_path.read_bytes()
     assert config_path.read_bytes() != before_disk
+
+
+def test_legacy_origin_config_put_keeps_raw_llm_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[general]
+language = "zh"
+
+[llm]
+default_provider = "openai"
+concurrency = 3
+
+[llm.openai]
+api_key = "legacy-secret"
+model = "gpt-4.1-mini"
+base_url = "https://api.openai.com/v1"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+    client = TestClient(app)
+    before_models = client.get("/api/model-config").json()
+    before_report = load_config(config_path).model_meta.migration_report
+    before_raw = config_path.read_text(encoding="utf-8")
+
+    response = client.put(
+        "/api/config",
+        json={
+            "language": "en",
+            "llm": {
+                "default_provider": "ollama",
+                "openai": {"api_key": "replacement-secret", "model": "replacement"},
+            },
+        },
+    )
+    after_models = client.get("/api/model-config").json()
+    after_raw = config_path.read_text(encoding="utf-8")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["warnings"] == ["model_config_not_updated"]
+    assert after_models["revision"] == before_models["revision"]
+    assert after_models["models"] == before_models["models"]
+    assert load_config(config_path).model_meta.migration_report == before_report
+    assert 'default_provider = "openai"' in after_raw
+    assert 'api_key = "legacy-secret"' in after_raw
+    assert "replacement-secret" not in after_raw
+    assert 'language = "en"' in after_raw
+    assert before_raw != after_raw
 
 
 def test_legacy_probe_endpoint_retains_only_network_proxy(

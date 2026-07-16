@@ -103,10 +103,8 @@ def _generic_json_schema_response_format() -> dict[str, Any]:
 class OpenAIProvider(LLMProvider):
     """OpenAI and compatible API provider."""
 
-    # OpenAI's API has a working embeddings endpoint
-    # (text-embedding-3-small / -large). Subclasses pointing at backends
-    # that don't expose embeddings (DeepSeek, OpenRouter, etc.) override
-    # this back to False — see DeepSeekProvider / OpenRouterProvider.
+    # The generic OpenAI client exposes embeddings; native route factories
+    # select protocol adapters and capabilities from connection metadata.
     supports_embedding = True
 
     _MAX_RETRIES = 3
@@ -798,6 +796,11 @@ class OpenAIProtocolProvider(OpenAIProvider):
                 f"{self.name} rate limit exceeded",
                 retry_after_seconds=retry_after_seconds_from_exception(exc),
             )
+        if status_code in _BILLING_BACKOFF_STATUS_CODES:
+            return LLMRateLimitError(
+                f"{self.name} provider billing backoff",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
         if isinstance(exc, openai.AuthenticationError) or status_code in {401, 403}:
             return _OpenAIProtocolError(
                 f"{self.name} authentication failed",
@@ -977,108 +980,6 @@ class OpenAIProtocolProvider(OpenAIProvider):
             if reasoning_effort is None
             else reasoning_effort.strip()
         )
-        if not effort:
-            return {"thinking": {"type": "disabled"}}
-        return {
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": effort,
-        }
-
-
-class DeepSeekProvider(OpenAIProvider):
-    """DeepSeek provider (OpenAI-compatible API).
-
-    Supports the v4 ``thinking`` mode via ``reasoning_effort``. When
-    ``reasoning_effort`` is set (``"high"`` or ``"max"``), requests are
-    sent with ``thinking={"type": "enabled"}`` and the requested effort
-    level as top-level body fields (the DeepSeek API accepts both
-    schemas).
-    """
-
-    # DeepSeek's API does not expose an embeddings endpoint. The
-    # inherited ``embed()`` would 404 at call time, which used to
-    # silently break the recommendation pipeline for DeepSeek users
-    # who never ran ``setup-embedding``. Marking it False makes
-    # ``build_embedding_service`` fall back to ollama / gemini.
-    supports_embedding = False
-
-    def __init__(
-        self,
-        api_key: str,
-        model: str = "deepseek-v4-flash",
-        *,
-        reasoning_effort: str = "",
-        timeout: float = 300.0,
-        proxy: str = "",
-        trust_env: bool = True,
-    ) -> None:
-        super().__init__(
-            api_key=api_key,
-            model=model,
-            base_url="https://api.deepseek.com",
-            provider_name="deepseek",
-            timeout=timeout,
-            proxy=proxy,
-            trust_env=trust_env,
-        )
-        self._reasoning_effort = reasoning_effort.strip()
-
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-        reasoning_effort: str | None = None,
-        model: str | None = None,
-    ) -> LLMResponse:
-        effort = self._reasoning_effort if reasoning_effort is None else reasoning_effort.strip()
-        if effort:
-            floor = _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR.get(effort, 16384)
-            if max_tokens < floor:
-                logger.debug(
-                    "deepseek: bumping max_tokens from %s to %s for effort=%s",
-                    max_tokens,
-                    floor,
-                    effort,
-                )
-                max_tokens = floor
-        try:
-            return await super().complete(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                json_mode=json_mode,
-                reasoning_effort=effort,
-                model=model,
-            )
-        except LLMResponseError:
-            if not effort:
-                logger.warning("deepseek: empty content; retrying once")
-                return await super().complete(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=json_mode,
-                    reasoning_effort="",
-                    model=model,
-                )
-            logger.warning(
-                "deepseek: empty content with reasoning_effort=%s; retrying with thinking disabled",
-                effort,
-            )
-            return await super().complete(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                json_mode=json_mode,
-                reasoning_effort="",
-                model=model,
-            )
-
-    def _extra_body(self, reasoning_effort: str | None = None) -> dict[str, Any]:
-        effort = self._reasoning_effort if reasoning_effort is None else reasoning_effort.strip()
         if not effort:
             return {"thinking": {"type": "disabled"}}
         return {

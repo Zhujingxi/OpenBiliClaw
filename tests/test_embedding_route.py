@@ -724,6 +724,7 @@ def test_registry_builds_native_route_in_exact_order_with_shared_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openbiliclaw.llm import registry as registry_module
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
 
     settings = _settings()
     records = (
@@ -754,7 +755,7 @@ def test_registry_builds_native_route_in_exact_order_with_shared_settings(
     service = registry_module.build_ordered_embedding_service(
         EmbeddingRouteConfig(enabled=True, settings=settings, providers=records),
         revision="r1",
-        runtime_options=registry_module.AdapterRuntimeOptions(),
+        runtime_options=AdapterRuntimeOptions(),
     )
 
     assert service is not None
@@ -769,12 +770,13 @@ def test_registry_builds_native_route_in_exact_order_with_shared_settings(
 
 def test_registry_keeps_disabled_native_embedding_route_disabled() -> None:
     from openbiliclaw.llm import registry as registry_module
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
 
     assert (
         registry_module.build_ordered_embedding_service(
             EmbeddingRouteConfig(enabled=False, settings=_settings(), providers=()),
             revision="r1",
-            runtime_options=registry_module.AdapterRuntimeOptions(),
+            runtime_options=AdapterRuntimeOptions(),
         )
         is None
     )

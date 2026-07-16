@@ -6,7 +6,7 @@ Discovery writes embeddings to L2; recommendation reads from L2
 with zero API calls on the hot path.
 
 Optional image embedding (cover-only vectors) is gated by
-``[llm.embedding].multimodal_enabled`` plus a provider/model that
+``[models.embedding.settings].multimodal_enabled`` plus a provider/model that
 supports native image embed (e.g. Gemini Embedding 2). Image vectors
 share the same cache table under ``img:`` keys and the same model
 namespace so they stay in one vector space with text embeds.
@@ -221,8 +221,8 @@ class EmbeddingService:
 
     Native ordered routes derive model, threshold, multimodal behavior and
     cache namespace exclusively from their shared ``EmbeddingModelSettings``.
-    Direct legacy provider construction remains available until Task 8 cuts
-    runtime composition over from ``[llm.embedding]``.
+    Direct construction remains a test/compatibility seam; production runtime
+    composition publishes one ordered route from ``Config.models``.
     """
 
     # Fixed text used by ``probe()`` for /api/health live readiness checks.

@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
 
+from .model_route_helpers import use_native_ollama
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -26,8 +28,7 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     # each test resolves under its own tmp project root (no cross-test leakage).
     monkeypatch.setattr("openbiliclaw.runtime.image_cache._CACHE_DIR", None)
     cfg = Config()
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.model = "llama3"
+    use_native_ollama(cfg)
     save_config(cfg, project_root / "config.toml")
 
 

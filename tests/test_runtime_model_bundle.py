@@ -76,10 +76,6 @@ def _config(tmp_path: Any, connection: ChatConnection, *, concurrency: int = 2) 
             timeout_seconds=30,
         )
     )
-    # The pre-Task-8 runtime still reads this legacy section. Keeping it
-    # buildable makes RED fail on the missing native bundle, not test setup.
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "legacy-only"
     return config
 
 

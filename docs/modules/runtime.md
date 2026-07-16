@@ -10,7 +10,9 @@ gate 属于 `RuntimeContext` 的稳定部分，容量只读取 `models.chat.conc
 
 模型 candidate 的 adapter 构造可以和普通配置写并行，但完整 consumer graph 不再携带构造开始时的全配置快照。`ModelConfigService` 进入 canonical writer、重读并完成模型 authority/revision 判定后，会调用同步 `restage_model_candidate()`，把已经构造好的 route/service 重新挂到当前 `RuntimeContext.config` 的完整配置图上，再写盘和短锁发布。因此普通 writer 在 candidate 等待期间提交的 scheduler/source 等非模型字段会同时保留在磁盘和 live controller；restage 失败时不写盘、不 swap。
 
-guided-init 的 `InitPrereqs.chat_ready()` 识别 production `OrderedLLMRoute.connections`，按配置顺序直接探测每个 connection adapter，第一条健康连接即通过；primary 不健康时会继续验证 fallback。旧的 `registry.get()` / `fallback_provider` 分支只保留给显式注入的 legacy test/embedding context，不会用于 production ordered route。
+guided-init 的 `InitPrereqs.chat_ready()` 只读取 production `OrderedLLMRoute.connections`，按配置顺序直接探测每个 connection adapter，第一条健康连接即通过；primary 不健康时会继续验证 fallback。生产与测试使用同一 ordered-route 协议，不再存在 vendor registry lookup 或单独的 fallback provider 构造分支。
+
+`RuntimeContext.llm_registry` 仅是历史字段名兼容别名：它在每次 publication 时都指向当前 `RuntimeModelBundle.chat_route`，值的真实类型与语义是 `OrderedLLMRoute`。该名称背后没有旧 registry class、provider bucket、builder 或独立状态；新代码应优先读取 `model_bundle.chat_route`。
 
 ## 概述
 
@@ -231,17 +233,17 @@ embedding_progress.reset()
 
 ### Degraded RuntimeContext
 
-`build_runtime_context()` 仍然保持严格：LLM registry 无法构建时直接抛出 `RegistryBuildError`，方便测试和 CLI 调用方快速失败。FastAPI 生产入口 `create_app()` 会单独捕获这个错误并调用 `build_degraded_runtime_context()`。
+`build_runtime_context()` 仍然保持严格：原生 ordered Chat / Embedding route 无法构建时直接抛出 `RegistryBuildError`，方便测试和 CLI 调用方快速失败。FastAPI 生产入口 `create_app()` 会单独捕获这个错误并调用 `build_degraded_runtime_context()`。
 
 降级模式下可用接口：
 
-- `GET /api/health`：返回 `status="degraded"`、`reason="llm_registry_unavailable"` 和 blocking issues；当 `SoulEngine` 可用时会额外返回可选字段 `profile_ready`，表示 soul 画像是否已生成。v0.3.95+ 额外返回 `embedding_ready`（bool）。v0.3.137+ 该同一 live probe 也被 `/api/init-status` 复用：若 `[llm.embedding].provider` 已配置，初始化前置清单会下发 `embedding_required=true`，`can_start` 与 `POST /api/init` 都必须等真实 probe 通过；provider 留空则可降级初始化。v0.3.97+ 这是一次**实时探活**而非「服务是否构建」：经 `EmbeddingService.probe()` 绕过缓存真打一次 provider，探测缓存保存 `ready / failed / timed_out` 原始三态而非调用方布尔值，并由 `_EMBEDDING_PROBE_TIMEOUT_SECONDS`（默认 15s）上限兜住。普通 `/api/health` 仅把 loopback Ollama 的 `timed_out` 解释为冷加载中的乐观可用，避免外部 Homebrew / 官方 Ollama 默认 5 分钟卸载后让插件横幅误报停服；远程 Ollama 或非 Ollama provider 超时仍为 `false`。成功沿用 `_EMBEDDING_READY_TTL_SECONDS`（默认 30s），明确失败与超时使用 8s 短 TTL 重探；single-flight 锁继续让并发 health/init 共享同一次真实 probe，但各入口独立解释结果。provider 现已 404/500（如 `bge-m3` 没拉、Ollama 停了、随包缺 `llama-server`）、返回空向量或抛出异常仍会如实报 `false`，修好后下次探活即翻 `true`；服务对象不存在仍 `false`，老/无 `probe()` 的服务回退「构建即就绪」。`false` 表示语义去重 / MMR 多样性降级（可能刷到换皮重复内容），插件 popup 据此显示「一键启用本地 Ollama」横幅。
+- `GET /api/health`：返回 `status="degraded"`、兼容 reason code `llm_registry_unavailable` 和 blocking issues；该 reason 只是稳定 API 字符串，不代表 runtime 仍有 legacy registry 类型。当 `SoulEngine` 可用时会额外返回可选字段 `profile_ready`，表示 soul 画像是否已生成。v0.3.95+ 额外返回 `embedding_ready`（bool）。v0.3.137+ 该同一 live probe 也被 `/api/init-status` 复用：若原生 `[models.embedding]` 已启用且 Provider 列表非空，初始化前置清单会下发 `embedding_required=true`，`can_start` 与 `POST /api/init` 都必须等真实 probe 通过；关闭 route 或 Provider 列表为空则可降级初始化。v0.3.97+ 这是一次**实时探活**而非「服务是否构建」：经 `EmbeddingService.probe()` 绕过缓存真打一次 provider，探测缓存保存 `ready / failed / timed_out` 原始三态而非调用方布尔值，并由 `_EMBEDDING_PROBE_TIMEOUT_SECONDS`（默认 15s）上限兜住。普通 `/api/health` 仅把 loopback Ollama 的 `timed_out` 解释为冷加载中的乐观可用，避免外部 Homebrew / 官方 Ollama 默认 5 分钟卸载后让插件横幅误报停服；远程 Ollama 或非 Ollama provider 超时仍为 `false`。成功沿用 `_EMBEDDING_READY_TTL_SECONDS`（默认 30s），明确失败与超时使用 8s 短 TTL 重探；single-flight 锁继续让并发 health/init 共享同一次真实 probe，但各入口独立解释结果。provider 现已 404/500（如 `bge-m3` 没拉、Ollama 停了、随包缺 `llama-server`）、返回空向量或抛出异常仍会如实报 `false`，修好后下次探活即翻 `true`；服务对象不存在仍 `false`，老/无 `probe()` 的服务回退「构建即就绪」。`false` 表示语义去重 / MMR 多样性降级（可能刷到换皮重复内容），插件 popup 据此显示「一键启用本地 Ollama」横幅。
 - `GET /api/config`：返回完整配置、`degraded=true` 和同一组 issues。
 - `PUT /api/config`：允许保存修复配置，但跳过热重载并返回 `restart_required=true`。
 - `GET /api/model-config`、`PUT /api/model-config`、`GET /api/model-connection-types` 与 `POST /api/model-config/probe`：保持模型修复、迁移决定、descriptor 与精确探测入口可达；请求仍受 revision/init guard 与 secret-safe validation 保护。
 - `GET /api/runtime-status` 与 `/api/runtime-stream`：用于 popup 展示降级状态；stream 会先发送 `{type:"degraded", ...}` 并保持连接。
 
-其他 API 在降级模式下返回 503，避免在缺少 LLM registry、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。
+其他 API 在降级模式下返回 503，避免在缺少可用模型 route、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。对外 `degraded_reason="llm_registry_unavailable"` 作为一版兼容值保留，不代表旧 `LLMRegistry` 仍存在。
 
 降级状态下成功 `PUT /api/model-config` 会构造并发布完整 runtime graph，启动新 graph 的后台任务，清除 `RuntimeContext` 与 app 两层 degraded 标记，再发一次 `config_reloaded`；调用方无需重启 daemon。构造、publication 或任务启动失败时，文件和完整 degraded runtime state 都恢复，且不发送成功事件。
 
@@ -513,7 +515,7 @@ XHS / 抖音 / YouTube 的插件任务桥保留两层去重：
 
 ### Config recovery boundary
 
-配置恢复是 runtime 和 API 的交界：`/api/config` 写盘前先校验新配置可构建 LLM registry，正常模式下写入后调用 `RuntimeContext.rebuild_from_config()` 与 `restart_background_tasks()`。热重载失败会恢复 `config.toml.bak`，并把 `rollback_applied` 返回给调用方；降级模式不做热重载，保存成功后返回 `restart_required=true`，要求用户重启 daemon 让新的 registry 生效。
+配置恢复是 runtime 和 API 的交界。普通 `/api/config` 事务只负责非模型字段，并保留磁盘上原始模型 authority；模型字段即使出现在 legacy payload 也会被忽略并返回 warning。只有 `PUT /api/model-config` 可以权威修改模型配置：它先从原生 records 构造完整 ordered routes 与 consumer graph，再原子写盘和发布；正常与 degraded runtime 都走同一 candidate swap，成功后无需重启 daemon。失败会恢复事务前文件和完整 normal/degraded runtime identity，并以 `rollback_applied` 告知调用方。
 
 原生模型配置使用阶段 7 的 model-scoped 串行锁与全配置 canonical path boundary，并由 `PUT /api/model-config` 暴露为唯一权威 HTTP 写路径：首次读取后执行 revision guard、credential merge、migration resolution、validation，并在 canonical boundary 外构造 candidate；提交前再与 auth admin、guided-init source opt-in、autostart apply、`PUT /api/config` 共用同一路径事务，先检查 guided-init precommit guard，再立即重读 base/local。guided init 的 `try_start` reservation 也在同一 canonical writer 内完成，因此 init 与模型 commit 只能有一方先取得 writer。普通字段并发变化会从最新原字节 rebase，模型 authority 的来源、内容或 local provenance 变化会 conflict。restage 后、创建 backup 与替换文件之前，app coordinator 优先使用 async capability 调用 `capture_model_runtime_task_state()`；它取得稳定 lifecycle lock，等正在执行的 public stop/restart 完整结束后一起捕获 runtime token 与三个 active flag。此时 canonical writer 已持有，但 lifecycle 代码从不反向取得 writer，锁顺序保持单向；等待快照时取消会原样传播且不改磁盘/runtime。bounded 同步 disk gate 从不跨 `await`；完成快照后的异步所有权覆盖 legacy backup、原子替换、无事件 graph publication、旧 registry drain、新 app loop 重启和 rollback，另一 task 的同步 writer 在 swap 窗口快速失败。所有 public stop/restart 由同一 lock 整段串行；restart 使用 private unlocked stop helper，在一次 ownership 中先清空三个 app slot、并发取消/收集其结果，同时调用 registry-wide `cancel_all(exclude={"guided_init"})`，再创建新 loops 并安排 post-reload one-shot。child failure/cancellation 属于 cleanup 结果，外层 caller cancellation 不会被吞。swap/restart 异常或 `CancelledError` 都会先按事务前快照恢复文件和完整 normal/degraded runtime graph；shielded restore 重新取得 lifecycle ownership 后按旧 ownership 重建等价 app loops，已清退 detached 旧 one-shot 保持取消，caller cancellation 随后原样传播。probe 的 init guard 除 gate 后检查外，还在取得 model path lock 后、读取 revision/credential 前再次执行，因此不会在慢保存排队期间越过 init reservation，且网络仍完全位于锁外。该流程仍使用独立 pre-model-refactor backup，不复用普通 `/api/config` 的 `.bak` 与整套 component rebuild。协调范围仅限当前进程且没有跨进程文件锁：即时重读只能发现读取前已可见的外部变化，外部 writer 仍可在重读到替换之间的窄窗口竞争。
 

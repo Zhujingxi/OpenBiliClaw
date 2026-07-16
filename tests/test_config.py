@@ -1,6 +1,8 @@
 """Tests for configuration management."""
 
+import re
 import tomllib
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -14,8 +16,6 @@ from openbiliclaw.config import (
     ConfigError,
     ConfigIssue,
     DiscoveryConfig,
-    LLMConfig,
-    LLMProviderConfig,
     NetworkConfig,
     SchedulerConfig,
     SoulConfig,
@@ -78,6 +78,65 @@ db_path = "data/openbiliclaw.db"
     )
 
 
+def test_runtime_and_setup_sources_use_native_model_routes_only() -> None:
+    """Production composition must not reconstruct the retired ``[llm]`` graph."""
+    root = Path(__file__).resolve().parents[1]
+    runtime_files = (
+        root / "src/openbiliclaw/config.py",
+        root / "src/openbiliclaw/llm/base.py",
+        root / "src/openbiliclaw/llm/registry.py",
+        root / "src/openbiliclaw/llm/route.py",
+        root / "src/openbiliclaw/llm/service.py",
+        root / "src/openbiliclaw/runtime/init_prereqs.py",
+        root / "src/openbiliclaw/api/runtime_context.py",
+        root / "src/openbiliclaw/cli.py",
+        root / "scripts/agent_bootstrap.py",
+    ) + tuple(sorted((root / "scripts").glob("*.py")))
+    forbidden = (
+        re.compile(r"\b(?:config|cfg|new_config|candidate_config)\.llm\b"),
+        re.compile(r"\b(?:LLMConfig|ModuleLLMConfig)\b"),
+        re.compile(r"\bmodule_overrides_from_config\b"),
+        re.compile(r"\bdefault_provider\b"),
+        re.compile(r"\bfallback_provider\b"),
+        re.compile(r"\bfallback_enabled\b"),
+        re.compile(r"\bbuild_llm_registry\b"),
+        re.compile(r"\bbuild_embedding_service\b"),
+        re.compile(r"\b(?:DeepSeekProvider|OpenRouterProvider|LLMRegistry)\b"),
+    )
+
+    for path in runtime_files:
+        text = path.read_text(encoding="utf-8")
+        matches = [pattern.pattern for pattern in forbidden if pattern.search(text)]
+        assert not matches, f"{path.relative_to(root)} retains legacy model identifiers: {matches}"
+
+
+def test_product_surfaces_do_not_emit_legacy_model_write_payloads() -> None:
+    root = Path(__file__).resolve().parents[1]
+    roots = (
+        root / "src/openbiliclaw/web",
+        root / "extension/popup",
+    )
+    removed_ids = re.compile(
+        r"\b(?:cfgLlmProvider|llmFallbackProvider|moduleSoulProvider|"
+        r"module_overrides_from_config|fallback_enabled)\b"
+    )
+    legacy_payload = re.compile(r"[\"']?llm[\"']?\s*:\s*\{")
+
+    for source_root in roots:
+        for path in source_root.rglob("*"):
+            if not path.is_file() or path.suffix not in {".html", ".js", ".ts"}:
+                continue
+            text = path.read_text(encoding="utf-8")
+            assert removed_ids.search(text) is None, path.relative_to(root)
+            assert legacy_payload.search(text) is None, path.relative_to(root)
+
+
+def test_config_root_has_no_legacy_llm_bucket_or_types() -> None:
+    assert "llm" not in {item.name for item in fields(Config)}
+    assert not hasattr(config_module, "LLMConfig")
+    assert not hasattr(config_module, "ModuleLLMConfig")
+
+
 class TestConfigDefaults:
     """Test default configuration values."""
 
@@ -87,8 +146,8 @@ class TestConfigDefaults:
         assert isinstance(config.api, ApiConfig)
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
-        assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 4
+        assert config.models.chat.connections[0].preset == "deepseek"
+        assert config.models.chat.concurrency == 4
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
@@ -115,15 +174,21 @@ class TestConfigDefaults:
         assert "model_meta" not in rendered
         assert "override_paths" not in rendered
 
-    def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
+    def test_native_concurrency_derives_background_limit(self) -> None:
+        from dataclasses import replace
+
         from openbiliclaw.llm.concurrency import background_llm_concurrency
 
-        config = Config(llm=LLMConfig(concurrency=3))
+        config = Config()
+        config.models = replace(
+            config.models,
+            chat=replace(config.models.chat, concurrency=3),
+        )
 
-        assert config.llm.concurrency == 3
-        assert background_llm_concurrency(config.llm.concurrency) == 2
+        assert config.models.chat.concurrency == 3
+        assert background_llm_concurrency(config.models.chat.concurrency) == 2
 
-    def test_runtime_concurrency_uses_models_when_legacy_value_conflicts(self) -> None:
+    def test_runtime_concurrency_uses_models(self) -> None:
         from dataclasses import replace
 
         from openbiliclaw.config import llm_concurrency_from_config
@@ -133,8 +198,6 @@ class TestConfigDefaults:
             config.models,
             chat=replace(config.models.chat, concurrency=7),
         )
-        config.llm.concurrency = 2
-
         assert llm_concurrency_from_config(config) == 7
 
     def test_saved_sync_defaults_off_and_round_trips(self, tmp_path: Path) -> None:
@@ -198,7 +261,7 @@ class TestConfigDefaults:
     def test_build_from_empty_dict(self) -> None:
         config = _build_config({})
         assert config.language == "zh"
-        assert config.llm.default_provider == "deepseek"
+        assert config.models == default_model_config()
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
 
@@ -231,7 +294,8 @@ manage_ollama = true
         assert config.language == "en"
         assert config.api.host == "127.0.0.1"
         assert config.api.port == 19090
-        assert config.llm.default_provider == "claude"
+        assert config.model_meta.source == "legacy"
+        assert config.models.chat.connections[0].type == "anthropic_compatible"
         # Other defaults should remain
         assert config.bilibili.auth_method == "cookie"
 
@@ -482,12 +546,9 @@ def test_load_config_with_diagnostics_creates_config_file(
     assert (tmp_path / "config.toml").exists()
     assert diagnostics.created_default_config is True
     assert diagnostics.config_path == tmp_path / "config.toml"
-    assert (
-        ConfigIssue(
-            field="llm.openai.api_key",
-            message="默认 provider `openai` 缺少 `api_key`，请在 config.toml 中填写。",
-        )
-        in diagnostics.issues
+    assert any(
+        issue.field == "models.chat.connections[0].credential" and issue.severity == "blocking"
+        for issue in diagnostics.issues
     )
 
 
@@ -519,318 +580,6 @@ base_url = "http://localhost:11434"
     assert diagnostics.config_path == tmp_path / "config.toml"
 
 
-def test_validate_runtime_config_requires_api_key_for_default_provider() -> None:
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key=""),
-        )
-    )
-
-    with pytest.raises(ConfigError, match="llm.openai.api_key"):
-        validate_runtime_config(config)
-
-
-def test_validate_runtime_config_allows_ollama_without_api_key() -> None:
-    config = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
-        )
-    )
-
-    validate_runtime_config(config)
-
-
-def test_build_config_supports_openrouter_provider() -> None:
-    config = _build_config(
-        {
-            "llm": {
-                "default_provider": "openrouter",
-                "openrouter": {
-                    "api_key": "test-key",
-                    "model": "openai/gpt-4o-mini",
-                    "base_url": "https://openrouter.ai/api/v1",
-                    "http_referer": "https://example.com",
-                    "x_title": "OpenBiliClaw",
-                },
-            }
-        }
-    )
-
-    assert config.llm.default_provider == "openrouter"
-    assert config.llm.openrouter.api_key == "test-key"
-    assert config.llm.openrouter.model == "openai/gpt-4o-mini"
-    assert config.llm.openrouter.base_url == "https://openrouter.ai/api/v1"
-    assert config.llm.openrouter.http_referer == "https://example.com"
-    assert config.llm.openrouter.x_title == "OpenBiliClaw"
-
-
-def test_validate_runtime_config_requires_openrouter_api_key() -> None:
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openrouter",
-            openrouter=LLMProviderConfig(api_key="", model="openai/gpt-4o-mini"),
-        )
-    )
-
-    with pytest.raises(ConfigError, match="llm.openrouter.api_key"):
-        validate_runtime_config(config)
-
-
-def test_build_config_supports_openai_compatible_provider() -> None:
-    """v0.3.32+ — generic OpenAI-protocol-compatible provider with its
-    own [llm.openai_compatible] block. Distinct from [llm.openai]."""
-    config = _build_config(
-        {
-            "llm": {
-                "default_provider": "openai_compatible",
-                "openai": {"api_key": "real-openai-key"},
-                "openai_compatible": {
-                    "api_key": "gsk-groq-test",
-                    "model": "llama-3.1-70b-versatile",
-                    "base_url": "https://api.groq.com/openai/v1",
-                },
-            }
-        }
-    )
-
-    assert config.llm.default_provider == "openai_compatible"
-    assert config.llm.openai_compatible.api_key == "gsk-groq-test"
-    assert config.llm.openai_compatible.model == "llama-3.1-70b-versatile"
-    assert config.llm.openai_compatible.base_url == "https://api.groq.com/openai/v1"
-    # The two blocks stay independent — adding openai_compatible does
-    # not stomp on [llm.openai].
-    assert config.llm.openai.api_key == "real-openai-key"
-
-
-def test_save_config_round_trips_openai_compatible(tmp_path: Path) -> None:
-    """[llm.openai_compatible] must survive a save/load cycle so popup
-    edits don't get silently dropped on backend restart."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.llm.openai_compatible.api_key = "gsk-test-key"
-    config.llm.openai_compatible.model = "qwen2.5-72b-instruct"
-    config.llm.openai_compatible.base_url = "https://api.together.xyz/v1"
-
-    save_config(config, config_path)
-    loaded = load_config(config_path)
-
-    assert loaded.llm.openai_compatible.api_key == "gsk-test-key"
-    assert loaded.llm.openai_compatible.model == "qwen2.5-72b-instruct"
-    assert loaded.llm.openai_compatible.base_url == "https://api.together.xyz/v1"
-
-
-def test_build_config_supports_openai_codex_auth_mode() -> None:
-    config = _build_config(
-        {
-            "llm": {
-                "default_provider": "openai",
-                "openai": {
-                    "api_key": "",
-                    "model": "gpt-5-nano",
-                    "auth_mode": "codex_oauth",
-                },
-            }
-        }
-    )
-
-    assert config.llm.openai.auth_mode == "codex_oauth"
-
-
-def test_save_config_round_trips_openai_auth_mode(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.llm.openai.auth_mode = "codex_oauth"
-
-    save_config(config, config_path)
-    loaded = load_config(config_path)
-
-    assert loaded.llm.openai.auth_mode == "codex_oauth"
-
-
-def test_collect_issues_allows_codex_oauth_without_api_key(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openbiliclaw.config import _collect_config_issues
-
-    token_path = tmp_path / "codex_auth.json"
-    token_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("OPENBILICLAW_CODEX_AUTH_PATH", str(token_path))
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key="", auth_mode="codex_oauth"),
-        )
-    )
-
-    fields = [issue.field for issue in _collect_config_issues(config)]
-
-    assert "llm.openai.api_key" not in fields
-    assert "llm.openai.codex_oauth" not in fields
-
-
-def test_collect_issues_blocks_codex_oauth_with_custom_base_url(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openbiliclaw.config import _collect_config_issues
-
-    token_path = tmp_path / "codex_auth.json"
-    token_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("OPENBILICLAW_CODEX_AUTH_PATH", str(token_path))
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(
-                api_key="",
-                auth_mode="codex_oauth",
-                base_url="https://proxy.example.com/v1",
-            ),
-        )
-    )
-
-    issues = _collect_config_issues(config)
-
-    assert any(issue.field == "llm.openai.base_url" for issue in issues)
-    assert any(issue.severity == "blocking" for issue in issues)
-
-
-def test_collect_issues_flags_missing_base_url_for_openai_compatible() -> None:
-    """openai_compatible without a base_url is meaningless — it would
-    just hit api.openai.com with the wrong key. Surface a config issue
-    so the user fixes it before the daemon starts."""
-    from openbiliclaw.config import _collect_config_issues
-
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai_compatible",
-            openai_compatible=LLMProviderConfig(
-                api_key="gsk-test-key",
-                model="llama-3.1-70b-versatile",
-                base_url="",  # ← missing
-            ),
-        )
-    )
-
-    issues = _collect_config_issues(config)
-    fields = [i.field for i in issues]
-    assert "llm.openai_compatible.base_url" in fields
-
-
-def test_save_config_round_trips_claude_base_url(tmp_path: Path) -> None:
-    """issue #72 — [llm.claude].base_url must be written back by
-    save_config; it used to be dropped by the provider-section whitelist."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.llm.claude.api_key = "sk-ant-test"
-    config.llm.claude.base_url = "https://relay.example.com/api"
-
-    save_config(config, config_path)
-    loaded = load_config(config_path)
-
-    assert loaded.llm.claude.base_url == "https://relay.example.com/api"
-
-
-def test_save_config_round_trips_api_flavor(tmp_path: Path) -> None:
-    """issue #72 — api_flavor survives a save/load cycle for the
-    OpenAI-protocol family."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.llm.openai.api_flavor = "responses"
-    config.llm.openai_compatible.api_key = "sk-relay"
-    config.llm.openai_compatible.base_url = "https://relay.example.com/v1"
-    config.llm.openai_compatible.api_flavor = "responses"
-
-    save_config(config, config_path)
-    loaded = load_config(config_path)
-
-    assert loaded.llm.openai.api_flavor == "responses"
-    assert loaded.llm.openai_compatible.api_flavor == "responses"
-
-
-def test_collect_issues_blocks_invalid_api_flavor() -> None:
-    from openbiliclaw.config import _collect_config_issues
-
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai_compatible",
-            openai_compatible=LLMProviderConfig(
-                api_key="sk-relay",
-                base_url="https://relay.example.com/v1",
-                api_flavor="banana",
-            ),
-        )
-    )
-
-    issues = _collect_config_issues(config)
-    flavor_issues = [i for i in issues if i.field == "llm.openai_compatible.api_flavor"]
-    assert flavor_issues and flavor_issues[0].severity == "blocking"
-
-
-def test_collect_issues_allows_responses_api_flavor() -> None:
-    from openbiliclaw.config import _collect_config_issues
-
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai_compatible",
-            openai_compatible=LLMProviderConfig(
-                api_key="sk-relay",
-                base_url="https://relay.example.com/v1",
-                api_flavor="responses",
-            ),
-        )
-    )
-
-    fields = [i.field for i in _collect_config_issues(config)]
-    assert "llm.openai_compatible.api_flavor" not in fields
-
-
-def test_build_config_supports_gemini_provider() -> None:
-    config = _build_config(
-        {
-            "llm": {
-                "default_provider": "gemini",
-                "gemini": {
-                    "api_key": "test-key",
-                    "model": "gemini-2.5-flash",
-                },
-            }
-        }
-    )
-
-    assert config.llm.default_provider == "gemini"
-    assert config.llm.gemini.api_key == "test-key"
-    assert config.llm.gemini.model == "gemini-2.5-flash"
-
-
-def test_validate_runtime_config_allows_gemini_env_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
-    config = Config(
-        llm=LLMConfig(
-            default_provider="gemini",
-            gemini=LLMProviderConfig(api_key="", model="gemini-2.5-flash"),
-        )
-    )
-
-    validate_runtime_config(config)
-
-
-def test_validate_runtime_config_requires_gemini_api_key() -> None:
-    config = Config(
-        llm=LLMConfig(
-            default_provider="gemini",
-            gemini=LLMProviderConfig(api_key="", model="gemini-2.5-flash"),
-        )
-    )
-
-    with pytest.raises(ConfigError, match="llm.gemini.api_key"):
-        validate_runtime_config(config)
-
-
 def test_validate_runtime_config_rejects_invalid_auth_method() -> None:
     config = Config(bilibili=BilibiliConfig(auth_method="invalid"))
 
@@ -840,10 +589,6 @@ def test_validate_runtime_config_rejects_invalid_auth_method() -> None:
 
 def test_validate_runtime_config_rejects_pool_target_count_above_cap() -> None:
     config = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
-        ),
         scheduler=SchedulerConfig(
             enabled=True,
             discovery_cron="0 */4 * * *",
@@ -1416,126 +1161,6 @@ def test_save_config_round_trips_advanced_scheduler_and_logging_fields(
     assert loaded.logging.unmanaged_max_age_days == 6
 
 
-def test_save_config_round_trips_runtime_changes(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.language = "en"
-    config.data_dir = "runtime-data"
-    config.llm.default_provider = "gemini"
-    config.llm.concurrency = 6
-    config.llm.fallback_provider = "openai"
-    config.llm.gemini.api_key = "gemini-test-key"
-    config.llm.gemini.model = "gemini-2.5-flash"
-    config.llm.embedding.fallback_enabled = True
-    config.llm.embedding.fallback_provider = "ollama"
-
-    save_config(config, config_path)
-    loaded = load_config(config_path)
-
-    assert loaded.language == "en"
-    assert loaded.data_dir == "runtime-data"
-    assert loaded.llm.default_provider == "gemini"
-    assert loaded.llm.concurrency == 6
-    assert loaded.llm.fallback_provider == "openai"
-    assert loaded.llm.gemini.api_key == "gemini-test-key"
-    assert loaded.llm.gemini.model == "gemini-2.5-flash"
-    assert loaded.llm.embedding.fallback_enabled is True
-    assert loaded.llm.embedding.fallback_provider == "ollama"
-
-
-def test_save_config_round_trips_empty_deepseek_reasoning_effort(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.llm.deepseek.reasoning_effort = ""
-
-    save_config(config, config_path)
-    rendered = config_path.read_text(encoding="utf-8")
-    loaded = load_config(config_path)
-
-    assert 'reasoning_effort = ""' in rendered
-    assert loaded.llm.deepseek.reasoning_effort == ""
-
-
-def test_llm_and_embedding_fallback_defaults_are_disabled() -> None:
-    config = Config()
-
-    # Chat side: a non-empty fallback_provider IS the enable switch — the
-    # legacy [llm].fallback_enabled bool has been removed entirely.
-    assert not hasattr(config.llm, "fallback_enabled")
-    assert config.llm.fallback_provider == ""
-    assert config.llm.embedding.fallback_enabled is False
-    assert config.llm.embedding.fallback_provider == ""
-    assert config.llm.embedding.output_dimensionality == 1024
-
-
-def test_save_config_round_trips_embedding_credentials(tmp_path: Path) -> None:
-    """v0.3.32+ EmbeddingConfig owns api_key/base_url. They must survive
-    a save/load round-trip — otherwise the popup's PUT /api/config would
-    silently lose the user's dedicated embedding credentials on restart."""
-    config_path = tmp_path / "config.toml"
-    config = Config()
-    config.llm.embedding.provider = "openai"
-    config.llm.embedding.model = "text-embedding-3-small"
-    config.llm.embedding.api_key = "sk-dedicated-embedding-xyz"
-    config.llm.embedding.base_url = "https://embed.example.com/v1"
-    config.llm.embedding.output_dimensionality = 768
-    config.llm.embedding.similarity_threshold = 0.91
-    config.llm.embedding.fallback_enabled = True
-    config.llm.embedding.fallback_provider = "openai_compatible"
-    config.llm.embedding.multimodal_enabled = True
-
-    save_config(config, config_path)
-    loaded = load_config(config_path)
-
-    assert loaded.llm.embedding.provider == "openai"
-    assert loaded.llm.embedding.model == "text-embedding-3-small"
-    assert loaded.llm.embedding.api_key == "sk-dedicated-embedding-xyz"
-    assert loaded.llm.embedding.base_url == "https://embed.example.com/v1"
-    assert loaded.llm.embedding.output_dimensionality == 768
-    assert loaded.llm.embedding.similarity_threshold == 0.91
-    assert loaded.llm.embedding.fallback_enabled is True
-    assert loaded.llm.embedding.fallback_provider == "openai_compatible"
-    assert loaded.llm.embedding.multimodal_enabled is True
-
-
-def test_embedding_multimodal_enabled_defaults_false() -> None:
-    config = Config()
-    assert config.llm.embedding.multimodal_enabled is False
-
-
-def test_load_config_accepts_legacy_embedding_section_without_api_key(
-    tmp_path: Path,
-) -> None:
-    """Pre-v0.3.32 configs only have provider/model/similarity_threshold
-    in [llm.embedding]. Loading must still succeed and the new fields
-    default to empty strings (which triggers the back-compat fallback in
-    build_embedding_service)."""
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[llm]
-default_provider = "ollama"
-
-[llm.ollama]
-model = "llama3"
-base_url = "http://localhost:11434/v1"
-
-[llm.embedding]
-provider = "ollama"
-model = ""
-similarity_threshold = 0.88
-""".strip()
-    )
-
-    loaded = load_config(config_path)
-
-    assert loaded.llm.embedding.provider == "ollama"
-    assert loaded.llm.embedding.api_key == ""
-    assert loaded.llm.embedding.base_url == ""
-    assert loaded.llm.embedding.output_dimensionality == 1024
-    assert loaded.llm.embedding.similarity_threshold == 0.88
-
-
 def test_api_auth_env_vars_matches_loader_read_surface() -> None:
     """The env-managed guard list MUST equal what ``_build_api_auth`` reads.
 
@@ -1830,9 +1455,9 @@ def test_save_config_preserves_unchanged_plaintext_password_non_env(
     path = tmp_path / "config.toml"
     path.write_text('[api.auth]\nenabled = true\npassword = "secret"\n', encoding="utf-8")
 
-    # an UNRELATED save (e.g. settings UI changing an LLM key) — auth untouched
+    # an unrelated save — auth untouched
     cfg = load_config(path)
-    cfg.llm.openai.api_key = "sk-unrelated"
+    cfg.language = "en"
     save_config(cfg, path)
 
     text = path.read_text(encoding="utf-8")
@@ -1968,7 +1593,7 @@ def test_save_config_does_not_bake_in_config_local_password(
 
     merged = load_config()
     assert verify_password("localpw", merged.api.auth.password_hash)  # local wins
-    merged.llm.openai.api_key = "sk-unrelated"
+    merged.language = "en"
     save_config(merged)
 
     text = (tmp_path / "config.toml").read_text(encoding="utf-8")
@@ -2233,21 +1858,6 @@ class TestDiscoveryConfig:
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.multimodal_batch_size == 8
-
-    def test_top_level_discovery_is_distinct_from_llm_discovery(self) -> None:
-        """`[discovery]` (planner knobs) must not collide with `[llm.discovery]`
-        (per-module provider override) — they are independent tables."""
-        config = _build_config(
-            {
-                "discovery": {"unified_keyword_planner_enabled": True, "gen_batch": 42},
-                "llm": {"discovery": {"provider": "deepseek", "model": "deepseek-v4-flash"}},
-            }
-        )
-
-        assert config.discovery.unified_keyword_planner_enabled is True
-        assert config.discovery.gen_batch == 42
-        assert config.llm.discovery.provider == "deepseek"
-        assert config.llm.discovery.model == "deepseek-v4-flash"
 
     def test_discovery_loads_and_normalizes_from_toml(self, tmp_path: Path) -> None:
         toml_path = tmp_path / "c.toml"
@@ -2522,150 +2132,11 @@ admission_min_score = {literal}
         assert "multimodal_image_max_px = 384" in rendered
 
 
-def test_collect_issues_blocks_unknown_embedding_provider() -> None:
-    """A browser page-translator once rewrote value-less <option> text into
-    config ('奥拉玛'), silently disabling the embedding service. Unknown
-    embedding provider names must block the save instead of persisting."""
-    from openbiliclaw.config import _collect_config_issues
-
-    config = Config()
-    config.llm.embedding.provider = "奥拉玛"
-    config.llm.embedding.fallback_provider = "双子座"
-
-    issues = _collect_config_issues(config)
-
-    fields = {issue.field for issue in issues if issue.severity == "blocking"}
-    assert "llm.embedding.provider" in fields
-    assert "llm.embedding.fallback_provider" in fields
-
-    # Legit values (any case) and empty stay clean.
-    config.llm.embedding.provider = "Ollama"
-    config.llm.embedding.fallback_provider = ""
-    issues = _collect_config_issues(config)
-    assert not any(issue.field.startswith("llm.embedding.") for issue in issues)
-
-
 def _llm_fallback_issues(config: Config) -> list[ConfigIssue]:
     from openbiliclaw.config import _collect_config_issues
 
     issues = _collect_config_issues(config)
     return [issue for issue in issues if issue.field == "llm.fallback_provider"]
-
-
-def test_collect_issues_blocks_unknown_llm_fallback_provider() -> None:
-    """`_fallback_order()` silently drops an unknown fallback name (e.g. a
-    browser-translated '奥拉玛'), so the save must block with the same
-    translation hint as the embedding-provider check."""
-    config = Config()
-    config.llm.default_provider = "deepseek"
-    config.llm.deepseek.api_key = "sk-x"
-    config.llm.fallback_provider = "奥拉玛"
-
-    issues = _llm_fallback_issues(config)
-
-    assert issues
-    assert all(issue.severity == "blocking" for issue in issues)
-    assert "网页翻译" in issues[0].message
-
-
-def test_collect_issues_blocks_llm_fallback_even_when_default_is_unknown() -> None:
-    """The fallback checks must run before the default-provider early return
-    and must not crash when the default provider itself is unknown."""
-    config = Config()
-    config.llm.default_provider = "bogus"
-    config.llm.fallback_provider = "deepseek"  # no api_key -> dead fallback
-
-    issues = _llm_fallback_issues(config)
-
-    assert issues
-    assert all(issue.severity == "blocking" for issue in issues)
-
-
-def test_collect_issues_blocks_same_name_llm_fallback() -> None:
-    """A fallback identical to the default provider would never fire —
-    comparison is normalized (strip/lower)."""
-    config = Config()
-    config.llm.default_provider = "deepseek"
-    config.llm.deepseek.api_key = "sk-x"
-    config.llm.fallback_provider = " DeepSeek "
-
-    issues = _llm_fallback_issues(config)
-
-    assert issues
-    assert all(issue.severity == "blocking" for issue in issues)
-    assert "永远不会生效" in issues[0].message
-
-
-def test_collect_issues_blocks_llm_fallback_missing_api_key() -> None:
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.openai.api_key = "sk-main"
-    config.llm.fallback_provider = "deepseek"
-
-    issues = _llm_fallback_issues(config)
-
-    assert issues
-    assert all(issue.severity == "blocking" for issue in issues)
-    assert "llm.deepseek.api_key" in issues[0].message
-
-
-def test_collect_issues_blocks_openai_compatible_llm_fallback_without_base_url() -> None:
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.openai.api_key = "sk-main"
-    config.llm.fallback_provider = "openai_compatible"
-    config.llm.openai_compatible.api_key = "sk-gateway"
-    config.llm.openai_compatible.base_url = ""
-
-    issues = _llm_fallback_issues(config)
-
-    assert issues
-    assert all(issue.severity == "blocking" for issue in issues)
-    assert "base_url" in issues[0].message
-
-
-def test_collect_issues_blocks_ollama_llm_fallback_without_model_or_base_url() -> None:
-    """Mirrors `_maybe_ollama_provider`: Ollama only registers with a model
-    or base_url; a bare `fallback_provider = "ollama"` would never fire."""
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.openai.api_key = "sk-main"
-    config.llm.fallback_provider = "ollama"
-
-    issues = _llm_fallback_issues(config)
-
-    assert issues
-    assert all(issue.severity == "blocking" for issue in issues)
-
-    config.llm.ollama.model = "llama3"
-    assert _llm_fallback_issues(config) == []
-
-
-def test_collect_issues_allows_gemini_llm_fallback_with_env_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.openai.api_key = "sk-main"
-    config.llm.fallback_provider = "gemini"
-
-    assert _llm_fallback_issues(config) == []
-
-
-def test_collect_issues_allows_empty_and_configured_llm_fallback() -> None:
-    config = Config()
-    config.llm.default_provider = "openai"
-    config.llm.openai.api_key = "sk-main"
-    config.llm.fallback_provider = ""
-
-    assert _llm_fallback_issues(config) == []
-
-    config.llm.fallback_provider = "deepseek"
-    config.llm.deepseek.api_key = "sk-fallback"
-
-    assert _llm_fallback_issues(config) == []
 
 
 # ── Phase 2 Task 4: inspiration config collapse (13 → 4) ────────────────
@@ -3059,8 +2530,6 @@ model = "evaluation-only"
         assert [item.id for item in config.models.chat.connections] == ["native-main"]
         assert config.models.chat.connections[0].credential.value == "NATIVE_API_KEY"
         assert config.models.chat.connections[0].credential.value != "legacy-secret"
-        assert config.llm.deepseek.api_key == ""
-        assert config.llm.default_provider == "deepseek"
         assert any(
             "[models]" in message and "[llm]" in message and "忽略" in message
             for message in diagnostics.messages
@@ -3080,7 +2549,6 @@ model = "evaluation-only"
 
         assert config.model_meta.source == "native"
         assert [item.id for item in config.models.chat.connections] == ["native-main"]
-        assert config.llm.deepseek.api_key == ""
         assert "malformed-legacy-secret" not in repr(diagnostics)
         assert any("[llm]" in message and "忽略" in message for message in diagnostics.messages)
 

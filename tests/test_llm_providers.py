@@ -24,8 +24,11 @@ from openbiliclaw.llm.base import (
 from openbiliclaw.llm.claude_provider import ClaudeProvider
 from openbiliclaw.llm.gemini_provider import GeminiProvider, gemini_sdk_available
 from openbiliclaw.llm.ollama_provider import OllamaProvider
-from openbiliclaw.llm.openai_provider import DeepSeekProvider, OpenAIProvider
-from openbiliclaw.llm.openrouter_provider import OpenRouterProvider
+from openbiliclaw.llm.openai_provider import (
+    OpenAIProtocolOptions,
+    OpenAIProtocolProvider,
+    OpenAIProvider,
+)
 
 
 def _openai_response(content: str = "ok") -> SimpleNamespace:
@@ -36,6 +39,51 @@ def _openai_response(content: str = "ok") -> SimpleNamespace:
             prompt_tokens=10,
             completion_tokens=5,
             total_tokens=15,
+        ),
+    )
+
+
+def _deepseek_provider(
+    *,
+    model: str = "deepseek-chat",
+    reasoning_effort: str = "",
+) -> OpenAIProtocolProvider:
+    return OpenAIProtocolProvider(
+        api_key="test-key",
+        model=model,
+        base_url="https://api.deepseek.com",
+        options=OpenAIProtocolOptions(
+            connection_id="deepseek",
+            preset="deepseek",
+            api_mode="chat_completions",
+            default_reasoning_effort=reasoning_effort,
+        ),
+    )
+
+
+def _openrouter_provider(
+    *,
+    model: str,
+    http_referer: str = "",
+    x_title: str = "",
+) -> OpenAIProtocolProvider:
+    headers = {
+        key: value
+        for key, value in {
+            "HTTP-Referer": http_referer,
+            "X-Title": x_title,
+        }.items()
+        if value
+    }
+    return OpenAIProtocolProvider(
+        api_key="test-key",
+        model=model,
+        base_url="https://openrouter.ai/api/v1",
+        options=OpenAIProtocolOptions(
+            connection_id="openrouter",
+            preset="openrouter",
+            api_mode="chat_completions",
+            extra_headers=headers,
         ),
     )
 
@@ -246,7 +294,7 @@ async def test_openai_provider_does_not_retry_rate_limit(
 async def test_openai_provider_treats_insufficient_balance_as_provider_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key")
+    provider = _deepseek_provider()
     calls = {"count": 0}
 
     class PaymentRequiredError(Exception):
@@ -496,7 +544,7 @@ async def test_claude_provider_does_not_retry_rate_limit(
 
 
 def test_deepseek_provider_defaults() -> None:
-    provider = DeepSeekProvider(api_key="test-key")
+    provider = _deepseek_provider()
     assert provider.name == "deepseek"
 
 
@@ -504,7 +552,7 @@ def test_deepseek_provider_defaults() -> None:
 async def test_deepseek_provider_accepts_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key", model="deepseek-default")
+    provider = _deepseek_provider(model="deepseek-default")
     captured: dict[str, object] = {}
 
     async def fake_request(**kwargs: object) -> SimpleNamespace:
@@ -528,7 +576,7 @@ async def test_deepseek_provider_accepts_per_call_model_override(
 async def test_deepseek_provider_sends_disabled_thinking_for_empty_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key", reasoning_effort="max")
+    provider = _deepseek_provider(reasoning_effort="max")
     captured: dict[str, object] = {}
 
     async def fake_request(**kwargs: object) -> SimpleNamespace:
@@ -544,7 +592,7 @@ async def test_deepseek_provider_sends_disabled_thinking_for_empty_reasoning_eff
 
     assert response.content == "deepseek-ok"
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert provider._reasoning_effort == "max"
+    assert provider.options.default_reasoning_effort == "max"
 
 
 @pytest.mark.asyncio
@@ -595,7 +643,7 @@ async def test_protocol_provider_parallel_reasoning_overrides_do_not_mutate_opti
 async def test_deepseek_provider_retries_empty_response_once_without_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key")
+    provider = _deepseek_provider()
     calls = {"count": 0}
 
     async def fake_create(**_: object) -> SimpleNamespace:
@@ -937,8 +985,7 @@ async def test_ollama_provider_native_reports_thinking_only_response(
 
 
 def test_openrouter_provider_defaults_and_headers() -> None:
-    provider = OpenRouterProvider(
-        api_key="test-key",
+    provider = _openrouter_provider(
         model="openai/gpt-4o-mini",
         http_referer="https://example.com",
         x_title="OpenBiliClaw",
@@ -956,7 +1003,7 @@ def test_openrouter_provider_defaults_and_headers() -> None:
 async def test_openrouter_provider_inherits_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = OpenRouterProvider(api_key="test-key", model="openai/default")
+    provider = _openrouter_provider(model="openai/default")
     captured: dict[str, object] = {}
 
     async def fake_request(**kwargs: object) -> SimpleNamespace:

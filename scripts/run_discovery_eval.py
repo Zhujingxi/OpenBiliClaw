@@ -159,7 +159,8 @@ async def main(args: argparse.Namespace) -> None:
     from openbiliclaw.config import load_config
     from openbiliclaw.eval.discovery_evaluator import DiscoveryEvalReport, DiscoveryEvaluator
     from openbiliclaw.eval.run_logger import RunLogger
-    from openbiliclaw.llm.registry import build_llm_registry
+    from openbiliclaw.memory.manager import MemoryManager
+    from _model_runtime import build_script_model_bundle
 
     logging.basicConfig(
         level=logging.INFO,
@@ -167,8 +168,9 @@ async def main(args: argparse.Namespace) -> None:
     )
 
     cfg = load_config()
-    registry = build_llm_registry(cfg)
-    llm_service = registry.default
+    memory = MemoryManager(PROJECT_ROOT / "data")
+    memory.initialize()
+    llm_service = build_script_model_bundle(cfg, memory).llm_service
 
     strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
 

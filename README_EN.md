@@ -606,6 +606,7 @@ background ─ background admission (default 3) ──────┘
 │ Chat/Embedding/Runtime tabs · one stable-ID ordered route │
 │ Desktop inspector · extension/mobile sequential list→detail · descriptor-driven fields │
 │ strict GET/PUT snapshot/save · descriptors · exact draft probe │
+│ descriptor registry → ModelConfigService → native ordered factories │
 │ CLI models list/add/edit/remove/move/probe → ModelConfigService │
 │ setup/bootstrap/install/Docker/package → native [models] writer │
 │ legacy /api/config is a credential-free projection with write guard │

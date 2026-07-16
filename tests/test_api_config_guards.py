@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+import tomllib
 from typing import TYPE_CHECKING
 
+import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
-from openbiliclaw.config import (
-    Config,
-    EmbeddingConfig,
-    LLMConfig,
-    LLMProviderConfig,
-    save_config,
-)
+from openbiliclaw.config import Config, save_config
 from openbiliclaw.config import (
     load_config as load_config_from_path,
 )
-from openbiliclaw.model_config import migrate_legacy_llm
+from openbiliclaw.model_config import (
+    ChatConnection,
+    ChatRouteConfig,
+    CredentialConfig,
+    EmbeddingModelSettings,
+    EmbeddingProviderConfig,
+    EmbeddingRouteConfig,
+    ModelConfig,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,285 +44,122 @@ def _make_client(
 
 
 def _base_config() -> Config:
-    config = Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(
-                api_key="sk-real-key-1234567890abcdef",
-                model="gpt-4o-mini",
+    return Config(
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="openai-main",
+                        name="OpenAI",
+                        type="openai_compatible",
+                        preset="openai",
+                        model="gpt-4o-mini",
+                        base_url="https://api.openai.com/v1",
+                        credential=CredentialConfig(source="inline", value="sk-real-key"),
+                        api_mode="chat_completions",
+                    ),
+                    ChatConnection(
+                        id="deepseek-backup",
+                        name="DeepSeek",
+                        type="openai_compatible",
+                        preset="deepseek",
+                        model="deepseek-chat",
+                        base_url="https://api.deepseek.com",
+                        credential=CredentialConfig(source="inline", value="deepseek-key"),
+                        api_mode="chat_completions",
+                    ),
+                )
             ),
-            claude=LLMProviderConfig(api_key="claude-real-key", model="claude-3-5-haiku"),
-            deepseek=LLMProviderConfig(api_key="deepseek-real-key", model="deepseek-chat"),
-            openrouter=LLMProviderConfig(api_key="openrouter-real-key", model="openrouter/auto"),
-            openai_compatible=LLMProviderConfig(
-                api_key="compat-real-key",
-                model="mimo-v2.5-pro",
-                base_url="https://token-plan-sgp.xiaomimimo.com/v1",
-            ),
-            embedding=EmbeddingConfig(
-                provider="openai",
-                model="text-embedding-3-small",
-                api_key="sk-embedding-real-key",
-                base_url="https://embed.example.com/v1",
+            embedding=EmbeddingRouteConfig(
+                enabled=True,
+                settings=EmbeddingModelSettings(model="text-embedding-3-small"),
+                providers=(
+                    EmbeddingProviderConfig(
+                        id="openai-embedding",
+                        name="OpenAI embedding",
+                        type="openai_compatible",
+                        preset="openai",
+                        base_url="https://api.openai.com/v1",
+                        credential=CredentialConfig(source="inline", value="embed-key"),
+                    ),
+                ),
             ),
         )
     )
-    # The transitional /api/config endpoint still projects the legacy shape,
-    # but runtime validation and publication use the native ordered route.
-    config.models = migrate_legacy_llm(asdict(config.llm), {}).models
-    return config
 
 
-def test_put_config_ignores_masked_chat_provider_api_key(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    "legacy_update",
+    [
+        {"openai": {"api_key": "sk-new", "model": "gpt-new"}},
+        {"fallback_provider": "claude"},
+        {"embedding": {"provider": "ollama", "model": "other"}},
+    ],
+)
+def test_put_config_ignores_all_legacy_model_updates(
+    monkeypatch,
+    tmp_path,
+    legacy_update,
+) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = tomllib.loads(config_path.read_text(encoding="utf-8"))["models"]
 
-    response = client.put("/api/config", json={"llm": {"openai": {"api_key": "sk-d****cdef"}}})
+    response = client.put("/api/config", json={"llm": legacy_update, "language": "en"})
 
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.api_key == "sk-real-key-1234567890abcdef"
-
-
-def test_put_config_ignores_empty_chat_provider_api_key(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put("/api/config", json={"llm": {"openai": {"api_key": ""}}})
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.api_key == "sk-real-key-1234567890abcdef"
+    assert response.status_code == 200, response.text
+    assert response.json()["warnings"] == ["model_config_not_updated"]
+    rendered = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert rendered["models"] == before
+    assert rendered["general"]["language"] == "en"
 
 
-def test_put_config_writes_real_new_chat_provider_api_key(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put(
-        "/api/config",
-        json={"llm": {"openai": {"api_key": "sk-new-real-key-fedcba0987654321"}}},
-    )
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.api_key == (
-        "sk-new-real-key-fedcba0987654321"
-    )
-
-
-def test_put_config_ignores_empty_chat_provider_model(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put("/api/config", json={"llm": {"openai": {"model": ""}}})
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.model == "gpt-4o-mini"
-
-
-def test_put_config_writes_real_new_chat_provider_model(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.model == "gpt-4.1-mini"
-
-
-def test_put_config_round_trips_openai_auth_mode(monkeypatch, tmp_path) -> None:
-    from openbiliclaw.llm.codex_auth import CodexCredentials
-
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-    monkeypatch.setattr(
-        "openbiliclaw.llm.codex_auth.load_codex_credentials",
-        lambda: CodexCredentials("access-token", "refresh-token", 9999999999),
-    )
-
-    response = client.put(
-        "/api/config",
-        json={"llm": {"openai": {"auth_mode": "codex_oauth"}}},
-    )
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.auth_mode == "codex_oauth"
-    get_response = client.get("/api/config")
-    assert get_response.status_code == 200
-    assert get_response.json()["llm"]["openai"]["auth_mode"] == "codex_oauth"
-
-
-def test_put_config_round_trips_explicit_fallback_providers(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    # Chat fallback must be a provider that would actually register — v0.3.156+
-    # rejects a dead fallback (claude has a real key in _base_config; a keyless
-    # gemini fallback is now a blocking 400 by design). Embedding fallback keeps
-    # ollama (embedding side has no api_key requirement).
-    response = client.put(
-        "/api/config",
-        json={
-            "llm": {
-                "fallback_provider": "claude",
-                "embedding": {"fallback_provider": "ollama"},
-            }
-        },
-    )
-
-    assert response.status_code == 200
-    loaded = load_config_from_path(config_path)
-    assert loaded.llm.fallback_provider == "claude"
-    assert loaded.llm.embedding.fallback_provider == "ollama"
-
-    get_response = client.get("/api/config")
-    assert get_response.status_code == 200
-    body = get_response.json()
-    assert body["llm"]["fallback_provider"] == "claude"
-    assert body["llm"]["embedding"]["fallback_provider"] == "ollama"
-
-
-def test_put_config_round_trips_embedding_multimodal_enabled(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    # Default off, and GET echoes it so the settings page can render the toggle.
-    assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is False
-
-    response = client.put(
-        "/api/config",
-        json={"llm": {"embedding": {"multimodal_enabled": True}}},
-    )
-    assert response.status_code == 200
-
-    loaded = load_config_from_path(config_path)
-    assert loaded.llm.embedding.multimodal_enabled is True
-    assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is True
-
-
-def test_put_config_accepts_dashscope_embedding_provider(monkeypatch, tmp_path) -> None:
-    """Regression (found by the multimodal E2E, 2026-07-14): `dashscope` must be
-    an accepted embedding provider at config-save validation, not just in the
-    registry. Otherwise the settings-page dropdown option 400s on save.
-    """
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put(
-        "/api/config",
-        json={
-            "llm": {
-                "embedding": {
-                    "provider": "dashscope",
-                    "model": "qwen3-vl-embedding",
-                    "api_key": "sk-dashscope-e2e",
-                    "multimodal_enabled": True,
-                }
-            }
-        },
-    )
-    assert response.status_code == 200, response.json()
-
-    loaded = load_config_from_path(config_path)
-    assert loaded.llm.embedding.provider == "dashscope"
-    assert loaded.llm.embedding.model == "qwen3-vl-embedding"
-    assert loaded.llm.embedding.multimodal_enabled is True
-
-    body = client.get("/api/config").json()["llm"]["embedding"]
-    assert body["provider"] == "dashscope"
-    assert body["multimodal_enabled"] is True
-
-
-def test_put_config_round_trips_embedding_output_dimensionality(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put(
-        "/api/config",
-        json={"llm": {"embedding": {"output_dimensionality": 768}}},
-    )
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.embedding.output_dimensionality == 768
-
-    get_response = client.get("/api/config")
-    assert get_response.status_code == 200
-    body = get_response.json()
-    assert body["llm"]["embedding"]["output_dimensionality"] == 768
-
-
-def test_put_config_rejects_invalid_embedding_output_dimensionality(
+def test_put_config_ignores_legacy_model_reset(
     monkeypatch,
     tmp_path,
 ) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = tomllib.loads(config_path.read_text(encoding="utf-8"))["models"]
 
     response = client.put(
         "/api/config",
-        json={"llm": {"embedding": {"output_dimensionality": "wide"}}},
+        json={"reset_fields": ["llm.openai.api_key"]},
     )
+
+    assert response.status_code == 200
+    assert response.json()["warnings"] == ["model_config_not_updated"]
+    assert tomllib.loads(config_path.read_text(encoding="utf-8"))["models"] == before
+
+
+def test_get_config_returns_secret_free_read_only_legacy_projection(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    client, _cfg, _config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    ordinary = client.get("/api/config").json()["llm"]
+    revealed = client.get("/api/config", params={"reveal_keys": "true"}).json()["llm"]
+
+    assert ordinary["read_only"] is True
+    assert ordinary["authoritative"] is False
+    assert ordinary["default_provider"] == "openai"
+    assert ordinary["fallback_provider"] == "deepseek"
+    assert ordinary["embedding"]["provider"] == "openai"
+    assert ordinary["openai"]["api_key"] == ""
+    assert revealed["openai"]["api_key"] == ""
+    assert revealed["embedding"]["api_key"] == ""
+
+
+def test_put_config_unknown_non_model_reset_is_rejected_without_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = config_path.read_bytes()
+
+    response = client.put("/api/config", json={"reset_fields": ["storage.db_path"]})
 
     assert response.status_code == 400
-    assert load_config_from_path(config_path).llm.embedding.output_dimensionality == 1024
-
-
-def test_put_config_ignores_whitespace_only_chat_provider_api_key(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put("/api/config", json={"llm": {"openai": {"api_key": "   "}}})
-
-    assert response.status_code == 200
-    assert load_config_from_path(config_path).llm.openai.api_key == "sk-real-key-1234567890abcdef"
-
-
-def test_put_config_uses_same_guard_for_other_chat_providers(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    for provider_name in ("claude", "deepseek", "openrouter", "openai_compatible"):
-        before = getattr(load_config_from_path(config_path).llm, provider_name).api_key
-        masked = before[:2] + "****" + before[-2:]
-        response = client.put(
-            "/api/config",
-            json={"llm": {provider_name: {"api_key": masked}}},
-        )
-        assert response.status_code == 200
-        assert getattr(load_config_from_path(config_path).llm, provider_name).api_key == before
-
-        response = client.put(
-            "/api/config",
-            json={"llm": {provider_name: {"api_key": ""}}},
-        )
-        assert response.status_code == 200
-        assert getattr(load_config_from_path(config_path).llm, provider_name).api_key == before
-
-
-def test_put_config_explicit_reset_clears_unused_allowlisted_secret(monkeypatch, tmp_path) -> None:
-    client, cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put("/api/config", json={"reset_fields": ["llm.claude.api_key"]})
-
-    assert response.status_code == 200
-    assert cfg.llm.claude.api_key == ""
-    assert load_config_from_path(config_path).llm.claude.api_key == ""
-
-
-def test_put_config_unknown_reset_is_rejected_without_mutation(monkeypatch, tmp_path) -> None:
-    client, cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-    before = config_path.read_text(encoding="utf-8")
-
-    response = client.put(
-        "/api/config",
-        json={
-            "reset_fields": ["storage.db_path"],
-            "llm": {"openai": {"model": "gpt-4.1-mini"}},
-        },
-    )
-
-    assert response.status_code == 400
-    assert config_path.read_text(encoding="utf-8") == before
-    assert cfg.llm.openai.model == "gpt-4o-mini"
-
-
-def test_put_config_ignores_empty_embedding_model_and_base_url(monkeypatch, tmp_path) -> None:
-    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-
-    response = client.put(
-        "/api/config",
-        json={"llm": {"embedding": {"model": "", "base_url": ""}}},
-    )
-
-    assert response.status_code == 200
-    embedding = load_config_from_path(config_path).llm.embedding
-    assert embedding.model == "text-embedding-3-small"
-    assert embedding.base_url == "https://embed.example.com/v1"
+    assert config_path.read_bytes() == before
 
 
 # ── Source cookie guards (bilibili masked/empty echo; dy/x file routing) ──

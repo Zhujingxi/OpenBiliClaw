@@ -4,19 +4,63 @@ from pathlib import Path
 
 import pytest
 
-from openbiliclaw.config import (
-    Config,
-    EmbeddingConfig,
-    LLMConfig,
-    LLMProviderConfig,
-    ModuleLLMConfig,
-)
+from openbiliclaw.config import Config
 from openbiliclaw.llm.base import LLMResponse, LLMTimeoutError
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 from openbiliclaw.llm.service import LLMService
+from openbiliclaw.model_config import (
+    ChatConnection,
+    ChatRouteConfig,
+    CredentialConfig,
+    EmbeddingModelSettings,
+    EmbeddingProviderConfig,
+    EmbeddingRouteConfig,
+    ModelConfig,
+)
 
 from . import test_refill_real_provider_integration as live_refill
 from .test_refill_real_provider_integration import _LiveMetrics, _MonitoredRegistry
+
+
+def _live_config(*, embedding_enabled: bool = False) -> Config:
+    return Config(
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="ollama-main",
+                        name="Ollama",
+                        type="ollama",
+                        model="unit-test-model",
+                    ),
+                    ChatConnection(
+                        id="openai-compatible",
+                        name="Compatible API",
+                        type="openai_compatible",
+                        model="test-compatible-model",
+                        base_url="https://compatible.example/v1",
+                        credential=CredentialConfig(
+                            source="inline",
+                            value="test-compatible-key",
+                        ),
+                    ),
+                )
+            ),
+            embedding=EmbeddingRouteConfig(
+                enabled=embedding_enabled,
+                settings=EmbeddingModelSettings(model="bge-m3"),
+                providers=(
+                    EmbeddingProviderConfig(
+                        id="ollama-embedding",
+                        name="Ollama Embedding",
+                        type="ollama",
+                    ),
+                )
+                if embedding_enabled
+                else (),
+            ),
+        )
+    )
 
 
 def test_live_summary_has_no_fabricated_metric_literals() -> None:
@@ -70,8 +114,6 @@ def test_live_refill_uses_public_technology_ranking_with_sanitized_rid() -> None
 @pytest.mark.asyncio
 async def test_retry_observer_counts_only_next_actual_invocation_after_transient() -> None:
     class _SequenceRegistry:
-        default_provider = "test"
-
         def __init__(self) -> None:
             self.calls = 0
 
@@ -102,8 +144,6 @@ async def test_retry_observer_counts_only_next_actual_invocation_after_transient
 @pytest.mark.asyncio
 async def test_retry_observer_does_not_count_unrelated_same_caller_request() -> None:
     class _SequenceRegistry:
-        default_provider = "test"
-
         def __init__(self) -> None:
             self.calls = 0
 
@@ -138,17 +178,7 @@ async def test_retry_observer_does_not_count_unrelated_same_caller_request() -> 
 def test_live_refill_uses_explicit_config_and_provider_without_mutating_loaded_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="unit-test-model"),
-            openai_compatible=LLMProviderConfig(
-                api_key="test-compatible-key",
-                base_url="https://compatible.example/v1",
-                model="test-compatible-model",
-            ),
-        )
-    )
+    loaded = _live_config()
     paths: list[object] = []
 
     def _load(path: object = None) -> Config:
@@ -157,125 +187,72 @@ def test_live_refill_uses_explicit_config_and_provider_without_mutating_loaded_c
 
     monkeypatch.setattr(live_refill, "load_config", _load)
     monkeypatch.setenv("OPENBILICLAW_REFILL_CONFIG", "/tmp/live-refill.toml")
-    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", " OPENAI_COMPATIBLE ")
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", " openai-compatible ")
 
     config, registry = live_refill._load_live_config_and_registry()
 
     assert paths == ["/tmp/live-refill.toml"]
-    assert loaded.llm.default_provider == "ollama"
-    assert config.llm.default_provider == "openai_compatible"
-    assert registry.default_provider == "openai_compatible"
+    assert [item.id for item in loaded.models.chat.connections] == [
+        "ollama-main",
+        "openai-compatible",
+    ]
+    assert [item.id for item in config.models.chat.connections] == ["openai-compatible"]
+    assert [item.id for item in registry.connections] == ["openai-compatible"]
 
 
 def test_openclaw_live_config_disables_embedding_and_ollama_without_mutating_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            fallback_provider="ollama",
-            ollama=LLMProviderConfig(
-                api_key="original-ollama-key",
-                base_url="http://127.0.0.1:11434/v1",
-                model="original-local-model",
-            ),
-            embedding=EmbeddingConfig(
-                provider="ollama",
-                model="bge-m3",
-                api_key="original-embedding-key",
-                base_url="http://127.0.0.1:11434/v1",
-                fallback_enabled=True,
-                fallback_provider="ollama",
-            ),
-            openai_compatible=LLMProviderConfig(
-                api_key="test-compatible-key",
-                base_url="https://compatible.example/v1",
-                model="test-compatible-model",
-            ),
-        )
-    )
+    loaded = _live_config(embedding_enabled=True)
     monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
     monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
-    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai-compatible")
 
     config, registry = live_refill._load_live_config_and_registry(disable_embedding=True)
 
-    assert loaded.llm.default_provider == "ollama"
-    assert loaded.llm.fallback_provider == "ollama"
-    assert loaded.llm.ollama.model == "original-local-model"
-    assert loaded.llm.embedding.provider == "ollama"
-    assert loaded.llm.embedding.fallback_provider == "ollama"
-    assert config.llm.default_provider == "openai_compatible"
-    assert config.llm.fallback_provider == ""
-    assert config.llm.ollama.api_key == ""
-    assert config.llm.ollama.base_url == ""
-    assert config.llm.ollama.model == ""
-    assert config.llm.embedding.provider == ""
-    assert config.llm.embedding.model == ""
-    assert config.llm.embedding.api_key == ""
-    assert config.llm.embedding.base_url == ""
-    assert config.llm.embedding.fallback_enabled is False
-    assert config.llm.embedding.fallback_provider == ""
-    assert registry.default_provider == "openai_compatible"
-    assert "ollama" not in registry.available_providers
+    assert loaded.models.embedding.enabled is True
+    assert [item.id for item in loaded.models.chat.connections] == [
+        "ollama-main",
+        "openai-compatible",
+    ]
+    assert config.models.embedding.enabled is False
+    assert config.models.embedding.providers == ()
+    assert [item.id for item in config.models.chat.connections] == ["openai-compatible"]
+    assert all(item.type != "ollama" for item in registry.connections)
 
 
 def test_live_refill_provider_selection_sets_one_global_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = Config(
-        llm=LLMConfig(
-            default_provider="openai_compatible",
-            openai_compatible=LLMProviderConfig(
-                api_key="test-compatible-key",
-                base_url="https://compatible.example/v1",
-                model="test-compatible-model",
-            ),
-            ollama=LLMProviderConfig(model="old-local-model"),
-            soul=ModuleLLMConfig(provider="ollama", model="old-soul-model"),
-            discovery=ModuleLLMConfig(provider="ollama", model="old-discovery-model"),
-            recommendation=ModuleLLMConfig(provider="ollama", model="old-recommendation-model"),
-            evaluation=ModuleLLMConfig(provider="ollama", model="old-evaluation-model"),
-        )
-    )
+    loaded = _live_config()
     monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
     monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
-    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai-compatible")
 
     _config, registry = live_refill._load_live_config_and_registry()
     service = LLMService(registry=registry, memory=None)  # type: ignore[arg-type]
 
-    assert loaded.llm.evaluation.provider == "ollama"
-    assert registry.default_provider == "openai_compatible"
+    assert len(loaded.models.chat.connections) == 2
+    assert [item.id for item in registry.connections] == ["openai-compatible"]
     assert service.registry is registry
 
 
 def test_live_refill_fails_when_explicit_provider_is_not_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="unit-test-model"),
-        )
-    )
+    loaded = _live_config()
     monkeypatch.delenv("OPENBILICLAW_REFILL_CONFIG", raising=False)
     monkeypatch.setattr(live_refill, "load_config", lambda: loaded)
-    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("OPENBILICLAW_REFILL_PROVIDER", "missing-connection")
 
-    with pytest.raises(RuntimeError, match="Requested live refill provider is unavailable"):
+    with pytest.raises(RuntimeError, match="Requested live refill connection is unavailable"):
         live_refill._load_live_config_and_registry()
 
 
 def test_live_refill_without_controls_keeps_zero_argument_config_loading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    loaded = Config(
-        llm=LLMConfig(
-            default_provider="ollama",
-            ollama=LLMProviderConfig(model="unit-test-model"),
-        )
-    )
+    loaded = _live_config()
     calls: list[tuple[object, ...]] = []
 
     def _load(*args: object) -> Config:
@@ -290,7 +267,10 @@ def test_live_refill_without_controls_keeps_zero_argument_config_loading(
 
     assert calls == [()]
     assert config is loaded
-    assert registry.default_provider == "ollama"
+    assert [item.id for item in registry.connections] == [
+        "ollama-main",
+        "openai-compatible",
+    ]
 
 
 def test_live_refill_integration_remains_explicitly_opt_in() -> None:

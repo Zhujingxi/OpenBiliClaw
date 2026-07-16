@@ -23,6 +23,8 @@ from openbiliclaw.saved_sync.router import NativeSaveRouter
 from openbiliclaw.saved_sync.service import SavedSyncService
 from openbiliclaw.storage.database import Database
 
+from .model_route_helpers import use_native_ollama
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
@@ -113,8 +115,7 @@ def saved_sync_client(
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     config = Config()
     config.scheduler.enabled = False
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    use_native_ollama(config)
     save_config(config, project_root / "config.toml")
 
     database = Database(tmp_path / "saved-sync.db")
@@ -876,6 +877,7 @@ async def test_runtime_rebuild_cancels_inflight_saved_sync_before_swap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openbiliclaw.api.runtime_context import RuntimeContext
+
     database = Database(tmp_path / "runtime-cancel.db")
     database.initialize()
     context = RuntimeContext(database=database)
@@ -1022,8 +1024,7 @@ def test_runtime_construction_failure_keeps_existing_saved_sync_and_bilibili_cli
 
     config = Config(data_dir=str(tmp_path / "runtime-atomic"))
     config.scheduler.enabled = False
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    use_native_ollama(config)
     _use_native_ollama(config)
     context = build_runtime_context(config)
     old_service = context.saved_sync_service
@@ -1052,8 +1053,7 @@ async def test_runtime_context_rebuilds_tracked_bilibili_saved_sync_service(
 
     config = Config(data_dir=str(tmp_path / "runtime-data"))
     config.scheduler.enabled = False
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    use_native_ollama(config)
     _use_native_ollama(config)
     context = build_runtime_context(config)
     first_service = context.saved_sync_service

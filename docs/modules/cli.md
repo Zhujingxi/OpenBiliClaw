@@ -93,7 +93,7 @@ $ openbiliclaw config-show
 当前配置概览
 配置项
   收藏自动同步  关闭
-Provider 概览
+模型路由
 ```
 
 `config-show` 只读取并展示配置，不创建保存任务，也不会执行平台账号写入。当前没有默认执行
@@ -219,7 +219,7 @@ $ openbiliclaw keyword-inspiration-report --window-days 14
 
 ### `openbiliclaw login codex`
 
-管理实验性的 Codex OAuth 凭据。该命令不自建 OAuth 流程，而是复用官方 Codex CLI 的登录态：默认读取 `~/.codex/auth.json`，导入到 `~/.openbiliclaw/codex_auth.json`，供 `[llm.openai].auth_mode="codex_oauth"` 使用。
+管理实验性的 Codex OAuth 凭据。该命令不自建 OAuth 流程，而是复用官方 Codex CLI 的登录态：默认读取 `~/.codex/auth.json`，导入到 `~/.openbiliclaw/codex_auth.json`，供原生 `type="codex_oauth"` Chat connection 使用。
 
 ```bash
 # 默认：先尝试导入 ~/.codex/auth.json；没有时调用官方 `codex login` 后再导入
@@ -238,16 +238,15 @@ $ openbiliclaw login codex --status
 $ openbiliclaw login codex --logout
 ```
 
-启用方式：
+导入后用模型命令新增或编辑独立 OAuth connection：
 
-```toml
-[llm.openai]
-auth_mode = "codex_oauth"
-api_key = ""
-base_url = ""
+```bash
+openbiliclaw models add --kind chat --id codex-main \
+  --connection-type codex_oauth --name "Codex OAuth" \
+  --model gpt-5 --credential-ref codex
 ```
 
-这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` 下 `base_url` 只能留空或指向 OpenAI 官方 API 域名，避免把 ChatGPT OAuth token 发给第三方代理。
+这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` endpoint 只能是 OpenAI 官方 API；factory 会在读取 token 前校验，避免把 ChatGPT OAuth token 发给第三方代理。
 
 ### `openbiliclaw browser status`
 
@@ -317,7 +316,7 @@ WARN extension presence required; backend will pause background LLM work after g
 
 这表示 daemon-owned 后台 LLM / embedding 工作需要浏览器插件保持 `runtime-stream` 在线，或仍处于断开后的宽限窗口内；手动 CLI/API 操作不受这个 WARN 影响。
 
-如果配置导致 LLM registry 无法构建，`start` 不会直接让 popup 完全失联，而是以降级模式启动本地 API，并在 uvicorn 启动前打印 `降级模式 / Degraded mode` 面板。面板会列出 `llm_registry_unavailable` 和 blocking issue，并提示打开扩展设置页保存修复配置后重启 daemon。
+如果配置导致原生模型 route 无法构建，`start` 不会直接让 popup 完全失联，而是以降级模式启动本地 API，并在 uvicorn 启动前打印 `降级模式 / Degraded mode` 面板。面板会列出兼容 reason `llm_registry_unavailable` 和 blocking issue，并提示打开扩展设置页保存修复配置后重启 daemon。
 
 如果数据库已损坏：
 

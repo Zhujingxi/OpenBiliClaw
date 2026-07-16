@@ -795,6 +795,8 @@ async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from types import SimpleNamespace
+
     from PIL import Image
 
     from openbiliclaw.llm.base import LLMResponse
@@ -811,18 +813,14 @@ async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
     image.save(buffer, format="JPEG", quality=92)
     image_cache.save_image_bytes(cover_url, buffer.getvalue(), "image/jpeg")
 
-    class _VisionProvider:
-        _model = "gpt-4o-mini"
-
-    class _CapturingRegistry:
-        default_provider = "openai"
+    class _CapturingRoute:
+        connections = (
+            SimpleNamespace(type="openai_compatible", model="gpt-4o-mini"),
+        )
 
         def __init__(self) -> None:
             self.calls: list[list[dict[str, object]]] = []
             self.json_modes: list[bool] = []
-
-        def get(self, _provider_key: str) -> object:
-            return _VisionProvider()
 
         async def complete(
             self,
@@ -860,9 +858,9 @@ async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
                 provider="capturing",
             )
 
-    registry = _CapturingRegistry()
+    route = _CapturingRoute()
     engine = ContentDiscoveryEngine(
-        llm_service=LLMService(registry=registry, memory=None),  # type: ignore[arg-type]
+        llm_service=LLMService(registry=route, memory=None),  # type: ignore[arg-type]
         multimodal_evaluation_enabled=True,
         multimodal_batch_size=4,
         multimodal_image_max_px=384,
@@ -903,10 +901,10 @@ async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
     )
 
     assert scores == [0.81, 0.42]
-    assert registry.json_modes == [True]
+    assert route.json_modes == [True]
     assert any(path.stem == image_cache.image_cache_key(cover_url) for path in tmp_path.glob("*.*"))
 
-    messages = registry.calls[0]
+    messages = route.calls[0]
     assert len(messages) == 2
     system_prompt = str(messages[0]["content"])
     assert "cover_image_ref" in system_prompt

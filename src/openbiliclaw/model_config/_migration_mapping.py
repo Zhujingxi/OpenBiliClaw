@@ -516,6 +516,16 @@ def migrate_legacy_llm(
     """Build a deterministic, secret-safe, read-only candidate from legacy data."""
     raw = {key: value for key, value in raw_llm.items() if isinstance(key, str)}
     environment = {str(key): str(value) for key, value in env.items()}
+    # Generic config environment overrides arrive as strings. Preserve the
+    # legacy numeric override contract inside the compatibility adapter so the
+    # runtime Config model never needs to reconstruct the retired schema.
+    for field_name in ("concurrency", "timeout"):
+        env_name = f"OPENBILICLAW_LLM_{field_name.upper()}"
+        if env_name in environment:
+            try:
+                raw[field_name] = int(environment[env_name].strip())
+            except ValueError:
+                raw[field_name] = environment[env_name]
     collector = IssueCollector()
     used_ids: set[str] = set()
     pending: list[_PendingValue] = []

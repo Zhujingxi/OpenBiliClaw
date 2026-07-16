@@ -12,6 +12,8 @@
 - 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
 - 带稳定模型连接身份的 `llm_usage` 成本与 token ledger。
 
+模型路由的 authority、revision、credential 与 circuit 不写入 SQLite：它们属于 `[models]`、`ModelConfigService` 和当前 `RuntimeModelBundle`。storage 只记录一次已完成调用实际命中的 connection identity 与 usage 元数据，因此原子 bundle swap 前后的在途调用可以各自按捕获到的稳定 ID 正确归因，不会把旧 route 的统计误记到新 revision。
+
 ## 已实现功能
 
 | 功能 | 状态 | 说明 |

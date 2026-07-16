@@ -10,6 +10,8 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.saved_sync.models import SavedItemInput
 from openbiliclaw.storage.database import Database
 
+from .model_route_helpers import use_native_ollama
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -25,8 +27,7 @@ def watch_later_client(
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     cfg = Config()
     cfg.scheduler.enabled = False
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.model = "llama3"
+    use_native_ollama(cfg)
     save_config(cfg, project_root / "config.toml")
 
     db = Database(tmp_path / "watch_later.db")

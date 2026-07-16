@@ -25,10 +25,10 @@ async def main() -> None:
     from openbiliclaw.eval.run_logger import RunLogger
     from openbiliclaw.eval.speculation_evaluator import SpeculationEvaluator
     from openbiliclaw.llm.prompts import build_speculation_generation_prompt
-    from openbiliclaw.llm.registry import build_llm_registry
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.profile import OnionProfile
     from openbiliclaw.soul.speculator import SpeculativeInterest
+    from _model_runtime import build_script_model_bundle
 
     cfg = load_config()
     data_dir = cfg.data_path
@@ -87,9 +87,12 @@ async def main() -> None:
     gen_step.save_prompt(prompt_messages)
 
     print("\n[1/3] 生成推测兴趣...")
-    registry = build_llm_registry(cfg)
-    llm = registry.get_provider()
-    response = await llm.complete(prompt_messages, temperature=0.7, max_tokens=4096)
+    model_bundle = build_script_model_bundle(cfg, memory)
+    response = await model_bundle.chat_route.complete(
+        prompt_messages,
+        temperature=0.7,
+        max_tokens=4096,
+    )
 
     raw_text = response.content if hasattr(response, "content") else str(response)
     gen_step.save_text("response.txt", raw_text)

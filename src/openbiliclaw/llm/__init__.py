@@ -1,7 +1,6 @@
 """LLM package — multi-model provider support."""
 
 from .base import (
-    HealthCheckResult,
     LLMFallbackError,
     LLMProvider,
     LLMProviderError,
@@ -15,13 +14,11 @@ from .base import (
 from .claude_provider import ClaudeProvider
 from .gemini_provider import GeminiProvider
 from .ollama_provider import OllamaProvider
-from .openai_provider import DeepSeekProvider, OpenAIProvider
-from .openrouter_provider import OpenRouterProvider
+from .openai_provider import OpenAIProtocolProvider, OpenAIProvider
 from .registry import (
     RegistryBuildError,
-    RegistrySummary,
-    build_llm_registry,
-    summarize_registry,
+    build_ordered_chat_route,
+    build_ordered_embedding_service,
 )
 from .service import (
     LLMProviderExecutionError,
@@ -33,9 +30,7 @@ from .service import (
 
 __all__ = [
     "ClaudeProvider",
-    "DeepSeekProvider",
     "GeminiProvider",
-    "HealthCheckResult",
     "LLMFallbackError",
     "LLMProvider",
     "LLMProviderError",
@@ -45,16 +40,15 @@ __all__ = [
     "LLMTimeoutError",
     "OllamaProvider",
     "OpenAIProvider",
-    "OpenRouterProvider",
+    "OpenAIProtocolProvider",
     "RegistryBuildError",
-    "RegistrySummary",
     "LLMProviderExecutionError",
     "LLMService",
     "LLMServiceError",
     "LLMResponseContentError",
-    "build_llm_registry",
+    "build_ordered_chat_route",
+    "build_ordered_embedding_service",
     "classify_llm_unavailability",
     "classify_llm_failure_kind",
     "is_llm_rate_limit_error",
-    "summarize_registry",
 ]

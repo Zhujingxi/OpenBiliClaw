@@ -14,7 +14,7 @@ required.
   - ``presence`` — tracks shared extension runtime-stream presence
 
 **Swappable components** (rebuilt on hot-reload):
-  - ``llm_registry``, ``llm_service``, ``bilibili_client``, ``saved_sync_service``
+  - ``model_bundle``, ``llm_service``, ``bilibili_client``, ``saved_sync_service``
   - ``soul_engine``, ``dialogue``
   - ``discovery_engine``, ``recommendation_engine``
   - ``runtime_controller``, ``account_sync_service``
@@ -329,12 +329,12 @@ def build_runtime_model_bundle(
     environment: Any | None = None,
 ) -> RuntimeModelBundle:
     """Build every Chat and embedding adapter before exposing a bundle."""
-    from openbiliclaw.llm.connection_factory import (
-        AdapterRuntimeOptions,
-        build_chat_adapter,
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
+    from openbiliclaw.llm.registry import (
+        RegistryBuildError,
+        build_ordered_chat_route,
+        build_ordered_embedding_service,
     )
-    from openbiliclaw.llm.registry import RegistryBuildError, build_ordered_embedding_service
-    from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
     from openbiliclaw.llm.service import LLMService
     from openbiliclaw.llm.usage_recorder import UsageRecorder
 
@@ -343,12 +343,10 @@ def build_runtime_model_bundle(
         environment=os.environ if environment is None else environment,
     )
     try:
-        connections = tuple(
-            RouteConnection(
-                connection=connection,
-                adapter=build_chat_adapter(connection, options),
-            )
-            for connection in models.chat.connections
+        chat_route = build_ordered_chat_route(
+            models.chat,
+            revision=revision,
+            runtime_options=options,
         )
         embedding_service = build_ordered_embedding_service(
             models.embedding,
@@ -359,11 +357,6 @@ def build_runtime_model_bundle(
         raise
     except Exception as exc:
         raise RegistryBuildError(f"Model route construction failed: {exc}") from exc
-    chat_route = OrderedLLMRoute(
-        connections,
-        revision=revision,
-        timeout_seconds=float(models.chat.timeout_seconds),
-    )
     usage_recorder = UsageRecorder(sink=usage_sink)
     llm_service = LLMService(
         registry=chat_route,
@@ -415,8 +408,9 @@ class RuntimeContext:
     _init_coordinator: Any = field(default=None, init=False, repr=False, compare=False)
     _init_prereqs: Any = field(default=None, init=False, repr=False, compare=False)
     # One immutable model graph is the source of truth for every new caller.
-    # ``llm_registry`` and ``llm_service`` below remain compatibility aliases
-    # and are always published from this same bundle.
+    # ``llm_registry`` is only a compatibility field name for the bundle's
+    # OrderedLLMRoute; it does not hold a legacy registry object or behavior.
+    # ``llm_service`` is likewise always published from this same bundle.
     model_bundle: RuntimeModelBundle | None = field(default=None, init=False, repr=False)
     _model_swap_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
@@ -2048,7 +2042,7 @@ def build_degraded_runtime_context(
         setter(_on_profile_changed)
 
     # Keep update check / apply available in degraded mode — a backend that
-    # can't build its LLM registry is exactly when the user may want to pull a
+    # can't build its model routes is exactly when the user may want to pull a
     # fix-carrying release. Construction is cheap and network-free; never let it
     # break the degraded recovery context.
     degraded_auto_update: AutoUpdateService | None = None
@@ -2061,7 +2055,7 @@ def build_degraded_runtime_context(
             event_publisher=getattr(event_hub, "publish", None),
         )
 
-    message = str(exc) if exc is not None else "LLM registry unavailable"
+    message = str(exc) if exc is not None else "Model routes unavailable"
     return RuntimeContext(
         database=database,
         memory_manager=memory_manager,
@@ -2073,7 +2067,7 @@ def build_degraded_runtime_context(
         degraded_issues=[
             ConfigIssue(
                 field="llm",
-                message=f"LLM registry unavailable: {message}",
+                message=f"Model routes unavailable: {message}",
                 severity="blocking",
             )
         ],

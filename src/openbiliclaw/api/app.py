@@ -86,7 +86,6 @@ from openbiliclaw.api.models import (
     LLMConfigOut,
     LLMProviderConfigOut,
     LoggingConfigOut,
-    ModuleLLMConfigOut,
     NetworkConfigOut,
     NotificationAckIn,
     NotificationAckResponse,
@@ -590,17 +589,6 @@ def _detect_lan_ip() -> str | None:
     return fallback
 
 
-_RESETTABLE_CONFIG_FIELDS = {
-    "llm.openai.api_key": ("llm", "openai", "api_key"),
-    "llm.claude.api_key": ("llm", "claude", "api_key"),
-    "llm.gemini.api_key": ("llm", "gemini", "api_key"),
-    "llm.deepseek.api_key": ("llm", "deepseek", "api_key"),
-    "llm.openrouter.api_key": ("llm", "openrouter", "api_key"),
-    "llm.openai_compatible.api_key": ("llm", "openai_compatible", "api_key"),
-    "llm.embedding.api_key": ("llm", "embedding", "api_key"),
-}
-
-
 def _config_backup_path(config_path: Path) -> Path:
     return config_path.with_name(f"{config_path.name}.bak")
 
@@ -620,8 +608,11 @@ def _restore_config_snapshot(backup_path: Path, config_path: Path) -> None:
 
 def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
     from openbiliclaw.config import ConfigIssue
-    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
-    from openbiliclaw.llm.registry import build_ordered_embedding_service
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
+    from openbiliclaw.llm.registry import (
+        build_ordered_chat_route,
+        build_ordered_embedding_service,
+    )
     from openbiliclaw.model_config import compute_model_revision
 
     issues = list(base_issues)
@@ -630,8 +621,11 @@ def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
             timeout_seconds=float(cfg.models.chat.timeout_seconds),
             environment=os.environ,
         )
-        for connection in cfg.models.chat.connections:
-            build_chat_adapter(connection, options)
+        build_ordered_chat_route(
+            cfg.models.chat,
+            revision=compute_model_revision(cfg.models),
+            runtime_options=options,
+        )
         build_ordered_embedding_service(
             cfg.models.embedding,
             revision=compute_model_revision(cfg.models),
@@ -1764,7 +1758,7 @@ def create_app(
             or path == "/api/autostart/apply"
             or path in ("/api/init-status", "/api/init", "/api/init/cancel")
             # Update status + manual check/apply: a backend that can't build its
-            # LLM registry is exactly when pulling a fix-carrying release matters,
+            # model routes is exactly when pulling a fix-carrying release matters,
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
@@ -10051,21 +10045,6 @@ def create_app(
                 cookie_env=cfg.sources.twitter.cookie_env,
             )
 
-        def _provider_out(provider_config: Any) -> LLMProviderConfigOut:
-            return LLMProviderConfigOut(
-                # The compatibility projection never carries model secrets,
-                # including when reveal_keys=true. Credential state and writes
-                # live exclusively on /api/model-config.
-                api_key="",
-                model=provider_config.model,
-                base_url=provider_config.base_url,
-                auth_mode=getattr(provider_config, "auth_mode", ""),
-                api_flavor=getattr(provider_config, "api_flavor", ""),
-                http_referer=getattr(provider_config, "http_referer", ""),
-                x_title=getattr(provider_config, "x_title", ""),
-                reasoning_effort=getattr(provider_config, "reasoning_effort", ""),
-            )
-
         def _legacy_provider_name(record: Any) -> str:
             connection_type = str(getattr(record, "type", "") or "")
             preset = str(getattr(record, "preset", "") or "")
@@ -10165,44 +10144,7 @@ def create_app(
                 ),
             )
 
-        native_models_active = (
-            str(getattr(getattr(cfg, "model_meta", None), "source", "")) == "native"
-        )
-        llm_projection = (
-            _native_llm_projection()
-            if native_models_active
-            else LLMConfigOut(
-                authoritative=False,
-                read_only=True,
-                projection="primary_and_first_fallback",
-                default_provider=cfg.llm.default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
-                timeout=int(getattr(cfg.llm, "timeout", 300)),
-                fallback_provider=cfg.llm.fallback_provider,
-                openai=_provider_out(cfg.llm.openai),
-                claude=_provider_out(cfg.llm.claude),
-                gemini=_provider_out(cfg.llm.gemini),
-                deepseek=_provider_out(cfg.llm.deepseek),
-                ollama=_provider_out(cfg.llm.ollama),
-                openrouter=_provider_out(cfg.llm.openrouter),
-                openai_compatible=_provider_out(cfg.llm.openai_compatible),
-                embedding=EmbeddingConfigOut(
-                    provider=cfg.llm.embedding.provider,
-                    model=cfg.llm.embedding.model,
-                    api_key="",
-                    base_url=cfg.llm.embedding.base_url,
-                    output_dimensionality=cfg.llm.embedding.output_dimensionality,
-                    similarity_threshold=cfg.llm.embedding.similarity_threshold,
-                    fallback_enabled=cfg.llm.embedding.fallback_enabled,
-                    fallback_provider=cfg.llm.embedding.fallback_provider,
-                    multimodal_enabled=cfg.llm.embedding.multimodal_enabled,
-                ),
-                soul=ModuleLLMConfigOut(),
-                discovery=ModuleLLMConfigOut(),
-                recommendation=ModuleLLMConfigOut(),
-                evaluation=ModuleLLMConfigOut(),
-            )
-        )
+        llm_projection = _native_llm_projection()
 
         issue_list = [
             ConfigIssueOut(
@@ -10419,124 +10361,6 @@ def create_app(
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
-    def _apply_llm_update(cfg: Any, llm_data: object) -> None:
-        """Apply the LLM subset of a config update to an in-memory config."""
-        if not isinstance(llm_data, dict):
-            return
-        from openbiliclaw.config import _normalize_llm_concurrency, _normalize_llm_timeout
-
-        if "default_provider" in llm_data:
-            cfg.llm.default_provider = str(llm_data["default_provider"])
-        if "concurrency" in llm_data:
-            cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
-        if "timeout" in llm_data:
-            cfg.llm.timeout = _normalize_llm_timeout(llm_data["timeout"])
-        # Legacy clients (older extension popups) still send
-        # "fallback_enabled" — deliberately ignored: a non-empty
-        # fallback_provider is the only enable switch.
-        if "fallback_provider" in llm_data:
-            cfg.llm.fallback_provider = str(llm_data["fallback_provider"]).strip()
-        for provider_name in (
-            "openai",
-            "claude",
-            "gemini",
-            "deepseek",
-            "ollama",
-            "openrouter",
-            "openai_compatible",
-        ):
-            if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
-                provider_cfg = getattr(cfg.llm, provider_name)
-                pdata = llm_data[provider_name]
-                skipped_fields: list[str] = []
-                for field_name in (
-                    "api_key",
-                    "model",
-                    "base_url",
-                    "auth_mode",
-                    "api_flavor",
-                    "http_referer",
-                    "x_title",
-                    "reasoning_effort",
-                ):
-                    if field_name in pdata:
-                        new_value = str(pdata[field_name])
-                        if field_name == "api_key" and "*" in new_value:
-                            skipped_fields.append(f"{field_name}=masked")
-                            continue
-                        existing = getattr(provider_cfg, field_name, "")
-                        if (
-                            # These accept an explicit empty value ("" = back
-                            # to default); the others treat empty as "keep".
-                            field_name not in {"auth_mode", "reasoning_effort", "api_flavor"}
-                            and not new_value.strip()
-                            and isinstance(existing, str)
-                            and existing.strip()
-                        ):
-                            skipped_fields.append(f"{field_name}=empty_skip")
-                            continue
-                        setattr(provider_cfg, field_name, new_value)
-                if skipped_fields:
-                    logger.debug(
-                        "Config LLM update: provider %s skipped fields: %s",
-                        provider_name,
-                        ", ".join(skipped_fields),
-                    )
-        if "embedding" in llm_data and isinstance(llm_data["embedding"], dict):
-            emb = llm_data["embedding"]
-            if "provider" in emb:
-                cfg.llm.embedding.provider = str(emb["provider"])
-            if "model" in emb:
-                new_model = str(emb["model"])
-                if new_model.strip() or not cfg.llm.embedding.model.strip():
-                    cfg.llm.embedding.model = new_model
-            if "api_key" in emb:
-                new_key = str(emb["api_key"])
-                if "*" not in new_key and (
-                    new_key.strip() or not cfg.llm.embedding.api_key.strip()
-                ):
-                    cfg.llm.embedding.api_key = new_key
-            if "base_url" in emb:
-                new_base_url = str(emb["base_url"])
-                if new_base_url.strip() or not cfg.llm.embedding.base_url.strip():
-                    cfg.llm.embedding.base_url = new_base_url
-            if "output_dimensionality" in emb:
-                try:
-                    cfg.llm.embedding.output_dimensionality = max(
-                        0,
-                        int(emb["output_dimensionality"] or 0),
-                    )
-                except (TypeError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="llm.embedding.output_dimensionality must be an integer",
-                    ) from exc
-            if "similarity_threshold" in emb:
-                cfg.llm.embedding.similarity_threshold = float(emb["similarity_threshold"])
-            if "fallback_enabled" in emb:
-                cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
-            if "fallback_provider" in emb:
-                cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
-            if "multimodal_enabled" in emb:
-                cfg.llm.embedding.multimodal_enabled = _as_bool(emb["multimodal_enabled"])
-        for module_name in ("soul", "discovery", "recommendation", "evaluation"):
-            if module_name in llm_data and isinstance(llm_data[module_name], dict):
-                mod_cfg = getattr(cfg.llm, module_name)
-                mdata = llm_data[module_name]
-                if "provider" in mdata:
-                    mod_cfg.provider = str(mdata["provider"])
-                if "model" in mdata:
-                    mod_cfg.model = str(mdata["model"])
-
-        # Transitional legacy-only configurations still need an in-memory
-        # native candidate before validation/hot reload. When native [models]
-        # is active, the handler removes ``llm`` before this helper is reached.
-        from dataclasses import asdict
-
-        from openbiliclaw.model_config import migrate_legacy_llm
-
-        cfg.models = migrate_legacy_llm(asdict(cfg.llm), os.environ).models
-
     async def _probe_network_proxy(mode: str, proxy: str) -> ConfigServiceProbeResponse:
         """Probe the submitted overseas routing policy without saving config.
 
@@ -10664,20 +10488,14 @@ def create_app(
         reset_fields = [str(field) for field in update.pop("reset_fields", [])]
         suppress_background_llm_work = bool(update.pop("suppress_background_llm_work", False))
         warnings: list[str] = []
-        native_models_active = (
-            str(getattr(getattr(cfg, "model_meta", None), "source", "")) == "native"
-        )
-        if native_models_active:
-            ignored_model_update = "llm" in update
-            update.pop("llm", None)
-            retained_resets = [field for field in reset_fields if not field.startswith("llm.")]
-            ignored_model_update = ignored_model_update or len(retained_resets) != len(reset_fields)
-            reset_fields = retained_resets
-            if ignored_model_update:
-                warnings.append("model_config_not_updated")
-        unknown_reset_fields = [
-            field for field in reset_fields if field not in _RESETTABLE_CONFIG_FIELDS
-        ]
+        ignored_model_update = "llm" in update
+        update.pop("llm", None)
+        retained_resets = [field for field in reset_fields if not field.startswith("llm.")]
+        ignored_model_update = ignored_model_update or len(retained_resets) != len(reset_fields)
+        reset_fields = retained_resets
+        if ignored_model_update:
+            warnings.append("model_config_not_updated")
+        unknown_reset_fields = list(reset_fields)
         if unknown_reset_fields:
             raise HTTPException(
                 status_code=400,
@@ -10692,11 +10510,6 @@ def create_app(
             cfg.language = str(update["language"])
         if "data_dir" in update:
             cfg.data_dir = str(update["data_dir"])
-
-        # Legacy-only model updates. Native [models] is authoritative and was
-        # removed from ``update`` above before any in-memory or disk mutation.
-        if "llm" in update:
-            _apply_llm_update(cfg, update["llm"])
 
         # A masked GET echo looks like ``SESS****abcd`` — a long asterisk run
         # never appears in a genuine Cookie header, so use it (not a single
@@ -11189,23 +11002,6 @@ def create_app(
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
-        for field in reset_fields:
-            target = _RESETTABLE_CONFIG_FIELDS[field]
-            section = getattr(cfg, target[0])
-            subsection = getattr(section, target[1])
-            setattr(subsection, target[2], "")
-
-        # A transitional legacy credential reset must be reflected in the
-        # native candidate before build validation.  Otherwise the live bundle
-        # would retain the old credential while config.toml is persisted
-        # without it, producing an unbuildable route on the next restart.
-        if any(field.startswith("llm.") for field in reset_fields):
-            from dataclasses import asdict
-
-            from openbiliclaw.model_config import migrate_legacy_llm
-
-            cfg.models = migrate_legacy_llm(asdict(cfg.llm), os.environ).models
-
         issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
         if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
             response = ConfigUpdateResponse(
@@ -11255,8 +11051,8 @@ def create_app(
             logger.info("Configuration saved to %s", saved_path)
 
             # Refresh the process-level outbound-proxy mirror BEFORE any runtime
-            # rebuild so the rebuilt LLM registry constructs its clients with the
-            # new proxy. CN-direct clients never read this value.
+            # rebuild so the rebuilt model routes construct clients with the new
+            # proxy. CN-direct clients never read this value.
             from openbiliclaw.network import set_outbound_proxy
 
             set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)

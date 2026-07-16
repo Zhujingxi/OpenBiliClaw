@@ -220,6 +220,23 @@ background ─ background admission (default 3) ──────┘
 
 下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
 
+模型配置只有一条生产数据流：`connection-type descriptor registry → ModelConfigService → 原生 ordered Chat/Embedding factories → RuntimeModelBundle → Soul / Dialogue / Discovery / Recommendation / CLI / OpenClaw`。桌面、移动、插件与 `/setup/` 消费同一脱敏 snapshot 和 descriptor；CLI 直接调用同一 service。旧 `[llm]` 只在加载时生成明确待确认的迁移候选，legacy `/api/config` 只提供无凭据只读投影，二者都不参与生产 route 构造或权威写入。
+
+```text
+descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
+             └─ CLI models ────────────────────────────────────────┤
+                                                                  ▼
+                                                         ModelConfigService
+                                                                  │ native [models]
+                                                                  ▼
+                                              ordered Chat / Embedding factories
+                                                                  │
+                                                                  ▼
+                                                        RuntimeModelBundle
+                                                                  │
+                                                                  └─ all model callers
+```
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                  用户交互层 (浏览器插件)                        │

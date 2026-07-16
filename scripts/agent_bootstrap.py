@@ -122,22 +122,6 @@ DEFAULT_CREDENTIAL_ENVS: dict[tuple[str, str], str] = {
     ("anthropic_compatible", "anthropic"): "ANTHROPIC_API_KEY",
     ("gemini_api", ""): "GEMINI_API_KEY",
 }
-REMOTE_PROVIDERS = (
-    "openai",
-    "claude",
-    "gemini",
-    "deepseek",
-    "openrouter",
-    "openai_compatible",
-)
-
-# Providers whose backend has no embeddings endpoint. When a user picks
-# one of these as the primary LLM and doesn't explicitly configure
-# embedding, we auto-wire local Ollama bge-m3 so the install actually
-# pulls the embedding model (otherwise embeddings silently fall back at
-# runtime to whatever the registry can find — see registry.py
-# build_embedding_service).
-PROVIDERS_WITHOUT_EMBED = ("claude", "deepseek", "openrouter")
 
 
 def ensure_local_no_proxy() -> str:
@@ -2602,82 +2586,9 @@ def align_docker_runtime_config(project_dir: Path) -> dict[str, Any]:
 
 
 def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
-    """Return a structured summary of missing secrets in config.toml."""
-
-    config_path = project_dir / "config.toml"
-    data = read_simple_toml(config_path)
-    models_raw = data.get("models")
-    if isinstance(models_raw, dict):
-        models = _load_typed_models(project_dir)
-        if not models.chat.connections:
-            bilibili_section = data.get("bilibili", {})
-            cookie_inline = str(bilibili_section.get("cookie", "") or "").strip()
-            cookie_file = project_dir / "data" / "bilibili_cookie.json"
-            cookie_on_disk = False
-            if cookie_file.exists():
-                try:
-                    cookie_data = json.loads(cookie_file.read_text(encoding="utf-8"))
-                    cookie_on_disk = bool(str(cookie_data.get("cookie", "")).strip())
-                except json.JSONDecodeError:
-                    cookie_on_disk = False
-            missing = ["models.chat.connections"]
-            if not (cookie_inline or cookie_on_disk):
-                missing.append("bilibili.cookie")
-            return {
-                "provider": "",
-                "connection_type": "",
-                "preset": "",
-                "connection_id": "",
-                "missing": missing,
-                "has_cookie_inline": bool(cookie_inline),
-                "has_cookie_file": cookie_on_disk,
-            }
-        primary = models.chat.connections[0]
-        provider = {
-            ("anthropic_compatible", "anthropic"): "claude",
-            ("gemini_api", ""): "gemini",
-            ("ollama", ""): "ollama",
-        }.get((primary.type, primary.preset), primary.preset or primary.type)
-        if primary.credential.source == "inline":
-            credential_ready = bool(primary.credential.value.strip())
-        elif primary.credential.source == "env":
-            credential_ready = bool(os.environ.get(primary.credential.value, "").strip())
-        elif primary.credential.source == "oauth":
-            credential_ready = bool(primary.credential.value.strip())
-        else:
-            credential_ready = primary.type == "ollama"
-        missing: list[str] = []
-        if not credential_ready:
-            missing.append(f"models.chat.connections.{primary.id}.credential")
-        bilibili_section = data.get("bilibili", {})
-        cookie_inline = str(bilibili_section.get("cookie", "") or "").strip()
-        cookie_file = project_dir / "data" / "bilibili_cookie.json"
-        cookie_on_disk = False
-        if cookie_file.exists():
-            try:
-                cookie_data = json.loads(cookie_file.read_text(encoding="utf-8"))
-                cookie_on_disk = bool(str(cookie_data.get("cookie", "")).strip())
-            except json.JSONDecodeError:
-                cookie_on_disk = False
-        if not (cookie_inline or cookie_on_disk):
-            missing.append("bilibili.cookie")
-        return {
-            "provider": provider,
-            "connection_type": primary.type,
-            "preset": primary.preset,
-            "connection_id": primary.id,
-            "missing": missing,
-            "has_cookie_inline": bool(cookie_inline),
-            "has_cookie_file": cookie_on_disk,
-        }
-
-    # One-cycle read compatibility for old checkouts. Every Task 14 writer
-    # upgrades through the typed migration path before changing model fields.
-    llm_section = data.get("llm", {})
-    provider = str(llm_section.get("default_provider", "") or "").strip() or "deepseek"
-
-    provider_cfg = llm_section.get(provider, {})
-    api_key = str(provider_cfg.get("api_key", "") or "").strip()
+    """Return missing credentials from the typed in-memory model route."""
+    data = read_simple_toml(project_dir / "config.toml")
+    models = _load_typed_models(project_dir)
     bilibili_section = data.get("bilibili", {})
     cookie_inline = str(bilibili_section.get("cookie", "") or "").strip()
     cookie_file = project_dir / "data" / "bilibili_cookie.json"
@@ -2689,18 +2600,52 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
         except json.JSONDecodeError:
             cookie_on_disk = False
 
+    if not models.chat.connections:
+        missing = ["models.chat.connections"]
+        if not (cookie_inline or cookie_on_disk):
+            missing.append("bilibili.cookie")
+        return {
+            "provider": "",
+            "connection_type": "",
+            "preset": "",
+            "connection_id": "",
+            "missing": missing,
+            "has_cookie_inline": bool(cookie_inline),
+            "has_cookie_file": cookie_on_disk,
+        }
+
+    primary = models.chat.connections[0]
+    provider = {
+        ("anthropic_compatible", "anthropic"): "claude",
+        ("gemini_api", ""): "gemini",
+        ("ollama", ""): "ollama",
+        ("openai_compatible", "custom"): "openai_compatible",
+    }.get((primary.type, primary.preset), primary.preset or primary.type)
+    if primary.credential.source == "inline":
+        credential_ready = bool(primary.credential.value.strip())
+    elif primary.credential.source == "env":
+        credential_ready = bool(os.environ.get(primary.credential.value, "").strip())
+    elif primary.credential.source == "oauth":
+        credential_ready = bool(primary.credential.value.strip())
+    else:
+        credential_ready = primary.type == "ollama"
+
     missing: list[str] = []
-    if provider in REMOTE_PROVIDERS and not api_key:
-        missing.append(f"llm.{provider}.api_key")
-    if provider == "openai_compatible":
-        base_url = str(provider_cfg.get("base_url", "") or "").strip()
-        if not base_url:
-            missing.append("llm.openai_compatible.base_url")
+    if not credential_ready:
+        missing.append(f"models.chat.connections.{primary.id}.credential")
+    if (
+        primary.type == "openai_compatible"
+        and primary.preset == "custom"
+        and not primary.base_url.strip()
+    ):
+        missing.append(f"models.chat.connections.{primary.id}.base_url")
     if not (cookie_inline or cookie_on_disk):
         missing.append("bilibili.cookie")
-
     return {
         "provider": provider,
+        "connection_type": primary.type,
+        "preset": primary.preset,
+        "connection_id": primary.id,
         "missing": missing,
         "has_cookie_inline": bool(cookie_inline),
         "has_cookie_file": cookie_on_disk,
@@ -2708,33 +2653,15 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
 
 
 def _embedding_choice_from_config(project_dir: Path) -> dict[str, Any]:
-    data = read_simple_toml(project_dir / "config.toml")
-    if isinstance(data.get("models"), dict):
-        embedding = _load_typed_models(project_dir).embedding
-        provider = embedding.providers[0].type if embedding.providers else ""
-        return {
-            "source": "config",
-            "provider": provider,
-            "providers": [item.type for item in embedding.providers],
-            "model": embedding.settings.model,
-            "enabled": embedding.enabled,
-            "explicit": True,
-        }
-    raw = data.get("llm", {}).get("embedding", {})
-    provider = str(raw.get("provider", "") or "").strip()
-    model = str(raw.get("model", "") or "").strip()
-    if provider or model:
-        return {
-            "source": "config",
-            "provider": provider,
-            "model": model,
-            "explicit": True,
-        }
+    embedding = _load_typed_models(project_dir).embedding
+    provider = embedding.providers[0].type if embedding.providers else ""
     return {
-        "source": "missing",
+        "source": "config" if embedding.enabled or embedding.providers else "missing",
         "provider": provider,
-        "model": model,
-        "explicit": False,
+        "providers": [item.type for item in embedding.providers],
+        "model": embedding.settings.model,
+        "enabled": embedding.enabled,
+        "explicit": bool(embedding.enabled or embedding.providers),
     }
 
 

@@ -13,7 +13,6 @@ import re
 import shutil
 import tomllib
 from collections.abc import Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, time
 from pathlib import Path
@@ -25,10 +24,12 @@ from openbiliclaw.model_config import (
     MigrationReport,
     ModelConfig,
     ModelConfigParseError,
+    connection_type_registry,
     default_model_config,
     migrate_legacy_llm,
     parse_model_config,
     render_model_config,
+    validate_model_config,
 )
 from openbiliclaw.model_config.serialization import encode_toml_basic_string
 
@@ -50,39 +51,6 @@ _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PROJECT_ROOT_ENV = "OPENBILICLAW_PROJECT_ROOT"
 _SUPPORTED_AUTH_METHODS = {"cookie", "qrcode", "none"}
-_SUPPORTED_OPENAI_AUTH_MODES = {"", "api_key", "codex_oauth"}
-_SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
-# Keep in sync with llm/registry.py `_EMBEDDING_CAPABLE_PROVIDERS` (config
-# cannot import the registry — cycle). An unknown name silently disables the
-# embedding service, so saves are validated as blocking (field 2026-07-05:
-# browser page-translation rewrote '奥拉玛' into config via value-less
-# <option> elements).
-_SUPPORTED_EMBEDDING_PROVIDERS = {
-    "",
-    "ollama",
-    "openai",
-    "gemini",
-    "openai_compatible",
-    # Alibaba DashScope native multimodal embedding (qwen3-vl). Must stay in
-    # sync with the registry's dedicated embedding providers — otherwise the
-    # backend can build it but config-save validation rejects it (drift caught
-    # by the multimodal cover-embedding E2E, 2026-07-14).
-    "dashscope",
-}
-# Keep in sync with llm/registry.py `build_llm_registry` provider_specs
-# (config cannot import the registry — cycle). Used to validate
-# `[llm].fallback_provider`: an unknown name is silently dropped by the
-# chat fallback chain (`base.py:_fallback_order`), so saves are validated
-# as blocking.
-_SUPPORTED_CHAT_PROVIDERS = {
-    "openai",
-    "claude",
-    "gemini",
-    "deepseek",
-    "ollama",
-    "openrouter",
-    "openai_compatible",
-}
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
@@ -138,8 +106,6 @@ _DEFAULT_MULTIMODAL_IMAGE_TIMEOUT_SECONDS = 6
 DEFAULT_LLM_CONCURRENCY = 4
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
-_DEFAULT_LLM_TIMEOUT = 300
-_MIN_LLM_TIMEOUT = 10
 _DEFAULT_POOL_SOURCE_SHARES = {
     "bilibili": 5,
     "xiaohongshu": 1,
@@ -153,18 +119,6 @@ _DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES = [
     "https://github.com/whiteguo233/OpenBiliClaw.git",
     "git@github.com:whiteguo233/OpenBiliClaw.git",
 ]
-_REMOTE_PROVIDER_FIELDS = {
-    "openai": "llm.openai.api_key",
-    "claude": "llm.claude.api_key",
-    "gemini": "llm.gemini.api_key",
-    "deepseek": "llm.deepseek.api_key",
-    "openrouter": "llm.openrouter.api_key",
-    # v0.3.32+ — generic OpenAI-protocol-compatible provider (Groq /
-    # Together / Azure OpenAI / vLLM / self-hosted, etc.). Distinct from
-    # ``openai`` so users can run both in parallel (chat = openai for
-    # gpt-5-nano, openai_compatible = Groq for fast Llama drafting).
-    "openai_compatible": "llm.openai_compatible.api_key",
-}
 
 
 class ConfigError(ValueError):
@@ -292,108 +246,6 @@ def _removed_discovery_key_issues(raw: dict[str, Any]) -> list[ConfigIssue]:
         for key in _REMOVED_INSPIRATION_DISCOVERY_KEYS
         if key in discovery_raw
     ]
-
-
-@dataclass
-class LLMProviderConfig:
-    """Configuration for a single LLM provider."""
-
-    api_key: str = ""
-    model: str = ""
-    base_url: str = ""
-    auth_mode: str = ""
-    # OpenAI-protocol endpoint selector: "" / "chat_completions" →
-    # /v1/chat/completions (default); "responses" → /v1/responses. Some
-    # third-party gateways expose GPT models only via the Responses API
-    # (issue #72). Honored by [llm.openai] and [llm.openai_compatible];
-    # ignored by all other providers.
-    api_flavor: str = ""
-    http_referer: str = ""
-    x_title: str = ""
-    # DeepSeek v4 thinking-mode control. "" disables; "high" / "max" enable
-    # reasoning. v0.3.31 default = "max" — combined with v0.3.29's prompt-cache
-    # refactor (system 100% static, DeepSeek auto-cache 90% off) the
-    # reasoning-token cost becomes affordable, and the LLM produces noticeably
-    # better tags (franchise_key consistent across batch, score_threshold=0.70
-    # still gives healthy pool throughput). Set to "" if the per-day spend
-    # creeps too high and you want to trade off label quality for budget.
-    # Ignored by providers that don't accept ``thinking`` / ``reasoning_effort``.
-    reasoning_effort: str = "max"
-    # Ollama-only: context window (tokens). 0 = use Ollama's server default
-    # (usually 4096) via the OpenAI-compat ``/v1`` shim. When >0, chat routes
-    # through Ollama's native ``/api/chat`` so ``options.num_ctx`` actually
-    # applies — the ``/v1`` shim silently ignores it, truncating large batch
-    # prompts and breaking structured-JSON output. Ignored by all other
-    # providers. See OllamaProvider._complete_native.
-    num_ctx: int = 0
-
-
-@dataclass
-class EmbeddingConfig:
-    """Embedding model configuration.
-
-    v0.3.32+ owns its own ``api_key`` / ``base_url`` so the embedding
-    provider is fully independent from ``[llm].default_provider`` and the
-    chat-side ``[llm.<name>]`` blocks. Fallback to other embedding
-    providers or chat-side credentials is opt-in via ``fallback_enabled``.
-    """
-
-    provider: str = ""  # Empty = embedding disabled until explicitly configured
-    model: str = "gemini-embedding-001"
-    api_key: str = ""
-    base_url: str = ""
-    output_dimensionality: int = 1024
-    similarity_threshold: float = 0.82
-    fallback_enabled: bool = False
-    fallback_provider: str = ""
-    # Optional cover image embedding (image-only vectors in the same space
-    # as text). Requires a multimodal embedding model such as
-    # gemini-embedding-2 or dashscope qwen3-vl-embedding. Default off so
-    # local bge-m3 / text-only paths pay zero extra cost.
-    multimodal_enabled: bool = False
-
-
-@dataclass
-class ModuleLLMConfig:
-    """Per-module LLM override. Empty strings = use global defaults."""
-
-    provider: str = ""
-    model: str = ""
-
-
-@dataclass
-class LLMConfig:
-    """LLM configuration with global defaults and per-module overrides."""
-
-    default_provider: str = "deepseek"
-    concurrency: int = DEFAULT_LLM_CONCURRENCY
-    timeout: int = _DEFAULT_LLM_TIMEOUT
-    # Non-empty = chat fallback on. There is no separate enable flag: the
-    # legacy ``fallback_enabled`` bool was never consulted by the fallback
-    # chain and has been removed (stale keys in old config.toml are ignored).
-    fallback_provider: str = ""
-    openai: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    claude: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    gemini: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    deepseek: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    ollama: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    openrouter: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    # v0.3.32+ generic OpenAI-protocol-compatible provider. Always
-    # requires an explicit base_url (otherwise it would just be ``openai``).
-    openai_compatible: LLMProviderConfig = field(default_factory=LLMProviderConfig)
-    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
-    # Per-module overrides (empty = use global default)
-    soul: ModuleLLMConfig = field(default_factory=ModuleLLMConfig)
-    discovery: ModuleLLMConfig = field(default_factory=ModuleLLMConfig)
-    recommendation: ModuleLLMConfig = field(default_factory=ModuleLLMConfig)
-    evaluation: ModuleLLMConfig = field(default_factory=ModuleLLMConfig)
-
-
-def _gemini_api_key_from_env() -> str:
-    """Return Gemini API key from official environment variables."""
-    google_api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
-    gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    return google_api_key or gemini_api_key
 
 
 @dataclass
@@ -857,7 +709,6 @@ class Config:
     language: str = "zh"
     data_dir: str = "data"
     api: ApiConfig = field(default_factory=ApiConfig)
-    llm: LLMConfig = field(default_factory=LLMConfig)
     models: ModelConfig = field(default_factory=default_model_config)
     model_meta: ModelConfigMeta = field(
         default_factory=ModelConfigMeta,
@@ -871,14 +722,14 @@ class Config:
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     # Top-level `[discovery]` carries the unified keyword planner / backpressure
-    # knobs (P1). Distinct from `[llm.discovery]` (per-module provider override).
+    # knobs (P1); model selection is global through ``Config.models``.
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
     saved_sync: SavedSyncConfig = field(default_factory=SavedSyncConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
-    # provider override): this carries soul-engine behavior toggles.
+    # Top-level `[soul]` carries soul-engine behavior toggles; it does not
+    # select or override the global model route.
     soul: SoulConfig = field(default_factory=SoulConfig)
 
     @property
@@ -993,7 +844,7 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     """Apply environment variable overrides.
 
     Environment variables follow the pattern: OPENBILICLAW_SECTION_KEY
-    e.g. OPENBILICLAW_LLM_DEFAULT_PROVIDER=claude
+    e.g. OPENBILICLAW_NETWORK_MODE=system
     """
     prefix = "OPENBILICLAW_"
     for env_key, env_value in os.environ.items():
@@ -1130,20 +981,6 @@ def _raw_table(value: object) -> dict[str, Any]:
     return {str(key): item for key, item in value.items() if isinstance(key, str)}
 
 
-def _legacy_provider_config(value: object) -> LLMProviderConfig:
-    """Build a known legacy provider view while tolerating extension keys."""
-    raw = _raw_table(value)
-    allowed = {item.name for item in fields(LLMProviderConfig)}
-    return LLMProviderConfig(**{key: item for key, item in raw.items() if key in allowed})
-
-
-def _module_llm_config(value: object) -> ModuleLLMConfig:
-    raw = _raw_table(value)
-    return ModuleLLMConfig(
-        **{key: item for key, item in raw.items() if key in {"provider", "model"}}
-    )
-
-
 def _models_from_raw(
     raw: Mapping[str, object],
     *,
@@ -1185,18 +1022,6 @@ def _build_config(
     """Build a Config dataclass from raw dict."""
     general = _raw_table(raw.get("general", {}))
     api_raw = raw.get("api", {}) if isinstance(raw.get("api"), dict) else {}
-    llm_value = raw.get("llm", {})
-    if "models" in raw:
-        # Native model configuration is authoritative.  The compatibility
-        # table contributes neither values nor credentials, even when its
-        # legacy shape is malformed; diagnostics report only that it was
-        # ignored.  Raw preservation still keeps its on-disk bytes on an
-        # ordinary (non-authoritative) save.
-        llm_raw: dict[str, Any] = {}
-    elif not isinstance(llm_value, Mapping):
-        raise TypeError("[llm] must be a table")
-    else:
-        llm_raw = _raw_table(llm_value)
     bili_raw = _raw_table(raw.get("bilibili", {}))
     sources_raw = _raw_table(raw.get("sources", {}))
     sched_raw = dict(raw.get("scheduler", {}))
@@ -1211,43 +1036,6 @@ def _build_config(
         saved_sync_raw = {}
     store_raw = _raw_table(raw.get("storage", {}))
     logging_raw = _raw_table(raw.get("logging", {}))
-
-    embedding_raw = _raw_table(llm_raw.get("embedding", {}))
-    llm = LLMConfig(
-        default_provider=llm_raw.get("default_provider", "deepseek"),
-        concurrency=_normalize_llm_concurrency(llm_raw.get("concurrency")),
-        timeout=_normalize_llm_timeout(llm_raw.get("timeout")),
-        fallback_provider=llm_raw.get("fallback_provider", ""),
-        openai=_legacy_provider_config(llm_raw.get("openai", {})),
-        claude=_legacy_provider_config(llm_raw.get("claude", {})),
-        gemini=_legacy_provider_config(llm_raw.get("gemini", {})),
-        deepseek=_legacy_provider_config(llm_raw.get("deepseek", {})),
-        ollama=_legacy_provider_config(llm_raw.get("ollama", {})),
-        openrouter=_legacy_provider_config(llm_raw.get("openrouter", {})),
-        openai_compatible=_legacy_provider_config(llm_raw.get("openai_compatible", {})),
-        embedding=EmbeddingConfig(
-            **{
-                k: v
-                for k, v in embedding_raw.items()
-                if k
-                in (
-                    "provider",
-                    "model",
-                    "api_key",
-                    "base_url",
-                    "output_dimensionality",
-                    "similarity_threshold",
-                    "fallback_enabled",
-                    "fallback_provider",
-                    "multimodal_enabled",
-                )
-            }
-        ),
-        soul=_module_llm_config(llm_raw.get("soul", {})),
-        discovery=_module_llm_config(llm_raw.get("discovery", {})),
-        recommendation=_module_llm_config(llm_raw.get("recommendation", {})),
-        evaluation=_module_llm_config(llm_raw.get("evaluation", {})),
-    )
 
     models, model_meta = _models_from_raw(
         raw,
@@ -1371,7 +1159,6 @@ def _build_config(
             port=_normalize_api_port(api_raw.get("port", 8420)),
             auth=api_auth,
         ),
-        llm=llm,
         models=models,
         model_meta=model_meta,
         bilibili=bilibili,
@@ -1489,8 +1276,6 @@ def _build_config(
         logging=LoggingConfig(**logging_raw),
         soul=soul,
     )
-    if "llm" in raw:
-        config.__dict__["_legacy_llm_snapshot"] = deepcopy(llm)
     return config
 
 
@@ -1907,25 +1692,6 @@ def _normalize_llm_concurrency(value: object) -> int:
     return normalized
 
 
-def _normalize_llm_timeout(value: object) -> int:
-    """Normalize the LLM request timeout (seconds)."""
-    if isinstance(value, bool):
-        return _DEFAULT_LLM_TIMEOUT
-    if isinstance(value, int | float):
-        normalized = int(value)
-    elif isinstance(value, str):
-        try:
-            normalized = int(value.strip())
-        except ValueError:
-            return _DEFAULT_LLM_TIMEOUT
-    else:
-        return _DEFAULT_LLM_TIMEOUT
-
-    if normalized < _MIN_LLM_TIMEOUT:
-        return _DEFAULT_LLM_TIMEOUT
-    return normalized
-
-
 def llm_concurrency_from_config(config: object) -> int:
     """Extract global chat-route concurrency from ``Config.models``.
 
@@ -2043,235 +1809,12 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
-    # Before the default-provider early return: embedding validation must run
-    # even when default_provider itself is broken.
-    for emb_field, emb_value in (
-        ("provider", config.llm.embedding.provider),
-        ("fallback_provider", config.llm.embedding.fallback_provider),
-    ):
-        normalized = str(emb_value or "").strip().lower()
-        if normalized not in _SUPPORTED_EMBEDDING_PROVIDERS:
-            supported = '"", "ollama", "openai", "gemini", "openai_compatible", "dashscope"'
-            issues.append(
-                ConfigIssue(
-                    field=f"llm.embedding.{emb_field}",
-                    message=(
-                        f"不支持的 embedding {emb_field}: `{emb_value}`。仅支持: {supported}。"
-                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
-                        "请关闭浏览器的网页翻译后到设置页重新选择。"
-                    ),
-                    severity="blocking",
-                )
-            )
-
-    # `[llm].fallback_provider` dead-state validation. The chat fallback
-    # chain (llm/base.py `_fallback_order`) deliberately drops an unusable
-    # fallback WITHOUT any runtime signal — surfacing the dead state here
-    # at save/load time is the only user-visible diagnosis. Runs before the
-    # default-provider early return so a broken default provider does not
-    # hide fallback problems.
-    fallback_name = str(config.llm.fallback_provider or "").strip().lower()
-    if fallback_name:
-        default_name = str(config.llm.default_provider or "").strip().lower()
-        if fallback_name not in _SUPPORTED_CHAT_PROVIDERS:
-            supported = ", ".join(sorted(_SUPPORTED_CHAT_PROVIDERS))
-            issues.append(
-                ConfigIssue(
-                    field="llm.fallback_provider",
-                    message=(
-                        f"不支持的备选 provider: `{config.llm.fallback_provider}`。"
-                        f"仅支持: {supported}。"
-                        "如果这个值看起来像被翻译过（例如「奥拉玛」），"
-                        "请关闭浏览器的网页翻译后到设置页重新选择。"
-                    ),
-                    severity="blocking",
-                )
-            )
-        elif fallback_name == default_name:
-            issues.append(
-                ConfigIssue(
-                    field="llm.fallback_provider",
-                    message=(
-                        "备选与主 Provider 相同时永远不会生效；"
-                        "请换一个不同类型的 Provider 或留空关闭 fallback。"
-                    ),
-                    severity="blocking",
-                )
-            )
-        else:
-            # Mirrors the default-provider credential logic below: gemini
-            # may take its key from GOOGLE_API_KEY / GEMINI_API_KEY, and
-            # openai may authenticate via Codex OAuth instead of api_key.
-            fallback_cfg = getattr(config.llm, fallback_name, None)
-            fallback_required_field = _REMOTE_PROVIDER_FIELDS.get(fallback_name)
-            fallback_has_env_key = fallback_name == "gemini" and bool(_gemini_api_key_from_env())
-            fallback_uses_codex_oauth = (
-                fallback_name == "openai"
-                and config.llm.openai.auth_mode.strip().lower() == "codex_oauth"
-            )
-            if (
-                fallback_required_field
-                and fallback_cfg is not None
-                and not fallback_cfg.api_key.strip()
-                and not fallback_has_env_key
-                and not fallback_uses_codex_oauth
-            ):
-                issues.append(
-                    ConfigIssue(
-                        field="llm.fallback_provider",
-                        message=(
-                            f"备选 provider `{fallback_name}` 缺少 `api_key`，不会被注册，"
-                            f"fallback 永远不会生效；请填写 `{fallback_required_field}` "
-                            "或留空关闭 fallback。"
-                        ),
-                        severity="blocking",
-                    )
-                )
-            if (
-                fallback_name == "openai_compatible"
-                and not config.llm.openai_compatible.base_url.strip()
-            ):
-                issues.append(
-                    ConfigIssue(
-                        field="llm.fallback_provider",
-                        message=(
-                            "备选 provider `openai_compatible` 必须填 `base_url` "
-                            "(例如 Groq: https://api.groq.com/openai/v1)，"
-                            "否则不会被注册，fallback 永远不会生效。"
-                        ),
-                        severity="blocking",
-                    )
-                )
-            # Keep in sync with llm/registry.py `_maybe_ollama_provider` /
-            # `_ollama_is_chat_capable` (config cannot import the registry —
-            # cycle): Ollama only registers when `[llm.ollama]` has a model
-            # or base_url, and naming it as fallback_provider already marks
-            # it chat-capable — so non-registration is the only dead state
-            # left to check here.
-            if (
-                fallback_name == "ollama"
-                and not config.llm.ollama.model.strip()
-                and not config.llm.ollama.base_url.strip()
-            ):
-                issues.append(
-                    ConfigIssue(
-                        field="llm.fallback_provider",
-                        message=(
-                            "备选 provider `ollama` 需要在 `[llm.ollama]` 填 `model` "
-                            "或 `base_url`，否则不会被注册，fallback 永远不会生效。"
-                        ),
-                        severity="blocking",
-                    )
-                )
-
-    provider_name = config.llm.default_provider
-    provider_configs: dict[str, LLMProviderConfig] = {
-        "openai": config.llm.openai,
-        "claude": config.llm.claude,
-        "gemini": config.llm.gemini,
-        "deepseek": config.llm.deepseek,
-        "ollama": config.llm.ollama,
-        "openrouter": config.llm.openrouter,
-        "openai_compatible": config.llm.openai_compatible,
-    }
-
-    provider_config = provider_configs.get(provider_name)
-    if provider_config is None:
+    for item in validate_model_config(config.models, connection_type_registry()):
         issues.append(
             ConfigIssue(
-                field="llm.default_provider",
-                message=f"不支持的默认 provider: `{provider_name}`。",
-            )
-        )
-        return issues
-
-    for flavor_provider in ("openai", "openai_compatible"):
-        flavor = provider_configs[flavor_provider].api_flavor.strip().lower()
-        if flavor not in _SUPPORTED_OPENAI_API_FLAVORS:
-            issues.append(
-                ConfigIssue(
-                    field=f"llm.{flavor_provider}.api_flavor",
-                    message=(
-                        f"`llm.{flavor_provider}.api_flavor` 仅支持: "
-                        '"", "chat_completions", "responses"。'
-                    ),
-                    severity="blocking",
-                )
-            )
-
-    openai_auth_mode = config.llm.openai.auth_mode.strip().lower()
-    if openai_auth_mode not in _SUPPORTED_OPENAI_AUTH_MODES:
-        issues.append(
-            ConfigIssue(
-                field="llm.openai.auth_mode",
-                message='`llm.openai.auth_mode` 仅支持: "", "api_key", "codex_oauth"。',
-                severity="blocking",
-            )
-        )
-
-    if openai_auth_mode == "codex_oauth":
-        if config.llm.openai.api_key.strip():
-            issues.append(
-                ConfigIssue(
-                    field="llm.openai.api_key",
-                    message='`auth_mode = "codex_oauth"` 时 `api_key` 会被忽略。',
-                )
-            )
-        if not _is_openai_official_base_url(config.llm.openai.base_url):
-            issues.append(
-                ConfigIssue(
-                    field="llm.openai.base_url",
-                    message=(
-                        '`auth_mode = "codex_oauth"` 只允许留空 base_url '
-                        "或使用 OpenAI 官方 API 域名，避免泄露 ChatGPT token。"
-                    ),
-                    severity="blocking",
-                )
-            )
-        try:
-            from openbiliclaw.llm.codex_auth import codex_credentials_exist
-
-            has_codex_credentials = codex_credentials_exist()
-        except Exception:
-            has_codex_credentials = False
-        if not has_codex_credentials:
-            issues.append(
-                ConfigIssue(
-                    field="llm.openai.codex_oauth",
-                    message="未找到 Codex OAuth 凭据，请先运行 `openbiliclaw login codex`。",
-                )
-            )
-
-    required_field = _REMOTE_PROVIDER_FIELDS.get(provider_name)
-    has_env_fallback = provider_name == "gemini" and bool(_gemini_api_key_from_env())
-    provider_uses_codex_oauth = provider_name == "openai" and openai_auth_mode == "codex_oauth"
-    if (
-        required_field
-        and not provider_config.api_key.strip()
-        and not has_env_fallback
-        and not provider_uses_codex_oauth
-    ):
-        issues.append(
-            ConfigIssue(
-                field=required_field,
-                message=(
-                    f"默认 provider `{provider_name}` 缺少 `api_key`，请在 config.toml 中填写。"
-                ),
-            )
-        )
-
-    # openai_compatible without an explicit base_url is meaningless — it
-    # would just be ``openai`` with extra steps. Surface this so the user
-    # knows to fill ``[llm.openai_compatible].base_url`` (Groq:
-    # https://api.groq.com/openai/v1, vLLM: http://your-vllm:8000/v1, ...).
-    if provider_name == "openai_compatible" and not config.llm.openai_compatible.base_url.strip():
-        issues.append(
-            ConfigIssue(
-                field="llm.openai_compatible.base_url",
-                message=(
-                    "默认 provider `openai_compatible` 必须填 `base_url` "
-                    "(例如 Groq: https://api.groq.com/openai/v1)。"
-                ),
+                field=item.path,
+                message=item.message,
+                severity=item.severity,
             )
         )
 
@@ -2287,14 +1830,6 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
         )
 
     return issues
-
-
-def _is_openai_official_base_url(base_url: str) -> bool:
-    raw = base_url.strip()
-    if not raw:
-        return True
-    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
-    return parsed.scheme == "https" and (parsed.hostname or "").lower() == "api.openai.com"
 
 
 def _append_model_load_diagnostics(
@@ -2661,16 +2196,6 @@ def _local_model_table_exists() -> bool:
     return models is not None or llm is not None
 
 
-def _refresh_legacy_llm_snapshot(config: Config, path: Path) -> None:
-    """Remember the legacy values actually persisted by the completed save."""
-    _, raw_llm = _read_on_disk_model_tables(path)
-    if raw_llm is None:
-        config.__dict__.pop("_legacy_llm_snapshot", None)
-        return
-    persisted = _build_config({"llm": raw_llm}).llm
-    config.__dict__["_legacy_llm_snapshot"] = deepcopy(persisted)
-
-
 _BARE_TOML_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -2920,163 +2445,6 @@ def render_model_config_document(original: bytes, models: ModelConfig) -> bytes:
     return output.encode("utf-8")
 
 
-def _render_legacy_llm_lines(config: Config) -> list[str]:
-    lines = [
-        "[llm]",
-        f"default_provider = {_toml_string(config.llm.default_provider)}",
-        f"concurrency = {_normalize_llm_concurrency(config.llm.concurrency)}",
-        f"timeout = {_normalize_llm_timeout(config.llm.timeout)}",
-        f"fallback_provider = {_toml_string(config.llm.fallback_provider)}",
-        "",
-    ]
-    lines.extend(_render_provider_section("openai", config.llm.openai))
-    lines.extend(_render_provider_section("claude", config.llm.claude))
-    lines.extend(_render_provider_section("gemini", config.llm.gemini))
-    lines.extend(_render_provider_section("deepseek", config.llm.deepseek))
-    lines.extend(_render_provider_section("ollama", config.llm.ollama))
-    lines.extend(_render_provider_section("openrouter", config.llm.openrouter))
-    lines.extend(_render_provider_section("openai_compatible", config.llm.openai_compatible))
-    lines.extend(
-        [
-            "[llm.embedding]",
-            f"provider = {_toml_string(config.llm.embedding.provider)}",
-            f"model = {_toml_string(config.llm.embedding.model)}",
-            f"api_key = {_toml_string(config.llm.embedding.api_key)}",
-            f"base_url = {_toml_string(config.llm.embedding.base_url)}",
-            f"output_dimensionality = {max(0, int(config.llm.embedding.output_dimensionality))}",
-            f"similarity_threshold = {config.llm.embedding.similarity_threshold}",
-            f"fallback_enabled = {_toml_bool(config.llm.embedding.fallback_enabled)}",
-            f"fallback_provider = {_toml_string(config.llm.embedding.fallback_provider)}",
-            f"multimodal_enabled = {_toml_bool(config.llm.embedding.multimodal_enabled)}",
-            "",
-            "# Per-module LLM overrides (empty = use global default)",
-            "[llm.soul]",
-            f"provider = {_toml_string(config.llm.soul.provider)}",
-            f"model = {_toml_string(config.llm.soul.model)}",
-            "",
-            "[llm.discovery]",
-            f"provider = {_toml_string(config.llm.discovery.provider)}",
-            f"model = {_toml_string(config.llm.discovery.model)}",
-            "",
-            "[llm.recommendation]",
-            f"provider = {_toml_string(config.llm.recommendation.provider)}",
-            f"model = {_toml_string(config.llm.recommendation.model)}",
-            "",
-            "[llm.evaluation]",
-            f"provider = {_toml_string(config.llm.evaluation.provider)}",
-            f"model = {_toml_string(config.llm.evaluation.model)}",
-        ]
-    )
-    return lines
-
-
-_LEGACY_PROVIDER_RENDER_FIELDS: dict[str, tuple[str, ...]] = {
-    "openai": ("api_key", "model", "base_url", "auth_mode", "api_flavor"),
-    "claude": ("api_key", "model", "base_url"),
-    "gemini": ("api_key", "model"),
-    "deepseek": ("api_key", "model", "base_url", "reasoning_effort"),
-    "ollama": ("api_key", "model", "base_url"),
-    "openrouter": ("api_key", "model", "base_url", "http_referer", "x_title"),
-    "openai_compatible": ("api_key", "model", "base_url", "api_flavor"),
-}
-_LEGACY_EMBEDDING_RENDER_FIELDS = (
-    "provider",
-    "model",
-    "api_key",
-    "base_url",
-    "output_dimensionality",
-    "similarity_threshold",
-    "fallback_enabled",
-    "fallback_provider",
-    "multimodal_enabled",
-)
-_LEGACY_MODULE_NAMES = ("soul", "discovery", "recommendation", "evaluation")
-
-
-def _changed_legacy_table(
-    result: dict[str, Any],
-    name: str,
-    current: object,
-    persisted: object,
-    field_names: tuple[str, ...],
-    *,
-    overridden_paths: frozenset[str],
-) -> None:
-    changed = [
-        field_name
-        for field_name in field_names
-        if f"llm.{name}.{field_name}" not in overridden_paths
-        and getattr(current, field_name) != getattr(persisted, field_name)
-    ]
-    if not changed:
-        return
-    table_value = result.get(name)
-    table = table_value if isinstance(table_value, dict) else {}
-    if table is not table_value:
-        result[name] = table
-    for field_name in changed:
-        value = getattr(current, field_name)
-        if field_name == "output_dimensionality":
-            value = max(0, int(value))
-        table[field_name] = value
-
-
-def _legacy_llm_with_known_changes(
-    config: Config,
-    raw: Mapping[str, object],
-) -> dict[str, Any]:
-    """Overlay deliberate legacy edits while retaining every unknown raw value."""
-    result: dict[str, Any] = deepcopy(dict(raw))
-    persisted = _build_config({"llm": dict(raw)}).llm
-    snapshot = getattr(config, "_legacy_llm_snapshot", None)
-    baseline = snapshot if isinstance(snapshot, LLMConfig) else persisted
-    overridden_paths = frozenset(config.model_meta.override_paths)
-
-    top_level_values = {
-        "default_provider": (config.llm.default_provider, baseline.default_provider),
-        "concurrency": (
-            _normalize_llm_concurrency(config.llm.concurrency),
-            baseline.concurrency,
-        ),
-        "timeout": (_normalize_llm_timeout(config.llm.timeout), baseline.timeout),
-        "fallback_provider": (
-            config.llm.fallback_provider,
-            baseline.fallback_provider,
-        ),
-    }
-    for key, (current, before) in top_level_values.items():
-        if f"llm.{key}" not in overridden_paths and current != before:
-            result[key] = current
-
-    for provider_name, field_names in _LEGACY_PROVIDER_RENDER_FIELDS.items():
-        _changed_legacy_table(
-            result,
-            provider_name,
-            getattr(config.llm, provider_name),
-            getattr(baseline, provider_name),
-            field_names,
-            overridden_paths=overridden_paths,
-        )
-    _changed_legacy_table(
-        result,
-        "embedding",
-        config.llm.embedding,
-        baseline.embedding,
-        _LEGACY_EMBEDDING_RENDER_FIELDS,
-        overridden_paths=overridden_paths,
-    )
-    for module_name in _LEGACY_MODULE_NAMES:
-        _changed_legacy_table(
-            result,
-            module_name,
-            getattr(config.llm, module_name),
-            getattr(baseline, module_name),
-            ("provider", "model"),
-            overridden_paths=overridden_paths,
-        )
-    return result
-
-
 def _model_section_lines(
     config: Config,
     *,
@@ -3094,11 +2462,10 @@ def _model_section_lines(
     if on_disk_llm is not None:
         if lines:
             lines.append("")
-        llm_raw = _legacy_llm_with_known_changes(config, on_disk_llm)
-        lines.extend(_render_raw_model_table("llm", llm_raw))
+        lines.extend(_render_raw_model_table("llm", on_disk_llm))
     if lines or preserve_model_absence:
         return lines
-    return _render_legacy_llm_lines(config)
+    return render_model_config(config.models)
 
 
 def save_config(
@@ -3160,7 +2527,6 @@ def _save_config_unlocked(
         ),
         encoding="utf-8",
     )
-    _refresh_legacy_llm_snapshot(config, path)
     return path
 
 
@@ -3399,26 +2765,6 @@ def _render_config_toml(
         ]
     )
     return "\n".join(lines)
-
-
-def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str]:
-    """Render one provider subsection."""
-    lines = [f"[llm.{name}]"]
-    lines.append(f"api_key = {_toml_string(provider.api_key)}")
-    lines.append(f"model = {_toml_string(provider.model)}")
-    if name in {"openai", "claude", "deepseek", "ollama", "openrouter", "openai_compatible"}:
-        lines.append(f"base_url = {_toml_string(provider.base_url)}")
-    if name == "openai":
-        lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
-    if name in {"openai", "openai_compatible"}:
-        lines.append(f"api_flavor = {_toml_string(provider.api_flavor)}")
-    if name == "deepseek":
-        lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
-    if name == "openrouter":
-        lines.append(f"http_referer = {_toml_string(provider.http_referer)}")
-        lines.append(f"x_title = {_toml_string(provider.x_title)}")
-    lines.append("")
-    return lines
 
 
 def _toml_string(value: str) -> str:

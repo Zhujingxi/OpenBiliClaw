@@ -66,6 +66,7 @@ def default_model_config() -> ModelConfig:
                     preset="deepseek",
                     model="deepseek-v4-flash",
                     base_url="https://api.deepseek.com",
+                    credential=CredentialConfig(source="env", value="DEEPSEEK_API_KEY"),
                     api_mode="chat_completions",
                     reasoning_effort="max",
                 ),

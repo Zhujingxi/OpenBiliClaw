@@ -394,6 +394,11 @@ exactly to a connection type plus preset (`deepseek`, `openai`, `openrouter`,
 `claude`, `gemini`, or `ollama`) and never creates a legacy
 `[llm]` writer. New scripts must use the canonical flags above.
 
+Bootstrap converts every accepted choice into the same native descriptor-backed
+records used by `ModelConfigService`; runtime construction then uses only the
+ordered Chat and Embedding factories. The deprecated flags are input aliases,
+not a legacy provider registry, class, or alternate configuration authority.
+
 Codex OAuth is canonical/human-wizard only: select `codex_oauth` directly;
 there is no deprecated `--provider codex` alias and no raw token flag.
 

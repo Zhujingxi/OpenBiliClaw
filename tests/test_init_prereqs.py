@@ -43,7 +43,7 @@ def _ordered_route(*providers: _Provider) -> OrderedLLMRoute:
 def _ctx(
     *, provider: Any = None, cookie: str = "", platforms: dict[str, bool] | None = None
 ) -> Any:
-    registry = SimpleNamespace(get=lambda: provider) if provider is not None else None
+    registry = _ordered_route(provider) if provider is not None else None
     platforms = platforms or {}
     sources = SimpleNamespace(
         **{
@@ -87,21 +87,16 @@ async def test_chat_ready_probes_ordered_connections_until_first_healthy() -> No
 
 
 def _ctx_with_fallback(default: Any, fallback: Any, *, fallback_name: str = "claude") -> Any:
-    """Context whose registry carries a chat-capable fallback provider."""
+    """Context whose route carries a second ordered connection."""
+    del fallback_name
     ctx = _ctx(provider=default)
-    providers = {"": default, fallback_name: fallback}
-    ctx.llm_registry = SimpleNamespace(
-        get=lambda name="": providers[name],
-        default_provider="openai",
-        fallback_provider=fallback_name,
-        is_chat_capable=lambda name: name == fallback_name,
-    )
+    ctx.llm_registry = _ordered_route(default, fallback)
     return ctx
 
 
 async def test_chat_ready_true_via_fallback_when_default_is_down() -> None:
-    """A healthy [llm].fallback_provider serves every runtime chat call, so
-    init must not be blocked just because the primary provider is down."""
+    """A healthy second ordered connection serves runtime chat calls, so init
+    must not be blocked just because the first connection is down."""
     default, fallback = _Provider(ok=False), _Provider(ok=True)
     pr = InitPrereqs(_ctx_with_fallback(default, fallback))
     assert await pr.chat_ready() is True
@@ -114,15 +109,6 @@ async def test_chat_ready_false_when_default_and_fallback_are_both_down() -> Non
     pr = InitPrereqs(_ctx_with_fallback(default, fallback))
     assert await pr.chat_ready() is False
     assert fallback.calls == 1
-
-
-async def test_chat_ready_skips_fallback_probe_when_same_as_default() -> None:
-    """A same-name fallback is dead config (the chain drops it) — probing it
-    again would just double the cost of a failing default probe."""
-    default, fallback = _Provider(ok=False), _Provider(ok=True)
-    pr = InitPrereqs(_ctx_with_fallback(default, fallback, fallback_name="openai"))
-    assert await pr.chat_ready() is False
-    assert fallback.calls == 0
 
 
 async def test_chat_ready_skips_fallback_probe_when_default_is_healthy() -> None:

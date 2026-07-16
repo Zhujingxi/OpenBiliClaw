@@ -15,6 +15,7 @@ background ─ background admission (default 3) ──────┘
                 parked when canonical available = 0
 
 all model configuration entry points + dedicated API + transactional Chat/Embedding runtime (stages 9–14)
+├─ descriptor registry → ModelConfigService → native connection factories
 ├─ Chat/Embedding/Runtime tabs → one ordered route model
 ├─ desktop selected inspector; extension/mobile sequential list → detail
 ├─ descriptor groups/search → fields/presets + shared Embedding settings
@@ -84,6 +85,7 @@ all model configuration entry points + dedicated API + transactional Chat/Embedd
 - 提供 JSON CLI bridge，供仓库内真实 OpenClaw skill pack 调用
 
 ### Model Configuration Domain (`model_config/`)
+- 数据流固定为 `descriptor registry → ModelConfigService → build_ordered_chat_route()/build_ordered_embedding_service() → RuntimeModelBundle → callers/surfaces`；descriptor 只描述字段与 preset，service 是唯一模型 authority 写入边界，factory 只消费已经验证的原生 records
 - 以 frozen dataclass 表示有序 Chat route、共享模型空间的 Embedding route、credential source 与字段化 validation issue；有序集合统一使用 tuple，Chat 角色仅由位置派生
 - 代码内 connection-type registry 提供 JSON-safe label、category、capability、字段、preset、默认值和帮助文案，不含 adapter 类、callable 或 secret
 - `validate_model_config()` 统一检查 route 数量、全局唯一 ID、type/preset capability、类型专属字段与 credential source；typed Embedding provider 没有 model 字段，raw provider 显式携带 `model` 会被拒绝
@@ -177,11 +179,11 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 
 ### Runtime (`runtime/`)
 - 系统生命周期管理和服务编排
-- 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream`，让 popup 设置页和手机版二维码入口仍能工作；其他 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路
+- 降级模式启动：生产 `create_app()` 遇到原生模型 route / `RuntimeModelBundle` 构造错误时保留 `/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status` 和 `/api/runtime-stream`，让 popup 设置页和手机版二维码入口仍能工作；其他 API 返回 503，避免半初始化 runtime 继续跑推荐/发现链路。兼容响应值 `llm_registry_unavailable` 暂时保留，但不表示旧 registry 仍参与运行时
 - 配置热重载：`RuntimeContext` 从 `Config.models` staging 完整 bundle 和所有 consumer，随后在短锁内原子 publication；所有 caller 共享同一全局 `complete()` 路径，模块 override 已删除。成功才发布带 revision 的 `config_reloaded`；失败恢复旧对象和 gate 状态。正向兴趣和避雷 speculator tick 继续作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞配置响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新
 - `runtime.autostart` — 当前用户作用域开机自启动 manager：macOS LaunchAgent、Windows HKCU Run + `.pyw`、Linux XDG autostart；API / CLI / 插件设置页通过 `GET /api/autostart-status` 与 `POST /api/autostart/apply` 管理，带 env-managed / `config.local.toml` shadow guard，并用开启「先写 config 后注册 OS」、关闭「先注销 OS 后写 config」的方向化事务避免崩溃残留
-- `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从 chat / embedding / fallback 配置判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
+- `runtime.ollama_supervisor` — `start` 启动前复用的 Ollama 预检 helper；从原生 ordered Chat connections 与 Embedding providers 判断是否需要 Ollama，归一化 endpoint 并剥离 `/v1`，仅在默认本机 `localhost:11434` 缺 daemon 时尝试后台拉起 `ollama serve`。桌面 macOS 安装包的随包 runtime 必须来自官方 `Ollama.app`，并携带 `ollama + llama-server + lib*.dylib/.so + mlx_metal_*`，打包阶段拒绝 Homebrew 单主程序或缺关键动态库的 runtime，避免 embedding runtime 半可用；图形化 init 在 embedding provider 已配置时还会复用真实 probe 作为硬前置，防止首轮画像在本地向量服务 500 时悄悄降级。
 - `ContinuousRefreshController` — 管理补货、来源 producer 与 API daemon 的 `CandidateEvalCoordinator` 子任务；幂等 `run_startup_maintenance()` 是 host 暴露服务前的统一零 LLM 库存恢复边界。API daemon 的 `run_forever()` 先调用它再启动 delight/candidate/background loops，pipeline 的单次 enqueue callback 是 coordinator 唯一即时唤醒；OpenClaw direct bootstrap 不运行该 loop，因此不 attach dormant candidate / expression coordinator，而将 `recommend(refresh_if_needed=True)` 的首轮 source/evaluation 限为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），在 commit 后同步 drain ≤4 expression copy、禁用本次 split retry。fresh history 为空时该 operation 直接 serve 首 batch 已复制的 canonical subset；其 one-shot callback 不创建 prewarm/provider background task，剩余 pending 由后续请求续补。热重载的新 controller 也先恢复；同一 controller 后续进入 loop 不重复维护。
 - `FeedbackBatchScheduler` — API 侧推荐反馈合并器；`/api/feedback` 只标记 dirty 并启动一次 debounce 后台任务，burst 内多条反馈 coalesce 成一次 feedback batch，批处理中又收到新反馈时补跑下一轮。Soul 层 single-flight 负责兜底其它入口的并发保护。
 - `/api/runtime-status` / `runtime-stream` — 对插件、移动 Web 和桌面 Web 发布同一套候选池库存口径：`pool_available_count` 只表示当前可立即被 `serve()` 消费的内容，`pool_raw_count` 表示基础 fresh 素材加待评估 raw candidates，`pool_pending_count` 表示已有素材但仍缺评估、文案、分类、可跳转链接或仍在近期已看窗口内。`pool_pending_eval_count` / `pool_evaluated_pending_count` 分别拆出待 LLM 评估和已评估待 admission 的数量；`pending_signal_events` 只表示 discovery refresh 游标后的新动作数量，用于下一次统一补货判断，不会由事件入口直接执行 refresh。前端只把 available 显示为“可换”，pending 显示为“正在整理”；后台补池的 source deficit 也使用 available-by-source，而 raw trim / headroom 使用 all-raw-material by-source。推荐读取、换一批和续页消费候选池后会立即广播新的 `refresh.pool_updated` 快照，使其它已打开客户端收敛到扣减后的库存，而不重载推荐列表。
@@ -255,14 +257,14 @@ X 是第六个内容源，分两条独立通路：
 ### LLM Providers (`llm/`)
 - 统一的多模型接口（OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter）
 - `connection_factory.py` 从不可变 `ChatConnection` / `EmbeddingProviderConfig` 记录显式构造 adapter；`AdapterRuntimeOptions` 只携带 timeout、精确环境映射和 secret-safe Codex token loader。OpenAI-protocol preset 由 frozen `OpenAIProtocolOptions` 隔离 request body/header/API mode，`EmbeddingProtocolAdapter` 保留共享 `EmbeddingModelSettings` 对象身份并按具体 model 声明图像能力；同步 model-capability checker 异常原样传播。两类 adapter 分别按配置数组组成 `OrderedLLMRoute` / `OrderedEmbeddingRoute`，再由 `RuntimeModelBundle` 统一发布给生产 consumer
-- `codex_auth.py` 提供实验性的 Codex CLI ChatGPT OAuth 凭据导入和刷新；`[llm.openai].auth_mode="codex_oauth"` 时仍注册为 `openai` provider，只替换认证来源，并限制 `base_url` 为 OpenAI 官方 API 域名
+- `codex_auth.py` 提供实验性的 Codex CLI ChatGPT OAuth 凭据导入和刷新；原生 `type="codex_oauth"` connection 只保存 `credential_ref="codex"`，factory 在 token lookup 前限制 endpoint 为 OpenAI 官方 API 域名。legacy `[llm.openai].auth_mode="codex_oauth"` 仅由只读 migration adapter 映射成该候选，不再进入独立 provider 注册路径
 - `OrderedLLMRoute` 以稳定 connection ID 而非 Provider 名为键：同类型记录可重复，严格按数组位置执行；总 deadline 不因 fallback 重置，rate-limit（`Retry-After` 或 60 秒）、auth/model 永久态、15 秒起至 300 秒的 transient 与 prompt-scoped failure 分别管理。普通成功只能清除 timed/transient circuit，不能清除并发打开的永久态；exact probe 只调用目标 ID、可绕过 open circuit，并且只有同 ID+revision 的 exact 成功可关闭永久态。route 耗尽只暴露安全结构化 attempts
 - `OrderedEmbeddingRoute` 以稳定 Provider ID 隔离同类型 endpoint，严格按数组位置执行且等待 Provider 内 retry 完成。空、非数值、非有限或错误 shape 向量只在当前调用 fallback；非零共享维度不匹配会打开当前 ID+revision 的永久 `config_error` circuit，维度为 0 的多模态 exact probe 若文本/图片向量长度不一致也做相同处理。精确探测绕过目标 circuit，只打目标文本与可选固定 PNG，不读写缓存/配置；普通成功只清 timed/transient，只有 exact 成功可关闭该 ID+revision 的永久态。仅类型化 Provider 和明确 transport 请求失败参与 fallback；取消、请求错误、能力 property/checker 错误和未知编程错误传播且不尝试后续 Provider。失败 aggregate 只保留固定安全摘要
 - `LLMResponse` 在既有 `provider` / `model` 计价字段之外携带 `connection_id` / `connection_type` / `preset` / `route_position`。`LLMService` 的普通、结构化、多模态与 tool path 全部调用同一个 route；caller tag 仅用于并发 admission 与 usage，不再选择模块 Provider/model。`llm_usage` 持久化这些字段并提供连接级成本汇总；旧库自动补列和索引
 - 结构化输出共享解析：`llm/json_utils.py` 为 discovery eval-batch、recommendation copy/classify、soul awareness/insight/profile/speculator 提供统一 JSON 容错，兼容 MiMo / OpenAI-compatible wrapper、fenced JSON、JSONL、schema echo 和 malformed `{ [ ... ] }`
 - v0.3.0+ embedding 兜底：`OllamaProvider.embed()` 走原生 `/api/embeddings`，配 `bge-m3` 模型可在 Mac/Win/Linux CPU 跑相似度计算，不需额外 API Key
 - `EmbeddingService` L1 内存 + L2 SQLite 双层缓存；注入原生 route 时从共享 settings 派生 model、维度、阈值、多模态开关和 cache namespace，拒绝缓存无效/错维向量。已识别 Provider/transport 请求失败导致 route 耗尽时返回 `[]` 并记录固定安全原因；能力 checker、未知、调用方和取消错误不降级而直接传播。namespace 不含 Provider ID/顺序，任一共享设置变化都会隔离缓存。legacy `embedding.provider="ollama"` 且凭据为空时仍直接使用本地默认地址，不产生兼容 warning
-- `DashScopeEmbeddingProvider`（`provider="dashscope"`，阿里百炼原生 multimodal-embedding API，仅 embedding）加入 embedding provider 家族，其 `embed()` 文本向量与 openai/gemini/ollama 一样接入既有文本 embedding 消费方；出站走 `network.httpx_kwargs_for_endpoint(base_url)`——dashscope.aliyuncs.com 属国内 endpoint，即使 `[network].mode` 切到 system/custom 也强制直连（对齐 v0.3.167）。可选 `[llm.embedding].multimodal_enabled` + 多模态模型（`gemini-embedding-2` / `qwen3-vl-embedding`）时启用**封面视觉链路**：discovery 入池预热封面向量（按 URL 派生键），Recommendation 两条路径一致消费「封面↔兴趣锚点」跨模态余弦的有界正向加成——惊喜 `precompute_delight_scores`(加到 delight_score) 与正常 `serve()` 排序(并入 relevance 项;热路径只读缓存、不现抓)。默认关闭、纯文本零成本、只加不减、默认路径逐字节一致
+- `DashScopeEmbeddingProvider` 由原生 `type="dashscope_api"` 的 Embedding provider record 构造，接入阿里百炼 multimodal-embedding API；其 `embed()` 文本向量与其它协议 adapter 一样进入 ordered Embedding route。出站走 `network.httpx_kwargs_for_endpoint(base_url)`——dashscope.aliyuncs.com 属国内 endpoint，即使 `[network].mode` 切到 system/custom 也强制直连（对齐 v0.3.167）。可选 `[models.embedding.settings].multimodal_enabled` + 多模态模型（`gemini-embedding-2` / `qwen3-vl-embedding`）时启用**封面视觉链路**：discovery 入池预热封面向量（按 URL 派生键），Recommendation 两条路径一致消费「封面↔兴趣锚点」跨模态余弦的有界正向加成——惊喜 `precompute_delight_scores`(加到 delight_score) 与正常 `serve()` 排序(并入 relevance 项;热路径只读缓存、不现抓)。默认关闭、纯文本零成本、只加不减、默认路径逐字节一致
 
 ### Storage (`storage/`)
 - SQLite 数据库管理

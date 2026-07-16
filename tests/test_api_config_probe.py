@@ -14,7 +14,8 @@ from pydantic import ValidationError
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.models import ConfigServiceProbeIn, ConfigServiceProbeResponse
-from openbiliclaw.config import Config, EmbeddingConfig, LLMConfig, LLMProviderConfig, save_config
+from openbiliclaw.config import Config, save_config
+from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -55,15 +56,18 @@ def _client_for_config(
 
 def _probe_base_config() -> Config:
     return Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key="sk-old", model="gpt-old"),
-            deepseek=LLMProviderConfig(api_key="sk-new", model="deepseek-chat"),
-            embedding=EmbeddingConfig(
-                provider="openai",
-                model="text-embedding-3-small",
-                api_key="sk-embedding-old",
-            ),
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="local",
+                        name="Local",
+                        type="ollama",
+                        model="qwen3:8b",
+                        base_url="http://127.0.0.1:11434/v1",
+                    ),
+                )
+            )
         )
     )
 

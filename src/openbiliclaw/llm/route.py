@@ -280,11 +280,6 @@ class OrderedLLMRoute:
         self._clock = clock or time.monotonic
         self.circuits = circuits or CircuitTable(clock=self._clock)
 
-    @property
-    def default_provider(self) -> str:
-        """Compatibility name for callers that inspect the primary ID."""
-        return self.connections[0].id if self.connections else ""
-
     def get(self, connection_id: str) -> LLMProvider:
         """Return the exact adapter by stable ID."""
         connection, _position = self._find_connection(connection_id)

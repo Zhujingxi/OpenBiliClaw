@@ -2,6 +2,8 @@
 
 > popup 的模型 tab 直接编辑 revisioned Chat / Embedding route；Primary 与 fallback 是同一条最多 10 项的有序列表，Runtime tab 继续承载 Chat 总并发与超时。
 
+模型 tab 的连接类型和字段来自 descriptor registry，保存经 `/api/model-config` 进入唯一 `ModelConfigService`，运行时再由原生 ordered factories 生成 `RuntimeModelBundle`。插件不构造 Provider、不写 legacy `[llm]`，通用设置 payload 也不携带模型字段。
+
 ## 模块范围
 
 `extension/` 是浏览器插件子项目（Chrome / Edge / Brave 主构建，Firefox 独立构建），负责：

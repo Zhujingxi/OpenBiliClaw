@@ -115,7 +115,7 @@ async def main(args: argparse.Namespace) -> None:
     from openbiliclaw.eval.discovery_scenario import ScenarioGenerator, ScenarioPool
     from openbiliclaw.eval.persona_pool import PersonaPool
     from openbiliclaw.eval.run_logger import RunLogger
-    from openbiliclaw.llm.registry import build_llm_registry
+    from _model_runtime import build_script_model_bundle
 
     logging.basicConfig(
         level=logging.INFO,
@@ -123,15 +123,13 @@ async def main(args: argparse.Namespace) -> None:
     )
 
     cfg = load_config()
-    registry = build_llm_registry(cfg)
 
-    # Build LLMService (needs a MemoryManager for core memory injection)
-    from openbiliclaw.llm.service import LLMService
+    # Build the native route bundle with memory for core-memory injection.
     from openbiliclaw.memory.manager import MemoryManager
 
     memory = MemoryManager(PROJECT_ROOT / "data")
     memory.initialize()
-    llm_service = LLMService(registry=registry, memory=memory)
+    llm_service = build_script_model_bundle(cfg, memory).llm_service
 
     evaluator = DiscoveryEvaluator(llm_service=llm_service)
     optimizer = create_discovery_optimizer(project_root=PROJECT_ROOT, use_agent_sdk=args.use_agent)

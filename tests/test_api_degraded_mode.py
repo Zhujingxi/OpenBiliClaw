@@ -8,11 +8,12 @@ from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.runtime_context import build_runtime_context
-from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+from openbiliclaw.config import Config, save_config
 from openbiliclaw.llm.registry import RegistryBuildError
 from openbiliclaw.model_config import (
     ChatConnection,
     ChatRouteConfig,
+    CredentialConfig,
     EmbeddingModelSettings,
     EmbeddingRouteConfig,
     ModelConfig,
@@ -26,10 +27,20 @@ def _clear_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _invalid_config(tmp_path) -> Config:
     return Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key="", model="gpt-4o-mini"),
-            ollama=LLMProviderConfig(model="", base_url=""),
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="invalid-openai",
+                        name="Invalid OpenAI",
+                        type="openai_compatible",
+                        preset="openai",
+                        model="gpt-4o-mini",
+                        base_url="https://api.openai.com/v1",
+                        api_mode="chat_completions",
+                    ),
+                )
+            )
         ),
         data_dir=str(tmp_path / "data"),
     )
@@ -37,9 +48,24 @@ def _invalid_config(tmp_path) -> Config:
 
 def _valid_config(tmp_path) -> Config:
     return Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key="sk-valid-openai-key", model="gpt-4o-mini"),
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="valid-openai",
+                        name="Valid OpenAI",
+                        type="openai_compatible",
+                        preset="openai",
+                        model="gpt-4o-mini",
+                        base_url="https://api.openai.com/v1",
+                        credential=CredentialConfig(
+                            source="inline",
+                            value="sk-valid-openai-key",
+                        ),
+                        api_mode="chat_completions",
+                    ),
+                )
+            )
         ),
         data_dir=str(tmp_path / "data"),
     )
@@ -160,7 +186,7 @@ def test_degraded_config_get_includes_recovery_context(
     assert any(issue["severity"] == "blocking" for issue in body["issues"])
 
 
-def test_degraded_config_put_saves_recovery_config_and_requires_restart(
+def test_degraded_legacy_config_put_cannot_mutate_model_route(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -173,13 +199,12 @@ def test_degraded_config_put_saves_recovery_config_and_requires_restart(
         json={"llm": {"openai": {"api_key": "sk-new-valid-key"}}},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 400
     body = response.json()
     assert body["reloaded"] is False
     assert body["rollback_applied"] is False
-    assert body["restart_required"] is True
-    assert "restart" in body["message"].lower()
-    assert "sk-new-valid-key" in (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert body["warnings"] == ["model_config_not_updated"]
+    assert "sk-new-valid-key" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
 
 
 def test_model_config_save_fully_recovers_degraded_runtime_before_reload_event(
@@ -307,7 +332,7 @@ def test_degraded_update_status_is_reachable(
 ) -> None:
     """Update status must bypass the degraded 503 gate.
 
-    A backend that can't build its LLM registry is exactly when the user may
+    A backend that can't build its model routes is exactly when the user may
     need to pull a fix-carrying release, so ``/api/update-status`` (and manual
     check/apply) stay on the degraded allow-list and the degraded context now
     builds a real ``AutoUpdateService`` to back them.
@@ -366,9 +391,10 @@ def test_restart_after_degraded_recovery_config_boots_normal(
     _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
     degraded_client = TestClient(create_app())
 
+    snapshot = degraded_client.get("/api/model-config").json()
     response = degraded_client.put(
-        "/api/config",
-        json={"llm": {"openai": {"api_key": "sk-new-valid-key"}}},
+        "/api/model-config",
+        json=_model_put_payload(snapshot["revision"], _recovery_models()),
     )
 
     assert response.status_code == 200

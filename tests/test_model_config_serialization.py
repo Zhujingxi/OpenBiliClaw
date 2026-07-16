@@ -462,7 +462,8 @@ def test_ordinary_save_still_creates_a_genuinely_absent_destination(tmp_path: Pa
 
     with path.open("rb") as handle:
         rendered = tomllib.load(handle)
-    assert rendered["llm"]["default_provider"] == "deepseek"
+    assert rendered["models"]["chat"]["connections"][0]["preset"] == "deepseek"
+    assert "llm" not in rendered
 
 
 def test_ordinary_save_preserves_model_absence_in_valid_existing_file(tmp_path: Path) -> None:
@@ -479,19 +480,25 @@ def test_ordinary_save_preserves_model_absence_in_valid_existing_file(tmp_path: 
     assert "llm" not in rendered
 
 
-def test_legacy_model_edit_updates_known_field_without_dropping_raw_extensions(
+def test_ordinary_save_keeps_legacy_model_table_read_only(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "config.toml"
     path.write_text(LEGACY_WITH_UNKNOWN_PROVIDER_KEY, encoding="utf-8")
     loaded = load_config(path)
-    loaded.llm.deepseek.model = "deepseek-updated"
+    loaded.models = replace(
+        loaded.models,
+        chat=replace(
+            loaded.models.chat,
+            connections=(replace(loaded.models.chat.connections[0], model="deepseek-updated"),),
+        ),
+    )
 
     save_config(loaded, path)
 
     with path.open("rb") as handle:
         llm = tomllib.load(handle)["llm"]
-    assert llm["deepseek"]["model"] == "deepseek-updated"
+    assert llm["deepseek"]["model"] == "deepseek-v4-flash"
     assert llm["deepseek"]["vendor_option"] == "keep-provider-option"
     assert llm["vendor_extension"] == "keep-me"
     assert [route["name"] for route in llm["vendor"]["routes"]] == [
@@ -616,7 +623,7 @@ def test_unrelated_default_path_save_does_not_bake_local_legacy_layer(
     local.write_text('[llm.deepseek]\nmodel = "local-only-model"\n', encoding="utf-8")
     loaded = load_config()
 
-    assert loaded.llm.deepseek.model == "local-only-model"
+    assert loaded.models.chat.connections[0].model == "local-only-model"
     assert loaded.model_meta.override_paths == ("llm.deepseek.model",)
     loaded.saved_sync.auto_sync_enabled = True
     save_config(loaded)
@@ -639,11 +646,11 @@ def test_env_legacy_override_records_the_exact_leaf_path(
 
     loaded = load_config()
 
-    assert loaded.llm.concurrency == 9
+    assert loaded.models.chat.concurrency == 9
     assert "llm.concurrency" in loaded.model_meta.override_paths
 
 
-def test_env_legacy_override_does_not_block_unrelated_known_edit(
+def test_env_legacy_override_does_not_change_raw_legacy_table_on_unrelated_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
@@ -651,18 +658,18 @@ def test_env_legacy_override_does_not_block_unrelated_known_edit(
     base = tmp_path / "config.toml"
     base.write_text(LEGACY_WITH_UNKNOWN_PROVIDER_KEY, encoding="utf-8")
     loaded = load_config()
-    loaded.llm.timeout = 111
+    loaded.language = "en"
 
     save_config(loaded)
 
     with base.open("rb") as handle:
         llm = tomllib.load(handle)["llm"]
     assert llm["concurrency"] == 4
-    assert llm["timeout"] == 111
+    assert llm["timeout"] == 300
     assert llm["vendor_extension"] == "keep-me"
 
 
-def test_local_legacy_override_does_not_block_unrelated_known_edit(
+def test_local_legacy_override_does_not_bake_into_raw_table_on_unrelated_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
@@ -671,15 +678,14 @@ def test_local_legacy_override_does_not_block_unrelated_known_edit(
     base.write_text(LEGACY_WITH_UNKNOWN_PROVIDER_KEY, encoding="utf-8")
     local.write_text('[llm.deepseek]\nmodel = "local-only-model"\n', encoding="utf-8")
     loaded = load_config()
-    loaded.llm.openai.model = "openai-updated"
-    loaded.llm.deepseek.model = "must-not-bake-over-local"
+    loaded.language = "en"
 
     save_config(loaded)
 
     with base.open("rb") as handle:
         llm = tomllib.load(handle)["llm"]
     assert llm["deepseek"]["model"] == "deepseek-v4-flash"
-    assert llm.get("openai", {}).get("model") == "openai-updated"
+    assert "openai" not in llm
     assert llm["deepseek"]["vendor_option"] == "keep-provider-option"
     assert (
         tomllib.loads(local.read_text(encoding="utf-8"))["llm"]["deepseek"]["model"]

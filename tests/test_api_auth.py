@@ -12,6 +12,8 @@ from openbiliclaw import auth_core as ac
 from openbiliclaw.api.app import create_app
 from openbiliclaw.storage.database import Database
 
+from .model_route_helpers import use_native_ollama, use_native_openai
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -47,8 +49,7 @@ def _build_app(
         monkeypatch.setenv("OPENBILICLAW_API_AUTH_PASSWORD", env_password)
     cfg = Config()
     cfg.scheduler.enabled = False
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.model = "llama3"
+    use_native_ollama(cfg)
     cfg.api.auth.enabled = enabled
     cfg.api.auth.session_secret = session_secret
     cfg.api.auth.session_ttl_hours = session_ttl_hours
@@ -847,20 +848,21 @@ def test_admin_revoke_failure_leaves_old_state_intact(tmp_path, monkeypatch) -> 
 
 
 def test_admin_save_preserves_other_config(tmp_path, monkeypatch) -> None:
-    # admin writes the whole config.toml; an unrelated field (LLM key) must survive.
+    # Admin writes the whole config.toml; native model authority must survive.
     from openbiliclaw.config import load_config
 
     app, _ = _build_app(tmp_path, monkeypatch, enabled=False, password=None)
     root = tmp_path / "runtime"
     # inject an unrelated config value, then toggle the gate via admin
     cfg = load_config()
-    cfg.llm.openai.api_key = "sk-keep-me"
+    use_native_openai(cfg, api_key="sk-keep-me")
     from openbiliclaw.config import save_config
 
-    save_config(cfg, root / "config.toml")
+    save_config(cfg, root / "config.toml", models_authoritative=True)
     r = _loopback(app).post("/api/auth/admin", json={"enabled": True, "password": "pw"})
     assert r.status_code == 200
-    assert load_config().llm.openai.api_key == "sk-keep-me"
+    loaded = load_config()
+    assert loaded.models.chat.connections[0].credential.value == "sk-keep-me"
     assert load_config().api.auth.enabled is True
 
 
@@ -1069,7 +1071,7 @@ def test_plaintext_password_survives_unrelated_save_without_revocation(
 
     # an unrelated settings save must keep the plaintext password line
     cfg = load_config()
-    cfg.llm.openai.api_key = "sk-unrelated"
+    cfg.language = "en"
     save_config(cfg)
     assert 'password = "secret"' in (project_root / "config.toml").read_text(encoding="utf-8")
 

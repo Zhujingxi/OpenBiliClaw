@@ -609,6 +609,7 @@ background ─ background admission (default 3) ──────┘
 │ Chat/Embedding/Runtime tabs · 同一稳定-ID ordered route │
 │ Desktop inspector · Extension/Mobile sequential list→detail · descriptor 驱动 │
 │ strict GET/PUT snapshot/save · descriptor · exact probe  │
+│ descriptor registry → ModelConfigService → 原生 ordered factories │
 │ CLI models list/add/edit/remove/move/probe → ModelConfigService │
 │ setup/bootstrap/install/Docker/package → native [models] writer │
 │ legacy /api/config 仅无凭据投影；旧模型写入返回 warning    │

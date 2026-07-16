@@ -111,14 +111,8 @@ class InitPrereqs:
             ttl = _CHAT_OK_TTL if self._chat_value else _CHAT_FAIL_TTL
             if time.monotonic() - self._chat_at < ttl:
                 return self._chat_value
-            route_connections = getattr(registry, "connections", None)
-            if route_connections is not None:
-                ready = await self._probe_ordered_chat_route(tuple(route_connections))
-            else:
-                # Dependency-injected integrations may still expose the
-                # pre-Task-8 registry protocol. Production RuntimeContext
-                # always takes the ordered-route branch above.
-                ready = await self._probe_legacy_chat_registry(registry)
+            route_connections = getattr(registry, "connections", ())
+            ready = await self._probe_ordered_chat_route(tuple(route_connections))
             self._chat_value = ready
             self._chat_at = time.monotonic()
             return ready
@@ -137,28 +131,6 @@ class InitPrereqs:
                 )
             return True
         return False
-
-    async def _probe_legacy_chat_registry(self, registry: Any) -> bool:
-        """Compatibility probe for explicitly injected legacy registries."""
-        ready = await self._probe_chat_provider(registry.get())
-        if ready:
-            return True
-        fallback_name = str(getattr(registry, "fallback_provider", "") or "")
-        if not (
-            fallback_name
-            and fallback_name != registry.default_provider
-            and registry.is_chat_capable(fallback_name)
-        ):
-            return False
-        ready = await self._probe_chat_provider(registry.get(fallback_name))
-        if ready:
-            logger.info(
-                "Chat readiness: default provider %s failed the probe but "
-                "fallback provider %s answered — chat is served via fallback.",
-                registry.default_provider,
-                fallback_name,
-            )
-        return ready
 
     async def _probe_chat_provider(self, provider: Any) -> bool:
         """One strict, bounded health_check; False on timeout or any error."""

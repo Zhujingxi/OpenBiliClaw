@@ -802,27 +802,41 @@ def test_should_not_auto_wire_embedding_under_docker() -> None:
     )
 
 
-def test_detect_missing_secrets_defaults_to_deepseek_when_provider_absent(tmp_path: Path) -> None:
+def test_detect_missing_secrets_reports_native_deepseek_route(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text(
-        "\n".join(
-            [
-                "[llm]",
-                "",
-                "[llm.deepseek]",
-                'api_key = ""',
-                "",
-                "[bilibili]",
-                'cookie = ""',
-                "",
-            ]
-        ),
+        """[models]
+schema_version = 1
+
+[models.chat]
+
+[[models.chat.connections]]
+id = "deepseek-main"
+name = "DeepSeek"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_mode = "chat_completions"
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = "bge-m3"
+
+[bilibili]
+cookie = ""
+""",
         encoding="utf-8",
     )
 
     status = bootstrap.detect_missing_secrets(tmp_path)
 
     assert status["provider"] == "deepseek"
-    assert status["missing"] == ["llm.deepseek.api_key", "bilibili.cookie"]
+    assert status["missing"] == [
+        "models.chat.connections.deepseek-main.credential",
+        "bilibili.cookie",
+    ]
 
 
 def test_parser_accepts_openai_compatible_provider(tmp_path: Path) -> None:
@@ -833,24 +847,33 @@ def test_parser_accepts_openai_compatible_provider(tmp_path: Path) -> None:
     assert args.provider == "openai_compatible"
 
 
-def test_detect_missing_secrets_flags_openai_compatible_connection_fields(
+def test_detect_missing_secrets_flags_native_custom_connection_fields(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "config.toml").write_text(
-        "\n".join(
-            [
-                "[llm]",
-                'default_provider = "openai_compatible"',
-                "",
-                "[llm.openai_compatible]",
-                'api_key = ""',
-                'base_url = ""',
-                "",
-                "[bilibili]",
-                'cookie = ""',
-                "",
-            ]
-        ),
+        """[models]
+schema_version = 1
+
+[models.chat]
+
+[[models.chat.connections]]
+id = "custom-main"
+name = "Custom gateway"
+type = "openai_compatible"
+preset = "custom"
+model = "custom-chat"
+base_url = ""
+api_mode = "chat_completions"
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = "bge-m3"
+
+[bilibili]
+cookie = ""
+""",
         encoding="utf-8",
     )
 
@@ -858,8 +881,8 @@ def test_detect_missing_secrets_flags_openai_compatible_connection_fields(
 
     assert status["provider"] == "openai_compatible"
     assert status["missing"] == [
-        "llm.openai_compatible.api_key",
-        "llm.openai_compatible.base_url",
+        "models.chat.connections.custom-main.credential",
+        "models.chat.connections.custom-main.base_url",
         "bilibili.cookie",
     ]
 

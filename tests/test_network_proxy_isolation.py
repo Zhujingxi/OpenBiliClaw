@@ -76,12 +76,19 @@ def test_douyin_client_never_uses_outbound_proxy(
 
 def test_ollama_factory_provider_has_no_outbound_proxy() -> None:
     """Ollama chat provider (localhost) must not carry the outbound proxy."""
-    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
-    from openbiliclaw.llm.registry import _maybe_ollama_provider
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+    from openbiliclaw.model_config import ChatConnection
 
-    config = Config(llm=LLMConfig(ollama=LLMProviderConfig(model="llama3")))
-    provider = _maybe_ollama_provider(config, {})
-    assert provider is not None
+    provider = build_chat_adapter(
+        ChatConnection(
+            id="ollama-main",
+            name="Ollama",
+            type="ollama",
+            model="llama3",
+            base_url="http://127.0.0.1:11434/v1",
+        ),
+        AdapterRuntimeOptions(environment={}),
+    )
     # OllamaProvider subclasses OpenAIProvider; an empty _proxy means its
     # AsyncOpenAI client was built without an injected proxied http_client.
     assert getattr(provider, "_proxy", "") == ""
@@ -119,15 +126,22 @@ def test_is_domestic_endpoint(url: str, expected: bool) -> None:
 
 
 def _openai_compatible_provider(base_url: str) -> Any:
-    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
-    from openbiliclaw.llm.registry import _maybe_openai_compatible_provider
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+    from openbiliclaw.model_config import ChatConnection, CredentialConfig
 
-    config = Config(
-        llm=LLMConfig(
-            openai_compatible=LLMProviderConfig(api_key="sk-x", base_url=base_url, model="m")
-        )
+    return build_chat_adapter(
+        ChatConnection(
+            id="custom-main",
+            name="Custom",
+            type="openai_compatible",
+            preset="custom",
+            model="m",
+            base_url=base_url,
+            credential=CredentialConfig(source="inline", value="sk-x"),
+            api_mode="chat_completions",
+        ),
+        AdapterRuntimeOptions(environment={}),
     )
-    return _maybe_openai_compatible_provider(config, {})
 
 
 def test_domestic_openai_compatible_forced_direct_under_custom_proxy() -> None:
@@ -146,12 +160,22 @@ def test_overseas_openai_compatible_still_uses_custom_proxy() -> None:
 
 
 def test_deepseek_provider_forced_direct_under_custom_proxy() -> None:
-    from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
-    from openbiliclaw.llm.registry import _maybe_deepseek_provider
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+    from openbiliclaw.model_config import ChatConnection, CredentialConfig
 
-    config = Config(llm=LLMConfig(deepseek=LLMProviderConfig(api_key="sk-x")))
-    provider = _maybe_deepseek_provider(config, {})
-    assert provider is not None
+    provider = build_chat_adapter(
+        ChatConnection(
+            id="deepseek-main",
+            name="DeepSeek",
+            type="openai_compatible",
+            preset="deepseek",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            credential=CredentialConfig(source="inline", value="sk-x"),
+            api_mode="chat_completions",
+        ),
+        AdapterRuntimeOptions(environment={}),
+    )
     assert getattr(provider, "_proxy", "") == ""
 
 

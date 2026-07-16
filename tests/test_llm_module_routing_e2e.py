@@ -46,15 +46,13 @@ class _RouteAdapter(LLMProvider):
         )
 
 
-async def test_all_former_module_buckets_use_the_same_order_and_connection_models(
+async def test_all_callers_use_the_same_order_and_connection_models(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    import openbiliclaw.llm as llm_package
     from openbiliclaw.api.runtime_context import build_runtime_context
     from openbiliclaw.config import Config
     from openbiliclaw.llm import connection_factory
-    from openbiliclaw.llm.base import LLMRegistry
 
     primary = ChatConnection(
         id="primary",
@@ -76,9 +74,6 @@ async def test_all_former_module_buckets_use_the_same_order_and_connection_model
         return adapter
 
     monkeypatch.setattr(connection_factory, "build_chat_adapter", build_adapter)
-    legacy_registry = LLMRegistry()
-    legacy_registry.register(_RouteAdapter(connection=fallback, fail=False), default=True)
-    monkeypatch.setattr(llm_package, "build_llm_registry", lambda _config: legacy_registry)
     config = Config(data_dir=str(tmp_path / "data"))
     config.scheduler.pool_target_count = 0
     config.models = ModelConfig(
@@ -88,13 +83,6 @@ async def test_all_former_module_buckets_use_the_same_order_and_connection_model
             timeout_seconds=30,
         )
     )
-    # Deliberately contradictory legacy buckets must have no runtime effect.
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "legacy-default"
-    config.llm.soul.model = "legacy-soul"
-    config.llm.discovery.model = "legacy-discovery"
-    config.llm.recommendation.model = "legacy-recommendation"
-    config.llm.evaluation.model = "legacy-evaluation"
     context = build_runtime_context(config)
 
     callers = (

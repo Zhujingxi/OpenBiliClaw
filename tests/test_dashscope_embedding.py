@@ -7,15 +7,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openbiliclaw.config import Config
-from openbiliclaw.llm.connection_factory import EmbeddingProtocolAdapter
+from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, EmbeddingProtocolAdapter
 from openbiliclaw.llm.dashscope_provider import DashScopeEmbeddingProvider
 from openbiliclaw.llm.embedding import EmbeddingService
 from openbiliclaw.llm.registry import (
-    _embedding_provider_honors_output_dimensionality,
-    build_embedding_service,
+    RegistryBuildError,
+    build_ordered_embedding_service,
 )
-from openbiliclaw.model_config import EmbeddingModelSettings
+from openbiliclaw.model_config import (
+    CredentialConfig,
+    EmbeddingModelSettings,
+    EmbeddingProviderConfig,
+    EmbeddingRouteConfig,
+)
 
 
 def test_is_multimodal_embedding_model_markers() -> None:
@@ -189,50 +193,64 @@ async def test_embedding_service_dashscope_image_active() -> None:
     assert vec == [1.0, 0.0]
 
 
-def test_build_embedding_service_dashscope(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = Config()
-    cfg.data_dir = str(tmp_path)
-    cfg.llm.embedding.provider = "dashscope"
-    cfg.llm.embedding.model = "qwen3-vl-embedding"
-    cfg.llm.embedding.api_key = "sk-dashscope-test"
-    cfg.llm.embedding.output_dimensionality = 1024
-    cfg.llm.embedding.multimodal_enabled = True
+def test_build_ordered_embedding_service_dashscope() -> None:
+    route = EmbeddingRouteConfig(
+        enabled=True,
+        settings=EmbeddingModelSettings(
+            model="qwen3-vl-embedding",
+            output_dimensionality=1024,
+            multimodal_enabled=True,
+        ),
+        providers=(
+            EmbeddingProviderConfig(
+                id="dashscope-main",
+                name="DashScope",
+                type="dashscope_api",
+                credential=CredentialConfig(source="inline", value="sk-dashscope-test"),
+            ),
+        ),
+    )
 
-    # Avoid writing next to real project if data_path resolves oddly.
-    monkeypatch.setattr(type(cfg), "data_path", property(lambda self: tmp_path))
-
-    from openbiliclaw.llm.base import LLMRegistry
-
-    service = build_embedding_service(cfg, LLMRegistry())
+    service = build_ordered_embedding_service(
+        route,
+        revision="rev-1",
+        runtime_options=AdapterRuntimeOptions(environment={}),
+    )
     assert service is not None
     assert service.image_embedding_active() is True
-    assert isinstance(service._provider, DashScopeEmbeddingProvider)  # type: ignore[attr-defined]
+    ordered_route = service._provider  # type: ignore[attr-defined]
+    assert isinstance(ordered_route.providers[0].provider, DashScopeEmbeddingProvider)
 
 
-def test_build_embedding_service_dashscope_missing_key() -> None:
-    cfg = Config()
-    cfg.llm.embedding.provider = "dashscope"
-    cfg.llm.embedding.api_key = ""
-    from openbiliclaw.llm.base import LLMRegistry
+def test_build_ordered_embedding_service_dashscope_missing_key() -> None:
+    route = EmbeddingRouteConfig(
+        enabled=True,
+        settings=EmbeddingModelSettings(model="qwen3-vl-embedding"),
+        providers=(
+            EmbeddingProviderConfig(
+                id="dashscope-main",
+                name="DashScope",
+                type="dashscope_api",
+                credential=CredentialConfig(source="env", value="DASHSCOPE_API_KEY"),
+            ),
+        ),
+    )
 
-    with patch.dict("os.environ", {}, clear=False):
-        # Ensure env keys are empty for this test.
-        import os
-
-        env_keys = ("DASHSCOPE_API_KEY", "DASHSCOPE_API_KEY_CN")
-        old = {k: os.environ.pop(k) for k in env_keys if k in os.environ}
-        try:
-            service = build_embedding_service(cfg, LLMRegistry())
-            assert service is None
-        finally:
-            os.environ.update(old)
+    with pytest.raises(RegistryBuildError, match="credential"):
+        build_ordered_embedding_service(
+            route,
+            revision="rev-1",
+            runtime_options=AdapterRuntimeOptions(environment={}),
+        )
 
 
 def test_dashscope_honors_output_dimensionality() -> None:
-    assert _embedding_provider_honors_output_dimensionality("dashscope", "qwen3-vl-embedding")
-    assert not _embedding_provider_honors_output_dimensionality(
-        "dashscope", "tongyi-embedding-vision-plus"
+    provider = DashScopeEmbeddingProvider(
+        api_key="sk-test",
+        embedding_output_dimensionality=1024,
     )
+    assert provider._dimension_for_model("qwen3-vl-embedding") == 1024
+    assert provider._dimension_for_model("tongyi-embedding-vision-plus") is None
 
 
 def test_base_url_strips_compatible_mode_suffix() -> None:

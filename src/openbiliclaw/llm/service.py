@@ -29,10 +29,7 @@ if TYPE_CHECKING:
 
 
 class SupportsComplete(Protocol):
-    """Protocol for the one global ordered route (or its legacy shim)."""
-
-    @property
-    def default_provider(self) -> str: ...
+    """Protocol for the one global ordered route."""
 
     async def complete(
         self,
@@ -292,23 +289,14 @@ class LLMService:
     def supports_image_input(self, caller: str = "discovery.evaluate_batch") -> bool:
         """Best-effort check for OpenAI-compatible vision-capable routes."""
         del caller
-        provider_key = self.registry.default_provider.strip().lower()
-        model = ""
         route_connections = getattr(self.registry, "connections", ())
-        if route_connections:
-            primary = route_connections[0]
-            provider_key = str(getattr(primary, "type", "") or "").lower()
-            model = str(getattr(primary, "model", "") or "")
-        if provider_key not in {"openai", "openai_compatible", "openrouter"}:
+        if not route_connections:
             return False
-
-        provider_obj: object | None = None
-        get_provider = getattr(self.registry, "get", None)
-        if not model and callable(get_provider):
-            with suppress(Exception):
-                provider_obj = get_provider(provider_key)
-        if provider_obj is not None:
-            model = str(getattr(provider_obj, "_model", "") or "")
+        primary = route_connections[0]
+        provider_key = str(getattr(primary, "type", "") or "").lower()
+        model = str(getattr(primary, "model", "") or "")
+        if provider_key not in {"openai_compatible", "codex_oauth"}:
+            return False
         model_lower = model.lower()
         vision_markers = (
             "gpt-4o",

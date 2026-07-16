@@ -13,8 +13,6 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.api.runtime_context import RuntimeContext, RuntimeModelBundle
 from openbiliclaw.config import (
     Config,
-    LLMConfig,
-    LLMProviderConfig,
     LoggingConfig,
     load_config,
     save_config,
@@ -27,6 +25,7 @@ from openbiliclaw.logging_setup import configure_logging
 from openbiliclaw.model_config import (
     ChatConnection,
     ChatRouteConfig,
+    CredentialConfig,
     EmbeddingModelSettings,
     EmbeddingRouteConfig,
     ModelConfig,
@@ -39,9 +38,21 @@ if TYPE_CHECKING:
 
 def _valid_config(api_key: str = "sk-valid-openai-key") -> Config:
     return Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key=api_key, model="gpt-4o-mini"),
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="openai-main",
+                        name="OpenAI",
+                        type="openai_compatible",
+                        preset="openai",
+                        model="gpt-4o-mini",
+                        base_url="https://api.openai.com/v1",
+                        credential=CredentialConfig(source="inline", value=api_key),
+                        api_mode="chat_completions",
+                    ),
+                )
+            )
         )
     )
 
@@ -53,7 +64,7 @@ def _make_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cfg: Config) -
     return TestClient(app)
 
 
-def test_put_config_rejects_unbuildable_candidate_before_writing(
+def test_put_config_rejects_unknown_reset_before_writing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -61,18 +72,11 @@ def test_put_config_rejects_unbuildable_candidate_before_writing(
     client = _make_client(monkeypatch, tmp_path, _valid_config())
     before = config_path.read_bytes()
 
-    response = client.put("/api/config", json={"reset_fields": ["llm.openai.api_key"]})
+    response = client.put("/api/config", json={"reset_fields": ["storage.db_path"]})
 
     assert response.status_code == 400
     body = response.json()
-    assert body["ok"] is False
-    assert body["reloaded"] is False
-    assert body["rollback_applied"] is False
-    assert any(
-        issue["severity"] == "blocking"
-        and issue["field"] in {"models", "llm", "llm.openai.api_key"}
-        for issue in body["config"]["issues"]
-    )
+    assert body["detail"]["error"] == "unknown_reset_fields"
     assert config_path.read_bytes() == before
     assert not (tmp_path / "config.toml.bak").exists()
 
@@ -85,7 +89,7 @@ def test_put_config_success_saves_snapshot_then_hot_reloads(
     client = _make_client(monkeypatch, tmp_path, _valid_config())
     before = config_path.read_bytes()
 
-    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
+    response = client.put("/api/config", json={"language": "en-US"})
 
     assert response.status_code == 200
     body = response.json()
@@ -93,7 +97,7 @@ def test_put_config_success_saves_snapshot_then_hot_reloads(
     assert body["reloaded"] is True
     assert body["rollback_applied"] is False
     assert body["restart_required"] is False
-    assert load_config(config_path).llm.openai.model == "gpt-4.1-mini"
+    assert load_config(config_path).language == "en-US"
     assert (tmp_path / "config.toml.bak").read_bytes() == before
 
 
@@ -110,7 +114,7 @@ def test_put_config_rolls_back_when_hot_reload_fails(
 
     monkeypatch.setattr(RuntimeContext, "rebuild_from_config", fail_rebuild)
 
-    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
+    response = client.put("/api/config", json={"language": "en-US"})
 
     assert response.status_code == 200
     body = response.json()
@@ -145,7 +149,7 @@ def test_put_config_hot_reload_failure_file_log_keeps_traceback(
 
     monkeypatch.setattr(RuntimeContext, "rebuild_from_config", fail_rebuild)
 
-    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
+    response = client.put("/api/config", json={"language": "en-US"})
 
     assert response.status_code == 200
     for handler in logging.getLogger().handlers:
@@ -178,7 +182,7 @@ def test_put_config_returns_500_when_rollback_restore_fails(
         raising=False,
     )
 
-    response = client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}})
+    response = client.put("/api/config", json={"language": "en-US"})
 
     assert response.status_code == 500
     body = response.json()
@@ -195,7 +199,6 @@ async def test_put_config_serializes_concurrent_saves(
     config_path = tmp_path / "config.toml"
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     first_cfg = _valid_config()
-    first_cfg.llm.openai.model = "gpt-4o-mini"
     save_config(first_cfg, config_path)
     app = create_app(memory_manager=object(), database=object(), soul_engine=object())
 
@@ -204,14 +207,14 @@ async def test_put_config_serializes_concurrent_saves(
         base_url="http://testserver",
     ) as client:
         first, second = await asyncio.gather(
-            client.put("/api/config", json={"llm": {"openai": {"model": "gpt-4.1-mini"}}}),
-            client.put("/api/config", json={"llm": {"openai": {"model": "gpt-5-mini"}}}),
+            client.put("/api/config", json={"language": "en-US"}),
+            client.put("/api/config", json={"language": "zh-TW"}),
         )
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert load_config(config_path).llm.openai.model == "gpt-5-mini"
-    assert load_config(tmp_path / "config.toml.bak").llm.openai.model == "gpt-4.1-mini"
+    assert load_config(config_path).language == "zh-TW"
+    assert load_config(tmp_path / "config.toml.bak").language == "en-US"
 
 
 @pytest.mark.asyncio

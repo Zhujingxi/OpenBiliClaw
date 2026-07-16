@@ -29,29 +29,22 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def smoke_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    from types import SimpleNamespace
-
+    from openbiliclaw.config import Config
     from openbiliclaw.storage.database import Database
+
+    from .model_route_helpers import use_native_ollama
 
     db = Database(tmp_path / "smoke.db")
     db.initialize()
 
-    fake_config = SimpleNamespace(
-        data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", browser_executable="", browser_headed=False),
-        sources=SimpleNamespace(
-            browser_cdp_url="",
-            browser_headed=False,
-            xiaohongshu=SimpleNamespace(
-                daily_search_budget=20,
-                daily_creator_budget=10,
-                task_interval_seconds=45,
-            ),
-        ),
-        scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
-    )
+    fake_config = Config(data_dir=str(tmp_path))
+    use_native_ollama(fake_config)
+    fake_config.sources.xiaohongshu.daily_search_budget = 20
+    fake_config.sources.xiaohongshu.daily_creator_budget = 10
+    fake_config.sources.xiaohongshu.task_interval_seconds = 45
+    fake_config.scheduler.pool_target_count = 300
+    fake_config.scheduler.account_sync_interval_hours = 24
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
-    monkeypatch.setattr("openbiliclaw.llm.build_llm_registry", lambda config: "registry")
     monkeypatch.setattr("openbiliclaw.bilibili.auth.resolve_runtime_cookie", lambda **_: "")
 
     from openbiliclaw.api.app import create_app
