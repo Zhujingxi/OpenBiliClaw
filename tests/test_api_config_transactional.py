@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -62,6 +64,50 @@ def _make_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cfg: Config) -
     save_config(cfg, tmp_path / "config.toml")
     app = create_app(memory_manager=object(), database=object(), soul_engine=object())
     return TestClient(app)
+
+
+def _model_put_payload(revision: str, models: ModelConfig) -> dict[str, object]:
+    def credential(connection: ChatConnection) -> dict[str, str]:
+        return {"action": "keep", "value": ""}
+
+    return {
+        "revision": revision,
+        "models": {
+            "schema_version": models.schema_version,
+            "chat": {
+                "connections": [
+                    {
+                        "id": item.id,
+                        "name": item.name,
+                        "type": item.type,
+                        "model": item.model,
+                        "preset": item.preset,
+                        "base_url": item.base_url,
+                        "credential": credential(item),
+                        "api_mode": item.api_mode,
+                        "reasoning_effort": item.reasoning_effort,
+                        "http_referer": item.http_referer,
+                        "x_title": item.x_title,
+                        "num_ctx": item.num_ctx,
+                    }
+                    for item in models.chat.connections
+                ],
+                "concurrency": models.chat.concurrency,
+                "timeout_seconds": models.chat.timeout_seconds,
+            },
+            "embedding": {
+                "enabled": models.embedding.enabled,
+                "settings": {
+                    "model": models.embedding.settings.model,
+                    "output_dimensionality": models.embedding.settings.output_dimensionality,
+                    "similarity_threshold": models.embedding.settings.similarity_threshold,
+                    "multimodal_enabled": models.embedding.settings.multimodal_enabled,
+                },
+                "providers": [],
+            },
+        },
+        "migration_resolutions": {},
+    }
 
 
 def test_put_config_rejects_unknown_reset_before_writing(
@@ -241,6 +287,107 @@ async def test_put_config_waits_on_the_canonical_path_write_boundary(
 
     assert response.status_code == 200
     assert load_config(config_path).language == "en-US"
+
+
+@pytest.mark.asyncio
+async def test_put_config_rebases_models_saved_while_waiting_for_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    initial = _valid_config()
+    save_config(initial, config_path, models_authoritative=True)
+
+    async def no_background_restart(self: RuntimeContext, *_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr(RuntimeContext, "restart_background_tasks", no_background_restart)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @asynccontextmanager
+    async def delayed_ordinary_write(path: Path):
+        entered.set()
+        await release.wait()
+        async with coordinated_config_write(path):
+            yield
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.app.coordinated_config_write",
+        delayed_ordinary_write,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        ordinary = asyncio.create_task(client.put("/api/config", json={"language": "en-US"}))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        current = (await client.get("/api/model-config")).json()
+        new_connection = replace(initial.models.chat.connections[0], model="gpt-4.1-new")
+        new_models = replace(
+            initial.models,
+            chat=replace(initial.models.chat, connections=(new_connection,)),
+        )
+        new_revision = compute_model_revision(new_models)
+        model_response = await client.put(
+            "/api/model-config",
+            json=_model_put_payload(current["revision"], new_models),
+        )
+        release.set()
+        ordinary_response = await ordinary
+
+    assert model_response.status_code == 200, model_response.text
+    assert ordinary_response.status_code == 200, ordinary_response.text
+    persisted = load_config(config_path)
+    assert persisted.language == "en-US"
+    assert persisted.models == new_models
+    runtime = app.state.runtime_context.current_model_candidate
+    assert runtime is not None
+    assert runtime.revision == new_revision
+    assert runtime.models == new_models
+
+
+@pytest.mark.asyncio
+async def test_put_config_rebase_keeps_effective_local_model_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    initial = _valid_config()
+    initial.models = replace(
+        initial.models,
+        chat=replace(initial.models.chat, concurrency=4),
+    )
+    save_config(initial, config_path, models_authoritative=True)
+    (tmp_path / "config.local.toml").write_text(
+        "[models.chat]\nconcurrency = 9\n",
+        encoding="utf-8",
+    )
+    assert load_config().models.chat.concurrency == 9
+
+    async def no_background_restart(self: RuntimeContext, *_: object, **__: object) -> None:
+        return None
+
+    monkeypatch.setattr(RuntimeContext, "restart_background_tasks", no_background_restart)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.put("/api/config", json={"language": "en-US"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["config"]["llm"]["concurrency"] == 9
+    runtime = app.state.runtime_context.current_model_candidate
+    assert runtime is not None
+    assert runtime.models.chat.concurrency == 9
+    effective = load_config()
+    assert "models.chat.concurrency" in effective.model_meta.override_paths
+    assert effective.models.chat.concurrency == 9
 
 
 async def test_runtime_model_candidate_swap_is_staged_and_identity_preserving() -> None:

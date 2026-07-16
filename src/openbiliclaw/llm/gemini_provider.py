@@ -198,11 +198,18 @@ class GeminiProvider(LLMProvider):
         )
 
     async def _request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._send_with_retry(self._client.aio.models.generate_content, **kwargs)
+
+    async def _embedding_request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._send_with_retry(self._client.aio.models.embed_content, **kwargs)
+
+    async def _send_with_retry(self, send: Any, **kwargs: Any) -> Any:
+        """Apply one retry/error contract to chat and embedding SDK calls."""
         last_error: LLMProviderError | None = None
 
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                return await self._client.aio.models.generate_content(**kwargs)
+                return await send(**kwargs)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -238,6 +245,11 @@ class GeminiProvider(LLMProvider):
             )
         if status_code in {401, 403}:
             return LLMProviderError(f"{self._provider_name} authentication failed")
+        if (
+            isinstance(exc, (ConnectionError, OSError, httpx.TransportError))
+            or "connection" in error_type
+        ):
+            return LLMProviderError(f"{self._provider_name} connection error")
         if (errors is not None and isinstance(exc, errors.ServerError)) or (
             status_code is not None and status_code >= 500
         ):
@@ -307,7 +319,7 @@ class GeminiProvider(LLMProvider):
         """
         if types is None:
             _raise_missing_sdk()
-        response = await self._client.aio.models.embed_content(
+        response = await self._embedding_request_with_retry(
             model=model,
             contents=text,
             config=self._embed_content_config(),
@@ -336,7 +348,7 @@ class GeminiProvider(LLMProvider):
             data=image_bytes,
             mime_type=(mime_type or "image/jpeg").strip() or "image/jpeg",
         )
-        response = await self._client.aio.models.embed_content(
+        response = await self._embedding_request_with_retry(
             model=model,
             contents=part,
             config=self._embed_content_config(),

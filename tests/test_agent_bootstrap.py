@@ -1847,6 +1847,89 @@ def test_collect_human_install_wizard_manual_cookie() -> None:
     assert any(kind == "secret" and "Cookie" in prompt for kind, prompt in prompts)
 
 
+def test_recovery_wizard_preserves_preselected_nonsecret_choices() -> None:
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--interactive-confirm",
+            "--connection-type",
+            "gemini_api",
+            "--llm-model",
+            "gemini-2.5-flash",
+            "--embedding-provider",
+            "ollama",
+            "--embedding-model",
+            "bge-m3",
+            "--no-xhs",
+            "--yes-douyin",
+            "--no-youtube",
+            "--bilibili-favorite-limit",
+            "120",
+            "--bilibili-follow-limit",
+            "80",
+        ]
+    )
+    plain_prompts: list[str] = []
+    secret_prompts: list[str] = []
+
+    answer = bootstrap.collect_human_install_wizard(
+        input_func=lambda prompt: plain_prompts.append(prompt) or "",
+        secret_input_func=lambda prompt: secret_prompts.append(prompt) or "test-gemini-key",
+        recovery_args=args,
+        existing_connection_type="gemini_api",
+        existing_preset="",
+        existing_model="gemini-2.5-flash",
+        existing_embedding_configured=True,
+        missing_fields=("models.chat.connections.gemini-main.credential",),
+    )
+
+    assert answer.connection_type == "gemini_api"
+    assert answer.preset == ""
+    assert answer.llm_model == "gemini-2.5-flash"
+    assert answer.llm_api_key == "test-gemini-key"
+    assert answer.embedding_provider == "ollama"
+    assert answer.embedding_model == "bge-m3"
+    assert answer.xhs is False
+    assert answer.douyin is True
+    assert answer.youtube is False
+    assert answer.bilibili_favorite_limit == 120
+    assert answer.bilibili_follow_limit == 80
+    assert answer.cookie_mode == "existing"
+    assert plain_prompts == []
+    assert len(secret_prompts) == 1
+    assert "gemini_api API Key" in secret_prompts[0]
+
+
+def test_recovery_wizard_does_not_collapse_existing_embedding_route() -> None:
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--interactive-confirm",
+            "--no-xhs",
+            "--no-douyin",
+            "--no-youtube",
+        ]
+    )
+
+    answer = bootstrap.collect_human_install_wizard(
+        input_func=lambda _prompt: "",
+        secret_input_func=lambda _prompt: pytest.fail("no secret should be requested"),
+        recovery_args=args,
+        existing_connection_type="openai_compatible",
+        existing_preset="deepseek",
+        existing_model="deepseek-v4-flash",
+        existing_api_key="already-set",
+        existing_embedding_configured=True,
+        missing_fields=(),
+    )
+    bootstrap.apply_human_install_answers_to_args(args, answer)
+
+    assert answer.preserve_chat is True
+    assert answer.preserve_embedding is True
+    assert args.connection_type is None
+    assert args.preset is None
+    assert args.embedding_provider is None
+    assert args.embedding_model is None
+
+
 def test_apply_human_install_answers_sets_all_bootstrap_args(tmp_path: Path) -> None:
     args = bootstrap.build_arg_parser().parse_args(["--project-dir", str(tmp_path)])
     answers = bootstrap.HumanInstallAnswers(

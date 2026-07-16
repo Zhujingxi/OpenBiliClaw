@@ -114,6 +114,64 @@ async def test_openai_provider_normalizes_response(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_openai_embedding_retries_and_raises_typed_secret_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+    calls = 0
+    sentinel = "openai-embedding-secret-never-retain"
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.embeddings, "create", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", no_sleep)
+
+    with pytest.raises(LLMTimeoutError) as raised:
+        await provider.embed("private text")
+
+    assert calls == 3
+    assert sentinel not in str(raised.value)
+    assert "private text" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_openai_embedding_does_not_retain_generic_sdk_failure_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+    calls = 0
+    sentinel = "openai-generic-sdk-secret-never-retain"
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.embeddings, "create", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as raised:
+        await provider.embed("private text")
+
+    assert calls == 3
+    assert sentinel not in str(raised.value)
+    assert sentinel not in repr(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
 async def test_openai_provider_accepts_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -767,11 +825,13 @@ async def test_ollama_provider_embed_calls_native_endpoint(
 
 
 @pytest.mark.asyncio
-async def test_ollama_provider_embed_returns_empty_on_failure(
+async def test_ollama_provider_embed_retries_then_raises_typed_secret_safe_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When Ollama isn't reachable, embed() should return [] not raise."""
     import httpx
+
+    calls = 0
+    sentinel = "ollama-embedding-secret-never-retain"
 
     class _FailingClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -784,13 +844,19 @@ async def test_ollama_provider_embed_returns_empty_on_failure(
             return None
 
         async def post(self, *args: object, **kwargs: object) -> object:
-            raise httpx.ConnectError("connection refused")
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError(f"connection refused: {sentinel}")
 
     monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
 
     provider = OllamaProvider(base_url="http://localhost:11434/v1")
-    result = await provider.embed("hello", model="bge-m3")
-    assert result == []
+    with pytest.raises(LLMProviderError) as raised:
+        await provider.embed("hello", model="bge-m3")
+
+    assert calls == 2
+    assert sentinel not in str(raised.value)
+    assert "hello" not in str(raised.value)
 
 
 class _FakeChatResponse:
@@ -1132,6 +1198,36 @@ async def test_gemini_provider_normalizes_response(
     assert config.thinking_config.thinking_budget == 0  # type: ignore[attr-defined]
     assert config.automatic_function_calling is not None  # type: ignore[attr-defined]
     assert config.automatic_function_calling.disable is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
+async def test_gemini_embedding_methods_retry_and_raise_typed_secret_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GeminiProvider(api_key="test-key")
+    calls = 0
+    sentinel = "gemini-embedding-secret-never-retain"
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.aio.models, "embed_content", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.gemini_provider.asyncio.sleep", no_sleep)
+
+    with pytest.raises(LLMTimeoutError) as text_error:
+        await provider.embed("private text")
+    with pytest.raises(LLMTimeoutError) as image_error:
+        await provider.embed_image(b"private image", model="gemini-embedding-2")
+
+    assert calls == 6
+    assert sentinel not in str(text_error.value)
+    assert sentinel not in str(image_error.value)
 
 
 @pytest.mark.asyncio

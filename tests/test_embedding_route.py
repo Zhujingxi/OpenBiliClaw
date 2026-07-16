@@ -12,15 +12,19 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
+import httpx
 import pytest
 
 from openbiliclaw.llm.base import LLMProviderError
+from openbiliclaw.llm.connection_factory import EmbeddingProtocolAdapter
 from openbiliclaw.llm.embedding import EmbeddingCache, EmbeddingService
 from openbiliclaw.llm.embedding_route import (
     FIXED_IMAGE_PROBE_PNG,
     EmbeddingRouteExhaustedError,
     OrderedEmbeddingRoute,
 )
+from openbiliclaw.llm.gemini_provider import GeminiProvider, gemini_sdk_available
+from openbiliclaw.llm.openai_provider import OpenAIProvider
 from openbiliclaw.llm.route import CircuitTable
 from openbiliclaw.model_config import (
     CredentialConfig,
@@ -217,6 +221,91 @@ async def test_provider_transport_retry_finishes_before_route_fallback() -> None
         "first:transport-attempt",
         "second:transport-attempt",
     ]
+
+
+async def test_real_openai_adapter_retries_before_fallback_and_opens_typed_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(model="text-embedding-3-small")
+    provider = OpenAIProvider(api_key="test-key")
+    calls = 0
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("transport-private-detail")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.embeddings, "create", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", no_sleep)
+    first = EmbeddingProtocolAdapter(
+        name="real-openai",
+        connection_type="openai_compatible",
+        preset="openai",
+        settings=settings,
+        provider=provider,
+    )
+    fallback = _adapter("fallback", settings, [1.0, 0.0])
+    circuits = CircuitTable()
+    route = OrderedEmbeddingRoute(
+        (first, fallback),
+        settings=settings,
+        revision="r1",
+        circuits=circuits,
+    )
+
+    assert await route.embed("private text") == [1.0, 0.0]
+    assert calls == 3
+    assert len(fallback.calls) == 1
+    state = circuits.state_for("real-openai", "r1")
+    assert state is not None
+    assert state.failure_kind == "timeout"
+    assert "transport-private-detail" not in repr(state)
+
+
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
+async def test_real_gemini_adapter_classifies_connection_failure_before_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(model="gemini-embedding-001")
+    provider = GeminiProvider(api_key="test-key")
+    calls = 0
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("transport-private-detail")
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.aio.models, "embed_content", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.gemini_provider.asyncio.sleep", no_sleep)
+    first = EmbeddingProtocolAdapter(
+        name="real-gemini",
+        connection_type="gemini_api",
+        preset="",
+        settings=settings,
+        provider=provider,
+    )
+    fallback = _adapter("fallback", settings, [1.0, 0.0])
+    circuits = CircuitTable()
+    route = OrderedEmbeddingRoute(
+        (first, fallback),
+        settings=settings,
+        revision="r1",
+        circuits=circuits,
+    )
+
+    assert await route.embed("private text") == [1.0, 0.0]
+    assert calls == 3
+    assert len(fallback.calls) == 1
+    state = circuits.state_for("real-gemini", "r1")
+    assert state is not None
+    assert state.failure_kind == "connection"
+    assert "transport-private-detail" not in repr(state)
 
 
 @pytest.mark.parametrize(

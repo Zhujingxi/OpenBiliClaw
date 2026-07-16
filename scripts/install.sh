@@ -412,12 +412,14 @@ print(f"DECISIONS={','.join(decision_missing)}")
 print(f"XHS_FLAG={xhs_flag}")
 print(f"DOUYIN_FLAG={douyin_flag}")
 print(f"YOUTUBE_FLAG={youtube_flag}")
+print(f"CONNECTION_TYPE={details.get('connection_type', '')}")
+print(f"PRESET={details.get('preset', '')}")
 print(f"SERVICE_FAILED={','.join(service_failed)}")
 print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
 PY
 )
     # Parse the KEY=VALUE lines back into shell variables.
-    local status health_url missing decisions xhs_flag douyin_flag youtube_flag service_failed service_errors
+    local status health_url missing decisions xhs_flag douyin_flag youtube_flag connection_type preset service_failed service_errors
     status=$(echo "$summary" | awk -F= '/^STATUS=/{sub(/^STATUS=/, ""); print; exit}')
     health_url=$(echo "$summary" | awk -F= '/^HEALTH_URL=/{sub(/^HEALTH_URL=/, ""); print; exit}')
     missing=$(echo "$summary" | awk -F= '/^MISSING=/{sub(/^MISSING=/, ""); print; exit}')
@@ -425,6 +427,8 @@ PY
     xhs_flag=$(echo "$summary" | awk -F= '/^XHS_FLAG=/{sub(/^XHS_FLAG=/, ""); print; exit}')
     douyin_flag=$(echo "$summary" | awk -F= '/^DOUYIN_FLAG=/{sub(/^DOUYIN_FLAG=/, ""); print; exit}')
     youtube_flag=$(echo "$summary" | awk -F= '/^YOUTUBE_FLAG=/{sub(/^YOUTUBE_FLAG=/, ""); print; exit}')
+    connection_type=$(echo "$summary" | awk -F= '/^CONNECTION_TYPE=/{sub(/^CONNECTION_TYPE=/, ""); print; exit}')
+    preset=$(echo "$summary" | awk -F= '/^PRESET=/{sub(/^PRESET=/, ""); print; exit}')
     service_failed=$(echo "$summary" | awk -F= '/^SERVICE_FAILED=/{sub(/^SERVICE_FAILED=/, ""); print; exit}')
     service_errors=$(echo "$summary" | awk -F= '/^SERVICE_ERRORS=/{sub(/^SERVICE_ERRORS=/, ""); print; exit}')
     if [ -z "$xhs_flag" ]; then
@@ -485,8 +489,8 @@ PY
                 # disclaimer below (init-progress spec Phase 3).
                 echo "             ✗ 复用的 B站 Cookie 已失效（后端实测校验未通过）。"
                 echo "               请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动"
-                echo "               同步新 Cookie；或按下方 manual fallback 步骤用"
-                echo "               --bilibili-cookie 手动更新后重跑 bootstrap。"
+                echo "               同步新 Cookie；或用 --interactive-confirm 重跑 bootstrap，"
+                echo "               在关闭终端回显的安全提示中手动粘贴 Cookie。"
                 echo "               Agents: the reused cookie FAILED live validation —"
                 echo "               ask the user to re-login before running init."
                 ;;
@@ -538,6 +542,8 @@ PY
         echo ""
         echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
         echo "         --project-dir $INSTALL_DIR \\"
+        echo "         --mode $MODE \\"
+        echo "         --interactive-confirm \\"
         case "$decisions" in
             *embedding*)
                 echo "         --embedding-provider ollama \\"
@@ -587,10 +593,11 @@ PY
         echo ""
         echo "  (B) [manual fallback]"
         echo "      F12 → Network → copy the 'Cookie' header from any"
-        echo "      bilibili.com request, then run:"
+        echo "      bilibili.com request, then run the secure prompt:"
         echo "        python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
         echo "            --project-dir $INSTALL_DIR \\"
-        echo "            --bilibili-cookie '<YOUR_COOKIE>' \\"
+        echo "            --mode $MODE \\"
+        echo "            --interactive-confirm \\"
         case "$decisions" in
             *embedding*)
                 echo "            --embedding-provider ollama \\"
@@ -603,6 +610,7 @@ PY
         echo "            --port $PORT --host $HOST"
         echo "      Use --yes-xhs / --yes-douyin / --yes-youtube only after"
         echo "      the user opts in; otherwise keep the matching --no-* flag."
+        echo "      The manual Cookie prompt keeps terminal echo disabled（关闭终端回显）."
         echo ""
         echo "  Verify the backend is healthy any time:"
         echo "      curl -sS $health_url"
@@ -625,7 +633,7 @@ PY
         echo "     and YouTube history/subscriptions/likes."
         echo "     Default: no. Use --yes-* flags only after explicit opt-in."
         echo ""
-        echo "  4. Prepare the missing values:"
+        echo "  4. Have the missing values ready; the secure prompt will collect them:"
         case "$missing" in
             *models.chat.connections*credential*|*llm.*api_key*)
                 echo "     - Chat credential — get an API key for the selected preset:"
@@ -646,15 +654,14 @@ PY
                 echo "           Extension: https://github.com/whiteguo233/OpenBiliClaw/releases"
                 echo "           After install, log in to bilibili.com if you aren't already;"
                 echo "           the extension pushes the cookie to this backend within seconds."
-                echo "           If you go this route, you can SKIP the --bilibili-cookie flag"
-                echo "           below after the extension syncs."
+                echo "           After the extension syncs, rerun the secure command below."
                 echo ""
                 echo "       (B) Manually paste the cookie:"
                 echo "           a. Log in at https://www.bilibili.com"
                 echo "           b. Open DevTools (F12) → Network tab"
                 echo "           c. Refresh the page, click any request"
                 echo "           d. Copy the full 'Cookie' header value"
-                echo "           Then proceed with step 5 below using --bilibili-cookie."
+                echo "           Then choose the manual Cookie prompt in step 5."
                 ;;
         esac
         echo ""
@@ -664,11 +671,14 @@ PY
         # Build the command dynamically — only show flags for what's missing.
         echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
         echo "         --project-dir $INSTALL_DIR \\"
-        echo "         --connection-type <YOUR_CONNECTION_TYPE> \\"
-        echo "         --preset <YOUR_PRESET> \\"
-        case "$missing" in
-            *models.chat.connections*credential*|*llm.*api_key*) echo "         --llm-api-key '<YOUR_API_KEY>' \\" ;;
-        esac
+        echo "         --mode $MODE \\"
+        echo "         --interactive-confirm \\"
+        if [ -n "$connection_type" ]; then
+            echo "         --connection-type $connection_type \\"
+        fi
+        if [ -n "$preset" ]; then
+            echo "         --preset $preset \\"
+        fi
         case "$decisions" in
             *embedding*)
                 echo "         --embedding-provider ollama \\"
@@ -678,13 +688,12 @@ PY
         echo "         $xhs_flag \\"
         echo "         $douyin_flag \\"
         echo "         $youtube_flag \\"
-        case "$missing" in
-            *bilibili.cookie*) echo "         --bilibili-cookie '<YOUR_COOKIE>' \\" ;;
-        esac
         echo "         --port $PORT --host $HOST"
         echo ""
         echo "     Replace the embedding/source flags according to the"
         echo "     user's answers before running the command."
+        echo "     API keys and a manual Cookie are prompted with terminal echo disabled"
+        echo "     （关闭终端回显）and never need to appear in shell history."
         echo ""
         echo "     This auto-runs 'openbiliclaw init' once credentials check out:"
         echo "       - pulls your Bilibili history"

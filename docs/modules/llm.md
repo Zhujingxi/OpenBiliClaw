@@ -195,6 +195,8 @@ print(probe.observed_dimension, probe.image_probe_performed)
 
 `OrderedEmbeddingRoute` 要求每个 adapter 的 `settings is settings`，因此 Provider 只能改变 credential、endpoint 与 transport，不能覆盖 model、维度、相似度阈值或多模态开关。调用严格按数组位置执行；单个 Provider 内部 retry 完成后才尝试下一项。同类型 Provider 由稳定 ID 独立隔离。`EmbeddingService` 注入该 route 后忽略 legacy 构造参数中的 model/cache namespace/阈值/多模态值，统一从共享 settings 派生，避免调用方制造第二套向量空间。
 
+OpenAI、Gemini（文本与图像）和 DashScope 的 Embedding transport 每次最多尝试 3 次，Ollama 最多 2 次。终态 timeout、connection、auth、rate-limit、5xx 与响应解析失败会抛出不携带密钥、URL userinfo、响应体或 raw cause/context 的类型化异常，交由 route 分类、熔断与 fallback。DashScope 的 HTTP 200 error envelope 仍是 Provider 失败，malformed JSON 是 invalid response；两者都不会伪装成成功空向量。只有结构有效的上游成功响应确实没有向量时才返回 `[]`，由 route 按 invalid response 处理。
+
 成功向量必须是非空、非布尔的有限数值列表。空向量、非数值、`NaN`/`inf` 和错误 shape 只触发本次 fallback，不跨请求熔断。非零 `output_dimensionality` 与返回维度不一致时记录 `config_error` 永久 circuit；维度为 `0` 且开启多模态时，exact probe 还要求同一 Provider 返回的文本与固定图片向量长度一致，不一致同样证明共享空间配置不可用并打开永久 `config_error`。Circuit 继续以 `(provider_id, config_revision)` 隔离：普通成功只清除 timed/transient 状态，不能清除并发打开的永久状态；失败精确探测不会削弱已有状态，只有成功精确探测可关闭目标 Provider 的当前 revision。维度为 `0` 且探测维度一致时，报告 Provider 原生维度。
 
 `probe_provider(id)` 绕过目标 circuit、只调用该 ID、不走 fallback、不读写 embedding cache，也不修改配置。多模态开启时，它还用仓库内固定 1×1 PNG 与固定 `image/png` MIME 探测图像向量；报告只能证明该 endpoint 在本次调用返回了可验证且模态长度一致的维度，不能证明不同 endpoint 的远端模型权重完全相同。建议在启用原生 route 前逐项探测所有 Provider，尤其是维度设为 `0` 时。
@@ -511,7 +513,7 @@ provider-error restart gate 与 model-path migration gate 全部检查这个 roo
 
 ## 设计决策
 
-1. **retry 策略**：每个协议 adapter 先完成自己的有界 transport retry；DeepSeek preset 对 HTTP 200 空 content 额外重试一次，并在 `reasoning_effort=""` 时显式关闭 thinking。HTTP 402 账单失败映射为无原文的 provider backoff。
+1. **retry 策略**：每个协议 adapter 先完成自己的有界 transport retry；Embedding 中 OpenAI / Gemini / DashScope 最多 3 次，Ollama 最多 2 次，终态失败统一进入 secret-safe typed failure 边界。DeepSeek preset 对 HTTP 200 空 content 额外重试一次，并在 `reasoning_effort=""` 时显式关闭 thinking。HTTP 402 账单失败映射为无原文的 provider backoff。
 2. **fallback 顺序**：生产 Chat / Embedding route 严格使用 `models.chat.connections` / `models.embedding.providers` 数组顺序并允许最多十条同类 connection；adapter retry 总在跨 connection fallback 之前完成。Embedding Provider 共用一个 settings 对象与 Provider-order-invariant cache namespace。
    - Chat 仅对已分类的 provider、transport、无效响应和 moderation 失败尝试下一项；取消、调用方/schema 错误和未知编程错误立即传播。
    - `complete_connection(id, ..., ignore_circuit=True)` 与 `probe_provider(id)` 是 exact path，只调用目标稳定 ID，不转向其它 connection。

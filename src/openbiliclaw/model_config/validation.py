@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -306,6 +307,63 @@ def validate_model_config(
     issues: list[ModelConfigIssue] = []
     chat_connections = tuple(config.chat.connections)
     embedding_providers: tuple[Any, ...] = tuple(config.embedding.providers)
+
+    concurrency = config.chat.concurrency
+    if (
+        isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or not 1 <= concurrency <= 16
+    ):
+        issues.append(
+            _issue(
+                "models.chat.concurrency",
+                "invalid_chat_concurrency",
+                "Chat concurrency must be an integer between 1 and 16.",
+            )
+        )
+
+    timeout_seconds = config.chat.timeout_seconds
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int)
+        or timeout_seconds < 10
+    ):
+        issues.append(
+            _issue(
+                "models.chat.timeout_seconds",
+                "invalid_chat_timeout",
+                "Chat timeout must be an integer of at least 10 seconds.",
+            )
+        )
+
+    output_dimensionality = config.embedding.settings.output_dimensionality
+    if (
+        isinstance(output_dimensionality, bool)
+        or not isinstance(output_dimensionality, int)
+        or output_dimensionality < 0
+    ):
+        issues.append(
+            _issue(
+                "models.embedding.settings.output_dimensionality",
+                "invalid_embedding_output_dimensionality",
+                "Embedding output dimensionality must be a non-negative integer.",
+            )
+        )
+
+    similarity_threshold = config.embedding.settings.similarity_threshold
+    if (
+        isinstance(similarity_threshold, bool)
+        or not isinstance(similarity_threshold, int | float)
+        or not 0.0 <= similarity_threshold <= 1.0
+        or not math.isfinite(similarity_threshold)
+    ):
+        issues.append(
+            _issue(
+                "models.embedding.settings.similarity_threshold",
+                "invalid_embedding_similarity_threshold",
+                "Embedding similarity threshold must be finite and between 0 and 1.",
+            )
+        )
 
     if not 1 <= len(chat_connections) <= 10:
         issues.append(

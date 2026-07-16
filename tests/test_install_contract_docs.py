@@ -26,8 +26,10 @@ def test_shell_installers_describe_connection_type_and_preset() -> None:
         assert "openbiliclaw models" in lowered
         assert "default llm provider" not in lowered
         assert "choose your llm provider" not in lowered
-        assert "--connection-type <YOUR_CONNECTION_TYPE>" in installer
-        assert "--preset <YOUR_PRESET>" in installer
+        assert "--connection-type" in installer
+        assert "--preset" in installer
+        assert "<YOUR_CONNECTION_TYPE>" not in installer
+        assert "<YOUR_PRESET>" not in installer
         assert "--provider <YOUR_PROVIDER>" not in installer
         assert "[llm.embedding]" not in installer
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_sh
@@ -116,6 +118,63 @@ def test_install_ps1_uses_interactive_auto_init_contract() -> None:
     assert "--interactive-confirm" in install_ps1
     assert "--wait-for-extension-cookie" in install_ps1
     assert "docker exec -it openbiliclaw-backend openbiliclaw init" not in install_ps1
+
+
+def test_installer_recovery_output_never_recommends_secrets_in_argv() -> None:
+    install_sh = _read("scripts/install.sh")
+    install_ps1 = _read("scripts/install.ps1")
+
+    shell_output_lines = [line for line in install_sh.splitlines() if "echo " in line]
+    powershell_output_lines = [line for line in install_ps1.splitlines() if "Write-Host" in line]
+    for output_lines in (shell_output_lines, powershell_output_lines):
+        rendered = "\n".join(output_lines)
+        assert "--llm-api-key" not in rendered
+        assert "--bilibili-cookie" not in rendered
+        assert "<YOUR_API_KEY>" not in rendered
+        assert "<YOUR_COOKIE>" not in rendered
+        assert "<YOUR_CONNECTION_TYPE>" not in rendered
+        assert "<YOUR_PRESET>" not in rendered
+        assert "--interactive-confirm" in rendered
+        assert "--connection-type" in rendered
+    assert "关闭终端回显" in install_sh
+    assert "关闭终端回显" in install_ps1
+    assert "CONNECTION_TYPE=" in install_sh
+    assert "PRESET=" in install_sh
+    assert "CONNECTION_TYPE=" in install_ps1
+    assert "PRESET=" in install_ps1
+    assert sum("--mode $MODE" in line for line in shell_output_lines) >= 3
+    assert sum("--mode $Mode" in line for line in powershell_output_lines) >= 3
+
+
+def test_bootstrap_raw_secret_flags_are_warned_compatibility_inputs() -> None:
+    bootstrap = _read("scripts/agent_bootstrap.py")
+
+    assert "Raw secret flags are compatibility inputs" in bootstrap
+    assert "process argv and shell history" in bootstrap
+    assert "prefer --interactive-confirm" in bootstrap
+    assert "terminal echo disabled" in bootstrap
+
+
+def test_active_agent_docs_use_native_routes_and_secure_recovery() -> None:
+    deployment = _read("docs/agent-deployment.md")
+    install = _read("docs/agent-install.md")
+
+    for retired in ("--module-override", "[llm.embedding]", "--provider NAME"):
+        assert retired not in deployment
+    for required in (
+        "--connection-type",
+        "--preset",
+        "--embedding-endpoint",
+        "openbiliclaw models list",
+        "--interactive-confirm",
+        "关闭终端回显",
+    ):
+        assert required in deployment
+    assert "--llm-api-key sk-" not in deployment
+    assert '--bilibili-cookie "$USER_PROVIDED_COOKIE"' not in deployment
+    assert "--llm-api-key sk-" not in install
+    assert "--llm-api-key AIza" not in install
+    assert '--bilibili-cookie "<full cookie string>"' not in install
 
 
 def test_one_line_installers_default_to_lan_accessible_backend() -> None:

@@ -25,13 +25,17 @@ Typical agent workflow:
     2. Run ``python scripts/agent_bootstrap.py --mode auto`` (add
        ``--reuse-from <path>`` when the user already has a working install).
     3. Parse ``BOOTSTRAP_STATUS`` JSON lines to decide next steps.
-    4. If the final status says ``missing_llm_key`` or ``missing_cookie``,
-       ask the user for the value and re-run with ``--llm-api-key`` or
-       ``--bilibili-cookie``.
+    4. If the final status reports a missing secret, re-run with
+       ``--interactive-confirm`` and collect it in the
+       terminal's no-echo prompt.
     5. Poll the emitted ``Health URL`` to confirm the service is ready.
 
 All secrets accepted via flags are written directly to ``config.toml`` and
 ``data/bilibili_cookie.json``. Nothing is uploaded off the machine.
+
+Raw secret flags are compatibility inputs: they expose values in process argv and shell history.
+Human setup and recovery should prefer --interactive-confirm;
+its secret prompts keep terminal echo disabled.
 """
 
 from __future__ import annotations
@@ -292,10 +296,12 @@ class HumanInstallAnswers:
     llm_api_key: str = ""
     llm_base_url: str | None = None
     llm_model: str | None = None
+    preserve_chat: bool = False
     embedding_provider: str = "ollama"
     embedding_model: str = "bge-m3"
     embedding_base_url: str | None = None
     embedding_api_key: str | None = None
+    preserve_embedding: bool = False
     xhs: bool = False
     douyin: bool = False
     youtube: bool = False
@@ -736,11 +742,31 @@ def collect_human_install_wizard(
     existing_api_key: str = "",
     existing_base_url: str = "",
     existing_model: str = "",
+    recovery_args: argparse.Namespace | None = None,
+    existing_connection_type: str = "",
+    existing_preset: str = "",
+    existing_embedding_configured: bool = False,
+    missing_fields: tuple[str, ...] = (),
 ) -> HumanInstallAnswers:
     """Collect full human one-line installer choices before bootstrap starts."""
 
     ensure_human_wizard_tty(input_func)
     secret_input_func = secret_input_func or read_secret_no_echo
+    if recovery_args is not None:
+        return _collect_human_recovery_answers(
+            recovery_args,
+            input_func=input_func,
+            secret_input_func=secret_input_func,
+            existing_provider=existing_provider,
+            existing_connection_type=existing_connection_type,
+            existing_preset=existing_preset,
+            existing_api_key=existing_api_key,
+            existing_base_url=existing_base_url,
+            existing_model=existing_model,
+            existing_embedding_configured=existing_embedding_configured,
+            missing_fields=missing_fields,
+        )
+
     llm = collect_human_llm_config(
         input_func=input_func,
         secret_input_func=secret_input_func,
@@ -809,6 +835,210 @@ def collect_human_install_wizard(
     )
 
 
+def _collect_human_recovery_answers(
+    args: argparse.Namespace,
+    *,
+    input_func: Any,
+    secret_input_func: Any,
+    existing_provider: str,
+    existing_connection_type: str,
+    existing_preset: str,
+    existing_api_key: str,
+    existing_base_url: str,
+    existing_model: str,
+    existing_embedding_configured: bool,
+    missing_fields: tuple[str, ...],
+) -> HumanInstallAnswers:
+    """Prompt only unresolved recovery values and preserve every known choice."""
+
+    credential_missing = any(
+        field.startswith("models.chat.connections") and field.endswith("credential")
+        for field in missing_fields
+    )
+    chat_missing = any(
+        field.startswith("models.chat.connections") or field.startswith("llm.")
+        for field in missing_fields
+    )
+    try:
+        if existing_connection_type:
+            existing_selection = resolve_connection_selection(
+                connection_type=existing_connection_type,
+                preset=existing_preset,
+            )
+        elif existing_provider:
+            existing_selection = resolve_connection_selection(provider=existing_provider)
+        else:
+            existing_selection = ("", "")
+    except ValueError:
+        existing_selection = ("", "")
+
+    explicit_chat_selection = bool(args.provider or args.connection_type or args.preset)
+    if explicit_chat_selection:
+        selected_type, selected_preset = resolve_connection_selection(
+            provider=args.provider,
+            connection_type=args.connection_type,
+            preset=args.preset,
+        )
+    elif existing_selection[0]:
+        selected_type, selected_preset = existing_selection
+    else:
+        llm = collect_human_llm_config(
+            input_func=input_func,
+            secret_input_func=secret_input_func,
+            existing_provider=existing_provider,
+            existing_api_key=existing_api_key,
+            existing_base_url=existing_base_url,
+            existing_model=existing_model,
+        )
+        selected_type, selected_preset = llm.connection_type, llm.preset
+
+    if explicit_chat_selection or existing_selection[0]:
+        same_selection = (selected_type, selected_preset) == existing_selection
+        model = args.llm_model or (existing_model if same_selection else "")
+        model = model or HUMAN_MODEL_DEFAULTS.get((selected_type, selected_preset), "")
+        if not model:
+            model = _prompt_required(input_func, f"{selected_type} chat model")
+
+        base_url = args.llm_base_url
+        if base_url is None and same_selection:
+            base_url = existing_base_url or None
+        if (
+            selected_preset == "custom"
+            and selected_type
+            in {
+                "openai_compatible",
+                "anthropic_compatible",
+            }
+            and not (base_url or "").strip()
+        ):
+            base_url = _prompt_required(input_func, f"{selected_type} Base URL")
+
+        api_key = ""
+        if (
+            selected_type not in {"ollama", "codex_oauth"}
+            and args.llm_api_key is None
+            and (credential_missing or not same_selection)
+        ):
+            api_key = _prompt_secret(
+                secret_input_func,
+                f"{selected_type} API Key",
+                existing=existing_api_key if same_selection else "",
+            )
+        llm = HumanInstallAnswers(
+            connection_type=selected_type,
+            preset=selected_preset,
+            llm_api_key=api_key,
+            llm_base_url=base_url,
+            llm_model=model,
+        )
+
+    chat_fields_explicit = any(
+        value is not None
+        for value in (
+            args.provider,
+            args.connection_type,
+            args.preset,
+            args.llm_api_key,
+            args.llm_base_url,
+            args.llm_model,
+        )
+    )
+    preserve_chat = bool(existing_selection[0]) and not (chat_fields_explicit or chat_missing)
+
+    preserve_embedding = bool(args.embedding_endpoint) or (
+        args.embedding_provider is None and existing_embedding_configured
+    )
+    embedding_provider = ""
+    embedding_model = ""
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
+    if not preserve_embedding and args.embedding_provider is not None:
+        embedding_provider = args.embedding_provider
+        embedding_model = args.embedding_model or {
+            "ollama": "bge-m3",
+            "gemini": "gemini-embedding-001",
+            "openai": "text-embedding-3-small",
+        }.get(embedding_provider, "")
+        if embedding_provider and not embedding_model:
+            embedding_model = _prompt_required(input_func, "Embedding model")
+        embedding_base_url = args.embedding_base_url
+        if embedding_provider == "openai_compatible" and not (embedding_base_url or "").strip():
+            embedding_base_url = _prompt_required(
+                input_func,
+                "Embedding OpenAI-compatible Base URL",
+            )
+        if embedding_provider not in {"", "ollama"} and args.embedding_api_key is None:
+            embedding_api_key = _prompt_secret(
+                secret_input_func,
+                "Embedding API Key",
+            )
+    elif not preserve_embedding:
+        (
+            embedding_provider,
+            embedding_model,
+            embedding_base_url,
+            embedding_api_key,
+        ) = _collect_human_embedding_config(input_func, secret_input_func)
+
+    def source_choice(name: str, prompt: str) -> bool:
+        if bool(getattr(args, f"yes_{name}")):
+            return True
+        if bool(getattr(args, f"no_{name}")):
+            return False
+        return _ask_yes_no(input_func, prompt, default=False)
+
+    xhs = source_choice(
+        "xhs",
+        "Include Xiaohongshu likes/favorites in the initial profile?",
+    )
+    douyin = source_choice(
+        "douyin",
+        "Include Douyin post/favorite/like/follow data in the initial profile?",
+    )
+    youtube = source_choice(
+        "youtube",
+        "Include YouTube history/subscriptions/likes in the initial profile?",
+    )
+
+    cookie_missing = any(field.startswith("bilibili.cookie") for field in missing_fields)
+    if cookie_missing:
+        cookie_mode, bilibili_cookie = _collect_human_cookie_config(
+            input_func,
+            secret_input_func,
+        )
+    else:
+        cookie_mode, bilibili_cookie = "existing", ""
+
+    return HumanInstallAnswers(
+        connection_type=llm.connection_type,
+        preset=llm.preset,
+        llm_api_key=llm.llm_api_key,
+        llm_base_url=llm.llm_base_url,
+        llm_model=llm.llm_model,
+        preserve_chat=preserve_chat,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_base_url=embedding_base_url,
+        embedding_api_key=embedding_api_key,
+        preserve_embedding=preserve_embedding,
+        xhs=xhs,
+        douyin=douyin,
+        youtube=youtube,
+        cookie_mode=cookie_mode,
+        bilibili_cookie=bilibili_cookie,
+        bilibili_favorite_limit=(
+            args.bilibili_favorite_limit
+            if args.bilibili_favorite_limit is not None
+            else DEFAULT_BILIBILI_FAVORITE_LIMIT
+        ),
+        bilibili_follow_limit=(
+            args.bilibili_follow_limit
+            if args.bilibili_follow_limit is not None
+            else DEFAULT_BILIBILI_FOLLOW_LIMIT
+        ),
+    )
+
+
 def apply_confirmation_answers_to_args(
     args: argparse.Namespace,
     answers: InitConfirmationAnswers,
@@ -844,23 +1074,25 @@ def apply_human_install_answers_to_args(
 ) -> None:
     """Mutate parsed args with full human installer choices."""
 
-    if args.provider is None and args.connection_type is None:
-        args.connection_type = answers.connection_type
-        args.preset = answers.preset or None
-    if args.llm_api_key is None and answers.llm_api_key:
-        args.llm_api_key = answers.llm_api_key
-    if args.llm_base_url is None and answers.llm_base_url is not None:
-        args.llm_base_url = answers.llm_base_url
-    if args.llm_model is None and answers.llm_model is not None:
-        args.llm_model = answers.llm_model
-    if args.embedding_provider is None:
-        args.embedding_provider = answers.embedding_provider
-    if args.embedding_model is None:
-        args.embedding_model = answers.embedding_model
-    if args.embedding_base_url is None and answers.embedding_base_url is not None:
-        args.embedding_base_url = answers.embedding_base_url
-    if args.embedding_api_key is None and answers.embedding_api_key:
-        args.embedding_api_key = answers.embedding_api_key
+    if not answers.preserve_chat:
+        if args.provider is None and args.connection_type is None:
+            args.connection_type = answers.connection_type
+            args.preset = answers.preset or None
+        if args.llm_api_key is None and answers.llm_api_key:
+            args.llm_api_key = answers.llm_api_key
+        if args.llm_base_url is None and answers.llm_base_url is not None:
+            args.llm_base_url = answers.llm_base_url
+        if args.llm_model is None and answers.llm_model is not None:
+            args.llm_model = answers.llm_model
+    if not answers.preserve_embedding:
+        if args.embedding_provider is None:
+            args.embedding_provider = answers.embedding_provider
+        if args.embedding_model is None:
+            args.embedding_model = answers.embedding_model
+        if args.embedding_base_url is None and answers.embedding_base_url is not None:
+            args.embedding_base_url = answers.embedding_base_url
+        if args.embedding_api_key is None and answers.embedding_api_key:
+            args.embedding_api_key = answers.embedding_api_key
     if not args.yes_xhs and not args.no_xhs:
         args.yes_xhs = answers.xhs
         args.no_xhs = not answers.xhs
@@ -936,7 +1168,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--llm-api-key",
         default=None,
-        help="LLM API key for the (current or overridden) provider. Stored in config.toml.",
+        help=(
+            "Compatibility input for an LLM API key; exposes the value in process argv "
+            "and shell history. Humans should prefer --interactive-confirm."
+        ),
     )
     parser.add_argument(
         "--llm-base-url",
@@ -1001,7 +1236,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--embedding-api-key",
         default=None,
-        help="Custom API key for the configured embedding provider(s).",
+        help=(
+            "Compatibility input for an embedding API key; exposes the value in process argv "
+            "and shell history. Humans should prefer --interactive-confirm."
+        ),
     )
     parser.add_argument(
         "--embedding-endpoint",
@@ -1016,7 +1254,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bilibili-cookie",
         default=None,
-        help="Bilibili cookie string. Stored in config.toml and data/bilibili_cookie.json.",
+        help=(
+            "Compatibility input for a Bilibili cookie; exposes the value in process argv "
+            "and shell history. Prefer --interactive-confirm or browser extension sync."
+        ),
     )
     parser.add_argument(
         "--bilibili-favorite-limit",
@@ -3351,7 +3592,8 @@ def run(args: argparse.Namespace) -> int:
         try:
             current = detect_missing_secrets(project_dir)
             provider = str(current.get("provider") or "deepseek")
-            current_connections = _load_typed_models(project_dir).chat.connections
+            current_models = _load_typed_models(project_dir)
+            current_connections = current_models.chat.connections
             primary = current_connections[0] if current_connections else None
             answers = collect_human_install_wizard(
                 existing_provider=provider,
@@ -3362,6 +3604,13 @@ def run(args: argparse.Namespace) -> int:
                 ),
                 existing_base_url=primary.base_url if primary is not None else "",
                 existing_model=primary.model if primary is not None else "",
+                recovery_args=args,
+                existing_connection_type=primary.type if primary is not None else "",
+                existing_preset=primary.preset if primary is not None else "",
+                existing_embedding_configured=bool(
+                    current_models.embedding.enabled or current_models.embedding.providers
+                ),
+                missing_fields=tuple(str(item) for item in current.get("missing", ())),
             )
             apply_human_install_answers_to_args(args, answers)
         except RuntimeError as exc:
@@ -3691,7 +3940,8 @@ def run(args: argparse.Namespace) -> int:
                 info(
                     "The Bilibili cookie reused from the previous install failed live "
                     "validation (expired/invalid). Log in to bilibili.com again and let "
-                    "the browser extension sync a fresh cookie, or pass --bilibili-cookie."
+                    "the browser extension sync a fresh cookie, or rerun with "
+                    "--interactive-confirm and choose the secure manual Cookie prompt."
                 )
         if args.wait_for_extension_cookie and final_status["missing"] == ["bilibili.cookie"]:
             emit(

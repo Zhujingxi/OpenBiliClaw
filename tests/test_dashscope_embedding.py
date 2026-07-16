@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openbiliclaw.llm.base import LLMProviderError, LLMResponseError
 from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, EmbeddingProtocolAdapter
 from openbiliclaw.llm.dashscope_provider import DashScopeEmbeddingProvider
 from openbiliclaw.llm.embedding import EmbeddingService
@@ -144,24 +145,89 @@ async def test_embed_image_sends_data_uri() -> None:
 @pytest.mark.asyncio
 async def test_embed_image_rejects_qwen25_independent() -> None:
     provider = DashScopeEmbeddingProvider(api_key="sk-test", model="qwen2.5-vl-embedding")
-    vector = await provider.embed_image(b"bytes", mime_type="image/jpeg")
+    vector = await provider.embed_image(
+        b"bytes",
+        mime_type="image/jpeg",
+        model="qwen2.5-vl-embedding",
+    )
     assert vector == []
 
 
 @pytest.mark.asyncio
-async def test_embed_returns_empty_on_api_error_payload() -> None:
+async def test_embed_raises_typed_secret_safe_error_on_api_error_payload() -> None:
     provider = DashScopeEmbeddingProvider(api_key="sk-test")
-    payload = {"code": "InvalidApiKey", "message": "Invalid API-key provided."}
+    sentinel = "dashscope-payload-secret-never-retain"
+    payload = {"code": "InvalidApiKey", "message": sentinel}
     mock_client = AsyncMock()
     mock_client.__aenter__.return_value = mock_client
     mock_client.__aexit__.return_value = None
     mock_client.post = AsyncMock(return_value=_mock_response(payload))
 
-    with patch(
-        "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
-        return_value=mock_client,
+    with (
+        patch(
+            "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ),
+        pytest.raises(LLMProviderError) as raised,
     ):
-        assert await provider.embed("hello") == []
+        await provider.embed("private text")
+
+    assert "authentication failed" in str(raised.value)
+    assert sentinel not in str(raised.value)
+    assert "private text" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_embed_raises_typed_secret_safe_error_on_malformed_json() -> None:
+    provider = DashScopeEmbeddingProvider(api_key="sk-test")
+    sentinel = "dashscope-json-secret-never-retain"
+    response = _mock_response({})
+    response.json.side_effect = ValueError(sentinel)
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.post = AsyncMock(return_value=response)
+
+    with (
+        patch(
+            "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ),
+        pytest.raises(LLMResponseError) as raised,
+    ):
+        await provider.embed("private text")
+
+    assert sentinel not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_embed_retries_http_server_failure_then_raises_secret_safe_error() -> None:
+    provider = DashScopeEmbeddingProvider(api_key="sk-test")
+    sentinel = "dashscope-response-secret-never-retain"
+    response = _mock_response({"error": sentinel}, status_code=503)
+    response.text = sentinel
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.__aexit__.return_value = None
+    mock_client.post = AsyncMock(return_value=response)
+
+    with (
+        patch(
+            "openbiliclaw.llm.dashscope_provider.httpx.AsyncClient",
+            return_value=mock_client,
+        ),
+        patch("asyncio.sleep", new=AsyncMock()),
+        pytest.raises(LLMProviderError) as raised,
+    ):
+        await provider.embed("private text")
+
+    assert mock_client.post.await_count == 3
+    assert sentinel not in str(raised.value)
+    assert "private text" not in str(raised.value)
 
 
 @pytest.mark.asyncio

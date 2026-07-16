@@ -490,6 +490,27 @@ def test_models_add_embedding_updates_one_shared_space_and_appends_provider(
     assert all("model" not in item for item in parsed["providers"])
 
 
+def test_models_edit_rejects_nonfinite_similarity_threshold_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    path = _project_root(monkeypatch, tmp_path, _models())
+    module = _models_module(runner)
+    _install_service(module, monkeypatch, ModelConfigService(path, FakeCoordinator()))
+    before = path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["models", "edit", "embed-a", "--similarity-threshold", "nan"],
+    )
+
+    assert result.exit_code == 1
+    assert "models.embedding.settings.similarity_threshold" in result.output
+    assert "invalid_embedding_similarity_threshold" in result.output
+    assert path.read_bytes() == before
+
+
 def test_models_edit_move_remove_use_stable_id_and_guard_the_final_chat_route(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

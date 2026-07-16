@@ -194,8 +194,19 @@ template can reuse an OpenAI credential when OpenAI was selected for the new
 install. A credential borrowed from one legacy Provider table is consumed at
 most once across Chat and Embedding; separate native route records retain their
 own stable-ID identity even if their credential values happen to match. Explicit
-`--llm-api-key`, `--embedding-api-key`, and `--bilibili-cookie` values override
-the reused values.
+Raw secret flags remain compatibility inputs for controlled automation, but
+they expose values in process argv and shell history. Human setup and recovery
+must prefer `--interactive-confirm`; its API Key and manual Cookie prompts
+disable terminal echo. Explicit compatibility values still override reused
+values.
+
+Recovery is selective. The installer carries the selected runtime `mode` and
+the validated current `connection_type` and `preset` forward as non-secret
+flags, while bootstrap
+reuses the current model, Base URL, ordered Chat fallbacks, complete Embedding
+route, source decisions, and import limits. It prompts only for a missing
+credential or an unresolved privacy choice; it does not rerun unrelated
+questions or collapse a multi-Provider Embedding route to one legacy alias.
 
 When `--embedding-api-key` is supplied without `--embedding-provider` or
 `--embedding-endpoint`, bootstrap updates every existing ordered Embedding
@@ -288,6 +299,12 @@ and explicit source choices (`--yes-xhs` / `--no-xhs` plus
 `status=needs_decisions` and **does not run init**. Ask the missing
 questions, then re-run bootstrap with those flags.
 
+On a recovery rerun, `--interactive-confirm` reads the current native route and
+the supplied non-secret flags first. The original runtime mode and already
+settled connection, preset,
+Embedding-route, limit, and source values are retained without being asked
+again; only fields still listed as missing are prompted.
+
 When an older non-interactive command omits an Embedding choice, the local
 bootstrap compatibility path may create one native `ollama` provider with
 shared model `bge-m3`; explicit disable remains `--embedding-provider ""`.
@@ -358,33 +375,34 @@ openbiliclaw models probe <STABLE_ID>
 
 ### Step 2 — Configure the selected Chat connection
 
-Canonical automation uses `--connection-type` and, only where supported,
-`--preset`:
+Canonical setup uses `--connection-type` and, only where supported,
+`--preset`. These examples keep only non-secret choices in argv;
+`--interactive-confirm` collects credentials with terminal echo disabled:
 
 ```bash
 # Default DeepSeek preset
 python3 scripts/agent_bootstrap.py \
   --connection-type openai_compatible --preset deepseek \
-  --llm-api-key sk-... --llm-model deepseek-v4-flash ...
+  --llm-model deepseek-v4-flash --interactive-confirm ...
 
 # OpenAI official preset
 python3 scripts/agent_bootstrap.py \
   --connection-type openai_compatible --preset openai \
-  --llm-api-key sk-... --llm-model gpt-5-nano ...
+  --llm-model gpt-5-nano --interactive-confirm ...
 
 # Custom OpenAI-compatible relay
 python3 scripts/agent_bootstrap.py \
   --connection-type openai_compatible --preset custom \
   --llm-base-url https://relay.example/v1 \
-  --llm-model relay-model --llm-api-key sk-... ...
+  --llm-model relay-model --interactive-confirm ...
 
 # Anthropic official preset
 python3 scripts/agent_bootstrap.py \
   --connection-type anthropic_compatible --preset anthropic \
-  --llm-api-key sk-ant-... --llm-model claude-sonnet-4-6 ...
+  --llm-model claude-sonnet-4-6 --interactive-confirm ...
 
 # Native APIs, local runtime, and OAuth do not take --preset
-python3 scripts/agent_bootstrap.py --connection-type gemini_api --llm-api-key AIza... ...
+python3 scripts/agent_bootstrap.py --connection-type gemini_api --interactive-confirm ...
 python3 scripts/agent_bootstrap.py --connection-type ollama --llm-model qwen2.5:7b ...
 python3 scripts/agent_bootstrap.py --connection-type codex_oauth --llm-model gpt-5-nano ...
 ```
@@ -493,7 +511,7 @@ B 站 cookie to the backend on install — `chrome.cookies.onChanged` →
 persists. The F12 dance is genuinely a fallback path now: most users
 hit it only because their AI agent forgot to mention option A.
 
-**If user picks A**: don't pass `--bilibili-cookie` to bootstrap. The
+**If user picks A**: choose extension sync instead of the manual Cookie prompt. The
 v0.3.20+ install.sh status block will explicitly print
 `OpenBiliClaw backend ready — waiting for browser extension to sync
 B站 Cookie` in **green** when this is the only thing missing — this is
@@ -515,10 +533,10 @@ checks and source choices still gate init:
 python3 scripts/agent_bootstrap.py --mode docker --interactive-confirm --wait-for-extension-cookie
 ```
 
-**If user picks B**: collect the cookie string, run with
-`--bilibili-cookie "<full cookie string>"` plus the explicit embedding
-and source flags from the user's answers — bootstrap auto-runs
-init once everything's present.
+**If user picks B**: rerun with `--interactive-confirm`, choose the
+manual Cookie option, and let the user paste it into the no-echo prompt. Keep
+the explicit non-secret Embedding and source flags from the user's answers;
+bootstrap auto-runs init once everything is present.
 
 ### Step 5 — Bilibili init signal limits
 
@@ -583,7 +601,7 @@ Match each example to the user's actual answers — don't copy-paste blindly.
 python3 scripts/agent_bootstrap.py \
   --connection-type openai_compatible \
   --preset deepseek \
-  --llm-api-key sk-... \
+  --interactive-confirm \
   --embedding-model bge-m3 \
   --embedding-endpoint ollama=http://127.0.0.1:11434/v1 \
   --no-xhs \
@@ -602,10 +620,9 @@ user to F12 if you can lead them to the extension first.
 ```bash
 python3 scripts/agent_bootstrap.py \
   --connection-type gemini_api \
-  --llm-api-key AIza... \
+  --interactive-confirm \
   --embedding-model gemini-embedding-001 \
   --embedding-endpoint gemini_api=https://generativelanguage.googleapis.com \
-  --embedding-api-key AIza... \
   --no-xhs \
   --no-douyin \
   --no-youtube
@@ -620,6 +637,7 @@ different record implicitly.
 ```bash
 python3 scripts/agent_bootstrap.py \
   --connection-type ollama \
+  --interactive-confirm \
   --llm-model llama3 \
   --embedding-model bge-m3 \
   --embedding-endpoint ollama=http://127.0.0.1:11434/v1 \
@@ -634,7 +652,7 @@ python3 scripts/agent_bootstrap.py \
 python3 scripts/agent_bootstrap.py \
   --connection-type openai_compatible \
   --preset deepseek \
-  --llm-api-key sk-... \
+  --interactive-confirm \
   --embedding-provider "" \
   --no-xhs \
   --no-douyin \
@@ -653,7 +671,7 @@ python3 scripts/agent_bootstrap.py \
   --connection-type openai_compatible \
   --preset custom \
   --llm-base-url http://localhost:8000/v1 \
-  --llm-api-key sk-or-none \
+  --interactive-confirm \
   --llm-model meta-llama/Llama-3.1-70B-Instruct \
   --embedding-model bge-m3 \
   --embedding-endpoint ollama=http://127.0.0.1:11434/v1 \

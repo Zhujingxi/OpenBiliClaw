@@ -8980,7 +8980,7 @@ def probe() -> None:
 def config_show() -> None:
     """显示当前配置."""
     from openbiliclaw.cli_models import safe_credential_label
-    from openbiliclaw.config import load_config_with_diagnostics
+    from openbiliclaw.config import load_config_with_diagnostics, mask_proxy_userinfo
 
     cfg, diagnostics = load_config_with_diagnostics()
     chat_connections = tuple(cfg.models.chat.connections)
@@ -9014,7 +9014,7 @@ def config_show() -> None:
                 cfg.network.mode, cfg.network.mode
             ),
         ),
-        ("海外自定义代理", cfg.network.proxy or "未设置"),
+        ("海外自定义代理", mask_proxy_userinfo(cfg.network.proxy) or "未设置"),
         ("收藏自动同步", "开启" if cfg.saved_sync.auto_sync_enabled else "关闭"),
         ("数据目录", str(cfg.data_path)),
     ]

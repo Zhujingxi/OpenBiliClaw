@@ -446,6 +446,8 @@ print(f"DECISIONS={','.join(decision_missing)}")
 print(f"XHS_FLAG={xhs_flag}")
 print(f"DOUYIN_FLAG={douyin_flag}")
 print(f"YOUTUBE_FLAG={youtube_flag}")
+print(f"CONNECTION_TYPE={details.get('connection_type', '')}")
+print(f"PRESET={details.get('preset', '')}")
 print(f"SERVICE_FAILED={','.join(service_failed)}")
 print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
 '@
@@ -454,7 +456,7 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
     $reuseArg = if ($null -ne $ReuseFrom) { $ReuseFrom } else { '' }
     $summary = & $PythonExe -c $parser $script:BootstrapLog $InstallDir "$Port" $ApiHost $reuseArg
 
-    $status = ''; $healthUrl = ''; $missing = ''; $decisions = ''; $xhsFlag = ''; $douyinFlag = ''; $youtubeFlag = ''; $serviceFailed = ''; $serviceErrors = ''
+    $status = ''; $healthUrl = ''; $missing = ''; $decisions = ''; $xhsFlag = ''; $douyinFlag = ''; $youtubeFlag = ''; $connectionType = ''; $preset = ''; $serviceFailed = ''; $serviceErrors = ''
     foreach ($line in $summary -split "`r?`n") {
         if ($line -like 'STATUS=*')     { $status    = $line.Substring(7) }
         elseif ($line -like 'HEALTH_URL=*') { $healthUrl = $line.Substring(11) }
@@ -463,6 +465,8 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         elseif ($line -like 'XHS_FLAG=*')   { $xhsFlag   = $line.Substring(9) }
         elseif ($line -like 'DOUYIN_FLAG=*') { $douyinFlag = $line.Substring(12) }
         elseif ($line -like 'YOUTUBE_FLAG=*') { $youtubeFlag = $line.Substring(13) }
+        elseif ($line -like 'CONNECTION_TYPE=*') { $connectionType = $line.Substring(16) }
+        elseif ($line -like 'PRESET=*') { $preset = $line.Substring(7) }
         elseif ($line -like 'SERVICE_FAILED=*') { $serviceFailed = $line.Substring(15) }
         elseif ($line -like 'SERVICE_ERRORS=*') { $serviceErrors = $line.Substring(15) }
     }
@@ -511,7 +515,8 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
             # (init-progress spec Phase 3).
             Write-Host '             [x] 复用的 B站 Cookie 已失效（后端实测校验未通过）。' -ForegroundColor Yellow
             Write-Host '                 请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动'
-            Write-Host '                 同步新 Cookie；或用 --bilibili-cookie 手动更新后重跑 bootstrap。'
+            Write-Host '                 同步新 Cookie；或用 --interactive-confirm 重跑 bootstrap，'
+            Write-Host '                 在关闭终端回显的安全提示中手动粘贴 Cookie。'
             Write-Host '                 Agents: the reused cookie FAILED live validation -'
             Write-Host '                 ask the user to re-login before running init.'
         } else {
@@ -552,6 +557,8 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host ''
         Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "         --project-dir $InstallDir ``"
+        Write-Host "         --mode $Mode ``"
+        Write-Host "         --interactive-confirm ``"
         if ($decisions -match 'embedding') {
             Write-Host "         --embedding-provider ollama ``"
             Write-Host "         --embedding-model bge-m3 ``"
@@ -599,10 +606,11 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host ''
         Write-Host '  (B) [manual fallback]'
         Write-Host "      F12 -> Network -> copy the 'Cookie' header from any"
-        Write-Host '      bilibili.com request, then run:'
+        Write-Host '      bilibili.com request, then run the secure prompt:'
         Write-Host "        python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "            --project-dir $InstallDir ``"
-        Write-Host "            --bilibili-cookie '<YOUR_COOKIE>' ``"
+        Write-Host "            --mode $Mode ``"
+        Write-Host "            --interactive-confirm ``"
         if ($decisions -match 'embedding') {
             Write-Host "            --embedding-provider ollama ``"
             Write-Host "            --embedding-model bge-m3 ``"
@@ -613,6 +621,7 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host "            --port $Port --host $ApiHost"
         Write-Host '      Use --yes-xhs / --yes-douyin / --yes-youtube only after'
         Write-Host '      the user opts in; otherwise keep the matching --no-* flag.'
+        Write-Host '      The manual Cookie prompt keeps terminal echo disabled（关闭终端回显）.'
         Write-Host ''
         Write-Host '  Verify the backend is healthy any time:'
         Write-Host "      Invoke-RestMethod $healthUrl"
@@ -642,10 +651,10 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
             Write-Host '         auto-sync - no F12, no copy/paste.'
             Write-Host '         Download: https://github.com/whiteguo233/OpenBiliClaw/releases'
             Write-Host '         Log in to bilibili.com if you are not already; the extension'
-            Write-Host '         pushes the cookie to this backend within seconds. You can then'
-            Write-Host '         omit --bilibili-cookie below after the extension syncs.'
+            Write-Host '         pushes the cookie to this backend within seconds. Then rerun'
+            Write-Host '         the secure command below.'
             Write-Host ''
-            Write-Host '     (B) Paste the cookie manually via --bilibili-cookie below.'
+            Write-Host '     (B) Paste the cookie in the secure manual prompt below.'
             Write-Host ''
         }
         Write-Host '  2. Ask which embedding service to use:'
@@ -658,14 +667,19 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host '     and YouTube history/subscriptions/likes.'
         Write-Host '     Default: no. Use --yes-* flags only after explicit opt-in.'
         Write-Host ''
-        Write-Host '  4. Prepare missing values, then run with values filled in (DO NOT add --skip-init):'
+        Write-Host '  4. Have missing values ready, then run the secure prompt (DO NOT add --skip-init):'
         Write-Host '     Include --preset only for a compatible connection type.'
         Write-Host ''
         Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "         --project-dir $InstallDir ``"
-        Write-Host "         --connection-type <YOUR_CONNECTION_TYPE> ``"
-        Write-Host "         --preset <YOUR_PRESET> ``"
-        if ($missing -match '(models\.chat\.connections.*credential|api_key)') { Write-Host "         --llm-api-key '<YOUR_API_KEY>' ``" }
+        Write-Host "         --mode $Mode ``"
+        Write-Host "         --interactive-confirm ``"
+        if ($connectionType) {
+            Write-Host "         --connection-type $connectionType ``"
+        }
+        if ($preset) {
+            Write-Host "         --preset $preset ``"
+        }
         if ($decisions -match 'embedding') {
             Write-Host "         --embedding-provider ollama ``"
             Write-Host "         --embedding-model bge-m3 ``"
@@ -673,11 +687,12 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host "         $xhsFlag ``"
         Write-Host "         $douyinFlag ``"
         Write-Host "         $youtubeFlag ``"
-        if ($missing -match 'bilibili.cookie') { Write-Host "         --bilibili-cookie '<YOUR_COOKIE>' ``" }
         Write-Host "         --port $Port --host $ApiHost"
         Write-Host ''
         Write-Host '     Replace the embedding/source flags according to the'
         Write-Host '     user answers before running the command.'
+        Write-Host '     API keys and a manual Cookie are prompted with terminal echo disabled'
+        Write-Host '     （关闭终端回显）and never need to appear in PowerShell history.'
         Write-Host ''
         Write-Host "     This auto-runs 'openbiliclaw init' once credentials check out:"
         Write-Host '       - pulls your Bilibili history'

@@ -514,6 +514,49 @@ def test_config_show_displays_registered_providers(
     assert "test-secret-config-show-never-print" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("proxy", "expected"),
+    [
+        ("http://user:pass@proxy.example:8080", "http://***@proxy.example:8080"),
+        ("https://user:pass@proxy.example:8443", "https://***@proxy.example:8443"),
+        ("socks5://user:pass@127.0.0.1:1080", "socks5://***@127.0.0.1:1080"),
+        ("socks5h://user%40mail:p%40ss@proxy.example:1080", "socks5h://***@proxy.example:1080"),
+        ("socks5://proxy.example:1080", "socks5://proxy.example:1080"),
+    ],
+)
+def test_shared_proxy_masker_preserves_endpoint_and_redacts_userinfo(
+    proxy: str,
+    expected: str,
+) -> None:
+    masker = getattr(config_module, "mask_proxy_userinfo", None)
+    assert callable(masker)
+    assert masker(proxy) == expected
+
+
+def test_config_show_redacts_encoded_proxy_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config()
+    cfg.network.mode = "custom"
+    cfg.network.proxy = "socks5h://mail%40example.com:p%40ss-secret@proxy.example:1080"
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "socks5h://***@proxy.example:1080" in result.stdout
+    assert "mail%40example.com" not in result.stdout
+    assert "p%40ss-secret" not in result.stdout
+    assert "mail@example.com" not in result.stdout
+    assert "p@ss-secret" not in result.stdout
+
+
 def test_config_show_displays_runtime_pause_fields(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:

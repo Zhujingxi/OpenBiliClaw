@@ -8,7 +8,14 @@ from typing import Any
 
 import httpx
 
-from .base import LLMProviderError, LLMResponse, LLMResponseError, LLMTimeoutError
+from .base import (
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponse,
+    LLMResponseError,
+    LLMTimeoutError,
+    retry_after_seconds_from_exception,
+)
 from .openai_provider import OpenAIProvider
 
 logger = logging.getLogger(__name__)
@@ -232,10 +239,9 @@ class OllamaProvider(OpenAIProvider):
         1024-dim). Other Ollama embedding models also work — just pass
         ``model=...``.
 
-        Retries once on transient errors (timeout / connection drop /
-        Ollama runner restart). Returns an empty list only after both
-        attempts fail. Callers (EmbeddingService) treat empty vectors
-        as "no embedding" and skip caching them.
+        Retries once on transient errors (timeout / connection drop / Ollama
+        runner restart). A successful response without a vector remains ``[]``;
+        failures after both attempts raise a typed, secret-safe provider error.
         """
         url = f"{self._native_root()}/api/embeddings"
         last_exc: Exception | None = None
@@ -277,23 +283,41 @@ class OllamaProvider(OpenAIProvider):
                     logger.debug(
                         "Ollama embedding attempt 1 failed (model=%s), retrying",
                         model,
-                        exc_info=True,
                     )
 
-        # Ollama puts the actionable part ("model 'bge-m3' not found",
-        # "out of memory", …) in the response body — without it a bare
-        # "500" is undiagnosable from logs (field log 2026-07-05).
-        body_hint = ""
-        if isinstance(last_exc, httpx.HTTPStatusError):
-            try:
-                body_hint = last_exc.response.text[:200]
-            except Exception:
-                body_hint = ""
+        mapped = self._map_embedding_error(last_exc)
+        last_exc = None
         logger.warning(
-            "Ollama embedding failed after 2 attempts (model=%s, url=%s)%s",
+            "Ollama embedding failed after 2 attempts (model=%s, url=%s)",
             model,
             url,
-            f" body={body_hint!r}" if body_hint else "",
-            exc_info=last_exc,
         )
-        return []
+        raise mapped
+
+    def _map_embedding_error(self, exc: Exception | None) -> LLMProviderError:
+        """Map native embedding transport failures without retaining raw detail."""
+        if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+            return LLMTimeoutError(f"{self._provider_name} embedding request timed out")
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code
+            if status == 429:
+                return LLMRateLimitError(
+                    f"{self._provider_name} embedding rate limit exceeded",
+                    retry_after_seconds=retry_after_seconds_from_exception(exc),
+                )
+            if status in {401, 403}:
+                return LLMProviderError(f"{self._provider_name} embedding authentication failed")
+            if status == 404:
+                return LLMProviderError(
+                    f"{self._provider_name} embedding model not found: HTTP 404"
+                )
+            if status >= 500:
+                return LLMProviderError(
+                    f"{self._provider_name} embedding server error: HTTP {status}"
+                )
+            return LLMProviderError(
+                f"{self._provider_name} embedding request failed: HTTP {status}"
+            )
+        if isinstance(exc, httpx.TransportError):
+            return LLMProviderError(f"{self._provider_name} embedding connection error")
+        return LLMProviderError(f"{self._provider_name} embedding request failed")

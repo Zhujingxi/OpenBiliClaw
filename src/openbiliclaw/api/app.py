@@ -18,7 +18,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlparse
 from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -148,6 +148,7 @@ from openbiliclaw.api.models import (
     ZhihuSourceConfigOut,
     validate_saved_item_key,
 )
+from openbiliclaw.config import mask_proxy_userinfo
 from openbiliclaw.config_write import coordinated_config_write
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
@@ -1208,21 +1209,6 @@ def _mode_to_flags(mode: str) -> tuple[bool, bool]:
     Literal (the handler validates before calling).
     """
     return (mode != "legacy", mode == "inspiration")
-
-
-def _mask_proxy_userinfo(url: str) -> str:
-    """Mask any ``user:pass@`` credential in a proxy URL for GET responses.
-
-    ``socks5://u:p@host:1`` → ``socks5://***@host:1``. A bare
-    ``socks5://host:1`` has no secret and is returned verbatim.
-    """
-    if not url:
-        return url
-    parts = urlsplit(url)
-    if "@" not in parts.netloc:
-        return url
-    host = parts.netloc.rsplit("@", 1)[1]
-    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
 
 
 def _is_masked_proxy_echo(value: str) -> bool:
@@ -10169,7 +10155,7 @@ def create_app(
             ),
             network=NetworkConfigOut(
                 mode=cfg.network.mode,
-                proxy=_mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
+                proxy=mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
             ),
             sources=SourcesConfigOut(
                 browser=SourcesBrowserConfigOut(
@@ -11034,6 +11020,37 @@ def create_app(
                 return JSONResponse(
                     {"error": "init_running", "detail": "初始化进行中，请稍后再保存配置"},
                     status_code=409,
+                )
+
+            # The ordinary form is prepared before it reaches the canonical
+            # write lock. A revision-guarded model save may therefore commit
+            # while this request is waiting. Native model routes are a
+            # separate authority: rebase them from the latest disk snapshot
+            # inside the lock so save, response, and runtime publication all
+            # use the same current bundle.
+            latest = load_config()
+            cfg.models = latest.models
+            cfg.model_meta = latest.model_meta
+            issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
+            if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
+                response = ConfigUpdateResponse(
+                    ok=False,
+                    config=_config_to_response(
+                        cfg,
+                        issues,
+                        mask_keys=True,
+                        degraded=bool(getattr(ctx, "degraded", False)),
+                        degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+                    ),
+                    message="配置校验失败，未写入 config.toml。",
+                    reloaded=False,
+                    rollback_applied=False,
+                    restart_required=False,
+                    warnings=warnings,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content=response.model_dump(mode="json"),
                 )
             try:
                 backup_path = _snapshot_config_file(config_path)

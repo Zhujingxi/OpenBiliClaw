@@ -415,9 +415,17 @@ class OpenAIProvider(LLMProvider):
     async def _create_response(self, **kwargs: Any) -> Any:
         return await self._client.responses.create(**kwargs)
 
-    async def _send_with_retry(self, send: Callable[..., Awaitable[Any]], **kwargs: Any) -> Any:
+    async def _send_with_retry(
+        self,
+        send: Callable[..., Awaitable[Any]],
+        *,
+        error_mapper: Callable[[Exception], LLMProviderError] | None = None,
+        retain_cause: bool = True,
+        **kwargs: Any,
+    ) -> Any:
         """Send a request with bounded retry for transient failures."""
         last_error: Exception | None = None
+        mapper = error_mapper or self._map_error
 
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
@@ -429,18 +437,25 @@ class OpenAIProvider(LLMProvider):
                         await self._apply_dynamic_token(force_refresh=True)
                         return await send(**kwargs)
                     except Exception as refresh_exc:
-                        mapped_refresh = self._map_error(refresh_exc)
-                        raise mapped_refresh from refresh_exc
-                mapped = self._map_error(exc)
+                        mapped_refresh = mapper(refresh_exc)
+                        if retain_cause:
+                            raise mapped_refresh from refresh_exc
+                        last_error = mapped_refresh
+                        break
+                mapped = mapper(exc)
                 last_error = mapped
                 if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
-                    raise mapped from exc
+                    if retain_cause:
+                        raise mapped from exc
+                    break
 
                 await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
 
         if last_error is None:
             raise LLMProviderError(f"{self._provider_name} request failed")
-        raise last_error
+        if retain_cause:
+            raise last_error
+        raise last_error from None
 
     async def _apply_dynamic_token(self, *, force_refresh: bool) -> None:
         if self._token_provider is None:
@@ -545,9 +560,88 @@ class OpenAIProvider(LLMProvider):
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         """Whether a mapped exception should be retried."""
+        if isinstance(exc, _OpenAIProtocolError):
+            return exc.retryable
         if isinstance(exc, LLMRateLimitError):
             return False
         return isinstance(exc, (LLMProviderError, LLMTimeoutError))
+
+    def _map_embedding_error(self, exc: Exception) -> LLMProviderError:
+        """Classify an embedding failure without retaining upstream detail."""
+        if isinstance(exc, LLMRateLimitError):
+            return LLMRateLimitError(
+                f"{self._provider_name} embedding rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
+        if isinstance(
+            exc,
+            (LLMTimeoutError, TimeoutError, httpx.TimeoutException, openai.APITimeoutError),
+        ):
+            return LLMTimeoutError(f"{self._provider_name} embedding request timed out")
+        if isinstance(exc, LLMResponseError):
+            return LLMResponseError(f"{self._provider_name} embedding returned an invalid response")
+
+        try:
+            status_code = self._status_code_int(getattr(exc, "status_code", None))
+        except Exception:
+            status_code = None
+        if status_code is None:
+            try:
+                response = getattr(exc, "response", None)
+                status_code = self._status_code_int(getattr(response, "status_code", None))
+            except Exception:
+                status_code = None
+
+        error_type = type(exc).__name__.lower().replace("_", "")
+        if (
+            isinstance(exc, openai.RateLimitError)
+            or status_code == 429
+            or "ratelimit" in error_type
+        ):
+            return LLMRateLimitError(
+                f"{self._provider_name} embedding rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
+        if status_code in _BILLING_BACKOFF_STATUS_CODES:
+            return LLMRateLimitError(
+                f"{self._provider_name} embedding billing backoff",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
+        if isinstance(exc, openai.AuthenticationError) or status_code in {401, 403}:
+            return _OpenAIProtocolError(
+                f"{self._provider_name} embedding authentication failed",
+                retryable=False,
+            )
+        if status_code == 404:
+            return _OpenAIProtocolError(
+                f"{self._provider_name} embedding model not found: HTTP 404",
+                retryable=False,
+            )
+        if status_code is not None and status_code >= 500:
+            return _OpenAIProtocolError(
+                f"{self._provider_name} embedding server error: HTTP {status_code}",
+                retryable=True,
+            )
+        if status_code is not None:
+            return _OpenAIProtocolError(
+                f"{self._provider_name} embedding request failed: HTTP {status_code}",
+                retryable=False,
+            )
+        if (
+            isinstance(
+                exc,
+                (ConnectionError, OSError, httpx.TransportError, openai.APIConnectionError),
+            )
+            or "connection" in error_type
+        ):
+            return _OpenAIProtocolError(
+                f"{self._provider_name} embedding connection error",
+                retryable=True,
+            )
+        return _OpenAIProtocolError(
+            f"{self._provider_name} embedding request failed",
+            retryable=True,
+        )
 
     def _json_response_format(self) -> dict[str, Any] | None:
         if self._is_lm_studio():
@@ -593,28 +687,25 @@ class OpenAIProvider(LLMProvider):
     async def embed(self, text: str, *, model: str = "text-embedding-3-small") -> list[float]:
         """Get text embedding via OpenAI's ``/v1/embeddings`` endpoint.
 
-        Returns an empty list on failure so callers can degrade
-        gracefully (the embedding service treats empty vectors as
-        "no embedding"). This matches the contract Gemini/Ollama
-        providers already follow.
+        Transport and provider failures use the same bounded retry and typed,
+        secret-safe error mapping as chat requests. A successful response with
+        no vector remains ``[]`` so the ordered route can distinguish an empty
+        result from provider unavailability.
         """
-        try:
-            kwargs: dict[str, Any] = {"model": model, "input": text}
-            if (
-                self._supports_embedding_dimensions(model)
-                and self._embedding_output_dimensionality > 0
-            ):
-                kwargs["dimensions"] = self._embedding_output_dimensionality
-            response = await self._client.embeddings.create(**kwargs)
-            return list(response.data[0].embedding)
-        except Exception:
-            logger.warning(
-                "%s embedding failed (model=%s)",
-                self._provider_name,
-                model,
-                exc_info=True,
-            )
+        kwargs: dict[str, Any] = {"model": model, "input": text}
+        if self._supports_embedding_dimensions(model) and self._embedding_output_dimensionality > 0:
+            kwargs["dimensions"] = self._embedding_output_dimensionality
+        response = await self._send_with_retry(
+            self._client.embeddings.create,
+            error_mapper=self._map_embedding_error,
+            retain_cause=False,
+            **kwargs,
+        )
+        data = getattr(response, "data", None) or []
+        if not data:
             return []
+        embedding = getattr(data[0], "embedding", None)
+        return list(embedding) if isinstance(embedding, list | tuple) else []
 
     def _supports_embedding_dimensions(self, model: str) -> bool:
         if not model.startswith("text-embedding-3-"):

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeGuard
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from openbiliclaw.config_write import coordinated_config_disk_write
 from openbiliclaw.model_config import (
@@ -938,6 +938,17 @@ def normalize_outbound_proxy(value: str) -> str:
         raise ValueError("代理地址缺少主机名,请填写形如 socks5://127.0.0.1:1080 的地址")
     # Preserve userinfo/host/port/path verbatim; only the scheme is lowercased.
     return f"{scheme}{text[len(parsed.scheme) :]}"
+
+
+def mask_proxy_userinfo(url: str) -> str:
+    """Redact proxy URL userinfo while preserving its useful endpoint."""
+    if not url:
+        return url
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
 
 
 def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:

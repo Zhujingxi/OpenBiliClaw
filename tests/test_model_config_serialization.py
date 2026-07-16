@@ -19,6 +19,8 @@ from openbiliclaw.model_config import (
     EmbeddingProviderConfig,
     EmbeddingRouteConfig,
     ModelConfig,
+    connection_type_registry,
+    validate_model_config,
 )
 
 NATIVE_MODELS_TOML = """
@@ -128,6 +130,41 @@ def _parse_error_type() -> type[ValueError]:
 
 def native_models_raw() -> dict[str, Any]:
     return tomllib.loads(NATIVE_MODELS_TOML)["models"]
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "expected_path"),
+    [
+        ("chat", "concurrency", 0, "models.chat.concurrency"),
+        ("chat", "timeout_seconds", 9, "models.chat.timeout_seconds"),
+        (
+            "embedding",
+            "output_dimensionality",
+            -1,
+            "models.embedding.settings.output_dimensionality",
+        ),
+        (
+            "embedding",
+            "similarity_threshold",
+            float("nan"),
+            "models.embedding.settings.similarity_threshold",
+        ),
+    ],
+)
+def test_parsed_toml_numeric_values_are_checked_by_domain_validation(
+    section: str,
+    field: str,
+    value: object,
+    expected_path: str,
+) -> None:
+    raw = native_models_raw()
+    target = raw["chat"] if section == "chat" else raw["embedding"]["settings"]
+    target[field] = value
+
+    parsed = _parse_model_config(raw)
+    issues = validate_model_config(parsed, connection_type_registry())
+
+    assert [issue.path for issue in issues] == [expected_path]
 
 
 def model_config(

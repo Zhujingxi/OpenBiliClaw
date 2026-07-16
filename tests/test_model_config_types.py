@@ -67,6 +67,125 @@ def issue_codes(config: ModelConfig) -> set[str]:
     return {issue.code for issue in validate_model_config(config, connection_type_registry())}
 
 
+def _with_numeric_value(config: ModelConfig, field: str, value: object) -> ModelConfig:
+    if field == "concurrency":
+        return replace(config, chat=replace(config.chat, concurrency=value))  # type: ignore[arg-type]
+    if field == "timeout_seconds":
+        return replace(config, chat=replace(config.chat, timeout_seconds=value))  # type: ignore[arg-type]
+    settings = config.embedding.settings
+    if field == "output_dimensionality":
+        settings = replace(settings, output_dimensionality=value)  # type: ignore[arg-type]
+    else:
+        settings = replace(settings, similarity_threshold=value)  # type: ignore[arg-type]
+    return replace(config, embedding=replace(config.embedding, settings=settings))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "path", "code"),
+    [
+        ("concurrency", 0, "models.chat.concurrency", "invalid_chat_concurrency"),
+        ("concurrency", 17, "models.chat.concurrency", "invalid_chat_concurrency"),
+        ("concurrency", True, "models.chat.concurrency", "invalid_chat_concurrency"),
+        ("concurrency", 1.5, "models.chat.concurrency", "invalid_chat_concurrency"),
+        ("timeout_seconds", 9, "models.chat.timeout_seconds", "invalid_chat_timeout"),
+        ("timeout_seconds", True, "models.chat.timeout_seconds", "invalid_chat_timeout"),
+        ("timeout_seconds", 10.5, "models.chat.timeout_seconds", "invalid_chat_timeout"),
+        (
+            "output_dimensionality",
+            -1,
+            "models.embedding.settings.output_dimensionality",
+            "invalid_embedding_output_dimensionality",
+        ),
+        (
+            "output_dimensionality",
+            True,
+            "models.embedding.settings.output_dimensionality",
+            "invalid_embedding_output_dimensionality",
+        ),
+        (
+            "output_dimensionality",
+            1.5,
+            "models.embedding.settings.output_dimensionality",
+            "invalid_embedding_output_dimensionality",
+        ),
+        (
+            "similarity_threshold",
+            -0.01,
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+        (
+            "similarity_threshold",
+            1.01,
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+        (
+            "similarity_threshold",
+            True,
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+        (
+            "similarity_threshold",
+            float("nan"),
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+        (
+            "similarity_threshold",
+            float("inf"),
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+        (
+            "similarity_threshold",
+            10**1000,
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+    ],
+)
+def test_domain_validation_rejects_invalid_route_numeric_values(
+    field: str,
+    value: object,
+    path: str,
+    code: str,
+) -> None:
+    config = _with_numeric_value(model_config(), field, value)
+
+    issues = validate_model_config(config, connection_type_registry())
+
+    assert [(issue.path, issue.code) for issue in issues] == [(path, code)]
+
+
+def test_domain_validation_accepts_numeric_boundaries() -> None:
+    config = model_config()
+    config = replace(config, chat=replace(config.chat, concurrency=1, timeout_seconds=10))
+    config = replace(
+        config,
+        embedding=replace(
+            config.embedding,
+            settings=replace(
+                config.embedding.settings,
+                output_dimensionality=0,
+                similarity_threshold=0.0,
+            ),
+        ),
+    )
+    assert validate_model_config(config, connection_type_registry()) == []
+
+    upper = replace(config, chat=replace(config.chat, concurrency=16))
+    upper = replace(
+        upper,
+        embedding=replace(
+            upper.embedding,
+            settings=replace(upper.embedding.settings, similarity_threshold=1.0),
+        ),
+    )
+    assert validate_model_config(upper, connection_type_registry()) == []
+
+
 def test_chat_roles_are_derived_only_from_order() -> None:
     config = model_config(chat_ids=("first", "second", "third"))
     assert [config.chat.role_at(i) for i in range(3)] == [

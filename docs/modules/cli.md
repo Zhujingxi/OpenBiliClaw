@@ -88,6 +88,8 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 CLI runtime builder 每个进程只取一次缓存的 `RuntimeModelBundle` 来构造 `SoulEngine`：Chat route、Embedding service、usage recorder 与 concurrency gate 都来自该同一 bundle。这样 CLI 的手动 dislike / avoidance 写回与 API/OpenClaw 一样可以执行语义候选池清理，不会因为另建 registry 或漏接 embedding 而降级。
 配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 
+代理 URL 若含 `user:password@`，`config-show` 与默认 API 读取共用同一个脱敏器：仅显示 `***@`，保留 scheme、host 与 port 以便诊断，不输出用户名、密码或其 URL 编码形式。
+
 ```bash
 $ openbiliclaw config-show
 当前配置概览

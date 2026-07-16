@@ -170,6 +170,49 @@ def _second_connection(connection_id: str = "secondary") -> ChatConnection:
     )
 
 
+async def test_save_rejects_invalid_route_numeric_values_before_build_or_write(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    initial = _models()
+    _write_native(path, initial)
+    coordinator = FakeCoordinator()
+    service = ModelConfigService(path, coordinator)
+    snapshot = service.read()
+    invalid = replace(
+        initial,
+        chat=replace(initial.chat, concurrency=0, timeout_seconds=9),
+        embedding=replace(
+            initial.embedding,
+            settings=replace(
+                initial.embedding.settings,
+                output_dimensionality=-1,
+                similarity_threshold=float("nan"),
+            ),
+        ),
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(ModelConfigValidationError) as raised:
+        await service.save(ModelConfigSaveRequest(revision=snapshot.revision, models=invalid))
+
+    assert {(error.path, error.code) for error in raised.value.errors} == {
+        ("models.chat.concurrency", "invalid_chat_concurrency"),
+        ("models.chat.timeout_seconds", "invalid_chat_timeout"),
+        (
+            "models.embedding.settings.output_dimensionality",
+            "invalid_embedding_output_dimensionality",
+        ),
+        (
+            "models.embedding.settings.similarity_threshold",
+            "invalid_embedding_similarity_threshold",
+        ),
+    }
+    assert coordinator.build_calls == 0
+    assert coordinator.swap_calls == 0
+    assert path.read_bytes() == before
+
+
 _ENDPOINT_CASES = (
     "chat-openai",
     "chat-anthropic",

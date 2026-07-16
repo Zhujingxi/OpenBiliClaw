@@ -258,6 +258,7 @@ def test_model_api_models_are_strict_and_hide_credential_value_from_repr() -> No
         ChatConnectionIn,
         ChatRouteIn,
         CredentialActionIn,
+        EmbeddingSettingsIn,
         ModelConfigPutIn,
     )
 
@@ -277,6 +278,27 @@ def test_model_api_models_are_strict_and_hide_credential_value_from_repr() -> No
         ChatRouteIn(connections=[connection], concurrency=17, timeout_seconds=10)
     with pytest.raises(ValidationError):
         ChatRouteIn(connections=[connection], concurrency=4, timeout_seconds=9)
+    with pytest.raises(ValidationError):
+        ChatRouteIn(connections=[connection], concurrency=True, timeout_seconds=10)
+    assert EmbeddingSettingsIn(
+        model="embedding",
+        output_dimensionality=0,
+        similarity_threshold=0.0,
+    )
+    assert EmbeddingSettingsIn(
+        model="embedding",
+        output_dimensionality=1,
+        similarity_threshold=1.0,
+    )
+    for settings in (
+        {"output_dimensionality": True, "similarity_threshold": 0.5},
+        {"output_dimensionality": -1, "similarity_threshold": 0.5},
+        {"output_dimensionality": 1, "similarity_threshold": True},
+        {"output_dimensionality": 1, "similarity_threshold": float("nan")},
+        {"output_dimensionality": 1, "similarity_threshold": float("inf")},
+    ):
+        with pytest.raises(ValidationError):
+            EmbeddingSettingsIn(model="embedding", **settings)
 
 
 def test_model_save_request_preserves_omitted_migration_position_for_backend_append() -> None:
