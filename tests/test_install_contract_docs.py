@@ -74,6 +74,17 @@ def test_task14_mandatory_docs_describe_all_native_install_writers() -> None:
     assert "fallback 顺序、Embedding Provider 顺序及共享 settings" in init_doc
 
 
+def test_llm_docs_describe_dashscope_as_native_embedding_provider() -> None:
+    doc = _read("docs/modules/llm.md")
+    row = next(line for line in doc.splitlines() if "| DashScope 多模态 embedding |" in line)
+
+    assert 'provider = "dashscope"' not in row
+    assert "`[[models.embedding.providers]]`" in row
+    assert '`type = "dashscope_api"`' in row
+    assert "`[models.embedding.settings]`" in row
+    assert "Provider 记录不携带 model/settings 覆盖" in row
+
+
 def test_bootstrap_and_install_docs_use_ordered_model_commands() -> None:
     bootstrap = _read("scripts/agent_bootstrap.py")
     agent_doc = _read("docs/agent-install.md")
