@@ -106,6 +106,7 @@ def test_legacy_provider_fallback_and_module_override_fields_are_absent() -> Non
 
 def test_narrow_model_layout_switches_from_list_to_detail() -> None:
     assert "@media (max-width: 820px)" in CSS
+    assert "@container desktop-main (max-width: 940px)" in CSS
     assert ".model-route-layout.is-detail" in CSS
     assert ".model-route-list-pane" in CSS
     assert ".model-inspector-pane" in CSS
@@ -117,12 +118,40 @@ def test_narrow_detail_moves_focus_and_back_restores_the_selected_row_control() 
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
 
     assert 'matchMedia("(max-width: 820px)")' in model_js
+    assert 'layout.getBoundingClientRect().width <= 940' in model_js
     assert "function focusNarrowDetail" in model_js
     assert 'byId("modelInspectorBack")?.focus()' in model_js
     assert "function focusSelectedRouteControl" in model_js
     assert "[data-model-select=" in model_js
     assert "focusSelectedRouteControl();" in model_js
     assert 'byId("modelRouteListPane").focus' not in model_js
+
+
+def test_settings_layout_is_wide_dense_and_keeps_descriptor_copy_separate() -> None:
+    assert ".settings-page { max-width: 1480px; font-size: 14px; }" in CSS
+    assert ".settings-page .content-page-head h2" in CSS
+    assert ".settings-panel:not(.model-settings-panel)" in CSS
+    assert ".model-type-option > span:first-child" in CSS
+    assert ".model-type-option > small" in CSS
+    assert "@container desktop-main (max-width: 720px)" in CSS
+    assert ".model-save-bar .settings-probe-status { flex: 0 1 auto; }" in CSS
+
+
+def test_route_empty_state_is_compact_localized_and_kind_specific() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+
+    for copy in (
+        '"调用顺序"',
+        '"Chat 路由"',
+        '"Embedding 路由"',
+        '"添加 Provider"',
+        '"尚未添加 Chat 连接。"',
+        '"尚未添加 Embedding Provider。"',
+    ):
+        assert copy in model_js
+    assert "当前 route 为空。" not in model_js
+    assert ".model-route-list-pane #modelAddConnection" in CSS
+    assert ".model-route-empty" in CSS
 
 
 def test_model_and_general_saves_have_separate_owners() -> None:
