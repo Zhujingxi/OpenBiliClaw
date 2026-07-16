@@ -10891,6 +10891,7 @@ def create_app(
             _normalize_pool_source_shares,
             _normalize_probability,
             _normalize_scheduler_int,
+            _validate_auto_update_check_interval,
             load_config,
             normalize_outbound_proxy,
             normalize_outbound_proxy_mode,
@@ -11265,6 +11266,12 @@ def create_app(
                             key,
                             _normalize_extension_disconnect_grace(sdata[key]),
                         )
+                    elif key == "auto_update_check_interval_hours":
+                        try:
+                            interval = _validate_auto_update_check_interval(sdata[key])
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        setattr(cfg.scheduler, key, interval)
                     elif key in scheduler_int_limits:
                         default, min_value, max_value = scheduler_int_limits[key]
                         setattr(

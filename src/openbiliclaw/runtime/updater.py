@@ -53,6 +53,8 @@ _OBSERVE_VIA = "runtime-stream"
 _TLS_VERIFICATION_GUIDANCE = (
     "TLS 证书校验失败;请修复系统证书链,或显式设置 SSL_CERT_FILE 指向可信 CA 证书包后重试"
 )
+_PROCESS_APPLY_LOCK = asyncio.Lock()
+_PROCESS_APPLY_TASK: asyncio.Task[None] | None = None
 
 
 @dataclass(frozen=True)
@@ -501,7 +503,6 @@ class AutoUpdateService:
     # digging through backend logs — the generic ``reason`` code alone doesn't
     # tell them *which* remote was rejected.
     _guard_detail: str = field(default="", repr=False)
-    _apply_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _apply_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
     # --- public API -----------------------------------------------------------
@@ -644,8 +645,10 @@ class AutoUpdateService:
 
     async def request_apply(self, *, tag: str = "") -> tuple[int, dict[str, object]]:
         """Validate and start a backend apply flow, returning before restart."""
-        async with self._apply_lock:
-            if self._apply_task is not None and not self._apply_task.done():
+        global _PROCESS_APPLY_TASK
+
+        async with _PROCESS_APPLY_LOCK:
+            if _PROCESS_APPLY_TASK is not None and not _PROCESS_APPLY_TASK.done():
                 self._state = "applying"
                 self._reason = "already_applying"
                 return 409, self._apply_response(
@@ -724,6 +727,7 @@ class AutoUpdateService:
             self._reason = "none"
             self._update_error = ""
             self._apply_task = asyncio.create_task(self._apply_update_to_tag(target_tag))
+            _PROCESS_APPLY_TASK = self._apply_task
             return 202, self._apply_response(
                 state="applying",
                 reason="none",

@@ -666,6 +666,39 @@ async def test_request_apply_rejects_second_concurrent_apply(
     }
 
 
+@pytest.mark.asyncio
+async def test_request_apply_reports_already_applying_after_service_hot_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    first = updater.AutoUpdateService(enabled=False)
+    rebuilt = updater.AutoUpdateService(enabled=False)
+
+    async def _guard(_tag: str) -> str:
+        return ""
+
+    async def _apply(_tag: str) -> None:
+        started.set()
+        await release.wait()
+
+    for service in (first, rebuilt):
+        monkeypatch.setattr(service, "_check_apply_guards", _guard)
+        monkeypatch.setattr(service, "_apply_update_to_tag", _apply)
+
+    first_status, _ = await first.request_apply(tag="backend-v0.3.92")
+    await asyncio.wait_for(started.wait(), timeout=0.5)
+    second_status, second_payload = await rebuilt.request_apply(tag="backend-v0.3.92")
+    release.set()
+    tasks = [task for task in (first._apply_task, rebuilt._apply_task) if task is not None]
+    if tasks:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=0.5)
+
+    assert first_status == 202
+    assert second_status == 409
+    assert second_payload["reason"] == "already_applying"
+
+
 @pytest.mark.parametrize(
     "remote_url",
     [

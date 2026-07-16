@@ -931,6 +931,22 @@ def test_load_config_defaults_invalid_scheduler_runtime_fields(
     assert getattr(config.scheduler, field) == expected
 
 
+@pytest.mark.parametrize("literal", ["0", "-1", '"invalid"'])
+def test_load_config_clamps_invalid_auto_update_interval_to_at_least_one_hour(
+    tmp_path: Path,
+    literal: str,
+) -> None:
+    toml_path = tmp_path / "c.toml"
+    toml_path.write_text(
+        f"[scheduler]\nauto_update_check_interval_hours = {literal}\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(toml_path)
+
+    assert config.scheduler.auto_update_check_interval_hours >= 1
+
+
 def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config = Config()

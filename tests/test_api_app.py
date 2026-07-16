@@ -10914,6 +10914,26 @@ class TestEmbeddingAndCompatProviderE2E:
         assert data["logging"]["unmanaged_truncate_mb"] == 78
         assert data["logging"]["unmanaged_max_age_days"] == 9
 
+    @pytest.mark.parametrize("invalid_interval", [0, -1, "2"])
+    def test_put_config_rejects_invalid_auto_update_interval(
+        self,
+        monkeypatch,
+        tmp_path,
+        invalid_interval,
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"scheduler": {"auto_update_check_interval_hours": invalid_interval}},
+        )
+
+        assert response.status_code == 400
+        assert cfg.scheduler.auto_update_check_interval_hours == 6
+
     def test_put_config_reddit_cookie_paste_writes_rdt_credential_store(
         self, monkeypatch, tmp_path
     ) -> None:

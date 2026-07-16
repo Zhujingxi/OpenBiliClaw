@@ -79,6 +79,8 @@ _DEFAULT_DELIGHT_QUEUE_LIMIT = 20
 _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
 _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES = 30
 _DEFAULT_FEEDBACK_BATCH_THRESHOLD = 3
+_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 1
+_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 6
 # Unified keyword planner (Discover backpressure refactor P1, spec §6).
 # All defaults are the owner-approved starting baseline; see
 # docs/plans/2026-06-14-discover-backpressure-refactor-design.md §6 and
@@ -463,7 +465,7 @@ class SchedulerConfig:
     # tag. Opt-in only — set ``true`` in config.toml after the release
     # pipeline is reliable.
     auto_update_enabled: bool = False
-    auto_update_check_interval_hours: int = 6
+    auto_update_check_interval_hours: int = _DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS
     auto_update_allow_prerelease: bool = False
     auto_update_allowed_remotes: list[str] = field(
         default_factory=lambda: list(_DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES)
@@ -1330,6 +1332,11 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     default=5,
                     min_value=1,
                 ),
+                "auto_update_check_interval_hours": _normalize_scheduler_int(
+                    sched_raw.get("auto_update_check_interval_hours"),
+                    default=_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                    min_value=_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                ),
                 "auto_update_allowed_remotes": _normalize_auto_update_allowed_remotes(
                     sched_raw.get("auto_update_allowed_remotes")
                 ),
@@ -1869,6 +1876,15 @@ def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
         return list(_DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES)
     remotes = [str(item).strip() for item in value if str(item).strip()]
     return remotes or list(_DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES)
+
+
+def _validate_auto_update_check_interval(value: object) -> int:
+    """Reject unsafe save-time updater intervals instead of silently coercing them."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("auto_update_check_interval_hours 必须是整数")
+    if value < _MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS:
+        raise ValueError("auto_update_check_interval_hours 必须至少为 1 小时")
+    return value
 
 
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
@@ -2448,6 +2464,7 @@ def save_config(
     autostart_authoritative: bool = False,
 ) -> Path:
     """Persist a Config dataclass to TOML."""
+    _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
