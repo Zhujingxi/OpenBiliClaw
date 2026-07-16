@@ -6,6 +6,7 @@ import { isTapAuthoritativeAction } from "../src/shared/behavior.ts";
 import { twitterAdapter } from "../src/shared/platforms/twitter.ts";
 import { bilibiliAdapter } from "../src/shared/platforms/bilibili.ts";
 import { redditAdapter } from "../src/shared/platforms/reddit.ts";
+import { xiaohongshuAdapter } from "../src/shared/platforms/xiaohongshu.ts";
 
 const kernelSource = readFileSync(
   new URL("../src/content/kernel.ts", import.meta.url),
@@ -61,6 +62,19 @@ test("bilibili suppresses only DOM comment (its interact tap owns it), not other
   // like / coin / favorite / share / follow still come from the DOM path.
   for (const action of ["like", "coin", "favorite", "share", "follow", "retraction"]) {
     assert.equal(isTapAuthoritativeAction(bilibiliAdapter, action), false, action);
+  }
+});
+
+test("xiaohongshu suppresses DOM like/favorite/retraction (its action tap owns them), not comment/share", () => {
+  // The xhs-action-tap emits the authoritative like/favorite from the write
+  // endpoints and their withdrawals as retractions; the icon-button DOM path
+  // must not double-count nor misfire. comment / share have no tap on xhs and
+  // still flow through the DOM.
+  for (const action of ["like", "favorite", "retraction"]) {
+    assert.equal(isTapAuthoritativeAction(xiaohongshuAdapter, action), true, action);
+  }
+  for (const action of ["comment", "share", "view", "scroll"]) {
+    assert.equal(isTapAuthoritativeAction(xiaohongshuAdapter, action), false, action);
   }
 });
 

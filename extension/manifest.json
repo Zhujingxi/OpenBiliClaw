@@ -67,7 +67,8 @@
             ],
             "js": [
                 "dist/main/xhs-token-sniffer.js",
-                "dist/main/xhs-state-bridge.js"
+                "dist/main/xhs-state-bridge.js",
+                "dist/main/xhs-action-tap.js"
             ],
             "run_at": "document_start",
             "world": "MAIN"

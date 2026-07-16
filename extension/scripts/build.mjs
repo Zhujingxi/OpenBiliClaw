@@ -36,6 +36,10 @@ const entrypoints = [
     outfile: resolve(root, `${outDir}/main/xhs-token-sniffer.js`),
   },
   {
+    entry: resolve(root, "src/main/xhs-action-tap.ts"),
+    outfile: resolve(root, `${outDir}/main/xhs-action-tap.js`),
+  },
+  {
     entry: resolve(root, "src/main/xhs-state-bridge.ts"),
     outfile: resolve(root, `${outDir}/main/xhs-state-bridge.js`),
   },

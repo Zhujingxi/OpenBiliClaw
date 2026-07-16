@@ -48,3 +48,15 @@ def test_dedup_key_prefixes_all_four_key_types() -> None:
     assert dedup_key("https://space.bilibili.com/12345") == "mid:12345"
     assert dedup_key(f"https://www.xiaohongshu.com/explore/{note}") == f"xhs:{note}"
     assert dedup_key("https://example.com/nothing") == ""
+
+
+def test_xhs_action_tap_url_shape_hits_the_note_key() -> None:
+    """The extension's xhs-action-tap builds a note URL as
+    ``https://www.xiaohongshu.com/explore/<note_id>`` (see
+    ``extension/src/content/xhs/action-event.ts:xhsNoteUrl``). That exact
+    shape must extract back to the same note key so a like and its later
+    retraction discount the same events."""
+    note = "69dea966000000001a0280ad"
+    tap_built_url = f"https://www.xiaohongshu.com/explore/{note}"
+    assert note_id_from_url(tap_built_url) == note
+    assert dedup_key(tap_built_url) == f"xhs:{note}"
