@@ -2499,6 +2499,27 @@ def apply_embedding_config(
             *fallbacks,
         )
         enabled = True
+    elif api_key is not None:
+        registry = connection_type_registry()
+        updated_providers: list[Any] = []
+        credential_updates = 0
+        for item in current:
+            accepts_credential = "credential" in registry.definition(item.type).allowed_fields(
+                "embedding", item.preset
+            )
+            if accepts_credential:
+                item = replace(
+                    item,
+                    credential=CredentialConfig(source="inline", value=api_key),
+                )
+                credential_updates += 1
+            updated_providers.append(item)
+        if not credential_updates:
+            raise RuntimeError(
+                "--embedding-api-key requires an existing credential-capable embedding provider"
+            )
+        providers = tuple(updated_providers)
+        enabled = models.embedding.enabled
     else:
         providers = current
         enabled = models.embedding.enabled

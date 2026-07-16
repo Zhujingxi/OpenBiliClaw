@@ -1243,6 +1243,183 @@ cookie = "test-reused-cookie"
     assert "test-explicit-cookie" not in output
 
 
+def _write_ordered_embedding_route(
+    project_dir: Path,
+    *,
+    openai_credential: str = 'api_key_env = "TARGET_OPENAI_EMBEDDING_KEY"',
+    custom_credential: str = 'api_key_env = "TARGET_CUSTOM_EMBEDDING_KEY"',
+    include_remote: bool = True,
+) -> None:
+    remote_providers = (
+        f"""[[models.embedding.providers]]
+id = "openai-second"
+name = "OpenAI second"
+type = "openai_compatible"
+preset = "openai"
+base_url = "https://api.openai.com/v1"
+{openai_credential}
+[[models.embedding.providers]]
+id = "custom-third"
+name = "Custom third"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://embedding.example.test/v1"
+{custom_credential}
+"""
+        if include_remote
+        else ""
+    )
+    project_dir.joinpath("config.toml").write_text(
+        f"""[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "chat-main"
+name = "Chat main"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+api_mode = "chat_completions"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "text-embedding-3-small"
+output_dimensionality = 1536
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "local-first"
+name = "Local first"
+type = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+{remote_providers}
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("reuse_credentials", [False, True])
+def test_run_embedding_key_only_updates_every_credential_capable_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reuse_credentials: bool,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    _write_ordered_embedding_route(target)
+    argv = [
+        "--project-dir",
+        str(target),
+        "--mode",
+        "local",
+        "--embedding-api-key",
+        "test-new-embedding-key",
+        "--skip-install",
+        "--skip-start",
+        "--skip-init",
+        "--skip-ollama-setup",
+    ]
+    if reuse_credentials:
+        source = tmp_path / "source"
+        source.mkdir()
+        _write_ordered_embedding_route(
+            source,
+            openai_credential='api_key = "test-reused-openai-key"',
+            custom_credential='api_key = "test-reused-custom-key"',
+        )
+        argv.extend(["--reuse-from", str(source)])
+    args = bootstrap.build_arg_parser().parse_args(argv)
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: target / "config.toml",
+    )
+    before = tomllib.loads(target.joinpath("config.toml").read_text(encoding="utf-8"))["models"][
+        "embedding"
+    ]
+
+    assert bootstrap.run(args) == 0
+
+    after = tomllib.loads(target.joinpath("config.toml").read_text(encoding="utf-8"))["models"][
+        "embedding"
+    ]
+    before_route = [
+        (item["id"], item["name"], item["type"], item.get("preset"), item["base_url"])
+        for item in before["providers"]
+    ]
+    after_route = [
+        (item["id"], item["name"], item["type"], item.get("preset"), item["base_url"])
+        for item in after["providers"]
+    ]
+    output = capsys.readouterr().out
+    assert after["enabled"] is True
+    assert after["settings"] == before["settings"]
+    assert after_route == before_route
+    assert "api_key" not in after["providers"][0]
+    assert "api_key_env" not in after["providers"][0]
+    assert [item["api_key"] for item in after["providers"][1:]] == [
+        "test-new-embedding-key",
+        "test-new-embedding-key",
+    ]
+    assert all("api_key_env" not in item for item in after["providers"][1:])
+    assert "test-new-embedding-key" not in output
+    assert "test-reused-openai-key" not in output
+    assert "test-reused-custom-key" not in output
+
+
+def test_run_embedding_key_only_rejects_route_without_credential_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_ordered_embedding_route(tmp_path, include_remote=False)
+    config_path = tmp_path / "config.toml"
+    before = config_path.read_bytes()
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--mode",
+            "local",
+            "--embedding-api-key",
+            "test-unused-embedding-key",
+            "--skip-install",
+            "--skip-start",
+            "--skip-init",
+            "--skip-ollama-setup",
+        ]
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: config_path,
+    )
+
+    assert bootstrap.run(args) == 2
+
+    output = capsys.readouterr().out
+    assert "requires an existing credential-capable embedding provider" in output
+    assert "test-unused-embedding-key" not in output
+    assert config_path.read_bytes() == before
+
+
 def test_reuse_config_secrets_skips_incompatible_source_route(
     tmp_path: Path,
 ) -> None:

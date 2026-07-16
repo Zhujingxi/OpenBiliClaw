@@ -197,6 +197,14 @@ own stable-ID identity even if their credential values happen to match. Explicit
 `--llm-api-key`, `--embedding-api-key`, and `--bilibili-cookie` values override
 the reused values.
 
+When `--embedding-api-key` is supplied without `--embedding-provider` or
+`--embedding-endpoint`, bootstrap updates every existing ordered Embedding
+provider whose descriptor accepts credentials. Stable IDs, names, types,
+presets, endpoints, shared settings, and order are preserved; credentialless
+providers such as Ollama remain unchanged. If the route has no
+credential-capable provider, bootstrap reports an error without rewriting the
+configuration.
+
 **You must surface the reuse to the user, not skip the corresponding
 question silently.** Specifically for `bilibili.cookie`:
 
