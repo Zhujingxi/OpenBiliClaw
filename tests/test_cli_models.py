@@ -889,6 +889,95 @@ def test_model_group_scrubs_api_key_before_all_parser_failures(
     assert vault.pending_count() == 0
 
 
+@pytest.mark.parametrize("target_kind", ["root", "subgroup"])
+@pytest.mark.parametrize("argument_source", ["explicit", "sys_argv"])
+@pytest.mark.parametrize("subcommand", ["add", "edit"])
+def test_model_group_scrubs_api_key_after_group_terminator(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    target_kind: str,
+    argument_source: str,
+    subcommand: str,
+) -> None:
+    module = _models_module(runner)
+    target = app if target_kind == "root" else module.models_app
+    command_args = (["models"] if target_kind == "root" else []) + ["--", subcommand]
+    if subcommand == "add":
+        command_args.extend(
+            [
+                "--kind",
+                "chat",
+                "--api-key",
+                _EXCEPTION_SECRET,
+                "--position",
+                "0",
+            ]
+        )
+    else:
+        command_args.extend(
+            [
+                "route-a",
+                "--api-key",
+                _EXCEPTION_SECRET,
+                "--output-dimensionality",
+                "-1",
+            ]
+        )
+
+    if argument_source == "explicit":
+        result = runner.invoke(target, command_args)
+        exception = result.exception
+        output = result.output
+        exit_code = result.exit_code
+        retained_args = command_args
+    else:
+        monkeypatch.setattr(sys, "argv", ["model-cli-test", *command_args])
+        command_args.clear()
+        command = typer.main.get_command(target)
+        with runner.isolation() as outstreams:
+            with pytest.raises(SystemExit) as caught:
+                command.main(args=None, prog_name="model-cli-test")
+            output = outstreams[2].getvalue().decode("utf-8", errors="replace")
+        exception = caught.value
+        exit_code = cast("int", exception.code)
+        retained_args = sys.argv[1:]
+
+    assert exit_code == 2
+    assert exception is not None
+    assert _EXCEPTION_SECRET not in output
+    assert _EXCEPTION_SECRET not in _exception_artifacts(exception)
+    assert all(_EXCEPTION_SECRET not in value for value in retained_args)
+    assert all(_EXCEPTION_SECRET not in value for value in sys.argv)
+    assert module._INLINE_API_KEY_VAULT.pending_count() == 0
+
+
+def test_group_terminator_keeps_later_leaf_terminator_boundary(
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    command_args = [
+        "models",
+        "--",
+        "add",
+        "--kind",
+        "chat",
+        "--api-key",
+        _EXCEPTION_SECRET,
+        "--",
+        _TERMINATED_API_KEY_LITERAL,
+    ]
+
+    result = runner.invoke(app, command_args)
+
+    assert result.exit_code == 2
+    assert result.exception is not None
+    assert _EXCEPTION_SECRET not in result.output
+    assert _EXCEPTION_SECRET not in _exception_artifacts(result.exception)
+    assert all(_EXCEPTION_SECRET not in value for value in command_args)
+    assert _TERMINATED_API_KEY_LITERAL in command_args
+    assert module._INLINE_API_KEY_VAULT.pending_count() == 0
+
+
 @pytest.mark.parametrize("argument_source", ["explicit", "sys_argv"])
 def test_model_group_cleans_partial_vault_when_sanitizer_aborts(
     monkeypatch: pytest.MonkeyPatch,

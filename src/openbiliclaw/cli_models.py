@@ -317,10 +317,13 @@ def _model_api_key_occurrences(
     """Select grammar-aware or conservative scanning for one model invocation."""
     if offset is None or offset >= len(args):
         return ()
-    command = group.commands.get(args[offset]) if group is not None else None
+    command_offset = offset + 1 if args[offset] == "--" else offset
+    if command_offset >= len(args):
+        return ()
+    command = group.commands.get(args[command_offset]) if group is not None else None
     if command is None:
-        return _conservative_api_key_occurrences(args, start=offset)
-    return _command_api_key_occurrences(args, start=offset + 1, command=command)
+        return _conservative_api_key_occurrences(args, start=command_offset)
+    return _command_api_key_occurrences(args, start=command_offset + 1, command=command)
 
 
 def _protect_inline_api_key_args(
