@@ -308,7 +308,7 @@ Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or anothe
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that both the configured LLM provider and embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in.
+The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Model setup chooses a Chat connection type first and a preset only when that type supports one; Embedding is an ordered provider list with one shared model/settings object. Before auto-init, bootstrap probes the stable primary Chat connection exactly with fallback disabled and every ordered Embedding provider exactly; any failure blocks init until you fix that record. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in.
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
@@ -348,7 +348,7 @@ Native Windows (PowerShell, no Docker or WSL2 required):
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-The script needs `git` and Python 3.11+. It clones the repo, then asks for LLM provider, embedding, Bilibili cookie, Xiaohongshu opt-in, Douyin opt-in, YouTube opt-in, X opt-in, and Zhihu opt-in choices in the terminal wizard before installing dependencies or starting the backend. Once the confirmations are complete, it starts the backend, runs the health check, verifies that the LLM provider and embedding service can really respond, then automatically runs init to build the first profile and discovery pool. If unsure, press Enter or choose the default.
+The script needs `git` and Python 3.11+. It clones the repo, then asks for the Chat connection type, a conditional preset, the ordered Embedding providers, Bilibili cookie, Xiaohongshu opt-in, Douyin opt-in, YouTube opt-in, X opt-in, and Zhihu opt-in choices in the terminal wizard before installing dependencies or starting the backend. Once the confirmations are complete, it starts the backend, runs the health check, probes the stable primary Chat connection with fallback disabled and every ordered Embedding provider against the shared settings, then automatically runs init to build the first profile and discovery pool. If unsure, press Enter or choose the default.
 
 </details>
 
@@ -602,11 +602,12 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Model API + transactional Chat/Embedding routes + desktop/extension/mobile/CLI editors (stages 9–13) │
+│ Model API + transactional Chat/Embedding routes + all configuration entry points (stages 9–14) │
 │ Chat/Embedding/Runtime tabs · one stable-ID ordered route │
 │ Desktop inspector · extension/mobile sequential list→detail · descriptor-driven fields │
 │ strict GET/PUT snapshot/save · descriptors · exact draft probe │
 │ CLI models list/add/edit/remove/move/probe → ModelConfigService │
+│ setup/bootstrap/install/Docker/package → native [models] writer │
 │ legacy /api/config is a credential-free projection with write guard │
 │ native/legacy + base/local → ModelConfigService path lock  │
 │ safe endpoint → redacted snapshot; credential + local fence │

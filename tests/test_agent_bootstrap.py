@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 import sys
+import tomllib
+import types
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,448 @@ def _load_bootstrap_module():
 
 
 bootstrap = _load_bootstrap_module()
+
+
+def _write_native_config(tmp_path: Path) -> None:
+    (tmp_path / "config.toml").write_text(
+        """[models]
+schema_version = 1
+
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+
+[[models.chat.connections]]
+id = "existing-main"
+name = "Existing main"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+api_mode = "chat_completions"
+
+[[models.chat.connections]]
+id = "kept-fallback"
+name = "Kept fallback"
+type = "ollama"
+model = "qwen2.5:7b"
+base_url = "http://127.0.0.1:11434/v1"
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+
+[bilibili]
+cookie = "SESSDATA=test; bili_jct=test; DedeUserID=1"
+""",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy", "connection_type", "preset"),
+    [
+        ("deepseek", "openai_compatible", "deepseek"),
+        ("openai", "openai_compatible", "openai"),
+        ("openrouter", "openai_compatible", "openrouter"),
+        ("openai_compatible", "openai_compatible", "custom"),
+        ("claude", "anthropic_compatible", "anthropic"),
+        ("gemini", "gemini_api", ""),
+        ("ollama", "ollama", ""),
+    ],
+)
+def test_legacy_provider_alias_maps_to_connection_type_and_preset(
+    legacy: str,
+    connection_type: str,
+    preset: str,
+) -> None:
+    assert bootstrap.resolve_connection_selection(provider=legacy) == (
+        connection_type,
+        preset,
+    )
+
+
+def test_parser_uses_connection_type_and_preset_as_canonical_model_flags(
+    tmp_path: Path,
+) -> None:
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--connection-type",
+            "openai_compatible",
+            "--preset",
+            "deepseek",
+            "--embedding-endpoint",
+            "ollama=http://embed-a:11434/v1",
+            "--embedding-endpoint",
+            "ollama=http://embed-b:11434/v1",
+        ]
+    )
+
+    assert args.connection_type == "openai_compatible"
+    assert args.preset == "deepseek"
+    assert args.embedding_endpoint == [
+        "ollama=http://embed-a:11434/v1",
+        "ollama=http://embed-b:11434/v1",
+    ]
+    assert not hasattr(args, "module_override")
+
+    with pytest.raises(SystemExit):
+        bootstrap.build_arg_parser().parse_args(["--module-override", "soul=ollama:qwen"])
+
+
+def test_deprecated_provider_alias_surface_is_exact_and_rejects_codex() -> None:
+    assert bootstrap.SUPPORTED_PROVIDERS == (
+        "openai",
+        "claude",
+        "gemini",
+        "deepseek",
+        "ollama",
+        "openrouter",
+        "openai_compatible",
+    )
+    assert "codex" not in bootstrap.LEGACY_PROVIDER_CONNECTIONS
+
+    with pytest.raises(SystemExit):
+        bootstrap.build_arg_parser().parse_args(["--provider", "codex"])
+
+
+def test_native_chat_writer_edits_primary_without_dropping_fallback(tmp_path: Path) -> None:
+    _write_native_config(tmp_path)
+
+    result = bootstrap.apply_chat_route_config(
+        tmp_path,
+        connection_type="openai_compatible",
+        preset="openrouter",
+        model="openai/gpt-5-nano",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="test-router-key",
+        credential_ref=None,
+    )
+
+    raw = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    connections = raw["models"]["chat"]["connections"]
+    assert result["connection_id"] == "existing-main"
+    assert [item["id"] for item in connections] == ["existing-main", "kept-fallback"]
+    assert connections[0]["type"] == "openai_compatible"
+    assert connections[0]["preset"] == "openrouter"
+    assert connections[0]["api_key"] == "test-router-key"
+    assert connections[1]["type"] == "ollama"
+    assert "[llm" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+
+def test_native_chat_writer_allocates_id_without_embedding_collision(tmp_path: Path) -> None:
+    tmp_path.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "chat-main"
+name = "Existing embedding"
+type = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+""",
+        encoding="utf-8",
+    )
+
+    result = bootstrap.apply_chat_route_config(
+        tmp_path,
+        connection_type="openai_compatible",
+        preset="deepseek",
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com",
+        api_key=None,
+        credential_ref=None,
+    )
+
+    raw = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    assert result["connection_id"] == "chat-main-2"
+    assert raw["models"]["chat"]["connections"][0]["id"] == "chat-main-2"
+    assert raw["models"]["embedding"]["providers"][0]["id"] == "chat-main"
+
+
+def test_embedding_endpoints_create_ordered_providers_with_shared_model(tmp_path: Path) -> None:
+    _write_native_config(tmp_path)
+
+    result = bootstrap.apply_embedding_config(
+        tmp_path,
+        provider=None,
+        model="bge-m3",
+        base_url=None,
+        api_key=None,
+        endpoints=[
+            "ollama=http://embed-a:11434/v1",
+            "ollama=http://embed-b:11434/v1",
+        ],
+    )
+
+    raw = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    embedding = raw["models"]["embedding"]
+    assert result["provider_ids"] == ["embedding-1", "embedding-2"]
+    assert embedding["enabled"] is True
+    assert embedding["settings"]["model"] == "bge-m3"
+    assert [provider["id"] for provider in embedding["providers"]] == [
+        "embedding-1",
+        "embedding-2",
+    ]
+    assert [provider["base_url"] for provider in embedding["providers"]] == [
+        "http://embed-a:11434/v1",
+        "http://embed-b:11434/v1",
+    ]
+    assert all("model" not in provider for provider in embedding["providers"])
+
+
+def test_embedding_endpoint_edits_reuse_positional_ids_and_only_compatible_credentials(
+    tmp_path: Path,
+) -> None:
+    _write_native_config(tmp_path)
+    bootstrap.apply_embedding_config(
+        tmp_path,
+        provider=None,
+        model="shared-vector-model",
+        base_url=None,
+        api_key="test-embedding-key",
+        endpoints=[
+            "openai_compatible:openai=https://embed-a.example/v1",
+            "ollama=http://embed-b:11434/v1",
+        ],
+    )
+
+    bootstrap.apply_embedding_config(
+        tmp_path,
+        provider=None,
+        model="shared-vector-model",
+        base_url=None,
+        api_key=None,
+        endpoints=[
+            "openai_compatible:openai=https://embed-a-edited.example/v1",
+            "ollama=http://embed-b-edited:11434/v1",
+        ],
+    )
+    edited = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    providers = edited["models"]["embedding"]["providers"]
+    assert [item["id"] for item in providers] == ["embedding-1", "embedding-2"]
+    assert providers[0]["api_key"] == "test-embedding-key"
+
+    bootstrap.apply_embedding_config(
+        tmp_path,
+        provider=None,
+        model="shared-vector-model",
+        base_url=None,
+        api_key=None,
+        endpoints=[
+            "ollama=http://embed-b-edited:11434/v1",
+            "openai_compatible:openai=https://embed-a-edited.example/v1",
+        ],
+    )
+    reordered = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))
+    providers = reordered["models"]["embedding"]["providers"]
+    assert [item["id"] for item in providers] == ["embedding-1", "embedding-2"]
+    assert [item["type"] for item in providers] == ["ollama", "openai_compatible"]
+    assert "api_key" not in providers[0]
+    assert "api_key" not in providers[1]
+
+
+def test_embedding_endpoint_allocates_id_without_chat_collision(tmp_path: Path) -> None:
+    _write_native_config(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'id = "existing-main"', 'id = "embedding-1"', 1
+        ),
+        encoding="utf-8",
+    )
+
+    result = bootstrap.apply_embedding_config(
+        tmp_path,
+        provider=None,
+        model="bge-m3",
+        base_url=None,
+        api_key=None,
+        endpoints=["ollama=http://embed-a:11434/v1"],
+    )
+
+    assert result["provider_ids"] == ["embedding-2"]
+
+
+@pytest.mark.parametrize(
+    ("alias", "preset", "model"),
+    [
+        ("openai", "openai", "gpt-5-nano"),
+        ("openrouter", "openrouter", "openai/gpt-5-nano"),
+    ],
+)
+def test_provider_alias_run_supplies_required_default_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    alias: str,
+    preset: str,
+    model: str,
+) -> None:
+    _write_native_config(tmp_path)
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--mode",
+            "local",
+            "--provider",
+            alias,
+            "--embedding-provider",
+            "",
+            "--skip-install",
+            "--skip-start",
+            "--skip-init",
+        ]
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: tmp_path / "config.toml",
+    )
+
+    assert bootstrap.run(args) == 0
+    primary = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["models"][
+        "chat"
+    ]["connections"][0]
+    assert primary["preset"] == preset
+    assert primary["model"] == model
+
+
+def test_run_creates_default_primary_when_native_chat_route_is_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "config.toml").write_text(
+        """[models]
+schema_version = 1
+
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--mode",
+            "local",
+            "--embedding-provider",
+            "",
+            "--skip-install",
+            "--skip-start",
+            "--skip-init",
+        ]
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: tmp_path / "config.toml",
+    )
+
+    assert bootstrap.run(args) == 0
+    primary = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["models"][
+        "chat"
+    ]["connections"][0]
+    assert primary["id"] == "chat-main"
+    assert primary["type"] == "openai_compatible"
+    assert primary["preset"] == "deepseek"
+
+
+def test_native_chat_route_is_untouched_without_explicit_model_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_native_config(tmp_path)
+    before = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["models"]["chat"]
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--mode",
+            "docker",
+            "--skip-start",
+            "--no-xhs",
+            "--no-douyin",
+            "--no-youtube",
+        ]
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: tmp_path / "config.toml",
+    )
+
+    assert bootstrap.run(args) == 0
+
+    after = tomllib.loads((tmp_path / "config.toml").read_text(encoding="utf-8"))["models"]["chat"]
+    assert after == before
+
+
+def test_codex_oauth_writer_serializes_only_imported_credential_reference(tmp_path: Path) -> None:
+    _write_native_config(tmp_path)
+
+    bootstrap.apply_chat_route_config(
+        tmp_path,
+        connection_type="codex_oauth",
+        preset="",
+        model="gpt-5-nano",
+        base_url=None,
+        api_key=None,
+        credential_ref="codex",
+    )
+
+    text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    connection = tomllib.loads(text)["models"]["chat"]["connections"][0]
+    assert connection["type"] == "codex_oauth"
+    assert connection["credential_ref"] == "codex"
+    assert "api_key" not in connection
+    assert "oauth_token" not in text
 
 
 def test_bootstrap_extends_no_proxy_for_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,7 +626,7 @@ def test_init_decisions_required_for_all_optional_sources(tmp_path: Path) -> Non
     assert decisions["missing"] == ["xhs", "douyin", "youtube"]
 
 
-def test_apply_embedding_config_writes_embedding_owned_credentials(tmp_path: Path) -> None:
+def test_apply_embedding_config_writes_native_provider_credentials(tmp_path: Path) -> None:
     _write_minimal_config(tmp_path)
 
     result = bootstrap.apply_embedding_config(
@@ -190,17 +634,19 @@ def test_apply_embedding_config_writes_embedding_owned_credentials(tmp_path: Pat
         provider="openai",
         model="text-embedding-3-small",
         base_url="https://embed.example.com/v1",
-        api_key="sk-embedding",
+        api_key="test-embedding-key",
     )
 
     text = (tmp_path / "config.toml").read_text(encoding="utf-8")
-    assert "llm.embedding.base_url" in result["written"]
-    assert "llm.embedding.api_key" in result["written"]
-    assert "[llm.embedding]" in text
-    assert 'provider = "openai"' in text
-    assert 'model = "text-embedding-3-small"' in text
-    assert 'base_url = "https://embed.example.com/v1"' in text
-    assert 'api_key = "sk-embedding"' in text
+    raw = tomllib.loads(text)
+    embedding = raw["models"]["embedding"]
+    assert result["written"] == ["models.embedding"]
+    assert embedding["settings"]["model"] == "text-embedding-3-small"
+    assert embedding["providers"][0]["type"] == "openai_compatible"
+    assert embedding["providers"][0]["preset"] == "openai"
+    assert embedding["providers"][0]["base_url"] == "https://embed.example.com/v1"
+    assert embedding["providers"][0]["api_key"] == "test-embedding-key"
+    assert "[llm" not in text
 
 
 def test_docker_run_rewrites_default_ollama_embedding_to_compose_sidecar(
@@ -243,9 +689,12 @@ def test_docker_run_rewrites_default_ollama_embedding_to_compose_sidecar(
 
     config = bootstrap.read_simple_toml(tmp_path / "config.toml")
     assert returncode == 0
-    assert config["llm"]["embedding"]["provider"] == "ollama"
-    assert config["llm"]["embedding"]["model"] == "bge-m3"
-    assert config["llm"]["embedding"]["base_url"] == "http://ollama:11434/v1"
+    embedding = config["models"]["embedding"]
+    assert embedding["enabled"] is True
+    assert embedding["settings"]["model"] == "bge-m3"
+    assert embedding["providers"][0]["type"] == "ollama"
+    assert embedding["providers"][0]["base_url"] == "http://ollama:11434/v1"
+    assert "llm" not in config
 
 
 def test_should_auto_wire_embedding_when_unconfigured_local() -> None:
@@ -339,41 +788,24 @@ def test_detect_missing_secrets_flags_openai_compatible_connection_fields(
     ]
 
 
-def test_reuse_config_secrets_copies_openai_compatible_connection(
+def test_reuse_config_secrets_overlays_compatible_credential_without_replacing_route(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "target"
     source = tmp_path / "source"
     target.mkdir()
     source.mkdir()
-    (target / "config.toml").write_text(
+    _write_native_config(target)
+    (source / "config.toml").write_text(
         "\n".join(
             [
                 "[llm]",
                 'default_provider = "deepseek"',
                 "",
-                "[llm.openai_compatible]",
-                'api_key = ""',
-                'model = ""',
-                'base_url = ""',
-                "",
-                "[bilibili]",
-                'cookie = ""',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (source / "config.toml").write_text(
-        "\n".join(
-            [
-                "[llm]",
-                'default_provider = "openai_compatible"',
-                "",
-                "[llm.openai_compatible]",
-                'api_key = "sk-relay"',
-                'model = "relay-model"',
-                'base_url = "https://relay.example/v1"',
+                "[llm.deepseek]",
+                'api_key = "test-reused-key"',
+                'model = "source-model-must-not-replace-target"',
+                'base_url = "https://source.example/v1"',
                 "",
                 "[bilibili]",
                 'cookie = "SESSDATA=test; bili_jct=test; DedeUserID=1"',
@@ -384,44 +816,107 @@ def test_reuse_config_secrets_copies_openai_compatible_connection(
     )
 
     summary = bootstrap.reuse_config_secrets(target, source)
-    status = bootstrap.detect_missing_secrets(target)
     target_config = bootstrap.read_simple_toml(target / "config.toml")
+    connections = target_config["models"]["chat"]["connections"]
 
-    assert "llm.openai_compatible.api_key" in summary["reused"]
-    assert "llm.openai_compatible.model" in summary["reused"]
-    assert "llm.openai_compatible.base_url" in summary["reused"]
-    assert status["missing"] == []
-    assert target_config["llm"]["default_provider"] == "openai_compatible"
-    assert target_config["llm"]["openai_compatible"]["api_key"] == "sk-relay"
-    assert target_config["llm"]["openai_compatible"]["model"] == "relay-model"
-    assert target_config["llm"]["openai_compatible"]["base_url"] == "https://relay.example/v1"
+    assert "models.chat.connections.existing-main.credential" in summary["reused"]
+    assert [item["id"] for item in connections] == ["existing-main", "kept-fallback"]
+    assert connections[0]["model"] == "deepseek-v4-flash"
+    assert connections[0]["base_url"] == "https://api.deepseek.com"
+    assert connections[0]["api_key"] == "test-reused-key"
+    assert connections[1]["type"] == "ollama"
+    assert "llm" not in target_config
 
 
-def test_reuse_config_secrets_copies_remote_provider_model_and_base_url(
+def test_reuse_config_secrets_reserves_exact_id_match_before_compatible_fallback(
     tmp_path: Path,
 ) -> None:
     target = tmp_path / "target"
     source = tmp_path / "source"
     target.mkdir()
     source.mkdir()
-    (target / "config.toml").write_text(
-        "\n".join(
-            [
-                "[llm]",
-                'default_provider = "deepseek"',
-                "",
-                "[llm.openrouter]",
-                'api_key = ""',
-                'model = ""',
-                'base_url = ""',
-                "",
-                "[bilibili]",
-                'cookie = ""',
-                "",
-            ]
-        ),
+    target.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "compatible-first"
+name = "Compatible first"
+type = "openai_compatible"
+preset = "deepseek"
+model = "target-first-model"
+base_url = "https://target-first.example/v1"
+api_key_env = "TARGET_FIRST_KEY"
+[[models.chat.connections]]
+id = "exact-second"
+name = "Exact second"
+type = "openai_compatible"
+preset = "deepseek"
+model = "target-second-model"
+base_url = "https://target-second.example/v1"
+api_key_env = "TARGET_SECOND_KEY"
+[models.embedding]
+enabled = false
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[bilibili]
+cookie = ""
+""",
         encoding="utf-8",
     )
+    source.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "exact-second"
+name = "Source exact"
+type = "openai_compatible"
+preset = "deepseek"
+model = "source-model-must-not-replace-target"
+base_url = "https://source.example/v1"
+api_key = "test-exact-source-key"
+[models.embedding]
+enabled = false
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+
+    summary = bootstrap.reuse_config_secrets(target, source)
+
+    connections = tomllib.loads((target / "config.toml").read_text(encoding="utf-8"))["models"][
+        "chat"
+    ]["connections"]
+    assert connections[0]["api_key_env"] == "TARGET_FIRST_KEY"
+    assert "api_key" not in connections[0]
+    assert connections[1]["api_key"] == "test-exact-source-key"
+    assert connections[0]["model"] == "target-first-model"
+    assert connections[1]["model"] == "target-second-model"
+    assert summary["reused"] == ["models.chat.connections.exact-second.credential"]
+
+
+def test_reuse_config_secrets_skips_incompatible_source_route(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    source = tmp_path / "source"
+    target.mkdir()
+    source.mkdir()
+    _write_native_config(target)
     (source / "config.toml").write_text(
         "\n".join(
             [
@@ -429,7 +924,7 @@ def test_reuse_config_secrets_copies_remote_provider_model_and_base_url(
                 'default_provider = "openrouter"',
                 "",
                 "[llm.openrouter]",
-                'api_key = "sk-router"',
+                'api_key = "test-router-key"',
                 'model = "anthropic/claude-sonnet-4-6"',
                 'base_url = "https://openrouter.ai/api/v1"',
                 "",
@@ -443,14 +938,22 @@ def test_reuse_config_secrets_copies_remote_provider_model_and_base_url(
 
     summary = bootstrap.reuse_config_secrets(target, source)
     target_config = bootstrap.read_simple_toml(target / "config.toml")
+    connections = target_config["models"]["chat"]["connections"]
 
-    assert "llm.openrouter.api_key" in summary["reused"]
-    assert "llm.openrouter.model" in summary["reused"]
-    assert "llm.openrouter.base_url" in summary["reused"]
-    assert target_config["llm"]["default_provider"] == "openrouter"
-    assert target_config["llm"]["openrouter"]["api_key"] == "sk-router"
-    assert target_config["llm"]["openrouter"]["model"] == "anthropic/claude-sonnet-4-6"
-    assert target_config["llm"]["openrouter"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert any("openai_compatible:openrouter" in item for item in summary["skipped"])
+    assert [item["id"] for item in connections] == ["existing-main", "kept-fallback"]
+    assert connections[0]["preset"] == "deepseek"
+    assert connections[0]["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert "llm" not in target_config
+
+
+def test_reuse_config_secrets_has_no_legacy_target_writer() -> None:
+    source = Path("scripts/agent_bootstrap.py").read_text(encoding="utf-8")
+    body = source.split("def reuse_config_secrets(", 1)[1].split("\ndef persist_cookie_file", 1)[0]
+
+    assert "default_provider" not in body
+    assert 'f"llm.' not in body
+    assert '"llm"' not in body
 
 
 def test_run_reports_auto_wired_embedding_from_config(
@@ -458,27 +961,7 @@ def test_run_reports_auto_wired_embedding_from_config(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    (tmp_path / "config.toml").write_text(
-        "\n".join(
-            [
-                "[llm]",
-                'default_provider = "deepseek"',
-                "",
-                "[llm.deepseek]",
-                'api_key = ""',
-                "",
-                "[llm.embedding]",
-                'provider = ""',
-                'model = ""',
-                'base_url = ""',
-                "",
-                "[bilibili]",
-                'cookie = ""',
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    _write_native_config(tmp_path)
     args = bootstrap.build_arg_parser().parse_args(
         [
             "--project-dir",
@@ -518,12 +1001,13 @@ def test_run_reports_auto_wired_embedding_from_config(
 
     assert returncode == 0
     assert final["message"] == "skipped_start"
-    assert final["details"]["init_decisions"]["embedding"] == {
-        "source": "config",
-        "provider": "ollama",
-        "model": "bge-m3",
-        "explicit": True,
-    }
+    embedding = final["details"]["init_decisions"]["embedding"]
+    assert embedding["source"] == "config"
+    assert embedding["provider"] == "ollama"
+    assert embedding["providers"] == ["ollama"]
+    assert embedding["model"] == "bge-m3"
+    assert embedding["enabled"] is True
+    assert embedding["explicit"] is True
 
 
 def test_build_init_command_appends_all_source_flags_for_local(tmp_path: Path) -> None:
@@ -550,12 +1034,28 @@ def test_build_init_command_appends_all_source_flags_for_local(tmp_path: Path) -
 
 
 def test_human_install_choice_parser_accepts_numbers_and_aliases() -> None:
-    assert bootstrap.resolve_human_llm_choice("") == "deepseek"
-    assert bootstrap.resolve_human_llm_choice("1") == "deepseek"
-    assert bootstrap.resolve_human_llm_choice("2") == "openai_compatible"
+    assert [item[0] for item in bootstrap.HUMAN_LLM_MENU] == [
+        "openai_compatible",
+        "anthropic_compatible",
+        "gemini_api",
+        "ollama",
+        "codex_oauth",
+    ]
+    assert bootstrap.resolve_human_llm_choice("") == "openai_compatible"
+    assert bootstrap.resolve_human_llm_choice("1") == "openai_compatible"
+    assert bootstrap.resolve_human_llm_choice("2") == "anthropic_compatible"
     assert bootstrap.resolve_human_llm_choice("relay") == "openai_compatible"
     assert bootstrap.resolve_human_llm_choice("ollama") == "ollama"
     assert bootstrap.resolve_human_llm_choice("bad") is None
+
+
+def test_human_install_preset_parser_runs_after_connection_type() -> None:
+    assert bootstrap.resolve_human_preset_choice("openai_compatible", "") == "deepseek"
+    assert bootstrap.resolve_human_preset_choice("openai_compatible", "2") == "openai"
+    assert bootstrap.resolve_human_preset_choice("openai_compatible", "relay") == "custom"
+    assert bootstrap.resolve_human_preset_choice("anthropic_compatible", "") == "anthropic"
+    assert bootstrap.resolve_human_preset_choice("gemini_api", "") == ""
+    assert bootstrap.resolve_human_preset_choice("openai_compatible", "bad") is None
 
 
 def test_secret_presence_label_never_includes_secret_value() -> None:
@@ -579,15 +1079,16 @@ def test_human_install_answers_reject_unknown_provider() -> None:
 
 def test_collect_human_llm_defaults_to_deepseek() -> None:
     prompts: list[tuple[str, str]] = []
-    plain_inputs = iter(["", ""])
-    secret_inputs = iter(["sk-deepseek"])
+    plain_inputs = iter(["", "", ""])
+    secret_inputs = iter(["test-deepseek-key"])
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda prompt: prompts.append(("plain", prompt)) or next(plain_inputs),
         secret_input_func=lambda prompt: prompts.append(("secret", prompt)) or next(secret_inputs),
     )
 
-    assert answer.provider == "deepseek"
-    assert answer.llm_api_key == "sk-deepseek"
+    assert answer.connection_type == "openai_compatible"
+    assert answer.preset == "deepseek"
+    assert answer.llm_api_key == "test-deepseek-key"
     assert answer.llm_model == "deepseek-v4-flash"
     assert answer.llm_base_url is None
     assert any(kind == "secret" and "API Key" in prompt for kind, prompt in prompts)
@@ -595,45 +1096,47 @@ def test_collect_human_llm_defaults_to_deepseek() -> None:
 
 def test_collect_human_llm_openai_compat_relay_collects_triplet() -> None:
     prompts: list[tuple[str, str]] = []
-    plain_inputs = iter(["2", "", "https://relay.example/v1", ""])
-    secret_inputs = iter(["sk-relay"])
+    plain_inputs = iter(["1", "4", "", "https://relay.example/v1"])
+    secret_inputs = iter(["test-relay-key"])
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda prompt: prompts.append(("plain", prompt)) or next(plain_inputs),
         secret_input_func=lambda prompt: prompts.append(("secret", prompt)) or next(secret_inputs),
     )
 
-    assert answer.provider == "openai_compatible"
-    assert answer.provider in bootstrap.SUPPORTED_PROVIDERS
+    assert answer.connection_type == "openai_compatible"
+    assert answer.preset == "custom"
     assert answer.llm_base_url == "https://relay.example/v1"
-    assert answer.llm_api_key == "sk-relay"
+    assert answer.llm_api_key == "test-relay-key"
     assert answer.llm_model == "gpt-5-nano"
     assert any(kind == "secret" and "API Key" in prompt for kind, prompt in prompts)
 
 
 def test_collect_human_llm_openai_compat_numeric_preset_uses_vendor_defaults() -> None:
-    plain_inputs = iter(["2", "2", "", ""])
-    secret_inputs = iter(["sk-kimi"])
+    plain_inputs = iter(["1", "3", ""])
+    secret_inputs = iter(["test-openrouter-key"])
 
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda _prompt: next(plain_inputs),
         secret_input_func=lambda _prompt: next(secret_inputs),
     )
 
-    assert answer.provider == "openai_compatible"
-    assert answer.llm_base_url == "https://api.moonshot.ai/v1"
-    assert answer.llm_api_key == "sk-kimi"
-    assert answer.llm_model == "kimi-k2.6"
+    assert answer.connection_type == "openai_compatible"
+    assert answer.preset == "openrouter"
+    assert answer.llm_base_url is None
+    assert answer.llm_api_key == "test-openrouter-key"
+    assert answer.llm_model == "openai/gpt-5-nano"
 
 
 def test_collect_human_llm_ollama_needs_no_api_key() -> None:
-    plain_inputs = iter(["7", "qwen2.5:7b"])
+    plain_inputs = iter(["4", "qwen2.5:7b"])
     secret_prompts: list[str] = []
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda _prompt: next(plain_inputs),
         secret_input_func=lambda prompt: secret_prompts.append(prompt) or "",
     )
 
-    assert answer.provider == "ollama"
+    assert answer.connection_type == "ollama"
+    assert answer.preset == ""
     assert answer.llm_api_key == ""
     assert answer.llm_model == "qwen2.5:7b"
     assert secret_prompts == []
@@ -641,8 +1144,8 @@ def test_collect_human_llm_ollama_needs_no_api_key() -> None:
 
 def test_collect_human_llm_does_not_reuse_key_across_providers() -> None:
     prompts: list[tuple[str, str]] = []
-    plain_inputs = iter(["3", ""])
-    secret_inputs = iter(["", "sk-openai"])
+    plain_inputs = iter(["1", "2", ""])
+    secret_inputs = iter(["", "test-openai-key"])
 
     answer = bootstrap.collect_human_llm_config(
         input_func=lambda prompt: prompts.append(("plain", prompt)) or next(plain_inputs),
@@ -651,8 +1154,9 @@ def test_collect_human_llm_does_not_reuse_key_across_providers() -> None:
         existing_api_key="sk-old-deepseek",
     )
 
-    assert answer.provider == "openai"
-    assert answer.llm_api_key == "sk-openai"
+    assert answer.connection_type == "openai_compatible"
+    assert answer.preset == "openai"
+    assert answer.llm_api_key == "test-openai-key"
     assert all("press Enter to reuse" not in prompt for _kind, prompt in prompts)
 
 
@@ -679,16 +1183,18 @@ def test_collect_human_install_wizard_default_path() -> None:
             "",
             "",
             "",
+            "",
         ]
     )
-    secret_inputs = iter(["sk-deepseek"])
+    secret_inputs = iter(["test-deepseek-key"])
 
     answer = bootstrap.collect_human_install_wizard(
         input_func=lambda prompt: prompts.append(("plain", prompt)) or next(plain_inputs),
         secret_input_func=lambda prompt: prompts.append(("secret", prompt)) or next(secret_inputs),
     )
 
-    assert answer.provider == "deepseek"
+    assert answer.connection_type == "openai_compatible"
+    assert answer.preset == "deepseek"
     assert answer.embedding_provider == "ollama"
     assert answer.embedding_model == "bge-m3"
     assert answer.bilibili_favorite_limit == 300
@@ -704,7 +1210,7 @@ def test_collect_human_install_wizard_manual_cookie() -> None:
     prompts: list[tuple[str, str]] = []
     plain_inputs = iter(
         [
-            "7",
+            "4",
             "qwen2.5:7b",
             "3",
             "120",
@@ -722,7 +1228,7 @@ def test_collect_human_install_wizard_manual_cookie() -> None:
         secret_input_func=lambda prompt: prompts.append(("secret", prompt)) or next(secret_inputs),
     )
 
-    assert answer.provider == "ollama"
+    assert answer.connection_type == "ollama"
     assert answer.embedding_provider == ""
     assert answer.embedding_model == ""
     assert answer.douyin is True
@@ -735,7 +1241,7 @@ def test_apply_human_install_answers_sets_all_bootstrap_args(tmp_path: Path) -> 
     args = bootstrap.build_arg_parser().parse_args(["--project-dir", str(tmp_path)])
     answers = bootstrap.HumanInstallAnswers(
         provider="deepseek",
-        llm_api_key="sk-test",
+        llm_api_key="test-key",
         llm_model="deepseek-v4-flash",
         embedding_provider="ollama",
         embedding_model="bge-m3",
@@ -750,8 +1256,10 @@ def test_apply_human_install_answers_sets_all_bootstrap_args(tmp_path: Path) -> 
 
     bootstrap.apply_human_install_answers_to_args(args, answers)
 
-    assert args.provider == "deepseek"
-    assert args.llm_api_key == "sk-test"
+    assert args.provider is None
+    assert args.connection_type == "openai_compatible"
+    assert args.preset == "deepseek"
+    assert args.llm_api_key == "test-key"
     assert args.llm_model == "deepseek-v4-flash"
     assert args.embedding_provider == "ollama"
     assert args.embedding_model == "bge-m3"
@@ -835,7 +1343,7 @@ def test_run_interactive_confirm_collects_full_human_install_choices(
         "collect_human_install_wizard",
         lambda **_kwargs: bootstrap.HumanInstallAnswers(
             provider="deepseek",
-            llm_api_key="sk-new",
+            llm_api_key="test-new-key",
             llm_model="deepseek-v4-flash",
             embedding_provider="ollama",
             embedding_model="bge-m3",
@@ -856,13 +1364,16 @@ def test_run_interactive_confirm_collects_full_human_install_choices(
 
     text = (tmp_path / "config.toml").read_text(encoding="utf-8")
     output = capsys.readouterr().out
+    raw = tomllib.loads(text)
 
     assert returncode == 0
-    assert 'default_provider = "deepseek"' in text
-    assert 'api_key = "sk-new"' in text
-    assert 'provider = "ollama"' in text
+    assert raw["models"]["chat"]["connections"][0]["type"] == "openai_compatible"
+    assert raw["models"]["chat"]["connections"][0]["preset"] == "deepseek"
+    assert raw["models"]["chat"]["connections"][0]["api_key"] == "test-new-key"
+    assert raw["models"]["embedding"]["providers"][0]["type"] == "ollama"
+    assert "llm" not in raw
     assert args.wait_for_extension_cookie is False
-    assert "sk-new" not in output
+    assert "test-new-key" not in output
     assert "SESSDATA=test" not in output
 
 
@@ -1200,6 +1711,82 @@ def test_pre_init_service_checks_accept_disabled_embedding(tmp_path: Path) -> No
     assert result["services"]["embedding"]["skipped"] is True
 
 
+def test_pre_init_service_check_process_failure_uses_fixed_secret_safe_error(
+    tmp_path: Path,
+) -> None:
+    sentinel = "sentinel-secret-from-subprocess-stderr"
+
+    def runner(
+        _cmd: list[str],
+        *,
+        check: bool = True,
+        cwd: Path | None = None,
+    ) -> bootstrap.CommandResult:
+        return bootstrap.CommandResult(returncode=7, stdout="", stderr=sentinel)
+
+    result = bootstrap.run_pre_init_service_checks(tmp_path, "local", runner=runner)
+
+    assert result["available"] is False
+    assert result["failed"] == ["llm", "embedding"]
+    assert result["services"]["llm"]["error"] == "service_check_process_failed"
+    assert result["services"]["embedding"]["error"] == "service_check_process_failed"
+    assert sentinel not in json.dumps(result, ensure_ascii=False)
+
+
+def test_pre_init_probe_uses_native_stable_ids_without_route_fallback() -> None:
+    probe = bootstrap.SERVICE_CHECK_PROBE
+
+    assert "cfg.models.chat.connections[0]" in probe
+    assert "complete_connection(" in probe
+    assert "primary.id" in probe
+    assert "ignore_circuit=True" in probe
+    assert "cfg.models.embedding" in probe
+    assert "for provider in embedding_cfg.providers" in probe
+    assert "probe_provider(provider.id)" in probe
+    assert "cfg.llm" not in probe
+    assert "build_llm_registry" not in probe
+    assert "{exc}" not in probe
+    assert '"exact_chat_probe_failed"' in probe
+    assert '"exact_embedding_probe_failed"' in probe
+
+
+def test_pre_init_probe_never_emits_exception_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sentinel = "sentinel-secret-must-not-appear"
+
+    def fail_load() -> object:
+        raise RuntimeError(sentinel)
+
+    config_module = types.ModuleType("openbiliclaw.config")
+    config_module.load_config = fail_load  # type: ignore[attr-defined]
+    factory_module = types.ModuleType("openbiliclaw.llm.connection_factory")
+    factory_module.AdapterRuntimeOptions = object  # type: ignore[attr-defined]
+    factory_module.build_chat_adapter = object  # type: ignore[attr-defined]
+    factory_module.build_embedding_adapter = object  # type: ignore[attr-defined]
+    route_module = types.ModuleType("openbiliclaw.llm.route")
+    route_module.OrderedLLMRoute = object  # type: ignore[attr-defined]
+    route_module.RouteConnection = object  # type: ignore[attr-defined]
+    embedding_module = types.ModuleType("openbiliclaw.llm.embedding_route")
+    embedding_module.OrderedEmbeddingRoute = object  # type: ignore[attr-defined]
+    for name, module in {
+        "openbiliclaw.config": config_module,
+        "openbiliclaw.llm.connection_factory": factory_module,
+        "openbiliclaw.llm.route": route_module,
+        "openbiliclaw.llm.embedding_route": embedding_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    exec(bootstrap.SERVICE_CHECK_PROBE, {})
+
+    output = capsys.readouterr().out
+    assert sentinel not in output
+    payload = json.loads(output)
+    assert payload["services"]["llm"]["error"] == "exact_chat_probe_failed"
+    assert payload["services"]["embedding"]["error"] == "exact_embedding_probe_failed"
+
+
 def test_run_blocks_auto_init_when_pre_init_service_check_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1296,10 +1883,15 @@ def test_docker_runtime_config_copy_commands(tmp_path: Path) -> None:
 
 def test_docker_secret_detector_command_reads_runtime_config() -> None:
     command = bootstrap.build_docker_missing_secrets_command()
+    script = command[-1]
 
     assert command[:3] == ["docker", "exec", "openbiliclaw-backend"]
     assert "/app/runtime/config.toml" in " ".join(command)
     assert "/app/runtime/data/bilibili_cookie.json" in " ".join(command)
+    assert 'data.get("models", {})' in script
+    assert 'chat.get("connections", [])' in script
+    assert 'primary.get("api_key_env"' in script
+    assert "default_provider" not in script
 
 
 def test_build_init_command_appends_explicit_source_flags_for_docker(tmp_path: Path) -> None:

@@ -8,10 +8,11 @@ script with the appropriate flags, then handles any interactive follow-ups
 (missing API key, missing Bilibili cookie, or explicit init source decisions)
 that the script reports.
 
-The script is intentionally non-interactive and machine-friendly:
+The script is machine-friendly by default, with an explicit human installer mode:
 - emits structured JSON status lines prefixed with ``BOOTSTRAP_STATUS:``
 - exits 0 on success, non-zero on failure
-- never prompts stdin (agent/user input is driven from outside the script)
+- prompts only when ``--interactive-confirm`` is supplied; otherwise all input
+  remains flag-driven for agent automation
 
 Supported flows:
 1. Docker path (preferred if Docker + docker compose are available)
@@ -46,7 +47,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,36 @@ SUPPORTED_PROVIDERS = (
     "openrouter",
     "openai_compatible",
 )
+SUPPORTED_CONNECTION_TYPES = (
+    "openai_compatible",
+    "anthropic_compatible",
+    "gemini_api",
+    "ollama",
+    "codex_oauth",
+)
+LEGACY_PROVIDER_CONNECTIONS: dict[str, tuple[str, str]] = {
+    "deepseek": ("openai_compatible", "deepseek"),
+    "openai": ("openai_compatible", "openai"),
+    "openrouter": ("openai_compatible", "openrouter"),
+    "openai_compatible": ("openai_compatible", "custom"),
+    "claude": ("anthropic_compatible", "anthropic"),
+    "gemini": ("gemini_api", ""),
+    "ollama": ("ollama", ""),
+}
+CONNECTION_PRESETS: dict[str, tuple[str, ...]] = {
+    "openai_compatible": ("openai", "deepseek", "openrouter", "custom"),
+    "anthropic_compatible": ("anthropic", "custom"),
+    "gemini_api": (),
+    "ollama": (),
+    "codex_oauth": (),
+}
+DEFAULT_CREDENTIAL_ENVS: dict[tuple[str, str], str] = {
+    ("openai_compatible", "openai"): "OPENAI_API_KEY",
+    ("openai_compatible", "deepseek"): "DEEPSEEK_API_KEY",
+    ("openai_compatible", "openrouter"): "OPENROUTER_API_KEY",
+    ("anthropic_compatible", "anthropic"): "ANTHROPIC_API_KEY",
+    ("gemini_api", ""): "GEMINI_API_KEY",
+}
 REMOTE_PROVIDERS = (
     "openai",
     "claude",
@@ -126,6 +157,41 @@ def ensure_local_no_proxy() -> str:
     os.environ["NO_PROXY"] = value
     os.environ["no_proxy"] = value
     return value
+
+
+def resolve_connection_selection(
+    *,
+    provider: str | None = None,
+    connection_type: str | None = None,
+    preset: str | None = None,
+) -> tuple[str, str]:
+    """Resolve canonical Chat type/preset while retaining provider aliases."""
+    legacy = LEGACY_PROVIDER_CONNECTIONS.get((provider or "").strip().lower())
+    resolved_type = (connection_type or "").strip().lower()
+    resolved_preset = (preset or "").strip().lower()
+    if legacy is not None:
+        if resolved_type and resolved_type != legacy[0]:
+            raise ValueError("--provider conflicts with --connection-type")
+        if resolved_preset and resolved_preset != legacy[1]:
+            raise ValueError("--provider conflicts with --preset")
+        resolved_type = resolved_type or legacy[0]
+        resolved_preset = resolved_preset or legacy[1]
+    if not resolved_type:
+        resolved_type, default_preset = LEGACY_PROVIDER_CONNECTIONS["deepseek"]
+        resolved_preset = resolved_preset or default_preset
+    if resolved_type not in SUPPORTED_CONNECTION_TYPES:
+        raise ValueError(f"unknown connection type: {resolved_type}")
+    allowed = CONNECTION_PRESETS[resolved_type]
+    if allowed:
+        if not resolved_preset:
+            resolved_preset = "custom" if resolved_type == "openai_compatible" else "anthropic"
+        if resolved_preset not in allowed:
+            raise ValueError(
+                f"preset {resolved_preset!r} is not valid for connection type {resolved_type!r}"
+            )
+    elif resolved_preset:
+        raise ValueError(f"connection type {resolved_type!r} does not use presets")
+    return resolved_type, resolved_preset
 
 
 # Mirror of cli.py's _OPENAI_COMPAT_PRESETS for non-interactive (AI agent
@@ -172,34 +238,35 @@ LLM_PRESETS: dict[str, dict[str, str]] = {
 }
 
 HUMAN_LLM_MENU: tuple[tuple[str, str, str], ...] = (
-    ("deepseek", "DeepSeek 官方 ★默认推荐", "deepseek-v4-flash"),
-    ("openai_compatible", "★ 中转站 / OpenAI 协议兼容服务", "relay preset"),
-    ("openai", "OpenAI 官方", "gpt-5-nano"),
-    ("gemini", "Gemini 官方", "gemini-2.5-flash"),
-    ("claude", "Claude 官方", "claude-sonnet-4-6"),
-    ("openrouter", "OpenRouter 聚合", "openai/gpt-5-nano"),
-    ("ollama", "本地 Ollama", "qwen2.5:7b"),
+    ("openai_compatible", "OpenAI-compatible", "OpenAI / DeepSeek / OpenRouter / 自定义网关"),
+    ("anthropic_compatible", "Anthropic-compatible", "Anthropic / 自定义 Messages 网关"),
+    ("gemini_api", "Gemini API", "Google 原生 API"),
+    ("ollama", "Ollama", "本地服务"),
+    ("codex_oauth", "Codex OAuth", "导入本机登录"),
 )
 
-HUMAN_OPENAI_COMPAT_PRESETS: tuple[str, ...] = (
-    "relay",
-    "kimi",
-    "minimax",
-    "qwen",
-    "zhipu",
-    "yi",
-    "azure",
-    "self-hosted",
-    "custom",
-)
+HUMAN_PRESET_MENUS: dict[str, tuple[tuple[str, str], ...]] = {
+    "openai_compatible": (
+        ("deepseek", "DeepSeek ★默认"),
+        ("openai", "OpenAI"),
+        ("openrouter", "OpenRouter"),
+        ("custom", "自定义 OpenAI-compatible 网关"),
+    ),
+    "anthropic_compatible": (
+        ("anthropic", "Anthropic ★默认"),
+        ("custom", "自定义 Anthropic-compatible 网关"),
+    ),
+}
 
-PROVIDER_MODEL_DEFAULTS: dict[str, str] = {
-    "deepseek": "deepseek-v4-flash",
-    "openai": "gpt-5-nano",
-    "gemini": "gemini-2.5-flash",
-    "claude": "claude-sonnet-4-6",
-    "openrouter": "openai/gpt-5-nano",
-    "ollama": "qwen2.5:7b",
+HUMAN_MODEL_DEFAULTS: dict[tuple[str, str], str] = {
+    ("openai_compatible", "deepseek"): "deepseek-v4-flash",
+    ("openai_compatible", "openai"): "gpt-5-nano",
+    ("openai_compatible", "openrouter"): "openai/gpt-5-nano",
+    ("openai_compatible", "custom"): "gpt-5-nano",
+    ("anthropic_compatible", "anthropic"): "claude-sonnet-4-6",
+    ("gemini_api", ""): "gemini-2.5-flash",
+    ("ollama", ""): "qwen2.5:7b",
+    ("codex_oauth", ""): "gpt-5-nano",
 }
 
 
@@ -235,7 +302,9 @@ class InitConfirmationAnswers:
 class HumanInstallAnswers:
     """Full human one-line installer choices collected before bootstrap work."""
 
-    provider: str
+    provider: str = ""
+    connection_type: str = ""
+    preset: str = ""
     llm_api_key: str = ""
     llm_base_url: str | None = None
     llm_model: str | None = None
@@ -252,8 +321,17 @@ class HumanInstallAnswers:
     bilibili_follow_limit: int = DEFAULT_BILIBILI_FOLLOW_LIMIT
 
     def __post_init__(self) -> None:
-        if self.provider not in SUPPORTED_PROVIDERS:
+        if self.provider and self.provider not in SUPPORTED_PROVIDERS:
             raise ValueError(f"unknown provider: {self.provider}")
+        if self.connection_type:
+            connection_type, preset = resolve_connection_selection(
+                connection_type=self.connection_type,
+                preset=self.preset,
+            )
+        else:
+            connection_type, preset = resolve_connection_selection(provider=self.provider or None)
+        object.__setattr__(self, "connection_type", connection_type)
+        object.__setattr__(self, "preset", preset)
 
 
 def emit(result: BootstrapResult) -> None:
@@ -289,47 +367,57 @@ def ensure_human_wizard_tty(input_func: Any) -> None:
 
 
 def resolve_human_llm_choice(raw: str) -> str | None:
-    """Resolve a menu number or alias into a supported provider name."""
+    """Resolve a menu number or alias into a canonical connection type."""
 
     value = raw.strip().lower()
     if not value:
-        return "deepseek"
+        return "openai_compatible"
     if value.isdigit():
         index = int(value)
         if 1 <= index <= len(HUMAN_LLM_MENU):
             return HUMAN_LLM_MENU[index - 1][0]
         return None
     aliases = {
+        "deepseek": "openai_compatible",
+        "openai": "openai_compatible",
+        "openrouter": "openai_compatible",
         "relay": "openai_compatible",
         "oneapi": "openai_compatible",
         "openai-compatible": "openai_compatible",
         "openai_compatible": "openai_compatible",
         "openai-compat": "openai_compatible",
         "compat": "openai_compatible",
+        "claude": "anthropic_compatible",
+        "anthropic": "anthropic_compatible",
+        "anthropic-compatible": "anthropic_compatible",
+        "gemini": "gemini_api",
+        "codex": "codex_oauth",
     }
-    menu_providers = {key for key, _label, _model in HUMAN_LLM_MENU}
-    return aliases.get(value, value if value in menu_providers else None)
+    menu_types = {key for key, _label, _help in HUMAN_LLM_MENU}
+    return aliases.get(value, value if value in menu_types else None)
 
 
-def _resolve_human_openai_compatible_preset(raw: str) -> str | None:
+def resolve_human_preset_choice(connection_type: str, raw: str) -> str | None:
+    """Resolve the preset only after its connection type is selected."""
+    options = HUMAN_PRESET_MENUS.get(connection_type, ())
+    if not options:
+        return ""
     value = raw.strip().lower()
     if not value:
-        return "relay"
+        return options[0][0]
     if value.isdigit():
         index = int(value)
-        if 1 <= index <= len(HUMAN_OPENAI_COMPAT_PRESETS):
-            return HUMAN_OPENAI_COMPAT_PRESETS[index - 1]
+        if 1 <= index <= len(options):
+            return options[index - 1][0]
         return None
     aliases = {
-        "oneapi": "relay",
-        "gateway": "relay",
-        "team": "relay",
-        "selfhosted": "self-hosted",
-        "self_hosted": "self-hosted",
+        "relay": "custom",
+        "gateway": "custom",
+        "oneapi": "custom",
+        "claude": "anthropic",
     }
-    if value in aliases:
-        return aliases[value]
-    return value if value in LLM_PRESETS else None
+    resolved = aliases.get(value, value)
+    return resolved if resolved in {preset for preset, _label in options} else None
 
 
 def _prompt_required(input_func: Any, prompt: str, *, default: str = "") -> str:
@@ -360,9 +448,7 @@ def _prompt_secret(
         try:
             value = str(secret_input_func(f"{prompt}{suffix}: ")).strip()
         except getpass.GetPassWarning as exc:
-            raise RuntimeError(
-                f"cannot disable terminal echo for secret prompt: {exc}"
-            ) from exc
+            raise RuntimeError(f"cannot disable terminal echo for secret prompt: {exc}") from exc
         if value:
             return value
         if existing:
@@ -381,51 +467,7 @@ def read_secret_no_echo(prompt: str) -> str:
         try:
             return getpass.getpass(prompt)
         except getpass.GetPassWarning as exc:
-            raise RuntimeError(
-                f"cannot disable terminal echo for secret prompt: {exc}"
-            ) from exc
-
-
-def _collect_human_openai_compatible_llm(
-    input_func: Any,
-    secret_input_func: Any,
-    *,
-    existing_provider: str,
-    existing_api_key: str,
-    existing_base_url: str,
-    existing_model: str,
-) -> HumanInstallAnswers:
-    print("")
-    print("OpenAI-compatible presets")
-    for index, preset_name in enumerate(HUMAN_OPENAI_COMPAT_PRESETS, start=1):
-        preset_cfg = LLM_PRESETS[preset_name]
-        model_label = preset_cfg.get("model") or "custom model"
-        print(f"{index}. {preset_name} ({model_label})")
-    preset: str | None = None
-    while preset is None:
-        preset = _resolve_human_openai_compatible_preset(
-            str(input_func("OpenAI-compatible preset [1 relay]: "))
-        )
-        if preset is None:
-            print("Unknown OpenAI-compatible preset. Please choose a number from the menu.")
-    preset_cfg = LLM_PRESETS.get(preset, LLM_PRESETS["relay"])
-    base_default = existing_base_url if existing_provider == "openai_compatible" else ""
-    base_default = base_default or preset_cfg.get("base_url", "")
-    base_url = _prompt_required(input_func, "OpenAI-compatible Base URL", default=base_default)
-    key_existing = existing_api_key if existing_provider == "openai_compatible" else ""
-    api_key = _prompt_secret(secret_input_func, "OpenAI-compatible API Key", existing=key_existing)
-    model_default = existing_model if existing_provider == "openai_compatible" else ""
-    model_default = model_default or preset_cfg.get("model", "")
-    if model_default:
-        model = _prompt_optional(input_func, "OpenAI-compatible model", default=model_default)
-    else:
-        model = _prompt_required(input_func, "OpenAI-compatible model")
-    return HumanInstallAnswers(
-        provider="openai_compatible",
-        llm_api_key=api_key,
-        llm_base_url=base_url,
-        llm_model=model,
-    )
+            raise RuntimeError(f"cannot disable terminal echo for secret prompt: {exc}") from exc
 
 
 def collect_human_llm_config(
@@ -437,44 +479,77 @@ def collect_human_llm_config(
     existing_base_url: str = "",
     existing_model: str = "",
 ) -> HumanInstallAnswers:
-    """Collect the primary LLM provider and provider-specific fields."""
+    """Collect connection type first, then preset/OAuth and descriptor fields."""
 
     secret_input_func = secret_input_func or read_secret_no_echo
     print("")
-    print("OpenBiliClaw needs an LLM provider.")
-    for index, (_provider, label, model) in enumerate(HUMAN_LLM_MENU, start=1):
-        print(f"{index}. {label} ({model})")
+    print("Choose the Chat connection type first.")
+    for index, (_connection_type, label, help_text) in enumerate(HUMAN_LLM_MENU, start=1):
+        print(f"{index}. {label} ({help_text})")
 
-    provider: str | None = None
-    while provider is None:
-        provider = resolve_human_llm_choice(
-            str(input_func("LLM provider [1 DeepSeek]: "))
+    connection_type: str | None = None
+    while connection_type is None:
+        connection_type = resolve_human_llm_choice(
+            str(input_func("Connection type [1 OpenAI-compatible]: "))
         )
-        if provider is None:
-            print("Unknown provider choice. Please choose a number from the menu.")
+        if connection_type is None:
+            print("Unknown connection type. Please choose a number from the menu.")
 
-    if provider == "openai_compatible":
-        return _collect_human_openai_compatible_llm(
+    preset = ""
+    preset_options = HUMAN_PRESET_MENUS.get(connection_type, ())
+    if preset_options:
+        print("")
+        print(f"{connection_type} presets")
+        for index, (_preset, label) in enumerate(preset_options, start=1):
+            print(f"{index}. {label}")
+        selected_preset: str | None = None
+        while selected_preset is None:
+            selected_preset = resolve_human_preset_choice(
+                connection_type,
+                str(input_func(f"Preset [1 {preset_options[0][0]}]: ")),
+            )
+            if selected_preset is None:
+                print("Unknown preset. Please choose a number from the menu.")
+        preset = selected_preset
+
+    try:
+        existing_type, existing_preset = resolve_connection_selection(
+            provider=existing_provider,
+        )
+    except ValueError:
+        existing_type, existing_preset = "", ""
+    same_selection = connection_type == existing_type and preset == existing_preset
+    model_default = existing_model if same_selection else ""
+    model_default = model_default or HUMAN_MODEL_DEFAULTS.get((connection_type, preset), "")
+    model = _prompt_required(
+        input_func,
+        f"{connection_type} chat model",
+        default=model_default,
+    )
+
+    base_url: str | None = None
+    if preset == "custom" and connection_type in {
+        "openai_compatible",
+        "anthropic_compatible",
+    }:
+        base_url = _prompt_required(
             input_func,
-            secret_input_func,
-            existing_provider=existing_provider,
-            existing_api_key=existing_api_key,
-            existing_base_url=existing_base_url,
-            existing_model=existing_model,
+            f"{connection_type} Base URL",
+            default=existing_base_url if same_selection else "",
         )
 
-    model_default = existing_model if provider == existing_provider else ""
-    model_default = model_default or PROVIDER_MODEL_DEFAULTS.get(provider, "")
-    if provider == "ollama":
-        model = _prompt_required(input_func, "Ollama chat model", default=model_default)
-        return HumanInstallAnswers(provider=provider, llm_model=model)
-
-    key_existing = existing_api_key if provider == existing_provider else ""
-    api_key = _prompt_secret(secret_input_func, f"{provider} API Key", existing=key_existing)
-    model = _prompt_optional(input_func, f"{provider} model", default=model_default)
+    api_key = ""
+    if connection_type not in {"ollama", "codex_oauth"}:
+        api_key = _prompt_secret(
+            secret_input_func,
+            f"{connection_type} API Key",
+            existing=existing_api_key if same_selection else "",
+        )
     return HumanInstallAnswers(
-        provider=provider,
+        connection_type=connection_type,
+        preset=preset,
         llm_api_key=api_key,
+        llm_base_url=base_url,
         llm_model=model,
     )
 
@@ -731,6 +806,8 @@ def collect_human_install_wizard(
 
     return HumanInstallAnswers(
         provider=llm.provider,
+        connection_type=llm.connection_type,
+        preset=llm.preset,
         llm_api_key=llm.llm_api_key,
         llm_base_url=llm.llm_base_url,
         llm_model=llm.llm_model,
@@ -783,10 +860,9 @@ def apply_human_install_answers_to_args(
 ) -> None:
     """Mutate parsed args with full human installer choices."""
 
-    if answers.provider not in SUPPORTED_PROVIDERS:
-        raise RuntimeError(f"unknown provider from human install wizard: {answers.provider}")
-    if args.provider is None:
-        args.provider = answers.provider
+    if args.provider is None and args.connection_type is None:
+        args.connection_type = answers.connection_type
+        args.preset = answers.preset or None
     if args.llm_api_key is None and answers.llm_api_key:
         args.llm_api_key = answers.llm_api_key
     if args.llm_base_url is None and answers.llm_base_url is not None:
@@ -814,11 +890,7 @@ def apply_human_install_answers_to_args(
         args.bilibili_favorite_limit = answers.bilibili_favorite_limit
     if args.bilibili_follow_limit is None:
         args.bilibili_follow_limit = answers.bilibili_follow_limit
-    if (
-        answers.cookie_mode == "manual"
-        and answers.bilibili_cookie
-        and not args.bilibili_cookie
-    ):
+    if answers.cookie_mode == "manual" and answers.bilibili_cookie and not args.bilibili_cookie:
         args.bilibili_cookie = answers.bilibili_cookie
     args.wait_for_extension_cookie = answers.cookie_mode == "extension"
 
@@ -861,10 +933,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to an existing OpenBiliClaw checkout whose secrets (API keys + Bilibili cookie) should be copied into the new install.",
     )
     parser.add_argument(
+        "--connection-type",
+        choices=SUPPORTED_CONNECTION_TYPES,
+        default=None,
+        help="Canonical Chat connection type (protocol, local runtime, or OAuth).",
+    )
+    parser.add_argument(
+        "--preset",
+        default=None,
+        help="Preset within the selected connection type (for example deepseek or openai).",
+    )
+    parser.add_argument(
         "--provider",
         choices=SUPPORTED_PROVIDERS,
         default=None,
-        help="Override default LLM provider.",
+        help="Deprecated provider alias; mapped to --connection-type plus --preset.",
     )
     parser.add_argument(
         "--llm-api-key",
@@ -929,22 +1012,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--embedding-base-url",
         default=None,
-        help="Custom base_url for the embedding provider (writes into the matching [llm.<provider>] block).",
+        help="Custom base_url for the single legacy --embedding-provider alias.",
     )
     parser.add_argument(
         "--embedding-api-key",
         default=None,
-        help="Custom API key for the embedding provider (writes into the matching [llm.<provider>] block).",
+        help="Custom API key for the configured embedding provider(s).",
     )
     parser.add_argument(
-        "--module-override",
+        "--embedding-endpoint",
         action="append",
         default=None,
-        metavar="MODULE=PROVIDER:MODEL",
+        metavar="TYPE[:PRESET]=BASE_URL",
         help=(
-            "Per-module LLM override. Repeatable. MODULE ∈ {soul, "
-            "discovery, recommendation, evaluation}. Example: "
-            "--module-override discovery=deepseek:deepseek-v4-flash"
+            "Ordered embedding endpoint. Repeat to add up to ten providers; "
+            "all entries share --embedding-model and route-wide settings."
         ),
     )
     parser.add_argument(
@@ -1421,6 +1503,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 
 async def main() -> None:
@@ -1442,59 +1525,77 @@ async def main() -> None:
     }
 
     cfg = None
-    registry = None
     try:
         from openbiliclaw.config import load_config
-        from openbiliclaw.llm.registry import build_llm_registry
+        from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions, build_chat_adapter
+        from openbiliclaw.llm.route import OrderedLLMRoute, RouteConnection
 
         cfg = load_config()
-        registry = build_llm_registry(cfg)
-        provider = str(cfg.llm.default_provider or registry.default_provider).strip().lower()
-        result["services"]["llm"]["provider"] = provider
-        response = await registry.complete_provider(
-            provider,
+        primary = cfg.models.chat.connections[0]
+        result["services"]["llm"]["provider"] = primary.type
+        result["services"]["llm"]["connection_id"] = primary.id
+        result["services"]["llm"]["preset"] = primary.preset
+        options = AdapterRuntimeOptions(timeout_seconds=30.0, environment=os.environ)
+        adapter = build_chat_adapter(primary, options)
+        route = OrderedLLMRoute(
+            (RouteConnection(connection=primary, adapter=adapter),),
+            revision="bootstrap-preflight",
+            timeout_seconds=30.0,
+        )
+        response = await route.complete_connection(
+            primary.id,
             [{"role": "user", "content": "Reply with OK only."}],
             temperature=0,
             max_tokens=8,
+            ignore_circuit=True,
         )
         if str(getattr(response, "content", "") or "").strip():
             result["services"]["llm"]["available"] = True
         else:
             result["services"]["llm"]["error"] = "empty completion response"
-    except Exception as exc:
-        result["services"]["llm"]["error"] = f"{type(exc).__name__}: {exc}"
+    except Exception:
+        result["services"]["llm"]["error"] = "exact_chat_probe_failed"
 
     try:
         from openbiliclaw.config import load_config
-        from openbiliclaw.llm.registry import build_embedding_service, build_llm_registry
+        from openbiliclaw.llm.connection_factory import (
+            AdapterRuntimeOptions,
+            build_embedding_adapter,
+        )
+        from openbiliclaw.llm.embedding_route import OrderedEmbeddingRoute
 
         if cfg is None:
             cfg = load_config()
-        if registry is None:
-            registry = build_llm_registry(cfg)
-
-        embedding_cfg = cfg.llm.embedding
-        provider = str(embedding_cfg.provider or "").strip().lower()
-        model = str(embedding_cfg.model or "").strip()
-        result["services"]["embedding"]["provider"] = provider
+        embedding_cfg = cfg.models.embedding
+        model = str(embedding_cfg.settings.model or "").strip()
         result["services"]["embedding"]["model"] = model
-        if not provider:
+        if not embedding_cfg.enabled:
             result["services"]["embedding"]["available"] = True
             result["services"]["embedding"]["skipped"] = True
+        elif not embedding_cfg.providers:
+            result["services"]["embedding"]["error"] = (
+                "embedding is enabled but its ordered provider list is empty"
+            )
         else:
-            embedding_service = build_embedding_service(cfg, registry)
-            if embedding_service is None:
-                result["services"]["embedding"]["error"] = (
-                    "embedding service could not be built"
-                )
-            else:
-                vector = await embedding_service.embed("openbiliclaw bootstrap embedding check")
-                if vector:
-                    result["services"]["embedding"]["available"] = True
-                else:
-                    result["services"]["embedding"]["error"] = "empty embedding vector"
-    except Exception as exc:
-        result["services"]["embedding"]["error"] = f"{type(exc).__name__}: {exc}"
+            result["services"]["embedding"]["provider"] = embedding_cfg.providers[0].type
+            result["services"]["embedding"]["connection_ids"] = [
+                provider.id for provider in embedding_cfg.providers
+            ]
+            options = AdapterRuntimeOptions(timeout_seconds=30.0, environment=os.environ)
+            adapters = tuple(
+                build_embedding_adapter(provider, embedding_cfg.settings, options)
+                for provider in embedding_cfg.providers
+            )
+            route = OrderedEmbeddingRoute(
+                adapters,
+                settings=embedding_cfg.settings,
+                revision="bootstrap-preflight",
+            )
+            for provider in embedding_cfg.providers:
+                await route.probe_provider(provider.id)
+            result["services"]["embedding"]["available"] = True
+    except Exception:
+        result["services"]["embedding"]["error"] = "exact_embedding_probe_failed"
 
     print(json.dumps(result, ensure_ascii=False))
 
@@ -1552,8 +1653,10 @@ def _normalize_service_entry(raw: Any) -> dict[str, Any]:
     return entry
 
 
-def _service_check_command_failed_result(command: list[str], result: CommandResult) -> dict[str, Any]:
-    error = (result.stderr or result.stdout or "service check command failed").strip()
+def _service_check_command_failed_result(
+    command: list[str], result: CommandResult
+) -> dict[str, Any]:
+    error = "service_check_process_failed"
     services = {
         "llm": {
             "available": False,
@@ -1940,29 +2043,90 @@ def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
         summary["skipped"].append("config.toml missing in source")
     else:
         source_data = read_simple_toml(source_config)
-        llm_section = source_data.get("llm", {})
-        provider = llm_section.get("default_provider")
-        if provider:
-            update_config_secret(project_dir / "config.toml", "llm", "default_provider", provider)
-            summary["reused"].append("llm.default_provider")
+        source_models = _load_typed_models(source_dir, allow_pending_migration=True)
+        target_models = _load_typed_models(project_dir)
 
-        for name in REMOTE_PROVIDERS:
-            provider_cfg = llm_section.get(name, {})
-            api_key = str(provider_cfg.get("api_key", "")).strip()
-            if api_key:
-                update_config_secret(project_dir / "config.toml", f"llm.{name}", "api_key", api_key)
-                summary["reused"].append(f"llm.{name}.api_key")
-            for field_name in ("model", "base_url"):
-                value = str(provider_cfg.get(field_name, "")).strip()
-                if not value:
-                    continue
-                update_config_secret(
-                    project_dir / "config.toml",
-                    f"llm.{name}",
-                    field_name,
-                    value,
+        def overlay_credentials(
+            target_records: tuple[Any, ...],
+            source_records: tuple[Any, ...],
+            *,
+            route: str,
+        ) -> tuple[tuple[Any, ...], set[str]]:
+            used: set[str] = set()
+            assignments: dict[str, Any] = {}
+            for target in target_records:
+                exact = next(
+                    (
+                        source
+                        for source in source_records
+                        if source.id not in used
+                        and source.id == target.id
+                        and source.type == target.type
+                        and source.preset == target.preset
+                        and source.credential.source != "none"
+                        and source.credential.value.strip()
+                    ),
+                    None,
                 )
-                summary["reused"].append(f"llm.{name}.{field_name}")
+                if exact is not None:
+                    assignments[target.id] = exact
+                    used.add(exact.id)
+            for target in target_records:
+                if target.id in assignments:
+                    continue
+                compatible = [
+                    source
+                    for source in source_records
+                    if source.id not in used
+                    and source.type == target.type
+                    and source.preset == target.preset
+                    and source.credential.source != "none"
+                    and source.credential.value.strip()
+                ]
+                if len(compatible) == 1:
+                    assignments[target.id] = compatible[0]
+                    used.add(compatible[0].id)
+
+            updated: list[Any] = []
+            for target in target_records:
+                source = assignments.get(target.id)
+                if source is None:
+                    updated.append(target)
+                    continue
+                updated.append(replace(target, credential=source.credential))
+                summary["reused"].append(f"models.{route}.{target.id}.credential")
+            return tuple(updated), used
+
+        chat, used_chat = overlay_credentials(
+            target_models.chat.connections,
+            source_models.chat.connections,
+            route="chat.connections",
+        )
+        embedding, used_embedding = overlay_credentials(
+            target_models.embedding.providers,
+            source_models.embedding.providers,
+            route="embedding.providers",
+        )
+        for route, records, used in (
+            ("chat", source_models.chat.connections, used_chat),
+            ("embedding", source_models.embedding.providers, used_embedding),
+        ):
+            for record in records:
+                if (
+                    record.credential.source != "none"
+                    and record.credential.value.strip()
+                    and record.id not in used
+                ):
+                    selection = f"{record.type}:{record.preset}".rstrip(":")
+                    summary["skipped"].append(
+                        f"models.{route} credential {selection} has no compatible target record"
+                    )
+        updated_models = replace(
+            target_models,
+            chat=replace(target_models.chat, connections=chat),
+            embedding=replace(target_models.embedding, providers=embedding),
+        )
+        _persist_typed_models(project_dir, updated_models)
 
         bilibili_section = source_data.get("bilibili", {})
         cookie_value = str(bilibili_section.get("cookie", "")).strip()
@@ -1992,26 +2156,165 @@ def persist_cookie_file(project_dir: Path, cookie: str) -> None:
     cookie_path.write_text(json.dumps({"cookie": cookie}, ensure_ascii=False), encoding="utf-8")
 
 
-def apply_provider_override(project_dir: Path, provider: str) -> None:
-    update_config_secret(project_dir / "config.toml", "llm", "default_provider", provider)
+def _ensure_project_model_imports(project_dir: Path) -> None:
+    """Expose the checked-out source tree only after project files exist."""
+    source_dir = project_dir / "src"
+    if source_dir.is_dir() and str(source_dir) not in sys.path:
+        sys.path.insert(0, str(source_dir))
 
 
-def apply_llm_api_key(project_dir: Path, provider: str, api_key: str) -> None:
-    update_config_secret(project_dir / "config.toml", f"llm.{provider}", "api_key", api_key)
+def _load_typed_models(
+    project_dir: Path,
+    *,
+    allow_pending_migration: bool = False,
+) -> Any:
+    """Load native models, migrating a lossless legacy route when necessary."""
+    _ensure_project_model_imports(project_dir)
+    from openbiliclaw.model_config import (
+        default_model_config,
+        migrate_legacy_llm,
+        parse_model_config,
+    )
+
+    raw = read_simple_toml(project_dir / "config.toml")
+    models_raw = raw.get("models")
+    if isinstance(models_raw, dict):
+        return parse_model_config(models_raw)
+    llm_raw = raw.get("llm")
+    if isinstance(llm_raw, dict):
+        migrated = migrate_legacy_llm(llm_raw, os.environ)
+        if migrated.report.has_pending_decisions and not allow_pending_migration:
+            fields = ", ".join(issue.field for issue in migrated.report.issues)
+            raise RuntimeError(
+                "legacy model configuration requires explicit migration choices: "
+                f"{fields}; run `openbiliclaw models list` first"
+            )
+        return migrated.models
+    return default_model_config()
 
 
-def apply_llm_base_url(project_dir: Path, provider: str, base_url: str) -> None:
-    update_config_secret(project_dir / "config.toml", f"llm.{provider}", "base_url", base_url)
+def _persist_typed_models(project_dir: Path, models: Any) -> None:
+    """Validate and serialize one native route while preserving other config."""
+    _ensure_project_model_imports(project_dir)
+    from openbiliclaw.config import render_model_config_document
+    from openbiliclaw.model_config import connection_type_registry, validate_model_config
+
+    issues = validate_model_config(models, connection_type_registry())
+    blocking = [issue for issue in issues if issue.severity == "blocking"]
+    if blocking:
+        detail = "; ".join(f"{issue.path}: {issue.message}" for issue in blocking)
+        raise RuntimeError(f"invalid model configuration: {detail}")
+    config_path = project_dir / "config.toml"
+    original = config_path.read_bytes()
+    config_path.write_bytes(render_model_config_document(original, models))
 
 
-def apply_llm_model(project_dir: Path, provider: str, model: str) -> None:
-    update_config_secret(project_dir / "config.toml", f"llm.{provider}", "model", model)
+def apply_chat_route_config(
+    project_dir: Path,
+    *,
+    connection_type: str,
+    preset: str,
+    model: str | None,
+    base_url: str | None,
+    api_key: str | None,
+    credential_ref: str | None,
+) -> dict[str, Any]:
+    """Edit the stable primary record and retain every ordered fallback."""
+    _ensure_project_model_imports(project_dir)
+    from openbiliclaw.model_config import (
+        ChatConnection,
+        CredentialConfig,
+        apply_preset_defaults,
+        connection_type_registry,
+    )
+
+    models = _load_typed_models(project_dir)
+    existing = models.chat.connections[0] if models.chat.connections else None
+    same_selection = bool(
+        existing and existing.type == connection_type and existing.preset == preset
+    )
+    if connection_type == "codex_oauth":
+        credential = CredentialConfig(source="oauth", value=credential_ref or "codex")
+    elif api_key is not None:
+        credential = CredentialConfig(source="inline", value=api_key)
+    elif same_selection and existing is not None:
+        credential = existing.credential
+    else:
+        env_name = DEFAULT_CREDENTIAL_ENVS.get((connection_type, preset), "")
+        credential = (
+            CredentialConfig(source="env", value=env_name) if env_name else CredentialConfig()
+        )
+
+    default_models = {
+        ("openai_compatible", "openai"): "gpt-5-nano",
+        ("openai_compatible", "deepseek"): "deepseek-v4-flash",
+        ("openai_compatible", "openrouter"): "openai/gpt-5-nano",
+        ("anthropic_compatible", "anthropic"): "claude-sonnet-4-6",
+        ("gemini_api", ""): "gemini-2.5-flash",
+        ("ollama", ""): "qwen2.5:7b",
+        ("codex_oauth", ""): "gpt-5-nano",
+    }
+    default_bases = {"ollama": "http://127.0.0.1:11434/v1"}
+    connection_id = existing.id if existing is not None else "chat-main"
+    if existing is None:
+        used_ids = {provider.id for provider in models.embedding.providers}
+        suffix = 2
+        while connection_id in used_ids:
+            connection_id = f"chat-main-{suffix}"
+            suffix += 1
+    connection = ChatConnection(
+        id=connection_id,
+        name=existing.name if existing is not None else "Primary Chat",
+        type=connection_type,
+        preset=preset,
+        model=(
+            model
+            if model is not None
+            else existing.model
+            if same_selection and existing is not None
+            else default_models.get((connection_type, preset), "")
+        ),
+        base_url=(
+            base_url
+            if base_url is not None
+            else existing.base_url
+            if same_selection and existing is not None
+            else default_bases.get(connection_type, "")
+        ),
+        credential=credential,
+        api_mode=existing.api_mode if same_selection and existing is not None else "",
+        reasoning_effort=(
+            existing.reasoning_effort if same_selection and existing is not None else ""
+        ),
+        http_referer=existing.http_referer if same_selection and existing is not None else "",
+        x_title=existing.x_title if same_selection and existing is not None else "",
+        num_ctx=existing.num_ctx if same_selection and existing is not None else 0,
+    )
+    touched = frozenset(
+        field_name
+        for field_name, value in (("model", model), ("base_url", base_url))
+        if value is not None
+    )
+    if preset:
+        definition = connection_type_registry().preset(connection_type, preset)
+        connection = apply_preset_defaults(connection, definition, touched)
+    fallbacks = models.chat.connections[1:] if existing is not None else ()
+    updated = replace(
+        models,
+        chat=replace(models.chat, connections=(connection, *fallbacks)),
+    )
+    _persist_typed_models(project_dir, updated)
+    return {
+        "connection_id": connection.id,
+        "connection_type": connection.type,
+        "preset": connection.preset,
+    }
 
 
 def should_auto_wire_embedding(
     *, embedding_provider_arg: str | None, effective_provider: str, mode: str
 ) -> bool:
-    """Whether bootstrap should default ``[llm.embedding]`` to local Ollama.
+    """Whether bootstrap should default native ``[models.embedding]`` to local Ollama.
 
     v0.3.95+: embedding is fully decoupled from the chat provider, so a
     flag-driven install that never passed ``--embedding-*`` — or one whose
@@ -2025,9 +2328,9 @@ def should_auto_wire_embedding(
     """
     if mode == "docker":
         return False
-    explicitly_disabled = embedding_provider_arg is not None and not (
-        embedding_provider_arg or ""
-    ).strip()
+    explicitly_disabled = (
+        embedding_provider_arg is not None and not (embedding_provider_arg or "").strip()
+    )
     if explicitly_disabled:
         return False
     return not effective_provider.strip()
@@ -2040,43 +2343,160 @@ def apply_embedding_config(
     model: str | None,
     base_url: str | None,
     api_key: str | None,
+    endpoints: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Write [llm.embedding] + (optionally) provider creds.
+    """Write ordered native providers that share one embedding model space."""
+    _ensure_project_model_imports(project_dir)
+    from openbiliclaw.model_config import (
+        CredentialConfig,
+        EmbeddingProviderConfig,
+        connection_type_registry,
+    )
 
-    Returns a structured summary so the bootstrap can emit a single event
-    listing exactly what was changed. Empty-string provider means
-    "embedding disabled"; missing fields are left untouched.
-    """
+    models = _load_typed_models(project_dir)
+    current = models.embedding.providers
+    target_provider = (provider or "").strip().lower()
+    if provider == "" and not endpoints:
+        providers: tuple[Any, ...] = ()
+        enabled = False
+    elif endpoints:
+        built: list[Any] = []
+        reserved_ids = {item.id for item in (*models.chat.connections, *current)}
+        allocated_ids: set[str] = set()
 
-    config_path = project_dir / "config.toml"
-    written: list[str] = []
-    if provider is not None:
-        update_config_secret(config_path, "llm.embedding", "provider", provider)
-        written.append("llm.embedding.provider")
-    if model is not None:
-        update_config_secret(config_path, "llm.embedding", "model", model)
-        written.append("llm.embedding.model")
+        def allocate_provider_id() -> str:
+            candidate = 1
+            while (
+                f"embedding-{candidate}" in reserved_ids
+                or f"embedding-{candidate}" in allocated_ids
+            ):
+                candidate += 1
+            record_id = f"embedding-{candidate}"
+            allocated_ids.add(record_id)
+            return record_id
 
-    target_provider = (provider or "").strip()
-    if base_url is not None:
-        update_config_secret(config_path, "llm.embedding", "base_url", base_url)
-        written.append("llm.embedding.base_url")
-    if api_key is not None:
-        update_config_secret(config_path, "llm.embedding", "api_key", api_key)
-        written.append("llm.embedding.api_key")
-
-    if target_provider == "ollama" and base_url is None:
-        existing = read_simple_toml(config_path).get("llm", {}).get("embedding", {})
-        if not str(existing.get("base_url", "")).strip():
-            update_config_secret(
-                config_path,
-                "llm.embedding",
-                "base_url",
-                "http://localhost:11434/v1",
+        for index, spec in enumerate(endpoints, start=1):
+            left, separator, endpoint = spec.partition("=")
+            if not separator or not endpoint.strip():
+                raise RuntimeError("--embedding-endpoint requires TYPE[:PRESET]=BASE_URL")
+            raw_type, preset_separator, raw_preset = left.strip().partition(":")
+            mapped = LEGACY_PROVIDER_CONNECTIONS.get(raw_type)
+            connection_type = mapped[0] if mapped is not None else raw_type
+            preset = raw_preset if preset_separator else (mapped[1] if mapped is not None else "")
+            if connection_type == "openai_compatible" and not preset:
+                preset = "custom"
+            definition = connection_type_registry().definition(connection_type)
+            if "embedding" not in definition.capabilities:
+                raise RuntimeError(
+                    f"connection type {connection_type!r} does not support embedding"
+                )
+            allowed_presets = connection_type_registry().presets_for(connection_type, "embedding")
+            if preset and preset not in allowed_presets:
+                raise RuntimeError(
+                    f"preset {preset!r} does not support embedding for {connection_type!r}"
+                )
+            previous = current[index - 1] if index <= len(current) else None
+            record_id = previous.id if previous is not None else allocate_provider_id()
+            same_selection = bool(
+                previous and previous.type == connection_type and previous.preset == preset
             )
-            written.append("llm.embedding.base_url(seeded)")
+            accepts_credential = "credential" in definition.allowed_fields("embedding", preset)
+            if not accepts_credential:
+                credential = CredentialConfig()
+            elif api_key is not None:
+                credential = CredentialConfig(source="inline", value=api_key)
+            elif same_selection and previous is not None:
+                credential = previous.credential
+            else:
+                env_name = DEFAULT_CREDENTIAL_ENVS.get((connection_type, preset), "")
+                credential = (
+                    CredentialConfig(source="env", value=env_name)
+                    if env_name
+                    else CredentialConfig()
+                )
+            built.append(
+                EmbeddingProviderConfig(
+                    id=record_id,
+                    name=(
+                        previous.name
+                        if same_selection and previous is not None
+                        else f"{definition.label} {index}"
+                    ),
+                    type=connection_type,
+                    preset=preset,
+                    base_url=endpoint.strip(),
+                    credential=credential,
+                )
+            )
+        providers = tuple(built)
+        enabled = True
+    elif provider is not None:
+        mapped = LEGACY_PROVIDER_CONNECTIONS.get(target_provider)
+        if mapped is None:
+            raise RuntimeError(f"unknown embedding provider alias: {target_provider}")
+        connection_type, preset = mapped
+        if "embedding" not in connection_type_registry().definition(connection_type).capabilities:
+            raise RuntimeError(f"provider alias {target_provider!r} does not support embedding")
+        existing = current[0] if current else None
+        record_id = existing.id if existing is not None else "embedding-main"
+        endpoint = base_url
+        same_selection = bool(
+            existing and existing.type == connection_type and existing.preset == preset
+        )
+        if endpoint is None and same_selection and existing is not None:
+            endpoint = existing.base_url
+        if endpoint is None and connection_type == "ollama":
+            endpoint = "http://localhost:11434/v1"
+        definition = connection_type_registry().definition(connection_type)
+        accepts_credential = "credential" in definition.allowed_fields("embedding", preset)
+        if not accepts_credential:
+            credential = CredentialConfig()
+        elif api_key is not None:
+            credential = CredentialConfig(source="inline", value=api_key)
+        elif same_selection and existing is not None:
+            credential = existing.credential
+        else:
+            env_name = DEFAULT_CREDENTIAL_ENVS.get((connection_type, preset), "")
+            credential = (
+                CredentialConfig(source="env", value=env_name) if env_name else CredentialConfig()
+            )
+        providers = (
+            EmbeddingProviderConfig(
+                id=record_id,
+                name=(
+                    existing.name
+                    if same_selection and existing is not None
+                    else "Primary Embedding"
+                ),
+                type=connection_type,
+                preset=preset,
+                base_url=endpoint or "",
+                credential=credential,
+            ),
+        )
+        enabled = True
+    else:
+        providers = current
+        enabled = models.embedding.enabled
 
-    return {"written": written, "provider": target_provider}
+    updated = replace(
+        models,
+        embedding=replace(
+            models.embedding,
+            enabled=enabled,
+            settings=replace(
+                models.embedding.settings,
+                model=model if model is not None else models.embedding.settings.model,
+            ),
+            providers=providers,
+        ),
+    )
+    _persist_typed_models(project_dir, updated)
+    return {
+        "written": ["models.embedding"],
+        "provider": target_provider,
+        "provider_ids": [item.id for item in providers],
+    }
 
 
 def _is_local_ollama_base_url(base_url: str) -> bool:
@@ -2086,68 +2506,29 @@ def _is_local_ollama_base_url(base_url: str) -> bool:
 
 def align_docker_runtime_config(project_dir: Path) -> dict[str, Any]:
     """Rewrite host-only config values before copying them into Docker runtime."""
-
-    config_path = project_dir / "config.toml"
-    config = read_simple_toml(config_path)
-    embedding_cfg = config.get("llm", {}).get("embedding", {})
-    provider = str(embedding_cfg.get("provider", "") or "").strip().lower()
-    base_url = str(embedding_cfg.get("base_url", "") or "").strip()
+    models = _load_typed_models(project_dir)
     written: list[str] = []
-
-    if provider == "ollama" and _is_local_ollama_base_url(base_url):
-        update_config_secret(
-            config_path,
-            "llm.embedding",
-            "base_url",
-            DOCKER_OLLAMA_BASE_URL,
+    providers = []
+    for item in models.embedding.providers:
+        if item.type == "ollama" and _is_local_ollama_base_url(item.base_url):
+            providers.append(replace(item, base_url=DOCKER_OLLAMA_BASE_URL))
+            written.append(f"models.embedding.providers.{item.id}.base_url")
+        else:
+            providers.append(item)
+    if written:
+        _persist_typed_models(
+            project_dir,
+            replace(
+                models,
+                embedding=replace(models.embedding, providers=tuple(providers)),
+            ),
         )
-        base_url = DOCKER_OLLAMA_BASE_URL
-        written.append("llm.embedding.base_url")
 
     return {
         "written": written,
-        "embedding_provider": provider,
-        "embedding_base_url": base_url,
+        "embedding_provider": providers[0].type if providers else "",
+        "embedding_base_url": providers[0].base_url if providers else "",
     }
-
-
-def parse_module_override(spec: str) -> tuple[str, str, str]:
-    """Parse --module-override values shaped like ``module=provider:model``.
-
-    ``provider`` may be empty (= keep global), and ``model`` may be empty
-    (= keep provider default). Raises ValueError on malformed input so
-    argparse-style failures bubble up cleanly.
-    """
-
-    if "=" not in spec:
-        raise ValueError(f"--module-override requires MODULE=PROVIDER:MODEL form, got: {spec!r}")
-    module, _, rhs = spec.partition("=")
-    module = module.strip().lower()
-    if module not in {"soul", "discovery", "recommendation", "evaluation"}:
-        raise ValueError(
-            f"unknown module {module!r}; expected one of soul / discovery / recommendation / evaluation"
-        )
-    if ":" in rhs:
-        provider, _, model = rhs.partition(":")
-    else:
-        provider, model = rhs, ""
-    provider = provider.strip().lower()
-    if provider and provider not in SUPPORTED_PROVIDERS:
-        raise ValueError(f"unknown provider {provider!r} in --module-override {spec!r}")
-    return module, provider, model.strip()
-
-
-def apply_module_overrides(project_dir: Path, specs: list[str]) -> dict[str, Any]:
-    """Write each --module-override into config.toml under [llm.<module>]."""
-
-    config_path = project_dir / "config.toml"
-    written: list[str] = []
-    for spec in specs:
-        module, provider, model = parse_module_override(spec)
-        update_config_secret(config_path, f"llm.{module}", "provider", provider)
-        update_config_secret(config_path, f"llm.{module}", "model", model)
-        written.append(f"llm.{module}={provider or 'default'}:{model or 'default'}")
-    return {"modules": written}
 
 
 def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
@@ -2155,6 +2536,73 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
 
     config_path = project_dir / "config.toml"
     data = read_simple_toml(config_path)
+    models_raw = data.get("models")
+    if isinstance(models_raw, dict):
+        models = _load_typed_models(project_dir)
+        if not models.chat.connections:
+            bilibili_section = data.get("bilibili", {})
+            cookie_inline = str(bilibili_section.get("cookie", "") or "").strip()
+            cookie_file = project_dir / "data" / "bilibili_cookie.json"
+            cookie_on_disk = False
+            if cookie_file.exists():
+                try:
+                    cookie_data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                    cookie_on_disk = bool(str(cookie_data.get("cookie", "")).strip())
+                except json.JSONDecodeError:
+                    cookie_on_disk = False
+            missing = ["models.chat.connections"]
+            if not (cookie_inline or cookie_on_disk):
+                missing.append("bilibili.cookie")
+            return {
+                "provider": "",
+                "connection_type": "",
+                "preset": "",
+                "connection_id": "",
+                "missing": missing,
+                "has_cookie_inline": bool(cookie_inline),
+                "has_cookie_file": cookie_on_disk,
+            }
+        primary = models.chat.connections[0]
+        provider = {
+            ("anthropic_compatible", "anthropic"): "claude",
+            ("gemini_api", ""): "gemini",
+            ("ollama", ""): "ollama",
+        }.get((primary.type, primary.preset), primary.preset or primary.type)
+        if primary.credential.source == "inline":
+            credential_ready = bool(primary.credential.value.strip())
+        elif primary.credential.source == "env":
+            credential_ready = bool(os.environ.get(primary.credential.value, "").strip())
+        elif primary.credential.source == "oauth":
+            credential_ready = bool(primary.credential.value.strip())
+        else:
+            credential_ready = primary.type == "ollama"
+        missing: list[str] = []
+        if not credential_ready:
+            missing.append(f"models.chat.connections.{primary.id}.credential")
+        bilibili_section = data.get("bilibili", {})
+        cookie_inline = str(bilibili_section.get("cookie", "") or "").strip()
+        cookie_file = project_dir / "data" / "bilibili_cookie.json"
+        cookie_on_disk = False
+        if cookie_file.exists():
+            try:
+                cookie_data = json.loads(cookie_file.read_text(encoding="utf-8"))
+                cookie_on_disk = bool(str(cookie_data.get("cookie", "")).strip())
+            except json.JSONDecodeError:
+                cookie_on_disk = False
+        if not (cookie_inline or cookie_on_disk):
+            missing.append("bilibili.cookie")
+        return {
+            "provider": provider,
+            "connection_type": primary.type,
+            "preset": primary.preset,
+            "connection_id": primary.id,
+            "missing": missing,
+            "has_cookie_inline": bool(cookie_inline),
+            "has_cookie_file": cookie_on_disk,
+        }
+
+    # One-cycle read compatibility for old checkouts. Every Task 14 writer
+    # upgrades through the typed migration path before changing model fields.
     llm_section = data.get("llm", {})
     provider = str(llm_section.get("default_provider", "") or "").strip() or "deepseek"
 
@@ -2191,6 +2639,17 @@ def detect_missing_secrets(project_dir: Path) -> dict[str, Any]:
 
 def _embedding_choice_from_config(project_dir: Path) -> dict[str, Any]:
     data = read_simple_toml(project_dir / "config.toml")
+    if isinstance(data.get("models"), dict):
+        embedding = _load_typed_models(project_dir).embedding
+        provider = embedding.providers[0].type if embedding.providers else ""
+        return {
+            "source": "config",
+            "provider": provider,
+            "providers": [item.type for item in embedding.providers],
+            "model": embedding.settings.model,
+            "enabled": embedding.enabled,
+            "explicit": True,
+        }
     raw = data.get("llm", {}).get("embedding", {})
     provider = str(raw.get("provider", "") or "").strip()
     model = str(raw.get("model", "") or "").strip()
@@ -2671,18 +3130,24 @@ def build_docker_missing_secrets_command() -> list[str]:
 
     script = r"""
 import json
+import os
 import tomllib
 from pathlib import Path
 
 config_path = Path("/app/runtime/config.toml")
 cookie_path = Path("/app/runtime/data/bilibili_cookie.json")
 data = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
-llm = data.get("llm", {})
-provider = str(llm.get("default_provider", "") or "").strip() or "deepseek"
-remote = {"openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"}
-provider_cfg = llm.get(provider, {})
-api_key = str(provider_cfg.get("api_key", "") or "").strip()
-base_url = str(provider_cfg.get("base_url", "") or "").strip()
+models = data.get("models", {})
+chat = models.get("chat", {})
+connections = chat.get("connections", [])
+primary = connections[0] if connections else {}
+connection_id = str(primary.get("id", "") or "").strip()
+connection_type = str(primary.get("type", "") or "").strip()
+preset = str(primary.get("preset", "") or "").strip()
+api_key = str(primary.get("api_key", "") or "").strip()
+api_key_env = str(primary.get("api_key_env", "") or "").strip()
+credential_ref = str(primary.get("credential_ref", "") or "").strip()
+base_url = str(primary.get("base_url", "") or "").strip()
 bilibili = data.get("bilibili", {})
 cookie_inline = str(bilibili.get("cookie", "") or "").strip()
 cookie_on_disk = False
@@ -2692,14 +3157,24 @@ if cookie_path.exists():
     except json.JSONDecodeError:
         cookie_on_disk = False
 missing = []
-if provider in remote and not api_key:
-    missing.append(f"llm.{provider}.api_key")
-if provider == "openai_compatible" and not base_url:
-    missing.append("llm.openai_compatible.base_url")
+if not primary:
+    missing.append("models.chat.connections")
+elif connection_type == "codex_oauth":
+    if not credential_ref:
+        missing.append(f"models.chat.connections.{connection_id}.credential")
+elif connection_type != "ollama":
+    env_ready = bool(api_key_env and str(os.environ.get(api_key_env, "") or "").strip())
+    if not (api_key or env_ready):
+        missing.append(f"models.chat.connections.{connection_id}.credential")
+if connection_type in {"openai_compatible", "anthropic_compatible", "ollama"} and not base_url:
+    missing.append(f"models.chat.connections.{connection_id}.base_url")
 if not (cookie_inline or cookie_on_disk):
     missing.append("bilibili.cookie")
 print(json.dumps({
-    "provider": provider,
+    "provider": preset or connection_type,
+    "connection_type": connection_type,
+    "preset": preset,
+    "connection_id": connection_id,
     "missing": missing,
     "has_cookie_inline": bool(cookie_inline),
     "has_cookie_file": cookie_on_disk,
@@ -2886,14 +3361,17 @@ def run(args: argparse.Namespace) -> int:
         try:
             current = detect_missing_secrets(project_dir)
             provider = str(current.get("provider") or "deepseek")
-            provider_cfg = (
-                read_simple_toml(project_dir / "config.toml").get("llm", {}).get(provider, {})
-            )
+            current_connections = _load_typed_models(project_dir).chat.connections
+            primary = current_connections[0] if current_connections else None
             answers = collect_human_install_wizard(
                 existing_provider=provider,
-                existing_api_key=str(provider_cfg.get("api_key", "") or ""),
-                existing_base_url=str(provider_cfg.get("base_url", "") or ""),
-                existing_model=str(provider_cfg.get("model", "") or ""),
+                existing_api_key=(
+                    primary.credential.value
+                    if primary is not None and primary.credential.source == "inline"
+                    else ""
+                ),
+                existing_base_url=primary.base_url if primary is not None else "",
+                existing_model=primary.model if primary is not None else "",
             )
             apply_human_install_answers_to_args(args, answers)
         except RuntimeError as exc:
@@ -2904,7 +3382,8 @@ def run(args: argparse.Namespace) -> int:
                 "ok",
                 "human_install_choices_set",
                 {
-                    "provider": args.provider,
+                    "connection_type": args.connection_type,
+                    "preset": args.preset or "",
                     "llm_model": args.llm_model,
                     "embedding_provider": args.embedding_provider,
                     "embedding_model": args.embedding_model,
@@ -2916,55 +3395,64 @@ def run(args: argparse.Namespace) -> int:
             )
         )
 
-    if args.provider:
-        apply_provider_override(project_dir, args.provider)
-        emit(BootstrapResult("ok", "provider_set", {"provider": args.provider}))
+    if getattr(args, "llm_preset", None):
+        legacy_preset = LLM_PRESETS.get(args.llm_preset, {})
+        if args.connection_type and args.connection_type != "openai_compatible":
+            emit(BootstrapResult("error", "preset_connection_type_conflict", {}))
+            return 2
+        args.connection_type = "openai_compatible"
+        args.preset = "custom"
+        if args.llm_base_url is None and legacy_preset.get("base_url"):
+            args.llm_base_url = legacy_preset["base_url"]
+        if args.llm_model is None and legacy_preset.get("model"):
+            args.llm_model = legacy_preset["model"]
 
-    current_provider = detect_missing_secrets(project_dir)["provider"]
-    if args.llm_api_key:
-        provider = args.provider or current_provider
-        apply_llm_api_key(project_dir, provider, args.llm_api_key)
-        emit(BootstrapResult("ok", "api_key_set", {"provider": provider}))
-
-    if args.llm_base_url is not None:
-        provider = args.provider or current_provider
-        apply_llm_base_url(project_dir, provider, args.llm_base_url)
-        emit(
-            BootstrapResult(
-                "ok",
-                "base_url_set",
-                {"provider": provider, "base_url": args.llm_base_url},
+    current_connections = _load_typed_models(project_dir).chat.connections
+    current_primary = current_connections[0] if current_connections else None
+    chat_touched = (
+        any(
+            value is not None
+            for value in (
+                args.connection_type,
+                args.preset,
+                args.provider,
+                args.llm_api_key,
+                args.llm_base_url,
+                args.llm_model,
+                getattr(args, "llm_preset", None),
             )
         )
-    elif args.provider == "openai":
-        # User picked OpenAI 官方 without a custom base_url. If a previous
-        # run wrote a gateway URL into [llm.openai] base_url, it would
-        # silently keep routing to that gateway.
-        # Reset the field to "" so the OpenAI SDK falls back to its
-        # built-in https://api.openai.com/v1.
-        if clear_config_value(project_dir / "config.toml", "llm.openai", "base_url"):
-            emit(
-                BootstrapResult(
-                    "ok",
-                    "base_url_reset",
-                    {
-                        "provider": "openai",
-                        "reason": (
-                            "--provider openai given without --llm-base-url; "
-                            "cleared stale value so SDK uses official OpenAI endpoint"
-                        ),
-                    },
+        or current_primary is None
+    )
+    if chat_touched:
+        try:
+            if args.connection_type or args.preset or args.provider:
+                connection_type, preset = resolve_connection_selection(
+                    provider=args.provider,
+                    connection_type=args.connection_type,
+                    preset=args.preset,
                 )
+            elif current_primary is None:
+                connection_type, preset = resolve_connection_selection()
+            else:
+                connection_type, preset = current_primary.type, current_primary.preset
+            chat_summary = apply_chat_route_config(
+                project_dir,
+                connection_type=connection_type,
+                preset=preset,
+                model=args.llm_model,
+                base_url=args.llm_base_url,
+                api_key=args.llm_api_key,
+                credential_ref="codex" if connection_type == "codex_oauth" else None,
             )
-
-    if args.llm_model is not None:
-        provider = args.provider or current_provider
-        apply_llm_model(project_dir, provider, args.llm_model)
+        except (KeyError, RuntimeError, ValueError) as exc:
+            emit(BootstrapResult("error", str(exc), {"step": "models.chat"}))
+            return 2
         emit(
             BootstrapResult(
                 "ok",
-                "model_set",
-                {"provider": provider, "model": args.llm_model},
+                "chat_route_set",
+                chat_summary,
             )
         )
 
@@ -2973,26 +3461,24 @@ def run(args: argparse.Namespace) -> int:
         or args.embedding_model is not None
         or args.embedding_base_url is not None
         or args.embedding_api_key is not None
+        or args.embedding_endpoint is not None
     )
     if embedding_touched:
-        summary = apply_embedding_config(
-            project_dir,
-            provider=args.embedding_provider,
-            model=args.embedding_model,
-            base_url=args.embedding_base_url,
-            api_key=args.embedding_api_key,
-        )
+        try:
+            summary = apply_embedding_config(
+                project_dir,
+                provider=args.embedding_provider,
+                model=args.embedding_model,
+                base_url=args.embedding_base_url,
+                api_key=args.embedding_api_key,
+                endpoints=args.embedding_endpoint,
+            )
+        except (KeyError, RuntimeError, ValueError) as exc:
+            emit(BootstrapResult("error", str(exc), {"step": "models.embedding"}))
+            return 2
         emit(BootstrapResult("ok", "embedding_set", summary))
 
     auto_embedding_to_ollama = False
-
-    if args.module_override:
-        try:
-            mod_summary = apply_module_overrides(project_dir, args.module_override)
-        except ValueError as exc:
-            emit(BootstrapResult("error", str(exc), {"step": "module_override"}))
-            return 2
-        emit(BootstrapResult("ok", "module_overrides_set", mod_summary))
 
     if args.bilibili_cookie:
         update_config_secret(
@@ -3019,22 +3505,12 @@ def run(args: argparse.Namespace) -> int:
                 )
             )
 
-    # v0.3.95+: revive the embedding→Ollama safety net. Embedding is fully
-    # decoupled from the chat provider (v0.3.32+), so an install that sets
-    # a chat-only provider (Claude / DeepSeek / OpenRouter can't embed) —
-    # or any flag-driven run that never passed --embedding-* — would leave
-    # [llm.embedding].provider empty, silently disabling semantic dedup and
-    # letting near-duplicate content slip through. The old flag was declared
-    # but never set, so the net was dead. Wire it for real. Skipped under
-    # Docker (the container would point at its own localhost, not the host's
-    # Ollama) and when the user explicitly disabled embedding by passing
-    # --embedding-provider "".
-    effective_embedding_provider = str(
-        read_simple_toml(project_dir / "config.toml")
-        .get("llm", {})
-        .get("embedding", {})
-        .get("provider", "")
-    ).strip()
+    # Keep local semantic dedup available when no native embedding providers
+    # were selected. An explicit empty legacy alias still means disabled.
+    embedding_route = _load_typed_models(project_dir).embedding
+    effective_embedding_provider = (
+        embedding_route.providers[0].type if embedding_route.providers else ""
+    )
     if should_auto_wire_embedding(
         embedding_provider_arg=args.embedding_provider,
         effective_provider=effective_embedding_provider,
@@ -3046,6 +3522,7 @@ def run(args: argparse.Namespace) -> int:
             model="bge-m3",
             base_url=None,
             api_key=None,
+            endpoints=None,
         )
         auto_embedding_to_ollama = True
         emit(
@@ -3072,10 +3549,11 @@ def run(args: argparse.Namespace) -> int:
     # the *host's* ollama at host.docker.internal, and managing a host
     # service from inside a container would be wrong.
     ollama_models_needed: list[str] = []
-    if (args.provider or status["provider"]) == "ollama":
-        ollama_models_needed.append((args.llm_model or "llama3").strip())
-    if (args.embedding_provider or "").strip() == "ollama":
-        ollama_models_needed.append((args.embedding_model or "bge-m3").strip())
+    effective_models = _load_typed_models(project_dir)
+    if effective_models.chat.connections and effective_models.chat.connections[0].type == "ollama":
+        ollama_models_needed.append(effective_models.chat.connections[0].model.strip())
+    if any(item.type == "ollama" for item in effective_models.embedding.providers):
+        ollama_models_needed.append(effective_models.embedding.settings.model.strip())
     # When we auto-wired Ollama for embedding (Claude / DeepSeek /
     # OpenRouter primary path), make sure bge-m3 is pulled so the
     # embedding service has a working backend at first run.
@@ -3343,32 +3821,6 @@ def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
-    # Resolve --llm-preset before run() so the rest of the pipeline
-    # sees concrete provider/base_url/model values. The preset implies
-    # provider=openai but never overrides explicit user-provided
-    # --llm-base-url / --llm-model.
-    if getattr(args, "llm_preset", None):
-        preset = LLM_PRESETS.get(args.llm_preset, {})
-        if not args.provider:
-            args.provider = "openai"
-        elif args.provider != "openai":
-            emit(
-                BootstrapResult(
-                    "error",
-                    "preset_provider_conflict",
-                    {
-                        "reason": (
-                            f"--llm-preset implies provider=openai but you "
-                            f"passed --provider={args.provider}. Drop one of them."
-                        )
-                    },
-                )
-            )
-            return 2
-        if args.llm_base_url is None and preset.get("base_url"):
-            args.llm_base_url = preset["base_url"]
-        if args.llm_model is None and preset.get("model"):
-            args.llm_model = preset["model"]
     try:
         return run(args)
     except KeyboardInterrupt:

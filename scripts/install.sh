@@ -560,8 +560,10 @@ PY
             echo ""
         fi
         echo "  1. Fix the failing service:"
-        echo "       - llm: check provider, API key, base_url/model, quota, or Ollama chat model."
-        echo "       - embedding: check [llm.embedding], API key/base_url/model, or run Ollama + pull bge-m3."
+        echo "       - chat: run 'openbiliclaw models list'; check connection type, preset,"
+        echo "         credential, base_url/model, quota, or the local runtime."
+        echo "         Probe one stable ID with: openbiliclaw models probe <STABLE_ID>"
+        echo "       - embedding: check [models.embedding] shared settings and ordered providers."
         echo "  2. Re-run the same bootstrap command after the fix (DO NOT add --skip-init)."
         echo "     It will repeat the service checks and only then run openbiliclaw init."
         echo ""
@@ -607,8 +609,11 @@ PY
     elif [ -n "$missing" ]; then
         echo "Next steps (credentials are missing):"
         echo ""
-        echo "  1. Choose your LLM provider (default: deepseek):"
-        echo "     Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible"
+        echo "  1. Choose the Chat connection type first (default: openai_compatible):"
+        echo "     Connection types: openai_compatible | anthropic_compatible | gemini_api | ollama | codex_oauth"
+        echo "     Then choose a preset when the connection type offers one:"
+        echo "       openai_compatible: deepseek (default) | openai | openrouter | custom"
+        echo "       anthropic_compatible: anthropic (default) | custom"
         echo ""
         echo "  2. Ask which embedding service to use:"
         echo "     Default: local Ollama bge-m3 (free/offline/no extra API key)."
@@ -622,8 +627,8 @@ PY
         echo ""
         echo "  4. Prepare the missing values:"
         case "$missing" in
-            *llm.*api_key*)
-                echo "     - LLM API key — get one from your chosen provider:"
+            *models.chat.connections*credential*|*llm.*api_key*)
+                echo "     - Chat credential — get an API key for the selected preset:"
                 echo "         OpenAI:     https://platform.openai.com/api-keys"
                 echo "         Gemini:     https://aistudio.google.com/apikey"
                 echo "         DeepSeek:   https://platform.deepseek.com/api_keys"
@@ -654,13 +659,15 @@ PY
         esac
         echo ""
         echo "  5. Run with your values filled in (DO NOT add --skip-init):"
+        echo "     Include --preset only for a compatible connection type."
         echo ""
         # Build the command dynamically — only show flags for what's missing.
         echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
         echo "         --project-dir $INSTALL_DIR \\"
-        echo "         --provider <YOUR_PROVIDER> \\"
+        echo "         --connection-type <YOUR_CONNECTION_TYPE> \\"
+        echo "         --preset <YOUR_PRESET> \\"
         case "$missing" in
-            *llm.*api_key*) echo "         --llm-api-key '<YOUR_API_KEY>' \\" ;;
+            *models.chat.connections*credential*|*llm.*api_key*) echo "         --llm-api-key '<YOUR_API_KEY>' \\" ;;
         esac
         case "$decisions" in
             *embedding*)

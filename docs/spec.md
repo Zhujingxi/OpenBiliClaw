@@ -376,9 +376,10 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
-│ 模型配置 API + 事务型有序 Chat/Embedding route + 四端编辑器（阶段 9–13）│
+│ 模型配置 API + 事务型有序 Chat/Embedding route + 全配置入口（阶段 9–14）│
 │ Desktop：ordered list + inspector；Extension/Mobile：sequential list→detail │
 │ CLI：models list/add/edit/remove/move/probe → ModelConfigService │
+│ setup/bootstrap/install/Docker/package → native [models] writer │
 │ Chat/Embedding/Runtime tabs；descriptor fields；Embedding 共享设置 │
 │ GET/PUT model-config → strict secret-safe schema ────────┐    │
 │ descriptors + exact probe → safe probe/circuit summary ─┤    │

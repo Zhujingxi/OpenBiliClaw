@@ -572,8 +572,10 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
             Write-Host ''
         }
         Write-Host '  1. Fix the failing service:'
-        Write-Host '       - llm: check provider, API key, base_url/model, quota, or Ollama chat model.'
-        Write-Host '       - embedding: check [llm.embedding], API key/base_url/model, or run Ollama + pull bge-m3.'
+        Write-Host "       - chat: run 'openbiliclaw models list'; check connection type, preset,"
+        Write-Host '         credential, base_url/model, quota, or the local runtime.'
+        Write-Host '         Probe one stable ID with: openbiliclaw models probe <STABLE_ID>'
+        Write-Host '       - embedding: check [models.embedding] shared settings and ordered providers.'
         Write-Host '  2. Re-run the same bootstrap command after the fix (DO NOT add --skip-init).'
         Write-Host '     It will repeat the service checks and only then run openbiliclaw init.'
         Write-Host ''
@@ -617,11 +619,14 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
     } elseif ($missing) {
         Write-Host 'Next steps (credentials are missing):'
         Write-Host ''
-        Write-Host '  1. Choose your LLM provider (default: deepseek):'
-        Write-Host '     Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible'
+        Write-Host '  1. Choose the Chat connection type first (default: openai_compatible):'
+        Write-Host '     Connection types: openai_compatible | anthropic_compatible | gemini_api | ollama | codex_oauth'
+        Write-Host '     Then choose a preset when the connection type offers one:'
+        Write-Host '       openai_compatible: deepseek (default) | openai | openrouter | custom'
+        Write-Host '       anthropic_compatible: anthropic (default) | custom'
         Write-Host ''
-        if ($missing -match 'api_key') {
-            Write-Host '     LLM API key - get one from your chosen provider:'
+        if ($missing -match '(models\.chat\.connections.*credential|api_key)') {
+            Write-Host '     Chat credential - get an API key for the selected preset:'
             Write-Host '         DeepSeek:   https://platform.deepseek.com/api_keys'
             Write-Host '         OpenAI:     https://platform.openai.com/api-keys'
             Write-Host '         Gemini:     https://aistudio.google.com/apikey'
@@ -654,11 +659,13 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         Write-Host '     Default: no. Use --yes-* flags only after explicit opt-in.'
         Write-Host ''
         Write-Host '  4. Prepare missing values, then run with values filled in (DO NOT add --skip-init):'
+        Write-Host '     Include --preset only for a compatible connection type.'
         Write-Host ''
         Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
         Write-Host "         --project-dir $InstallDir ``"
-        Write-Host "         --provider <YOUR_PROVIDER> ``"
-        if ($missing -match 'api_key')         { Write-Host "         --llm-api-key '<YOUR_API_KEY>' ``" }
+        Write-Host "         --connection-type <YOUR_CONNECTION_TYPE> ``"
+        Write-Host "         --preset <YOUR_PRESET> ``"
+        if ($missing -match '(models\.chat\.connections.*credential|api_key)') { Write-Host "         --llm-api-key '<YOUR_API_KEY>' ``" }
         if ($decisions -match 'embedding') {
             Write-Host "         --embedding-provider ollama ``"
             Write-Host "         --embedding-model bge-m3 ``"

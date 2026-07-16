@@ -8,6 +8,8 @@ user data out of the install directory on upgrade — cover it directly.
 from __future__ import annotations
 
 import importlib.util
+import tomllib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +28,289 @@ def _load_entry_module():
 
 
 entry = _load_entry_module()
+
+
+def test_packaged_ollama_transform_skips_authoritative_remote_route_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """# preserved prefix
+[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "remote-chat"
+name = "Remote Chat"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "text-embedding-3-small"
+output_dimensionality = 1536
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "remote-embedding"
+name = "Remote Embedding"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://embedding.example/v1"
+api_key_env = "EMBEDDING_API_KEY"
+[general]
+language = "zh"
+""",
+        encoding="utf-8",
+    )
+    original = config_path.read_bytes()
+
+    changed = entry._configure_ollama_embedding(
+        config_path,
+        provider_id="ollama-packaged",
+        name="Bundled Ollama",
+        base_url="http://127.0.0.1:11435/v1",
+        model="bge-m3",
+    )
+
+    assert changed is False
+    assert config_path.read_bytes() == original
+
+
+def test_packaged_ollama_transform_skips_owned_id_collision_with_chat(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "ollama-packaged"
+name = "User Chat"
+type = "ollama"
+model = "qwen"
+base_url = "http://127.0.0.1:11434/v1"
+[models.embedding]
+enabled = false
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+""",
+        encoding="utf-8",
+    )
+    original = config_path.read_bytes()
+
+    assert (
+        entry._packaged_embedding_route_seedable(
+            config_path,
+            provider_id="ollama-packaged",
+        )
+        is False
+    )
+    assert (
+        entry._configure_ollama_embedding(
+            config_path,
+            provider_id="ollama-packaged",
+            name="Bundled Ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            model="bge-m3",
+        )
+        is False
+    )
+    assert config_path.read_bytes() == original
+
+
+def test_packaging_entry_has_no_legacy_embedding_regex_mutators() -> None:
+    source = Path("packaging/entry.py").read_text(encoding="utf-8")
+
+    assert "_enable_ollama_embedding_default" not in source
+    assert "_set_embedding_field" not in source
+    assert "_default_ollama_to_embedding_only" not in source
+    assert "[llm.embedding]" not in source
+    assert "\nimport re\n" not in source
+
+
+def test_bundled_seed_skips_authoritative_remote_route_and_runtime_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundled = tmp_path / "bundle"
+    (bundled / "bge-m3-seed").mkdir(parents=True)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "chat"
+name = "Chat"
+type = "ollama"
+model = "qwen"
+base_url = "http://127.0.0.1:11434/v1"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "text-embedding-3-small"
+output_dimensionality = 1536
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "remote-a"
+name = "Remote A"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://a.example/v1"
+api_key_env = "EMBED_A_KEY"
+[[models.embedding.providers]]
+id = "remote-b"
+name = "Remote B"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://b.example/v1"
+api_key_env = "EMBED_B_KEY"
+""",
+        encoding="utf-8",
+    )
+    original = config_path.read_bytes()
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.embedding_seed.effective_embedding_models_dir",
+        lambda **_kwargs: pytest.fail("remote route must skip model-dir resolution"),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.embedding_seed.seed_embedding_model",
+        lambda _seed, _target: pytest.fail("remote route must skip bundled model seeding"),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.ollama_supervisor.start_managed_ollama_at",
+        lambda _target, _host: pytest.fail("remote route must skip daemon startup"),
+    )
+
+    assert entry._seed_bundled_embedding_model(bundled, config_path) is False
+    assert config_path.read_bytes() == original
+
+
+def test_bundled_seed_enables_fresh_empty_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundled = tmp_path / "bundle"
+    (bundled / "bge-m3-seed").mkdir(parents=True)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "chat"
+name = "Chat"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+[models.embedding]
+enabled = false
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+""",
+        encoding="utf-8",
+    )
+    target = tmp_path / "models"
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.embedding_seed.effective_embedding_models_dir",
+        lambda **_kwargs: target,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.embedding_seed.seed_embedding_model",
+        lambda _seed, _target: SimpleNamespace(ok=True, detail=""),
+    )
+    started: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.ollama_supervisor.start_managed_ollama_at",
+        lambda target_dir, host: started.append((target_dir, host)) or True,
+    )
+
+    assert entry._seed_bundled_embedding_model(bundled, config_path) is True
+
+    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    providers = raw["models"]["embedding"]["providers"]
+    assert [provider["id"] for provider in providers] == ["ollama-packaged"]
+    assert raw["models"]["embedding"]["settings"]["model"] == "bge-m3"
+    assert started == [(str(target), "127.0.0.1:11435")]
+
+
+def test_packaged_ollama_transform_updates_owned_record_without_reordering(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "chat"
+name = "Chat"
+type = "ollama"
+model = "qwen"
+base_url = "http://127.0.0.1:11434/v1"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "remote-a"
+name = "Remote A"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://a.example/v1"
+api_key_env = "EMBED_A_KEY"
+[[models.embedding.providers]]
+id = "ollama-packaged"
+name = "Old Packaged"
+type = "ollama"
+base_url = "http://127.0.0.1:11434/v1"
+""",
+        encoding="utf-8",
+    )
+
+    assert (
+        entry._configure_ollama_embedding(
+            config_path,
+            provider_id="ollama-packaged",
+            name="Bundled Ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            model="bge-m3",
+        )
+        is True
+    )
+
+    providers = tomllib.loads(config_path.read_text(encoding="utf-8"))["models"]["embedding"][
+        "providers"
+    ]
+    assert [provider["id"] for provider in providers] == ["remote-a", "ollama-packaged"]
+    assert providers[0]["api_key_env"] == "EMBED_A_KEY"
+    assert providers[1]["base_url"] == "http://127.0.0.1:11435/v1"
 
 
 # --------------------------------------------------------------------------- #
@@ -440,12 +725,29 @@ def test_ensure_embedding_model_async_reports_global_pull_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from openbiliclaw.config import Config
+    from openbiliclaw.model_config import (
+        EmbeddingModelSettings,
+        EmbeddingProviderConfig,
+        EmbeddingRouteConfig,
+    )
     from openbiliclaw.runtime import embedding_progress
 
     cfg = Config()
-    cfg.llm.embedding.provider = "ollama"
-    cfg.llm.embedding.model = "bge-m3"
-    cfg.llm.embedding.base_url = "http://localhost:11434/v1"
+    cfg.models = replace(
+        cfg.models,
+        embedding=EmbeddingRouteConfig(
+            enabled=True,
+            settings=EmbeddingModelSettings(model="bge-m3"),
+            providers=(
+                EmbeddingProviderConfig(
+                    id="ollama-packaged",
+                    name="Bundled Ollama",
+                    type="ollama",
+                    base_url="http://localhost:11434/v1",
+                ),
+            ),
+        ),
+    )
     pulled: list[tuple[str, str]] = []
 
     class _InlineThread:

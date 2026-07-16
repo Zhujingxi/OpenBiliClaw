@@ -1,4 +1,12 @@
+import tomllib
 from pathlib import Path
+
+from openbiliclaw.config import load_config
+from openbiliclaw.model_config import (
+    connection_type_registry,
+    parse_model_config,
+    validate_model_config,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -7,29 +15,80 @@ def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_shell_installers_recommend_same_default_llm_provider() -> None:
+def test_shell_installers_describe_connection_type_and_preset() -> None:
     install_sh = _read("scripts/install.sh")
     install_ps1 = _read("scripts/install.ps1")
-    config_example = _read("config.example.toml")
 
-    expected_default = "Choose your LLM provider (default: deepseek):"
-    expected_supported = (
-        "Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible"
-    )
-
-    assert expected_default in install_sh
-    assert expected_default in install_ps1
-    assert expected_supported in install_sh
-    assert expected_supported in install_ps1
+    for installer in (install_sh, install_ps1):
+        lowered = installer.lower()
+        assert "connection type" in lowered
+        assert "preset" in lowered
+        assert "openbiliclaw models" in lowered
+        assert "default llm provider" not in lowered
+        assert "choose your llm provider" not in lowered
+        assert "--connection-type <YOUR_CONNECTION_TYPE>" in installer
+        assert "--preset <YOUR_PRESET>" in installer
+        assert "--provider <YOUR_PROVIDER>" not in installer
+        assert "[llm.embedding]" not in installer
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_sh
     assert "DeepSeek:   https://platform.deepseek.com/api_keys" in install_ps1
-    config_lines = {
-        line.strip()
-        for line in config_example.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    }
-    assert 'default_provider = "deepseek"' in config_lines
-    assert 'default_provider = "openai"' not in config_lines
+
+
+def test_config_example_is_valid_native_model_schema() -> None:
+    text = _read("config.example.toml")
+    raw = tomllib.loads(text)
+
+    models = parse_model_config(raw["models"])
+    assert validate_model_config(models, connection_type_registry()) == []
+    assert models.schema_version == 1
+    assert len(models.chat.connections) == 1
+    assert models.chat.connections[0].type == "openai_compatible"
+    assert models.chat.connections[0].preset == "deepseek"
+    assert models.embedding.settings.model == "bge-m3"
+    assert "llm" not in raw
+    assert "[llm" not in text
+    assert "default_provider" not in text
+    assert "fallback_provider" not in text
+    assert "module-override" not in text
+
+    loaded = load_config(ROOT / "config.example.toml")
+    assert loaded.model_meta.source == "native"
+    assert loaded.models == models
+
+
+def test_task14_mandatory_docs_describe_all_native_install_writers() -> None:
+    changelog = _read("docs/changelog.md")
+    architecture = _read("docs/architecture.md")
+    spec = _read("docs/spec.md")
+    config_doc = _read("docs/modules/config.md")
+    init_doc = _read("docs/modules/init.md")
+
+    current_changelog = changelog.split("## v0.3.167", 1)[0]
+    assert "首启、安装、Docker 与桌面打包统一写入原生模型路由（阶段 14）" in current_changelog
+    for document in (architecture, spec):
+        assert "阶段 9–14" in document
+        assert "setup/bootstrap/install/Docker/package" in document
+    assert "agent bootstrap / 一句话安装器、Docker 首次 seed、桌面打包 helper" in config_doc
+    assert "`agent_bootstrap.py` 已删除 `--module-override`" in config_doc
+    assert "编辑快照中现有的第一条稳定-ID Chat 记录" in init_doc
+    assert "fallback 顺序、Embedding Provider 顺序及共享 settings" in init_doc
+
+
+def test_bootstrap_and_install_docs_use_ordered_model_commands() -> None:
+    bootstrap = _read("scripts/agent_bootstrap.py")
+    agent_doc = _read("docs/agent-install.md")
+    docker_doc = _read("docs/docker-deployment.md")
+    init_doc = _read("docs/modules/init.md")
+
+    assert '"--connection-type"' in bootstrap
+    assert '"--preset"' in bootstrap
+    assert '"--embedding-endpoint"' in bootstrap
+    assert '"--module-override"' not in bootstrap
+    for document in (agent_doc, docker_doc, init_doc):
+        lowered = document.lower()
+        assert "openbiliclaw models" in lowered
+        assert "connection type" in lowered or "连接类型" in document
+    assert "--module-override" not in agent_doc
 
 
 def test_install_sh_uses_interactive_auto_init_contract() -> None:
@@ -97,7 +156,7 @@ def test_docker_docs_promote_human_one_line_installer_contract() -> None:
 
     assert "MODE=docker curl -fsSL .../install.sh | bash" in install_sh
     assert "MODE=docker curl -fsSL https://raw.githubusercontent.com" in docker_doc
-    assert "human Docker one-line installer asks the same LLM provider first" in docker_doc
+    assert "human Docker one-line installer asks the Chat connection type first" in docker_doc
     assert "http://ollama:11434/v1" in docker_doc
     assert "127.0.0.1:8420/api/bilibili/cookie" in docker_doc
     assert "init` 是 v0.3.20+ 的交互式向导" not in docker_doc
@@ -117,7 +176,9 @@ def test_install_contract_blocks_init_when_ai_service_checks_fail() -> None:
     assert "AI service check failed before init" in install_sh
     assert "AI service check failed before init" in install_ps1
     assert "status=service_check_failed" in agent_doc
-    assert "default LLM provider or embedding service failed" in agent_doc
+    assert "exact primary Chat connection or an ordered Embedding provider" in agent_doc
+    assert "exact stable primary Chat connection" in agent_doc
+    assert "every configured ordered Embedding provider" in agent_doc
     assert "service_check_failed" in docker_doc
     assert "service_check_failed" in cli_doc
 
@@ -131,23 +192,27 @@ def test_human_installers_run_full_terminal_wizard_before_init() -> None:
     assert "--interactive-confirm" in install_sh
     assert "--interactive-confirm" in install_ps1
     assert "human_install_choices_set" in bootstrap
-    assert "human one-line installer asks LLM provider first" in agent_doc
+    assert "human one-line installer asks Chat connection type first" in agent_doc
     assert "openai_compatible" in bootstrap
     assert "GetPassWarning" in bootstrap
 
 
-def test_agent_install_llm_menu_numbering_matches_current_options() -> None:
+def test_agent_install_connection_type_menu_matches_current_options() -> None:
     doc = _read("docs/agent-install.md")
 
-    assert "Present **seven top-level options**" in doc
-    assert "Present **three top-level options**" not in doc
-    assert 'is folded into "Advanced" further down' not in doc
-    assert "**Hardware caveat for option 7 (Ollama)**" in doc
-    assert "#### Options 3-6 (OpenAI 官方 / Gemini / Claude / OpenRouter)" in doc
-    assert "#### Option 2 (OpenAI 官方 / Gemini / Claude / OpenRouter)" not in doc
+    assert "Present **five top-level connection types**" in doc
+    assert "openai_compatible" in doc
+    assert "anthropic_compatible" in doc
+    assert "gemini_api" in doc
+    assert "ollama" in doc
+    assert "codex_oauth" in doc
+    assert "OpenAI-compatible presets" in doc
+    assert "Anthropic-compatible presets" in doc
+    assert "Present **seven top-level options**" not in doc
+    assert "DeepSeek / OpenAI / OpenRouter are presets, not top-level providers" in doc
 
 
-def test_cli_module_docs_show_native_model_editor_while_bootstrap_keeps_its_menu() -> None:
+def test_cli_module_docs_and_bootstrap_share_native_connection_types() -> None:
     doc = _read("docs/modules/cli.md")
     bootstrap = _read("scripts/agent_bootstrap.py")
 
@@ -159,10 +224,11 @@ def test_cli_module_docs_show_native_model_editor_while_bootstrap_keeps_its_menu
     assert "不再写 legacy `[llm]`" in doc
     assert "1   DeepSeek 官方 ★默认推荐" not in doc
 
-    # Agent/bootstrap and installer cutover belongs to Task 14; Task 13 only
-    # removes the parallel menu from the native terminal CLI setup path.
     assert "HUMAN_LLM_MENU" in bootstrap
-    assert "DeepSeek 官方 ★默认推荐" in bootstrap
+    assert '"openai_compatible", "OpenAI-compatible"' in bootstrap
+    assert '"anthropic_compatible", "Anthropic-compatible"' in bootstrap
+    assert '"codex_oauth", "Codex OAuth"' in bootstrap
+    assert "DeepSeek 官方 ★默认推荐" not in bootstrap
     assert "User picked OpenAI 官方 (option 2 in agent-install.md)" not in bootstrap
 
 

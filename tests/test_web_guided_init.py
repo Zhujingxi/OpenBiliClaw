@@ -1,5 +1,8 @@
 import asyncio
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -91,13 +94,277 @@ def test_web_surfaces_no_longer_block_reddit_only_init() -> None:
     assert "Reddit 当前只启用 discovery" not in app_js
 
 
-def test_setup_llm_model_is_visible_and_save_suppresses_background_llm_work() -> None:
-    """Setup step 1 saves config only; model name is a normal required field."""
+def test_setup_model_route_is_descriptor_driven_and_provider_first() -> None:
+    """Fresh setup consumes the native model APIs and a vertical type list."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
-    assert "高级（可选：自定义模型名）" not in setup_html
-    assert '<label for="model">模型名</label>' in setup_html
-    assert "suppress_background_llm_work: true" in setup_html
+    assert 'id="connectionTypeList"' in setup_html
+    assert 'class="connection-type-list"' in setup_html
+    assert 'fetch("/api/model-connection-types?capability=chat"' in setup_html
+    assert 'fetch("/api/model-config"' in setup_html
+    assert 'fetch("/api/model-config/probe"' in setup_html
+    assert 'fetch("/api/model-config", {' in setup_html
+    assert 'method: "PUT"' in setup_html
+    assert "descriptor.fields" in setup_html
+    assert "preset_definitions" in setup_html
+    model_save = setup_html.split("async function saveModelRoute()", 1)[1].split(
+        "async function checkBili()", 1
+    )[0]
+    assert 'fetch("/api/config"' not in model_save
+    assert 'fetch("/api/config", {' not in setup_html
+    assert "suppress_background_llm_work" not in setup_html
+    assert "llm: {" not in setup_html
+    narrow_css = setup_html.split("@media (max-width: 680px)", 1)[1].split("@keyframes", 1)[0]
+    assert ".connection-type-list { max-height: none; grid-template-columns: 1fr; }" in narrow_css
+
+
+def test_setup_model_editor_escapes_config_values_and_can_create_first_chat_route() -> None:
+    """Config-derived markup is escaped and an empty native route gets one stable draft."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    assert 'let stableId = "chat-primary"' in setup_html
+    assert "connections.length" in setup_html
+    assert "createFirstChatDraft()" in setup_html
+    assert 'value="${escapeHtml(value)}"' in setup_html
+    assert "escapeHtml(status.credential_ref" in setup_html
+    assert "escapeHtml(draftConnection.credential.value" in setup_html
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the inline escaping regression")
+    helper = setup_html.split("    function escapeHtml(value) {", 1)[1].split(
+        "\n    }\n\n    function descriptorFor", 1
+    )[0]
+    function_source = "function escapeHtml(value) {" + helper + "\n}"
+    attack = '"><img src=x onerror="globalThis.injected=true">'
+    result = subprocess.run(
+        [
+            node,
+            "-e",
+            f"{function_source}; process.stdout.write(escapeHtml({json.dumps(attack)}));",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (
+        result.stdout == "&quot;&gt;&lt;img src=x onerror=&quot;globalThis.injected=true&quot;&gt;"
+    )
+    assert "<img" not in result.stdout
+
+
+def test_setup_empty_chat_route_allocates_globally_unique_stable_id() -> None:
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the stable-ID regression")
+
+    safe_status = setup_html.split("    function safeCredentialStatus(credential) {", 1)[1].split(
+        "\n    }\n\n    function hydrateDraftConnection", 1
+    )[0]
+    create_draft = setup_html.split("    function createFirstChatDraft() {", 1)[1].split(
+        "\n    }\n\n    function currentPreset", 1
+    )[0]
+    apply_defaults = setup_html.split(
+        "    function applyPresetDefaults(descriptor, preset, force = false) {", 1
+    )[1].split("\n    }\n\n    function selectConnectionType", 1)[0]
+    script = "\n".join(
+        [
+            "let draftConnection = null;",
+            (
+                "let modelSnapshot = {models: {chat: {connections: []}, "
+                "embedding: {providers: [{id: 'chat-primary'}]}}};"
+            ),
+            (
+                "let modelDescriptors = [{id: 'ollama', label: 'Ollama', "
+                "category: 'local_runtime', fields: [], preset_definitions: []}];"
+            ),
+            "function safeCredentialStatus(credential) {" + safe_status + "\n}",
+            "function applyPresetDefaults(descriptor, preset, force = false) {"
+            + apply_defaults
+            + "\n}",
+            "function createFirstChatDraft() {" + create_draft + "\n}",
+            "process.stdout.write(createFirstChatDraft().id);",
+        ]
+    )
+
+    result = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == "chat-primary-2"
+
+
+def test_setup_model_save_requires_exact_probe_before_revisioned_put() -> None:
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    save = setup_html.split("async function saveModelRoute()", 1)[1].split(
+        "async function checkBili()", 1
+    )[0]
+
+    assert save.index('fetch("/api/model-config/probe"') < save.index(
+        'fetch("/api/model-config", {'
+    )
+    assert "revision: modelSnapshot.revision" in save
+    assert "connection: primaryDraft" in save
+
+
+def test_setup_model_save_preserves_untouched_native_route_payload_fields() -> None:
+    """Only the selected primary is editable; every other API field stays equivalent."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the model payload regression")
+
+    function_names = (
+        "credentialActionPayload",
+        "chatConnectionPayload",
+        "embeddingProviderPayload",
+        "buildModelConfigPayload",
+    )
+    function_sources: list[str] = []
+    for index, function_name in enumerate(function_names):
+        next_name = (
+            function_names[index + 1] if index + 1 < len(function_names) else "validateModelDraft"
+        )
+        body = setup_html.split(f"    function {function_name}", 1)[1].split(
+            f"\n    function {next_name}", 1
+        )[0]
+        function_sources.append(f"function {function_name}{body}\n")
+
+    snapshot = {
+        "revision": "revision-14",
+        "models": {
+            "schema_version": 1,
+            "chat": {
+                "concurrency": 7,
+                "timeout_seconds": 123.5,
+                "connections": [
+                    {
+                        "id": "primary",
+                        "name": "Primary",
+                        "type": "openai_compatible",
+                        "model": "primary-model",
+                        "preset": "deepseek",
+                        "base_url": "https://primary.example/v1",
+                        "credential": {"configured": True, "source": "inline"},
+                        "api_mode": "responses",
+                        "reasoning_effort": "high",
+                        "http_referer": "https://primary.example",
+                        "x_title": "Primary title",
+                        "num_ctx": 4096,
+                        "probe": {"ok": True},
+                        "circuit": {"state": "closed"},
+                    },
+                    {
+                        "id": "fallback",
+                        "name": "Fallback",
+                        "type": "anthropic_compatible",
+                        "model": "fallback-model",
+                        "preset": "anthropic",
+                        "base_url": "https://fallback.example/v1",
+                        "credential": {"configured": True, "source": "env"},
+                        "api_mode": "messages",
+                        "reasoning_effort": "medium",
+                        "http_referer": "https://fallback.example",
+                        "x_title": "Fallback title",
+                        "num_ctx": 8192,
+                        "probe": {"ok": False},
+                        "circuit": {"state": "open"},
+                    },
+                ],
+            },
+            "embedding": {
+                "enabled": True,
+                "settings": {
+                    "model": "shared-embedding-model",
+                    "output_dimensionality": 1536,
+                    "similarity_threshold": 0.73,
+                    "multimodal_enabled": True,
+                },
+                "providers": [
+                    {
+                        "id": "embedding-remote",
+                        "name": "Remote embedding",
+                        "type": "openai_compatible",
+                        "preset": "openai",
+                        "base_url": "https://embedding.example/v1",
+                        "credential": {"configured": True, "source": "env"},
+                        "probe": {"ok": True},
+                        "circuit": {"state": "closed"},
+                    }
+                ],
+            },
+        },
+    }
+    script = "\n".join(
+        [
+            f"const modelSnapshot = {json.dumps(snapshot)};",
+            *function_sources,
+            "const primary = chatConnectionPayload(modelSnapshot.models.chat.connections[0]);",
+            "process.stdout.write(JSON.stringify(buildModelConfigPayload(primary)));",
+        ]
+    )
+    result = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    expected_fallback = {
+        key: snapshot["models"]["chat"]["connections"][1][key]
+        for key in (
+            "id",
+            "name",
+            "type",
+            "model",
+            "preset",
+            "base_url",
+            "api_mode",
+            "reasoning_effort",
+            "http_referer",
+            "x_title",
+            "num_ctx",
+        )
+    }
+    expected_fallback["credential"] = {"action": "keep"}
+    expected_embedding = {
+        key: snapshot["models"]["embedding"]["providers"][0][key]
+        for key in ("id", "name", "type", "preset", "base_url")
+    }
+    expected_embedding["credential"] = {"action": "keep"}
+
+    assert payload["revision"] == snapshot["revision"]
+    assert payload["models"]["chat"]["concurrency"] == 7
+    assert payload["models"]["chat"]["timeout_seconds"] == 123.5
+    assert payload["models"]["chat"]["connections"][1] == expected_fallback
+    assert payload["models"]["embedding"] == {
+        "enabled": True,
+        "settings": snapshot["models"]["embedding"]["settings"],
+        "providers": [expected_embedding],
+    }
+    assert "probe" not in json.dumps(payload)
+    assert "circuit" not in json.dumps(payload)
+
+
+def test_setup_revision_conflict_rehydrates_the_latest_native_snapshot() -> None:
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    conflict_handler = setup_html.split("function handleModelConflict(details)", 1)[1].split(
+        "async function loadModelSetup()", 1
+    )[0]
+    save = setup_html.split("async function saveModelRoute()", 1)[1].split(
+        "async function checkBili()", 1
+    )[0]
+
+    assert "details?.latest" in conflict_handler
+    assert "hydrateModelSetup(details.latest)" in conflict_handler
+    assert 'error.status === 409 && error.details?.error === "revision_conflict"' in save
+    assert "handleModelConflict(error.details)" in save
 
 
 def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() -> None:
@@ -235,14 +502,15 @@ def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> 
     assert "renderWaitingForFirstPool(status)" in guard
 
 
-def test_setup_wizard_allows_saved_api_key_to_be_reused_without_reentry() -> None:
-    """PUT /api/config only touches fields present in the payload, so an empty
-    key field on a provider with a persisted key must not block step 0."""
+def test_setup_wizard_hydrates_credential_status_without_secret_value() -> None:
+    """A configured key becomes a keep action, never an editable placeholder."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
-    assert "savedKeyProviders" in setup_html
-    assert "!apiKey && !savedKeyProviders.has(provider)" in setup_html
-    assert "已保存，留空则沿用当前 Key" in setup_html
+    assert "credential.status" in setup_html
+    assert 'action: "keep"' in setup_html
+    assert 'autocomplete="new-password"' in setup_html
+    assert "savedKeyProviders" not in setup_html
+    assert "masked" not in setup_html.lower()
 
 
 def test_setup_wizard_first_pool_wait_has_web_escape_hatch() -> None:
@@ -269,15 +537,13 @@ def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
         encoding="utf-8"
     )
 
-    # /setup/ wizard: Claude shows optional Base URL with a relay hint;
-    # openai_compatible shows the protocol selector; base_url is only
-    # submitted for providers whose form actually displayed it.
-    assert 'id="baseHint"' in setup_html
-    assert 'id="flavorWrap"' in setup_html
-    assert 'id="apiFlavor"' in setup_html
-    assert "(isCompat || isClaude)" in setup_html
-    assert 'provider === "openai_compatible" || provider === "claude"' in setup_html
-    assert 'pcfg.api_flavor = $("#apiFlavor").value' in setup_html
+    # /setup/ renders these conditionally from the backend descriptor instead
+    # of hard-coding OpenAI/Anthropic gateway rules.
+    assert 'id="modelDescriptorFields"' in setup_html
+    assert "descriptor.fields" in setup_html
+    assert "field.capabilities" in setup_html
+    assert "field.presets" in setup_html
+    assert "field.choices" in setup_html
 
     # Desktop settings render api_mode for every selected route record from
     # the backend descriptor instead of duplicating primary/fallback controls.
@@ -291,7 +557,7 @@ def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
 
 
 def test_setup_wizard_config_save_401_points_to_login_instead_of_dead_end() -> None:
-    """/api/config is session-gated while init endpoints are public: an
+    """The model API is session-gated while init endpoints are public: an
     auth-enabled remote browser must get a login path on save, not a bare
     "保存失败：HTTP 401" dead end at step 0."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")

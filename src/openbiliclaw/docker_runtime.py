@@ -6,6 +6,8 @@ import os
 import shutil
 import socket
 import sys
+import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,15 +40,9 @@ def bootstrap_runtime_root(
 
     When ``OPENBILICLAW_SEED_OLLAMA_DEFAULTS`` is set in ``env`` (the
     Docker compose file ships it on by default), the freshly-created
-    config gets two values pre-filled so the bundled Ollama sidecar
-    works out of the box:
-
-      * ``[llm.ollama] base_url`` → ``OPENBILICLAW_OLLAMA_BASE_URL``
-        (default ``http://ollama:11434/v1`` — the compose service name)
-      * ``[llm.embedding] provider`` → ``ollama``
-      * ``[llm.embedding] model`` → ``OPENBILICLAW_EMBEDDING_MODEL``
-        (default ``bge-m3``)
-      * ``[llm.embedding] base_url`` → ``OPENBILICLAW_OLLAMA_BASE_URL``
+    config gets a native ``ollama-docker`` embedding provider plus shared
+    model settings for the bundled sidecar. Existing ordered remote providers
+    and the Chat route remain intact.
 
     An existing ``config.toml`` is never overwritten — users who already
     set up their own embedding stack keep their choices.
@@ -75,55 +71,58 @@ def _seed_ollama_defaults(
     ollama_base_url: str,
     embedding_model: str,
 ) -> None:
-    """Patch ``base_url`` under [llm.ollama] and provider/model under
-    [llm.embedding] in a freshly-copied template config.
+    """Seed one typed native provider without disturbing existing routes."""
+    from openbiliclaw.config import render_model_config_document
+    from openbiliclaw.model_config import (
+        EmbeddingProviderConfig,
+        parse_model_config,
+    )
 
-    Line-based editor: the config template only uses single-line string
-    values for the fields we touch, so a small in-place edit is enough
-    and we avoid pulling in a TOML writer dependency just for this.
-    """
-    text = config_path.read_text(encoding="utf-8")
-    text = _set_toml_string(text, "llm.ollama", "base_url", ollama_base_url)
-    text = _set_toml_string(text, "llm.embedding", "provider", "ollama")
-    text = _set_toml_string(text, "llm.embedding", "model", embedding_model)
-    text = _set_toml_string(text, "llm.embedding", "base_url", ollama_base_url)
-    config_path.write_text(text, encoding="utf-8")
-
-
-def _set_toml_string(content: str, section: str, key: str, value: str) -> str:
-    """Replace ``key = "..."`` under ``[section]`` with ``key = "<value>"``.
-
-    Appends both the section header and the key/value pair when missing,
-    so the helper is idempotent on partial templates. Ignores commented
-    lines and inline tables.
-    """
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    new_line = f'{key} = "{escaped}"'
-    section_header = f"[{section}]"
-
-    lines = content.splitlines()
-    in_section = False
-    for index, raw_line in enumerate(lines):
-        stripped = raw_line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_section = stripped == section_header
-            continue
-        if not in_section or stripped.startswith("#") or "=" not in stripped:
-            continue
-        lhs = stripped.split("=", 1)[0].strip()
-        if lhs == key:
-            indent = raw_line[: len(raw_line) - len(raw_line.lstrip())]
-            lines[index] = f"{indent}{new_line}"
-            trailing_newline = "\n" if content.endswith("\n") else ""
-            return "\n".join(lines) + trailing_newline
-
-    # Section/key didn't exist: append a fresh block at the end.
-    suffix: list[str] = []
-    if not content.endswith("\n"):
-        suffix.append("")
-    suffix.append(section_header)
-    suffix.append(new_line)
-    return content + "\n".join(suffix) + "\n"
+    original = config_path.read_bytes()
+    raw = tomllib.loads(original.decode("utf-8"))
+    models_raw = raw.get("models")
+    if not isinstance(models_raw, dict):
+        raise ValueError("Docker config template requires a native [models] table")
+    models = parse_model_config(models_raw)
+    chat_ids = {item.id for item in models.chat.connections}
+    existing_owned = next(
+        (
+            item
+            for item in models.embedding.providers
+            if item.id == "ollama-docker" and item.type == "ollama" and item.id not in chat_ids
+        ),
+        None,
+    )
+    provider_id = "ollama-docker"
+    if existing_owned is None:
+        used_ids = chat_ids | {item.id for item in models.embedding.providers}
+        suffix = 2
+        while provider_id in used_ids:
+            provider_id = f"ollama-docker-{suffix}"
+            suffix += 1
+    provider = EmbeddingProviderConfig(
+        id=provider_id,
+        name="Docker Ollama",
+        type="ollama",
+        base_url=ollama_base_url,
+    )
+    retained = tuple(
+        item
+        for item in models.embedding.providers
+        if existing_owned is None or item.id != existing_owned.id
+    )
+    if len(retained) >= 10:
+        return
+    updated = replace(
+        models,
+        embedding=replace(
+            models.embedding,
+            enabled=True,
+            settings=replace(models.embedding.settings, model=embedding_model),
+            providers=(provider, *retained),
+        ),
+    )
+    config_path.write_bytes(render_model_config_document(original, updated))
 
 
 def can_connect(host: str, port: int, timeout: float) -> bool:

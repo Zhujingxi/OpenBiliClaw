@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import tomllib
 from typing import TYPE_CHECKING
 
 from openbiliclaw.docker_runtime import (
@@ -123,17 +124,34 @@ def test_bootstrap_runtime_root_seeds_embedding_base_url_for_ollama_sidecar(
     runtime_root = tmp_path / "runtime"
     template = tmp_path / "config.example.toml"
     template.write_text(
-        "\n".join(
-            [
-                "[llm.ollama]",
-                'base_url = ""',
-                "",
-                "[llm.embedding]",
-                'provider = ""',
-                'model = ""',
-                'base_url = ""',
-            ]
-        ),
+        """[models]
+schema_version = 1
+
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+
+[[models.chat.connections]]
+id = "remote-chat"
+name = "Remote chat"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[models.embedding]
+enabled = false
+
+[models.embedding.settings]
+model = "unused"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+
+[general]
+language = "zh"
+""",
         encoding="utf-8",
     )
 
@@ -148,10 +166,118 @@ def test_bootstrap_runtime_root_seeds_embedding_base_url_for_ollama_sidecar(
     )
 
     text = (runtime_root / "config.toml").read_text(encoding="utf-8")
-    assert "[llm.embedding]" in text
-    assert 'provider = "ollama"' in text
-    assert 'model = "bge-m3"' in text
-    assert 'base_url = "http://ollama:11434/v1"' in text
+    raw = tomllib.loads(text)
+    embedding = raw["models"]["embedding"]
+    assert raw["general"] == {"language": "zh"}
+    assert raw["models"]["chat"]["connections"][0]["id"] == "remote-chat"
+    assert embedding["enabled"] is True
+    assert embedding["settings"]["model"] == "bge-m3"
+    assert embedding["providers"] == [
+        {
+            "id": "ollama-docker",
+            "name": "Docker Ollama",
+            "type": "ollama",
+            "base_url": "http://ollama:11434/v1",
+        }
+    ]
+    assert "[llm" not in text
+
+
+def test_docker_embedding_seed_preserves_existing_remote_providers(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "chat"
+name = "Chat"
+type = "ollama"
+model = "qwen"
+base_url = "http://chat:11434/v1"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "remote-embedding"
+name = "Remote embedding"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://embedding.example/v1"
+api_key_env = "EMBEDDING_API_KEY"
+""",
+        encoding="utf-8",
+    )
+
+    bootstrap_runtime_root(
+        runtime_root=runtime_root,
+        template_path=template,
+        env={"OPENBILICLAW_SEED_OLLAMA_DEFAULTS": "1"},
+    )
+
+    raw = tomllib.loads((runtime_root / "config.toml").read_text(encoding="utf-8"))
+    providers = raw["models"]["embedding"]["providers"]
+    assert [provider["id"] for provider in providers] == [
+        "ollama-docker",
+        "remote-embedding",
+    ]
+    assert providers[1]["api_key_env"] == "EMBEDDING_API_KEY"
+
+
+def test_docker_embedding_seed_allocates_globally_unique_owned_id(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    template = tmp_path / "config.example.toml"
+    template.write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "ollama-docker"
+name = "Existing chat"
+type = "ollama"
+model = "qwen"
+base_url = "http://chat:11434/v1"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "remote-model"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "ollama-docker-2"
+name = "Remote embedding"
+type = "openai_compatible"
+preset = "custom"
+base_url = "https://embedding.example/v1"
+api_key_env = "EMBEDDING_API_KEY"
+""",
+        encoding="utf-8",
+    )
+
+    bootstrap_runtime_root(
+        runtime_root=runtime_root,
+        template_path=template,
+        env={"OPENBILICLAW_SEED_OLLAMA_DEFAULTS": "1"},
+    )
+
+    raw = tomllib.loads((runtime_root / "config.toml").read_text(encoding="utf-8"))
+    providers = raw["models"]["embedding"]["providers"]
+    assert [provider["id"] for provider in providers] == [
+        "ollama-docker-3",
+        "ollama-docker-2",
+    ]
+    assert raw["models"]["chat"]["connections"][0]["id"] == "ollama-docker"
+    assert providers[1]["api_key_env"] == "EMBEDDING_API_KEY"
 
 
 def test_bootstrap_runtime_environment_prepares_runtime_root_and_proxy(tmp_path: Path) -> None:

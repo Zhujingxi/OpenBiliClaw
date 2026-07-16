@@ -312,7 +312,7 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
 ```
 
-AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证 LLM provider 和 embedding 服务；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X 和知乎数据只有你明确同意才会进入初始画像。
+AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。模型配置先选 Chat 连接类型，再按该类型选择 preset；Embedding 是共享同一 model/settings 的有序 Provider 列表。自动初始化前会精确探测 stable primary Chat（不走 fallback）和每一条 ordered Embedding Provider；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X 和知乎数据只有你明确同意才会进入初始画像。
 
 Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
@@ -352,7 +352,7 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集 LLM provider、embedding、B 站 Cookie、小红书 opt-in、抖音 opt-in、YouTube opt-in、X opt-in、知乎 opt-in 等决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证 LLM provider 和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。不确定的选项直接回车或选默认。
+脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后在终端向导里先选 Chat connection type、仅在支持时选 preset，再配置 ordered Embedding providers、B 站 Cookie、小红书 opt-in、抖音 opt-in、YouTube opt-in、X opt-in、知乎 opt-in 等决策，之后才安装依赖、启动后端和健康检查；确认齐全后会精确探测 stable primary Chat（禁用 fallback）和所有 ordered Embedding providers 与共享 settings，再自动运行 init，完成画像生成和首轮发现。不确定的选项直接回车或选默认。
 
 </details>
 
@@ -605,11 +605,12 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 模型 API + 有序 Chat/Embedding route + 桌面/插件/移动/CLI 编辑器（阶段 9–13）│
+│ 模型 API + 有序 Chat/Embedding route + 全配置入口（阶段 9–14）│
 │ Chat/Embedding/Runtime tabs · 同一稳定-ID ordered route │
 │ Desktop inspector · Extension/Mobile sequential list→detail · descriptor 驱动 │
 │ strict GET/PUT snapshot/save · descriptor · exact probe  │
 │ CLI models list/add/edit/remove/move/probe → ModelConfigService │
+│ setup/bootstrap/install/Docker/package → native [models] writer │
 │ legacy /api/config 仅无凭据投影；旧模型写入返回 warning    │
 │ native/legacy + base/local → ModelConfigService path lock │
 │ safe endpoint → 脱敏 snapshot；credential + local fence  │
