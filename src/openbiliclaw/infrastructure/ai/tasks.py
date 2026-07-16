@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
-from pydantic_ai import Agent, UsageLimits
+import re
+from typing import TypeVar
+from uuid import UUID  # noqa: TC003 - Pydantic resolves this annotation at runtime
 
-from openbiliclaw.features.feed.domain import CandidateAssessment, ContentItem
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai import Agent, ModelRetry, RunContext, UsageLimits
+
+from openbiliclaw.features.feed.domain import (  # noqa: TC001 - Pydantic resolves these
+    CandidateAssessment,
+    ContentItem,
+)
 from openbiliclaw.features.profile.domain import ProfileDelta, ProfileSnapshot
 from openbiliclaw.infrastructure.ai.spec import CachePolicy, TaskLane, TaskSpec
+
+
+class ProfileEvidence(BaseModel):
+    """Stable evidence identity paired with the text supplied to the model."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: UUID
+    content: str = Field(min_length=1, max_length=10_000)
 
 
 class ProfileDeltaInput(BaseModel):
@@ -16,7 +32,7 @@ class ProfileDeltaInput(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     profile: ProfileSnapshot
-    evidence: tuple[str, ...] = Field(min_length=1)
+    evidence: tuple[ProfileEvidence, ...] = Field(min_length=1)
 
 
 class KeywordGenerationInput(BaseModel):
@@ -45,6 +61,21 @@ class CandidateAssessmentInput(BaseModel):
     content: ContentItem
 
 
+class CandidateAssessmentOutput(BaseModel):
+    """AI-owned scores and copied identities, excluding application row identity."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content_id: UUID
+    profile_revision: int = Field(ge=0)
+    relevance: float = Field(ge=0, le=1)
+    quality: float = Field(ge=0, le=1)
+    novelty: float = Field(ge=0, le=1)
+    risk: float = Field(ge=0, le=1)
+    topics: tuple[str, ...] = ()
+    explanation: str = ""
+
+
 class RecommendationExplanationInput(BaseModel):
     """Facts permitted in one user-facing recommendation explanation."""
 
@@ -71,14 +102,101 @@ KEYWORD_GENERATION_AGENT: Agent[None, KeywordGenerationOutput] = Agent(
     output_type=KeywordGenerationOutput,
     instructions="Generate concise source-neutral discovery queries from the supplied profile.",
 )
-CANDIDATE_ASSESSMENT_AGENT: Agent[None, CandidateAssessment] = Agent(
-    output_type=CandidateAssessment,
+CANDIDATE_ASSESSMENT_AGENT: Agent[None, CandidateAssessmentOutput] = Agent(
+    output_type=CandidateAssessmentOutput,
     instructions="Assess the supplied content only against the supplied profile evidence.",
 )
 RECOMMENDATION_EXPLANATION_AGENT: Agent[None, RecommendationExplanationOutput] = Agent(
     output_type=RecommendationExplanationOutput,
     instructions="Explain the recommendation using only supplied content and assessment facts.",
 )
+
+InputModelT = TypeVar("InputModelT", bound=BaseModel)
+
+
+def _prompt_input(ctx: RunContext[None], input_type: type[InputModelT]) -> InputModelT:
+    if not isinstance(ctx.prompt, str):
+        raise ModelRetry("task input context is unavailable")
+    try:
+        return input_type.model_validate_json(ctx.prompt)
+    except ValueError as exc:
+        raise ModelRetry("task input context is invalid") from exc
+
+
+@PROFILE_DELTA_AGENT.output_validator
+def validate_profile_delta_provenance(ctx: RunContext[None], output: ProfileDelta) -> ProfileDelta:
+    """Require every proposed evidence reference to come from the typed input."""
+
+    task_input = _prompt_input(ctx, ProfileDeltaInput)
+    supplied_ids = {item.id for item in task_input.evidence}
+    if any(facet.overridden for facet in output.upserts):
+        raise ModelRetry("AI output cannot create user overrides")
+    if any(not set(facet.evidence_ids) <= supplied_ids for facet in output.upserts):
+        raise ModelRetry("profile evidence IDs must be copied from task input")
+    current = {(facet.name, facet.value.casefold()): facet for facet in task_input.profile.facets}
+    if any(
+        (key := (name, value.casefold())) not in current or current[key].overridden
+        for name, value in output.removals
+    ):
+        raise ModelRetry("profile removals must target supplied non-override facets")
+    return output
+
+
+@KEYWORD_GENERATION_AGENT.output_validator
+def validate_keyword_generation(
+    ctx: RunContext[None], output: KeywordGenerationOutput
+) -> KeywordGenerationOutput:
+    """Enforce the requested bound and case-insensitive uniqueness."""
+
+    task_input = _prompt_input(ctx, KeywordGenerationInput)
+    normalized = [keyword.strip().casefold() for keyword in output.keywords]
+    if len(output.keywords) > task_input.limit:
+        raise ModelRetry("keyword output exceeds requested limit")
+    if len(set(normalized)) != len(normalized):
+        raise ModelRetry("keyword output must be unique")
+    return output
+
+
+@CANDIDATE_ASSESSMENT_AGENT.output_validator
+def validate_candidate_identity(
+    ctx: RunContext[None], output: CandidateAssessmentOutput
+) -> CandidateAssessmentOutput:
+    """Require content and profile identities to be copied from input."""
+
+    task_input = _prompt_input(ctx, CandidateAssessmentInput)
+    if output.content_id != task_input.content.id:
+        raise ModelRetry("assessment content ID must be copied from task input")
+    if output.profile_revision != task_input.profile.revision:
+        raise ModelRetry("assessment profile revision must be copied from task input")
+    return output
+
+
+@RECOMMENDATION_EXPLANATION_AGENT.output_validator
+def validate_recommendation_grounding(
+    ctx: RunContext[None], output: RecommendationExplanationOutput
+) -> RecommendationExplanationOutput:
+    """Require internally consistent identities and at least one supplied grounding term."""
+
+    task_input = _prompt_input(ctx, RecommendationExplanationInput)
+    if task_input.assessment.content_id != task_input.content.id:
+        raise ModelRetry("recommendation assessment content does not match input content")
+    if task_input.assessment.profile_revision != task_input.profile.revision:
+        raise ModelRetry("recommendation assessment profile does not match input profile")
+    facts = " ".join(
+        (
+            task_input.content.title,
+            task_input.profile.narrative,
+            *task_input.assessment.topics,
+        )
+    )
+    grounding_terms = {
+        token.casefold() for token in re.findall(r"[A-Za-z0-9\u4e00-\u9fff]{4,}", facts)
+    }
+    explanation = output.explanation.casefold()
+    if grounding_terms and not any(term in explanation for term in grounding_terms):
+        raise ModelRetry("recommendation explanation is not grounded in supplied facts")
+    return output
+
 
 PROFILE_DELTA_TASK = TaskSpec(
     name="profile_delta",
@@ -107,7 +225,7 @@ KEYWORD_GENERATION_TASK = TaskSpec(
 CANDIDATE_ASSESSMENT_TASK = TaskSpec(
     name="candidate_assessment",
     input_type=CandidateAssessmentInput,
-    output_type=CandidateAssessment,
+    output_type=CandidateAssessmentOutput,
     agent=CANDIDATE_ASSESSMENT_AGENT,
     model_alias="obc-analysis",
     semantic_retry_limit=2,

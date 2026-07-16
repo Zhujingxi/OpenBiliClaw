@@ -46,18 +46,20 @@ import os
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -3319,28 +3321,117 @@ def start_local_backend(project_dir: Path, host: str, port: int) -> subprocess.P
 
 
 def ensure_docker_infrastructure_secrets(project_dir: Path) -> None:
-    """Create stable local LiteLLM infrastructure secrets without replacing values."""
+    """Atomically create stable local infrastructure secrets in a non-symlink env file."""
 
     env_file = project_dir / ".env"
-    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
-    generated = {
-        "LITELLM_POSTGRES_PASSWORD": secrets.token_hex(32),
-        "LITELLM_MASTER_KEY": f"sk-{secrets.token_hex(32)}",
-    }
-    found: set[str] = set()
-    for index, line in enumerate(lines):
-        key, separator, value = line.partition("=")
-        key = key.strip()
-        if separator and key in generated:
-            found.add(key)
-            if not value.strip():
-                lines[index] = f"{key}={generated[key]}"
-    for key, value in generated.items():
-        if key not in found:
-            lines.append(f"{key}={value}")
-    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    if os.name != "nt":
-        env_file.chmod(0o600)
+    project_dir.mkdir(parents=True, exist_ok=True)
+    with _exclusive_file_lock(project_dir / ".env.lock"):
+        lines = _read_regular_file_lines(env_file)
+        generated = {
+            "LITELLM_POSTGRES_PASSWORD": secrets.token_hex(32),
+            "LITELLM_MASTER_KEY": f"sk-{secrets.token_hex(32)}",
+        }
+        found: set[str] = set()
+        for index, line in enumerate(lines):
+            key, separator, value = line.partition("=")
+            key = key.strip()
+            if separator and key in generated:
+                found.add(key)
+                if not value.strip():
+                    lines[index] = f"{key}={generated[key]}"
+        for key, value in generated.items():
+            if key not in found:
+                lines.append(f"{key}={value}")
+        _atomic_write_private_file(env_file, "\n".join(lines) + "\n")
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    if lock_path.is_symlink():
+        raise RuntimeError(f"refusing symlink lock file: {lock_path}")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f"lock path is not a regular file: {lock_path}")
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            locked = True
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            locked = True
+        yield
+    finally:
+        if locked and os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        elif locked:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _read_regular_file_lines(path: Path) -> list[str]:
+    if path.is_symlink():
+        raise RuntimeError(f"refusing symlink environment file: {path}")
+    if not path.exists():
+        return []
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f"environment path is not a regular file: {path}")
+        with os.fdopen(descriptor, encoding="utf-8", closefd=False) as handle:
+            return handle.read().splitlines()
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_private_file(path: Path, content: str) -> None:
+    temporary = path.with_name(f".env.tmp-{secrets.token_hex(16)}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(descriptor)
+        if path.is_symlink():
+            raise RuntimeError(f"refusing symlink environment file: {path}")
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        os.close(descriptor)
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def docker_compose_up(project_dir: Path) -> None:

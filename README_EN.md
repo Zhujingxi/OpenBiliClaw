@@ -355,11 +355,13 @@ The script needs `git` and Python 3.11+. It clones the repo, then asks for the C
 <details>
 <summary>Advanced: Docker deployment</summary>
 
-Good if you already have Docker installed; ships with an Ollama embedding sidecar. The prebuilt image needs no source checkout:
+Good if you already have Docker installed; ships with the LiteLLM policy and an Ollama embedding sidecar. The prebuilt image needs no source checkout, but both the Compose and matching policy files must be downloaded:
 
 ```bash
 mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+mkdir -p litellm
 curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/litellm/config.yaml -o litellm/config.yaml
 umask 077
 printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
@@ -367,6 +369,8 @@ docker compose -f docker-compose.prebuilt.yml up -d
 # configure the three stable model aliases at http://127.0.0.1:4000/ui;
 # then open http://127.0.0.1:8420/setup/ for the legacy initialization flow
 ```
+
+LiteLLM Admin binds only to host `127.0.0.1` by default. Remote administration requires an explicit Compose port-binding change plus your own firewall, TLS, and access controls.
 
 Or paste this into an AI coding agent for the terminal wizard + auto-init path:
 

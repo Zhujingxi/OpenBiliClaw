@@ -74,9 +74,9 @@ def test_fresh_migration_creates_only_vnext_schema_and_predefined_collections(
     )
 
     assert set(inspect(engine).get_table_names()) == {"alembic_version", *EXPECTED_TABLES}
-    assert "input_payload" not in {
-        column["name"] for column in inspect(engine).get_columns("ai_runs")
-    }
+    ai_run_columns = {column["name"] for column in inspect(engine).get_columns("ai_runs")}
+    assert "input_payload" not in ai_run_columns
+    assert "output_payload" not in ai_run_columns
     with UnitOfWork(session_factory) as uow:
         collections = uow.collections.list_predefined()
     assert [(collection.slug, collection.display_name) for collection in collections] == [
@@ -222,7 +222,7 @@ def test_concurrent_profile_writers_raise_domain_conflict(migrated_database: Pat
     engine.dispose()
 
 
-def test_ai_run_repository_has_no_raw_input_persistence_channel(
+def test_ai_run_repository_has_no_input_or_output_payload_persistence_channel(
     migrated_database: Path,
 ) -> None:
     engine, session_factory = create_engine_and_session(
@@ -230,6 +230,8 @@ def test_ai_run_repository_has_no_raw_input_persistence_channel(
     )
     with UnitOfWork(session_factory) as uow:
         assert "input_payload" not in signature(uow.ai_runs.add_started).parameters
+        assert "input_payload" not in signature(uow.ai_runs.succeed).parameters
+        assert "output_payload" not in signature(uow.ai_runs.succeed).parameters
         run_id = uow.ai_runs.add_started(task_name="profile_delta", model_alias="obc-analysis")
         uow.commit()
 

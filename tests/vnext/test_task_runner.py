@@ -49,18 +49,10 @@ class Answer(BaseModel):
     answer: str = Field(min_length=1)
 
 
-class CredentialBearingAnswer(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    answer: str = Field(min_length=1)
-    provider_api_key: str = Field(min_length=1)
-    nested: dict[str, str]
-
-
 @dataclass
 class RecordingSpy:
     started: list[tuple[str, str]] = field(default_factory=list)
-    succeeded: list[tuple[UUID, dict[str, object], dict[str, int]]] = field(default_factory=list)
+    succeeded: list[tuple[UUID, dict[str, int]]] = field(default_factory=list)
     failed: list[tuple[UUID, str]] = field(default_factory=list)
 
     def start(self, *, task_name: str, model_alias: str) -> UUID:
@@ -71,10 +63,9 @@ class RecordingSpy:
         self,
         run_id: UUID,
         *,
-        output_payload: dict[str, object],
         usage: dict[str, int],
     ) -> None:
-        self.succeeded.append((run_id, output_payload, usage))
+        self.succeeded.append((run_id, usage))
 
     def fail(self, run_id: UUID, *, error_kind: str) -> None:
         self.failed.append((run_id, error_kind))
@@ -134,75 +125,44 @@ async def test_runner_returns_typed_output_and_records_only_safe_outcome_fields(
     assert output == Answer(answer="typed")
     assert resolved_aliases == ["obc-interactive"]
     assert recorder.started == [("answer-question", "obc-interactive")]
-    assert recorder.succeeded[0][0:2] == (RUN_ID, {"answer": "typed"})
+    assert recorder.succeeded[0][0] == RUN_ID
+    assert set(recorder.succeeded[0][1]) == {
+        "requests",
+        "tool_calls",
+        "input_tokens",
+        "output_tokens",
+        "cache_write_tokens",
+        "cache_read_tokens",
+    }
     assert recorder.failed == []
     assert "private prompt" not in repr(recorder)
 
 
-async def test_runner_redacts_credential_shaped_output_fields_before_recording() -> None:
-    synthetic_key = "synthetic-provider-key-never-persist"
-    model = TestModel(
-        custom_output_args={
-            "answer": "typed",
-            "provider_api_key": synthetic_key,
-            "nested": {"access_token": synthetic_key},
-        }
-    )
-    recorder = RecordingSpy()
-    runner = TaskRunner(model_resolver=lambda alias: model, recorder=recorder)
-    spec = TaskSpec(
-        name="credential-bearing-answer",
-        input_type=Question,
-        output_type=CredentialBearingAnswer,
-        agent=Agent(output_type=CredentialBearingAnswer),
-        model_alias="obc-interactive",
-        semantic_retry_limit=0,
-        timeout_seconds=1,
-        usage_limits=UsageLimits(request_limit=1),
-        cache_policy=CachePolicy.DEFAULT,
-        lane=TaskLane.INTERACTIVE,
-    )
-
-    output = await runner.run(spec, {"text": "question"})
-
-    assert output.provider_api_key == synthetic_key
-    recorded = recorder.succeeded[0][1]
-    assert recorded["provider_api_key"] == "[REDACTED]"
-    assert recorded["nested"] == {"access_token": "[REDACTED]"}
-    assert synthetic_key not in repr(recorder)
-
-
-async def test_sqlalchemy_ai_run_record_never_persists_raw_input_or_credentials(
+async def test_sqlalchemy_ai_run_record_cannot_persist_echoed_input_or_output(
     tmp_path: Any,
 ) -> None:
     engine, session_factory = create_engine_and_session(
         DatabaseSettings(url=f"sqlite:///{tmp_path / 'ai-run.db'}")
     )
     Base.metadata.create_all(engine)
-    raw_secret = "synthetic-input-secret-must-not-be-stored"
+    private_input = "synthetic-private-input-must-not-be-stored"
 
     with UnitOfWork(session_factory) as uow:
         output = await TaskRunner(
-            model_resolver=lambda alias: TestModel(custom_output_args={"answer": "safe"}),
+            model_resolver=lambda alias: TestModel(custom_output_args={"answer": private_input}),
             recorder=uow.ai_runs,
-        ).run(make_spec(Agent(output_type=Answer)), {"text": raw_secret})
+        ).run(make_spec(Agent(output_type=Answer)), {"text": private_input})
         uow.commit()
 
     with session_factory() as session:
         stored = session.scalar(select(AIRunModel))
         assert stored is not None
         assert stored.status == "succeeded"
-        assert stored.output_payload == output.model_dump(mode="json")
+        assert output.answer == private_input
+        assert "output_payload" not in AIRunModel.__table__.columns
+        assert not hasattr(stored, "output_payload")
         assert stored.usage is not None
-        assert raw_secret not in repr(stored.__dict__)
-        assert set(stored.__dict__) >= {
-            "task_name",
-            "model_alias",
-            "status",
-            "output_payload",
-            "usage",
-            "error",
-        }
+        assert private_input not in repr(stored.__dict__)
     engine.dispose()
 
 
@@ -314,6 +274,10 @@ def test_task_spec_rejects_unknown_or_embedding_aliases() -> None:
         make_spec(Agent(output_type=Answer), alias="obc-embedding")
 
 
+def test_candidate_output_excludes_application_owned_assessment_id() -> None:
+    assert "id" not in CANDIDATE_ASSESSMENT_TASK.output_type.model_fields
+
+
 async def test_litellm_resolver_normalizes_v1_and_disables_sdk_retries() -> None:
     resolver = LiteLLMModelResolver(
         base_url="http://litellm.test/v1/",
@@ -330,6 +294,44 @@ async def test_litellm_resolver_normalizes_v1_and_disables_sdk_retries() -> None
 
 
 @pytest.mark.parametrize(
+    ("policy", "expected_settings"),
+    [
+        (CachePolicy.DEFAULT, None),
+        (CachePolicy.BYPASS, {"extra_body": {"cache": {"no-cache": True}}}),
+    ],
+)
+async def test_cache_policy_is_forwarded_to_litellm_without_local_caching(
+    policy: CachePolicy, expected_settings: dict[str, object] | None
+) -> None:
+    seen_settings: list[dict[str, object] | None] = []
+
+    class SettingsSpyModel(TestModel):
+        async def request(self, messages: Any, model_settings: Any, parameters: Any) -> Any:
+            seen_settings.append(model_settings)
+            return await super().request(messages, model_settings, parameters)
+
+    spec = make_spec(Agent(output_type=Answer))
+    spec = TaskSpec(
+        name=spec.name,
+        input_type=spec.input_type,
+        output_type=spec.output_type,
+        agent=spec.agent,
+        model_alias=spec.model_alias,
+        semantic_retry_limit=spec.semantic_retry_limit,
+        timeout_seconds=spec.timeout_seconds,
+        usage_limits=spec.usage_limits,
+        cache_policy=policy,
+        lane=spec.lane,
+    )
+    await TaskRunner(
+        model_resolver=lambda alias: SettingsSpyModel(custom_output_args={"answer": "ok"}),
+        recorder=RecordingSpy(),
+    ).run(spec, {"text": "question"})
+
+    assert seen_settings == [expected_settings]
+
+
+@pytest.mark.parametrize(
     ("dataset_name", "spec"),
     [
         ("profile_delta", PROFILE_DELTA_TASK),
@@ -338,7 +340,7 @@ async def test_litellm_resolver_normalizes_v1_and_disables_sdk_retries() -> None
         ("recommendation_explanation", RECOMMENDATION_EXPLANATION_TASK),
     ],
 )
-def test_eval_dataset_cases_match_their_typed_task_contracts(
+def test_eval_dataset_cases_match_contracts_and_execute_real_evaluators(
     dataset_name: str, spec: TaskSpec[Any, Any]
 ) -> None:
     dataset = Dataset[dict[str, object], dict[str, object], dict[str, str]].from_file(
@@ -346,6 +348,84 @@ def test_eval_dataset_cases_match_their_typed_task_contracts(
     )
 
     assert dataset.cases
+    assert dataset.evaluators
     for case in dataset.cases:
         spec.input_type.model_validate(case.inputs)
         spec.output_type.model_validate(case.expected_output)
+    report = dataset.evaluate_sync(lambda inputs: {})
+    assert report.cases
+    assert report.cases[0].assertions["EqualsExpected"].value is False
+
+
+@pytest.mark.parametrize(
+    ("dataset_name", "spec", "invalid_output"),
+    [
+        (
+            "profile_delta",
+            PROFILE_DELTA_TASK,
+            {
+                "narrative": "changed",
+                "upserts": [
+                    {
+                        "name": "interests",
+                        "value": "invented",
+                        "weight": 0.5,
+                        "confidence": 0.5,
+                        "evidence_ids": ["00000000-0000-0000-0000-000000009999"],
+                        "overridden": False,
+                    }
+                ],
+                "removals": [],
+            },
+        ),
+        (
+            "keyword_generation",
+            KEYWORD_GENERATION_TASK,
+            {"keywords": ["duplicate", "Duplicate", "third", "fourth", "fifth"]},
+        ),
+        (
+            "candidate_assessment",
+            CANDIDATE_ASSESSMENT_TASK,
+            {
+                "content_id": "00000000-0000-0000-0000-000000009999",
+                "profile_revision": 999,
+                "relevance": 0.5,
+                "quality": 0.5,
+                "novelty": 0.5,
+                "risk": 0.1,
+                "topics": ["procedural modeling"],
+                "explanation": "grounded",
+            },
+        ),
+        (
+            "recommendation_explanation",
+            RECOMMENDATION_EXPLANATION_TASK,
+            {"explanation": "Entirely unrelated generic filler."},
+        ),
+    ],
+)
+async def test_builtin_task_semantic_validators_trigger_model_retry(
+    dataset_name: str,
+    spec: TaskSpec[Any, Any],
+    invalid_output: dict[str, object],
+) -> None:
+    dataset = Dataset[dict[str, object], dict[str, object], dict[str, str]].from_file(
+        REPOSITORY_ROOT / "evals" / "datasets" / f"{dataset_name}.yaml"
+    )
+    requests = 0
+
+    class CountingModel(TestModel):
+        async def request(self, messages: Any, model_settings: Any, parameters: Any) -> Any:
+            nonlocal requests
+            requests += 1
+            return await super().request(messages, model_settings, parameters)
+
+    runner = TaskRunner(
+        model_resolver=lambda alias: CountingModel(custom_output_args=invalid_output),
+        recorder=RecordingSpy(),
+    )
+
+    with pytest.raises(Exception, match="maximum output retries"):
+        await runner.run(spec, dataset.cases[0].inputs)
+
+    assert requests == spec.semantic_retry_limit + 1

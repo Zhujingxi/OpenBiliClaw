@@ -6,6 +6,7 @@ import os
 import sys
 import tomllib
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,86 @@ def test_ensure_docker_infrastructure_secrets_creates_and_preserves_env(
     assert len(values["LITELLM_MASTER_KEY"]) == 67
     if os.name != "nt":
         assert env_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_ensure_docker_infrastructure_secrets_rejects_env_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "outside.env"
+    target.write_text("DO_NOT_TOUCH=1\n", encoding="utf-8")
+    (tmp_path / ".env").symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+
+    assert target.read_text(encoding="utf-8") == "DO_NOT_TOUCH=1\n"
+
+
+def test_ensure_docker_infrastructure_secrets_rejects_lock_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "outside.lock"
+    target.write_text("DO_NOT_TOUCH=1\n", encoding="utf-8")
+    (tmp_path / ".env.lock").symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+
+    assert target.read_text(encoding="utf-8") == "DO_NOT_TOUCH=1\n"
+
+
+def test_ensure_docker_infrastructure_secrets_preserves_existing_values(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "UNRELATED=preserved\n"
+        "LITELLM_POSTGRES_PASSWORD=existing-postgres-value\n"
+        "LITELLM_MASTER_KEY=sk-existing-master-value\n",
+        encoding="utf-8",
+    )
+
+    bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+
+    content = env_file.read_text(encoding="utf-8")
+    assert "UNRELATED=preserved" in content
+    assert "LITELLM_POSTGRES_PASSWORD=existing-postgres-value" in content
+    assert "LITELLM_MASTER_KEY=sk-existing-master-value" in content
+
+
+def test_ensure_docker_infrastructure_secrets_uses_mode_0600_at_create(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    original_open = bootstrap.os.open
+    create_modes: list[int] = []
+
+    def recording_open(path, flags, mode=0o777, *args, **kwargs):
+        if flags & os.O_CREAT:
+            create_modes.append(mode & 0o777)
+        return original_open(path, flags, mode, *args, **kwargs)
+
+    monkeypatch.setattr(bootstrap.os, "open", recording_open)
+
+    bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+
+    assert create_modes
+    assert set(create_modes) == {0o600}
+
+
+def test_ensure_docker_infrastructure_secrets_serializes_concurrent_updates(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("UNRELATED=preserved\n", encoding="utf-8")
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        list(
+            executor.map(
+                lambda _: bootstrap.ensure_docker_infrastructure_secrets(tmp_path), range(24)
+            )
+        )
+
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert lines.count("UNRELATED=preserved") == 1
+    assert sum(line.startswith("LITELLM_POSTGRES_PASSWORD=") for line in lines) == 1
+    assert sum(line.startswith("LITELLM_MASTER_KEY=") for line in lines) == 1
+    assert not list(tmp_path.glob(".env.tmp-*"))
 
 
 def _write_native_config(tmp_path: Path) -> None:

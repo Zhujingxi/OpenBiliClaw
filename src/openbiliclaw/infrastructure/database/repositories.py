@@ -176,7 +176,6 @@ class AIRunRepository(Protocol):
         self,
         run_id: UUID,
         *,
-        output_payload: dict[str, object],
         usage: dict[str, int],
     ) -> None: ...
 
@@ -578,7 +577,6 @@ class SQLAlchemyAIRunRepository:
                 task_name=task_name,
                 model_alias=model_alias,
                 status="running",
-                output_payload=None,
                 usage=None,
                 error=None,
                 started_at=_utc_now(),
@@ -591,14 +589,12 @@ class SQLAlchemyAIRunRepository:
         self,
         run_id: UUID,
         *,
-        output_payload: dict[str, object],
         usage: dict[str, int],
     ) -> None:
-        """Finish a run with typed output and provider-neutral usage counters."""
+        """Finish a run with provider-neutral usage counters only."""
 
         row = self._require_running(run_id)
         row.status = "succeeded"
-        row.output_payload = output_payload
         row.usage = usage
         row.error = None
         row.finished_at = _utc_now()
@@ -608,7 +604,6 @@ class SQLAlchemyAIRunRepository:
 
         row = self._require_running(run_id)
         row.status = "failed"
-        row.output_payload = None
         row.usage = None
         row.error = (
             error_kind if error_kind.isidentifier() and len(error_kind) <= 100 else "AIError"

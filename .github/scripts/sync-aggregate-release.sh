@@ -90,7 +90,7 @@ _ghcr_manifest_pullable() {
 
 if _ghcr_manifest_pullable "$docker_image" && _ghcr_manifest_pullable "$docker_ollama_image"; then
   docker_line="[\`${docker_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-backend) + [\`${docker_ollama_image}:${project_version}\`](https://github.com/${repo}/pkgs/container/openbiliclaw-ollama) (multi-arch: amd64 + arm64; bge-m3 baked in)"
-  docker_download_line="- Docker (self-hosted): download [\`docker-compose.prebuilt.yml\`](https://github.com/${repo}/blob/main/docker-compose.prebuilt.yml), run \`docker compose -f docker-compose.prebuilt.yml up -d\`, then open \`http://127.0.0.1:8420/setup/\`
+  docker_download_line="- Docker (self-hosted): download [\`docker-compose.prebuilt.yml\`](https://github.com/${repo}/blob/main/docker-compose.prebuilt.yml) and [\`litellm/config.yaml\`](https://github.com/${repo}/blob/main/litellm/config.yaml), run \`docker compose -f docker-compose.prebuilt.yml up -d\`, then open \`http://127.0.0.1:8420/setup/\`
 "
 fi
 

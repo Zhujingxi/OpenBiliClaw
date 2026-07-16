@@ -32,3 +32,5 @@ cases:
       explanation: "This practical Geometry Nodes walkthrough fits your interest in hands-on procedural modeling."
     metadata:
       rubric: "The explanation is concise and introduces no claims absent from the supplied facts."
+evaluators:
+  - EqualsExpected

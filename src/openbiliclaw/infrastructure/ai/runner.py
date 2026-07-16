@@ -10,13 +10,15 @@ from pydantic import TypeAdapter
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
+from openbiliclaw.infrastructure.ai.spec import CachePolicy
+
 if TYPE_CHECKING:
     from uuid import UUID
 
     import httpx
-    from pydantic import BaseModel
     from pydantic_ai import AgentRunResult
     from pydantic_ai.models import Model
+    from pydantic_ai.settings import ModelSettings
 
     from openbiliclaw.infrastructure.ai.spec import GenerativeAlias, InputT, OutputT, TaskSpec
 
@@ -30,7 +32,6 @@ class AIRunRecorder(Protocol):
         self,
         run_id: UUID,
         *,
-        output_payload: dict[str, object],
         usage: dict[str, int],
     ) -> None: ...
 
@@ -105,13 +106,13 @@ class TaskRunner:
                 result = await spec.agent.run(
                     validated_input.model_dump_json(),
                     model=model,
+                    model_settings=_model_settings(spec.cache_policy),
                     usage_limits=spec.usage_limits,
                     retries={"output": spec.semantic_retry_limit},
                 )
             output = TypeAdapter(spec.output_type).validate_python(result.output)
             self._recorder.succeed(
                 run_id,
-                output_payload=_object_payload(output),
                 usage=_safe_usage(result),
             )
             return output
@@ -123,33 +124,10 @@ class TaskRunner:
             raise
 
 
-def _object_payload(output: BaseModel) -> dict[str, object]:
-    payload = output.model_dump(mode="json")
-    return {str(key): _redact_sensitive_value(str(key), value) for key, value in payload.items()}
-
-
-def _redact_sensitive_value(key: str, value: object) -> object:
-    normalized = key.lower().replace("-", "_")
-    sensitive_markers = (
-        "api_key",
-        "authorization",
-        "cookie",
-        "credential",
-        "password",
-        "private_key",
-        "secret",
-        "token",
-    )
-    if any(marker in normalized for marker in sensitive_markers):
-        return "[REDACTED]"
-    if isinstance(value, dict):
-        return {
-            str(child_key): _redact_sensitive_value(str(child_key), child_value)
-            for child_key, child_value in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_sensitive_value("", item) for item in value]
-    return value
+def _model_settings(cache_policy: CachePolicy) -> ModelSettings | None:
+    if cache_policy is CachePolicy.BYPASS:
+        return {"extra_body": {"cache": {"no-cache": True}}}
+    return None
 
 
 def _safe_usage(result: AgentRunResult[object]) -> dict[str, int]:

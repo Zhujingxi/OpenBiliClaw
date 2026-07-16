@@ -1,8 +1,10 @@
 # OpenBiliClaw backend via the prebuilt multi-arch image on GHCR.
 #
-# This file is self-contained — no git clone or local build needed:
+# This two-file distribution needs no git clone or local build:
 #
+#   mkdir -p litellm
 #   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+#   curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/litellm/config.yaml -o litellm/config.yaml
 #   umask 077
 #   printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
 #     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
@@ -50,8 +52,11 @@ services:
       DATABASE_URL: postgresql://litellm:${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}@litellm-postgres:5432/litellm
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       STORE_MODEL_IN_DB: "True"
+    command: ["--config=/app/config.yaml"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
     ports:
-      - "${LITELLM_PORT:-4000}:4000"
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=4)"]
       interval: 15s

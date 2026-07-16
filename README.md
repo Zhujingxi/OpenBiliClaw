@@ -359,11 +359,13 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 <details>
 <summary>高级：Docker 部署</summary>
 
-适合已经安装 Docker 的用户，自带 Ollama embedding sidecar。预构建镜像无需克隆源码：
+适合已经安装 Docker 的用户，自带 LiteLLM policy 与 Ollama embedding sidecar。预构建镜像无需克隆源码，但需要下载 Compose 和同版本 policy 两个文件：
 
 ```bash
 mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
+mkdir -p litellm
 curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/litellm/config.yaml -o litellm/config.yaml
 umask 077
 printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
@@ -371,6 +373,8 @@ docker compose -f docker-compose.prebuilt.yml up -d
 # 在 http://127.0.0.1:4000/ui 配置三个稳定模型别名；
 # 再打开 http://127.0.0.1:8420/setup/ 完成 legacy 初始化
 ```
+
+LiteLLM Admin 默认只绑定宿主机 `127.0.0.1`；远程管理必须显式修改 Compose 端口绑定，并自行配置防火墙、TLS 与访问控制。
 
 也可以把下面这句粘给 AI 编程助手，走终端向导 + 自动 init：
 

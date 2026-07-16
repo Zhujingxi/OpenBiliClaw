@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
 
@@ -22,7 +24,8 @@ class AliasHealth(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     alias: ModelAlias
-    healthy: bool
+    available: bool
+    state: Literal["healthy", "degraded", "unavailable"]
     reason: str | None = None
 
 
@@ -60,7 +63,11 @@ class AIHealthService:
         )
 
     async def check_aliases(self) -> AIHealthResult:
-        """Return one redacted result per alias in stable application order."""
+        """Probe aliases and return only stable, redacted failure classifications.
+
+        LiteLLM's ``/health?model=...`` may perform provider calls. Callers should
+        treat this method as an explicit diagnostic, not a cheap liveness probe.
+        """
 
         statuses: list[AliasHealth] = []
         reached_proxy = False
@@ -72,18 +79,41 @@ class AIHealthService:
                     headers={"Authorization": f"Bearer {self._api_key.get_secret_value()}"},
                 )
                 reached_proxy = True
-                response.raise_for_status()
+            except httpx.TransportError:
+                statuses.append(_unavailable(alias, "proxy_transport_error"))
+                continue
+
+            if response.status_code in (401, 403):
+                statuses.append(_unavailable(alias, "proxy_auth_failed"))
+                continue
+            if response.status_code == 404:
+                statuses.append(_unavailable(alias, "alias_not_configured"))
+                continue
+            if response.status_code >= 500:
+                statuses.append(_unavailable(alias, "proxy_server_error"))
+                continue
+            if response.is_error:
+                statuses.append(_unavailable(alias, "proxy_request_rejected"))
+                continue
+            try:
                 payload = TypeAdapter(_ProxyHealthResponse).validate_python(response.json())
-                healthy = payload.healthy_count > 0 and payload.unhealthy_count == 0
+            except (ValueError, TypeError):
+                statuses.append(_unavailable(alias, "proxy_invalid_response"))
+                continue
+            if payload.healthy_count > 0:
+                degraded = payload.unhealthy_count > 0
                 statuses.append(
                     AliasHealth(
                         alias=alias,
-                        healthy=healthy,
-                        reason=None if healthy else "alias_unavailable",
+                        available=True,
+                        state="degraded" if degraded else "healthy",
+                        reason="provider_degraded" if degraded else None,
                     )
                 )
-            except (httpx.HTTPError, ValueError):
-                statuses.append(AliasHealth(alias=alias, healthy=False, reason="proxy_unavailable"))
+            elif payload.unhealthy_count > 0:
+                statuses.append(_unavailable(alias, "provider_unhealthy"))
+            else:
+                statuses.append(_unavailable(alias, "alias_not_configured"))
         return AIHealthResult(proxy_reachable=reached_proxy, aliases=tuple(statuses))
 
     async def aclose(self) -> None:
@@ -91,3 +121,7 @@ class AIHealthService:
 
         if self._owns_client:
             await self._client.aclose()
+
+
+def _unavailable(alias: ModelAlias, reason: str) -> AliasHealth:
+    return AliasHealth(alias=alias, available=False, state="unavailable", reason=reason)

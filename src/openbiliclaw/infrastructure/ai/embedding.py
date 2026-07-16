@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError
 
-EMBEDDING_ALIAS = "obc-embedding"
+EMBEDDING_ALIAS: Literal["obc-embedding"] = "obc-embedding"
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -29,7 +29,7 @@ class EmbeddingNamespace(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    alias: str = EMBEDDING_ALIAS
+    alias: Literal["obc-embedding"] = EMBEDDING_ALIAS
     vector_dimension: int = Field(gt=0)
     profile_version: str = Field(min_length=1)
 

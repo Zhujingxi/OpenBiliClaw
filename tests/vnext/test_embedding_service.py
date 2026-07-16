@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
-from openbiliclaw.infrastructure.ai.embedding import EmbeddingService, EmbeddingSettings
+from openbiliclaw.infrastructure.ai.embedding import (
+    EmbeddingNamespace,
+    EmbeddingService,
+    EmbeddingSettings,
+)
 
 
 def _client(handler: httpx.AsyncBaseTransport) -> httpx.AsyncClient:
@@ -127,3 +132,15 @@ async def test_embedding_does_not_retry_http_failures() -> None:
             await service.embed(["text"])
 
     assert calls == 1
+
+
+def test_embedding_namespace_alias_is_exact_and_non_overridable() -> None:
+    namespace = EmbeddingNamespace(vector_dimension=3, profile_version="profile-v1")
+    assert namespace.alias == "obc-embedding"
+
+    with pytest.raises(ValidationError):
+        EmbeddingNamespace(
+            alias="provider-specific-embedding",
+            vector_dimension=3,
+            profile_version="profile-v1",
+        )

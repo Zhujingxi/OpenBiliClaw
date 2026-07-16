@@ -16,7 +16,7 @@ services:
     restart: unless-stopped
 
   litellm:
-    # Pinned signed upstream release; never pass provider credentials through
+    # Pinned upstream version tag; never pass provider credentials through
     # Compose. Add them to the persistent LiteLLM database through /ui.
     image: ghcr.io/berriai/litellm:v1.92.0
     container_name: openbiliclaw-litellm
@@ -31,7 +31,7 @@ services:
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     ports:
-      - "${LITELLM_PORT:-4000}:4000"
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=4)"]
       interval: 15s

@@ -17,3 +17,5 @@ cases:
         - "procedural material breakdown"
     metadata:
       rubric: "Queries are distinct, profile-grounded, and do not assume a specific source platform."
+evaluators:
+  - EqualsExpected

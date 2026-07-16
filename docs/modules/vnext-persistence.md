@@ -41,7 +41,7 @@
 | `infrastructure.security` | `CredentialCipher`, `EncryptedCredential` |
 | `infrastructure.security.credentials` | `MissingCredentialKeyError`, `SECRET_KEY_ENV` |
 
-`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`source_tasks`、`job_runs`、`ai_runs` 当前只提供供后续任务继续构建的低层新增入口，不代表对应 worker 或 AI runner 已经上线。`ai_runs` 只记录 task、model alias、状态、时间、usage 与 outcome；schema 和 repository 均不接受原始输入、prompt 或请求 payload，避免应用数据库成为 provider credential 的旁路持久化通道。
+`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`source_tasks`、`job_runs`、`ai_runs` 当前只提供供后续任务继续构建的低层新增入口，不代表对应 worker 或 AI runner 已经上线。`ai_runs` 只记录 task、model alias、状态、时间、usage 与错误分类；ORM、未发布 Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。
 
 `UserSettings` 的当前完整契约如下：
 
