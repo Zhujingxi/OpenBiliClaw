@@ -189,11 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.171 (2026-07-16)**
+📌 Latest: **v0.3.172 (2026-07-16)**
 
-- **Sharing data across versions no longer empties the pool** — legacy desktop writers can keep adding Bilibili and Douyin candidates with blank `item_key` values, and the current release repairs and deduplicates them at startup.
-- **“I don't want this” now becomes a real long-term avoidance** — once persisted, exact candidates are purged asynchronously and semantic recall plus model review removes similar content without delaying the reply or full profile rebuild.
-- **Source “Apply now” works in pip/venv installs** — when `uv` is unavailable, the backend syncs runtime dependencies with its current Python and restarts through the module entry point.
+- **No more CPU burn when content sources are temporarily unavailable** — replenishment requests now back off on an escalating cooldown, fixing the fan-spinning / overheating regression; normal cadence resumes within ten minutes of a source recovering.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
