@@ -247,13 +247,22 @@ def _canonicalize_remote_url(url: str) -> str:
         scheme, _, rest = text.partition("://")
         if scheme in {"http", "https", "ssh", "git", "git+ssh"}:
             head, slash, tail = rest.partition("/")
-            host_path = head.rsplit("@", 1)[-1] + slash + tail
+            host = head.rsplit("@", 1)[-1]
+            if scheme in {"ssh", "git+ssh"} and host in {
+                "ssh.github.com",
+                "ssh.github.com:443",
+            }:
+                host = "github.com"
+            host_path = host + slash + tail
         else:
             host_path = text
     elif ":" in text.split("/", 1)[0]:
         # scp-like syntax: [user@]host:path
         head, _, tail = text.partition(":")
-        host_path = f"{head.rsplit('@', 1)[-1]}/{tail.lstrip('/')}"
+        host = head.rsplit("@", 1)[-1]
+        if host == "ssh.github.com":
+            host = "github.com"
+        host_path = f"{host}/{tail.lstrip('/')}"
     else:
         host_path = text
     if host_path.endswith(".git"):
@@ -838,34 +847,59 @@ class AutoUpdateService:
                 logger.warning("Auto-update apply refused: %s is not a git work tree", root)
                 return "unsupported_install_mode"
 
-        remote = await self._run_git(["config", "--get", "remote.origin.url"], root)
-        remote_url = remote.stdout.strip() if remote.returncode == 0 else ""
-        if not remote_url:
-            return await self._refuse_unreadable_origin(root, remote)
-        redacted = _redact_remote_url(remote_url)
-        if _remote_has_credentials(remote_url):
-            logger.warning("Auto-update apply refused: remote URL embeds credentials")
-            self._guard_detail = (
-                f"origin 远端内嵌了凭证({redacted});"
-                f"改用不带 token 的地址:git remote set-url origin {DEFAULT_ALLOWED_REMOTES[0]}"
+        configured = await self._run_git(["config", "--get", "remote.origin.url"], root)
+        effective = await self._run_git(["ls-remote", "--get-url", "origin"], root)
+        all_effective = await self._run_git(["remote", "get-url", "--all", "origin"], root)
+        effective_urls = effective.stdout.splitlines() if effective.returncode == 0 else []
+        all_effective_urls = (
+            all_effective.stdout.splitlines() if all_effective.returncode == 0 else []
+        )
+        remote_urls = (
+            [url.strip() for url in [*effective_urls, *all_effective_urls] if url.strip()]
+            if effective_urls and all_effective_urls
+            else []
+        )
+        if not effective_urls and not all_effective_urls:
+            # Older injected runners (and old git wrappers) may acknowledge the
+            # effective-URL probes without returning output. Preserve their
+            # readable single-URL result, but never use it when either effective
+            # probe returned a real value or failed: the allowlist must govern
+            # what git will actually use.
+            configured_urls = (
+                configured.stdout.splitlines() if configured.returncode == 0 else []
             )
-            return "untrusted_remote"
+            if effective.returncode == 0 and all_effective.returncode == 0:
+                remote_urls = [url.strip() for url in configured_urls if url.strip()]
+        if not remote_urls or effective.returncode != 0 or all_effective.returncode != 0:
+            return await self._refuse_unreadable_origin(root, configured)
+
         allowed = {_canonicalize_remote_url(item) for item in self.allowed_remotes}
-        if _canonicalize_remote_url(remote_url) not in allowed:
-            logger.warning(
-                "Auto-update apply refused: remote %r is not in the allowlist %s "
-                "(compared after canonicalization; add it to [scheduler] "
-                "auto_update_allowed_remotes or run: git remote set-url origin %s)",
-                remote_url,
-                list(self.allowed_remotes),
-                DEFAULT_ALLOWED_REMOTES[0],
-            )
-            self._guard_detail = (
-                f"origin 远端 {redacted} 不在允许列表;"
-                f"指回官方:git remote set-url origin {DEFAULT_ALLOWED_REMOTES[0]}"
-                f",或把该地址加入 config.toml 的 [scheduler] auto_update_allowed_remotes"
-            )
-            return "untrusted_remote"
+        for remote_url in remote_urls:
+            redacted = _redact_remote_url(remote_url)
+            if _remote_has_credentials(remote_url):
+                logger.warning("Auto-update apply refused: remote URL embeds credentials")
+                self._guard_detail = (
+                    f"origin 远端内嵌了凭证({redacted});"
+                    f"改用不带 token 的地址:git remote set-url origin "
+                    f"{DEFAULT_ALLOWED_REMOTES[0]}"
+                )
+                return "untrusted_remote"
+            if _canonicalize_remote_url(remote_url) not in allowed:
+                logger.warning(
+                    "Auto-update apply refused: remote %r is not in the allowlist %s "
+                    "(compared after canonicalization; add it to [scheduler] "
+                    "auto_update_allowed_remotes or run: git remote set-url origin %s)",
+                    remote_url,
+                    list(self.allowed_remotes),
+                    DEFAULT_ALLOWED_REMOTES[0],
+                )
+                self._guard_detail = (
+                    f"origin 远端 {redacted} 不在允许列表;"
+                    f"指回官方:git remote set-url origin {DEFAULT_ALLOWED_REMOTES[0]}"
+                    f",或把该地址加入 config.toml 的 [scheduler] "
+                    "auto_update_allowed_remotes"
+                )
+                return "untrusted_remote"
 
         status = await self._run_git(["status", "--porcelain"], root)
         if status.returncode != 0:

@@ -1153,6 +1153,145 @@ def test_canonicalize_remote_url(url: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "ssh://git@ssh.github.com:443/whiteguo233/OpenBiliClaw.git",
+            "github.com/whiteguo233/openbiliclaw",
+        ),
+        (
+            "git@ssh.github.com:whiteguo233/OpenBiliClaw.git",
+            "github.com/whiteguo233/openbiliclaw",
+        ),
+    ],
+)
+def test_canonicalize_official_github_ssh_over_443_host(url: str, expected: str) -> None:
+    assert updater._canonicalize_remote_url(url) == expected
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_accepts_multiple_effective_official_urls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+    calls: list[list[str]] = []
+
+    async def _run_command(command, _root, *, timeout):
+        calls.append(list(command))
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 2, "", "")
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://github.com/whiteguo233/OpenBiliClaw.git\n"
+                "git@github.com:whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == ""
+    assert ["git", "ls-remote", "--get-url", "origin"] in calls
+    assert ["git", "remote", "get-url", "--all", "origin"] in calls
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_rejects_one_untrusted_url_among_multiple_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 2, "", "")
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://github.com/whiteguo233/OpenBiliClaw.git\n"
+                "https://mirror.example/whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == "untrusted_remote"
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_rejects_insteadof_rewritten_effective_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "https://mirror.example/https://github.com/whiteguo233/OpenBiliClaw.git\n",
+                "",
+            )
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://github.com/whiteguo233/OpenBiliClaw.git\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == "untrusted_remote"
+
+
+@pytest.mark.asyncio
+async def test_remote_guard_rejects_mirror_wrapped_github_url(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+    mirror = "https://gh-proxy.com/https://github.com/whiteguo233/OpenBiliClaw.git"
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "config", "--get", "remote.origin.url"]:
+            return subprocess.CompletedProcess(command, 0, f"{mirror}\n", "")
+        if command == ["git", "ls-remote", "--get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 0, f"{mirror}\n", "")
+        if command == ["git", "remote", "get-url", "--all", "origin"]:
+            return subprocess.CompletedProcess(command, 0, f"{mirror}\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    assert await service._check_apply_guards("backend-v0.3.92") == "untrusted_remote"
+
+
+@pytest.mark.parametrize(
     "remote_url",
     [
         "https://github.com/whiteguo233/OpenBiliClaw",  # .git-less manual clone
