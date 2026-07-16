@@ -127,7 +127,11 @@ class CandidateEvalCoordinator:
 
         self._generation += 1
         self.last_wake_reason = str(reason)
-        if self._paused and self._resume_notification(reason):
+        self._supply_cooldown_until = 0.0
+        resume_notification = self._resume_notification(reason)
+        if resume_notification:
+            self._supply_streak = 0
+        if self._paused and resume_notification:
             self._paused = False
             self._backoff_until = 0.0
         self._wake_event.set()
@@ -304,6 +308,8 @@ class CandidateEvalCoordinator:
             elif self.last_cached > 0:
                 self._zero_cache_streak = 0
                 self._no_progress_level = 0
+                self._supply_streak = 0
+                self._supply_cooldown_until = 0.0
             if self._zero_cache_streak >= 3:
                 delay = _NO_PROGRESS_BACKOFF_SECONDS[
                     min(self._no_progress_level, len(_NO_PROGRESS_BACKOFF_SECONDS) - 1)

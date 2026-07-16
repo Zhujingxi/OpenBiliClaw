@@ -637,6 +637,87 @@ async def test_unproductive_supply_backs_off_exponentially() -> None:
     assert intervals == sorted(intervals)
 
 
+@pytest.mark.asyncio
+async def test_notify_pierces_supply_cooldown_once() -> None:
+    now = [100.0]
+    supply_calls: list[float] = []
+    pipeline = _FakeStagedPipeline(candidate_count=0)
+
+    async def request_supply(reason: str) -> dict[str, object]:
+        supply_calls.append(now[0])
+        return {"refreshed": False, "reason": "below_threshold"}
+
+    coordinator = CandidateEvalCoordinator(
+        pipeline=pipeline,
+        snapshot_provider=lambda: CandidateEvalSnapshot(0, 600, 0, 0, 0, 0),
+        profile_provider=lambda: object(),
+        supply_callback=request_supply,
+        safety_wake_seconds=60.0,
+        time_fn=lambda: now[0],
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    async with asyncio.timeout(2):
+        while coordinator._supply_streak < 1:
+            await asyncio.sleep(0)
+
+    coordinator.notify("candidate_commit")
+    async with asyncio.timeout(2):
+        while coordinator._supply_streak < 2:
+            await asyncio.sleep(0)
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert supply_calls == [100.0, 100.0]
+    assert coordinator._supply_cooldown_until == 160.0
+    await coordinator.stop()
+    await task
+
+
+def test_manual_notify_resets_supply_ladder() -> None:
+    now = [100.0]
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    coordinator.time_fn = lambda: now[0]
+    for _ in range(5):
+        coordinator._record_supply_result(productive=False)
+
+    coordinator.notify("manual_refresh")
+    coordinator._record_supply_result(productive=False)
+
+    assert coordinator._supply_streak == 1
+    assert coordinator._supply_cooldown_until == 130.0
+
+
+@pytest.mark.asyncio
+async def test_productive_supply_resets_ladder() -> None:
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    coordinator._record_supply_result(productive=False)
+    coordinator._record_supply_result(productive=False)
+    coordinator.supply_callback = lambda reason: {"refreshed": True}
+
+    coordinator._request_supply("test")
+    assert coordinator._supply_task is not None
+    await coordinator._supply_task
+    await coordinator._settle_supply_task()
+
+    assert coordinator._supply_streak == 0
+    assert coordinator._supply_cooldown_until == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [None, "legacy"])
+async def test_legacy_supply_result_shape_is_not_throttled(result: object) -> None:
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    coordinator.supply_callback = lambda reason: result
+
+    coordinator._request_supply("test")
+    assert coordinator._supply_task is not None
+    await coordinator._supply_task
+    await coordinator._settle_supply_task()
+
+    assert coordinator._supply_streak == 0
+    assert coordinator._supply_cooldown_until == 0.0
+
+
 class _SqliteSoakEngine:
     def __init__(self, database: Database) -> None:
         self.database = database
