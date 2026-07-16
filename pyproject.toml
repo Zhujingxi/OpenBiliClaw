@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbiliclaw"
-version = "0.3.168"
+version = "0.4.0"
 description = "Your local-first, cross-platform AI discovery friend for Bilibili, Zhihu, and more."
 readme = "README.md"
 license = { text = "MIT" }
@@ -111,7 +111,11 @@ select = [
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
     "TCH",  # flake8-type-checking
+    "C901", # McCabe complexity
 ]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
 "src/openbiliclaw/llm/prompts.py" = ["E501"]  # Prompt templates contain long JSON examples
@@ -141,3 +145,28 @@ asyncio_mode = "auto"
 markers = [
     "integration: real Bilibili API checks that require local credentials",
 ]
+
+[tool.importlinter]
+root_package = "openbiliclaw"
+
+[[tool.importlinter.contracts]]
+name = "Domain is independent"
+type = "forbidden"
+source_modules = [
+    "openbiliclaw.features.activity.domain",
+    "openbiliclaw.features.profile.domain",
+    "openbiliclaw.features.feed.domain",
+    "openbiliclaw.features.library.domain",
+    "openbiliclaw.features.chat.domain",
+    "openbiliclaw.features.sources.domain",
+]
+forbidden_modules = [
+    "openbiliclaw.infrastructure",
+    "openbiliclaw.api",
+]
+
+[[tool.importlinter.contracts]]
+name = "Features do not depend on HTTP"
+type = "forbidden"
+source_modules = ["openbiliclaw.features"]
+forbidden_modules = ["openbiliclaw.api"]

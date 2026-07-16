@@ -1,0 +1,370 @@
+"""Characterization tests for the frozen vNext domain boundary."""
+
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+import pytest
+from pydantic import BaseModel, ValidationError
+
+from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind, ProfileSignal
+from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
+from openbiliclaw.features.feed.domain import (
+    CandidateAssessment,
+    ContentItem,
+    FeedEntry,
+    Interaction,
+    InteractionKind,
+    feed_deficit,
+)
+from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
+from openbiliclaw.features.profile.domain import (
+    ProfileDelta,
+    ProfileFacet,
+    ProfileSnapshot,
+    apply_profile_delta,
+)
+from openbiliclaw.features.sources.domain import (
+    SourceCapability,
+    SourceConnector,
+    SourceManifest,
+)
+
+NOW = datetime(2026, 7, 17, 8, 30, tzinfo=UTC)
+EVENT_ID = UUID("00000000-0000-0000-0000-000000000001")
+CONTENT_ID = UUID("00000000-0000-0000-0000-000000000002")
+ASSESSMENT_ID = UUID("00000000-0000-0000-0000-000000000003")
+PROFILE_ID = UUID("00000000-0000-0000-0000-000000000004")
+ACCOUNT_ID = UUID("00000000-0000-0000-0000-000000000005")
+CONVERSATION_ID = UUID("00000000-0000-0000-0000-000000000006")
+
+
+def _contracts() -> tuple[BaseModel, ...]:
+    facet = ProfileFacet(
+        name="interests",
+        value="Python",
+        weight=0.8,
+        confidence=0.9,
+        evidence_ids=(EVENT_ID,),
+    )
+    return (
+        ActivityEvent(
+            id=EVENT_ID,
+            source_id="bilibili",
+            account_id=ACCOUNT_ID,
+            kind=ActivityKind.VIEW,
+            occurred_at=NOW,
+            content_external_id="BV1contract",
+            url="https://www.bilibili.com/video/BV1contract",
+            title="Domain contracts",
+            text="watched",
+            duration_seconds=42.5,
+            metadata={"progress": 0.75},
+        ),
+        ProfileSignal(
+            facet="interests",
+            value="Python",
+            weight=0.8,
+            confidence=0.9,
+            evidence_ids=(EVENT_ID,),
+        ),
+        facet,
+        ProfileSnapshot(
+            id=PROFILE_ID,
+            revision=3,
+            narrative="Builds reliable systems.",
+            facets=(facet,),
+            confidence=0.9,
+            created_at=NOW,
+        ),
+        ProfileDelta(narrative="Updated", upserts=(facet,)),
+        ContentItem(
+            id=CONTENT_ID,
+            source_id="bilibili",
+            external_id="BV1contract",
+            url="https://www.bilibili.com/video/BV1contract",
+            title="Domain contracts",
+            summary="A focused introduction.",
+            creator="OpenBiliClaw",
+            published_at=NOW,
+            media_type="video",
+            metadata={"duration": 600},
+        ),
+        CandidateAssessment(
+            id=ASSESSMENT_ID,
+            content_id=CONTENT_ID,
+            profile_revision=3,
+            relevance=0.9,
+            quality=0.8,
+            novelty=0.7,
+            risk=0.1,
+            topics=("python", "architecture"),
+            explanation="Strong match.",
+        ),
+        FeedEntry(
+            id=UUID("00000000-0000-0000-0000-000000000007"),
+            content_id=CONTENT_ID,
+            assessment_id=ASSESSMENT_ID,
+            position=2,
+            admitted_at=NOW,
+            explanation="Because you value maintainability.",
+        ),
+        Interaction(
+            id=UUID("00000000-0000-0000-0000-000000000008"),
+            content_id=CONTENT_ID,
+            kind=InteractionKind.POSITIVE,
+            occurred_at=NOW,
+            metadata={"surface": "web"},
+        ),
+        CollectionItem(
+            id=UUID("00000000-0000-0000-0000-000000000009"),
+            collection=CollectionKind.FAVORITES,
+            content_id=CONTENT_ID,
+            added_at=NOW,
+            note="Revisit this.",
+        ),
+        ChatTurn(
+            id=UUID("00000000-0000-0000-0000-000000000010"),
+            conversation_id=CONVERSATION_ID,
+            role=ChatRole.ASSISTANT,
+            content="Here is why this fits.",
+            created_at=NOW,
+            ai_run_id=UUID("00000000-0000-0000-0000-000000000011"),
+        ),
+        SourceManifest(
+            source_id="bilibili",
+            display_name="Bilibili",
+            capabilities=frozenset({SourceCapability.ACTIVITY_IMPORT, SourceCapability.SEARCH}),
+            requires_account=True,
+        ),
+    )
+
+
+@pytest.mark.parametrize("contract", _contracts(), ids=lambda value: type(value).__name__)
+def test_frozen_contracts_json_round_trip(contract: BaseModel) -> None:
+    restored = type(contract).model_validate_json(contract.model_dump_json())
+
+    assert restored == contract
+    with pytest.raises(ValidationError, match="frozen"):
+        contract.id = UUID(int=0)  # type: ignore[attr-defined,misc]
+
+
+@pytest.mark.parametrize(
+    ("contract", "field"),
+    [
+        (
+            ProfileSignal(
+                facet="interests",
+                value="Python",
+                weight=0.8,
+                confidence=0.9,
+                evidence_ids=(EVENT_ID,),
+            ),
+            "value",
+        ),
+        (
+            ProfileDelta(
+                narrative="Updated",
+                removals=(("interests", "Python"),),
+            ),
+            "narrative",
+        ),
+    ],
+)
+def test_frozen_contracts_without_ids_reject_assignment(contract: BaseModel, field: str) -> None:
+    with pytest.raises(ValidationError, match="frozen"):
+        setattr(contract, field, "changed")
+
+
+@pytest.mark.parametrize("contract_type", [ProfileSignal, ProfileFacet])
+def test_profile_evidence_is_mandatory(contract_type: type[BaseModel]) -> None:
+    with pytest.raises(ValidationError, match="evidence_ids"):
+        contract_type.model_validate(
+            {
+                "facet" if contract_type is ProfileSignal else "name": "interests",
+                "value": "Python",
+                "weight": 0.8,
+                "confidence": 0.9,
+                "evidence_ids": (),
+            }
+        )
+
+
+def test_user_override_has_full_confidence_and_cannot_be_silently_removed() -> None:
+    override = ProfileFacet(
+        name="avoidances",
+        value="Clickbait",
+        weight=-1,
+        confidence=0.2,
+        evidence_ids=(EVENT_ID,),
+        overridden=True,
+    )
+    snapshot = ProfileSnapshot(revision=4, facets=(override,))
+
+    updated = apply_profile_delta(
+        snapshot,
+        ProfileDelta(removals=(("avoidances", "CLICKBAIT"),)),
+    )
+
+    assert override.confidence == 1.0
+    assert updated.facets == (override,)
+    assert updated.revision == 5
+
+
+def test_user_override_signal_always_has_full_confidence() -> None:
+    signal = ProfileSignal(
+        facet="interests",
+        value="Testing",
+        weight=1,
+        confidence=0,
+        evidence_ids=(EVENT_ID,),
+        override=True,
+    )
+
+    assert signal.confidence == 1.0
+
+
+def test_duplicate_facets_merge_case_insensitively_with_all_evidence() -> None:
+    second_event = UUID("00000000-0000-0000-0000-000000000012")
+    snapshot = ProfileSnapshot(
+        revision=1,
+        facets=(
+            ProfileFacet(
+                name="interests",
+                value="Python",
+                weight=0.4,
+                confidence=0.5,
+                evidence_ids=(EVENT_ID,),
+            ),
+        ),
+    )
+    delta = ProfileDelta(
+        upserts=(
+            ProfileFacet(
+                name="interests",
+                value="python",
+                weight=0.8,
+                confidence=0.75,
+                evidence_ids=(second_event,),
+            ),
+        )
+    )
+
+    updated = apply_profile_delta(snapshot, delta)
+
+    assert len(updated.facets) == 1
+    assert updated.facets[0].evidence_ids == (EVENT_ID, second_event)
+    assert updated.facets[0].confidence == 0.75
+    assert updated.facets[0].weight == pytest.approx(0.64)
+
+
+def test_non_override_update_cannot_replace_user_override() -> None:
+    override = ProfileFacet(
+        name="interests",
+        value="Python",
+        weight=1,
+        confidence=1,
+        evidence_ids=(EVENT_ID,),
+        overridden=True,
+    )
+    proposal = ProfileFacet(
+        name="interests",
+        value="python",
+        weight=-1,
+        confidence=0.9,
+        evidence_ids=(UUID("00000000-0000-0000-0000-000000000013"),),
+    )
+
+    updated = apply_profile_delta(
+        ProfileSnapshot(revision=7, facets=(override,)),
+        ProfileDelta(upserts=(proposal,)),
+    )
+
+    assert updated.facets == (override,)
+
+
+def test_apply_profile_delta_is_deterministic() -> None:
+    snapshot = ProfileSnapshot(
+        id=PROFILE_ID,
+        revision=2,
+        narrative="Original",
+        created_at=NOW,
+    )
+    delta = ProfileDelta(
+        upserts=(
+            ProfileFacet(
+                name="values",
+                value="Evidence",
+                weight=0.9,
+                confidence=0.8,
+                evidence_ids=(EVENT_ID,),
+            ),
+        )
+    )
+
+    first = apply_profile_delta(snapshot, delta)
+    second = apply_profile_delta(snapshot, delta)
+
+    assert first == second
+    assert first.id == PROFILE_ID
+    assert first.created_at == NOW
+
+
+def test_candidate_assessment_scores_clamp_to_unit_interval() -> None:
+    assessment = CandidateAssessment(
+        content_id=CONTENT_ID,
+        profile_revision=1,
+        relevance=1.5,
+        quality=-0.25,
+        novelty=2,
+        risk=-1,
+    )
+
+    assert assessment.relevance == 1.0
+    assert assessment.quality == 0.0
+    assert assessment.novelty == 1.0
+    assert assessment.risk == 0.0
+    assert assessment.score == 0.75
+
+
+@pytest.mark.parametrize(
+    ("current_unseen", "expected"),
+    [(4, 16), (5, 0), (6, 0), (20, 0)],
+)
+def test_feed_deficit_replenishes_only_below_low_watermark(
+    current_unseen: int, expected: int
+) -> None:
+    assert feed_deficit(current_unseen, low_watermark=5, high_watermark=20) == expected
+
+
+@pytest.mark.parametrize(
+    ("current_unseen", "low_watermark", "high_watermark"),
+    [(-1, 5, 20), (1, -1, 20), (1, 5, -1), (1, 21, 20)],
+)
+def test_feed_deficit_rejects_invalid_watermarks(
+    current_unseen: int, low_watermark: int, high_watermark: int
+) -> None:
+    with pytest.raises(ValueError):
+        feed_deficit(current_unseen, low_watermark, high_watermark)
+
+
+def test_source_connector_is_a_runtime_checkable_capability_contract() -> None:
+    class FakeConnector:
+        manifest = SourceManifest(
+            source_id="test",
+            display_name="Test",
+            capabilities=frozenset({SourceCapability.SEARCH}),
+        )
+
+        async def import_activity(self) -> tuple[ActivityEvent, ...]:
+            return ()
+
+        async def discover(
+            self, capability: SourceCapability, query: str | None, limit: int
+        ) -> tuple[ContentItem, ...]:
+            del capability, query, limit
+            return ()
+
+    connector: Any = FakeConnector()
+
+    assert isinstance(connector, SourceConnector)

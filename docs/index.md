@@ -39,6 +39,7 @@
 
 | 模块 | 文档 | 对应代码 | 状态 |
 |------|------|----------|------|
+| vNext 领域契约 | [modules/vnext-domain.md](modules/vnext-domain.md) | `src/openbiliclaw/features/*/domain.py` | 🚧 已冻结领域边界，尚未接入运行时 / API |
 | LLM 多模型支持 | [modules/llm.md](modules/llm.md) | `src/openbiliclaw/llm/` | ✅ 全局 ordered Chat/Embedding route + immutable runtime bundle + connection usage 归因 |
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
 | 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / 通用 Web 多源 discovery |

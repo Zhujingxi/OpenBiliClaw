@@ -4,6 +4,10 @@
 
 ---
 
+## v0.4.0：vNext 后端领域边界（2026-07-17）
+
+- **冻结 vNext 领域契约**：新增 activity、profile、feed、library、chat 与 sources 六个 feature domain，统一不可变 Pydantic 契约、证据必填画像信号、用户覆盖保护、大小写不敏感画像合并、候选评分钳制及 feed 低水位补货策略；本阶段只建立无框架依赖的领域边界，尚未切换现有运行时或公开 API。
+
 ## v0.3.168 / extension v0.3.168 / desktop v0.3.168：初始化有界化、多模态封面与升级可靠性（2026-07-14）
 
 后端源码走 `backend-v0.3.168`，浏览器插件走 `extension-v0.3.168`，桌面安装包走 `desktop-v0.3.168`。
