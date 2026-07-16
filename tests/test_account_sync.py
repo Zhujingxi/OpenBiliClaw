@@ -419,8 +419,10 @@ async def test_account_sync_records_profile_analysis_error_without_advancing_cur
     assert memory.state["last_history_view_at"] == 0
     assert memory.state["last_account_sync_at"] == ""
     # The one-shot bootstrap chance is not burned on an unavailable model.
+    # (_apply_profile_update probes readiness once up front for routing, but
+    # the failed analyze means _auto_bootstrap_soul_profile never runs.)
     assert soul.bootstrap_calls == []
-    assert soul.ready_checks == 0
+    assert soul.ready_checks == 1
 
 
 @pytest.mark.asyncio
