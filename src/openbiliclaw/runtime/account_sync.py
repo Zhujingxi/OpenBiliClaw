@@ -12,6 +12,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 from openbiliclaw.bilibili.api import BilibiliAuthExpiredError
 from openbiliclaw.llm.base import classify_llm_unavailability, safe_llm_failure_message
 
+# Cross-source identity-key helpers live in the shared ``sources.identity_keys``
+# module (promoted in event-capture-completion Phase 0 so retraction discounting
+# can key on the same normalization). Aliased to the historic private names to
+# keep this module's call sites unchanged.
+from openbiliclaw.sources.identity_keys import dedup_key as _dedup_key
+from openbiliclaw.sources.identity_keys import tweet_id_from_url as _tweet_id_from_url
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -36,55 +43,6 @@ _X_ID_CAP = 2000
 # First-sync seeding reads *all* persisted X events (init may be months old), so
 # the lookback is effectively unwindowed rather than the 48h dedup window.
 _X_SEED_WINDOW_HOURS = 24 * 365 * 10
-
-
-def _bvid_from_url(url: str) -> str:
-    """Extract the ``BV...`` id from a ``bilibili.com/video/<bvid>`` URL."""
-    marker = "bilibili.com/video/"
-    if marker not in url:
-        return ""
-    tail = url.split(marker, 1)[1]
-    return tail.split("/", 1)[0].split("?", 1)[0].strip()
-
-
-def _mid_from_url(url: str) -> str:
-    """Extract the UP mid from a ``space.bilibili.com/<mid>`` URL."""
-    marker = "space.bilibili.com/"
-    if marker not in url:
-        return ""
-    tail = url.split(marker, 1)[1]
-    return tail.split("/", 1)[0].split("?", 1)[0].strip()
-
-
-def _tweet_id_from_url(url: str) -> str:
-    """Extract the tweet id from the trailing ``/status/<id>`` URL segment.
-
-    Handles both ``x.com/i/status/<id>`` (extension GraphQL tap) and
-    ``x.com/<handle>/status/<id>`` (server-side events).
-    """
-    marker = "/status/"
-    if marker not in url:
-        return ""
-    tail = url.split(marker, 1)[1]
-    return tail.split("/", 1)[0].split("?", 1)[0].strip()
-
-
-def _dedup_key(url: str) -> str:
-    """Map an event URL to a normalized cross-source identity key.
-
-    X keys on the tweet id (URL handle differs across sources), bilibili
-    videos on the bvid, follows on the UP mid. Empty when no key applies.
-    """
-    tweet_id = _tweet_id_from_url(url)
-    if tweet_id:
-        return f"x:{tweet_id}"
-    bvid = _bvid_from_url(url)
-    if bvid:
-        return f"bv:{bvid}"
-    mid = _mid_from_url(url)
-    if mid:
-        return f"mid:{mid}"
-    return ""
 
 
 class SupportsRecentEventUrls(Protocol):

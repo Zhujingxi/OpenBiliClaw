@@ -1590,6 +1590,77 @@ class Database:
         finally:
             conn.close()
 
+    def mark_positive_events_retracted(
+        self,
+        identity_urls: list[str],
+        retracted_action: str,
+        *,
+        retraction_at: datetime,
+    ) -> int:
+        """Discount stored positive events undone by a retraction (Phase 0 face 2).
+
+        Covers offline reread paths (``openbiliclaw init`` full rebuild, the 12h
+        cognition/profile-consolidation cycle) that re-read the events table. For
+        every ``retracted_action`` row whose URL normalizes to the same identity
+        key as ``identity_urls`` **and whose event time is strictly earlier than
+        ``retraction_at``**, mark ``metadata.retracted=true`` and cap
+        ``signal_strength`` at 0.2. Rows without a usable event time are
+        conservatively skipped (same causality rule as the in-memory face).
+
+        Identity keys (tweet_id / bvid / mid / xhs note_id) are globally unique,
+        so there is no time-window guard — undoing a months-old like is exactly
+        the case this must catch. Rows are never deleted and non-metadata
+        columns are never rewritten (invariant 3).
+
+        Returns the number of rows marked.
+        """
+        from datetime import UTC
+
+        from openbiliclaw.sources.event_format import (
+            RETRACTABLE_ACTIONS,
+            apply_retraction_discount,
+            parse_event_timestamp,
+        )
+        from openbiliclaw.sources.identity_keys import dedup_key
+
+        action = str(retracted_action or "").strip().lower()
+        if action not in RETRACTABLE_ACTIONS:
+            return 0
+        target_keys = {key for url in identity_urls if (key := dedup_key(str(url or "")))}
+        if not target_keys:
+            return 0
+
+        cutoff = retraction_at if retraction_at.tzinfo else retraction_at.replace(tzinfo=UTC)
+
+        conn = self.open_connection()
+        try:
+            rows = conn.execute(
+                "SELECT id, url, metadata FROM events WHERE event_type = ?", (action,)
+            ).fetchall()
+            marked = 0
+            for row in rows:
+                if dedup_key(str(row["url"] or "")) not in target_keys:
+                    continue
+                try:
+                    metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                event_time = parse_event_timestamp(metadata)
+                if event_time is None or event_time >= cutoff:
+                    continue
+                patched = apply_retraction_discount(metadata)
+                conn.execute(
+                    "UPDATE events SET metadata = ? WHERE id = ?",
+                    (json.dumps(patched, ensure_ascii=False), row["id"]),
+                )
+                marked += 1
+            conn.commit()
+            return marked
+        finally:
+            conn.close()
+
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get recent events.
 

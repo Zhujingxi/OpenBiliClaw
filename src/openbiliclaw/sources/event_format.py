@@ -54,10 +54,135 @@ the LLM consumes ``context``.
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+# --- Retraction discounting (event-capture-completion Phase 0) --------------
+#
+# A retraction (an unlike / unbookmark / unfollow / undo-retweet) neutralizes a
+# prior positive event. The positive evidence is *discounted, never deleted*
+# (invariant 3): its metadata is marked ``retracted`` and its evidence strength
+# capped. Whitelisted actions map 1:1 to positive event_types.
+RETRACTABLE_ACTIONS = frozenset({"like", "favorite", "share", "follow"})
+
+# Post-retraction evidence strength. Calibration: mirrors the extension's
+# explicit retraction ``signal_strength`` (see the feedback/retraction branch in
+# ``default_signal_strength_for_event`` — both 0.2) so a retracted positive is
+# downgraded to the same weak-evidence floor as the retraction signal itself.
+# Reopen calibration on any provider/model swap (pitfall #3).
+RETRACTION_DISCOUNTED_STRENGTH = 0.2
+
+# Natural-language marker appended to a retracted event's rendered context so
+# every reread LLM consumption face (preference / awareness) sees the undo, not
+# just the structured ``retracted`` flag. Half-width parens match the existing
+# ``format_event_context`` extra style.
+RETRACTION_RENDER_MARKER = "(已撤销)"
+
+
+def apply_retraction_discount(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``metadata`` marked retracted with capped strength.
+
+    Idempotent: re-applying keeps ``signal_strength`` at the min (never
+    re-inflates). A missing / unparseable strength is set to the floor.
+    """
+    result = dict(metadata)
+    result["retracted"] = True
+    raw = result.get("signal_strength")
+    try:
+        current = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        current = None
+    result["signal_strength"] = (
+        RETRACTION_DISCOUNTED_STRENGTH
+        if current is None
+        else min(current, RETRACTION_DISCOUNTED_STRENGTH)
+    )
+    return result
+
+
+def _metadata_is_retracted(metadata: Any) -> bool:
+    """True when the event's metadata carries a truthy ``retracted`` flag.
+
+    Handles both dict metadata (in-memory events) and the raw JSON-string
+    metadata returned by ``Database.query_events`` for reread paths.
+    """
+    if isinstance(metadata, dict):
+        return bool(metadata.get("retracted"))
+    if isinstance(metadata, str) and metadata:
+        try:
+            parsed = json.loads(metadata)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(parsed, dict) and bool(parsed.get("retracted"))
+    return False
+
+
+def render_retraction_marked_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append ``(已撤销)`` to the context of retracted events for rendering.
+
+    Non-retracted events are returned as-is (identity), so rendering of an
+    event set without any retraction is byte-for-byte unchanged (invariant 2).
+    """
+    marked: list[dict[str, Any]] = []
+    for event in events:
+        if not _metadata_is_retracted(event.get("metadata")):
+            marked.append(event)
+            continue
+        context = str(event.get("context") or "")
+        if RETRACTION_RENDER_MARKER in context:
+            marked.append(event)
+            continue
+        copy = dict(event)
+        copy["context"] = (
+            context + RETRACTION_RENDER_MARKER if context else RETRACTION_RENDER_MARKER
+        )
+        marked.append(copy)
+    return marked
+
+
+def parse_event_timestamp(metadata: dict[str, Any] | None) -> datetime | None:
+    """Extract a timezone-aware UTC event time from ``metadata.timestamp``.
+
+    The extension folds ``item.timestamp`` (epoch milliseconds) into
+    ``metadata.timestamp`` at ingest; account_sync / server events may carry an
+    ISO string. Returns ``None`` when no usable timestamp is present so callers
+    can conservatively skip causality-dependent decisions (Phase 0 rule: time
+    unavailable → do not discount).
+    """
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("timestamp")
+    if isinstance(raw, bool):  # bool is an int subclass — never a timestamp
+        return None
+    if isinstance(raw, int | float):
+        return _epoch_to_datetime(float(raw))
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        try:
+            return _epoch_to_datetime(float(text))
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return None
+
+
+def _epoch_to_datetime(value: float) -> datetime:
+    """Convert an epoch value to UTC, treating large magnitudes as milliseconds."""
+    # Values above ~1e11 are milliseconds (year 5138 in seconds), so any real
+    # ms epoch (~1.7e12 today) divides cleanly while second epochs pass through.
+    seconds = value / 1000.0 if abs(value) >= 1e11 else value
+    return datetime.fromtimestamp(seconds, UTC)
+
 
 SatisfactionCategory = Literal["positive", "neutral", "negative", "unknown"]
 
