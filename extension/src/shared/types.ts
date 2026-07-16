@@ -54,9 +54,9 @@ export interface PlatformAdapter {
    * path as their source of truth.
    *
    * X declares `{like, favorite, share, comment, retraction}` (its GraphQL
-   * tap emits all five); bilibili declares `{comment}` once its reply/add
-   * interact tap ships; xiaohongshu declares `{like, favorite, retraction}`
-   * once its action tap ships.
+   * tap emits all five); bilibili declares
+   * `{comment, like, favorite, coin, retraction}` via its interact tap;
+   * xiaohongshu declares `{like, favorite, retraction}` via its action tap.
    */
   readonly tapAuthoritativeActions?: ReadonlySet<string>;
 

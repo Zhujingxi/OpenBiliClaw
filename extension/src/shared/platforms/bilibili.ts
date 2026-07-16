@@ -64,11 +64,17 @@ export function inferBilibiliActionType(hint: ActionHint): string | null {
 export const bilibiliAdapter: PlatformAdapter = {
   sourcePlatform: "bilibili",
   // The MAIN-world interact tap (`main/bili-interact-tap.ts`) emits the
-  // authoritative comment on a successful `/x/v2/reply/add`; the DOM click
-  // path must not fire a comment when the user merely opens the comment panel
-  // nor double-count the submit. Like / coin / favorite / share / follow have
-  // no tap and stay DOM-sourced.
-  tapAuthoritativeActions: new Set(["comment"]),
+  // authoritative comment / like / favorite / coin / retraction after the
+  // corresponding Bilibili write succeeds. The DOM path must not double-count
+  // those writes (and cannot infer Bilibili's class-only pressed state).
+  // Share / follow have no tap and stay DOM-sourced.
+  tapAuthoritativeActions: new Set([
+    "comment",
+    "like",
+    "favorite",
+    "coin",
+    "retraction",
+  ]),
   detectPageType: detectBilibiliPageType,
   extractContentId: extractBvid,
   extractSearchQuery: (url) => queryParam(url, "keyword"),

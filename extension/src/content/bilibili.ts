@@ -8,11 +8,12 @@
  *
  *   2. Listen for the MAIN-world interact tap's `postMessage`
  *      (`source: "obc-bili-interact"`) and forward each captured danmaku /
- *      comment as a `comment` BEHAVIOR_EVENT to the service worker → backend.
+ *      comment / action as a unified BEHAVIOR_EVENT to the service worker →
+ *      backend.
  *
  * The MAIN-world tap (`dist/main/bili-interact-tap.js`) runs at
  * document_start in `world: MAIN` (see manifest.json) and observes the user's
- * own `/x/v2/dm/post` and `/x/v2/reply/add` writes. It never mutates the
+ * own danmaku, comment, like, favorite, and coin writes. It never mutates the
  * page's requests.
  */
 
@@ -24,6 +25,7 @@ import { COMMENT_TEXT_MAX_CHARS, sanitizeUserText } from "../shared/text-sanitiz
 // Danmaku evidence strength — mirrors the backend's danmaku default (0.6),
 // below a written comment (0.75) because bullet chatter is more casual.
 const DANMAKU_SIGNAL_STRENGTH = 0.6;
+const RETRACTION_SIGNAL_STRENGTH = 0.2;
 
 /** Best-effort current page href (safe under node --test where window is absent). */
 function currentHref(): string {
@@ -33,33 +35,49 @@ function currentHref(): string {
 export function isBiliInteraction(value: unknown): value is BiliInteraction {
   if (!value || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  if (v.kind !== "danmaku" && v.kind !== "comment") return false;
-  return typeof v.text === "string" && v.text.length > 0;
+  if (v.kind === "danmaku" || v.kind === "comment") {
+    return typeof v.text === "string" && v.text.length > 0;
+  }
+  if (v.kind === "like" || v.kind === "favorite" || v.kind === "coin") return true;
+  if (v.kind !== "retraction") return false;
+  return v.retracted_action === "like" || v.retracted_action === "favorite";
 }
 
 /**
- * Normalize a captured `BiliInteraction` into the unified `comment`
- * BEHAVIOR_EVENT forwarded to `/api/events`. The video URL is the current page
- * href (the user is on the video page when they danmaku / comment), so the
- * backend's bvid extraction works without the tap resolving aid → bvid.
- * The comment text is sanitized here (first defense; the backend repeats it).
- * Pure — no side effects.
+ * Normalize a captured `BiliInteraction` into a unified BEHAVIOR_EVENT
+ * forwarded to `/api/events`. The URL always uses the current page href (the
+ * user is on the video page when the write occurs), so backend bvid extraction
+ * works without resolving aid → bvid. Comment text is sanitized here (first
+ * defense; the backend repeats it). Pure — no side effects.
  */
 export function buildEventFromBiliInteraction(interaction: BiliInteraction): BehaviorEvent {
   const href = currentHref();
   const hasWindow = typeof window !== "undefined";
   const hasDocument = typeof document !== "undefined";
 
-  const metadata: Record<string, unknown> = {
-    comment_kind: interaction.kind === "danmaku" ? "danmaku" : "comment",
-  };
-  const cleaned = sanitizeUserText(interaction.text, COMMENT_TEXT_MAX_CHARS);
-  if (cleaned) metadata.comment_text = cleaned;
+  const isComment = interaction.kind === "danmaku" || interaction.kind === "comment";
+  const metadata: Record<string, unknown> = {};
+  if (isComment) {
+    metadata.comment_kind = interaction.kind;
+    const cleaned = sanitizeUserText(interaction.text ?? "", COMMENT_TEXT_MAX_CHARS);
+    if (cleaned) metadata.comment_text = cleaned;
+  }
   if (interaction.bvid) metadata.bvid = interaction.bvid;
   if (interaction.kind === "danmaku") metadata.signal_strength = DANMAKU_SIGNAL_STRENGTH;
+  if (interaction.kind === "retraction") {
+    metadata.feedback_type = "retraction";
+    metadata.retracted_action = interaction.retracted_action;
+    metadata.signal_strength = RETRACTION_SIGNAL_STRENGTH;
+  }
+
+  const eventType = interaction.kind === "retraction"
+    ? "feedback"
+    : isComment
+      ? "comment"
+      : interaction.kind;
 
   return {
-    type: "comment",
+    type: eventType,
     url: href,
     title: hasDocument ? document.title || "" : "",
     timestamp: Date.now(),
