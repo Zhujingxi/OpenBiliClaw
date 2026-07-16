@@ -1060,6 +1060,28 @@ def test_exact_integer_fields_reject_booleans_and_fractional_floats() -> None:
     }.issubset(fields)
 
 
+def test_legacy_similarity_threshold_rejects_huge_integer_without_overflow() -> None:
+    raw = legacy_provider("ollama")
+    raw["embedding"] = {
+        "provider": "ollama",
+        "model": "bge-m3",
+        "output_dimensionality": 1024,
+        "similarity_threshold": 10**1000,
+        "fallback_enabled": False,
+    }
+
+    result = _migrate(raw)
+    issue = next(
+        item
+        for item in result.report.issues
+        if item.field == "llm.embedding.similarity_threshold"
+    )
+
+    assert result.models.embedding.settings.similarity_threshold == 0.82
+    assert issue.code == "invalid_legacy_value"
+    assert issue.reason == "embedding_similarity_threshold_is_invalid"
+
+
 def test_malformed_unknown_provider_data_preserves_only_safe_metadata() -> None:
     result = _migrate(
         {

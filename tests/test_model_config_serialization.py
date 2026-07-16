@@ -167,6 +167,20 @@ def test_parsed_toml_numeric_values_are_checked_by_domain_validation(
     assert [issue.path for issue in issues] == [expected_path]
 
 
+def test_parse_model_config_rejects_huge_number_without_overflow() -> None:
+    raw = native_models_raw()
+    raw["embedding"]["settings"]["similarity_threshold"] = 10**1000
+
+    with pytest.raises(
+        _parse_error_type(),
+        match=(
+            r"models\.embedding\.settings\.similarity_threshold: "
+            r"number is outside the supported range"
+        ),
+    ):
+        _parse_model_config(raw)
+
+
 def model_config(
     *,
     secret: str = "sk-inline",

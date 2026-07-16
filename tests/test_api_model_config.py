@@ -273,6 +273,10 @@ def test_model_api_models_are_strict_and_hide_credential_value_from_repr() -> No
     connection = ChatConnectionIn.model_validate(
         _chat_payload(_native_models().chat.connections[0])
     )
+    invalid_num_ctx = _chat_payload(_native_models().chat.connections[0])
+    invalid_num_ctx["num_ctx"] = -1
+    with pytest.raises(ValidationError):
+        ChatConnectionIn.model_validate(invalid_num_ctx)
     assert ChatRouteIn(connections=[connection], concurrency=16, timeout_seconds=10)
     with pytest.raises(ValidationError):
         ChatRouteIn(connections=[connection], concurrency=17, timeout_seconds=10)

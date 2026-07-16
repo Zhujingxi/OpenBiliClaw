@@ -117,7 +117,13 @@ def _number(raw: RawTable, name: str, path: str, *, default: float) -> float:
     value = raw[name]
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise _error(f"{path}.{name}", "expected a number")
-    return float(value)
+    try:
+        return float(value)
+    except (OverflowError, TypeError, ValueError):
+        raise _error(
+            f"{path}.{name}",
+            "number is outside the supported range",
+        ) from None
 
 
 def _boolean(raw: RawTable, name: str, path: str, *, default: bool) -> bool:

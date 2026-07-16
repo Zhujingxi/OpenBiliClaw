@@ -186,6 +186,32 @@ def test_domain_validation_accepts_numeric_boundaries() -> None:
     assert validate_model_config(upper, connection_type_registry()) == []
 
 
+def test_domain_validation_rejects_negative_ollama_num_ctx_with_connection_id() -> None:
+    connection = chat_connection(
+        "local-ollama",
+        connection_type="ollama",
+        preset="",
+        credential=CredentialConfig(),
+        base_url="http://127.0.0.1:11434/v1",
+        api_mode="",
+        num_ctx=-1,
+    )
+    config = replace(model_config(), chat=ChatRouteConfig(connections=(connection,)))
+
+    issues = validate_model_config(config, connection_type_registry())
+
+    assert [
+        (issue.path, issue.code, issue.connection_id)
+        for issue in issues
+    ] == [
+        (
+            "models.chat.connections[0].num_ctx",
+            "invalid_chat_num_ctx",
+            "local-ollama",
+        )
+    ]
+
+
 def test_chat_roles_are_derived_only_from_order() -> None:
     config = model_config(chat_ids=("first", "second", "third"))
     assert [config.chat.role_at(i) for i in range(3)] == [

@@ -401,6 +401,17 @@ def validate_model_config(
     issues.extend(_validate_ids(records))
 
     for index, connection in enumerate(chat_connections):
+        num_ctx = _value(connection, "num_ctx", 0)
+        if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx < 0:
+            connection_id = _text(connection, "id").strip() or None
+            issues.append(
+                _issue(
+                    f"models.chat.connections[{index}].num_ctx",
+                    "invalid_chat_num_ctx",
+                    "Ollama context size must be a non-negative integer.",
+                    connection_id,
+                )
+            )
         issues.extend(
             _validate_record(
                 connection,

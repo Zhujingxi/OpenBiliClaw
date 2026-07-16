@@ -242,8 +242,14 @@ def bounded_float_field(
     if isinstance(value, bool) or not isinstance(value, int | float):
         collector.add("invalid_legacy_value", field, reason=reason)
         return default
-    normalized = float(value)
-    if not minimum <= normalized <= maximum:
+    # Compare before coercion so an arbitrarily large TOML integer is rejected
+    # by the bounded range without overflowing ``float()``.
+    if not minimum <= value <= maximum:
+        collector.add("invalid_legacy_value", field, reason=reason)
+        return default
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError):
         collector.add("invalid_legacy_value", field, reason=reason)
         return default
     return normalized

@@ -87,6 +87,19 @@ def test_llm_docs_describe_dashscope_as_native_embedding_provider() -> None:
     assert "Provider 记录不携带 model/settings 覆盖" in row
 
 
+def test_model_refactor_design_artifacts_use_the_implemented_embedding_schema() -> None:
+    design = _read(
+        "docs/superpowers/specs/2026-07-15-model-configuration-refactor-design.md"
+    )
+    plan = _read("docs/superpowers/plans/2026-07-15-model-configuration-refactor.md")
+
+    assert "**状态：** 已实施" in design
+    for document in (design, plan):
+        assert "[models.embedding.settings]" in document
+        assert "exist only at models.embedding, never on a provider" not in document
+    assert "只存在于 `[models.embedding]`" not in design
+
+
 def test_bootstrap_and_install_docs_use_ordered_model_commands() -> None:
     bootstrap = _read("scripts/agent_bootstrap.py")
     agent_doc = _read("docs/agent-install.md")

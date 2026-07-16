@@ -13,7 +13,7 @@
 - Work only on branch codex/model-config-refactor.
 - [models].schema_version starts at 1. A native [models] table always wins when [models] and [llm] coexist.
 - Chat has 1..10 ordered connections. Index 0 is Primary; later indices are Fallback 1..9. No stored role, priority, or fallback_enabled field exists.
-- Embedding is disabled with zero providers or enabled with 1..10 ordered providers. model, output_dimensionality, similarity_threshold, and multimodal_enabled exist only at models.embedding, never on a provider.
+- Embedding is disabled with zero providers or enabled with 1..10 ordered providers. model, output_dimensionality, similarity_threshold, and multimodal_enabled exist only at models.embedding.settings, never on a provider.
 - Stable IDs survive rename and reorder. IDs are unique across Chat connections and Embedding providers so probe, circuit, usage, and error paths remain unambiguous.
 - OpenAI, DeepSeek, OpenRouter, and custom gateways are presets of openai_compatible. Anthropic official and custom gateways are presets of anthropic_compatible. Presets fill untouched defaults only.
 - Codex OAuth is its own codex_oauth connection type. Its token is never serialized and can be sent only to the official OpenAI endpoint.
@@ -1420,6 +1420,8 @@ Assert OPENBILICLAW_EMBEDDING_MODEL and the compose sidecar produce:
 ~~~toml
 [models.embedding]
 enabled = true
+
+[models.embedding.settings]
 model = "bge-m3"
 
 [[models.embedding.providers]]

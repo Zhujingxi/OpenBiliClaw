@@ -58,7 +58,7 @@ class ChatConnectionIn(StrictModel):
     reasoning_effort: str = ""
     http_referer: str = ""
     x_title: str = ""
-    num_ctx: int = 0
+    num_ctx: int = Field(default=0, ge=0)
 
 
 class ChatConnectionOut(StrictModel):
