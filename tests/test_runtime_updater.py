@@ -136,6 +136,46 @@ async def test_fetch_latest_version_prefers_backend_tag_over_higher_legacy_tag()
     assert await service._fetch_latest_version() == "backend-v0.3.89"
 
 
+def test_prerelease_candidates_order_by_semver_identifiers() -> None:
+    """rc2 beats rc1 and a same-numbered stable beats any prerelease (audit N8)."""
+    selection = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc1", "backend-v0.4.0-rc2"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert selection.tag == "backend-v0.4.0-rc2"
+    # Feed order must not decide the winner.
+    reversed_selection = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc2", "backend-v0.4.0-rc1"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert reversed_selection.tag == "backend-v0.4.0-rc2"
+    stable = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc9", "backend-v0.4.0"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert stable.tag == "backend-v0.4.0"
+    # Numeric identifiers compare numerically: rc.10 > rc.9.
+    numeric = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc.9", "backend-v0.4.0-rc.10"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert numeric.tag == "backend-v0.4.0-rc.10"
+
+
+def test_prerelease_version_text_keeps_prerelease_identity() -> None:
+    """UI must not present backend-v0.4.0-rc1 as a stable v0.4.0 (audit N8)."""
+    selection = updater._select_latest_candidate_from_tag_names(
+        ["backend-v0.4.0-rc1"],
+        allow_prerelease=True,
+        channel="backend",
+    )
+    assert selection.version_text == "0.4.0-rc1"
+
+
 @pytest.mark.asyncio
 async def test_fetch_latest_version_ignores_prerelease_by_default() -> None:
     _FakeAsyncClient.pages = {

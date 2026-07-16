@@ -64,6 +64,28 @@ class _BackendTagCandidate:
     tag: str
     canonical: bool
     prerelease: bool
+    # SemVer §11 identifier ordering for the prerelease suffix; empty for
+    # stable releases. Only used as a selection tie-breaker (audit N8) — the
+    # applied/skip decision still compares numeric ``version`` tuples.
+    prerelease_key: tuple[tuple[int, int, str], ...] = ()
+
+    @property
+    def sort_key(self) -> tuple[object, ...]:
+        # A stable release outranks every same-numbered prerelease; among
+        # prereleases, SemVer identifier order applies (rc.10 > rc.9 > rc1).
+        return (self.version, 0 if self.prerelease else 1, self.prerelease_key)
+
+
+def _prerelease_sort_key(suffix: str) -> tuple[tuple[int, int, str], ...]:
+    """Map ``-rc.10`` style suffixes to a SemVer §11 comparable tuple."""
+    identifiers = suffix.lstrip("-").split(".")
+    key: list[tuple[int, int, str]] = []
+    for ident in identifiers:
+        if ident.isdigit():
+            key.append((0, int(ident), ""))
+        else:
+            key.append((1, 0, ident))
+    return tuple(key)
 
 
 @dataclass(frozen=True)
@@ -154,12 +176,14 @@ def _parse_backend_candidate(
     if prerelease and not include_prerelease:
         return None
     version = tuple(int(part) for part in match.group("version").split("."))
+    suffix = match.group("prerelease") or ""
     return _BackendTagCandidate(
         version=version,
-        version_text=match.group("version"),
+        version_text=match.group("version") + suffix,
         tag=raw,
         canonical=canonical,
         prerelease=prerelease,
+        prerelease_key=_prerelease_sort_key(suffix) if prerelease else (),
     )
 
 
@@ -190,12 +214,14 @@ def _parse_desktop_candidate(
     prerelease = bool(match.group("prerelease"))
     if prerelease and not include_prerelease:
         return None
+    suffix = match.group("prerelease") or ""
     return _BackendTagCandidate(
         version=tuple(int(part) for part in match.group("version").split(".")),
-        version_text=match.group("version"),
+        version_text=match.group("version") + suffix,
         tag=raw,
         canonical=True,
         prerelease=prerelease,
+        prerelease_key=_prerelease_sort_key(suffix) if prerelease else (),
     )
 
 
@@ -349,11 +375,11 @@ def _select_latest_candidate_from_tag_names(
     candidates = canonical or legacy
     ignored = max(
         ignored_prereleases,
-        key=lambda item: item.version,
+        key=lambda item: item.sort_key,
         default=None,
     )
     if candidates:
-        latest = max(candidates, key=lambda item: item.version)
+        latest = max(candidates, key=lambda item: item.sort_key)
         return _BackendTagSelection(
             tag=latest.tag,
             version=latest.version,
