@@ -3207,16 +3207,21 @@ async def test_evaluate_content_batch_splits_once_after_first_parse_failure() ->
 
 
 @pytest.mark.asyncio
-async def test_evaluate_content_batch_persistent_parse_failure_splits_to_single_eval() -> None:
+async def test_evaluate_content_batch_persistent_parse_failure_bounded_retry_zeroes() -> None:
     llm_service = _SplitRetryBatchLLMService(invalid_all_batches=True)
     engine = ContentDiscoveryEngine(llm_service=llm_service)
     contents = _split_retry_contents(16, prefix="FAIL")
 
     scores = await engine.evaluate_content_batch(contents, _build_profile(), batch_size=16)
 
-    assert llm_service.batch_call_sizes == [16, 8, 8]
-    assert llm_service.single_calls == 16
-    assert scores == [0.51] * 16
+    # Missing-member retry is bounded (1 initial + max_extra_requests) and
+    # never degrades into a per-item single-call storm; exhausted members
+    # settle at 0.0 with an explicit reason.
+    assert llm_service.batch_call_sizes[0] == 16
+    assert len(llm_service.batch_call_sizes) == 7
+    assert llm_service.single_calls == 0
+    assert scores == [0.0] * 16
+    assert all(c.relevance_reason == "evaluation_response_missing" for c in contents)
 
 
 @pytest.mark.asyncio

@@ -2679,6 +2679,9 @@ eval_prefilter_mode = "  Shadow  "
     def test_validate_runtime_config_rejects_invalid_eval_prefilter_mode(self) -> None:
         config = Config()
         config.llm.default_provider = "ollama"
+        # Main's stricter validation requires an explicit ollama chat model;
+        # satisfy it so validation reaches the prefilter-mode check.
+        config.llm.ollama.model = "qwen2.5:7b"
         config.discovery.eval_prefilter_mode = "aggressive"
 
         with pytest.raises(ConfigError, match="discovery\\.eval_prefilter_mode"):
