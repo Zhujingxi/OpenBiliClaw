@@ -10,12 +10,12 @@ from uuid import UUID, uuid4
 
 from pydantic import JsonValue, TypeAdapter
 
+from openbiliclaw.features._metadata import freeze_metadata, serialize_metadata
 from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
     SourceTaskCompletion,
     SourceTaskRequest,
     SourceTaskSnapshot,
-    SourceTransportKind,
     UnsupportedSourceOperationError,
 )
 
@@ -26,6 +26,26 @@ if TYPE_CHECKING:
     from openbiliclaw.features.sources.registry import SourceRegistry
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+_CREDENTIAL_TOKENS = frozenset(
+    {
+        "apikey",
+        "apikeys",
+        "authorization",
+        "authorizations",
+        "cookie",
+        "cookies",
+        "credential",
+        "credentials",
+        "password",
+        "passwords",
+        "secret",
+        "secrets",
+        "session",
+        "sessions",
+        "token",
+        "tokens",
+    }
+)
 _CREDENTIAL_FIELD_SUFFIXES = (
     "apikey",
     "apikeys",
@@ -43,6 +63,7 @@ _CREDENTIAL_FIELD_SUFFIXES = (
     "token",
     "tokens",
 )
+_SAFE_ANALYTICS_FIELDS = frozenset({"cookiepolicy", "sessionduration", "tokencount"})
 
 
 class CredentialShapedPayloadError(ValueError):
@@ -57,10 +78,14 @@ class SourceTaskCompletionConflictError(RuntimeError):
     """Raised when a completed task receives a different duplicate result."""
 
 
+class CancelledSourceTaskError(RuntimeError):
+    """Raised when a cancelled durable task receives a completion callback."""
+
+
 class SourceTaskRepository(Protocol):
     """Persistence operations required by the generic source-task service."""
 
-    def add_pending(self, request: SourceTaskRequest, *, now: datetime) -> UUID: ...
+    def add_pending(self, request: SourceTaskRequest, *, task_id: UUID, now: datetime) -> UUID: ...
 
     def claim(
         self,
@@ -82,6 +107,8 @@ class SourceTaskRepository(Protocol):
     ) -> SourceTaskCompletion: ...
 
     def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
+
+    def cancel(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot: ...
 
 
 class SourceTaskUnitOfWork(Protocol):
@@ -117,21 +144,22 @@ class SourceTaskService:
         self._registry_provider = registry if callable(registry) else lambda: registry
         self._lease_seconds = lease_seconds
 
-    def enqueue(self, request: SourceTaskRequest) -> UUID:
+    def enqueue(self, request: SourceTaskRequest, *, task_id: UUID | None = None) -> UUID:
         """Persist validated work only when the source advertises the operation."""
 
         connector = self._registry_provider().get(request.source_id)
         spec = connector.manifest.operation_spec(request.operation)
-        if spec.transport_kind is not SourceTransportKind.BROWSER:
+        if not spec.browser_assisted:
             raise UnsupportedSourceOperationError(
                 f"{request.source_id.value} {request.operation.value} is not browser-assisted"
             )
         _safe_json_object(request.payload)
         now = datetime.now(UTC)
+        resolved_task_id = task_id or uuid4()
         with self._uow_factory() as uow:
-            task_id = uow.source_tasks.add_pending(request, now=now)
+            persisted_id = uow.source_tasks.add_pending(request, task_id=resolved_task_id, now=now)
             uow.commit()
-        return task_id
+        return persisted_id
 
     def claim(self, source_id: str) -> ClaimedSourceTask | None:
         """Lease the oldest pending or expired task for one canonical source."""
@@ -145,7 +173,7 @@ class SourceTaskService:
                 allowed_operations=frozenset(
                     spec.operation.value
                     for spec in connector.manifest.operations
-                    if spec.transport_kind is SourceTransportKind.BROWSER
+                    if spec.browser_assisted
                 ),
                 lease_token=token,
                 now=now,
@@ -179,26 +207,36 @@ class SourceTaskService:
         with self._uow_factory() as uow:
             return uow.source_tasks.get_snapshot(task_id)
 
+    def cancel(self, task_id: UUID) -> SourceTaskSnapshot:
+        """Make pending or leased browser work durably non-actionable."""
+
+        with self._uow_factory() as uow:
+            snapshot = uow.source_tasks.cancel(task_id, now=datetime.now(UTC))
+            uow.commit()
+        return snapshot
+
 
 def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     """Validate JSON recursively and reject credential-shaped keys without echoing values."""
 
     _reject_credential_fields(value)
-    result = _JSON_OBJECT.validate_python(_thaw(value), strict=True)
+    frozen = freeze_metadata(value)
+    result = _JSON_OBJECT.validate_python(serialize_metadata(frozen), strict=True)
     return result
 
 
 def _reject_credential_fields(value: object, *, path: tuple[str, ...] = ()) -> None:
     if isinstance(value, MappingABC):
         for key, child in value.items():
-            raw_key = str(key).casefold()
+            key_text = str(key)
+            tokenized_key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key_text).casefold()
+            raw_key = key_text.casefold()
             normalized = re.sub(r"[^a-z0-9]", "", raw_key)
-            segments = tuple(part for part in re.split(r"[^a-z0-9]+", raw_key) if part)
-            sensitive = normalized.endswith(("authorization", "authorizations")) or (
-                normalized.endswith(_CREDENTIAL_FIELD_SUFFIXES)
+            segments = frozenset(part for part in re.split(r"[^a-z0-9]+", tokenized_key) if part)
+            sensitive = normalized not in _SAFE_ANALYTICS_FIELDS and (
+                bool(segments & _CREDENTIAL_TOKENS)
+                or normalized.endswith(_CREDENTIAL_FIELD_SUFFIXES)
             )
-            if segments and segments[-1] in _CREDENTIAL_FIELD_SUFFIXES:
-                sensitive = True
             if sensitive:
                 safe_path = ".".join((*path, str(key)))
                 raise CredentialShapedPayloadError(
@@ -210,16 +248,9 @@ def _reject_credential_fields(value: object, *, path: tuple[str, ...] = ()) -> N
             _reject_credential_fields(child, path=path)
 
 
-def _thaw(value: object) -> object:
-    if isinstance(value, MappingABC):
-        return {str(key): _thaw(child) for key, child in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_thaw(child) for child in value]
-    return value
-
-
 # Re-export the request from the service module as the application-facing task API.
 __all__ = [
+    "CancelledSourceTaskError",
     "CredentialShapedPayloadError",
     "SourceTaskCompletionConflictError",
     "SourceTaskRequest",

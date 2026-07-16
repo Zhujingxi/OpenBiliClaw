@@ -10,7 +10,7 @@ retained transports (HTTP / CLI / logged-in extension tab)
         ▼
 7 explicit SourceManifest + Connector adapters
         ├─► immutable ActivityEvent / ContentItem
-        └─► generic SourceTaskService ─► source_tasks (lease claim/complete)
+        └─► generic SourceTaskService ─► source_tasks (lease claim/complete/cancel)
         │ normalized domain objects
         ▼
 features: Activity ──► Profile ─────┐
@@ -48,7 +48,7 @@ Deferred: production source composition/extension rewiring, data migration, job 
 
 vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO`；`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
 
-七个平台 registry 只在 composition time 显式构造，不扫描动态插件。connector manifest 将稳定产品能力与 concrete operation 分开，每个 operation 声明 auth、normalized result kind 和 direct / CLI / browser transport；B 站 explore 保留在高层 discovery，不冒充平台原生操作。现有 Bilibili API、Douyin direct、YouTube scraper、X client、Reddit CLI 均有生产 adapter，登录态页面操作使用 typed durable queue + bounded wait。generic task 只接受 manifest 中 browser-assisted operation，payload/result 递归拒绝 singular / plural / qualified credential-shaped key。并发 claim 只有一个 lease owner；相同 completion 幂等，不同结果冲突。详细矩阵见 [vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。
+七个平台 registry 只在 composition time 显式构造，不扫描动态插件。connector manifest 将稳定产品能力与 concrete operation 分开，每个 operation 声明 auth、normalized result kind、primary transport 和可选 fallback transport；B 站 search 是 direct primary + 仅在 retained risk-control signal 下启用的 browser fallback，explore 保留在高层 discovery，不冒充平台原生操作。现有 Bilibili API、Douyin direct、YouTube scraper、X client、Reddit CLI 均有生产 adapter，登录态页面操作使用 typed durable queue。generic task 只接受 manifest 中 primary/fallback browser-assisted operation，payload/result 先做 finite JSON 校验，再以 token classifier 拒绝 qualified credential container。enqueue + poll 共用 bounded timeout；timeout / asyncio cancellation 会补偿 in-flight insert 为 terminal cancelled，cancelled row 不再 claim 或 complete。并发 claim 只有一个 lease owner；相同 completion 幂等，不同结果冲突。详细矩阵见 [vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。
 
 AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。四个 task 的 PydanticAI output validator 分别约束 evidence provenance、keyword uniqueness/limit、candidate content/profile identity 和 explanation grounding；中文 grounding 使用排除通用话术的重叠 CJK 2/3-gram，并要求 shared trigram coverage 或两个独立 unit，candidate 的 application row ID 不由模型生成。四份 versioned Pydantic Evals dataset 使用 task-specific offline invariant evaluator，推荐解释另配置只供显式 eval 使用的 `LLMJudge` rubric；deterministic guard 不替代该主观事实忠实度评测。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。Compose 已可独立启动 LiteLLM/PostgreSQL、在 loopback `/ui` 配置 provider，并让源码/预构建路径挂载同一 policy，但未启动验证，也尚无生产 use case 构造 typed runner。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
 

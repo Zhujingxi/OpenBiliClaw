@@ -27,7 +27,7 @@
 | `features.feed.domain` | `ContentItem`, `CandidateAssessment`, `FeedEntry`, `InteractionKind`, `Interaction`, `feed_deficit()` |
 | `features.library.domain` | `CollectionKind`, `CollectionItem` |
 | `features.chat.domain` | `ChatRole`, `ChatTurn` |
-| `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceOperation`, `SourceOperationSpec`, `SourceManifest`, `SourceConnector`, browser task request/claim/snapshot/completion models |
+| `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceOperation`, `SourceOperationSpec`（primary + optional fallback transport）, `SourceManifest`, `SourceConnector`, browser task request/claim/status/snapshot/completion models |
 
 所有 Pydantic 契约均使用 `frozen=True` 与 `extra="forbid"`，支持 JSON 序列化后由同类型无损还原。`ActivityEvent`、`ContentItem` 与 `Interaction` 的 metadata 只接受 JSON 值，并把对象递归冻结为只读 mapping、数组递归冻结为 tuple；序列化时还原为普通 JSON object/array。`SourceConnector` 是 runtime-checkable Protocol，不是 transport payload 容器，其 normalized result annotations 可在运行时解析。七平台实现、能力矩阵和通用任务安全合同见 [vNext 多来源连接器与通用浏览器任务](vnext-sources.md)。
 

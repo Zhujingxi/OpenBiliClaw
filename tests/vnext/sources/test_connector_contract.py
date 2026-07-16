@@ -62,7 +62,21 @@ class RecordingTransport:
     async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
         self.calls.append((operation, query, limit))
         if operation == SourceOperation.BOOTSTRAP_IMPORT:
-            return [ACTIVITY_ROWS[self.source_id]]
+            rows: list[dict[str, Any]] = []
+            identity_field = {
+                "bilibili": "bvid",
+                "xiaohongshu": "note_id",
+                "douyin": "aweme_id",
+                "youtube": "video_id",
+                "twitter": "id",
+                "zhihu": "content_id",
+                "reddit": "name",
+            }[self.source_id]
+            for index in range(limit + 3):
+                row = dict(ACTIVITY_ROWS[self.source_id])
+                row[identity_field] = f"{row[identity_field]}-{index}"
+                rows.append(row)
+            return rows
         return [CONTENT_ROWS[self.source_id]]
 
 
@@ -102,6 +116,11 @@ def test_manifests_separate_capabilities_from_operations_and_transport_metadata(
         for spec in registry.get("bilibili").manifest.operations
         if spec.operation.value == "explore"
     }
+    bilibili = registry.get("bilibili").manifest
+    search = bilibili.operation_spec(SourceOperation.SEARCH)
+    assert search.transport_kind is SourceTransportKind.DIRECT
+    assert search.fallback_transport_kind is SourceTransportKind.BROWSER
+    assert SourceCapability.BROWSER_ASSISTED in bilibili.capabilities
 
 
 @pytest.mark.parametrize("source_id", SOURCE_IDS)
@@ -115,6 +134,10 @@ async def test_every_advertised_operation_executes_and_returns_its_declared_type
         assert result
         expected = ActivityEvent if spec.result_kind is SourceResultKind.ACTIVITY else ContentItem
         assert all(isinstance(item, expected) for item in result)
+        assert len(result) <= 5
+        if spec.result_kind is SourceResultKind.ACTIVITY:
+            assert len(result) == 5
+        assert connector._transport.calls[-1][2] == 5  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize("source_id", SOURCE_IDS)

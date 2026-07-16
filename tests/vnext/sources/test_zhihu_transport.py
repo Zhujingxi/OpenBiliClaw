@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 
 from openbiliclaw.features.activity.domain import ActivityKind
@@ -35,6 +36,8 @@ class ExactRetainedShapeTransport:
                     "author": "Alice",
                     "summary": "flat summary",
                     "title": "Answer",
+                    "interaction_time": "2026-07-17T10:00:00+08:00",
+                    "created_time": "2020-01-01T00:00:00Z",
                 }
             ]
         return [
@@ -55,6 +58,7 @@ async def test_zhihu_exact_retained_shape_maps_action_flat_fields_and_typed_iden
 
     assert event.kind is ActivityKind.LIKE
     assert event.content_external_id == "answer:42"
+    assert event.occurred_at == datetime(2026, 7, 17, 2, 0, tzinfo=UTC)
     assert item.external_id == "article:42"
     assert item.creator == "Bob"
     assert item.summary == "flat discovery summary"

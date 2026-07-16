@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from openbiliclaw.features.sources.domain import SourceOperation
 from openbiliclaw.features.sources.service import (
+    CancelledSourceTaskError,
     CredentialShapedPayloadError,
     SourceTaskCompletionConflictError,
     SourceTaskRequest,
@@ -214,6 +215,9 @@ def test_credential_shaped_completion_is_rejected_without_persisting_secret(
         "request_authorization",
         "refresh_tokens",
         "nestedApiKeys",
+        "cookie_jar",
+        "authorization_header",
+        "cookie_jars",
     ],
 )
 def test_plural_and_qualified_credential_containers_are_rejected_before_persistence(
@@ -239,13 +243,72 @@ def test_non_secret_analytics_fields_are_not_false_positives(
     task_context: tuple[Any, Any, SourceTaskService], field: str
 ) -> None:
     _, _, service = task_context
-    service.enqueue(
+    task_id = service.enqueue(
         SourceTaskRequest(
             source_id="zhihu",
             operation=SourceOperation.SEARCH,
             payload={field: 1},
         )
     )
+    claim = service.claim("zhihu")
+    assert claim is not None
+    service.complete(task_id, claim.lease_token, {field: 1, "items": []})
+
+
+@pytest.mark.parametrize("field", ["cookie_jar", "authorization_header", "access_tokens"])
+def test_qualified_credential_completion_is_rejected(
+    task_context: tuple[Any, Any, SourceTaskService], field: str
+) -> None:
+    _, _, service = task_context
+    task_id = service.enqueue(
+        SourceTaskRequest(source_id="zhihu", operation=SourceOperation.FEED, payload={"limit": 1})
+    )
+    claim = service.claim("zhihu")
+    assert claim is not None
+    with pytest.raises(CredentialShapedPayloadError):
+        service.complete(task_id, claim.lease_token, {"outer": {field: "secret"}})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_never_reach_request_or_result_persistence(
+    task_context: tuple[Any, Any, SourceTaskService], value: float
+) -> None:
+    session_factory, _, service = task_context
+    with pytest.raises(ValidationError):
+        SourceTaskRequest(
+            source_id="zhihu",
+            operation=SourceOperation.SEARCH,
+            payload={"nested": [{"score": value}]},
+        )
+    task_id = service.enqueue(
+        SourceTaskRequest(source_id="zhihu", operation=SourceOperation.FEED, payload={"limit": 1})
+    )
+    claim = service.claim("zhihu")
+    assert claim is not None
+    with pytest.raises(ValueError, match="finite"):
+        service.complete(task_id, claim.lease_token, {"items": [{"score": value}]})
+    with session_factory() as session:
+        row = session.get(SourceTaskModel, str(task_id))
+        assert row is not None
+        assert row.result_payload is None
+
+
+def test_cancelled_task_is_terminal_unclaimable_and_uncompletable(
+    task_context: tuple[Any, Any, SourceTaskService],
+) -> None:
+    _, _, service = task_context
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.SEARCH, payload={"query": "python"}
+        )
+    )
+    claim = service.claim("zhihu")
+    assert claim is not None
+    snapshot = service.cancel(task_id)
+    assert snapshot.status.value == "cancelled"
+    assert service.claim("zhihu") is None
+    with pytest.raises(CancelledSourceTaskError):
+        service.complete(task_id, claim.lease_token, {"items": []})
 
 
 def test_two_separate_uows_claim_one_task_for_exactly_one_owner(

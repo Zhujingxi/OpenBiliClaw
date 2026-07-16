@@ -58,6 +58,7 @@ def operation_spec(
     result_kind: SourceResultKind = SourceResultKind.CONTENT,
     requires_auth: bool,
     transport_kind: SourceTransportKind,
+    fallback_transport_kind: SourceTransportKind | None = None,
 ) -> SourceOperationSpec:
     """Keep source manifests concise while retaining explicit per-operation metadata."""
 
@@ -67,6 +68,7 @@ def operation_spec(
         result_kind=result_kind,
         requires_auth=requires_auth,
         transport_kind=transport_kind,
+        fallback_transport_kind=fallback_transport_kind,
     )
 
 
@@ -92,16 +94,18 @@ class NormalizingConnector:
     def manifest(self) -> SourceManifest:
         return self._manifest
 
-    async def import_activity(self) -> tuple[ActivityEvent, ...]:
+    async def import_activity(self, limit: int = 100) -> tuple[ActivityEvent, ...]:
         operation = SourceOperation.BOOTSTRAP_IMPORT
         self._require(operation)
+        if not 1 <= limit <= 100:
+            raise ValueError("source activity limit must be between 1 and 100")
         if self._normalize_activity is None:
             raise UnsupportedSourceOperationError(
                 f"{self.manifest.source_id} does not support {operation.value}"
             )
-        rows = await self._transport.fetch(operation=operation.value, query=None, limit=100)
+        rows = await self._transport.fetch(operation=operation.value, query=None, limit=limit)
         normalized = (self._normalize_activity(row) for row in rows)
-        return _dedupe_events(event for event in normalized if event is not None)
+        return _dedupe_events(event for event in normalized if event is not None)[:limit]
 
     async def discover(
         self, operation: SourceOperation, query: str | None, limit: int
@@ -127,7 +131,7 @@ class NormalizingConnector:
     ) -> SourceResult:
         spec = self._require(operation)
         if spec.result_kind is SourceResultKind.ACTIVITY:
-            return await self.import_activity()
+            return await self.import_activity(limit)
         return await self.discover(operation, query, limit)
 
     def _require(self, operation: SourceOperation):  # type: ignore[no-untyped-def]

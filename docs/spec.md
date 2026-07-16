@@ -209,7 +209,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ### 3.1 vNext 领域、来源、持久化与类型化 AI 基础（尚非运行时权威）
 
-v0.4.0 先冻结 feature-oriented 领域契约和确定性策略，再加入七平台 capability connector / generic source task、隔离的 SQLAlchemy/Alembic persistence、类型化系统设置、凭据加密和只经 LiteLLM 的 typed AI 基础。连线标出已实现的依赖方向与后续 use case 的预期关系，不表示生产请求已切换；v0.3 API、runtime、legacy storage 和四端客户端仍是当前实际路径。
+v0.4.0 先冻结 feature-oriented 领域契约和确定性策略，再加入七平台 capability / concrete-operation connector、可取消的 generic source task、隔离的 SQLAlchemy/Alembic persistence、类型化系统设置、凭据加密和只经 LiteLLM 的 typed AI 基础。operation 可显式声明 primary + fallback transport；browser task timeout / 调用取消会落 durable terminal `cancelled`，而不是遗留 actionable row。连线标出已实现的依赖方向与后续 use case 的预期关系，不表示生产请求已切换；v0.3 API、runtime、legacy storage 和四端客户端仍是当前实际路径。
 
 ```text
 HTTP / CLI / logged-in browser transports

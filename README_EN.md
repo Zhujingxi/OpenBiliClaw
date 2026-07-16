@@ -586,11 +586,11 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ### vNext Domain, Seven Sources, Persistence, and Typed AI Foundation (not cut over)
 
-v0.4.0 now includes framework-independent domain contracts, seven capability-based source connectors and lease-safe generic source tasks, isolated SQLAlchemy/Alembic persistence, typed settings, Fernet credential encryption, and a PydanticAI typed-task boundary routed only through LiteLLM. **The current API, business runtime, CLI, and frontend do not use them yet, and the extension has not switched to the generic task route.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live business path.
+v0.4.0 now includes framework-independent domain contracts, seven capability/concrete-operation source connectors, lease-safe generic source tasks with durable cancellation, isolated SQLAlchemy/Alembic persistence, typed settings, Fernet credential encryption, and a PydanticAI typed-task boundary routed only through LiteLLM. The Bilibili search contract explicitly records its direct primary and browser fallback. **The current API, business runtime, CLI, and frontend do not use them yet, and the extension has not switched to the generic task route.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live business path.
 
 ```text
 7 explicit SourceManifest + Connectors ──normalized──► Activity / Profile / Content / Feed
-             │ generic lease claim/complete
+             │ generic lease claim/complete/cancel
              └───────────────────────────────────────► source_tasks
                                    │ typed repositories
                                    ▼

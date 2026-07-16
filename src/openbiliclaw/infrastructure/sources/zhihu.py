@@ -178,7 +178,9 @@ def _activity(row: dict[str, Any]) -> ActivityEvent | None:
         source_id="zhihu",
         kind=_zhihu_activity_kind(row),
         external_id=external_id,
-        occurred_at=timestamp(row.get("occurred_at") or row.get("created_time")),
+        occurred_at=timestamp(
+            row.get("interaction_time") or row.get("occurred_at") or row.get("created_time")
+        ),
         url=_url(row, external_id),
         title=first_text(row.get("title"), nested(row, "question", "title")) or None,
         metadata={"scope": first_text(row.get("scope"))},

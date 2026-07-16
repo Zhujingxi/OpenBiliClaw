@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from openbiliclaw.bilibili.api import BilibiliAPIError
 from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
 from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
 from openbiliclaw.features.sources.domain import (
@@ -27,6 +28,10 @@ from openbiliclaw.infrastructure.sources._base import (
     text,
     timestamp,
 )
+from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
+
+if TYPE_CHECKING:
+    from openbiliclaw.features.sources.service import SourceTaskService
 
 
 class BilibiliTransport(Protocol):
@@ -50,6 +55,14 @@ class BilibiliReadClient(Protocol):
     async def get_following(self, *, page: int = 1, page_size: int = 50) -> list[Any]: ...
     async def get_related_videos(self, bvid: str) -> list[dict[str, Any]]: ...
     async def get_ranking(self, rid: int = 0) -> list[dict[str, Any]]: ...
+    @classmethod
+    def search_cooldown_remaining(cls) -> float: ...
+    @classmethod
+    def search_dom_fallback_remaining(cls) -> float: ...
+
+
+class BilibiliSearchFallbackError(RuntimeError):
+    """Narrow signal that retained direct search explicitly requested DOM fallback."""
 
 
 class BilibiliDirectTransport:
@@ -81,18 +94,56 @@ class BilibiliDirectTransport:
             ]
             return (history + favorites + following)[:limit]
         if operation == SourceOperation.SEARCH:
-            return await self._client.search(query or "", page_size=limit)
+            try:
+                rows = await self._client.search(query or "", page_size=limit)
+            except BilibiliAPIError as exc:
+                if self._fallback_requested():
+                    raise BilibiliSearchFallbackError(
+                        "Bilibili direct search requested fallback"
+                    ) from exc
+                raise
+            if not rows and self._fallback_requested():
+                raise BilibiliSearchFallbackError("Bilibili direct search requested fallback")
+            return rows
         if operation == SourceOperation.TRENDING:
             return (await self._client.get_ranking())[:limit]
         if operation == SourceOperation.RELATED:
             return (await self._client.get_related_videos(query or ""))[:limit]
         raise ValueError(f"unsupported Bilibili operation: {operation}")
 
+    def _fallback_requested(self) -> bool:
+        return (
+            self._client.search_cooldown_remaining() > 0
+            or self._client.search_dom_fallback_remaining() > 0
+        )
+
+
+class BilibiliSearchFallbackTransport:
+    """Use the browser only for the retained client's explicit risk-control signal."""
+
+    def __init__(
+        self,
+        direct: BilibiliDirectTransport,
+        browser: QueuedBrowserTransport,
+    ) -> None:
+        self._direct = direct
+        self._browser = browser
+
+    async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
+        try:
+            return await self._direct.fetch(operation=operation, query=query, limit=limit)
+        except BilibiliSearchFallbackError:
+            return await self._browser.fetch(operation=operation, query=query, limit=limit)
+
 
 def build_bilibili_connector(
-    client: BilibiliReadClient, settings: BilibiliSettings | None = None
+    client: BilibiliReadClient,
+    task_service: SourceTaskService,
+    settings: BilibiliSettings | None = None,
 ) -> BilibiliConnector:
-    return BilibiliConnector(BilibiliDirectTransport(client), settings)
+    direct = BilibiliDirectTransport(client)
+    browser = QueuedBrowserTransport(task_service, SourceId.BILIBILI)
+    return BilibiliConnector(BilibiliSearchFallbackTransport(direct, browser), settings)
 
 
 class BilibiliSettings(BaseModel):
@@ -112,6 +163,7 @@ _MANIFEST = SourceManifest(
             SourceCapability.SEARCH,
             SourceCapability.TRENDING_FEED,
             SourceCapability.RELATED_DISCOVERY,
+            SourceCapability.BROWSER_ASSISTED,
         }
     ),
     operations=(
@@ -127,6 +179,7 @@ _MANIFEST = SourceManifest(
             SourceCapability.SEARCH,
             requires_auth=False,
             transport_kind=SourceTransportKind.DIRECT,
+            fallback_transport_kind=SourceTransportKind.BROWSER,
         ),
         operation_spec(
             SourceOperation.TRENDING,

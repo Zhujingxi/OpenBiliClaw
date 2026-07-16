@@ -85,6 +85,16 @@ class SourceOperationSpec(BaseModel):
     result_kind: SourceResultKind
     requires_auth: bool
     transport_kind: SourceTransportKind
+    fallback_transport_kind: SourceTransportKind | None = None
+
+    @property
+    def browser_assisted(self) -> bool:
+        """Whether primary or fallback execution uses the durable browser queue."""
+
+        return SourceTransportKind.BROWSER in {
+            self.transport_kind,
+            self.fallback_transport_kind,
+        }
 
 
 class SourceManifest(BaseModel):
@@ -109,9 +119,8 @@ class SourceManifest(BaseModel):
             SourceCapability.AUTHENTICATION not in self.capabilities
         ):
             raise ValueError("authenticated operations require authentication capability")
-        if (
-            any(spec.transport_kind is SourceTransportKind.BROWSER for spec in self.operations)
-            and SourceCapability.BROWSER_ASSISTED not in self.capabilities
+        if any(spec.browser_assisted for spec in self.operations) and (
+            SourceCapability.BROWSER_ASSISTED not in self.capabilities
         ):
             raise ValueError("browser operations require browser-assisted capability")
         return self
@@ -167,6 +176,7 @@ class SourceTaskStatus(StrEnum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    CANCELLED = "cancelled"
 
 
 class SourceTaskSnapshot(BaseModel):
