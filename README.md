@@ -597,7 +597,8 @@ background ─ background admission (default 3) ──────┘
 ```
 ┌────────────────────────────────────────────────┐
 │          浏览器插件（Chrome / Firefox）           │
-│   行为采集 · Cookie 同步 · 平台任务 · 侧边栏推荐     │
+│   行为采集 · MAIN-world tap（评论/弹幕正文）      │
+│   Cookie 同步 · 平台任务 · 侧边栏推荐             │
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP

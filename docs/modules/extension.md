@@ -54,6 +54,8 @@
 | 搜索采集（Enter + 结果页 URL） | ✅ | 除 Enter 键外，导航到搜索结果页时由 `adapter.extractSearchQuery(url)` 从结果 URL 提取关键词（覆盖点搜索按钮、点联想词），各平台按自身 `detectPageType` 模式解析（bilibili/xhs `keyword`、抖音路径段 `/search/<词>` 与 `/jingxuan/search/<词>`、youtube `search_query`、知乎/reddit/X `q`；X `/explore` 等无词搜索页返回 null 不发事件）。Enter 与 URL 两路共用 10s 归一化去重窗口，同一搜索只发一次 |
 | X 取消操作采集 | ✅ | X GraphQL tap 新增 `UnfavoriteTweet`/`DeleteBookmark`/`DeleteRetweet` 三个 op → 归一为 `feedback` 事件（`feedback_type="retraction"`、`retracted_action=<like/favorite/share>`、`signal_strength=0.2`）。DOM 强信号侧：点击 `aria-pressed="true"` 的赞/收藏/关注按钮识别为撤销——tap 权威平台（X）只压制正向事件不重复发，其余平台改发 retraction。撤销事件满意度恒为 neutral，不进反馈批学习、不走强信号旁路（撤销=中和，非负偏好） |
 | xhs token 嗅探（MAIN world） | ✅ | `src/main/xhs-token-sniffer.ts` 以 `world: "MAIN"`、`run_at: "document_start"` 注入 xhs 页面，劫持 `window.fetch` / `XMLHttpRequest` 扫描 xhs 自家 API 响应里的 `(note_id, xsec_token)` 对子，通过 `postMessage` 桥接到 isolated world 再 `/api/sources/xhs/tokens` 回填到 `content_cache` 与 `discovery_candidates`——解决搜索页永不带 token 导致点击命中 300031 登录墙的问题 |
+| 评论 / 弹幕正文采集（网络层） | ✅ | 用户亲手写的评论 / 弹幕正文首次进入画像证据链，**均在提交成功后经网络层采集**。X：GraphQL tap 的 reply `CreateTweet` 提取 `variables.tweet_text`，仅当响应无 GraphQL `errors`（业务码校验）才附带正文（既有 comment 事件发射时序不变）。B 站：新 MAIN-world `src/main/bili-interact-tap.ts`（`world:"MAIN"`、`document_start`、匹配 bilibili.com）观察 `POST …/x/v2/reply/add`（评论）与 `POST …/x/v2/dm/post`（弹幕），仅当响应 `code===0` 才发，`postMessage`（`obc-bili-interact`）桥接到 `content/bilibili.ts` 构造 `comment` 事件（评论 `comment_kind="comment"`、弹幕 `comment_kind="danmaku"`+`signal_strength=0.6`）。正文经**双端净化**（扩展 `shared/text-sanitize.ts` 与后端 `sources/event_format.py` 各自截断 200 字符 + 剥离 Unicode category-C）。事件 URL 取当前视频页 href，后端据此提取 bvid |
+| tap 权威按动作粒度 DOM 抑制 | ✅ | `PlatformAdapter.tapAuthoritativeActions`（动作集合）取代旧 `strongSignalSource` 粗粒度标记：kernel 在 DOM 动作发射前（正向路径与 `aria-pressed` 撤销路径统一）检查该集合，命中动作 DOM 零发射，消除「网络提交 + DOM 点击」双计与「仅打开评论区 / 转发菜单即记事件」的假动作。X 声明 `{like,favorite,share,comment,retraction}`，B 站声明 `{comment}`（reply/add tap 上线），未声明动作与非 tap 平台不变 |
 | 引导初始化 CTA | ✅ | v0.3.68：推荐 tab 未初始化时不再叫用户去命令行，而是给「开始初始化」面板：① 数据来源勾选（v0.3.118+ B 站默认勾选但可取消，与小红书 / 抖音 / YouTube / X / 知乎一样可选，至少保留一个；静态渲染秒开）+ 文案提示「使用某平台前先在当前浏览器登录该平台账号，勾选会同时开启该来源」；② 「开始初始化」按钮（点击驱动校验，不在加载时空等慢预检）。点击后置「检查中…」加载态并实时拉 `GET /api/init-status` 校验前置（LLM / embedding / 所选平台登录）：一个来源都没勾 → 提示「至少勾选一个数据来源」；勾选的小红书 / 抖音 / YouTube / X / 知乎会随 `POST /api/init` 作为本轮 opt-in 生效并 best-effort 写回 `sources.<platform>.enabled=true`；勾了 B 站但未登录 → 提示登录或取消勾选（未勾 B 站时不再要求 B 站登录）；前置未通过 → 展示前置清单 + 原因、按钮复位、**不**启动；全通过才调 `POST /api/init`（带所选 `sources`），订阅 `runtime-stream` 的 `init_progress/failed/completed`（+ 3s 轮询兜底）实时更新进度，完成后自动加载推荐 / 画像。其中 LLM / embedding 为严格真实探测（各发一次真实最小请求，超时 / 失败判未就绪）。v0.3.162+：向量模型行直接消费既有 `embedding_repair_running/completed/total`、`ollama_phase`、`embedding_pull_status` 与 `embedding_check`；拉取中渲染 1–99% 进度条和 phase 文案，可修复诊断渲染对应按钮，点击调用既有 `startEmbeddingRepair()` 并轮询 init-status 刷新，不增加后端字段。v0.3.168+：面板明确说明四阶段严格串行——完整画像保存后才开始内容发现、评估和推荐文案，典型耗时 4–20 分钟；阶段 4 的细分 note 直接来自后端。普通完成代表已有 canonical 推荐可直接浏览，部分完成则保留后台补池 warning，不再合成前端 95% 二次等待。DOM 无关逻辑在 `popup/popup-init-control.js`（单测 `tests/init-control.test.ts`）。画像 / 画像编辑空状态文案改为指向推荐页初始化。详见 [init 模块文档](init.md) |
 | 头部响应式 + Star 按钮 | ✅ | side panel 默认窄宽（<460px）下头部保持**单行**（品牌左、4 个操作图标右、垂直居中）：隐藏装饰 eyebrow、状态徽标空间不足时紧凑换到标题下、图标压 28px（`.hero-actions button` 提高优先级压过靠后的 `.webui-button{32px}`），不再把图标右浮成空一截的第二行；≥460px 维持原样。功能键图标列下一行有**常驻 GitHub Star 按钮**（`.hero-sub` 内右对齐），做成大项目常见的 GitHub-Buttons 双段样式 `[🐙 Star | 数量]`：Octocat + 「Star」+ 实时 star 数（popup.js 拉 `api.github.com` CORS、`localStorage` 缓存 12h，失败则只显示 `[🐙 Star]`）；点击打开仓库（直接 star 需 GitHub 认证，官方组件亦只跳转）。响应式断点用 chrome-devtools 实测 360/400/560px，断言在 `tests/popup-layout.test.ts` |
 | 桌面 Web Star 引导 | ✅ | PC Web `/web` 顶部状态区新增常驻 GitHub Star CTA，文案为「好用求 Star」，沿用插件的 GitHub-Buttons 双段视觉：Octocat + CTA 文案 + 实时 star 数。`src/openbiliclaw/web/desktop/assets/js/app.js` 直接打开项目仓库，并通过 `api.github.com/repos/whiteguo233/OpenBiliClaw` 拉取 star 数、写入 `localStorage` 缓存 12h；离线 / 限流时保留按钮但隐藏数量。`1180px` 以下收起品牌副标题、状态文案和 CTA 文案，只保留图标 + 数量，避免桌面窄宽顶栏重叠。静态回归见 `tests/test_desktop_web_pool_status.py::test_desktop_web_shows_github_star_cta` |
@@ -139,13 +141,16 @@ extension/
 │   │       ├── passive.ts     # 小红书被动 URL / note metadata 采集
 │   │       └── task-executor.ts # 后台任务在页面内的执行入口
 │   ├── main/
+│   │   ├── bili-interact-tap.ts  # MAIN-world B站 dm/post + reply/add tap（弹幕/评论正文）
 │   │   ├── dy-fetch-tap.ts       # MAIN-world 抖音 fetch tap + API harvester
+│   │   ├── x-graphql-tap.ts      # MAIN-world X GraphQL tap（点赞/收藏/转发/回复/撤销）
 │   │   └── xhs-token-sniffer.ts  # MAIN-world fetch/XHR sniffer，捞 xsec_token
 │   └── shared/
 │       ├── backend-endpoint.ts # 共用后端 origin / apiUrl() / wsUrl() + chrome.storage 持久化 endpoint
-│       ├── behavior.ts        # createBehaviorEvent / DOM snapshot kernel
+│       ├── behavior.ts        # createBehaviorEvent / DOM snapshot kernel / isTapAuthoritativeAction
 │       ├── e2e.ts             # E2E request / result / action 类型与超时常量
-│       ├── types.ts           # BehaviorEvent + PlatformAdapter 接口
+│       ├── text-sanitize.ts   # sanitizeUserText：评论/弹幕正文截断 200 + 剥离 category-C
+│       ├── types.ts           # BehaviorEvent + PlatformAdapter（含 tapAuthoritativeActions）接口
 │       └── platforms/
 │           ├── bilibili.ts    # bvid 提取、卡片选择器、动作关键字
 │           ├── douyin.ts      # aweme_id 提取、卡片选择器、动作关键字
