@@ -55,12 +55,16 @@ test("a non-tap platform never suppresses any DOM action", () => {
   }
 });
 
-test("bilibili suppresses only DOM comment (its interact tap owns it), not other actions", () => {
-  // The bili-interact-tap emits the authoritative comment; clicking the DOM
-  // "评论" control must not double-count nor fire on merely opening the panel.
-  assert.equal(isTapAuthoritativeAction(bilibiliAdapter, "comment"), true);
-  // like / coin / favorite / share / follow still come from the DOM path.
-  for (const action of ["like", "coin", "favorite", "share", "follow", "retraction"]) {
+test("bilibili DOM like/favorite/coin/retraction clicks emit zero events when its tap owns them", () => {
+  // The bili-interact-tap emits successful network writes. The kernel's two
+  // isTapAuthoritativeAction guards therefore turn both positive action clicks
+  // and withdrawals into zero DOM emissions, including Bilibili's class-only
+  // pressed controls that do not expose aria-pressed.
+  for (const action of ["comment", "like", "favorite", "coin", "retraction"]) {
+    assert.equal(isTapAuthoritativeAction(bilibiliAdapter, action), true, action);
+  }
+  // share / follow still have no Bilibili tap and remain DOM-sourced.
+  for (const action of ["share", "follow"]) {
     assert.equal(isTapAuthoritativeAction(bilibiliAdapter, action), false, action);
   }
 });

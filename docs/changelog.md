@@ -8,6 +8,7 @@
 
 后端源码走 `backend-v0.3.173`，浏览器插件走 `extension-v0.3.173`，桌面安装包走 `desktop-v0.3.173`。三渠道版本重新对齐（0.3.172 因未发 extension tag 导致聚合校验失败、Latest 页面短暂空资产,已降级为 prerelease;本版为所有渠道的推荐升级目标）。
 
+- **修复 B 站取消点赞被误记为第二次正向点赞**：B 站按钮用 class `on` 表示选中态而没有 `aria-pressed`，DOM kernel 无法识别撤销；既有 MAIN-world `bili-interact-tap` 现按网络写入权威采集点赞（`like=1/2`）、收藏增删与投币，仅 HTTP 2xx 且业务 `code===0` 才发事件，取消赞 / 取消收藏归一为 `feedback` retraction（`signal_strength=0.2`）。B 站 adapter 同步将 `{like,favorite,coin,retraction}` 纳入 tap 权威集合，DOM 对这些动作零发射，避免双计；端点 fixture 依据 bilibili-API-collect 公开记录构造，仍待真机验证。
 - **源码自动更新链路按 effective URL、强 TLS 与进程唯一写入全面加固**：remote 守卫同时校验 `ls-remote --get-url` 和全部 `get-url --all` 值，放行 GitHub 官方 SSH-over-443、拒绝 `insteadOf` 镜像改写与凭据地址且绝不改写用户 git 配置；API 传输失败会尝试 Atom，空异常、畸形 JSON、git 缺失/超时、lockfile checkout 与 `index.lock` merge 都保留稳定 reason 和真实 `last_error`。更新器删除 `verify=False` 降级，staged 改动算脏但未跟踪文件仍豁免，tag 通道在 git 变更前封闭，apply 锁跨配置热重载保持进程唯一；custom 代理显式贯通 git/uv/pip，direct/system 继承行为不变。检查间隔加载时保证至少 1 小时、保存时拒绝非法值；桌面 error 卡优先显示明细，扩展 popup 对 frozen/docker/unsupported 禁用自动应用，含空格仓库路径的修复命令统一加引号。prerelease 候选排序补齐 SemVer §11 语义（同号 stable > 任意 prerelease、`rc.10 > rc.9 > rc1`），UI 展示保留 prerelease 后缀。移动 Web 更新面板与 CLI update 命令明确维持现状，未在本次范围内。规格与实施计划见 `docs/plans/2026-07-16-auto-update-hardening-{spec,plan}.md`（基于 Codex 全链路审计 13 项发现的裁决）。
 
 ## v0.3.172：候选补货空转冷却——源枯竭不再烧 CPU（2026-07-16）
