@@ -6,10 +6,10 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 
 from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
@@ -81,19 +81,18 @@ class SQLAlchemyBrowserTaskRepository:
         source_id: str,
         allowed_operations: frozenset[str],
         lease_token: str,
-        now: datetime,
-        lease_expires_at: datetime,
+        lease_seconds: int,
     ) -> ClaimedSourceTask | None:
         if not allowed_operations:
             return None
-        self._abandon_expired(now=now, source_id=source_id)
+        self._abandon_expired(source_id=source_id)
         claimable = and_(
-            SourceTaskModel.request_deadline_at > now,
+            _database_time_is_before(SourceTaskModel.request_deadline_at),
             or_(
                 SourceTaskModel.status == "pending",
                 and_(
                     SourceTaskModel.status == "in_progress",
-                    SourceTaskModel.lease_expires_at <= now,
+                    _database_time_is_at_or_after(SourceTaskModel.lease_expires_at),
                 ),
             ),
         )
@@ -116,19 +115,21 @@ class SQLAlchemyBrowserTaskRepository:
                 .values(
                     status="in_progress",
                     lease_token=lease_token,
-                    lease_expires_at=lease_expires_at,
-                    updated_at=now,
+                    lease_expires_at=_database_time_plus(seconds=lease_seconds),
+                    updated_at=_database_time(),
                 )
                 .returning(SourceTaskModel)
             )
             if row is not None:
+                if row.lease_expires_at is None:
+                    raise RuntimeError("claimed source task has no lease deadline")
                 return ClaimedSourceTask(
                     id=UUID(row.id),
                     source_id=SourceId(row.source_id),
                     operation=SourceOperation(row.operation),
                     payload=row.request_payload,
                     lease_token=lease_token,
-                    lease_expires_at=lease_expires_at,
+                    lease_expires_at=_aware(row.lease_expires_at),
                     request_deadline_at=_aware(row.request_deadline_at),
                 )
             self._session.expire_all()
@@ -140,7 +141,6 @@ class SQLAlchemyBrowserTaskRepository:
         task_id: UUID,
         lease_token: str,
         result: dict[str, JsonValue],
-        now: datetime,
     ) -> SourceTaskCompletion:
         row = self._session.scalar(
             update(SourceTaskModel)
@@ -148,20 +148,24 @@ class SQLAlchemyBrowserTaskRepository:
                 SourceTaskModel.id == str(task_id),
                 SourceTaskModel.status == "in_progress",
                 SourceTaskModel.lease_token == lease_token,
-                SourceTaskModel.lease_expires_at > now,
-                SourceTaskModel.request_deadline_at > now,
+                _database_time_is_before(SourceTaskModel.lease_expires_at),
+                _database_time_is_before(SourceTaskModel.request_deadline_at),
             )
             .values(
                 status="completed",
                 result_payload=result,
                 lease_expires_at=None,
-                updated_at=now,
+                updated_at=_database_time(),
             )
             .returning(SourceTaskModel)
         )
         if row is not None:
-            return SourceTaskCompletion(id=task_id, completed_at=now, idempotent=False)
-        self._abandon_expired(now=now, task_id=task_id)
+            return SourceTaskCompletion(
+                id=task_id,
+                completed_at=_aware(row.updated_at),
+                idempotent=False,
+            )
+        self._abandon_expired(task_id=task_id)
         self._session.expire_all()
         row = self._session.get(SourceTaskModel, str(task_id))
         if row is None:
@@ -182,7 +186,7 @@ class SQLAlchemyBrowserTaskRepository:
             )
         raise StaleSourceTaskLeaseError("source task completion lease is stale")
 
-    def cancel(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot:
+    def cancel(self, task_id: UUID) -> SourceTaskSnapshot:
         row = self._session.scalar(
             update(SourceTaskModel)
             .where(
@@ -193,7 +197,7 @@ class SQLAlchemyBrowserTaskRepository:
                 status=SourceTaskStatus.CANCELLED.value,
                 lease_token=None,
                 lease_expires_at=None,
-                updated_at=now,
+                updated_at=_database_time(),
             )
             .returning(SourceTaskModel)
         )
@@ -209,8 +213,8 @@ class SQLAlchemyBrowserTaskRepository:
             result=row.result_payload,
         )
 
-    def get_snapshot(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot:
-        self._abandon_expired(now=now, task_id=task_id)
+    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot:
+        self._abandon_expired(task_id=task_id)
         self._session.expire_all()
         row = self._session.get(SourceTaskModel, str(task_id))
         if row is None:
@@ -225,13 +229,12 @@ class SQLAlchemyBrowserTaskRepository:
     def _abandon_expired(
         self,
         *,
-        now: datetime,
         source_id: str | None = None,
         task_id: UUID | None = None,
     ) -> None:
         expired = update(SourceTaskModel).where(
             SourceTaskModel.status.in_(_ACTIONABLE_STATUSES),
-            SourceTaskModel.request_deadline_at <= now,
+            _database_time_is_at_or_after(SourceTaskModel.request_deadline_at),
         )
         if source_id is not None:
             expired = expired.where(SourceTaskModel.source_id == source_id)
@@ -242,7 +245,7 @@ class SQLAlchemyBrowserTaskRepository:
                 status=SourceTaskStatus.ABANDONED.value,
                 lease_token=None,
                 lease_expires_at=None,
-                updated_at=now,
+                updated_at=_database_time(),
             )
         )
 
@@ -330,6 +333,7 @@ class QueuedBrowserTransport:
                     return
                 await asyncio.to_thread(self._service.cancel, task_id)
         except TimeoutError:
+            enqueue_task.add_done_callback(_consume_late_enqueue_outcome)
             logger.warning("source task cleanup reached its persistence deadline")
         except Exception as error:
             logger.warning("source task cleanup failed (%s)", type(error).__name__)
@@ -349,3 +353,32 @@ class QueuedBrowserTransport:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _database_time() -> Any:
+    """SQLite UTC clock with fractional-second precision, expressed through SQLAlchemy."""
+
+    return func.strftime("%Y-%m-%d %H:%M:%f", "now")
+
+
+def _database_time_plus(*, seconds: int) -> Any:
+    return func.strftime("%Y-%m-%d %H:%M:%f", "now", f"+{seconds} seconds")
+
+
+def _database_time_is_before(column: Any) -> Any:
+    return func.julianday(column) > func.julianday("now")
+
+
+def _database_time_is_at_or_after(column: Any) -> Any:
+    return func.julianday(column) <= func.julianday("now")
+
+
+def _consume_late_enqueue_outcome(task: asyncio.Task[UUID]) -> None:
+    """Retrieve a late enqueue result so its exception never reaches the loop handler."""
+
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as error:
+        logger.warning("late source task enqueue failed (%s)", type(error).__name__)

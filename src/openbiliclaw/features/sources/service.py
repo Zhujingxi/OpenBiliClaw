@@ -105,8 +105,7 @@ class SourceTaskRepository(Protocol):
         source_id: str,
         allowed_operations: frozenset[str],
         lease_token: str,
-        now: datetime,
-        lease_expires_at: datetime,
+        lease_seconds: int,
     ) -> ClaimedSourceTask | None: ...
 
     def complete(
@@ -115,12 +114,11 @@ class SourceTaskRepository(Protocol):
         task_id: UUID,
         lease_token: str,
         result: dict[str, JsonValue],
-        now: datetime,
     ) -> SourceTaskCompletion: ...
 
-    def get_snapshot(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot: ...
+    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
 
-    def cancel(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot: ...
+    def cancel(self, task_id: UUID) -> SourceTaskSnapshot: ...
 
 
 class SourceTaskUnitOfWork(Protocol):
@@ -201,7 +199,6 @@ class SourceTaskService:
         """Lease the oldest pending or expired task for one canonical source."""
 
         connector = self._registry_provider().get(source_id)
-        now = datetime.now(UTC)
         token = uuid4().hex
         with self._uow_factory() as uow:
             task = uow.source_tasks.claim(
@@ -212,8 +209,7 @@ class SourceTaskService:
                     if spec.browser_assisted
                 ),
                 lease_token=token,
-                now=now,
-                lease_expires_at=now + timedelta(seconds=self._lease_seconds),
+                lease_seconds=self._lease_seconds,
             )
             uow.commit()
         return task
@@ -232,7 +228,6 @@ class SourceTaskService:
                 task_id=task_id,
                 lease_token=lease_token,
                 result=safe_result,
-                now=datetime.now(UTC),
             )
             uow.commit()
         return completion
@@ -241,7 +236,7 @@ class SourceTaskService:
         """Read task state without exposing lease or persistence details."""
 
         with self._uow_factory() as uow:
-            snapshot = uow.source_tasks.get_snapshot(task_id, now=datetime.now(UTC))
+            snapshot = uow.source_tasks.get_snapshot(task_id)
             uow.commit()
         return snapshot
 
@@ -249,7 +244,7 @@ class SourceTaskService:
         """Make pending or leased browser work durably non-actionable."""
 
         with self._uow_factory() as uow:
-            snapshot = uow.source_tasks.cancel(task_id, now=datetime.now(UTC))
+            snapshot = uow.source_tasks.cancel(task_id)
             uow.commit()
         return snapshot
 

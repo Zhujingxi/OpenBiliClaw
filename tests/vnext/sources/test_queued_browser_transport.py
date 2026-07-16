@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from openbiliclaw.features.sources.domain import SourceOperation, SourceTaskStatus
 from openbiliclaw.infrastructure.database.models import SourceTaskModel
@@ -50,7 +53,10 @@ async def test_queue_transport_has_a_bounded_wait(
     with session_factory() as session:
         rows = list(session.scalars(select(SourceTaskModel)))
     assert len(rows) == 1
-    assert rows[0].status == SourceTaskStatus.CANCELLED.value
+    assert rows[0].status in {
+        SourceTaskStatus.CANCELLED.value,
+        SourceTaskStatus.ABANDONED.value,
+    }
     assert service.claim("zhihu") is None
 
     retry_transport = QueuedBrowserTransport(
@@ -72,7 +78,12 @@ async def test_queue_transport_has_a_bounded_wait(
     assert await retry
     with session_factory() as session:
         statuses = sorted(session.scalars(select(SourceTaskModel.status)))
-    assert statuses == [SourceTaskStatus.CANCELLED.value, SourceTaskStatus.COMPLETED.value]
+    assert SourceTaskStatus.COMPLETED.value in statuses
+    assert len(statuses) == 2
+    assert set(statuses) & {
+        SourceTaskStatus.CANCELLED.value,
+        SourceTaskStatus.ABANDONED.value,
+    }
 
 
 async def test_explicit_async_cancellation_compensates_the_durable_task(
@@ -295,3 +306,148 @@ async def test_cleanup_failure_preserves_original_timeout_and_deadline_excludes_
     assert service.snapshot(row.id).status is SourceTaskStatus.ABANDONED
     assert cancel_called.is_set()
     assert "cleanup-secret-must-not-be-logged" not in caplog.text
+
+
+async def test_late_enqueue_exception_is_drained_without_secret_or_loop_error(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, service = task_context
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    secret = "late-enqueue-secret-must-not-escape"
+    loop_errors: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    source_logger = logging.getLogger(
+        "openbiliclaw.infrastructure.sources.browser_tasks"
+    )
+    monkeypatch.setattr(source_logger, "disabled", False)
+
+    class LateFailingService:
+        persistence_timeout_seconds = 0.02
+
+        def enqueue(
+            self, request: Any, *, task_id: Any, request_deadline_at: Any
+        ) -> Any:
+            started.set()
+            release.wait(timeout=1)
+            finished.set()
+            raise RuntimeError(secret)
+
+        def cancel(self, task_id: Any) -> Any:
+            return service.cancel(task_id)
+
+        def snapshot(self, task_id: Any) -> Any:
+            return service.snapshot(task_id)
+
+    transport = QueuedBrowserTransport(
+        LateFailingService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=0.01,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.02,
+    )
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
+            await transport.fetch(
+                operation=SourceOperation.SEARCH.value, query="python", limit=3
+            )
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        loop.set_exception_handler(previous_handler)
+
+    assert loop_errors == []
+    assert secret not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+async def test_delayed_insert_and_blocked_worker_claim_use_database_deadline(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+) -> None:
+    session_factory, engine, service = task_context
+    enqueue_started = threading.Event()
+    release_enqueue = threading.Event()
+
+    class DelayedService:
+        persistence_timeout_seconds = 1.0
+
+        def enqueue(
+            self, request: Any, *, task_id: Any, request_deadline_at: Any
+        ) -> Any:
+            enqueue_started.set()
+            release_enqueue.wait(timeout=1)
+            return service.enqueue(
+                request,
+                task_id=task_id,
+                request_deadline_at=request_deadline_at,
+            )
+
+        def cancel(self, task_id: Any) -> Any:
+            return service.cancel(task_id)
+
+        def snapshot(self, task_id: Any) -> Any:
+            return service.snapshot(task_id)
+
+    transport = QueuedBrowserTransport(
+        DelayedService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=0.4,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.3,
+    )
+    pending = asyncio.create_task(
+        transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+    )
+    assert await asyncio.to_thread(enqueue_started.wait, 1)
+    await asyncio.sleep(0.05)
+    release_enqueue.set()
+    row = None
+    for _ in range(200):
+        with session_factory() as session:
+            row = session.scalar(select(SourceTaskModel))
+        if row is not None:
+            break
+        await asyncio.sleep(0.001)
+    assert row is not None
+    deadline = row.request_deadline_at.replace(tzinfo=UTC)
+    claim_started = threading.Event()
+
+    def claim() -> Any:
+        claim_started.set()
+        return service.claim("zhihu")
+
+    with engine.connect() as blocker:
+        transaction = blocker.begin()
+        blocker.execute(
+            update(SourceTaskModel)
+            .where(SourceTaskModel.id == row.id)
+            .values(updated_at=datetime.now(UTC))
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outcome = pool.submit(claim)
+            assert await asyncio.to_thread(claim_started.wait, 1)
+            assert datetime.now(UTC) < deadline
+            await asyncio.sleep(
+                max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.05
+            )
+            assert not outcome.done()
+            transaction.commit()
+            assert await asyncio.to_thread(outcome.result, 1) is None
+
+    with pytest.raises(TimeoutError):
+        await pending
+    assert service.claim("zhihu") is None
+    assert service.snapshot(row.id).status in {
+        SourceTaskStatus.CANCELLED,
+        SourceTaskStatus.ABANDONED,
+    }

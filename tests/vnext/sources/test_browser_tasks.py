@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -10,7 +12,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from openbiliclaw.features.sources.domain import SourceOperation, SourceTaskStatus
 from openbiliclaw.features.sources.service import (
@@ -39,7 +41,7 @@ def task_context(tmp_path: Path) -> tuple[Any, Any, SourceTaskService]:
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
-    database_settings = DatabaseSettings(url=url, busy_timeout_seconds=0.2)
+    database_settings = DatabaseSettings(url=url, busy_timeout_seconds=2.0)
     engine, session_factory = create_engine_and_session(database_settings)
     transports = {
         source_id: RecordingTransport(source_id)
@@ -379,6 +381,124 @@ def test_completion_after_request_deadline_is_rejected_as_abandoned(
     with pytest.raises(AbandonedSourceTaskError):
         service.complete(task_id, claim.lease_token, {"items": []})
     assert service.snapshot(task_id).status is SourceTaskStatus.ABANDONED
+
+
+def test_claim_rechecks_database_time_after_waiting_for_writer_lock(
+    task_context: tuple[Any, Any, SourceTaskService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory, engine, service = task_context
+    deadline = datetime.now(UTC) + timedelta(milliseconds=250)
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.SEARCH, payload={"query": "python"}
+        ),
+        request_deadline_at=deadline,
+    )
+    entered_uow = threading.Event()
+    original_uow_factory = service._uow_factory  # noqa: SLF001
+
+    def observed_uow_factory() -> Any:
+        entered_uow.set()
+        return original_uow_factory()
+
+    monkeypatch.setattr(service, "_uow_factory", observed_uow_factory)
+    with engine.connect() as blocker:
+        transaction = blocker.begin()
+        blocker.execute(
+            update(SourceTaskModel)
+            .where(SourceTaskModel.id == str(task_id))
+            .values(updated_at=datetime.now(UTC))
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outcome = pool.submit(service.claim, "zhihu")
+            assert entered_uow.wait(timeout=1)
+            assert datetime.now(UTC) < deadline
+            time.sleep(max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.05)
+            transaction.commit()
+            assert outcome.result(timeout=1) is None
+
+    assert service.snapshot(task_id).status is SourceTaskStatus.ABANDONED
+    with session_factory() as session:
+        row = session.get(SourceTaskModel, str(task_id))
+        assert row is not None
+        assert row.lease_token is None
+
+
+def test_completion_rechecks_database_time_after_waiting_for_writer_lock(
+    task_context: tuple[Any, Any, SourceTaskService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, engine, service = task_context
+    deadline = datetime.now(UTC) + timedelta(milliseconds=250)
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.SEARCH, payload={"query": "python"}
+        ),
+        request_deadline_at=deadline,
+    )
+    claim = service.claim("zhihu")
+    assert claim is not None
+    entered_uow = threading.Event()
+    original_uow_factory = service._uow_factory  # noqa: SLF001
+
+    def observed_uow_factory() -> Any:
+        entered_uow.set()
+        return original_uow_factory()
+
+    monkeypatch.setattr(service, "_uow_factory", observed_uow_factory)
+    with engine.connect() as blocker:
+        transaction = blocker.begin()
+        blocker.execute(
+            update(SourceTaskModel)
+            .where(SourceTaskModel.id == str(task_id))
+            .values(updated_at=datetime.now(UTC))
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outcome = pool.submit(
+                service.complete,
+                task_id,
+                claim.lease_token,
+                {"items": []},
+            )
+            assert entered_uow.wait(timeout=1)
+            assert datetime.now(UTC) < deadline
+            time.sleep(max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.05)
+            transaction.commit()
+            with pytest.raises(AbandonedSourceTaskError):
+                outcome.result(timeout=1)
+
+    assert service.snapshot(task_id).status is SourceTaskStatus.ABANDONED
+
+
+def test_claim_lease_is_born_from_database_time_after_writer_lock_wait(
+    task_context: tuple[Any, Any, SourceTaskService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, engine, service = task_context
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.FEED, payload={"limit": 1}
+        ),
+        request_deadline_at=datetime.now(UTC) + timedelta(seconds=5),
+    )
+    monkeypatch.setattr(service, "_lease_seconds", 1)
+    with engine.connect() as blocker:
+        transaction = blocker.begin()
+        blocker.execute(
+            update(SourceTaskModel)
+            .where(SourceTaskModel.id == str(task_id))
+            .values(updated_at=datetime.now(UTC))
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outcome = pool.submit(service.claim, "zhihu")
+            time.sleep(1.05)
+            assert not outcome.done()
+            transaction.commit()
+            claim = outcome.result(timeout=1)
+
+    assert claim is not None
+    assert claim.lease_expires_at > datetime.now(UTC) + timedelta(milliseconds=700)
 
 
 def test_two_separate_uows_claim_one_task_for_exactly_one_owner(
