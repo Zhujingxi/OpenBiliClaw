@@ -119,6 +119,7 @@ class ProfileService:
         evidence_ids: frozenset[UUID],
         expected_base_revision: int | None | object = _UNSET,
         checkpoint: Callable[[], None] | None = None,
+        transaction_guard: Callable[[object], None] | None = None,
     ) -> ProfileSnapshot:
         """Validate and append without splitting read/write across transactions."""
 
@@ -126,6 +127,8 @@ class ProfileService:
         if checkpoint is not None:
             checkpoint()
         with self._uow_factory() as uow:
+            if transaction_guard is not None:
+                transaction_guard(uow)
             current = uow.profiles.latest()
             actual_revision = None if current is None else current.revision
             if expected_base_revision is not _UNSET and actual_revision != expected_base_revision:
@@ -158,6 +161,7 @@ class ProfileService:
         signals: tuple[ProfileSignal, ...],
         *,
         checkpoint: Callable[[], None] | None = None,
+        transaction_guard: Callable[[object], None] | None = None,
     ) -> ProfileSnapshot:
         """Optionally ask typed AI for a delta, then enforce application-owned policy."""
 
@@ -177,6 +181,7 @@ class ProfileService:
             ),
             expected_base_revision=expected_base_revision,
             checkpoint=checkpoint,
+            transaction_guard=transaction_guard,
         )
 
 

@@ -78,6 +78,14 @@ class MemoryJobs:
             if row["status"] is JobRunStatus.PENDING and row["dispatched_at"] is None
         )
 
+    def pending(self) -> tuple[UUID, ...]:
+        return tuple(
+            run_id for run_id, row in self.rows.items() if row["status"] is JobRunStatus.PENDING
+        )
+
+    def guard_running(self, run_id: UUID) -> bool:
+        return self.rows[run_id]["status"] is JobRunStatus.RUNNING
+
     def checkpoint(self, run_id: UUID, progress: float) -> bool:
         row = self.rows[run_id]
         if row["status"] is not JobRunStatus.RUNNING:

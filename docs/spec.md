@@ -209,7 +209,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ### 3.1 vNext 领域、用例与独立 worker（公开 API 尚未切换）
 
-v0.4.0 已实现 feature-oriented 领域契约、七平台 connector、generic source task、隔离 persistence、类型化设置、凭据加密、只经 LiteLLM 的 typed AI，以及 activity/profile/feed/library/chat application service 和四任务 Huey worker。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure/重启可 reconcile，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。profile 使用独立 consumed-evidence ledger 与 expected base revision；Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。该 worker 已可运行，但 v0.3 API、legacy runtime、扩展 dispatcher 和四端客户端尚未切换。
+v0.4.0 已实现 feature-oriented 领域契约、七平台 connector、generic source task、隔离 persistence、类型化设置、凭据加密、只经 LiteLLM 的 typed AI，以及 activity/profile/feed/library/chat application service 和四任务 Huey worker。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure 可按 undispatched row reconcile，worker startup 则重发全部 pending row，覆盖 dequeue 后、应用 claim 前崩溃，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。每个 handler 的条件 running guard 与其 feature writes 共用一个 UoW，以 SQLite write lock 原子排序 cancellation 与 activity、profile+ledger、feed graph、cleanup effect。profile 另使用独立 consumed-evidence ledger 与 expected base revision；Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。该 worker 已可运行，但 v0.3 API、legacy runtime、扩展 dispatcher 和四端客户端尚未切换。
 
 ```text
 HTTP / CLI / logged-in browser transports
@@ -243,7 +243,7 @@ Application services + worker handlers
                                              LiteLLM ─► dedicated PostgreSQL
 
 Huey (separate huey.db) ─► source_sync / profile_projection / feed_replenishment / cleanup
-                              └─► JobService ─► authoritative dispatch/status/cancel/progress
+                              └─► JobService ─► all-pending recovery/claim/cancel/txn guard
 
 Implemented now: domain contracts/policies, seven source manifests/connectors/settings,
                  generic lease-safe source tasks, schema/migration, repositories/UoW,

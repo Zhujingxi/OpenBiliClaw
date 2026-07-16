@@ -231,7 +231,10 @@ class FeedService:
         self._settings = settings
 
     async def replenish(
-        self, *, checkpoint: Callable[[float], None] | None = None
+        self,
+        *,
+        checkpoint: Callable[[float], None] | None = None,
+        transaction_guard: Callable[[object], None] | None = None,
     ) -> tuple[FeedEntry, ...]:
         with self._uow_factory() as uow:
             profile = uow.profiles.latest()
@@ -361,6 +364,8 @@ class FeedService:
         if checkpoint is not None:
             checkpoint(0.85)
         with self._uow_factory() as uow:
+            if transaction_guard is not None:
+                transaction_guard(uow)
             for item in new_content:
                 uow.content.add(item)
             uow.content.flush()

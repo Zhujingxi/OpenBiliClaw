@@ -105,7 +105,7 @@ class WorkerOrchestrator:
                 raise TypeError(f"source sync returned non-activity data: {source_id}")
             for event in cast("tuple[ActivityEvent, ...]", result):
                 context.checkpoint(0.9)
-                self._activity.ingest(event)
+                self._activity.ingest(event, transaction_guard=context.guard)
         context.checkpoint(0.95)
 
     async def profile_projection(self, _run_id: UUID, context: JobExecutionContext) -> None:
@@ -125,7 +125,11 @@ class WorkerOrchestrator:
                 context.checkpoint(0.8)
 
             try:
-                await self._profile.project(tuple(signals), checkpoint=before_profile_commit)
+                await self._profile.project(
+                    tuple(signals),
+                    checkpoint=before_profile_commit,
+                    transaction_guard=context.guard,
+                )
             except (StaleProfileRevisionError, ProfileRevisionConflict) as exc:
                 raise TransientJobError("profile revision changed during projection") from exc
         context.checkpoint(0.95)
@@ -136,14 +140,17 @@ class WorkerOrchestrator:
         def checkpoint(progress: float) -> None:
             context.checkpoint(progress)
 
-        await self._feed.replenish(checkpoint=checkpoint)
+        await self._feed.replenish(
+            checkpoint=checkpoint,
+            transaction_guard=context.guard,
+        )
         context.checkpoint(0.95)
 
     def cleanup(self, _run_id: UUID, context: JobExecutionContext) -> None:
         """Delete only terminal business-job history older than retention."""
 
         context.checkpoint(0.5)
-        self._jobs.cleanup_finished(retention_days=30)
+        self._jobs.cleanup_finished(retention_days=30, transaction_guard=context.guard)
         context.checkpoint(0.95)
 
     def handlers(self) -> Mapping[str, JobHandler]:

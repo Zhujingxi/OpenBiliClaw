@@ -742,6 +742,25 @@ class SQLAlchemyJobRunRepository:
         ).all()
         return tuple(UUID(row.id) for row in rows)
 
+    def pending(self) -> tuple[UUID, ...]:
+        rows = self._session.scalars(
+            select(JobRunModel)
+            .where(JobRunModel.status == JobRunStatus.PENDING.value)
+            .order_by(JobRunModel.created_at, JobRunModel.id)
+        ).all()
+        return tuple(UUID(row.id) for row in rows)
+
+    def guard_running(self, run_id: UUID) -> bool:
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status == JobRunStatus.RUNNING.value,
+            )
+            .values(updated_at=JobRunModel.updated_at)
+        )
+        return bool(getattr(result, "rowcount", 0))
+
     def checkpoint(self, run_id: UUID, progress: float) -> bool:
         row = self._session.get(JobRunModel, str(run_id))
         if row is None:

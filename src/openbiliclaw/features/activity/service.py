@@ -89,11 +89,18 @@ class ActivityService:
     def __init__(self, uow_factory: Callable[[], ActivityUnitOfWork]) -> None:
         self._uow_factory = uow_factory
 
-    def ingest(self, event: ActivityEvent) -> tuple[ProfileSignal, ...]:
+    def ingest(
+        self,
+        event: ActivityEvent,
+        *,
+        transaction_guard: Callable[[object], None] | None = None,
+    ) -> tuple[ProfileSignal, ...]:
         """Store an immutable event before exposing its evidence projection."""
 
         signals = project_activity_event(event)
         with self._uow_factory() as uow:
+            if transaction_guard is not None:
+                transaction_guard(uow)
             uow.activities.add_if_absent(event)
             uow.commit()
         return signals

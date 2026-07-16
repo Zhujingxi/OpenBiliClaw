@@ -30,7 +30,7 @@
 | 本地集合与聊天 | `collections`, `collection_items`, `chat_turns` |
 | 后续执行基础 | `source_tasks`, `job_runs`, `ai_runs` |
 
-内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger 都以外键关联活动证据，后者不受后续 facet 删除影响。`job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，progress 只允许单调前进。来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
+内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger 都以外键关联活动证据，后者不受后续 facet 删除影响。`job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，但不是“消息仍在 queue”的证明：worker startup 会重新发布全部 pending row。progress 只允许单调前进。来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
 
 ## 公开 API
 
@@ -42,7 +42,7 @@
 | `infrastructure.security` | `CredentialCipher`, `EncryptedCredential` |
 | `infrastructure.security.credentials` | `MissingCredentialKeyError`, `SECRET_KEY_ENV` |
 
-`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`activities` 支持幂等导入，profile repository 提供独立 consumed ledger，assessment adapter 可查询同 revision 已评估与历史 admitted/interacted 内容，`job_runs` 提供幂等 schedule、dispatch reconciliation、原子 claim、运行中取消、progress checkpoint、重启恢复和 terminal cleanup。worker 中的 `TaskRunner` 会写 `ai_runs`，但该表只记录 task、model alias、状态、时间、usage 与错误分类；ORM、Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。`source_tasks` 已由 queued browser transport 使用，但现有浏览器扩展 dispatcher 尚未切到 generic claim/complete。
+`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`activities` 支持幂等导入，profile repository 提供独立 consumed ledger，assessment adapter 可查询同 revision 已评估与历史 admitted/interacted 内容，`job_runs` 提供幂等 schedule、全部/未发布 pending 查询、dispatch reconciliation、原子 claim、条件 running transaction guard、运行中取消、progress checkpoint、重启恢复和 terminal cleanup。四个 worker handler 在 feature 写事务内先执行 guard；其 SQLite write lock 把 cancellation 与 activity、profile+ledger、feed graph、cleanup effect 线性化为明确的先后顺序。worker 中的 `TaskRunner` 会写 `ai_runs`，但该表只记录 task、model alias、状态、时间、usage 与错误分类；ORM、Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。`source_tasks` 已由 queued browser transport 使用，但现有浏览器扩展 dispatcher 尚未切到 generic claim/complete。
 
 `UserSettings` 的当前完整契约如下：
 

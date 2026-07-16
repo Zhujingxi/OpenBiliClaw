@@ -586,7 +586,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ### vNext Domain, Use Cases, and Independent Worker (public API not cut over)
 
-v0.4.0 now includes framework-independent domain contracts, seven source connectors, lease-safe generic source tasks, isolated persistence, typed settings, Fernet credentials, six typed AI tasks, activity/profile/feed/library/chat application services, and an independent Huey worker. The worker constructs all seven built-ins explicitly and decrypts credentials only on the first direct call; all sources are disabled by default, so startup makes no live source calls. Four background jobs use application `job_runs` as the authority for reliable dispatch, status, idempotency, in-flight cancellation, monotonic progress, and restart recovery; Huey results are transport-only. Profile revisions atomically record an independent consumed-evidence ledger, and Feed excludes durable assessment/admission history. **The current API, legacy business runtime, CLI, frontend, and extension dispatcher have not switched yet**, and the isolated database neither replaces nor migrates existing data.
+v0.4.0 now includes framework-independent domain contracts, seven source connectors, lease-safe generic source tasks, isolated persistence, typed settings, Fernet credentials, six typed AI tasks, activity/profile/feed/library/chat application services, and an independent Huey worker. The worker constructs all seven built-ins explicitly and decrypts credentials only on the first direct call; all sources are disabled by default, so startup makes no live source calls. Four background jobs use application `job_runs` as the authority for reliable dispatch, status, idempotency, in-flight cancellation, monotonic progress, and restart recovery; Huey results are transport-only. Startup republishes every pending row, atomic claim absorbs duplicate messages, and a running guard inside each feature persistence transaction orders cancellation atomically with business effects. Profile revisions atomically record an independent consumed-evidence ledger, and Feed excludes durable assessment/admission history. **The current API, legacy business runtime, CLI, frontend, and extension dispatcher have not switched yet**, and the isolated database neither replaces nor migrates existing data.
 
 ```text
 7 explicit SourceManifest + Connectors ──normalized──► Activity / Profile / Content / Feed
@@ -605,7 +605,7 @@ vNext use cases ─► typed TaskSpec / PydanticAI ─► TaskRunner ─► Lite
                        ├─ obc-interactive / obc-analysis│ routing/fallback/retry/cache
                        └─ obc-embedding ◄─ embeddings ──┘
 
-Huey scheduler/transport ─► source sync / profile / feed / cleanup ─► authoritative job_runs
+Huey scheduler/transport ─► source sync / profile / feed / cleanup ─► job_runs (all-pending recovery / atomic claim / transaction guard)
 
 Implemented: domain/source/task/persistence, application services, typed AI,
              four-job worker, offline evals, and LiteLLM/Huey Compose

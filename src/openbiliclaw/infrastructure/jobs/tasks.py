@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import UUID
 
 from huey import crontab
@@ -81,6 +81,10 @@ class JobRunRepository(Protocol):
 
     def pending_undispatched(self) -> tuple[UUID, ...]: ...
 
+    def pending(self) -> tuple[UUID, ...]: ...
+
+    def guard_running(self, run_id: UUID) -> bool: ...
+
     def checkpoint(self, run_id: UUID, progress: float) -> bool: ...
 
     def update(
@@ -112,6 +116,12 @@ class JobUnitOfWork(Protocol):
     ) -> None: ...
 
     def commit(self) -> None: ...
+
+
+class GuardedJobUnitOfWork(Protocol):
+    """Existing feature transaction exposing the shared job-state repository."""
+
+    job_runs: JobRunRepository
 
 
 class JobQueue(Protocol):
@@ -185,11 +195,15 @@ class JobService:
             uow.job_runs.mark_dispatched(snapshot.id)
             uow.commit()
 
-    def reconcile_pending_dispatches(self) -> tuple[UUID, ...]:
-        """Republish every durable pending row that has no successful handoff marker."""
+    def reconcile_pending_dispatches(self, *, include_dispatched: bool = False) -> tuple[UUID, ...]:
+        """Republish durable pending rows, including marked handoffs during startup."""
 
         with self._uow_factory() as uow:
-            pending = uow.job_runs.pending_undispatched()
+            pending = (
+                uow.job_runs.pending()
+                if include_dispatched
+                else uow.job_runs.pending_undispatched()
+            )
         dispatched: list[UUID] = []
         for run_id in pending:
             snapshot = self.inspect(run_id)
@@ -280,13 +294,20 @@ class JobService:
         with self._uow_factory() as uow:
             recovered = uow.job_runs.recover_running()
             uow.commit()
-        self.reconcile_pending_dispatches()
+        self.reconcile_pending_dispatches(include_dispatched=True)
         return recovered
 
-    def cleanup_finished(self, *, retention_days: int = 30) -> int:
+    def cleanup_finished(
+        self,
+        *,
+        retention_days: int = 30,
+        transaction_guard: Callable[[object], None] | None = None,
+    ) -> int:
         if retention_days < 1:
             raise ValueError("job retention must be at least one day")
         with self._uow_factory() as uow:
+            if transaction_guard is not None:
+                transaction_guard(uow)
             removed = uow.job_runs.cleanup_finished(
                 older_than=datetime.now(UTC) - timedelta(days=retention_days)
             )
@@ -303,6 +324,17 @@ class JobExecutionContext:
 
     def checkpoint(self, progress: float) -> JobRunSnapshot:
         return self._service.checkpoint(self.run_id, progress)
+
+    def guard(self, uow: object) -> None:
+        """Linearize cancellation with feature writes in their existing transaction."""
+
+        guarded = cast("GuardedJobUnitOfWork", uow)
+        if guarded.job_runs.guard_running(self.run_id):
+            return
+        snapshot = _snapshot(self.run_id, guarded.job_runs.get(self.run_id))
+        if snapshot.status is JobRunStatus.CANCELLED:
+            raise JobCancelledError(f"job was cancelled: {self.run_id}")
+        raise RuntimeError(f"job is not running: {self.run_id}")
 
 
 JobHandler = Callable[[UUID, JobExecutionContext], None | Awaitable[None]]

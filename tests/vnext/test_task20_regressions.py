@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -31,15 +32,27 @@ from openbiliclaw.infrastructure.ai.tasks import (
 )
 from openbiliclaw.infrastructure.ai.use_cases import TaskRunnerBatchAssessor
 from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_engine_and_session
+from openbiliclaw.infrastructure.database.models import (
+    CandidateAssessmentModel,
+    ContentItemModel,
+    FeedEntryModel,
+    JobRunModel,
+    ProfileConsumedEvidenceModel,
+    ProfileRevisionModel,
+)
 from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.orchestration import (
     WorkerDependencies,
     build_worker_runtime,
 )
+from openbiliclaw.infrastructure.jobs.queue import build_huey
 from openbiliclaw.infrastructure.jobs.tasks import (
+    HueyJobQueue,
     JobCancelledError,
     JobExecutionContext,
+    JobRunStatus,
+    JobService,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +68,21 @@ class Queue:
         del job_name, run_id, priority
 
 
+class CancelBeforePersistenceContext(JobExecutionContext):
+    """Deterministically let cancellation win immediately before the UoW guard."""
+
+    def __init__(self, service: JobService, run_id: UUID) -> None:
+        super().__init__(service, run_id)
+        self._job_service = service
+        self._cancelled = False
+
+    def guard(self, uow: object) -> None:
+        if not self._cancelled:
+            self._job_service.cancel(self.run_id)
+            self._cancelled = True
+        super().guard(uow)
+
+
 @pytest.fixture
 def database(tmp_path: Path) -> Iterator[tuple[Engine, sessionmaker[Session]]]:
     path = tmp_path / "task20-regressions.db"
@@ -64,6 +92,43 @@ def database(tmp_path: Path) -> Iterator[tuple[Engine, sessionmaker[Session]]]:
     engine, session_factory = create_engine_and_session(DatabaseSettings(url=f"sqlite:///{path}"))
     yield engine, session_factory
     engine.dispose()
+
+
+def test_startup_republishes_dequeued_pending_huey_message_exactly_once(
+    database: tuple[Engine, sessionmaker[Session]], tmp_path: Path
+) -> None:
+    """A transport dequeue before app claim must not strand durable pending work."""
+
+    _engine, session_factory = database
+    transport = build_huey(tmp_path / "startup-recovery-huey.db")
+    effects: list[UUID] = []
+    service: JobService
+
+    @transport.task(name="source_sync")
+    def execute_source_sync(run_id: str) -> None:
+        resolved = UUID(run_id)
+        if not service.claim(resolved):
+            return
+        effects.append(resolved)
+        service.succeed(resolved)
+
+    service = JobService(
+        lambda: UnitOfWork(session_factory),
+        queue=HueyJobQueue(tasks={"source_sync": execute_source_sync}),
+    )
+    run = service.schedule("source_sync", idempotency_key="dequeue-before-claim")
+    dropped = transport.dequeue()
+    assert dropped is not None
+    assert service.inspect(run.id).status is JobRunStatus.PENDING
+    assert service.inspect(run.id).dispatched_at is not None
+
+    service.recover_interrupted()
+    service.recover_interrupted()
+    while (message := transport.dequeue()) is not None:
+        transport.execute(message)
+
+    assert effects == [run.id]
+    assert service.inspect(run.id).status is JobRunStatus.SUCCEEDED
 
 
 class BatchRunner:
@@ -352,3 +417,164 @@ async def test_cancel_during_model_boundary_prevents_profile_and_ledger_commit(
     with UnitOfWork(session_factory) as uow:
         assert uow.profiles.latest() is None
         assert uow.profiles.consumed_evidence_ids() == frozenset()
+
+
+class ImmediateActivitySource:
+    manifest = SourceManifest(
+        source_id=SourceId.BILIBILI,
+        display_name="Bilibili",
+        capabilities=frozenset({SourceCapability.BOOTSTRAP_IMPORT}),
+        operations=(
+            SourceOperationSpec(
+                operation=SourceOperation.BOOTSTRAP_IMPORT,
+                capability=SourceCapability.BOOTSTRAP_IMPORT,
+                result_kind=SourceResultKind.ACTIVITY,
+                requires_auth=False,
+                transport_kind=SourceTransportKind.DIRECT,
+            ),
+        ),
+    )
+
+    async def execute(
+        self, operation: SourceOperation, query: str | None = None, limit: int = 20
+    ) -> tuple[ActivityEvent, ...]:
+        del operation, query, limit
+        return (
+            ActivityEvent(
+                source_id="bilibili",
+                kind=ActivityKind.FAVORITE,
+                title="cancel at atomic persistence guard",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_cancellation_winning_at_atomic_guard_persists_no_activity(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    _engine, session_factory = database
+    SettingsService(lambda: UnitOfWork(session_factory)).update(
+        {"source_enabled": {"bilibili": True}}
+    )
+    service, handlers = build_worker_runtime(
+        WorkerDependencies(
+            session_factory=session_factory,
+            source_registry=SourceRegistry((ImmediateActivitySource(),)),
+            task_runner=BatchRunner(),  # type: ignore[arg-type]
+            job_queue=Queue(),
+        )
+    )
+    run = service.schedule("source_sync", idempotency_key="cancel-at-source-guard")
+    assert service.claim(run.id)
+
+    with pytest.raises(JobCancelledError):
+        await handlers["source_sync"](run.id, CancelBeforePersistenceContext(service, run.id))
+
+    with UnitOfWork(session_factory) as uow:
+        assert uow.activities.list_all() == ()
+    assert service.inspect(run.id).status is JobRunStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_profile_cancellation_winning_at_atomic_guard_persists_no_revision_or_ledger(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    _engine, session_factory = database
+    event = ActivityEvent(
+        source_id="local",
+        kind=ActivityKind.CHAT_LEARNING,
+        text="cancel at profile guard",
+    )
+    with UnitOfWork(session_factory) as uow:
+        uow.activities.add(event)
+        uow.commit()
+    service, handlers = build_worker_runtime(
+        WorkerDependencies(
+            session_factory=session_factory,
+            source_registry=SourceRegistry(()),
+            task_runner=BatchRunner(),  # type: ignore[arg-type]
+            job_queue=Queue(),
+        )
+    )
+    run = service.schedule("profile_projection", idempotency_key="cancel-at-profile-guard")
+    assert service.claim(run.id)
+
+    with pytest.raises(JobCancelledError):
+        await handlers["profile_projection"](
+            run.id, CancelBeforePersistenceContext(service, run.id)
+        )
+
+    with session_factory() as session:
+        assert session.query(ProfileRevisionModel).count() == 0
+        assert session.query(ProfileConsumedEvidenceModel).count() == 0
+    assert service.inspect(run.id).status is JobRunStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_feed_cancellation_winning_at_atomic_guard_persists_no_feed_graph(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    _engine, session_factory = database
+    with UnitOfWork(session_factory) as uow:
+        uow.profiles.append(ProfileSnapshot(revision=0), expected_revision=None)
+        uow.commit()
+    SettingsService(lambda: UnitOfWork(session_factory)).update(
+        {"source_enabled": {"bilibili": True}, "feed_low_watermark": 1, "feed_high_watermark": 1}
+    )
+    item = ContentItem(
+        source_id="bilibili",
+        external_id="cancel-at-feed-guard",
+        url="https://example.com/cancel-at-feed-guard",
+        title="cancel at feed guard",
+    )
+    service, handlers = build_worker_runtime(
+        WorkerDependencies(
+            session_factory=session_factory,
+            source_registry=SourceRegistry((ListConnector((item,)),)),
+            task_runner=BatchRunner(),  # type: ignore[arg-type]
+            job_queue=Queue(),
+        )
+    )
+    run = service.schedule("feed_replenishment", idempotency_key="cancel-at-feed-guard")
+    assert service.claim(run.id)
+
+    with pytest.raises(JobCancelledError):
+        await handlers["feed_replenishment"](
+            run.id, CancelBeforePersistenceContext(service, run.id)
+        )
+
+    with session_factory() as session:
+        assert session.query(ContentItemModel).count() == 0
+        assert session.query(CandidateAssessmentModel).count() == 0
+        assert session.query(FeedEntryModel).count() == 0
+    assert service.inspect(run.id).status is JobRunStatus.CANCELLED
+
+
+def test_cleanup_cancellation_winning_at_atomic_guard_preserves_terminal_history(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    _engine, session_factory = database
+    service, handlers = build_worker_runtime(
+        WorkerDependencies(
+            session_factory=session_factory,
+            source_registry=SourceRegistry(()),
+            task_runner=BatchRunner(),  # type: ignore[arg-type]
+            job_queue=Queue(),
+        )
+    )
+    old = service.schedule("source_sync", idempotency_key="old-terminal")
+    assert service.claim(old.id)
+    service.succeed(old.id)
+    with session_factory() as session:
+        row = session.get(JobRunModel, str(old.id))
+        assert row is not None
+        row.finished_at = datetime.now(UTC) - timedelta(days=31)
+        session.commit()
+    cleanup_run = service.schedule("cleanup", idempotency_key="cancel-at-cleanup-guard")
+    assert service.claim(cleanup_run.id)
+
+    with pytest.raises(JobCancelledError):
+        handlers["cleanup"](cleanup_run.id, CancelBeforePersistenceContext(service, cleanup_run.id))
+
+    assert service.inspect(old.id).status is JobRunStatus.SUCCEEDED
+    assert service.inspect(cleanup_run.id).status is JobRunStatus.CANCELLED

@@ -16,14 +16,15 @@ feature service 只依赖自身声明的 repository、AI、settings 和 source P
 | feedback | 同一事务写 `Interaction` 和确定性 feedback `ActivityEvent`；repository rank adjustment 会让后续排序读取该反馈 |
 | library | 只写本地 `favorites` / `watch_later`，不调用平台账号 mutation |
 | chat | 直接调用共享 `TaskRunner` 的 `obc-interactive` lane，不进入 Huey；持久化 user/assistant 两轮并输出可直接渲染为 SSE 的 typed delta/done chunks；opt-in learning 只写 activity evidence |
+| background jobs | startup 重发全部 pending row，原子 claim 消解重复 Huey message；四类 feature 写事务内的 running guard 将 cancellation 与业务 effect 原子排序 |
 
 ## 四个任务与权威状态
 
 只注册以下四个 Huey task：`source_sync`、`profile_projection`、`feed_replenishment`、`cleanup`。`source_sync` 执行已启用 connector 的真实 bootstrap activity operation；`profile_projection` 只处理 consumed ledger 尚未登记的事件；`feed_replenishment` 调用上述有界用例；`cleanup` 只删除超过保留期的 terminal `job_runs`。`source_sync` 的 Huey periodic wrapper 每分钟做一次轻量 tick，真实幂等时间桶读取 `UserSettings.source_sync_interval_minutes`；其它任务类型不增加。
 
-Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priority、有限 retry、periodic schedule 与 task lock；结果只属于 transport。应用先持久化 pending `job_runs`，再通过 TaskWrapper immediate enqueue 发布，成功后写 `dispatched_at`。queue failure 保留 undispatched row；重复 schedule 与 worker startup 会 reconcile。若进程在 enqueue 后、marker 前崩溃，允许重复 transport message，但业务原子 claim 保证只执行一次。产品状态、幂等键、协作式运行中取消、attempt、单调 progress、error/timestamps 全部以应用库为权威，`JobService.inspect()` 从不读取 Huey Result。consumer 异常退出后会把遗留 running 重置为 pending/undispatched 并重新发布。
+Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priority、有限 retry、periodic schedule 与 task lock；结果只属于 transport。应用先持久化 pending `job_runs`，再通过 TaskWrapper immediate enqueue 发布，成功后写 `dispatched_at`。queue failure 保留 undispatched row；重复 schedule 只 reconcile undispatched row，而 worker startup 会重新发布**全部** pending row，包括已有 marker 但可能已被 Huey dequeue、尚未完成应用 claim 的 row。enqueue/marker 或 dequeue/claim 任一窗口崩溃都允许产生重复 transport message，业务原子 claim 保证只有一个执行者；重启在 republish 中再次崩溃也不会重复业务 effect。产品状态、幂等键、协作式运行中取消、attempt、单调 progress、error/timestamps 全部以应用库为权威，`JobService.inspect()` 从不读取 Huey Result。consumer 异常退出后会把遗留 running 重置为 pending/undispatched，再与其它 pending row 一起重新发布。
 
-四个 handler 都使用 `JobExecutionContext.checkpoint()`：每个外部 source/model 边界之后、每个持久化 side effect 之前重新读取应用 DB cancellation，并提交可见且不回退的 progress。取消后的 source event、profile revision/evidence、feed batch 或 cleanup effect 不会继续写入；retry 保留已达到的最高 progress。
+四个 handler 都使用 `JobExecutionContext.checkpoint()` 在外部 source/model 边界后提交可见且不回退的 progress，并使用 `JobExecutionContext.guard()` 保护最终持久化。guard 不是独立的“先检查再写”：它在 activity、profile revision+consumed ledger、content+assessment+feed entry 或 terminal cleanup 的同一个 UoW 中，以条件 `running` update 取得 SQLite write lock 后才允许业务写入。若 cancellation 先提交，guard 失败且整个 feature UoW 无 effect；若 guard 先取得锁，feature effect 先原子提交，cancellation 随后线性化。retry 保留已达到的最高 progress。
 
 三个 priority 常量按 `interactive > user-triggered > scheduled-maintenance` 排序；chat 虽使用 interactive lane，但永不进入后台队列。worker 使用最多四个 thread workers，并通过 `python -m openbiliclaw.infrastructure.jobs.worker` 启动。源码与预构建 Compose 都挂载独立 Huey 文件；legacy `openbiliclaw-backend` 服务在 Task 21 前不改名。
 
@@ -41,7 +42,7 @@ worker 默认迁移隔离 vNext 数据库，构造 SQLAlchemy UoW、`SettingsSer
 - `features.library.service.LibraryService`
 - `features.chat.service.ChatService`, `ChatChunk`
 - `infrastructure.ai.use_cases` 的三个共享 TaskRunner adapter
-- `infrastructure.jobs.tasks.JobService`, `JobExecutionContext`, `JobRunSnapshot`, 四个 task wrapper
+- `infrastructure.jobs.tasks.JobService`, `JobExecutionContext`（含 transaction-scoped `guard()`）, `JobRunSnapshot`, 四个 task wrapper
 - `infrastructure.jobs.orchestration.build_worker_runtime()`
 - `infrastructure.jobs.worker.build_default_source_registry()`
 - `infrastructure.jobs.worker.run_worker()`
