@@ -65,6 +65,13 @@ def test_card_metadata_css_defines_duration_badge_and_stats_line() -> None:
     assert "color: var(--muted);" in APP_CSS
 
 
+def test_desktop_recommendation_covers_bound_eager_loading_to_first_four() -> None:
+    assert "const DESKTOP_EAGER_COVER_COUNT = 4;" in APP_JS
+    assert "index < DESKTOP_EAGER_COVER_COUNT" in APP_JS
+    assert 'loading="${eager ? "eager" : "lazy"}"' in APP_JS
+    assert 'fetchpriority="${eager ? "high" : "low"}"' in APP_JS
+
+
 def test_delight_card_renders_the_same_engagement_stats_as_the_grid() -> None:
     """Field report 2026-07-07: the surprise (delight) card never showed the
     ▶/👍/💬 metadata the grid cards do. normalizeDelight now carries the counts
@@ -77,14 +84,14 @@ def test_delight_card_renders_the_same_engagement_stats_as_the_grid() -> None:
 
     # The delight card fills #delightStats from recommendationStats and hides it
     # when there are no counts (reusing the grid's .video-stats treatment).
-    assert 'const delightStats = recommendationStats(state.delight);' in APP_JS
+    assert "const delightStats = recommendationStats(state.delight);" in APP_JS
     assert "delightStatsEl.textContent = delightStats;" in APP_JS
     assert "delightStatsEl.hidden = !delightStats;" in APP_JS
 
     # comment_count (💬) is in the shared stats renderer so both cards show it.
     stats = _function_body("recommendationStats")
     assert "if (item.comment_count > 0)" in stats
-    assert '💬 ' in stats
+    assert "💬 " in stats
 
     # The DOM has the stats element on the delight card.
     index_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")

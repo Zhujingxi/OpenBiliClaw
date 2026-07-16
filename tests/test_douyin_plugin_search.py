@@ -84,6 +84,19 @@ def test_plugin_search_item_to_aweme_maps_fields() -> None:
     }
 
 
+def test_plugin_search_item_to_aweme_preserves_published_time() -> None:
+    aweme = plugin_search_item_to_aweme(
+        {
+            "aweme_id": "published-123",
+            "title": "带发布时间的插件搜索结果",
+            "published_at": 1783492200,
+        }
+    )
+
+    assert aweme is not None
+    assert aweme["create_time"] == 1783492200
+
+
 @pytest.mark.asyncio
 async def test_plugin_search_client_returns_completed_task_items(database: Database) -> None:
     queue = DyTaskQueue(database)

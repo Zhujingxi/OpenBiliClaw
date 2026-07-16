@@ -911,13 +911,22 @@ def test_keyword_cohort_stats_compare_inspiration_and_merged_yield(
     db.conn.execute(
         """
         INSERT INTO content_cache (
-            bvid, title, relevance_score, pool_status, pool_topic_label,
+            bvid, item_key, title, relevance_score, pool_status, pool_topic_label,
             topic_group, source_platform, delight_score, source_keyword_id
         )
         VALUES
-            ('BV_INSPIRE_1', 'inspire one', 0.9, 'fresh', '独立游戏', '游戏', 'bilibili', 0.92, ?),
-            ('BV_INSPIRE_2', 'inspire two', 0.9, 'fresh', '独立游戏', '游戏', 'bilibili', 0.88, ?),
-            ('BV_MERGED_1', 'merged one', 0.9, 'fresh', 'AI 工具', '科技', 'bilibili', 0.80, ?)
+            (
+                'BV_INSPIRE_1', 'bilibili:BV_INSPIRE_1', 'inspire one',
+                0.9, 'fresh', '独立游戏', '游戏', 'bilibili', 0.92, ?
+            ),
+            (
+                'BV_INSPIRE_2', 'bilibili:BV_INSPIRE_2', 'inspire two',
+                0.9, 'fresh', '独立游戏', '游戏', 'bilibili', 0.88, ?
+            ),
+            (
+                'BV_MERGED_1', 'bilibili:BV_MERGED_1', 'merged one',
+                0.9, 'fresh', 'AI 工具', '科技', 'bilibili', 0.80, ?
+            )
         """,
         (ids["灵感关键词"], ids["灵感关键词"], ids["旧流程关键词"]),
     )

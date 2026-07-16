@@ -100,6 +100,20 @@ test("Firefox manifest declares required data collection categories", () => {
   );
 });
 
+test("Firefox manifest uses the project-owned AMO Gecko ID", () => {
+  const root = process.cwd();
+  const manifest = JSON.parse(
+    readFileSync(join(root, "manifest.firefox.json"), "utf8"),
+  ) as {
+    browser_specific_settings?: { gecko?: { id?: string } };
+  };
+
+  assert.equal(
+    manifest.browser_specific_settings?.gecko?.id,
+    "openbiliclaw-firefox@whiteguo233.github.io",
+  );
+});
+
 test("Chrome and Firefox manifests avoid all-sites host permission", () => {
   const root = process.cwd();
   const chromeManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {

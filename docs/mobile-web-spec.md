@@ -55,7 +55,7 @@
    - 与插件共享 `session=popup&scope=chat` 的主聊天历史
    - 聊天回复完成后刷新画像摘要与活动流
    - 底部固定两行输入框，优先保留聊天上下文浏览空间
-   - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针卡片首次点击后会锁住同卡片其它动作，避免重复提交；空态提示保持 X 关闭入口可用）
+   - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针非聊天动作按归一化后的 `type + domain` 键记录独立的 in-flight 状态，关闭再打开 overlay 或其它重渲染仍从该状态恢复整卡禁用、`is-processing` 与 `aria-busy=true`，避免重复提交；只有服务端接受结算或返回终态 no-op 后才写入 terminal handled key 并移除卡片，传输/服务端失败则清除 pending、保留卡片并恢复全部动作供重试；空态提示保持 X 关闭入口可用）
 
 4. **通用**
    - 底部 Tab 导航栏（推荐/画像/对话）
@@ -174,7 +174,19 @@ if web_dir.is_dir():
 移动端会在 `view-models.js` 中做最小字段适配：
 - 推荐池状态读取 `/api/runtime-status` 的 `pool_available_count`、`last_replenished_count`、`recent_pool_topics`，再映射成推荐页三枚 chip 使用的 `pool_size`、`recent_replenish`、`current_topic`。
 - 推荐页头部用 `getMobileRecommendationHeaderState()` 生成插件语义一致的标题、首屏「换一批」、三枚池状态 chip 和活动辅助行；移动端把池状态压成横向轻量 pill，并把 `xhs-extension-*` / `dy-plugin-*` / `yt-*` 等内部来源名显示为用户可读短标签；列表接近底部时用 `IntersectionObserver` 自动调用 `append`，同时保留底部「加载更多」作为手动兜底。
-- 惊喜推荐沿用插件 compact banner 思路：左侧小缩略图、标签 / 标题 / 理由 / 来源围绕头图形成 featured card，推荐原因带轻量标记，翻页控件与「稍后看」关闭入口放在右上角，动作区仍保持「看看 / 喜欢 / 不感兴趣 / 聊一聊」；「聊一聊」会在当前卡片内展开 composer 和多轮气泡，不切换到对话 tab。
+- 惊喜推荐沿用插件 compact banner 思路：左侧小缩略图、标签 / 标题 / 理由 / 来源围绕头图形成 featured card，推荐原因带轻量标记，翻页控件与「稍后看」关闭入口放在右上角，动作区保持「看看 / 喜欢 / 稍后再看 / 收藏 / 不感兴趣 / 聊一聊」；「聊一聊」会在当前卡片内展开 composer 和多轮气泡，不切换到对话 tab。结果提示与动作区独立渲染：`state="liked"` 同时显示「好，这类多来点。」和完整动作组，like 使用 `aria-pressed="true"` 且只禁用重复 like，其余动作继续可用；like 请求失败则恢复未选中状态。
+
+Delight UI 投影矩阵：
+
+| `state` | `show_status` | `show_actions` | `like_pressed` | `like_disabled` |
+| --- | --- | --- | --- | --- |
+| `pending` | 有响应文案时显示 | 是 | 否 | 否 |
+| `liked` | 是 | 是 | 是 | 是 |
+| `viewed` | 是 | 否 | 否 | 是 |
+| `rejected` | 是 | 否 | 否 | 是 |
+| `chatted / chatting` | 有响应文案时显示 | 是 | 否 | 否 |
+
+本地点击成功、刷新后 `pending-batch` 返回 liked，以及 `delight.liked` 实时事件都复用这份投影；`handled` 仅作为 `viewed / rejected` 的兼容终态，不参与 liked 动作区可见性。
 - MBTI 维度兼容后端对象形态（如 `EI: { pole: "I", strength: 0.8 }`）和旧数组形态，统一映射为 `{ left, right, score }` 后再渲染。
 - MBTI 会保留后端 `confidence` 显示为“可信度”；内容口味将 `long/slow` 等 raw 枚举映射为“长视频 / 慢节奏”等中文标签；使用场景会显示 `session_type` 为“模式”。
 - 认知更新卡片会保留后端 `context_line` 与 `source_label`，即使前端已做过一次 normalize 后再次渲染，也不回退成泛化上下文。
@@ -192,6 +204,7 @@ if web_dir.is_dir():
 复用插件的 `runtime-stream` 协议，移动端关注的事件：
 - `refresh.pool_updated` → 更新池子状态 / header，不替换当前推荐列表
 - `delight.candidate` → 更新惊喜推荐
+- `delight.liked` → 将匹配 bvid 的候选投影为 liked，保留状态与其它动作
 - `profile_updated` → 刷新画像
 - `interest.probe` → 弹出探测通知
 - `activity.added` → 更新活动流

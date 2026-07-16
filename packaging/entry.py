@@ -953,8 +953,11 @@ def main() -> None:
     _copy_legacy_packaged_user_data(_legacy_packaged_user_data_root(), project_root)
     # Very old Windows onedir builds: relocate any user data left in the install
     # dir into the per-user root, BEFORE we create fresh data/ (a whole-dir move
-    # must not land inside a freshly-made empty dir).
-    _migrate_legacy_install_dir_data(bundled_resources, project_root)
+    # must not land inside a freshly-made empty dir). Source launches also use
+    # the repository root as ``bundled_resources``; never treat its ignored
+    # config/data as legacy packaged data when a selftest overrides the profile.
+    if getattr(sys, "frozen", False):
+        _migrate_legacy_install_dir_data(bundled_resources, project_root)
     project_root.mkdir(parents=True, exist_ok=True)
     os.environ["OPENBILICLAW_PROJECT_ROOT"] = str(project_root)
 

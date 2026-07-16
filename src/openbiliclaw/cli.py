@@ -6,10 +6,12 @@ Provides the command-line entry point using Typer.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
 import sys
+import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +23,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from openbiliclaw.llm.base import safe_llm_failure_message
+from openbiliclaw.llm.service import _background_admission_bypass
+from openbiliclaw.published_time import format_published_time
 from openbiliclaw.runtime.ollama_supervisor import (
     _is_default_ollama_endpoint,
     _ollama_is_running,
@@ -30,6 +35,89 @@ from openbiliclaw.runtime.ollama_supervisor import (
     ollama_required,
 )
 from openbiliclaw.soul.preference_analyzer import DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE
+
+_INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
+_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 360.0
+_INIT_DISCOVERY_TIMEOUT_SECONDS = 600.0
+_INIT_COLLECTION_TIMEOUT_SECONDS = 600.0
+_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS = 240.0
+_INIT_X_COLLECTION_TIMEOUT_SECONDS = 180.0
+
+# Stage 2 fans bootstrap events into bounded LLM chunks. Real gateways can
+# legitimately need about three minutes for one 200-event chunk, and the
+# analyzer only starts as many chunks at once as the configured LLM service
+# concurrency permits. Scale the default wall clock by concurrency waves so a
+# healthy single-slot gateway is not killed halfway through a 1,100-event
+# bootstrap while faster multi-slot gateways still retain a useful deadline.
+# One extra wave covers the single reasoning-only / transient-limit recovery
+# that a healthy run may need without turning progress into an unlimited lease.
+# Explicit caller overrides (including tiny test budgets and <=0 "disabled")
+# remain exact.
+_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE = 300.0
+_INIT_PROFILE_ANALYSIS_RECOVERY_RESERVE_SECONDS = 300.0
+
+_INIT_PROFILE_BUILD_TIMEOUT_MESSAGE = (
+    "画像生成等待 AI 服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
+    "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
+)
+
+
+def _profile_analysis_concurrency(soul_engine: Any) -> int:
+    """Return the effective preference-analysis fan-out for timeout sizing."""
+    analyzer = getattr(soul_engine, "_preference_analyzer", None)
+    service = getattr(analyzer, "registry", None)
+    configured = getattr(service, "concurrency", 1)
+    try:
+        return max(1, int(configured))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _profile_analysis_timeout_seconds(
+    *,
+    event_count: int,
+    requested: float | None,
+    concurrency: int = 1,
+) -> float | None:
+    """Return stage-2's bounded wall clock for this bootstrap size."""
+    if requested is not None:
+        return requested if requested > 0 else None
+    chunks = max(
+        1,
+        (max(0, event_count) + DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE - 1)
+        // DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    )
+    waves = (chunks + max(1, concurrency) - 1) // max(1, concurrency)
+    return max(
+        _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS,
+        waves * _INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE
+        + _INIT_PROFILE_ANALYSIS_RECOVERY_RESERVE_SECONDS,
+    )
+
+
+def _profile_analysis_timeout_message(seconds: float) -> str:
+    minutes = max(1, (max(1, int(seconds)) + 59) // 60)
+    return (
+        f"偏好分析等待 AI 服务超过本轮 {minutes} 分钟上限仍未返回结果，"
+        "已自动停止，避免继续卡住。常见原因是 Base URL、模型名或代理配置错误，"
+        "网络无法访问模型服务，或模型服务响应过慢。请到模型设置测试 AI 服务，"
+        "修正后再重试初始化。"
+    )
+
+
+_INIT_DISCOVERY_TIMEOUT_MESSAGE = (
+    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 10 分钟仍未完成，"
+    "本次初始化已按“部分完成”结束，避免继续卡住。"
+    "常见原因是所选内容源未登录或网络不可达，也可能是 AI 评估响应过慢。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+_INIT_DISCOVERY_PARTIAL_MESSAGE = (
+    "画像已生成，但首轮内容发现、个性化评分或推荐文案生成失败，"
+    "尚未产出可直接浏览的首轮内容，本次初始化已按“部分完成”结束。"
+    "常见原因是所选内容源暂不可用，或 AI 评估 / 文案生成失败。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
 
 
 def _force_utf8_stdout_on_windows() -> None:
@@ -248,7 +336,7 @@ _EXTENSION_PRESENCE_REQUIRED_WARNING = (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping
 
 
 def _print_page_title(title: str, subtitle: str = "") -> None:
@@ -375,6 +463,8 @@ async def _run_with_progress(
     label: str,
     eta_seconds: int,
     tick_seconds: int = 20,
+    status_provider: Callable[[], str] | None = None,
+    progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> Any:
     """Run a coroutine while printing periodic progress updates.
 
@@ -385,6 +475,14 @@ async def _run_with_progress(
     "started, ETA Xs" line, ticks every ``tick_seconds`` with
     elapsed/ETA while the work runs, and prints a final completion
     line with actual wall time.
+
+    ``status_provider`` (optional) returns a short live-status suffix —
+    e.g. ``"已完成 3/12 批"`` — appended to every heartbeat so a stalled
+    inner batch shows a *frozen* sub-progress next to the growing
+    elapsed clock, pinpointing where it hung. The ETA half never lies:
+    once ``elapsed`` passes ``eta_seconds`` the heartbeat switches from a
+    ``预计还需 ~Ns`` countdown (which would otherwise pin at ``~0s`` and
+    read as "about to finish") to an explicit "已超预估、仍在处理" notice.
     """
     import time as _time
     from contextlib import suppress as _suppress
@@ -396,8 +494,20 @@ async def _run_with_progress(
         while True:
             await asyncio.sleep(tick_seconds)
             elapsed = int(_time.monotonic() - start)
-            remaining = max(0, eta_seconds - elapsed)
-            console.print(f"  [dim]· {label}: 已用 {elapsed}s / 预计还需 ~{remaining}s[/dim]")
+            if elapsed < eta_seconds:
+                eta_part = f"预计还需 ~{eta_seconds - elapsed}s"
+            else:
+                eta_part = f"已超预估(~{eta_seconds}s)，仍在处理"
+            status = ""
+            if status_provider is not None:
+                with _suppress(Exception):
+                    text = status_provider()
+                    if text:
+                        status = f" · {text}"
+            console.print(f"  [dim]· {label}: 已用 {elapsed}s / {eta_part}{status}[/dim]")
+            if progress_callback is not None:
+                with _suppress(Exception):
+                    await progress_callback(elapsed, eta_seconds)
 
     ticker_task = asyncio.create_task(_ticker())
     try:
@@ -413,10 +523,16 @@ async def _run_with_progress(
 
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
+    published = format_published_time(
+        getattr(item.content, "published_at", ""),
+        getattr(item.content, "published_label", ""),
+    )
     rows = [
         ("标题", item.content.title or "（暂无）"),
         ("UP 主", item.content.up_name or "（未知）"),
     ]
+    if published:
+        rows.append(("发布时间", published))
     if item.topic_label:
         rows.append(("话题标签", item.topic_label))
     rows.extend(
@@ -469,6 +585,19 @@ def _build_registry() -> Any:
     from openbiliclaw.llm import build_llm_registry
 
     return build_llm_registry(load_config())
+
+
+def _build_llm_concurrency_gate() -> Any:
+    """Return the single LLM gate owned by this CLI process composition."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.llm.concurrency import LLMConcurrencyGate
+
+    cached = _RUNTIME_COMPONENTS.get("llm_concurrency_gate")
+    if cached is not None:
+        return cached
+    gate = LLMConcurrencyGate(load_config().llm.concurrency)
+    _RUNTIME_COMPONENTS["llm_concurrency_gate"] = gate
+    return gate
 
 
 def _build_auth_manager() -> Any:
@@ -544,6 +673,7 @@ def _build_soul_engine() -> Any:
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
         module_overrides=module_overrides_from_config(cfg),
         llm_concurrency=cfg.llm.concurrency,
+        llm_concurrency_gate=_build_llm_concurrency_gate(),
         speculation_interval_minutes=cfg.scheduler.speculation_interval_minutes,
         speculation_ttl_days=cfg.scheduler.speculation_ttl_days,
         speculation_cooldown_days=cfg.scheduler.speculation_cooldown_days,
@@ -591,6 +721,7 @@ def _build_recommendation_engine() -> Any:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(cfg),
         concurrency=cfg.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     from openbiliclaw.llm.registry import build_embedding_service
 
@@ -685,6 +816,7 @@ def _build_discovery_engine() -> Any:
         SearchStrategy,
         TrendingStrategy,
     )
+    from openbiliclaw.llm.concurrency import background_llm_concurrency
     from openbiliclaw.llm.service import LLMService, module_overrides_from_config
 
     memory = _build_memory_manager()
@@ -700,12 +832,11 @@ def _build_discovery_engine() -> Any:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(cfg),
         concurrency=cfg.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     concurrency = DiscoveryConcurrencyController(
         bilibili_request_concurrency=2,
-        # Inherit dataclass default (currently 32) — sized so an init
-        # discover's ~32 batches all fan out in a single wave instead
-        # of queueing behind a tight cap. See engine.py for rationale.
+        llm_evaluation_concurrency=background_llm_concurrency(cfg.llm.concurrency),
     )
 
     # Build embedding service from config (optional)
@@ -926,6 +1057,25 @@ def main(log_level: str | None = typer.Option(None, "--log-level")) -> None:
     _APP_CONTEXT["log_level"] = log_level
     _bootstrap_container_runtime()
     _initialize_logging(log_level_override=log_level)
+    _sync_outbound_proxy()
+
+
+def _sync_outbound_proxy() -> None:
+    """Mirror [network].proxy into the process-level source of truth for CLI.
+
+    Runs once per CLI invocation so any command that builds an LLM registry or
+    the updater routes overseas traffic through the configured proxy. Guarded
+    so a missing/broken config never blocks a command from starting.
+    """
+    import contextlib
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.network import set_outbound_proxy
+
+    # Config resolution must never block a command from starting.
+    with contextlib.suppress(Exception):
+        network = load_config().network
+        set_outbound_proxy(network.proxy, mode=network.mode)
 
 
 def _print_config_guidance(messages: list[str]) -> None:
@@ -1059,7 +1209,7 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-flash"},
     # Ollama: project is Chinese-primary; qwen2.5:7b handles Chinese
     # noticeably better than llama3 at the same size.
-    "ollama": {"base_url": "http://localhost:11434/v1", "model": "qwen2.5:7b"},
+    "ollama": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b"},
     # OpenRouter: route to OpenAI's cheapest current-gen by default.
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-5-nano"},
 }
@@ -1339,7 +1489,7 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_has_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Return True if Ollama already has the named model pulled."""
     import httpx
 
@@ -1358,7 +1508,7 @@ def _ollama_has_model(model: str, host: str = "http://localhost:11434") -> bool:
     return False
 
 
-def _ollama_pull_model(model: str, host: str = "http://localhost:11434") -> bool:
+def _ollama_pull_model(model: str, host: str = "http://127.0.0.1:11434") -> bool:
     """Stream a model pull from Ollama; print progress to console."""
     import httpx
 
@@ -1489,7 +1639,7 @@ def _save_embedding_config(
     if base_url:
         config.llm.embedding.base_url = base_url.strip()
     elif provider == "ollama" and not config.llm.embedding.base_url.strip():
-        config.llm.embedding.base_url = "http://localhost:11434/v1"
+        config.llm.embedding.base_url = "http://127.0.0.1:11434/v1"
     if api_key:
         config.llm.embedding.api_key = api_key.strip()
     save_config(config, diagnostics.config_path)
@@ -2208,24 +2358,42 @@ async def _run_init_discovery_backfill_async(
     *,
     target_pool_count: int = 100,
     label_suffix: str = "",
+    progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
 ) -> int:
-    """Backfill the initial discovery pool in stages until the target is reached."""
+    """Build the first serviceable discovery pool from the committed profile."""
     from openbiliclaw.discovery.pool_snapshot import build_cold_start_pool_snapshot
+    from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+    async def _report(done: int, total: int, note: str) -> None:
+        if progress_callback is None:
+            return
+        result = progress_callback(done, total, note)
+        if inspect.isawaitable(result):
+            await result
 
     database = _get_runtime_database()
     discovery_engine = _build_discovery_engine()
+    gate = _build_llm_concurrency_gate()
+    target = max(0, int(target_pool_count))
+    if target == 0:
+        await _report(4, 4, "已跳过首轮内容池构建")
+        return 0
+
     discovered_count = 0
+    copy_error: BaseException | None = None
 
     for index, strategies in enumerate(_INIT_DISCOVERY_PLAN, start=1):
         current_pool_count = database.count_pool_candidates()
-        if current_pool_count >= target_pool_count:
+        gate.update_inventory(available=current_pool_count, target=target)
+        if current_pool_count >= target:
             break
-        request_limit = max(20, target_pool_count - current_pool_count)
+        await _report(0, 4, "正在基于完整画像生成发现方向并抓取候选")
+        request_limit = max(20, target - current_pool_count)
         pool_snapshot = (
             build_cold_start_pool_snapshot(
                 profile,
-                pool_target_count=target_pool_count,
-                source_targets={"bilibili": target_pool_count},
+                pool_target_count=target,
+                source_targets={"bilibili": target},
             )
             if current_pool_count <= 0
             else None
@@ -2234,9 +2402,7 @@ async def _run_init_discovery_backfill_async(
             f"补货阶段 {index}/{len(_INIT_DISCOVERY_PLAN)}: {_format_strategy_group(strategies)}"
             f"{label_suffix}"
         )
-        console.print(
-            f"当前池子 {current_pool_count}/{target_pool_count}，本轮请求上限 {request_limit}"
-        )
+        console.print(f"当前池子 {current_pool_count}/{target}，本轮请求上限 {request_limit}")
         discovered = await _run_with_progress(
             discovery_engine.discover(
                 profile,
@@ -2251,34 +2417,43 @@ async def _run_init_discovery_backfill_async(
             eta_seconds=300,
         )
         discovered_count += len(discovered)
-        console.print(
-            "阶段完成: "
-            f"当前池子 {database.count_pool_candidates()}/{target_pool_count}，"
-            f"本轮发现 {len(discovered)} 条"
+        current_pool_count = database.count_pool_candidates()
+        gate.update_inventory(available=current_pool_count, target=target)
+        await _report(
+            2,
+            4,
+            f"已发现 {discovered_count} 条候选，正在生成首轮推荐文案",
         )
 
+        if current_pool_count < target:
+            recommendation_engine = _build_recommendation_engine()
+            try:
+                copied = await recommendation_engine.drain_pending_expression_copy(
+                    profile=profile,
+                    limit=max(1, target),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                copy_error = exc
+                copied = max(0, int(getattr(exc, "completed", 0) or 0))
+            current_pool_count = database.count_pool_candidates()
+            gate.update_inventory(available=current_pool_count, target=target)
+            await _report(
+                3,
+                4,
+                f"已生成 {copied} 条推荐文案，正在验证首轮内容可用性",
+            )
+        console.print(
+            f"阶段完成: 当前池子 {current_pool_count}/{target}，本轮发现 {len(discovered)} 条"
+        )
+
+    available = database.count_pool_candidates()
+    gate.update_inventory(available=available, target=target)
+    if available <= 0:
+        raise InitialPoolUnavailableError(discovered_count=discovered_count) from copy_error
+    await _report(4, 4, f"首轮内容池已就绪（{available} 条可直接浏览）")
     return discovered_count
-
-
-def _build_draft_profile_for_discover(memory: Any) -> Any:
-    """Build a preference-only ``OnionProfile`` so discover can start
-    in parallel with ``build_initial_profile`` (P3).
-
-    The full profile builder runs an LLM synthesis call over history +
-    preference + awareness + insights to produce
-    ``personality_portrait``, ``deep_needs``, ``core_traits`` etc. —
-    fields that *colour* discover's evaluation prompt but aren't
-    load-bearing for relevance scoring (interests + style +
-    favorite_up_users carry the signal). Letting discover use a
-    preference-only draft while the real profile builds in the
-    background overlaps two phases that previously serialised.
-    """
-    from openbiliclaw.soul.profile import OnionProfile
-
-    preference_layer = memory.get_layer("preference").data
-    draft = OnionProfile()
-    draft.populate_from_flat_preference(preference_layer)
-    return draft
 
 
 def _xhs_bootstrap_dedupe_hours() -> float:
@@ -2441,6 +2616,7 @@ def _collect_xhs_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued bootstrap_profile task.
 
@@ -2486,6 +2662,8 @@ def _collect_xhs_bootstrap_events(
     poll_interval = 0.5
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], {}, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -2617,6 +2795,7 @@ def _collect_dy_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued Douyin bootstrap task.
 
@@ -2662,6 +2841,8 @@ def _collect_dy_bootstrap_events(
     poll_interval = 0.5
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], {}, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -2777,6 +2958,7 @@ def _collect_yt_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued YouTube bootstrap task.
 
@@ -2815,6 +2997,8 @@ def _collect_yt_bootstrap_events(
     poll_interval = 0.5
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], {}, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -2940,6 +3124,7 @@ def _collect_zhihu_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and harvest a previously-enqueued Zhihu bootstrap task."""
     import json
@@ -2978,6 +3163,8 @@ def _collect_zhihu_bootstrap_events(
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], empty_counts, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -3458,6 +3645,7 @@ def _collect_reddit_bootstrap_events(
     task_id: str | None,
     *,
     max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
     """Wait for and convert a Reddit bootstrap_events task."""
     import json
@@ -3490,6 +3678,8 @@ def _collect_reddit_bootstrap_events(
     deadline = time.monotonic() + max(0.0, max_wait_seconds)
     task: dict[str, Any] | None = None
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], empty_counts, "timeout"
         task = queue.get(task_id)
         status = str((task or {}).get("status", "")).strip()
         if status in {"completed", "failed"}:
@@ -5597,6 +5787,8 @@ class InitResult:
     discovered_count: int
     discovery_error: bool
     discover_exc: BaseException | None
+    discovery_reason: str | None = None
+    discovery_detail: str = ""
 
 
 class GuidedInitError(Exception):
@@ -5754,6 +5946,10 @@ async def run_guided_init(
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
     coordinator: Any = None,
     run_id: str | None = None,
+    profile_analysis_timeout_seconds: float | None = None,
+    profile_build_timeout_seconds: float = _INIT_PROFILE_BUILD_TIMEOUT_SECONDS,
+    discovery_timeout_seconds: float = _INIT_DISCOVERY_TIMEOUT_SECONDS,
+    collection_timeout_seconds: float = _INIT_COLLECTION_TIMEOUT_SECONDS,
 ) -> InitResult:
     """Shared async init pipeline (gui-init spec §1).
 
@@ -5763,14 +5959,20 @@ async def run_guided_init(
 
       1. fetch B站 + collect cross-platform bootstrap signals → propagate
       2. analyze preferences
-      3/4. build soul profile ‖ backfill discovery pool (parallel)
+      3. build and durably commit the full soul profile
+      4. discover, evaluate, write recommendation copy, and verify the first
+         serviceable pool from that committed profile
 
     Bilibili is optional like every other source (``include_bili``); at
     least one selected source must yield signals or stage 1 raises
     ``GuidedInitError("empty_signals")``. ``client`` may be ``None`` when
-    ``include_bili`` is False.
+    ``include_bili`` is False. Stage 1 has one wall-clock budget shared by all
+    selected sources (10 minutes by default), with shorter Bilibili/X caps and
+    cooperative cancellation for extension collectors. Collected events are
+    committed in one SQLite transaction before preference analysis starts.
 
-    ``discover_backfill`` is the one genuinely path-specific step: the CLI
+    Stage 4 never starts from a draft profile. ``discover_backfill`` is the one
+    genuinely path-specific step: the CLI
     injects :func:`_run_init_discovery_backfill_async` (one-shot engine);
     the API injects ``controller.run_init_backfill`` (holds the refresh
     lock). When ``coordinator``/``run_id`` are supplied, stage transitions
@@ -5786,9 +5988,217 @@ async def run_guided_init(
         if coordinator is not None and run_id is not None:
             await coordinator.stage_done(run_id, n, status=status, reason=reason)
 
+    async def _report_stage_progress(
+        stage: int,
+        *,
+        done: int = 0,
+        total: int = 0,
+        note: str | None = None,
+        mode: str = "determinate",
+        elapsed_seconds: int | None = None,
+        max_seconds: int | None = None,
+        substantive: bool = True,
+    ) -> None:
+        """Send additive progress fields while tolerating legacy test/plugins.
+
+        Third-party coordinators built against the older ``done/total/note``
+        contract keep working; the in-tree coordinator receives the richer
+        elapsed/indeterminate payload.
+        """
+        if coordinator is None or run_id is None:
+            return
+        progress = coordinator.stage_progress
+        values: dict[str, Any] = {
+            "done": done,
+            "total": total,
+            "note": note,
+            "mode": mode,
+            "elapsed_seconds": elapsed_seconds,
+            "max_seconds": max_seconds,
+            "substantive": substantive,
+        }
+        try:
+            parameters = inspect.signature(progress).parameters.values()
+            accepts_kwargs = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
+            accepted = {p.name for p in parameters}
+        except (TypeError, ValueError):
+            accepts_kwargs = True
+            accepted = set()
+        kwargs = (
+            values
+            if accepts_kwargs
+            else {key: value for key, value in values.items() if key in accepted}
+        )
+        await progress(run_id, stage, **kwargs)
+
     def _register_task(task_id: str | None) -> None:
         if coordinator is not None and run_id is not None and task_id:
             coordinator.register_enqueued_task(run_id, task_id)
+
+    # Stage-1 per-source progress: stage 1 serially fetches/collects each
+    # selected source (single platform can block up to ~300s), so surface which
+    # source is in flight and how many are done — otherwise the GUI bar sits at
+    # 13% for minutes (init-progress spec Phase 1). done counts sources that
+    # finished; total is the count of selected sources (B站 is the first).
+    _stage1_source_total = sum(
+        (
+            include_bili,
+            include_xhs,
+            include_dy,
+            include_yt,
+            include_x,
+            include_zhihu,
+            include_reddit,
+        )
+    )
+    _stage1_source_done = 0
+    _stage1_started_at = asyncio.get_running_loop().time()
+    _stage1_deadline = (
+        _stage1_started_at + collection_timeout_seconds
+        if collection_timeout_seconds > 0
+        else float("inf")
+    )
+    _stage1_budget_exhausted = False
+
+    def _stage1_remaining_seconds() -> float:
+        return max(0.0, _stage1_deadline - asyncio.get_running_loop().time())
+
+    async def _await_stage1_operation(
+        factory: Callable[[], Awaitable[Any]],
+        *,
+        label: str,
+        max_wait_seconds: float,
+    ) -> tuple[Any | None, bool]:
+        """Run one source under both its own and stage-1's global budget."""
+        nonlocal _stage1_budget_exhausted
+        available = _stage1_remaining_seconds()
+        budget = min(max(0.0, max_wait_seconds), available)
+        if budget <= 0:
+            _stage1_budget_exhausted = True
+            return None, True
+        started = asyncio.get_running_loop().time()
+        operation: asyncio.Future[Any] = asyncio.ensure_future(factory())
+        timed_out = False
+        try:
+            while not operation.done():
+                elapsed = asyncio.get_running_loop().time() - started
+                remaining = min(
+                    budget - elapsed,
+                    _stage1_remaining_seconds(),
+                )
+                if remaining <= 0:
+                    timed_out = True
+                    _stage1_budget_exhausted = _stage1_remaining_seconds() <= 0
+                    break
+                done_tasks, _ = await asyncio.wait({operation}, timeout=min(10.0, remaining))
+                if operation in done_tasks:
+                    break
+                elapsed_int = max(0, int(asyncio.get_running_loop().time() - started))
+                global_left = max(0, int(_stage1_remaining_seconds()))
+                await _report_stage_progress(
+                    1,
+                    done=_stage1_source_done,
+                    total=_stage1_source_total,
+                    note=f"正在采集 {label} · 已等待 {elapsed_int}s · 阶段剩余最多 {global_left}s",
+                    mode="indeterminate",
+                    elapsed_seconds=elapsed_int,
+                    max_seconds=max(1, int(budget)),
+                    substantive=False,
+                )
+            if timed_out:
+                operation.cancel()
+                with suppress(BaseException):
+                    await operation
+                return None, True
+            return await operation, False
+        except asyncio.CancelledError:
+            operation.cancel()
+            with suppress(BaseException):
+                await operation
+            raise
+
+    def _source_wait_seconds(env_name: str, fallback: float) -> float:
+        try:
+            return max(0.0, float(os.environ.get(env_name, str(fallback))))
+        except (TypeError, ValueError):
+            return fallback
+
+    async def _run_extension_collector(
+        collector: Callable[..., tuple[list[dict[str, Any]], dict[str, int], str]],
+        task_id: str | None,
+        *,
+        label: str,
+        env_name: str,
+        default_wait_seconds: float,
+    ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+        """Run a blocking extension poll with a cooperative stop flag."""
+        cancel_event = threading.Event()
+        collector_done = threading.Event()
+        wait_seconds = min(
+            _source_wait_seconds(env_name, default_wait_seconds),
+            _stage1_remaining_seconds(),
+        )
+
+        def _collect() -> tuple[list[dict[str, Any]], dict[str, int], str]:
+            try:
+                kwargs: dict[str, Any] = {}
+                try:
+                    parameters = inspect.signature(collector).parameters.values()
+                    accepts_kwargs = any(
+                        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters
+                    )
+                    accepted = {p.name for p in parameters}
+                except (TypeError, ValueError):
+                    accepts_kwargs = True
+                    accepted = set()
+                if accepts_kwargs or "max_wait_seconds" in accepted:
+                    kwargs["max_wait_seconds"] = wait_seconds
+                if accepts_kwargs or "cancel_event" in accepted:
+                    kwargs["cancel_event"] = cancel_event
+                return collector(task_id, **kwargs)
+            finally:
+                collector_done.set()
+
+        try:
+            result, timed_out = await _await_stage1_operation(
+                lambda: asyncio.to_thread(_collect),
+                label=label,
+                # Leave one poll interval of outer grace; the global budget
+                # remains the hard ceiling enforced by the helper.
+                max_wait_seconds=wait_seconds + 0.75,
+            )
+        finally:
+            cancel_event.set()
+            # Cancelling asyncio.to_thread() cannot stop an already-running
+            # worker. Give the cooperative 0.5s poll loop a bounded drain so a
+            # terminal init does not leave a collector touching the task queue
+            # after its run lock has been released. Poll the threading.Event
+            # from the event loop instead of consuming a second executor slot.
+            drain_deadline = asyncio.get_running_loop().time() + 1.0
+            while not collector_done.is_set():
+                remaining = drain_deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.01, remaining))
+        if timed_out or result is None:
+            return [], {}, "timeout"
+        return cast("tuple[list[dict[str, Any]], dict[str, int], str]", result)
+
+    async def _stage1_begin_source(label: str, *, wait_hint: str = "") -> None:
+        if coordinator is not None and run_id is not None:
+            note = f"正在采集 {label}"
+            if wait_hint:
+                note += f" · {wait_hint}"
+            await _report_stage_progress(
+                1,
+                done=_stage1_source_done,
+                total=_stage1_source_total,
+                note=note,
+            )
+
+    def _stage1_finish_source() -> None:
+        nonlocal _stage1_source_done
+        _stage1_source_done += 1
 
     async def _enqueue_register_kick(
         enqueue_fn: Callable[..., str | None], source: str
@@ -5828,19 +6238,30 @@ async def run_guided_init(
     favorites_data: list[dict[str, Any]] = []
     following_data: list[dict[str, Any]] = []
     if include_bili:
-        history, favorites_data, following_data = await _fetch_bilibili_init_data(
-            client,
-            history_limit=history_limit,
-            favorite_limit=favorite_limit,
-            follow_limit=follow_limit,
+        await _stage1_begin_source("B 站")
+        bili_result, bili_timed_out = await _await_stage1_operation(
+            lambda: _fetch_bilibili_init_data(
+                client,
+                history_limit=history_limit,
+                favorite_limit=favorite_limit,
+                follow_limit=follow_limit,
+            ),
+            label="B 站",
+            max_wait_seconds=_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS,
         )
-        if not history:
-            raise GuidedInitError("empty_history", "当前无法从 B 站历史中生成初始画像。")
-        console.print(
-            f"  浏览历史 [green]{len(history)}[/green] 条"
-            f" / 收藏 [green]{len(favorites_data)}[/green] 个"
-            f" / 关注 [green]{len(following_data)}[/green] 人"
-        )
+        if bili_timed_out or bili_result is None:
+            console.print("  [yellow]B 站采集超过本阶段等待上限，已跳过并继续其他来源。[/yellow]")
+        else:
+            history, favorites_data, following_data = cast(
+                "tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]",
+                bili_result,
+            )
+            console.print(
+                f"  浏览历史 [green]{len(history)}[/green] 条"
+                f" / 收藏 [green]{len(favorites_data)}[/green] 个"
+                f" / 关注 [green]{len(following_data)}[/green] 人"
+            )
+        _stage1_finish_source()
     else:
         console.print("  [dim]未选择 B 站来源,跳过 B 站历史 / 收藏 / 关注拉取。[/dim]")
 
@@ -5848,9 +6269,20 @@ async def run_guided_init(
     # run them in a worker thread (Database is check_same_thread=False) so
     # the API event loop isn't frozen for the collect window. CLI output /
     # ordering is unchanged (it's sequential here regardless).
-    xhs_events, xhs_scope_counts, xhs_status = await asyncio.to_thread(
-        _collect_xhs_bootstrap_events, xhs_task_id
-    )
+    if include_xhs:
+        await _stage1_begin_source("小红书", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_xhs:
+        xhs_events, xhs_scope_counts, xhs_status = await _run_extension_collector(
+            _collect_xhs_bootstrap_events,
+            xhs_task_id,
+            label="小红书",
+            env_name="OPENBILICLAW_XHS_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_XHS_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        xhs_events, xhs_scope_counts, xhs_status = [], {}, "skipped"
+    if include_xhs:
+        _stage1_finish_source()
     if xhs_status == "ok":
         console.print(
             "  小红书 "
@@ -5881,9 +6313,20 @@ async def run_guided_init(
             "  [dim]已请求扩展拉抖音发布 / 收藏 / 点赞 / 关注"
             "(开始抢一次浏览器焦点,~60-90 秒)。[/dim]"
         )
-    dy_events, dy_scope_counts, dy_status = await asyncio.to_thread(
-        _collect_dy_bootstrap_events, dy_task_id
-    )
+    if include_dy:
+        await _stage1_begin_source("抖音", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_dy:
+        dy_events, dy_scope_counts, dy_status = await _run_extension_collector(
+            _collect_dy_bootstrap_events,
+            dy_task_id,
+            label="抖音",
+            env_name="OPENBILICLAW_DY_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_DY_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        dy_events, dy_scope_counts, dy_status = [], {}, "skipped"
+    if include_dy:
+        _stage1_finish_source()
     if dy_status == "ok":
         console.print(
             "  抖音 "
@@ -5916,9 +6359,20 @@ async def run_guided_init(
             "  [dim]已请求扩展拉 YouTube 观看历史 / 订阅 / 点赞"
             "(开始抢一次浏览器焦点,~30-90 秒)。[/dim]"
         )
-    yt_events, yt_scope_counts, yt_status = await asyncio.to_thread(
-        _collect_yt_bootstrap_events, yt_task_id
-    )
+    if include_yt:
+        await _stage1_begin_source("YouTube", wait_hint="扩展未响应会在约 5 分钟后自动跳过")
+    if include_yt:
+        yt_events, yt_scope_counts, yt_status = await _run_extension_collector(
+            _collect_yt_bootstrap_events,
+            yt_task_id,
+            label="YouTube",
+            env_name="OPENBILICLAW_YT_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_YT_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        yt_events, yt_scope_counts, yt_status = [], {}, "skipped"
+    if include_yt:
+        _stage1_finish_source()
     if yt_status == "ok":
         console.print(
             "  YouTube "
@@ -5949,9 +6403,20 @@ async def run_guided_init(
         console.print(
             "  [dim]已请求扩展拉知乎浏览 / 收藏 / 点赞(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
-    zhihu_events, zhihu_scope_counts, zhihu_status = await asyncio.to_thread(
-        _collect_zhihu_bootstrap_events, zhihu_task_id
-    )
+    if include_zhihu:
+        await _stage1_begin_source("知乎", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_zhihu:
+        zhihu_events, zhihu_scope_counts, zhihu_status = await _run_extension_collector(
+            _collect_zhihu_bootstrap_events,
+            zhihu_task_id,
+            label="知乎",
+            env_name="OPENBILICLAW_ZHIHU_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_ZHIHU_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        zhihu_events, zhihu_scope_counts, zhihu_status = [], {}, "skipped"
+    if include_zhihu:
+        _stage1_finish_source()
     if zhihu_status == "ok":
         zhihu_activity_favorites = int(zhihu_scope_counts.get("zhihu_activity_favorite", 0))
         zhihu_favorites = (
@@ -5983,10 +6448,22 @@ async def run_guided_init(
     x_likes_data: list[dict[str, Any]] = []
     x_bookmarks_data: list[dict[str, Any]] = []
     if include_x:
-        x_likes_data, x_bookmarks_data = await _fetch_x_init_data(
-            likes_limit=_INIT_X_LIKES_LIMIT,
-            bookmarks_limit=_INIT_X_BOOKMARKS_LIMIT,
+        await _stage1_begin_source("X")
+        x_result, x_timed_out = await _await_stage1_operation(
+            lambda: _fetch_x_init_data(
+                likes_limit=_INIT_X_LIKES_LIMIT,
+                bookmarks_limit=_INIT_X_BOOKMARKS_LIMIT,
+            ),
+            label="X",
+            max_wait_seconds=_INIT_X_COLLECTION_TIMEOUT_SECONDS,
         )
+        if x_timed_out or x_result is None:
+            console.print("  [yellow]X 采集超过等待上限，已跳过并继续初始化。[/yellow]")
+        else:
+            x_likes_data, x_bookmarks_data = cast(
+                "tuple[list[dict[str, Any]], list[dict[str, Any]]]", x_result
+            )
+        _stage1_finish_source()
         if x_likes_data or x_bookmarks_data:
             console.print(
                 f"  X 点赞 [green]{len(x_likes_data)}[/green] 条"
@@ -6001,9 +6478,20 @@ async def run_guided_init(
         console.print(
             "  [dim]已请求扩展拉 Reddit 收藏 / 点赞 / 订阅(使用当前浏览器登录态,~30-90 秒)。[/dim]"
         )
-    reddit_events, reddit_scope_counts, reddit_status = await asyncio.to_thread(
-        _collect_reddit_bootstrap_events, reddit_task_id
-    )
+    if include_reddit:
+        await _stage1_begin_source("Reddit", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+    if include_reddit:
+        reddit_events, reddit_scope_counts, reddit_status = await _run_extension_collector(
+            _collect_reddit_bootstrap_events,
+            reddit_task_id,
+            label="Reddit",
+            env_name="OPENBILICLAW_REDDIT_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_REDDIT_BOOTSTRAP_WAIT_SECONDS,
+        )
+    else:
+        reddit_events, reddit_scope_counts, reddit_status = [], {}, "skipped"
+    if include_reddit:
+        _stage1_finish_source()
     if reddit_status == "ok":
         console.print(
             "  Reddit "
@@ -6101,6 +6589,18 @@ async def run_guided_init(
     # With bilibili now optional, the floor is "at least one selected source
     # produced signals" — an all-empty run can't build a meaningful profile.
     if not events:
+        if _stage1_budget_exhausted:
+            raise GuidedInitError(
+                "collection_timeout",
+                "数据采集已达到 10 分钟总等待上限，且暂未取得可用于画像的行为信号。"
+                "系统已停止继续等待平台或扩展，避免初始化锁死；请确认平台登录和扩展连接后重试。",
+            )
+        if include_bili and _stage1_source_total == 1:
+            raise GuidedInitError(
+                "empty_history",
+                "B 站历史为空，收藏和关注也没有取得可用于画像的信号。"
+                "请先在 B 站产生一些观看 / 收藏 / 关注记录，或启用其他数据来源后重试 init。",
+            )
         raise GuidedInitError(
             "empty_signals",
             "所选数据来源没有拉到任何行为信号，无法生成初始画像。"
@@ -6123,30 +6623,138 @@ async def run_guided_init(
                 "reddit": len(reddit_events),
             }
         )
-    for event in events_to_persist:
-        await memory.propagate_event(event)
+    propagate_events = getattr(memory, "propagate_events", None)
+    if callable(propagate_events):
+        await propagate_events(events_to_persist)
+    else:
+        for event in events_to_persist:
+            await memory.propagate_event(event)
     await _stage_done(1)
 
     # ── Stage 2: analyze preferences ──
     await _stage_started(2)
     _print_section_title("2/4 分析偏好")
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
+    profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
+    profile_analysis_budget = _profile_analysis_timeout_seconds(
+        event_count=len(events),
+        requested=profile_analysis_timeout_seconds,
+        concurrency=profile_analysis_concurrency,
+    )
+
+    # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
+    # instead of sitting static (init-progress spec Phase 1). We ALWAYS echo the
+    # completion line to stdout (desktop.log captures stdout, not the logger's
+    # openbiliclaw.log — so without this the desktop log shows only the eta
+    # heartbeat and a stall is invisible) and, on the API path, also fan the
+    # count onto coordinator.stage_progress for the GUI. ``_chunk_progress`` is
+    # a live mirror the heartbeat reads so every tick shows "已完成 X/N 批";
+    # when a chunk hangs that count freezes next to the growing clock.
+    expected_chunk_total = max(
+        1,
+        (len(events) + DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE - 1)
+        // DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    )
+    _chunk_progress = {"done": 0, "total": expected_chunk_total}
+    stage2_started_at = asyncio.get_running_loop().time()
+
+    def _stage2_elapsed() -> int:
+        return max(0, int(asyncio.get_running_loop().time() - stage2_started_at))
+
+    async def _stage2_progress(done: int, total: int) -> None:
+        _chunk_progress["done"] = done
+        _chunk_progress["total"] = total
+        console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
+        await _report_stage_progress(
+            2,
+            done=done,
+            total=total,
+            note=f"第 {done}/{total} 批",
+            elapsed_seconds=_stage2_elapsed(),
+            max_seconds=max(1, int(profile_analysis_budget)) if profile_analysis_budget else 0,
+        )
+
+    def _chunk_status() -> str:
+        total = _chunk_progress["total"]
+        return f"已完成 {_chunk_progress['done']}/{total} 批"
+
+    async def _stage2_tick(elapsed: int, eta_seconds: int) -> None:
+        total = _chunk_progress["total"]
+        await _report_stage_progress(
+            2,
+            done=_chunk_progress["done"],
+            total=total,
+            note=f"{_chunk_status()} · AI 已处理 {elapsed}s",
+            mode="determinate" if total > 0 else "indeterminate",
+            elapsed_seconds=elapsed,
+            max_seconds=max(1, int(profile_analysis_budget)) if profile_analysis_budget else 0,
+            substantive=False,
+        )
+
     # Chunk the event list so bootstrap does bounded batch processing
     # instead of serialising one max-thinking call over hundreds of events.
-    await _run_with_progress(
-        soul_engine.analyze_events(
-            events,
-            event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    await _report_stage_progress(
+        2,
+        done=0,
+        total=expected_chunk_total,
+        note=(
+            f"已完成 0/{expected_chunk_total} 批 · "
+            f"AI 开始处理（并发上限 {profile_analysis_concurrency}）"
         ),
-        label="分析偏好（分片批处理）",
-        eta_seconds=180,
+        elapsed_seconds=0,
+        max_seconds=max(1, int(profile_analysis_budget)) if profile_analysis_budget else 0,
     )
+    try:
+        with _background_admission_bypass():
+            await asyncio.wait_for(
+                _run_with_progress(
+                    soul_engine.analyze_events(
+                        events,
+                        event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+                        progress_callback=_stage2_progress,
+                    ),
+                    label="分析偏好（分片批处理）",
+                    eta_seconds=180,
+                    status_provider=_chunk_status,
+                    progress_callback=_stage2_tick,
+                ),
+                timeout=profile_analysis_budget,
+            )
+    except TimeoutError as exc:
+        raise GuidedInitError(
+            "analyze_failed",
+            _profile_analysis_timeout_message(
+                profile_analysis_budget or _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
+            ),
+        ) from exc
+    except Exception as exc:
+        # Surface the real LLM cause (SSL / no provider / rate limit / timeout /
+        # moderation) so the init page shows *why* stage 2 stalled instead of a
+        # generic crash. Mirrors the stage-3 (build_initial_profile) handling —
+        # this stage is equally LLM-heavy and was the silent-retry sink behind
+        # "卡在分析偏好" reports (issue #113). CancelledError is NOT caught: it
+        # propagates so the wrapper records `cancelled`, never `completed`.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        llm_reason = describe_llm_failure(exc)
+        message = (
+            f"偏好分析失败：{llm_reason}"
+            if llm_reason
+            else "偏好分析阶段出错。可稍后手动重试 `openbiliclaw init`。"
+        )
+        raise GuidedInitError("analyze_failed", message) from exc
     await _stage_done(2)
 
-    # ── Stage 3 + 4: build profile ‖ discovery backfill (parallel) ──
+    # ── Stage 3: build and durably commit the full profile ──
     await _stage_started(3)
-    await _stage_started(4)
-    _print_section_title("3/4 生成画像 + 4/4 发现内容(并发)")
+    _print_section_title("3/4 生成并保存完整画像")
+    await _report_stage_progress(
+        3,
+        note="正在综合偏好、历史与认知线索",
+        mode="indeterminate",
+        elapsed_seconds=0,
+        max_seconds=max(1, int(profile_build_timeout_seconds)),
+    )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
         combined_history.append(
@@ -6186,73 +6794,147 @@ async def run_guided_init(
     if x_likes_events or x_bookmark_events:
         combined_history.extend(_x_events_to_history_items(x_likes_events + x_bookmark_events))
 
-    # Discover starts on a preference-only draft so trending / search /
-    # related_chain / explore can score candidates while the LLM
-    # synthesizes the rich personality_portrait / deep_needs fields.
-    draft_profile = _build_draft_profile_for_discover(memory)
+    async def _build_initial_profile() -> Any:
+        with _background_admission_bypass():
+            return await soul_engine.build_initial_profile(combined_history)
 
-    profile_task = asyncio.create_task(
-        _run_with_progress(
-            soul_engine.build_initial_profile(combined_history),
-            label="生成画像(单次 LLM 综合分析)",
-            eta_seconds=70,
+    async def _stage3_tick(elapsed: int, eta_seconds: int) -> None:
+        await _report_stage_progress(
+            3,
+            note=f"AI 正在综合完整画像 · 已处理 {elapsed}s",
+            mode="indeterminate",
+            elapsed_seconds=elapsed,
+            max_seconds=max(1, int(profile_build_timeout_seconds)),
+            substantive=False,
         )
-    )
-    discover_task = asyncio.create_task(
-        discover_backfill(
-            draft_profile,
-            target_pool_count=target_pool_count,
-            label_suffix=" — 用 P2 草稿画像并发预热",
-        )
-    )
+
     profile_data: Any = None
     discovered_count = 0
     discover_exc: BaseException | None = None
-    try:
-        # Profile is load-bearing. CancelledError is deliberately NOT caught —
-        # it propagates (and the finally tears down the sibling) so the wrapper
-        # records `cancelled`, never `completed`.
-        try:
-            profile_data = await profile_task
-        except Exception as exc:
-            # Surface the real LLM cause (moderation refusal / no provider /
-            # rate limit / timeout) so the init page shows *why* it failed
-            # instead of a generic "稍后重试". Falls back to generic when the
-            # failure carries no recognizable LLM signal.
-            from openbiliclaw.llm.base import describe_llm_failure
+    discovery_reason: str | None = None
+    discovery_detail = ""
 
+    # Profile is load-bearing. CancelledError is deliberately NOT caught so
+    # the API wrapper records `cancelled`, never `completed`.
+    try:
+        profile_data = await asyncio.wait_for(
+            _run_with_progress(
+                _build_initial_profile(),
+                label="生成并保存完整画像(单次 LLM 综合分析)",
+                eta_seconds=70,
+                progress_callback=_stage3_tick,
+            ),
+            timeout=profile_build_timeout_seconds if profile_build_timeout_seconds > 0 else None,
+        )
+    except Exception as exc:
+        # Surface the real LLM cause (moderation refusal / no provider /
+        # rate limit / timeout) so the init page shows *why* it failed.
+        from openbiliclaw.llm.base import describe_llm_failure
+
+        if isinstance(exc, TimeoutError):
+            message = _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE
+        else:
             llm_reason = describe_llm_failure(exc)
             message = (
                 f"画像生成失败：{llm_reason}"
                 if llm_reason
                 else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
             )
-            raise GuidedInitError("profile_failed", message) from exc
-        await _stage_done(3)
+        raise GuidedInitError("profile_failed", message) from exc
 
-        # Discover is best-effort: a normal failure leaves a partial pool the
-        # user can still start with. Cancellation propagates (not caught).
-        try:
-            discovered_count = await discover_task
-        except Exception as exc:
-            discovered_count = 0
-            discover_exc = exc
-        await _stage_done(
+    await _report_stage_progress(
+        3,
+        done=1,
+        total=1,
+        note="完整画像已保存，下一步将严格基于它生成内容",
+    )
+    await _stage_done(3)
+
+    # ── Stage 4: only the committed full profile may drive discovery ──
+    await _stage_started(4)
+    _print_section_title("4/4 建立首轮可用内容池")
+
+    _stage4_live_done = 0
+    _stage4_live_total = 4
+    _stage4_live_note = "准备发现候选内容"
+
+    async def _stage4_progress(done: int, total: int, note: str) -> None:
+        nonlocal _stage4_live_done, _stage4_live_total, _stage4_live_note
+        _stage4_live_done = done
+        _stage4_live_total = total
+        _stage4_live_note = note
+        if coordinator is not None and run_id is not None:
+            await _report_stage_progress(4, done=done, total=total, note=note)
+        else:
+            console.print(f"  [dim]首轮内容池：{note}（{done}/{total}）[/dim]")
+
+    async def _stage4_tick(elapsed: int, eta_seconds: int) -> None:
+        await _report_stage_progress(
             4,
-            status="warning" if discover_exc is not None else "ok",
-            reason="discovery_partial" if discover_exc is not None else None,
+            done=_stage4_live_done,
+            total=_stage4_live_total,
+            note=f"{_stage4_live_note} · 已处理 {elapsed}s",
+            mode="indeterminate",
+            elapsed_seconds=elapsed,
+            max_seconds=max(1, int(discovery_timeout_seconds)),
+            substantive=False,
         )
-    finally:
-        # Guarantee neither parallel task outlives this scope on ANY exit path —
-        # including a CancelledError raised at an await *between* the stages
-        # (e.g. _stage_done(3)'s event publish). An orphaned run_init_backfill
-        # would otherwise keep holding _refresh_lock. Cancel then drain both.
-        for _parallel_task in (profile_task, discover_task):
-            if not _parallel_task.done():
-                _parallel_task.cancel()
-        for _parallel_task in (profile_task, discover_task):
-            with suppress(BaseException):
-                await _parallel_task
+
+    await _stage4_progress(0, 4, "完整画像已就绪，准备发现候选内容")
+    backfill_kwargs: dict[str, Any] = {
+        "target_pool_count": target_pool_count,
+        "label_suffix": "",
+    }
+    try:
+        signature = inspect.signature(discover_backfill)
+    except (TypeError, ValueError):
+        accepts_progress_callback = True
+    else:
+        accepts_progress_callback = "progress_callback" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+    if accepts_progress_callback:
+        backfill_kwargs["progress_callback"] = _stage4_progress
+
+    # Stage 4 is best-effort once the full profile exists: timeout/failure is
+    # terminal *partial success*, and clients may enter the app while the
+    # restarted runtime continues replenishment. Cancellation still propagates.
+    try:
+        discovered_count = await asyncio.wait_for(
+            _run_with_progress(
+                discover_backfill(profile_data, **backfill_kwargs),
+                label="基于完整画像生成首轮内容池",
+                eta_seconds=300,
+                progress_callback=_stage4_tick,
+            ),
+            timeout=discovery_timeout_seconds if discovery_timeout_seconds > 0 else None,
+        )
+        await _stage4_progress(4, 4, "首轮内容已完成评分与推荐文案，可直接浏览")
+    except Exception as exc:
+        from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+        discovered_count = max(0, int(getattr(exc, "discovered_count", 0) or 0))
+        discover_exc = exc
+        if isinstance(exc, TimeoutError):
+            discovery_reason = "discovery_timeout"
+            discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
+        elif isinstance(exc, InitialPoolUnavailableError):
+            discovery_reason = "discovery_partial"
+            discovery_detail = (
+                "画像已生成，首轮发现也已完成"
+                f"（发现 {exc.discovered_count} 条候选），但尚无候选完成评分与推荐文案，"
+                "因此目前没有可直接浏览的首轮内容。本次初始化已按“部分完成”结束，"
+                "系统会在后台继续补齐；你可以先进入应用，并检查 AI 服务与平台登录状态。"
+            )
+        else:
+            discovery_reason = "discovery_partial"
+            discovery_detail = _INIT_DISCOVERY_PARTIAL_MESSAGE
+    await _stage_done(
+        4,
+        status="warning" if discover_exc is not None else "ok",
+        reason=discovery_reason,
+    )
 
     return InitResult(
         history=history,
@@ -6279,6 +6961,8 @@ async def run_guided_init(
         discovered_count=discovered_count,
         discovery_error=discover_exc is not None,
         discover_exc=discover_exc,
+        discovery_reason=discovery_reason,
+        discovery_detail=discovery_detail,
     )
 
 
@@ -6398,13 +7082,13 @@ def init(
         else "拉取所选平台数据（B 站已跳过）"
     )
     console.print(
-        "[bold yellow]⏱  这一步首次运行预计需要 2–5 分钟，"
+        "[bold yellow]⏱  这一步首次运行通常需要 4–20 分钟，"
         "请保持网络畅通别中断。[/bold yellow]\n"
-        "  四个阶段会依次跑：\n"
+        "  四个阶段会严格依次执行，完整画像保存后才开始内容发现：\n"
         f"    1/4  {stage1_label}\n"
         "    2/4  分析偏好（LLM 调用，≈ 30–90s）\n"
-        "    3/4  生成灵魂画像（LLM 调用，≈ 30–60s）\n"
-        "    4/4  发现首轮内容池（多策略并发 + LLM 评估，≈ 1–3 分钟）\n"
+        "    3/4  生成并保存完整画像（LLM 调用，≈ 30–70s）\n"
+        "    4/4  生成首轮可用推荐（发现 + 评估 + 推荐文案，≈ 2–5 分钟）\n"
         "[dim]全程会打印进度，不要以为卡住了——LLM 单次响应可能就要 10–30s。[/dim]\n"
     )
     if not include_bili:
@@ -6594,7 +7278,7 @@ def init(
         _print_status_panel(
             "warning",
             "部分完成",
-            "画像已生成，但 discover 阶段失败，可稍后手动执行 `openbiliclaw discover`。",
+            result.discovery_detail + " 也可稍后手动执行 `openbiliclaw discover`。",
         )
 
     _print_status_panel(
@@ -7029,6 +7713,7 @@ def profile_consolidate(
             usage_recorder=_build_usage_recorder(),
             module_overrides=module_overrides_from_config(cfg),
             concurrency=cfg.llm.concurrency,
+            concurrency_gate=_build_llm_concurrency_gate(),
         )
     except Exception as exc:
         console.print(f"[yellow]  LLM 不可用（{exc}）— 只做规则合并与聚类预览。[/yellow]")
@@ -8840,6 +9525,8 @@ def keyword_inspiration_dry_run(
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(config),
+        concurrency=config.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
     soul_engine = _build_soul_engine()
     try:
@@ -8977,6 +9664,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         usage_recorder=_build_usage_recorder(),
         module_overrides=module_overrides_from_config(config),
         concurrency=config.llm.concurrency,
+        concurrency_gate=_build_llm_concurrency_gate(),
     )
 
     xhs_cfg = getattr(config.sources, "xiaohongshu", None)
@@ -9669,7 +10357,11 @@ def chat() -> None:
                 console.print("阿花：对话结束。")
                 return
 
-            reply = asyncio.run(dialogue.respond(user_message))
+            try:
+                reply = asyncio.run(dialogue.respond(user_message))
+            except Exception as exc:
+                console.print(f"阿花：{safe_llm_failure_message(exc)}")
+                continue
             console.print(f"阿花：{reply}")
     except KeyboardInterrupt:
         console.print("阿花：对话结束。")
@@ -9875,6 +10567,14 @@ def config_show() -> None:
             ),
         ),
         ("开机自启动", _format_autostart_config_status(cfg)),
+        (
+            "海外网络模式",
+            {"direct": "直连", "system": "跟随系统代理", "custom": "自定义代理"}.get(
+                cfg.network.mode, cfg.network.mode
+            ),
+        ),
+        ("海外自定义代理", cfg.network.proxy or "未设置"),
+        ("收藏自动同步", "开启" if cfg.saved_sync.auto_sync_enabled else "关闭"),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

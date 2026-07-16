@@ -252,14 +252,26 @@ def test_enqueue_discovery_candidates_can_bound_pending_rows_per_source(
 
     rows = db.conn.execute(
         """
-        SELECT content_id
+        SELECT content_id, status, eval_error
         FROM discovery_candidates
         WHERE source_platform = 'xiaohongshu'
         ORDER BY id ASC
         """
     ).fetchall()
     assert inserted == 5
-    assert [row["content_id"] for row in rows] == ["xhs-2", "xhs-3", "xhs-4"]
+    assert len(rows) == 5
+    assert [row["content_id"] for row in rows if row["status"] == "pending_eval"] == [
+        "xhs-2",
+        "xhs-3",
+        "xhs-4",
+    ]
+    assert [row["content_id"] for row in rows if row["status"] == "trimmed_capacity"] == [
+        "xhs-0",
+        "xhs-1",
+    ]
+    assert {row["eval_error"] for row in rows if row["status"] == "trimmed_capacity"} == {
+        "source_raw_ceiling:xiaohongshu"
+    }
 
 
 def test_source_cap_counts_evaluating_rows_without_deleting_them(
@@ -298,14 +310,20 @@ def test_source_cap_counts_evaluating_rows_without_deleting_them(
 
     rows = db.conn.execute(
         """
-        SELECT status, content_id
+        SELECT status, content_id, claim_token, eval_error
         FROM discovery_candidates
         WHERE source_platform = 'youtube'
         ORDER BY id ASC
         """
     ).fetchall()
-    assert len(rows) == 3
+    assert len(rows) == 6
     assert [row["status"] for row in rows].count("evaluating") == 2
+    assert [row["status"] for row in rows].count("pending_eval") == 1
+    assert [row["status"] for row in rows].count("trimmed_capacity") == 3
+    assert all(row["claim_token"] for row in rows if row["status"] == "evaluating")
+    assert {row["eval_error"] for row in rows if row["status"] == "trimmed_capacity"} == {
+        "source_raw_ceiling:youtube"
+    }
 
 
 def test_text_candidate_round_trips_body_text_and_content_type(tmp_path: Path) -> None:
@@ -403,9 +421,7 @@ def test_reset_stale_evaluations_zero_minutes_releases_fresh_and_null_claims(
     _enqueue_one(db, "BVNULL")
     rows = db.claim_discovery_candidates_for_eval(limit=2)
     assert len(rows) == 2
-    db.conn.execute(
-        "UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL'"
-    )
+    db.conn.execute("UPDATE discovery_candidates SET claimed_at = NULL WHERE content_id = 'BVNULL'")
     db.conn.commit()
 
     released = db.reset_stale_discovery_candidate_evaluations(max_age_minutes=0)

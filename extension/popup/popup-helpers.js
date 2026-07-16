@@ -146,6 +146,23 @@ export function buildImageProxyPath(value) {
   return `/api/image-proxy?url=${encodeURIComponent(src)}`;
 }
 
+const PLATFORM_DISPLAY_NAMES = {
+  bilibili: "B 站",
+  youtube: "YouTube",
+  douyin: "抖音",
+  xiaohongshu: "小红书",
+  xhs: "小红书",
+  twitter: "X",
+  x: "X",
+  zhihu: "知乎",
+  reddit: "Reddit",
+};
+
+export function platformDisplayName(value) {
+  const key = normalizeText(value).toLowerCase();
+  return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
+}
+
 export function buildVideoUrl(bvid) {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }
@@ -200,11 +217,18 @@ export function shouldAutoLoadRecommendations({
   );
 }
 
-export function getConnectionBadgeState(online) {
-  if (online) {
+export function getConnectionBadgeState(status) {
+  if (status === "online") {
     return {
       tone: "online",
       label: "已连接",
+    };
+  }
+
+  if (status === "reconnecting") {
+    return {
+      tone: "reconnecting",
+      label: "重连中",
     };
   }
 
@@ -223,20 +247,28 @@ export function getHintBannerState(tone) {
 }
 
 export function normalizeRecommendation(item) {
+  const bvid = normalizeText(item?.bvid);
+  const sourcePlatform = normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili";
+  const contentId = normalizeText(item?.content_id)
+    || (bvid && !bvid.includes(":") ? bvid : "");
   return {
     id: Number(item?.id ?? 0),
-    bvid: normalizeText(item?.bvid),
+    bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
     up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
     presented: Boolean(item?.presented),
-    content_id: normalizeText(item?.content_id) || normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: contentId,
     content_url: normalizeText(item?.content_url) || "",
-    source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",
-    content_type: normalizeText(item?.content_type) || "video",
+    source_platform: sourcePlatform,
+    content_type: normalizeText(item?.content_type)
+      || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
     body_text: normalizeText(item?.body_text),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
     // Engagement counts so the card can render the ▶/👍/💬/⭐ stats row
     // (favorite_count already folds in Xiaohongshu 收藏 backend-side).
     view_count: Number(item?.view_count ?? 0) || 0,
@@ -245,6 +277,37 @@ export function normalizeRecommendation(item) {
     favorite_count: Number(item?.favorite_count ?? 0) || 0,
     danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
   };
+}
+
+export function reconcileRecommendationReplacement(currentItems, incomingItems) {
+  const current = Array.isArray(currentItems) ? currentItems : [];
+  const incoming = Array.isArray(incomingItems) ? incomingItems : [];
+  const preserved = incoming.length === 0 && current.length > 0;
+  return {
+    items: preserved ? current : incoming,
+    preserved,
+  };
+}
+
+export function formatPublishedTime(item, now = Date.now()) {
+  const parsed = Date.parse(String(item?.published_at || ""));
+  if (Number.isFinite(parsed)) {
+    const diff = now - parsed;
+    if (diff >= -300_000 && diff < 60_000) return "刚刚";
+    if (diff >= 0 && diff < 86_400_000) {
+      return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+    }
+    if (diff >= 0 && diff < 604_800_000) {
+      return `${Math.floor(diff / 86_400_000)} 天前`;
+    }
+    const date = new Date(parsed);
+    const current = new Date(now);
+    if (date.getFullYear() === current.getFullYear()) {
+      return `${date.getMonth() + 1}月${date.getDate()}日`;
+    }
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+  return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
 }
 
 const TEXT_CARD_CONTENT_TYPES = new Set([
@@ -289,7 +352,7 @@ export function normalizeSavedItem(item) {
     ...item,
     bvid,
     title: normalizeText(item?.title) || bvid,
-    up_name: normalizeText(item?.up_name),
+    up_name: normalizeText(item?.up_name || item?.author_name),
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url),
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili",
@@ -300,6 +363,8 @@ export function normalizeDelightCandidate(item) {
   const normalizedState = normalizeText(item?.state) || "pending";
   return {
     bvid: normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: normalizeText(item?.content_id),
     title: normalizeText(item?.title) || DEFAULT_DELIGHT_TITLE,
     delight_reason: normalizeText(item?.delight_reason) || DEFAULT_DELIGHT_REASON,
     delight_score: Number(item?.delight_score ?? 0),
@@ -307,6 +372,10 @@ export function normalizeDelightCandidate(item) {
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url) || "",
     source_platform: normalizeSourcePlatform(item?.source_platform, item?.content_url) || "",
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+    content_type: normalizeText(item?.content_type),
+    body_text: normalizeText(item?.body_text),
     state: normalizedState,
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
@@ -334,11 +403,19 @@ export function mergeDelightCandidate(current, incoming, dismissedBvids = []) {
   if (!current || normalizeText(current?.bvid) !== normalizedIncoming.bvid) {
     return normalizedIncoming;
   }
+  const currentState = normalizeText(current?.state) || "pending";
+  const incomingState = normalizedIncoming.state;
+  const currentResponse = normalizeText(current?.response_message);
+  let responseMessage = normalizedIncoming.response_message;
+  if (incomingState === "pending") {
+    responseMessage = currentResponse || responseMessage;
+  } else if (incomingState === currentState && !responseMessage) {
+    responseMessage = currentResponse;
+  }
   return {
     ...normalizedIncoming,
-    state: normalizeText(current?.state) || normalizedIncoming.state,
-    response_message:
-      normalizeText(current?.response_message) || normalizedIncoming.response_message,
+    state: incomingState !== "pending" ? incomingState : currentState,
+    response_message: responseMessage,
     chat_reply: normalizeText(current?.chat_reply) || normalizedIncoming.chat_reply,
     composer_open: Boolean(current?.composer_open),
     chat_draft: normalizeText(current?.chat_draft),
@@ -356,6 +433,10 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
       visible: false,
       highlighted: false,
       handled: false,
+      show_status: false,
+      show_actions: false,
+      like_pressed: false,
+      like_disabled: false,
       score_label: "",
       response_tone: "info",
       response_message: "",
@@ -367,26 +448,50 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
     score >= 0.65 ? "这条可能会拐到你" :
     "有点出其不意";
   const highlight = normalizeText(highlightBvid) === normalized.bvid;
+  const base = {
+    visible: true,
+    highlighted: highlight,
+    handled: false,
+    show_status: Boolean(normalized.response_message),
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: scoreLabel,
+    response_tone: "info",
+    response_message: normalized.response_message,
+  };
 
   if (normalized.state === "viewed") {
     return {
-      visible: true,
-      highlighted: highlight,
+      ...base,
       handled: true,
-      score_label: scoreLabel,
+      show_status: true,
+      show_actions: false,
+      like_disabled: true,
       response_tone: "success",
       response_message:
         normalized.response_message || "已打开，阿B 会把这次点击当成强信号。",
     };
   }
 
+  if (normalized.state === "liked") {
+    return {
+      ...base,
+      show_status: true,
+      like_pressed: true,
+      like_disabled: true,
+      response_tone: "success",
+      response_message: normalized.response_message || "好，这类多来点。",
+    };
+  }
+
   if (normalized.state === "rejected") {
     return {
-      visible: true,
-      highlighted: highlight,
+      ...base,
       handled: true,
-      score_label: scoreLabel,
-      response_tone: "info",
+      show_status: true,
+      show_actions: false,
+      like_disabled: true,
       response_message:
         normalized.response_message || "记下了，这类惊喜先少来点。",
     };
@@ -394,24 +499,14 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
 
   if (normalized.state === "chatted") {
     return {
-      visible: true,
-      highlighted: highlight,
-      handled: true,
-      score_label: scoreLabel,
-      response_tone: "info",
+      ...base,
+      show_status: true,
       response_message:
         normalized.response_message || "这句已经记下，后面会更会试探。",
     };
   }
 
-  return {
-    visible: true,
-    highlighted: highlight,
-    handled: false,
-    score_label: scoreLabel,
-    response_tone: "info",
-    response_message: normalized.response_message,
-  };
+  return base;
 }
 
 export function buildFeedbackPayload(recommendationId, feedbackType, note = "") {
@@ -906,7 +1001,11 @@ export function getReadyRecommendationHint(status) {
   };
 }
 
-export function getManualRefreshResultHint({ itemCount = 0, hadAdvertisedInventory = false } = {}) {
+export function getManualRefreshResultHint({
+  itemCount = 0,
+  hadAdvertisedInventory = false,
+  preservedCurrent = false,
+} = {}) {
   const count = Number(itemCount || 0);
   if (count > 0) {
     return {
@@ -914,9 +1013,15 @@ export function getManualRefreshResultHint({ itemCount = 0, hadAdvertisedInvento
       tone: "success",
     };
   }
+  if (preservedCurrent) {
+    return {
+      message: "这次没换出新内容，当前推荐已保留。",
+      tone: "info",
+    };
+  }
   if (hadAdvertisedInventory) {
     return {
-      message: "池子状态刚刚同步，正在整理内容。",
+      message: "库存还在，但这批暂时没有可用新内容，稍后再试。",
       tone: "info",
     };
   }

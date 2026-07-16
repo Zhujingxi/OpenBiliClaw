@@ -222,8 +222,55 @@ ensure_checkout() {
                 behind=$(git rev-list --count "$local_sha..$remote_sha" 2>/dev/null || echo "?")
                 dirty=$(git status --porcelain 2>/dev/null)
                 if [ -n "$dirty" ]; then
-                    log "${C_YELLOW}⚠ Existing checkout is $behind commits behind origin/$BRANCH but has local changes — skipping auto-update.${C_RESET}"
-                    log "  To update manually: cd $INSTALL_DIR && git stash && git pull && git stash pop"
+                    # `uv sync` / `npm ci` during install rewrite uv.lock and
+                    # extension/package-lock.json, leaving the tree "dirty" and
+                    # permanently blocking auto-update — users got stranded on
+                    # weeks-old code (e.g. v0.3.89) without noticing. If the ONLY
+                    # dirty paths are these regenerated lockfiles, discard them
+                    # (the dependency step rebuilds them) and update anyway.
+                    non_lock=$(git status --porcelain 2>/dev/null \
+                        | grep -vE '[[:space:]](uv\.lock|extension/package-lock\.json)$' || true)
+                    if [ -z "$non_lock" ]; then
+                        log "Local changes are only regenerated lockfiles (uv.lock / package-lock.json) — resetting and updating…"
+                        # Reset each present lockfile independently: a single
+                        # `git checkout -- a b` aborts entirely if any pathspec is
+                        # missing (older checkouts lack package-lock.json), leaving
+                        # the tree dirty and the pull below failing.
+                        for _lf in uv.lock extension/package-lock.json; do
+                            git cat-file -e "HEAD:$_lf" 2>/dev/null \
+                                && git checkout HEAD -- "$_lf" 2>/dev/null || true
+                        done
+                        if git pull --ff-only --quiet origin "$BRANCH"; then
+                            log "${C_GREEN}✓ Updated to $(git rev-parse --short HEAD)${C_RESET}"
+                        else
+                            log "${C_YELLOW}git pull failed after resetting lockfiles; keeping current checkout.${C_RESET}"
+                        fi
+                        return 0
+                    fi
+                    # Genuine local edits: make the stale-version risk impossible
+                    # to miss (a quiet one-line skip is why people ran old code).
+                    cur_ver=$(git show "HEAD:pyproject.toml" 2>/dev/null | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+                    new_ver=$(git show "origin/$BRANCH:pyproject.toml" 2>/dev/null | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+                    log "${C_YELLOW}──────────────────────────────────────────────────────────────${C_RESET}"
+                    log "${C_YELLOW}⚠  NOT updated: checkout is $behind commits behind origin/$BRANCH and has local edits.${C_RESET}"
+                    log "${C_YELLOW}   Version v${cur_ver:-?} → latest v${new_ver:-?}; continuing will run OLD code.${C_RESET}"
+                    log "${C_YELLOW}   Locally modified files:${C_RESET}"
+                    git status --porcelain 2>/dev/null | while IFS= read -r _line; do log "     $_line"; done
+                    log "${C_YELLOW}   Update (keep your edits): cd $INSTALL_DIR && git stash && git pull --ff-only && git stash pop${C_RESET}"
+                    log "${C_YELLOW}   Or let the installer do it (auto git stash first): FORCE_UPDATE=1 <rerun the install command>${C_RESET}"
+                    log "${C_YELLOW}──────────────────────────────────────────────────────────────${C_RESET}"
+                    if [ "${FORCE_UPDATE:-}" = "1" ]; then
+                        log "FORCE_UPDATE=1 → stashing local changes and updating…"
+                        if git stash push -u -m "install.sh auto-stash before update" >/dev/null 2>&1 \
+                            && git pull --ff-only --quiet origin "$BRANCH"; then
+                            log "${C_GREEN}✓ Updated to $(git rev-parse --short HEAD)${C_RESET}"
+                            if ! git stash pop >/dev/null 2>&1; then
+                                log "${C_YELLOW}  Your edits are saved in git stash but auto-restore hit a conflict — run 'cd $INSTALL_DIR && git stash pop' to resolve.${C_RESET}"
+                            fi
+                        else
+                            log "${C_YELLOW}Auto-update failed; checkout unchanged (edits preserved in git stash — 'git stash pop' to restore).${C_RESET}"
+                        fi
+                    fi
                     return 0
                 fi
                 log "Updating existing checkout: $behind commits behind origin/$BRANCH — pulling…"
@@ -431,16 +478,33 @@ PY
     echo "Checkout:    $INSTALL_DIR"
     if [ -n "$REUSE_FROM" ]; then
         echo "Reused from: $REUSE_FROM"
-        echo "             ⓘ Reused API keys / B站 cookie are NOT validated."
-        echo "               B站 cookies expire within weeks; if the previous"
-        echo "               install's cookie is stale, init will silently"
-        echo "               return 0 history items and the soul profile will"
-        echo "               be hollow. Agents: surface this reuse to the user"
-        echo "               (HARD RULE 4 in docs/agent-install.md) before"
-        echo "               proceeding — do not skip the cookie question just"
-        echo "               because the file already exists."
-        echo "               To skip auto-reuse and supply fresh credentials:"
-        echo "               REUSE_FROM= curl -fsSL ... | bash"
+        case "$missing" in
+            *"bilibili.cookie (stale"*)
+                # The backend's live probe REJECTED the reused cookie — this
+                # is a confirmed-stale state, not the generic "not validated"
+                # disclaimer below (init-progress spec Phase 3).
+                echo "             ✗ 复用的 B站 Cookie 已失效（后端实测校验未通过）。"
+                echo "               请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动"
+                echo "               同步新 Cookie；或按下方 manual fallback 步骤用"
+                echo "               --bilibili-cookie 手动更新后重跑 bootstrap。"
+                echo "               Agents: the reused cookie FAILED live validation —"
+                echo "               ask the user to re-login before running init."
+                ;;
+            *)
+                # Backend not up / probe indeterminate: keep the generic
+                # can't-validate disclaimer.
+                echo "             ⓘ Reused API keys / B站 cookie are NOT validated."
+                echo "               B站 cookies expire within weeks; if the previous"
+                echo "               install's cookie is stale, init will silently"
+                echo "               return 0 history items and the soul profile will"
+                echo "               be hollow. Agents: surface this reuse to the user"
+                echo "               (HARD RULE 4 in docs/agent-install.md) before"
+                echo "               proceeding — do not skip the cookie question just"
+                echo "               because the file already exists."
+                echo "               To skip auto-reuse and supply fresh credentials:"
+                echo "               REUSE_FROM= curl -fsSL ... | bash"
+                ;;
+        esac
     fi
     echo "Health URL:  $health_url"
     if [ -n "$missing" ]; then

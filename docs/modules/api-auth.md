@@ -20,7 +20,7 @@
 | 记住登录 | ✅ | `session_ttl_hours=0`（默认）签发无 `exp` token + 超长 cookie `Max-Age`，关浏览器 / 重启后端都不失效。 |
 | HttpOnly cookie 凭据 | ✅ | 默认下发 `obc_session`（`HttpOnly; Path=/; SameSite=Lax`，host-only，`Secure` 仅当对外协议为 HTTPS），同源 fetch / `<img>` / WebSocket 自动携带；前端永不持有 token。 |
 | 跨源 Bearer 逃生通道 | ✅ | 仅当 Origin 命中 `allowed_bearer_origins` 且 `ttl>0`，登录才在 body 返回 token（`sessionStorage`）；同源 / 缺 Origin 一律 cookie-only（后端不变量）。 |
-| CSRF 防护 | ✅ | cookie 鉴权的非安全方法（POST/PUT/PATCH/DELETE）强制 `Origin==Host`（`same_origin()`）+ 头 `X-OBC-Auth: 1`；Bearer / 可信本机 / 安全方法豁免；WebSocket 握手按 `same_origin` 校验。 |
+| CSRF 防护 | ✅ | cookie 鉴权的非安全方法（POST/PUT/PATCH/DELETE）强制 `Origin==Host`（`same_origin()`）+ 头 `X-OBC-Auth: 1`；普通安全方法读取豁免，但 six state-changing GET `/next-task` claim routes（XHS / 抖音 / YouTube / X / 知乎 / Reddit）在精确路径集合中强制 `X-OBC-Auth`，因为领取会 claim+lock；Bearer / 可信本机豁免；WebSocket 握手按 `same_origin` 校验。 |
 | 撤销纪元 | ✅ | `auth_epoch` 存 SQLite `auth_state` 单行，跨进程事务原子自增、验签实时读。改密 / `--logout-all` / `--rotate-secret` / `POST /api/auth/logout?all=true` 都通过它撤销所有设备。 |
 | 改密即撤销（全通道） | ✅ | `password_fingerprint`（`HMAC(session_secret,"pw:"+明文)` 或 `"ph:"+hash`）在启动 / 重载时比对，变化即 `auth_epoch += 1`；scrypt 随机盐不会造成误撤销，永不过期登录跨重启不被误撤销。 |
 | 登录失败限流 | ✅ | 进程内按真实客户端 IP 计数，15 分钟内失败 ≥5 次锁 15 分钟，`POST /api/auth/login` 返回 429。可信本机不计入。 |
@@ -33,7 +33,7 @@
 | 扩展 origin 独立路径 | ✅ | `is_extension_origin()` 识别 `chrome-extension://` / `moz-extension://`，`pick_token()` 和登录端点对扩展 origin 走独立分支，不依赖 `allowed_bearer_origins`。 |
 | 设备密钥摘要 | ✅ | `extension_access_keys` 只保存 `key_id:sha256(secret)`；完整高熵密钥只由 CLI 显示一次。总开关 `extension_access_enabled=false` 默认关闭。 |
 | 短会话交换 | ✅ | 限流的 `POST /api/auth/extension-token` 验证设备密钥后签发 `1..168h` 会话；错误不泄露 key ID 是否存在。 |
-| 传输边界 | ✅ | 普通扩展 HTTP 使用 `Authorization: Bearer`，URL 不含 token；仅 WebSocket 和图片代理允许扩展 Origin 携带短会话 query token。 |
+| 传输边界 | ✅ | 普通扩展 HTTP 使用 `Authorization: Bearer`，URL 不含 token；仅 WebSocket 和图片代理允许扩展 Origin 携带短会话 query token。popup saved/config 请求的单个 Abort deadline 覆盖初次短会话交换、401 强制换票与受保护请求，认证 fetch 接收同一 AbortSignal。 |
 | 撤销 | ✅ | `ext-key revoke <key-id>` 删除摘要并 bump 全局 `auth_epoch`，所有 Web / 扩展会话立即失效；失败时回滚配置。 |
 | 远程 endpoint 权限 | ✅ | 扩展按 `scheme://host/*` 请求跨浏览器可用的最小 host 权限；权限 API 不能可移植地限定端口，实际请求仍固定配置端口。公网 host 强制 HTTPS，HTTPS 自动派生 WSS。 |
 

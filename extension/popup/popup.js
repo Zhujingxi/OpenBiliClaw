@@ -8,6 +8,7 @@ import {
   buildRecommendationClickPayload,
   buildVideoUrl,
   formatRelativeTimestamp,
+  formatPublishedTime,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
   getConnectionBadgeState,
@@ -28,7 +29,9 @@ import {
   normalizeProbeType,
   normalizeRuntimeStatus,
   normalizeProfileSummary,
+  platformDisplayName,
   probeMessageKey,
+  reconcileRecommendationReplacement,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -37,16 +40,23 @@ import {
   validateCommentInput,
 } from "./popup-helpers.js";
 import { createRuntimeStreamClient } from "./popup-stream.js";
-import { createOfflineBackendPoller } from "./popup-connection-poller.js";
+import {
+  createBackendConnectionCoordinator,
+  createOfflineBackendPoller,
+} from "./popup-connection-poller.js";
 import {
   buildInitChecklist,
   describeInitFailure,
   describeInitReason,
+  describeInitStatusReason,
   describeInitStartError,
   embeddingRepairStartAccepted,
   initProgressView,
+  INIT_EXPECTATION_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
+  shouldAttachRunningInitProgress,
+  stalenessView,
 } from "./popup-init-control.js";
 import {
   getBackendBaseUrl,
@@ -65,7 +75,22 @@ import {
   getMobileQrViewState,
   isLoopbackMobileHost,
 } from "./popup-qr.js";
-import { createSavedToggleRegistry } from "./popup-saved-sync.js";
+import {
+  createSavedToggleRegistry,
+  captureSavedFocus,
+  createRetainedSavedListState,
+  createSavedSubmissionFence,
+  createSavedTaskCoordinator,
+  createSavedSyncTaskTracker,
+  getSavedSyncPresentation,
+  isSavedSyncEligibleStatus,
+  normalizeCanonicalSavedItem,
+  partitionSavedQueueResults,
+  restoreSavedFocus,
+  sanitizeSavedSyncTask,
+  summarizeSavedSyncResults,
+  updateSavedBatchButtonState,
+} from "./popup-saved-sync.js";
 import {
   installEmbeddingBannerAutoRefresh,
   shouldShowEmbeddingBanner,
@@ -77,6 +102,7 @@ import {
   fetchUpdateStatus,
   checkBackendUpdate,
   applyBackendUpdate,
+  cancelInit,
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
@@ -107,14 +133,12 @@ import {
   submitFeedback,
   submitInsightFeedback,
   updateConfig,
-  addToWatchLater,
-  removeFromWatchLater,
-  watchLaterStatus,
-  fetchWatchLater,
-  addToFavorite,
-  removeFromFavorite,
-  favoriteStatus,
-  fetchFavorites,
+  fetchSavedItems,
+  pollSavedSyncTask,
+  removeSavedItem,
+  saveItem,
+  savedItemStatus,
+  syncSavedItems,
 } from "./popup-api.js";
 
 const state = {
@@ -189,7 +213,9 @@ const elements = {
   initProgress: document.getElementById("initProgress"),
   initProgressBar: document.getElementById("initProgressBar"),
   initProgressLabel: document.getElementById("initProgressLabel"),
+  initStallHint: document.getElementById("initStallHint"),
   initStartBtn: document.getElementById("initStartBtn"),
+  initCancelBtn: document.getElementById("initCancelBtn"),
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
   refreshRecommendationsButton: document.getElementById("refreshRecommendationsButton"),
@@ -212,6 +238,10 @@ const elements = {
   watchLaterEmpty: document.getElementById("watchLaterEmpty"),
   favoritesList: document.getElementById("favoritesList"),
   favoritesEmpty: document.getElementById("favoritesEmpty"),
+  watchLaterSyncAll: document.getElementById("watchLaterSyncAll"),
+  watchLaterSyncStatus: document.getElementById("watchLaterSyncStatus"),
+  favoritesSyncAll: document.getElementById("favoritesSyncAll"),
+  favoritesSyncStatus: document.getElementById("favoritesSyncStatus"),
   profileEmpty: document.getElementById("profileEmpty"),
   profileEmptyTitle: document.getElementById("profileEmptyTitle"),
   profileEmptyText: document.getElementById("profileEmptyText"),
@@ -310,13 +340,26 @@ let recommendationAutoLoadUserArmed = false;
 let recommendationAutoLoadTouchY = null;
 let recommendationAutoLoadIntentInitialized = false;
 let runtimeStreamClient = null;
-const offlineBackendPoller = createOfflineBackendPoller({
+let offlineBackendPoller = null;
+const backendConnectionCoordinator = createBackendConnectionCoordinator({
+  checkBackendStatus,
+  onStatusChange(status) {
+    state.online = status !== "offline";
+    setStatus(status);
+    if (status === "offline") {
+      offlineBackendPoller?.start();
+      return;
+    }
+    offlineBackendPoller?.stop();
+  },
+});
+offlineBackendPoller = createOfflineBackendPoller({
   isOnline: () => state.online,
   checkBackendStatus,
   onOnline: async () => {
-    if (!state.online) {
-      state.online = true;
-      setStatus(true);
+    const wasOnline = state.online;
+    backendConnectionCoordinator.markHttpReachable();
+    if (!wasOnline) {
       setHint("后端连上了，正在刷新。", "success");
     }
     scheduleRecommendationsRefresh({ delayMs: 0 });
@@ -406,7 +449,7 @@ function setHint(message, tone = "info") {
   renderActivityCard();
 }
 
-function setStatus(online) {
+function setStatus(status) {
   if (
     !(elements.statusBadge instanceof HTMLElement) ||
     !(elements.statusDot instanceof HTMLElement) ||
@@ -414,9 +457,10 @@ function setStatus(online) {
   ) {
     return;
   }
-  const badgeState = getConnectionBadgeState(online);
+  const badgeState = getConnectionBadgeState(status);
   elements.statusBadge.dataset.tone = badgeState.tone;
   elements.statusDot.classList.toggle("offline", badgeState.tone === "offline");
+  elements.statusDot.classList.toggle("reconnecting", badgeState.tone === "reconnecting");
   elements.statusLabel.textContent = badgeState.label;
 }
 
@@ -549,54 +593,261 @@ function setActiveTab(tabName) {
   }
 }
 
-async function toggleWatchLaterSaved(bvid) {
-  return watchLaterToggles.toggle(bvid, {
-    add: addToWatchLater,
-    remove: removeFromWatchLater,
+function normalizePopupSavedItem(itemOrBvid) {
+  const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
+  return {
+    ...item,
+    ...normalizeCanonicalSavedItem(item),
+  };
+}
+
+async function toggleWatchLaterSaved(itemOrBvid) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  return watchLaterToggles.toggle(item.item_key, {
+    add: () => saveItem("watch_later", item),
+    remove: () => removeSavedItem("watch_later", item.item_key),
   });
 }
 
-async function toggleFavoriteSaved(bvid) {
-  return favoriteToggles.toggle(bvid, {
-    add: addToFavorite,
-    remove: removeFromFavorite,
+async function toggleFavoriteSaved(itemOrBvid) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  return favoriteToggles.toggle(item.item_key, {
+    add: () => saveItem("favorite", item),
+    remove: () => removeSavedItem("favorite", item.item_key),
   });
 }
 
-function bindWatchLaterToggle(button, bvid, labels = {}) {
-  watchLaterToggles.registerButton(bvid, button, labels);
-  void watchLaterToggles.hydrateStatus(bvid, watchLaterStatus);
-  return button;
-}
-
-function bindFavoriteToggle(button, bvid, labels = {}) {
-  favoriteToggles.registerButton(bvid, button, labels);
-  void favoriteToggles.hydrateStatus(bvid, favoriteStatus);
-  return button;
-}
-
-// ── Watch-later view (稍后再看) ──────────────────────────────────
-async function loadWatchLater() {
-  const list = elements.watchLaterList;
-  const empty = elements.watchLaterEmpty;
-  if (!(list instanceof HTMLElement)) return;
-  let data = null;
+async function toggleSavedWithFeedback(label, itemOrBvid, registry, toggle) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  setHint(`正在更新${label}…`, "info");
   try {
-    data = await fetchWatchLater(100, 0);
+    await toggle(item);
+    setHint(
+      registry.isSaved(item.item_key) ? `已保存到${label}` : `已从${label}移除`,
+      "success",
+    );
   } catch {
-    data = null;
+    // The registry has already restored the previous optimistic state.
+    setHint(`${label}更新失败，请确认本地后端正在运行后重试。`, "error");
   }
-  const items = Array.isArray(data?.items) ? data.items : [];
+}
+
+function bindWatchLaterToggle(button, itemOrBvid, labels = {}) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  watchLaterToggles.registerButton(item.item_key, button, labels);
+  void watchLaterToggles.hydrateStatus(
+    item.item_key,
+    (itemKey) => savedItemStatus("watch_later", itemKey),
+  );
+  return button;
+}
+
+function bindFavoriteToggle(button, itemOrBvid, labels = {}) {
+  const item = normalizePopupSavedItem(itemOrBvid);
+  favoriteToggles.registerButton(item.item_key, button, labels);
+  void favoriteToggles.hydrateStatus(
+    item.item_key,
+    (itemKey) => savedItemStatus("favorite", itemKey),
+  );
+  return button;
+}
+
+// ── Platform-neutral saved views ─────────────────────────────────
+const savedListStates = {
+  watch_later: createRetainedSavedListState(),
+  favorite: createRetainedSavedListState(),
+};
+const savedPendingFocus = { watch_later: null, favorite: null };
+function createSavedTaskRuntime() {
+  const tracker = createSavedSyncTaskTracker({ poll: (taskId) => pollSavedSyncTask(taskId) });
+  return {
+    tracker,
+    submissions: createSavedSubmissionFence(),
+    coordinator: createSavedTaskCoordinator({
+      tracker,
+      fetchTask: (taskId) => pollSavedSyncTask(taskId),
+    }),
+  };
+}
+const savedTaskRuntimes = {
+  watch_later: createSavedTaskRuntime(),
+  favorite: createSavedTaskRuntime(),
+};
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.resumeAll();
+  }
+});
+window.addEventListener("pagehide", () => {
+  for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.dispose();
+}, { once: true });
+
+function syncEligible(item, listKind = "") {
+  const runtime = savedTaskRuntimes[listKind];
+  return isSavedSyncEligibleStatus(item?.sync_status, item?.error_code, item?.sync_task_id)
+    && !runtime?.submissions.has(item?.item_key)
+    && !runtime?.coordinator.owns(item?.item_key);
+}
+
+function savedSyncDetail(item) {
+  return getSavedSyncPresentation(
+    item?.sync_status,
+    item?.error_code,
+    item?.resolved_target,
+    item?.error_message,
+    item?.sync_task_id,
+  ).detail;
+}
+
+async function runSavedSync(listKind, items, button, status, reload, confirmBatch = false) {
+  if (button?.disabled) return;
+  const runtime = savedTaskRuntimes[listKind];
+  const coordinator = runtime.coordinator;
+  const selected = (Array.isArray(items) ? items : []).filter((item) => syncEligible(item, listKind));
+  if (!selected.length) return;
+  const platforms = Array.from(new Set(selected.map((item) => (
+    platformDisplayName(item.source_platform || item.item_key?.split(":", 1)[0])
+  ))));
+  if (confirmBatch && !window.confirm(
+    `将同步 ${selected.length} 项到 ${platforms.join("、")}，继续吗？`,
+  )) return;
+  const selectedKeys = selected.map((item) => item.item_key);
+  if (!runtime.submissions.claim(selectedKeys)) return;
+
+  let submitted = false;
+  if (button) {
+    const focusRoot = button.closest?.(".view") || button.parentElement;
+    savedPendingFocus[listKind] = captureSavedFocus(focusRoot, button)
+      || { kind: "list", action: "sync-all" };
+    button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-busy", "true");
+    button.textContent = "同步中…";
+  }
+  if (status) {
+    status.removeAttribute("role");
+    status.setAttribute("aria-busy", "true");
+    status.textContent = `正在同步 ${selected.length} 项…`;
+  }
+  try {
+    const task = sanitizeSavedSyncTask(
+      await syncSavedItems(listKind, selectedKeys),
+    );
+    if (!task.task_id) throw new Error("同步任务缺少 task_id，请重试。");
+    coordinator.track(task, selectedKeys, {
+      onProgress: () => {
+        if (status) status.textContent = `正在同步 ${selected.length} 项…`;
+      },
+      onBackground: () => {
+        if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+      },
+      onPollError: () => {
+        if (status) status.textContent = "仍在后台同步；连接恢复后会继续查询。";
+      },
+      onTerminal: (terminalTask) => {
+        if (status) status.removeAttribute("aria-busy");
+        if (status) status.textContent = summarizeSavedSyncResults(terminalTask.items) || "同步已完成";
+        void reload();
+      },
+    });
+    submitted = true;
+    if (status) status.textContent = `同步任务已提交 · ${selected.length} 项`;
+  } catch (error) {
+    if (status) {
+      status.role = "alert";
+      status.textContent = error?.message || "同步失败，请稍后重试。";
+    }
+  } finally {
+    runtime.submissions.release(selectedKeys);
+    if (!submitted && button) {
+      button.disabled = false;
+      button.setAttribute("aria-disabled", "false");
+      button.removeAttribute("aria-busy");
+    }
+    if (!submitted && status) status.removeAttribute("aria-busy");
+    await reload();
+  }
+}
+
+async function loadSavedList(listKind, { list, empty, syncAll, status, toggles }) {
+  if (!(list instanceof HTMLElement)) return;
+  const focusRoot = list.closest?.(".view") || list;
+  const focusToken = captureSavedFocus(focusRoot) || savedPendingFocus[listKind];
+  const retained = savedListStates[listKind];
+  const coordinator = savedTaskRuntimes[listKind].coordinator;
+  const hadLoadError = Boolean(retained.snapshot().error);
+  try {
+    const data = await fetchSavedItems(listKind, 100, 0);
+    retained.commit({
+      items: Array.isArray(data?.items) ? data.items.map(normalizePopupSavedItem) : [],
+      total: data?.total,
+    });
+    await coordinator.recover(retained.snapshot().items, {
+      onProgress: () => {
+        if (status) status.textContent = "正在同步已恢复的任务…";
+      },
+      onBackground: () => {
+        if (status) status.textContent = "仍在后台同步；可切换页面，返回后会继续更新。";
+      },
+      onPollError: () => {
+        if (status) status.textContent = "同步状态查询超时；连接恢复后会继续查询。";
+      },
+      onTerminal: (task) => {
+        if (status) status.textContent = summarizeSavedSyncResults(task.items) || "同步已完成";
+        void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
+      },
+    });
+    if (status && hadLoadError) {
+      status.removeAttribute("role");
+      status.replaceChildren();
+    }
+  } catch (error) {
+    retained.fail(error);
+    if (status) {
+      status.role = "alert";
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "saved-load-retry";
+      retry.dataset.savedListAction = "retry";
+      retry.textContent = "重试加载";
+      retry.addEventListener("click", (event) => {
+        savedPendingFocus[listKind] = captureSavedFocus(focusRoot, event.currentTarget);
+        void loadSavedList(listKind, { list, empty, syncAll, status, toggles });
+      });
+      status.replaceChildren(
+        document.createTextNode(`${retained.snapshot().error} `),
+        retry,
+      );
+    }
+  }
+  const { items } = retained.snapshot();
   list.replaceChildren();
-  if (!items.length) {
-    if (empty instanceof HTMLElement) empty.hidden = false;
-    return;
-  }
-  if (empty instanceof HTMLElement) empty.hidden = true;
+  if (empty instanceof HTMLElement) empty.hidden = items.length > 0;
   for (const item of items) {
-    watchLaterToggles.setSaved(item.bvid, true);
-    list.appendChild(buildWatchLaterCard(item));
+    toggles.setSaved(item.item_key, true);
+    list.appendChild(buildSavedCard(listKind, item, { list, empty, toggles }));
   }
+  if (restoreSavedFocus(focusRoot, focusToken)) savedPendingFocus[listKind] = null;
+  const pendingCount = items.filter((item) => syncEligible(item, listKind)).length;
+  if (syncAll instanceof HTMLButtonElement) {
+    syncAll.textContent = `同步未同步内容（${pendingCount}）`;
+    updateSavedBatchButtonState(syncAll, pendingCount);
+    syncAll.onclick = () => runSavedSync(
+      listKind, items, syncAll, status,
+      () => loadSavedList(listKind, { list, empty, syncAll, status, toggles }),
+      true,
+    );
+  }
+}
+
+async function loadWatchLater() {
+  return loadSavedList("watch_later", {
+    list: elements.watchLaterList,
+    empty: elements.watchLaterEmpty,
+    syncAll: elements.watchLaterSyncAll,
+    status: elements.watchLaterSyncStatus,
+    toggles: watchLaterToggles,
+  });
 }
 
 // Optimistic saved-card removal shared by the watch-later and favorites
@@ -606,9 +857,10 @@ async function loadWatchLater() {
 // whenever the DELETE queued behind slow same-origin requests (covers via
 // image-proxy compete for Chrome's 6-connection limit) or failed, clicking
 // looked like it did nothing.
-function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list, empty }) {
+function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, toggles, list, empty, onRemoved }) {
   remove.addEventListener("click", async () => {
     if (remove.disabled) return;
+    savedPendingFocus[listKind] = captureSavedFocus(list.closest?.(".view") || list, remove);
     remove.disabled = true;
     const anchor = card.nextElementSibling;
     card.remove();
@@ -616,10 +868,11 @@ function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list,
       empty.hidden = false;
     }
     try {
-      await requestRemove(bvid);
-      toggles.setSaved(bvid, false);
+      await requestRemove(itemKey);
+      toggles.setSaved(itemKey, false);
+      if (typeof onRemoved === "function") await onRemoved();
     } catch (error) {
-      console.error("saved-card remove failed:", bvid, error);
+      console.error("saved-card remove failed:", itemKey, error);
       if (list instanceof HTMLElement) {
         list.insertBefore(card, anchor?.parentElement === list ? anchor : null);
       }
@@ -631,24 +884,46 @@ function bindSavedCardRemove(card, remove, { bvid, requestRemove, toggles, list,
   });
 }
 
-function buildWatchLaterCard(item) {
+function buildSavedCard(listKind, item, { list, empty, toggles }) {
+  if (savedTaskRuntimes[listKind].submissions.has(item.item_key)
+    || savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
+    item = { ...item, sync_status: "syncing" };
+  }
   const card = document.createElement("article");
   card.className = "saved-card";
-  card.dataset.bvid = item.bvid;
+  card.dataset.itemKey = item.item_key;
 
   const body = document.createElement("button");
   body.type = "button";
   body.className = "saved-card-open";
+  body.dataset.savedAction = "open";
   const media = buildSavedCardMedia(item);
   const copy = document.createElement("span");
   copy.className = "saved-card-copy";
   const title = document.createElement("p");
   title.className = "saved-card-title";
-  title.textContent = item.title || item.bvid;
+  title.textContent = item.title || item.content_id;
   const up = document.createElement("p");
   up.className = "saved-card-up";
-  up.textContent = item.up_name || "";
-  copy.append(title, up);
+  up.textContent = item.author_name || item.up_name || "";
+  const syncLine = document.createElement("span");
+  syncLine.className = "saved-sync-line";
+  const presentation = getSavedSyncPresentation(
+    item.sync_status,
+    item.error_code,
+    item.resolved_target,
+    item.error_message,
+    item.sync_task_id,
+  );
+  const chip = document.createElement("span");
+  chip.className = "saved-sync-chip";
+  chip.dataset.tone = presentation.tone;
+  chip.textContent = presentation.label;
+  const target = document.createElement("span");
+  target.className = "saved-sync-target";
+  target.textContent = savedSyncDetail(item);
+  syncLine.append(chip, target);
+  copy.append(title, up, syncLine);
   body.append(copy);
   body.prepend(media);
   body.addEventListener("click", () => {
@@ -659,17 +934,43 @@ function buildWatchLaterCard(item) {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "saved-card-remove";
+  remove.dataset.savedAction = "remove";
   remove.textContent = "移除";
-  remove.title = "移出稍后再看";
+  remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
   bindSavedCardRemove(card, remove, {
-    bvid: item.bvid,
-    requestRemove: removeFromWatchLater,
-    toggles: watchLaterToggles,
-    list: elements.watchLaterList,
-    empty: elements.watchLaterEmpty,
+    listKind,
+    itemKey: item.item_key,
+    requestRemove: (itemKey) => removeSavedItem(listKind, itemKey),
+    toggles,
+    list,
+    empty,
+    onRemoved: listKind === "watch_later" ? loadWatchLater : loadFavorites,
   });
 
-  card.append(body, remove);
+  const actions = document.createElement("span");
+  actions.className = "saved-card-actions";
+  if (presentation.actionable || presentation.busy) {
+    const sync = document.createElement("button");
+    sync.type = "button";
+    sync.className = "saved-card-sync";
+    sync.dataset.savedAction = "sync";
+    sync.textContent = presentation.actionLabel;
+    sync.disabled = presentation.busy;
+    sync.setAttribute("aria-disabled", String(presentation.busy));
+    sync.setAttribute("aria-label", presentation.busy ? `${presentation.label}，请稍候` : presentation.actionLabel);
+    if (presentation.actionable) {
+      sync.addEventListener("click", () => runSavedSync(
+        listKind,
+        [item],
+        sync,
+        listKind === "watch_later" ? elements.watchLaterSyncStatus : elements.favoritesSyncStatus,
+        listKind === "watch_later" ? loadWatchLater : loadFavorites,
+      ));
+    }
+    actions.append(sync);
+  }
+  actions.append(remove);
+  card.append(body, actions);
   return card;
 }
 
@@ -688,70 +989,14 @@ function buildSavedCardMedia(item) {
   return media;
 }
 
-// ── Favorites view (收藏夹) ─────────────────────────────────────
 async function loadFavorites() {
-  const list = elements.favoritesList;
-  const empty = elements.favoritesEmpty;
-  if (!(list instanceof HTMLElement)) return;
-  let data = null;
-  try {
-    data = await fetchFavorites(100, 0);
-  } catch {
-    data = null;
-  }
-  const items = Array.isArray(data?.items) ? data.items : [];
-  list.replaceChildren();
-  if (!items.length) {
-    if (empty instanceof HTMLElement) empty.hidden = false;
-    return;
-  }
-  if (empty instanceof HTMLElement) empty.hidden = true;
-  for (const item of items) {
-    favoriteToggles.setSaved(item.bvid, true);
-    list.appendChild(buildFavoriteCard(item));
-  }
-}
-
-function buildFavoriteCard(item) {
-  const card = document.createElement("article");
-  card.className = "saved-card";
-  card.dataset.bvid = item.bvid;
-
-  const body = document.createElement("button");
-  body.type = "button";
-  body.className = "saved-card-open";
-  const media = buildSavedCardMedia(item);
-  const copy = document.createElement("span");
-  copy.className = "saved-card-copy";
-  const title = document.createElement("p");
-  title.className = "saved-card-title";
-  title.textContent = item.title || item.bvid;
-  const up = document.createElement("p");
-  up.className = "saved-card-up";
-  up.textContent = item.up_name || "";
-  copy.append(title, up);
-  body.append(copy);
-  body.prepend(media);
-  body.addEventListener("click", () => {
-    const url = buildContentUrl(item);
-    if (url) window.open(url, "_blank");
-  });
-
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "saved-card-remove";
-  remove.textContent = "移除";
-  remove.title = "取消收藏";
-  bindSavedCardRemove(card, remove, {
-    bvid: item.bvid,
-    requestRemove: removeFromFavorite,
-    toggles: favoriteToggles,
+  return loadSavedList("favorite", {
     list: elements.favoritesList,
     empty: elements.favoritesEmpty,
+    syncAll: elements.favoritesSyncAll,
+    status: elements.favoritesSyncStatus,
+    toggles: favoriteToggles,
   });
-
-  card.append(body, remove);
-  return card;
 }
 
 function showRecommendationEmptyState(title, message) {
@@ -806,10 +1051,29 @@ function _setInitStartButton(label, enabled) {
   }
 }
 
-function _setInitReason(text) {
+function _setInitCancelButton(visible, enabled = visible) {
+  if (!(elements.initCancelBtn instanceof HTMLButtonElement)) {
+    return;
+  }
+  elements.initCancelBtn.hidden = !visible;
+  elements.initCancelBtn.disabled = !enabled;
+  if (!elements.initCancelBtn.dataset.bound) {
+    elements.initCancelBtn.dataset.bound = "1";
+    elements.initCancelBtn.addEventListener("click", () => {
+      void handleCancelInitClick();
+    });
+  }
+}
+
+function _setInitReason(text, assertive = true) {
   if (elements.initStartReason instanceof HTMLElement) {
     elements.initStartReason.textContent = text || "";
     elements.initStartReason.hidden = !text;
+    elements.initStartReason.setAttribute("role", text && assertive ? "alert" : "status");
+    elements.initStartReason.setAttribute(
+      "aria-live",
+      text && assertive ? "assertive" : "polite",
+    );
   }
 }
 
@@ -982,11 +1246,22 @@ function renderInitPanelIdle() {
     li.className = "init-hint-row";
     li.textContent = "点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。";
     elements.initChecklist.append(li);
+    // Expectation management (init-progress Phase 2): tell the user upfront
+    // how long the whole run typically takes.
+    const expectation = document.createElement("li");
+    expectation.className = "init-hint-row";
+    expectation.textContent = INIT_EXPECTATION_HINT;
+    elements.initChecklist.append(expectation);
   }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = true;
   }
+  if (elements.initStallHint instanceof HTMLElement) {
+    elements.initStallHint.hidden = true;
+    elements.initStallHint.classList.remove("stale");
+  }
   _setInitStartButton("开始初始化", true);
+  _setInitCancelButton(false);
   _setInitReason("");
 }
 
@@ -1006,24 +1281,57 @@ function renderInitProgress(status) {
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
-      elements.initProgressBar.style.width = `${progress.pct}%`;
+      elements.initProgressBar.style.width = progress.indeterminate ? "100%" : `${progress.pct}%`;
+      elements.initProgressBar.classList.toggle("indeterminate", progress.indeterminate);
     }
     if (elements.initProgressLabel instanceof HTMLElement) {
       elements.initProgressLabel.textContent = progress.failed
         ? `初始化未完成：${describeInitFailure(status, progress)}`
+        : progress.partial
+          ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
         : progress.active
-          ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
+          ? progress.indeterminate
+            ? progress.stageLabel || "正在初始化"
+            : `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
+      elements.initProgressLabel.setAttribute("role", progress.failed ? "alert" : "status");
+      elements.initProgressLabel.setAttribute(
+        "aria-live",
+        progress.failed ? "assertive" : "polite",
+      );
+    }
+  }
+  // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
+  // the backend keeps writing; amber stall copy after >90s of silence.
+  if (elements.initStallHint instanceof HTMLElement) {
+    if (progress.active) {
+      const staleness = stalenessView(status);
+      const text = staleness.fresh
+        ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+        : staleness.text;
+      elements.initStallHint.textContent = text;
+      elements.initStallHint.classList.toggle("stale", !staleness.fresh);
+      elements.initStallHint.hidden = !text;
+    } else {
+      elements.initStallHint.hidden = true;
+      elements.initStallHint.classList.remove("stale");
     }
   }
   if (progress.active) {
     _setInitStartButton("初始化进行中…", false);
+    _setInitCancelButton(true);
     _setInitReason("");
   } else if (progress.failed) {
     _setInitStartButton("重试初始化", true);
+    _setInitCancelButton(false);
     _setInitReason("");
+  } else if (progress.partial) {
+    _setInitStartButton("画像已生成", false);
+    _setInitCancelButton(false);
+    _setInitReason(describeInitStatusReason(status), false);
   } else {
     _setInitStartButton("已初始化", false);
+    _setInitCancelButton(false);
     _setInitReason("");
   }
 }
@@ -1034,7 +1342,11 @@ async function pollInitProgress() {
   let status = null;
   try {
     status = await fetchInitStatus();
-  } catch {
+  } catch (error) {
+    _setInitReason(
+      `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`,
+      false,
+    );
     clearInitPolling();
     initPollTimer = setTimeout(() => {
       void pollInitProgress();
@@ -1052,10 +1364,61 @@ async function pollInitProgress() {
   clearInitPolling();
   if (status.initialized) {
     state.profileLoaded = false;
-    setHint("初始化完成！正在加载画像和推荐…", "success");
+    setHint(
+      status.partial_success
+        ? describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"
+        : "初始化完成！正在加载画像和推荐…",
+      status.partial_success ? "warning" : "success",
+    );
     scheduleRecommendationsRefresh();
     void loadProfileSummary({ force: true });
   }
+}
+
+async function handleCancelInitClick() {
+  if (elements.initCancelBtn instanceof HTMLButtonElement) {
+    elements.initCancelBtn.disabled = true;
+    elements.initCancelBtn.textContent = "取消中…";
+  }
+  try {
+    await cancelInit();
+    _setInitReason("已发送取消请求，正在安全结束当前步骤…", false);
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollInitProgress(), 300);
+  } catch (error) {
+    if (error?.status === 409) {
+      clearInitPolling();
+      initPollTimer = setTimeout(() => void pollInitProgress(), 300);
+    } else {
+      _setInitReason(error?.details?.detail || error?.message || "取消请求失败。");
+    }
+  } finally {
+    if (elements.initCancelBtn instanceof HTMLButtonElement) {
+      elements.initCancelBtn.textContent = "取消";
+      elements.initCancelBtn.disabled = false;
+    }
+  }
+}
+
+// Boot-time re-attach: when the popup opens while a run is already live, the
+// uninitialized branch would otherwise paint the idle panel and never poll
+// (the run started elsewhere, so no click/SSE kicked the poll here). Fetch once
+// and, ONLY if a run is in flight, take over with the progress view + poll.
+// The idle path is left untouched (renderInitProgress would clobber it). This
+// mirrors the setup wizard's boot guard and the desktop hydrate re-attach.
+async function maybeAttachRunningInitProgress() {
+  let status;
+  try {
+    status = await fetchInitStatus();
+  } catch {
+    return false;
+  }
+  if (!shouldAttachRunningInitProgress(status)) {
+    return false;
+  }
+  renderInitProgress(status);
+  _startInitProgressPoll();
+  return true;
 }
 
 function _startInitProgressPoll() {
@@ -1118,7 +1481,7 @@ async function handleStartInitClick() {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(
-      describeInitReason(status.reason) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
+      describeInitStatusReason(status) || "以下条件未满足，无法开始初始化，补齐后再点一次。",
     );
     return;
   }
@@ -1387,6 +1750,39 @@ function isAvoidanceProbeType(type) {
   return normalizeProbeType(type) === "avoidance.probe";
 }
 
+function probeActionDescriptors(type) {
+  return isAvoidanceProbeType(type)
+    ? [
+        { action: "confirm", label: "确认避雷", className: "is-confirm" },
+        { action: "defer", label: "搁置避雷", className: "is-neutral" },
+        { action: "reject", label: "不是雷点", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ]
+    : [
+        { action: "confirm", label: "确认喜欢", className: "is-confirm" },
+        { action: "defer", label: "暂时搁置", className: "is-neutral" },
+        { action: "reject", label: "确认不喜欢", className: "is-reject" },
+        { action: "chat", label: "多聊聊", className: "is-chat" },
+      ];
+}
+
+function probeResponseMessage(type, responseType, domain) {
+  const isAvoidance = isAvoidanceProbeType(type);
+  if (responseType === "defer") {
+    return isAvoidance
+      ? `好，「${domain}」先搁置，过阵子再确认是不是雷点。`
+      : `好，「${domain}」先搁置，过阵子再问。`;
+  }
+  if (responseType === "confirm") {
+    return isAvoidance
+      ? `好，「${domain}」会作为避雷方向处理。`
+      : `好，「${domain}」记住了。`;
+  }
+  return isAvoidance
+    ? `好，「${domain}」不记成避雷。`
+    : `好，「${domain}」会作为不喜欢处理。`;
+}
+
 function isChallengeProbe(probe) {
   const mode = String(probe?.probe_mode || "").toLowerCase();
   return Boolean(probe?.challenge) || mode === "lateral" || mode === "bridge" || mode === "wildcard";
@@ -1533,6 +1929,20 @@ function connectRuntimeStream() {
       ) {
         setHint(String(event.message || ""), "success");
       }
+      if (event.type === "delight.liked") {
+        const data = event.data || event;
+        const bvid = String(data.bvid || data.domain || event.bvid || event.domain || "");
+        const index = state.activeDelights.findIndex((item) => item?.bvid === bvid);
+        if (index >= 0) {
+          state.activeDelights[index] = {
+            ...state.activeDelights[index],
+            state: "liked",
+            response_message: String(data.message || event.message || "好，这类多来点。"),
+          };
+          syncDelightHead();
+          renderDelightSlot();
+        }
+      }
       // Live guided-init progress (gui-init F1): drive the recommend-tab
       // progress bar from the run's stage events.
       if (event.type === "init_progress" || event.type === "init_failed") {
@@ -1541,7 +1951,12 @@ function connectRuntimeStream() {
       // Init completed: re-fetch everything including profile
       if (event.type === "init_completed") {
         state.profileLoaded = false;
-        setHint("初始化完成！正在加载画像和推荐…", "success");
+        setHint(
+          event.partial_success
+            ? String(event.detail || "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。")
+            : "初始化完成！正在加载画像和推荐…",
+          event.partial_success ? "warning" : "success",
+        );
         scheduleRecommendationsRefresh();
         void loadProfileSummary({ force: true });
       }
@@ -1556,21 +1971,24 @@ function connectRuntimeStream() {
     },
     onConnect() {
       const wasOnline = state.online;
-      offlineBackendPoller.stop();
-      if (!wasOnline) {
-        state.online = true;
-        setStatus(true);
-        setHint("后端连上了，正在刷新。", "success");
+      const { reconnected } = backendConnectionCoordinator.markStreamConnected();
+      if (!wasOnline || reconnected) {
+        setHint(
+          reconnected && wasOnline ? "实时连接已恢复，正在刷新。" : "后端连上了，正在刷新。",
+          "success",
+        );
         scheduleRecommendationsRefresh({ delayMs: 0 });
       }
     },
     onDisconnect() {
-      if (state.online) {
-        state.online = false;
-        setStatus(false);
+      void backendConnectionCoordinator.markStreamDisconnected().then((result) => {
+        if (!result.applied) return;
+        if (result.reachable) {
+          setHint("实时连接正在恢复，后端功能仍可用。");
+          return;
+        }
         setHint("后端连接断了，等重连上会自动恢复。", "error");
-      }
-      offlineBackendPoller.start();
+      });
     },
   });
   client.connect();
@@ -1842,22 +2260,21 @@ function renderSpeculativeInterests(container, items, { kind = "interest" } = {}
     if ((item.status || "active") === "active" && item.domain) {
       const actions = document.createElement("div");
       actions.className = "spec-actions";
-
-      const confirmBtn = document.createElement("button");
-      confirmBtn.className = "probe-btn is-confirm";
-      confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "喜欢";
-      confirmBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "confirm", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      const rejectBtn = document.createElement("button");
-      rejectBtn.className = "probe-btn is-reject";
-      rejectBtn.textContent = isAvoidance ? "不是" : "不喜欢";
-      rejectBtn.addEventListener("click", () =>
-        handleSpecResponse(item.domain, "reject", row, isAvoidance ? "avoidance.probe" : "interest.probe"),
-      );
-
-      actions.append(confirmBtn, rejectBtn);
+      for (const { action: responseType, label, className } of probeActionDescriptors(
+        probeType,
+      ).filter(({ action }) => action !== "chat")) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `probe-btn ${className}`;
+        button.textContent = label;
+        button.setAttribute("aria-label", label);
+        button.title = label;
+        button.dataset.responseType = responseType;
+        button.addEventListener("click", () =>
+          handleSpecResponse(item.domain, responseType, row, probeType),
+        );
+        actions.append(button);
+      }
       row.append(actions);
     }
 
@@ -1890,9 +2307,7 @@ async function handleSpecResponse(domain, responseType, rowEl, type = "interest.
       rowEl.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "spec-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `好，「${domain}」记住了。` : `好，「${domain}」先不看了。`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       rowEl.append(msg);
       setTimeout(() => rowEl.remove(), 2500);
     }
@@ -1963,23 +2378,16 @@ function renderProbeCard() {
 
   const actions = document.createElement("div");
   actions.className = "probe-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = "\u559C\u6B22";
-  confirmBtn.addEventListener("click", () => handleProbeResponse("confirm"));
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = "\u4E0D\u559C\u6B22";
-  rejectBtn.addEventListener("click", () => handleProbeResponse("reject"));
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591a\u804a\u804a";
-  chatBtn.addEventListener("click", () => handleProbeResponse("chat"));
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
+  for (const descriptor of probeActionDescriptors("interest.probe")) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.addEventListener("click", () => handleProbeResponse(descriptor.action));
+    actions.append(button);
+  }
   card.append(actions);
 
   // Insert at the top of the speculative interests container
@@ -2018,9 +2426,7 @@ async function handleProbeResponse(responseType) {
       probeCard.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "probe-result";
-      msg.textContent = responseType === "confirm"
-        ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002`
-        : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`;
+      msg.textContent = probeResponseMessage("interest.probe", responseType, domain);
       probeCard.append(msg);
       setTimeout(() => probeCard.remove(), 3000);
     }
@@ -2324,7 +2730,7 @@ function onMessageActionClick(event) {
     dismissMessage(domain, type);
   } else if (action === "chat") {
     expandInlineChat(card, domain, type);
-  } else if (action === "confirm" || action === "reject") {
+  } else if (action === "confirm" || action === "defer" || action === "reject") {
     // Guard against a double-click firing the API twice before the card is
     // replaced with its success state; clear on settle so an error path (card
     // kept) can be retried (success replaces the card, so it's moot there).
@@ -2432,29 +2838,17 @@ function buildMessageCard(probe) {
 
   const actions = document.createElement("div");
   actions.className = "message-actions";
-
-  const confirmBtn = document.createElement("button");
-  confirmBtn.className = "probe-btn is-confirm";
-  confirmBtn.textContent = isAvoidance ? "确实不喜欢" : "\u559C\u6B22";
-  confirmBtn.dataset.msgAction = "confirm";
-
-  const rejectBtn = document.createElement("button");
-  rejectBtn.className = "probe-btn is-reject";
-  rejectBtn.textContent = isAvoidance ? "不是" : "\u4E0D\u559C\u6B22";
-  rejectBtn.dataset.msgAction = "reject";
-
-  const chatBtn = document.createElement("button");
-  chatBtn.className = "probe-btn is-chat";
-  chatBtn.textContent = "\u591A\u804A\u804A";
-  chatBtn.dataset.msgAction = "chat";
-
-  if (probe.chat_status === "pending") {
-    confirmBtn.disabled = true;
-    rejectBtn.disabled = true;
-    chatBtn.disabled = true;
+  for (const descriptor of probeActionDescriptors(type)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `probe-btn ${descriptor.className}`;
+    button.textContent = descriptor.label;
+    button.setAttribute("aria-label", descriptor.label);
+    button.title = descriptor.label;
+    button.dataset.msgAction = descriptor.action;
+    button.disabled = probe.chat_status === "pending";
+    actions.append(button);
   }
-
-  actions.append(confirmBtn, rejectBtn, chatBtn);
   item.append(actions);
   return item;
 }
@@ -2493,6 +2887,18 @@ function appendRecommendationStats(parent, item) {
   stats.className = "recommendation-stats";
   stats.textContent = text;
   parent.append(stats);
+}
+
+function appendPublishedTime(parent, item) {
+  const text = formatPublishedTime(item);
+  if (!text) return;
+  const time = document.createElement("span");
+  time.className = "recommendation-published-time";
+  time.textContent = text;
+  if (item.published_at && Number.isFinite(Date.parse(item.published_at))) {
+    time.title = new Date(item.published_at).toLocaleString();
+  }
+  parent.append(time);
 }
 
 // ── Delight (surprise recommendation) card ─────────────────────
@@ -2542,10 +2948,16 @@ function buildDelightCard(delight) {
     textCol.append(hookBadge);
   }
 
+  const platformChip = document.createElement("span");
+  platformChip.className = "message-delight-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  textCol.append(platformChip);
+
   const title = document.createElement("div");
   title.className = "message-delight-title";
   title.textContent = delight.title || "";
   textCol.append(title);
+  appendPublishedTime(textCol, delight);
 
   top.append(textCol);
   item.append(top);
@@ -2679,6 +3091,17 @@ function expandDelightChat(itemEl, delight) {
       });
       const ca = itemEl.querySelector(".message-chat-area");
       if (ca) ca.remove();
+      const showFailure = (nextTurn) => {
+        thinking.remove();
+        const errorEl = document.createElement("div");
+        errorEl.className = "message-chat-reply";
+        errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+        itemEl.append(errorEl);
+        sendBtn.disabled = false;
+        if (actions) actions.hidden = false;
+        applyTurnToMessage(nextTurn);
+        applyTurnToDelight(nextTurn);
+      };
       const showReply = (nextTurn) => {
         thinking.remove();
         const replyEl = document.createElement("div");
@@ -2689,14 +3112,21 @@ function expandDelightChat(itemEl, delight) {
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
       };
+      const settleTurn = (nextTurn) => {
+        if (nextTurn.status === "failed") {
+          showFailure(nextTurn);
+          return;
+        }
+        if (nextTurn.status === "completed") showReply(nextTurn);
+      };
       if (turn.status === "completed" || turn.status === "failed") {
-        showReply(turn);
+        settleTurn(turn);
       } else {
         applyTurnToMessage(turn);
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate(nextTurn) {
             if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-              showReply(nextTurn);
+              settleTurn(nextTurn);
             }
           },
         });
@@ -2795,8 +3225,12 @@ function createChatThinkingPlaceholder(label) {
 async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.probe") {
   const message = input.value.trim();
   if (!message) return;
+  const chatArea = input.closest(".message-chat-area");
+  if (!chatArea || !input.isConnected || !sendBtn.isConnected) return;
   const isAvoidance = isAvoidanceProbeType(type);
 
+  chatArea.querySelector(".message-chat-reply.is-error")?.remove();
+  input.disabled = true;
   sendBtn.disabled = true;
   const turnId = createClientTurnId(isAvoidance ? "avoidance_probe" : "probe");
   rememberHandledProbe(domain, type);
@@ -2818,12 +3252,24 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       message,
     });
 
-    // Remove chat area, show result, then remove card after delay
-    const chatArea = itemEl.querySelector(".message-chat-area");
-    if (chatArea) chatArea.remove();
+    // Completed turns remove the card after showing the reply. Failed turns
+    // restore the handled/retry state and keep the card visible.
+    const showFailure = (nextTurn) => {
+      forgetHandledProbe(domain, type);
+      thinking.remove();
+      input.disabled = false;
+      sendBtn.disabled = false;
+      const errorEl = document.createElement("div");
+      errorEl.className = "message-chat-reply is-error";
+      errorEl.textContent = nextTurn.error || "刚刚没发出去，换个说法再试试。";
+      chatArea.append(errorEl);
+      applyTurnToMessage(nextTurn);
+      input.focus();
+    };
 
     const showReply = (nextTurn) => {
       thinking.remove();
+      chatArea.remove();
       const replyEl = document.createElement("div");
       replyEl.className = "message-chat-reply";
       replyEl.textContent =
@@ -2837,14 +3283,22 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       }, 4000);
     };
 
+    const settleTurn = (nextTurn) => {
+      if (nextTurn.status === "failed") {
+        showFailure(nextTurn);
+        return;
+      }
+      if (nextTurn.status === "completed") showReply(nextTurn);
+    };
+
     if (turn.status === "completed" || turn.status === "failed") {
-      showReply(turn);
+      settleTurn(turn);
     } else {
       applyTurnToMessage(turn);
       pollChatTurnUntilSettled(turn.turn_id, {
         onUpdate(nextTurn) {
           if (nextTurn.status === "completed" || nextTurn.status === "failed") {
-            showReply(nextTurn);
+            settleTurn(nextTurn);
           }
         },
       });
@@ -2853,12 +3307,14 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
     console.error("Inline chat failed:", err);
     forgetHandledProbe(domain, type);
     thinking.remove();
+    input.disabled = false;
     sendBtn.disabled = false;
     // Show error hint inline
     const errEl = document.createElement("div");
-    errEl.className = "message-chat-reply";
+    errEl.className = "message-chat-reply is-error";
     errEl.textContent = "\u540E\u53F0\u6B63\u5FD9\uFF0C\u7B49\u4E00\u4E0B\u518D\u804A\u3002";
-    itemEl.append(errEl);
+    chatArea.append(errEl);
+    input.focus();
     setTimeout(() => errEl.remove(), 3000);
   }
 }
@@ -2904,9 +3360,7 @@ async function handleMessageResponse(domain, responseType, type = "interest.prob
       item.replaceChildren();
       const msg = document.createElement("p");
       msg.className = "message-result";
-      msg.textContent = isAvoidance
-        ? (responseType === "confirm" ? `好，「${domain}」会作为避雷方向处理。` : `好，「${domain}」不记成避雷。`)
-        : (responseType === "confirm" ? `\u597D\uFF0C\u300C${domain}\u300D\u8BB0\u4F4F\u4E86\u3002` : `\u597D\uFF0C\u300C${domain}\u300D\u5148\u4E0D\u770B\u4E86\u3002`);
+      msg.textContent = probeResponseMessage(type, responseType, domain);
       item.append(msg);
       setTimeout(() => {
         item.remove();
@@ -4219,7 +4673,7 @@ function renderChatTurn(turn) {
     return;
   }
   if (status === "failed") {
-    const message = turn.reply || "刚刚没发出去，换个说法再试试。";
+    const message = turn.error || "刚刚没发出去，换个说法再试试。";
     if (assistantPart instanceof HTMLElement) {
       replaceChatThinkingPlaceholder(assistantPart, message);
     } else {
@@ -4536,8 +4990,6 @@ function renderDelightSlot() {
   }
 
   const delight = head;
-  const isHandled = uiState.handled;
-  const isChatting = delight.state === "chatting";
   const isExpanded = Boolean(delight.expanded);
 
   // Banner with thumbnail. Collapsed = ~64px row showing thumbnail +
@@ -4588,6 +5040,11 @@ function renderDelightSlot() {
   kicker.className = "delight-banner-kicker";
   kicker.textContent = `✨ ${delight.delight_hook || "惊喜推荐"}`;
   kickerLine.append(kicker);
+  const platformChip = document.createElement("span");
+  platformChip.className = "delight-banner-platform";
+  platformChip.textContent = platformDisplayName(delight.source_platform || "bilibili");
+  kickerLine.append(platformChip);
+  appendPublishedTime(kickerLine, delight);
   if (queueLength > 1) {
     const prevBtn = document.createElement("button");
     prevBtn.type = "button";
@@ -4665,7 +5122,7 @@ function renderDelightSlot() {
       body.append(reason);
     }
 
-    if (uiState.response_message) {
+    if (uiState.show_status) {
       const response = document.createElement("p");
       response.className = "delight-banner-response";
       response.dataset.tone = uiState.response_tone;
@@ -4734,6 +5191,9 @@ function renderDelightSlot() {
           await respondToDelight(delight.bvid, "like", delight.title);
         } catch (err) {
           console.error("Delight like failed:", err);
+          setHint("这次喜欢还没记上，可以再试一次。", "error");
+          renderDelightSlot();
+          return;
         }
         setHint("好，这类多来点。", "success");
         updateDelightHead({
@@ -4745,6 +5205,8 @@ function renderDelightSlot() {
         renderDelightSlot();
       },
     );
+    likeButton.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false");
+    likeButton.disabled = uiState.like_disabled;
 
     const rejectButton = createActionButton(
       "不感兴趣",
@@ -4778,35 +5240,22 @@ function renderDelightSlot() {
     // \u7A0D\u540E\u518D\u770B = \u65F6\u949F\u56FE\u6807\uFF08\u72B6\u6001\u8D70 aria-pressed + CSS\uFF0C\u4E0D\u505A\u5B57\u5F62\u66FF\u6362\uFF09
     const delightWatchLaterButton = (() => {
       const btn = createActionButton("", "action-button action-secondary delight-banner-action delight-save-toggle watch-later-btn", async () => {
-        try {
-          await toggleWatchLaterSaved(delight.bvid);
-        } catch {
-          // Registry already rolled back the optimistic state.
-        }
+        await toggleSavedWithFeedback("稍后再看", delight, watchLaterToggles, toggleWatchLaterSaved);
       });
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
-      bindWatchLaterToggle(btn, delight.bvid);
+      bindWatchLaterToggle(btn, delight);
       return btn;
     })();
 
     // \u6536\u85CF = \u661F\u661F\u56FE\u6807\uFF0C\u4E0E\u7A0D\u540E\u518D\u770B\u76F8\u4E92\u72EC\u7ACB
     const delightFavoriteButton = (() => {
       const btn = createActionButton("", "action-button action-secondary delight-banner-action delight-save-toggle favorite-btn", async () => {
-        try {
-          await toggleFavoriteSaved(delight.bvid);
-        } catch {
-          // Registry already rolled back the optimistic state.
-        }
+        await toggleSavedWithFeedback("收藏", delight, favoriteToggles, toggleFavoriteSaved);
       });
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
-      bindFavoriteToggle(btn, delight.bvid);
+      bindFavoriteToggle(btn, delight);
       return btn;
     })();
-
-    if (isHandled || isChatting) {
-      rejectButton.disabled = true;
-      likeButton.disabled = true;
-    }
 
     actions.append(
       openButton,
@@ -4816,7 +5265,9 @@ function renderDelightSlot() {
       rejectButton,
       chatButton,
     );
-    body.append(actions);
+    if (uiState.show_actions) {
+      body.append(actions);
+    }
 
     if (delight.composer_open) {
       const composer = document.createElement("div");
@@ -4950,11 +5401,37 @@ function renderDelightSlot() {
       dismissAll.type = "button";
       dismissAll.className = "delight-banner-dismiss-all";
       dismissAll.textContent = `全部稍后看 (${queueLength})`;
-      dismissAll.addEventListener("click", (event) => {
+      dismissAll.addEventListener("click", async (event) => {
         event.stopPropagation();
-        for (const d of state.activeDelights) rememberDismissedDelight(d.bvid);
-        clearDelightQueue();
-        setHint("都收起来了，需要时去邮箱里翻。", "info");
+        if (dismissAll.disabled) return;
+        dismissAll.disabled = true;
+        dismissAll.textContent = "本地保存中…";
+        const snapshot = state.activeDelights.map((item) => normalizePopupSavedItem(item));
+        const results = await Promise.allSettled(
+          snapshot.map((item) => saveItem("watch_later", item)),
+        );
+        const partition = partitionSavedQueueResults(snapshot, results);
+        let syncing = 0;
+        partition.saved.forEach(({ item, itemKey, value }) => {
+          if (itemKey) {
+            watchLaterToggles.setSaved(itemKey, true);
+          }
+          if (value?.sync_task_id && ["pending", "syncing"].includes(value?.sync_status)) {
+            syncing += 1;
+            savedTaskRuntimes.watch_later.coordinator.track({
+              task_id: value.sync_task_id,
+              items: [{ item_key: itemKey, status: value.sync_status }],
+            }, [itemKey], {
+              onTerminal: () => { void loadWatchLater(); },
+            });
+          }
+          rememberDismissedDelight(item.bvid || item.content_id);
+        });
+        const saved = partition.savedCount;
+        const failed = partition.failedCount;
+        state.activeDelights = partition.remaining;
+        syncDelightHead();
+        setHint(`本地保存 ${saved} · 同步中 ${syncing} · 失败 ${failed}`, failed ? "warning" : "success");
         renderDelightSlot();
       });
       body.append(dismissAll);
@@ -5172,6 +5649,7 @@ function renderRecommendations(items, { append = false } = {}) {
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
     metaLine.textContent = `这位 UP：${item.up_name}`;
+    appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
     appendRecommendationStats(content, item);
@@ -5240,28 +5718,20 @@ function renderRecommendations(items, { append = false } = {}) {
       }),
       (() => {
         const btn = createActionButton("", "action-button action-secondary", async () => {
-          try {
-            await toggleWatchLaterSaved(item.bvid);
-          } catch {
-            // Registry already rolled back the optimistic state.
-          }
+          await toggleSavedWithFeedback("稍后再看", item, watchLaterToggles, toggleWatchLaterSaved);
         });
         btn.innerHTML = WATCH_LATER_ICON_SVG;
         btn.classList.add("saved-toggle", "watch-later-btn");
-        bindWatchLaterToggle(btn, item.bvid);
+        bindWatchLaterToggle(btn, item);
         return btn;
       })(),
       (() => {
         const btn = createActionButton("", "action-button action-secondary", async () => {
-          try {
-            await toggleFavoriteSaved(item.bvid);
-          } catch {
-            // Registry already rolled back the optimistic state.
-          }
+          await toggleSavedWithFeedback("收藏", item, favoriteToggles, toggleFavoriteSaved);
         });
         btn.innerHTML = FAVORITE_ICON_SVG;
         btn.classList.add("saved-toggle", "favorite-btn");
-        bindFavoriteToggle(btn, item.bvid);
+        bindFavoriteToggle(btn, item);
         return btn;
       })(),
       createActionButton("少来点", "action-button action-secondary", async () => {
@@ -5429,10 +5899,13 @@ function renderRecommendationState(stateShape) {
   if (stateShape.kind === "uninitialized") {
     showRecommendationEmptyState(
       "还没完成初始化",
-      "点「开始初始化」，会先检查前置条件，通过后就在这里一步步建好画像和首轮内容池。",
+      "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
     setHint("先完成初始化，把画像和候选池攒起来。");
     renderInitPanelIdle();
+    // If a run is already live (started elsewhere / page reopened mid-init),
+    // take over with the progress view + poll instead of a dead idle panel.
+    void maybeAttachRunningInitProgress();
     return;
   }
 
@@ -5628,11 +6101,13 @@ async function refreshProfileSummaryAfterInteraction({
 
 async function initializeRecommendations() {
   const online = await checkBackendStatus();
-  state.online = online;
-  setStatus(online);
+  if (online) {
+    backendConnectionCoordinator.markHttpReachable();
+  } else {
+    backendConnectionCoordinator.markOffline();
+  }
 
   if (!online) {
-    offlineBackendPoller.start();
     state.runtimeStatus = null;
     state.runtimeConfig = null;
     state.recommendations = [];
@@ -5645,7 +6120,6 @@ async function initializeRecommendations() {
     renderProfileSummary(normalizeProfileSummary({ initialized: false }));
     return;
   }
-  offlineBackendPoller.stop();
 
   const [runtimeResult, recommendationResult, delightResult, configResult] =
     await Promise.allSettled([
@@ -5737,10 +6211,16 @@ async function handleManualRefresh() {
       setHint("还没初始化好。去「推荐」页点「开始初始化」，完成后再刷新。", "error");
       return;
     }
+    const replacement = reconcileRecommendationReplacement(
+      state.recommendations,
+      result.items,
+    );
     resetRecommendationAutoLoadIntent();
-    state.recommendations = result.items;
+    state.recommendations = replacement.items;
     state.loadingMore = false;
-    state.hasMoreRecommendations = result.items.length >= 10;
+    state.hasMoreRecommendations = replacement.preserved
+      ? false
+      : result.items.length >= 10;
     state.runtimeStatus = await fetchRuntimeStatus().catch(() => state.runtimeStatus);
     renderPoolStatus(state.runtimeStatus);
     renderRecommendationState(
@@ -5753,6 +6233,7 @@ async function handleManualRefresh() {
     const hint = getManualRefreshResultHint({
       itemCount: result.items.length,
       hadAdvertisedInventory,
+      preservedCurrent: replacement.preserved,
     });
     setHint(hint.message, hint.tone);
     await loadActivityFeed();
@@ -6202,6 +6683,7 @@ function bindSettings() {
     gemini: "gemini-embedding-001",
     ollama: "bge-m3",
     openai_compatible: "bge-large-en-v1.5",
+    dashscope: "qwen3-vl-embedding",
   };
   const EMBEDDING_BASE_URL_HINT = {
     "": "留空使用默认",
@@ -6209,6 +6691,7 @@ function bindSettings() {
     gemini: "(Gemini SDK 不需要 base_url)",
     ollama: "http://localhost:11434/v1",
     openai_compatible: "https://api.together.xyz/v1 / http://localhost:8000/v1",
+    dashscope: "留空 = https://dashscope.aliyuncs.com（国际站 dashscope-intl.aliyuncs.com）",
   };
 
   function applyEmbeddingProviderUI() {
@@ -6444,10 +6927,11 @@ function bindSettings() {
     ready: "#2ecc71",
     syncing: "#9aa0a6",
     no_auth: "#9aa0a6",
+    unverified: "#9aa0a6",
     missing: "#e0a800",
     missing_cookie: "#e0a800",
     login_required: "#e0a800",
-    rate_limited: "#e0a800",
+    rate_limited: "#9aa0a6",
     partial: "#e0a800",
     stale: "#e0a800",
     error: "#e74c3c",
@@ -6455,7 +6939,21 @@ function bindSettings() {
     blocked: "#e74c3c",
   };
   const SOURCE_STATUS_LABEL = {
+    ok: "接入可用",
+    ready: "凭据已就绪",
     syncing: "接入中",
+    no_auth: "无需登录",
+    unverified: "状态待验证",
+    missing: "需要登录",
+    missing_cookie: "缺少 Cookie",
+    login_required: "需要登录",
+    rate_limited: "频率受限",
+    partial: "部分可用",
+    stale: "需要刷新",
+    error: "检查失败",
+    expired: "凭据失效",
+    expired_cookie: "Cookie 失效",
+    blocked: "接入受阻",
   };
   const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
 
@@ -6504,7 +7002,7 @@ function bindSettings() {
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
-    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
+    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
     syncLlmFallbackSameState();
@@ -6550,6 +7048,8 @@ function bindSettings() {
     setVal("cfgEmbeddingBaseUrl", cfg.llm?.embedding?.base_url);
     setVal("cfgEmbeddingModel", cfg.llm?.embedding?.model);
     setVal("cfgEmbeddingSimilarity", cfg.llm?.embedding?.similarity_threshold);
+    const embMultimodal = document.getElementById("cfgEmbeddingMultimodalEnabled");
+    if (embMultimodal) embMultimodal.checked = cfg.llm?.embedding?.multimodal_enabled === true;
     applyEmbeddingProviderUI();
 
     // Bilibili
@@ -6624,6 +7124,13 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
+    setVal("cfgNetworkProxy", cfg.network?.proxy || "");
+    const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+    if (savedAutoSync instanceof HTMLInputElement) {
+      savedAutoSync.checked = cfg.saved_sync?.auto_sync_enabled === true;
+      savedAutoSync.dataset.confirmed = savedAutoSync.checked ? "true" : "false";
+    }
 
     // Scheduler
     const schedEnabled = document.getElementById("cfgSchedulerEnabled");
@@ -6642,6 +7149,7 @@ function bindSettings() {
     setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
     setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
+    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
@@ -6695,7 +7203,7 @@ function bindSettings() {
       data_dir: getVal("cfgDataDir"),
       llm: {
         default_provider: providerSelect.value,
-        concurrency: getInt("cfgLlmConcurrency", 3),
+        concurrency: getInt("cfgLlmConcurrency", 4),
         timeout: getInt("cfgLlmTimeout", 300),
         // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除
         // （老后端会忽略未知字段，新后端不再回显它）。
@@ -6744,6 +7252,7 @@ function bindSettings() {
           similarity_threshold: getFloat("cfgEmbeddingSimilarity", 0.82),
           fallback_enabled: Boolean(embeddingFallbackProvider),
           fallback_provider: embeddingFallbackProvider,
+          multimodal_enabled: checked("cfgEmbeddingMultimodalEnabled"),
         },
         soul: {
           provider: getVal("cfgModuleSoulProvider"),
@@ -6844,6 +7353,7 @@ function bindSettings() {
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
         keyword_generation_mode: getVal("cfgKeywordGenerationMode"),
+        candidate_eval_concurrency: getInt("cfgCandidateEvalConcurrency", 3),
         multimodal_evaluation_enabled: checked("cfgMultimodalEvaluationEnabled"),
         multimodal_batch_size: getInt("cfgMultimodalBatchSize", 8),
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),
@@ -6883,8 +7393,15 @@ function bindSettings() {
         auto_update_enabled: checked("cfgAutoUpdate"),
         auto_update_check_interval_hours: getInt("cfgAutoUpdateInterval", 6),
       },
+      saved_sync: {
+        auto_sync_enabled: checked("cfgSavedAutoSync"),
+      },
       storage: {
         db_path: getVal("cfgStorageDbPath"),
+      },
+      network: {
+        mode: getVal("cfgNetworkProxyMode"),
+        proxy: getVal("cfgNetworkProxy"),
       },
       logging: {
         level: getVal("cfgLogLevel"),
@@ -6994,6 +7511,33 @@ function bindSettings() {
     });
   }
 
+  async function runNetworkProxyConfigProbe(button, statusEl) {
+    if (!button) return;
+    button.disabled = true;
+    renderProbePending(statusEl, "代理");
+    try {
+      const proxy = getVal("cfgNetworkProxy");
+      const mode = getVal("cfgNetworkProxyMode");
+      const result = await probeConfigService("network_proxy", { network: { mode, proxy } });
+      renderProbeResult(statusEl, result);
+    } catch (err) {
+      renderProbeResult(statusEl, {
+        ok: false,
+        error: err?.message || "代理探测失败",
+      });
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  const probeNetworkProxyBtn = document.getElementById("cfgProbeNetworkProxy");
+  const probeNetworkProxyStatus = document.getElementById("cfgProbeNetworkProxyStatus");
+  if (probeNetworkProxyBtn instanceof HTMLButtonElement) {
+    probeNetworkProxyBtn.addEventListener("click", () => {
+      void runNetworkProxyConfigProbe(probeNetworkProxyBtn, probeNetworkProxyStatus);
+    });
+  }
+
   const backendCheckBtn = document.getElementById("backendUpdateCheck");
   const backendApplyBtn = document.getElementById("backendUpdateApply");
   if (backendCheckBtn instanceof HTMLButtonElement) {
@@ -7029,6 +7573,23 @@ function bindSettings() {
         await loadBackendUpdateStatus();
         backendApplyBtn.disabled = false;
       }
+    });
+  }
+
+  const savedAutoSync = document.getElementById("cfgSavedAutoSync");
+  const savedAutoSyncStatus = document.getElementById("cfgSavedAutoSyncStatus");
+  if (savedAutoSync instanceof HTMLInputElement) {
+    savedAutoSync.addEventListener("change", () => {
+      if (!savedAutoSync.checked || savedAutoSync.dataset.confirmed === "true") return;
+      const warning = "开启后，在 OpenBiliClaw 点击收藏或稍后再看会修改对应平台账号中的收藏、书签、Saved、播放列表或稍后观看。";
+      if (!window.confirm(warning)) {
+        savedAutoSync.checked = false;
+        savedAutoSync.dataset.confirmed = "false";
+        if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已取消，自动同步仍为关闭。";
+        return;
+      }
+      savedAutoSync.dataset.confirmed = "true";
+      if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已确认；保存配置后开启。";
     });
   }
 
@@ -7185,16 +7746,15 @@ function bindSettings() {
         // Rebind the runtime stream against the new origin and refresh
         // the online indicator. If the backend isn't yet running on the
         // new port these will retry on the fixed liveness cadence and the popup
-        // status will flip to offline — exactly the signal the user
-        // needs to remember to start the daemon with --port.
+        // status will stay reconnecting or flip to offline — exactly the signal
+        // the user needs to remember to start the daemon with --port.
         await clearPopupSession();
         connectRuntimeStream();
-        state.online = await checkBackendStatus();
-        setStatus(state.online);
-        if (state.online) {
-          offlineBackendPoller.stop();
+        const online = await checkBackendStatus();
+        if (online) {
+          backendConnectionCoordinator.markHttpReachable();
         } else {
-          offlineBackendPoller.start();
+          backendConnectionCoordinator.markOffline();
         }
       }
     } catch (err) {

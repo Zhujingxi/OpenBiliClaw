@@ -174,6 +174,7 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "runtime"
+    credential_file = tmp_path / "rdt-cli" / "credential.json"
     cfg = Config(
         llm=LLMConfig(
             default_provider="ollama",
@@ -184,6 +185,10 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     cfg.sources.reddit.backend = "extension"
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
+    monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks._rdt_credential_file",
+        lambda: credential_file,
+    )
     monkeypatch.setattr(
         "openbiliclaw.sources.reddit_tasks.probe_reddit_command_backend",
         lambda backend: pytest.fail("extension status must not probe command backends"),
@@ -208,7 +213,7 @@ def test_reddit_source_status_uses_extension_backend_without_command_probe(
     assert "OpenBiliClaw 插件" in reddit["detail"]
 
 
-def test_reddit_source_status_defaults_to_rdt_command_backend(
+def test_reddit_source_status_uses_local_rdt_credential_without_command_probe(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -222,13 +227,14 @@ def test_reddit_source_status_defaults_to_rdt_command_backend(
     cfg.sources.reddit.enabled = True
     save_config(cfg, project_root / "config.toml")
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
-    probed: dict[str, str] = {}
-
-    def probe(backend: str) -> object:
-        probed["backend"] = backend
-        return type("Status", (), {"state": "ready", "message": "rdt ok"})()
-
-    monkeypatch.setattr("openbiliclaw.sources.reddit_tasks.probe_reddit_command_backend", probe)
+    monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks._rdt_saved_credential_state",
+        lambda: ("present", "rdt credential 就绪。"),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.reddit_tasks.probe_reddit_command_backend",
+        lambda backend: pytest.fail(f"settings status must not probe {backend}"),
+    )
 
     db = _make_database(tmp_path)
     app = create_app(memory_manager=object(), database=db, soul_engine=object())
@@ -238,10 +244,10 @@ def test_reddit_source_status_defaults_to_rdt_command_backend(
 
     assert resp.status_code == 200
     reddit = resp.json()["reddit"]
-    assert probed == {"backend": "rdt"}
     assert reddit["enabled"] is True
     assert reddit["state"] == "ready"
-    assert reddit["detail"] == "rdt ok"
+    assert reddit["logged_in"] is True
+    assert "未实时访问 Reddit" in reddit["detail"]
 
 
 def test_put_config_preserves_reddit_extension_backend(

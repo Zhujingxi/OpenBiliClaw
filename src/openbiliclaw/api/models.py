@@ -2,9 +2,87 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+import ipaddress
+import re
+import unicodedata
+from typing import Annotated, Literal, Self
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
+
+NativeSaveStatusOut = Literal[
+    "pending",
+    "syncing",
+    "synced",
+    "already_synced",
+    "login_required",
+    "unsupported",
+    "rate_limited",
+    "extension_required",
+    "failed",
+]
+NativeSaveActionOut = Literal["favorite", "watch_later"]
+_SAVED_PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+_URL_FALLBACK_ID_RE = re.compile(r"[0-9a-f]{24}")
+_ZHIHU_TYPED_CONTENT_ID_RE = re.compile(r"(?:question|answer|article):[0-9]+")
+
+
+def _has_unicode_control(value: str) -> bool:
+    return any(unicodedata.category(character).startswith("C") for character in value)
+
+
+def _has_identity_whitespace(value: str) -> bool:
+    return any(character.isspace() for character in value)
+
+
+def _validate_http_url(value: str) -> str:
+    if _has_identity_whitespace(value) or _has_unicode_control(value):
+        raise ValueError("URL fields must not contain whitespace or control characters")
+    try:
+        parts = urlsplit(value)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("URL fields must use a valid absolute HTTP(S) URL") from exc
+    if parts.scheme.lower() not in {"http", "https"} or not parts.netloc or hostname is None:
+        raise ValueError("URL fields must use a valid absolute HTTP(S) URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URL fields must not contain credentials")
+    if port is not None and port <= 0:
+        raise ValueError("URL fields must use a valid TCP port")
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("URL fields must contain a valid hostname") from exc
+        labels = ascii_hostname.removesuffix(".").split(".")
+        if (
+            not ascii_hostname
+            or len(ascii_hostname.removesuffix(".")) > 253
+            or any(
+                not label
+                or len(label) > 63
+                or label.startswith("-")
+                or label.endswith("-")
+                or re.fullmatch(r"[A-Za-z0-9-]+", label) is None
+                for label in labels
+            )
+        ):
+            raise ValueError("URL fields must contain a valid hostname") from None
+    return value
 
 
 class BehaviorEventIn(BaseModel):
@@ -45,6 +123,25 @@ class HealthResponse(BaseModel):
     embedding_ready: bool | None = None
 
 
+class InitStageProgressOut(BaseModel):
+    """Fine-grained progress inside a running stage (init-progress spec).
+
+    Additive/optional: only present while a stage exposes sub-progress (e.g.
+    stage 2 chunked preference analysis). Absent on stages with no natural
+    progress points or on a status produced by an older backend.
+    """
+
+    done: int = 0
+    total: int = 0
+    note: str | None = None
+    # ``indeterminate`` means the backend is inside one long operation with
+    # no honest item count (for example one LLM request). elapsed/max still
+    # provide a bounded countdown without inventing a percentage.
+    mode: str = "determinate"  # determinate | indeterminate
+    elapsed_seconds: int | None = None
+    max_seconds: int | None = None
+
+
 class InitStageOut(BaseModel):
     """One stage of guided init (gui-init spec API shape)."""
 
@@ -52,6 +149,10 @@ class InitStageOut(BaseModel):
     label: str
     status: str  # pending | running | ok | warning | failed
     reason: str | None = None
+    # Optional (backward-compatible): intra-stage sub-progress + typical
+    # duration hint. Old stages_json rows lack these; both default to None.
+    progress: InitStageProgressOut | None = None
+    eta_seconds: int | None = None
 
 
 class InitPrerequisitesOut(BaseModel):
@@ -65,7 +166,7 @@ class InitPrerequisitesOut(BaseModel):
     # Classified cause when embedding_ready is False, so the UI can say
     # WHY instead of a dead retry (v0.3.155+): ok | disabled | misconfigured |
     # not_running | model_missing | model_broken | model_path_encoding |
-    # disk_full | network | model_oom | provider_error | error.
+    # disk_full | network | model_oom | provider_error | checking | error.
     embedding_check: str = "ok"
     embedding_detail: str = ""  # human-readable hint ("" when ok/disabled)
     # Live pull progress while a one-click repair is downloading the model
@@ -97,6 +198,15 @@ class InitStatusOut(BaseModel):
     prerequisites: InitPrerequisitesOut = Field(default_factory=InitPrerequisitesOut)
     reason: str = "none"
     detail: str = ""
+    # Backward-compatible alias of ``last_heartbeat_at``. New clients must use
+    # the explicit liveness/progress clocks below instead of treating a heartbeat
+    # as proof that useful work advanced.
+    last_activity: str = ""
+    # Explicit liveness/progress clocks. ``last_activity`` remains as a
+    # compatibility alias of ``last_heartbeat_at`` for older clients.
+    last_heartbeat_at: str = ""
+    last_progress_at: str = ""
+    progress_sequence: int = 0
 
 
 class RecommendationOut(BaseModel):
@@ -104,6 +214,7 @@ class RecommendationOut(BaseModel):
 
     id: int
     bvid: str
+    item_key: str = ""
     title: str = ""
     up_name: str = ""
     cover_url: str = ""
@@ -115,6 +226,8 @@ class RecommendationOut(BaseModel):
     content_id: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
     # Text-first sources (X tweet/thread): the popup renders a no-cover
     # text card from body_text/title when content_type is tweet/thread or
     # cover_url is empty.
@@ -143,6 +256,12 @@ class RecommendationReshuffleResponse(BaseModel):
     """Immediate recommendation reshuffle result."""
 
     items: list[RecommendationOut]
+
+
+class RecommendationReshuffleIn(BaseModel):
+    """Optional visible-card exclusions for a reshuffle request."""
+
+    excluded_bvids: list[str] = Field(default_factory=list)
 
 
 class RecommendationAppendIn(BaseModel):
@@ -175,6 +294,32 @@ class RuntimeStatusResponse(BaseModel):
     pool_pending_eval_count: int = 0
     pool_evaluated_pending_count: int = 0
     pool_target_count: int = 0
+    candidate_eval_state: str = "idle"
+    candidate_eval_workers: int = 0
+    candidate_eval_in_flight: int = 0
+    candidate_eval_pending: int = 0
+    candidate_eval_backoff_until: float = 0.0
+    candidate_eval_last_error: str = ""
+    candidate_eval_last_batch_seconds: float = 0.0
+    candidate_eval_last_cached: int = 0
+    candidate_eval_last_rejected: int = 0
+    expression_pending_count: int = 0
+    expression_batch_state: str = "idle"
+    expression_batch_deadline: float = 0.0
+    expression_last_completed: int = 0
+    expression_last_error: str = ""
+    llm_total_concurrency: int = 0
+    llm_background_concurrency: int = 0
+    llm_total_active: int = 0
+    llm_total_waiting: int = 0
+    llm_background_active: int = 0
+    llm_background_waiting: int = 0
+    llm_refill_active: int = 0
+    llm_refill_waiting: int = 0
+    llm_maintenance_active: int = 0
+    llm_maintenance_waiting: int = 0
+    llm_refill_priority_active: bool = False
+    inventory_priority_state: str = "healthy"
     last_discovered_count: int = 0
     last_replenished_count: int = 0
     recent_pool_topics: list[str] = Field(default_factory=list)
@@ -247,6 +392,8 @@ class PendingDelightOut(BaseModel):
     """One proactive delight recommendation."""
 
     bvid: str
+    item_key: str = ""
+    content_id: str = ""
     title: str = ""
     delight_reason: str = ""
     delight_score: float = 0.0
@@ -254,6 +401,10 @@ class PendingDelightOut(BaseModel):
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    published_at: str = ""
+    published_label: str = ""
+    content_type: str = "video"
+    body_text: str = ""
     # Engagement stats (from content_cache), so the delight card can show the
     # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
     # not fetched (platforms that don't populate a metric render nothing).
@@ -459,15 +610,17 @@ class SourceStatusItem(BaseModel):
     - ``ok``         — credential present AND live-validated (X only, from the
       health store).
     - ``ready``      — credential present and structurally valid, but not
-      live-validated (B站 cookie with login fields, 抖音 cookie present, 小红书
-      browser login state recently synced).
+      live-validated (B站 cookie with login fields, or a fresh browser login
+      state recently synced).
     - ``partial``    — credential present but structurally incomplete, likely
       broken (B站 cookie missing some of the core login fields).
     - ``stale``      — credential synced before but not recently, likely
       expired.
     - ``missing``    — source enabled but no usable credential.
-    - ``unverified`` — plugin-backed source is enabled but local task history
-      does not prove a recent successful or failed login-state run yet.
+    - ``unverified`` — a credential or source is configured, but local state
+      does not prove that it currently works.
+    - ``login_required`` / ``error`` — a local command credential is missing,
+      or its saved credential file is invalid.
     - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
     - ``no_auth``    — source needs no login (YouTube, public).
 
@@ -731,14 +884,92 @@ ExtensionE2EAction = Literal[
 ExtensionE2EActionList = Annotated[list[ExtensionE2EAction], Field(min_length=1)]
 ExtensionE2EActionStatus = Literal["ok", "skipped", "failed"]
 ExtensionE2ERunStatus = Literal["ok", "partial", "failed", "timeout"]
+ExtensionNativeSaveE2EPlatform = Literal[
+    "youtube",
+    "xiaohongshu",
+    "douyin",
+    "twitter",
+    "zhihu",
+    "reddit",
+]
+_EXTENSION_NATIVE_SAVE_E2E_TARGETS: dict[str, dict[NativeSaveActionOut, str]] = {
+    "youtube": {"favorite": "OpenBiliClaw", "watch_later": "YouTube Watch Later"},
+    "xiaohongshu": {"favorite": "小红书收藏", "watch_later": "小红书收藏"},
+    "douyin": {"favorite": "抖音收藏", "watch_later": "抖音收藏"},
+    "twitter": {"favorite": "X Bookmarks", "watch_later": "X Bookmarks"},
+    "zhihu": {"favorite": "OpenBiliClaw", "watch_later": "OpenBiliClaw"},
+    "reddit": {"favorite": "Reddit Saved", "watch_later": "Reddit Saved"},
+}
+_EXTENSION_NATIVE_SAVE_E2E_CONTENT_IDS: dict[str, re.Pattern[str]] = {
+    "youtube": re.compile(r"[A-Za-z0-9_-]{11}"),
+    "xiaohongshu": re.compile(r"[0-9a-f]{24}"),
+    "douyin": re.compile(r"[0-9]{5,30}"),
+    "twitter": re.compile(r"[0-9]{5,30}"),
+    "zhihu": re.compile(r"(?:question|answer|article):[0-9]+"),
+    "reddit": re.compile(r"t[13]_[a-z0-9]+"),
+}
+_EXTENSION_NATIVE_SAVE_E2E_ERROR_CODES: dict[NativeSaveStatusOut, frozenset[str]] = {
+    "pending": frozenset({""}),
+    "syncing": frozenset({""}),
+    "synced": frozenset({""}),
+    "already_synced": frozenset({""}),
+    "login_required": frozenset({""}),
+    "rate_limited": frozenset({""}),
+    "unsupported": frozenset({"unsupported_content_type"}),
+    "extension_required": frozenset({"extension_unavailable"}),
+    "failed": frozenset(
+        {
+            "adapter_exception",
+            "adapter_timeout",
+            "extension_task_timeout",
+            "interrupted",
+            "invalid_adapter_result",
+            "item_heartbeat_failed",
+            "native_confirmation_not_observed",
+            "native_content_not_ready",
+            "native_control_not_found",
+            "native_dialog_not_opened",
+            "native_request_rejected",
+            "native_save_failed",
+            "native_save_timeout",
+            "native_target_not_found",
+            "not_saved_locally",
+            "sync_already_in_progress",
+        }
+    ),
+}
 
 
 def _default_extension_e2e_platforms() -> list[ExtensionE2EPlatform]:
     return ["douyin", "xiaohongshu", "twitter", "reddit"]
 
 
+class ExtensionNativeSaveE2EAuthorizationIn(BaseModel):
+    """Exact, non-secret authorization for one named native-save mutation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    allow_state_changing: StrictBool
+    platform: ExtensionNativeSaveE2EPlatform
+    action: NativeSaveActionOut
+    content_id: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    expected_target: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+
+    @model_validator(mode="after")
+    def _validate_exact_mapping(self) -> Self:
+        if self.allow_state_changing is not True:
+            raise ValueError("allow_state_changing must be true")
+        if _EXTENSION_NATIVE_SAVE_E2E_CONTENT_IDS[self.platform].fullmatch(self.content_id) is None:
+            raise ValueError("content_id is not an allowed public content identity")
+        if self.expected_target != _EXTENSION_NATIVE_SAVE_E2E_TARGETS[self.platform][self.action]:
+            raise ValueError("expected_target does not match platform action")
+        return self
+
+
 class ExtensionE2ERunIn(BaseModel):
     """Request to run a local browser-extension E2E simulation."""
+
+    model_config = ConfigDict(extra="forbid")
 
     platforms: list[ExtensionE2EPlatform] = Field(
         default_factory=_default_extension_e2e_platforms,
@@ -747,6 +978,17 @@ class ExtensionE2ERunIn(BaseModel):
     actions: dict[ExtensionE2EPlatform, ExtensionE2EActionList] = Field(default_factory=dict)
     allow_state_changing: bool = False
     timeout_seconds: int = Field(default=45, ge=5, le=180)
+    native_save_authorization: ExtensionNativeSaveE2EAuthorizationIn | None = None
+
+    @model_validator(mode="after")
+    def _validate_native_save_mode(self) -> Self:
+        if self.native_save_authorization is None:
+            return self
+        if self.allow_state_changing is not True:
+            raise ValueError("allow_state_changing must be true for native save")
+        if self.actions:
+            raise ValueError("native-save E2E cannot include generic actions")
+        return self
 
 
 class ExtensionE2EActionResultIn(BaseModel):
@@ -765,13 +1007,49 @@ class ExtensionE2EPlatformResultIn(BaseModel):
     detail: str = ""
 
 
+class ExtensionNativeSaveE2EResultIn(BaseModel):
+    """Only fields allowed in a native-save E2E result record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform: ExtensionNativeSaveE2EPlatform
+    action: NativeSaveActionOut
+    content_id: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    expected_target: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    task_status: NativeSaveStatusOut
+    error_code: Annotated[StrictStr, Field(max_length=64)] = ""
+
+    @model_validator(mode="after")
+    def _validate_safe_pair(self) -> Self:
+        authorization = ExtensionNativeSaveE2EAuthorizationIn(
+            allow_state_changing=True,
+            platform=self.platform,
+            action=self.action,
+            content_id=self.content_id,
+            expected_target=self.expected_target,
+        )
+        del authorization
+        if self.error_code not in _EXTENSION_NATIVE_SAVE_E2E_ERROR_CODES[self.task_status]:
+            raise ValueError("task_status and error_code combination is not allowed")
+        return self
+
+
 class ExtensionE2EResultIn(BaseModel):
     """Signed extension callback payload for a local E2E run."""
+
+    model_config = ConfigDict(extra="forbid")
 
     run_id: str
     token: str
     platforms: list[ExtensionE2EPlatformResultIn] = Field(default_factory=list)
     error: str = ""
+    native_save_result: ExtensionNativeSaveE2EResultIn | None = None
+
+    @model_validator(mode="after")
+    def _validate_result_mode(self) -> Self:
+        if self.native_save_result is not None and (self.platforms or self.error):
+            raise ValueError("native-save result cannot include generic result fields")
+        return self
 
 
 class ExtensionE2EEventMatchOut(BaseModel):
@@ -810,6 +1088,7 @@ class ExtensionE2ERunOut(BaseModel):
     platforms: list[ExtensionE2EPlatformReportOut] = Field(default_factory=list)
     error: str = ""
     timeout_seconds: int
+    native_save_result: ExtensionNativeSaveE2EResultIn | None = None
 
 
 class FeedbackIn(BaseModel):
@@ -874,18 +1153,34 @@ class WatchLaterStateResponse(BaseModel):
 
     saved: bool
     total: int
+    item_key: str = ""
+    sync_status: NativeSaveStatusOut | None = None
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class WatchLaterItem(BaseModel):
     """One item in the watch-later list."""
 
     bvid: str
+    item_key: str = ""
+    content_id: str = ""
     title: str = ""
     up_name: str = ""
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    content_type: str = "video"
     added_at: str = ""
+    sync_status: NativeSaveStatusOut = "pending"
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class WatchLaterListResponse(BaseModel):
@@ -907,18 +1202,34 @@ class FavoriteStateResponse(BaseModel):
 
     saved: bool
     total: int
+    item_key: str = ""
+    sync_status: NativeSaveStatusOut | None = None
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class FavoriteItem(BaseModel):
     """One item in the favorites list."""
 
     bvid: str
+    item_key: str = ""
+    content_id: str = ""
     title: str = ""
     up_name: str = ""
     cover_url: str = ""
     content_url: str = ""
     source_platform: str = ""
+    content_type: str = "video"
     added_at: str = ""
+    sync_status: NativeSaveStatusOut = "pending"
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
 
 
 class FavoriteListResponse(BaseModel):
@@ -926,6 +1237,238 @@ class FavoriteListResponse(BaseModel):
 
     items: list[FavoriteItem]
     total: int
+
+
+_SavedIdentityString = Annotated[StrictStr, Field(max_length=2048)]
+
+
+def validate_saved_item_key(value: str) -> str:
+    """Validate a canonical item key without guessing or alias resolution."""
+    if not isinstance(value, str):
+        raise ValueError("item_key must be a string")
+    item_key = value.strip()
+    if (
+        not item_key
+        or item_key != value
+        or len(item_key) > 2048
+        or _has_identity_whitespace(item_key)
+        or _has_unicode_control(item_key)
+    ):
+        raise ValueError("item_key must be a non-blank canonical key")
+    parts = item_key.split(":")
+    platform = parts[0]
+    stable_key = len(parts) == 2 and bool(parts[1])
+    zhihu_typed_key = (
+        len(parts) == 3
+        and platform == "zhihu"
+        and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(":".join(parts[1:])) is not None
+    )
+    url_fallback_key = (
+        len(parts) == 3
+        and parts[1] == "url"
+        and _URL_FALLBACK_ID_RE.fullmatch(parts[2]) is not None
+    )
+    if (
+        not platform
+        or not (stable_key or zhihu_typed_key or url_fallback_key)
+        or canonical_source_platform(platform) != platform
+        or _SAVED_PLATFORM_RE.fullmatch(platform) is None
+    ):
+        raise ValueError("item_key must be a canonical platform:content identity")
+    return item_key
+
+
+class SavedItemIn(BaseModel):
+    """Canonical local-save input for every supported source platform."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_platform: _SavedIdentityString
+    content_id: _SavedIdentityString = ""
+    content_url: _SavedIdentityString = ""
+    content_type: Annotated[StrictStr, Field(min_length=1, max_length=128)] = "video"
+    title: _SavedIdentityString = ""
+    author_name: _SavedIdentityString = ""
+    cover_url: _SavedIdentityString = ""
+    note: _SavedIdentityString = ""
+
+    @field_validator(
+        "source_platform",
+        "content_id",
+        "content_url",
+        "content_type",
+        "title",
+        "author_name",
+        "cover_url",
+        "note",
+    )
+    @classmethod
+    def _strip_safe_text(cls, value: str, info: ValidationInfo) -> str:
+        if _has_unicode_control(value):
+            raise ValueError("saved item fields must not contain Unicode control characters")
+        if (
+            info.field_name
+            in {
+                "source_platform",
+                "content_id",
+                "content_url",
+                "cover_url",
+            }
+            and value != value.strip()
+        ):
+            raise ValueError("saved identity and URL fields must not have surrounding whitespace")
+        normalized = value.strip()
+        return normalized
+
+    @field_validator("source_platform")
+    @classmethod
+    def _canonicalize_platform(cls, value: str) -> str:
+        platform = canonical_source_platform(value)
+        if not platform:
+            raise ValueError("source_platform is required")
+        if _SAVED_PLATFORM_RE.fullmatch(platform) is None:
+            raise ValueError("source_platform must be a canonical platform slug")
+        return platform
+
+    @field_validator("content_type")
+    @classmethod
+    def _require_content_type(cls, value: str) -> str:
+        if not value:
+            raise ValueError("content_type is required")
+        return value
+
+    @field_validator("content_url", "cover_url")
+    @classmethod
+    def _validate_optional_http_url(cls, value: str) -> str:
+        if not value:
+            return value
+        return _validate_http_url(value)
+
+    @field_validator("content_id")
+    @classmethod
+    def _validate_content_id(cls, value: str, info: ValidationInfo) -> str:
+        platform = str(info.data.get("source_platform", ""))
+        typed_zhihu_id = (
+            platform == "zhihu" and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(value) is not None
+        )
+        if (
+            (":" in value and not typed_zhihu_id)
+            or _has_identity_whitespace(value)
+            or _has_unicode_control(value)
+        ):
+            raise ValueError("content_id must be one non-blank stable identity segment")
+        return value
+
+    def model_post_init(self, __context: object) -> None:
+        del __context
+        validate_saved_item_key(
+            make_item_key(self.source_platform, self.content_id, self.content_url)
+        )
+
+
+class SavedItemKeyIn(BaseModel):
+    """Exact local membership identity used for removal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_key: _SavedIdentityString
+
+    @field_validator("item_key")
+    @classmethod
+    def _validate_item_key(cls, value: str) -> str:
+        return validate_saved_item_key(value)
+
+
+class SavedSyncRequest(BaseModel):
+    """Explicit manual-sync selection; an empty list means all eligible rows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_keys: Annotated[list[StrictStr], Field(max_length=500)] = Field(default_factory=list)
+
+    @field_validator("item_keys")
+    @classmethod
+    def _validate_item_keys(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(validate_saved_item_key(value) for value in values))
+
+
+class ExtensionNativeSaveResultIn(BaseModel):
+    """Strict extension callback for one durable native-save job."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: Annotated[StrictStr, Field(min_length=1, max_length=64)]
+    item_key: Annotated[StrictStr, Field(min_length=1, max_length=768)]
+    status: Literal[
+        "synced",
+        "already_synced",
+        "login_required",
+        "rate_limited",
+        "unsupported",
+        "failed",
+    ]
+    error_code: Annotated[StrictStr, Field(max_length=128)] = ""
+    error_message: Annotated[StrictStr, Field(max_length=512)] = ""
+
+
+class SavedItemStateResponse(BaseModel):
+    """Local membership plus its latest native-sync state."""
+
+    saved: bool
+    item_key: str
+    sync_status: NativeSaveStatusOut | None = None
+    sync_task_id: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
+
+
+class SavedListItem(BaseModel):
+    """One platform-neutral saved membership and sync snapshot."""
+
+    item_key: str
+    source_platform: str
+    content_id: str
+    content_url: str = ""
+    content_type: str = "video"
+    title: str = ""
+    author_name: str = ""
+    cover_url: str = ""
+    note: str = ""
+    added_at: str = ""
+    sync_status: NativeSaveStatusOut = "pending"
+    sync_task_id: str = ""
+    requested_action: str = ""
+    resolved_action: str = ""
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
+
+
+class SavedListResponse(BaseModel):
+    """Paginated platform-neutral saved memberships."""
+
+    items: list[SavedListItem]
+    total: int
+
+
+class SavedSyncItemResponse(BaseModel):
+    """One truthful item result in a native-save task."""
+
+    item_key: str
+    status: NativeSaveStatusOut
+    resolved_action: NativeSaveActionOut
+    resolved_target: str = ""
+    error_code: str = ""
+    error_message: str = ""
+
+
+class SavedSyncBatchResponse(BaseModel):
+    """Durable native-save batch state returned at creation and polling."""
+
+    task_id: str
+    items: list[SavedSyncItemResponse]
 
 
 class RecommendationClickIn(BaseModel):
@@ -1018,7 +1561,7 @@ class LLMProviderConfigOut(BaseModel):
     api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
-    reasoning_effort: str = ""
+    reasoning_effort: str = "medium"
 
 
 class EmbeddingConfigOut(BaseModel):
@@ -1031,6 +1574,9 @@ class EmbeddingConfigOut(BaseModel):
     similarity_threshold: float = 0.82
     fallback_enabled: bool = False
     fallback_provider: str = ""
+    # Optional cover image-only embedding (needs a multimodal embedding model
+    # such as gemini-embedding-2 or dashscope qwen3-vl-embedding). Default off.
+    multimodal_enabled: bool = False
 
 
 class ModuleLLMConfigOut(BaseModel):
@@ -1040,7 +1586,7 @@ class ModuleLLMConfigOut(BaseModel):
 
 class LLMConfigOut(BaseModel):
     default_provider: str = "deepseek"
-    concurrency: int = 3
+    concurrency: int = 4
     timeout: int = 300
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;
@@ -1066,6 +1612,13 @@ class BilibiliConfigOut(BaseModel):
     cookie: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
+
+
+class NetworkConfigOut(BaseModel):
+    """Overseas routing policy. Any proxy URL userinfo is masked in responses."""
+
+    mode: str = "direct"
+    proxy: str = ""
 
 
 class SourcesBrowserConfigOut(BaseModel):
@@ -1208,6 +1761,7 @@ class DiscoveryConfigOut(BaseModel):
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
     admission_min_score: float = 0.60
+    candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
     multimodal_evaluation_enabled: bool = False
     multimodal_batch_size: int = 8
     multimodal_image_max_px: int = 384
@@ -1274,6 +1828,21 @@ class AutostartConfigOut(BaseModel):
     manage_ollama: bool = True
 
 
+class SavedSyncConfigOut(BaseModel):
+    auto_sync_enabled: bool = False
+
+
+class SavedSyncConfigUpdateIn(BaseModel):
+    auto_sync_enabled: StrictBool | None = None
+
+    @field_validator("auto_sync_enabled", mode="before")
+    @classmethod
+    def reject_explicit_null_auto_sync(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("saved_sync.auto_sync_enabled must be a boolean")
+        return value
+
+
 class AutostartStatusOut(BaseModel):
     supported: bool
     enabled: bool
@@ -1306,10 +1875,12 @@ class ConfigResponse(BaseModel):
     degraded_reason: str = ""
     llm: LLMConfigOut = Field(default_factory=LLMConfigOut)
     bilibili: BilibiliConfigOut = Field(default_factory=BilibiliConfigOut)
+    network: NetworkConfigOut = Field(default_factory=NetworkConfigOut)
     sources: SourcesConfigOut = Field(default_factory=SourcesConfigOut)
     scheduler: SchedulerConfigOut = Field(default_factory=SchedulerConfigOut)
     discovery: DiscoveryConfigOut = Field(default_factory=DiscoveryConfigOut)
     autostart: AutostartConfigOut = Field(default_factory=AutostartConfigOut)
+    saved_sync: SavedSyncConfigOut = Field(default_factory=SavedSyncConfigOut)
     storage: StorageConfigOut = Field(default_factory=StorageConfigOut)
     logging: LoggingConfigOut = Field(default_factory=LoggingConfigOut)
     issues: list[ConfigIssueOut] = Field(default_factory=list)
@@ -1324,11 +1895,20 @@ class ConfigUpdateIn(BaseModel):
     suppress_background_llm_work: bool | None = None
     llm: dict[str, object] | None = None
     bilibili: dict[str, object] | None = None
+    network: dict[str, object] | None = None
     sources: dict[str, object] | None = None
     scheduler: dict[str, object] | None = None
     discovery: dict[str, object] | None = None
+    saved_sync: SavedSyncConfigUpdateIn | None = None
     storage: dict[str, object] | None = None
     logging: dict[str, object] | None = None
+
+    @field_validator("saved_sync", mode="before")
+    @classmethod
+    def reject_explicit_null_saved_sync(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("saved_sync must be an object")
+        return value
 
 
 class ConfigServiceProbeIn(BaseModel):
@@ -1338,7 +1918,7 @@ class ConfigServiceProbeIn(BaseModel):
     provider, no fallback chain) instead of the default provider.
     """
 
-    kind: Literal["llm", "embedding", "llm_fallback"]
+    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
     config: dict[str, object] = Field(default_factory=dict)
 
 
@@ -1346,7 +1926,7 @@ class ConfigServiceProbeResponse(BaseModel):
     """Result of a user-triggered provider connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding", "llm_fallback"]
+    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
     provider: str = ""
     model: str = ""
     message: str = ""

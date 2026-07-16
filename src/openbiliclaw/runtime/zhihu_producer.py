@@ -57,6 +57,10 @@ class ZhihuDiscoveryProducer:
     max_items_per_keyword: int = 20
     max_seed_count: int = 5
     candidate_pipeline: Any | None = None
+    # API/OpenClaw runtime composition flips this after attaching its shared
+    # CandidateEvalCoordinator. Standalone producer runs preserve the legacy
+    # inline drain path.
+    candidate_evaluation_owned_by_coordinator: bool = False
     keyword_fetch: Any | None = None
     creator_seed_loader: Any | None = None
     related_seed_loader: Any | None = None
@@ -188,7 +192,7 @@ class ZhihuDiscoveryProducer:
                     )
                 )
             result_payload["enqueued"] = enqueued
-            if enqueued > 0:
+            if enqueued > 0 and not self.candidate_evaluation_owned_by_coordinator:
                 drain_result = await self.candidate_pipeline.drain_pending(
                     profile=profile,
                     batch_size=requested_limit,

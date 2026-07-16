@@ -6,6 +6,7 @@ dynamically selecting and switching between providers.
 
 from __future__ import annotations
 
+import errno
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -15,6 +16,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 LLM_CONNECTIVITY_PROBE_MAX_TOKENS = 4096
+# Balanced default for provider-native reasoning controls.  Channel-facing
+# callers still pass ``""`` explicitly through LLMService; each adapter then
+# disables reasoning or selects the cheapest supported approximation.
+DEFAULT_REASONING_EFFORT = "medium"
 
 
 class LLMProviderError(Exception):
@@ -49,6 +54,11 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
       ``LLMProviderExecutionError`` in the chain reports that no provider was
       available (typically during guided init, before a chat LLM is
       configured).
+    - ``"model_not_found"`` when the provider reachably answered but the
+      configured model does not exist (a local Ollama model never pulled → 404
+      ``not_found_error``, or a wrong/inaccessible model name). Retrying won't
+      help until the user pulls/renames the model, but the loop should log one
+      calm actionable line rather than a full traceback.
     - ``None`` for anything else — a genuine error the caller should keep
       logging loudly.
 
@@ -56,28 +66,8 @@ def classify_llm_unavailability(exc: BaseException) -> str | None:
     limit" fallback wraps a rate-limit cause and should read as backoff, not a
     missing provider.
     """
-    # Lazily imported to avoid a circular import (service imports this module).
-    from openbiliclaw.llm.service import LLMProviderExecutionError
-
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    rate_limited = False
-    no_provider = False
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        message = str(current).lower()
-        if isinstance(current, LLMRateLimitError) or "rate limit" in message:
-            rate_limited = True
-        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
-            "no provider was available" in message
-        ):
-            no_provider = True
-        current = current.__cause__ or current.__context__
-    if rate_limited:
-        return "rate_limited"
-    if no_provider:
-        return "no_provider"
-    return None
+    kind = classify_llm_failure_kind(exc)
+    return kind if kind in {"rate_limited", "no_provider", "model_not_found"} else None
 
 
 # Substrings that mark an upstream content-moderation / compliance refusal.
@@ -96,6 +86,20 @@ _LLM_MODERATION_MARKERS = (
 )
 
 _LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+# The provider host was reachable and answered, but the configured *model* is
+# missing: a local Ollama model that was never pulled returns HTTP 404 with
+# ``{"type": "not_found_error", "message": "model 'x' not found, try pulling it
+# first"}``; OpenAI-compat 404s say ``the model 'x' does not exist``. Distinct
+# from ``no_provider`` (no chat provider configured at all) and from auth (401):
+# retrying is futile until the user pulls/renames the model, so callers should
+# surface an actionable "pull the model / fix the name" hint, not a traceback.
+_LLM_MODEL_NOT_FOUND_MARKERS = (
+    "not_found_error",
+    "try pulling it first",
+    "no such model",
+    "does not exist or you do not have access",
+    "model does not exist",
+)
 _LLM_QUOTA_MARKERS = (
     "rate limit",
     "insufficient_quota",
@@ -104,6 +108,132 @@ _LLM_QUOTA_MARKERS = (
     "exhausted",
     "429",
 )
+
+_LLM_TIMEOUT_MARKERS = ("timeout", "timed out", "deadline exceeded")
+# SSL / certificate verification failures. Kept distinct from the generic
+# connection markers because the actionable cause differs: a cert-verify
+# failure on an otherwise-reachable host almost always means a local proxy /
+# antivirus / firewall is doing HTTPS interception (or the endpoint uses a
+# self-signed cert), so the user-facing hint points at the proxy, not the
+# network. httpx raises ``ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED]`` and
+# the OpenAI SDK wraps it as ``APIConnectionError`` — neither subclasses
+# Python's ``ConnectionError``, so we sniff the message.
+_LLM_SSL_MARKERS = (
+    "ssl:",
+    "certificate verify failed",
+    "certificate_verify_failed",
+    "unable to get local issuer",
+    "self-signed certificate",
+    "self signed certificate",
+    "sslcertverificationerror",
+    "ssl handshake",
+)
+_LLM_CONNECTION_MARKERS = (
+    "connection reset",
+    "connection refused",
+    "connection error",
+    "connection aborted",
+    "network is unreachable",
+    "name resolution",
+    "temporary failure in name resolution",
+    "failed to establish a new connection",
+    "max retries exceeded",
+    "getaddrinfo failed",
+)
+_LLM_SERVER_ERROR_MARKERS = (
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "status 500",
+    "status 502",
+    "status 503",
+    "status 504",
+)
+_LLM_INVALID_RESPONSE_MARKERS = (
+    "empty response",
+    "empty completion",
+    "invalid response",
+    "expected scored json",
+)
+
+
+def classify_llm_failure_kind(exc: BaseException) -> str | None:
+    """Return a machine-readable LLM failure kind from an exception chain.
+
+    The chain walk is cycle-safe. Specific provider throttling and missing
+    provider states win over coarser timeout/response classifications.
+    """
+
+    # Lazily imported to avoid a circular import (service imports this module).
+    from openbiliclaw.llm.service import LLMProviderExecutionError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    rate_limited = no_provider = auth_failed = model_not_found = False
+    timed_out = invalid_response = connection = server_error = False
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if isinstance(current, LLMRateLimitError) or any(
+            marker in message for marker in _LLM_QUOTA_MARKERS
+        ):
+            rate_limited = True
+        if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
+            "no provider was available" in message
+        ):
+            no_provider = True
+        if any(marker in message for marker in _LLM_MODEL_NOT_FOUND_MARKERS) or (
+            "model" in message and "not found" in message
+        ):
+            model_not_found = True
+        if any(marker in message for marker in _LLM_AUTH_MARKERS):
+            auth_failed = True
+        if isinstance(current, (LLMTimeoutError, TimeoutError)) or any(
+            marker in message for marker in _LLM_TIMEOUT_MARKERS
+        ):
+            timed_out = True
+        network_errno = isinstance(current, OSError) and current.errno in {
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTDOWN,
+            errno.EHOSTUNREACH,
+            errno.ETIMEDOUT,
+        }
+        if (
+            isinstance(current, ConnectionError)
+            or network_errno
+            or any(marker in message for marker in _LLM_CONNECTION_MARKERS)
+            or any(marker in message for marker in _LLM_SSL_MARKERS)
+        ):
+            connection = True
+        if any(marker in message for marker in _LLM_SERVER_ERROR_MARKERS):
+            server_error = True
+        if isinstance(current, LLMResponseError) or any(
+            marker in message for marker in _LLM_INVALID_RESPONSE_MARKERS
+        ):
+            invalid_response = True
+        current = current.__cause__ or current.__context__
+    if rate_limited:
+        return "rate_limited"
+    if no_provider:
+        return "no_provider"
+    if model_not_found:
+        return "model_not_found"
+    if auth_failed:
+        return "auth_failed"
+    if timed_out:
+        return "timeout"
+    if connection:
+        return "connection"
+    if server_error:
+        return "server_error"
+    if invalid_response:
+        return "invalid_response"
+    return None
 
 
 def describe_llm_failure(exc: BaseException) -> str | None:
@@ -121,36 +251,65 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     (switch models), so it wins over the coarser transient buckets.
     """
     # Lazily imported to avoid a circular import (service imports this module).
-    from openbiliclaw.llm.service import LLMProviderExecutionError
+    from openbiliclaw.llm.service import LLMProviderExecutionError, LLMResponseContentError
 
     seen: set[int] = set()
     current: BaseException | None = exc
     moderation = auth_failed = rate_limited = False
     timed_out = no_provider = empty_response = False
+    ssl_failed = connect_failed = model_not_found = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
         if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
             moderation = True
+        if any(marker in message for marker in _LLM_MODEL_NOT_FOUND_MARKERS) or (
+            "model" in message and "not found" in message
+        ):
+            model_not_found = True
         if any(marker in message for marker in _LLM_AUTH_MARKERS):
             auth_failed = True
         if isinstance(current, LLMRateLimitError) or any(
             marker in message for marker in _LLM_QUOTA_MARKERS
         ):
             rate_limited = True
-        if isinstance(current, LLMTimeoutError) or "timed out" in message:
+        if isinstance(current, LLMTimeoutError | TimeoutError) or "timed out" in message:
             timed_out = True
+        if any(marker in message for marker in _LLM_SSL_MARKERS):
+            ssl_failed = True
+        network_errno = isinstance(current, OSError) and current.errno in {
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ENETDOWN,
+            errno.ENETUNREACH,
+            errno.EHOSTDOWN,
+            errno.EHOSTUNREACH,
+            errno.ETIMEDOUT,
+        }
+        if (
+            isinstance(current, ConnectionError)
+            or network_errno
+            or any(marker in message for marker in _LLM_CONNECTION_MARKERS)
+        ):
+            connect_failed = True
         if isinstance(current, LLMFallbackError | LLMProviderExecutionError) and (
             "no provider was available" in message
         ):
             no_provider = True
-        if isinstance(current, LLMResponseError):
+        if isinstance(current, LLMResponseError | LLMResponseContentError):
             empty_response = True
         current = current.__cause__ or current.__context__
 
     if moderation:
         return (
             "AI 服务上游因内容合规策略拒绝了本次请求；可更换一个不带内容审查的模型 / 服务商后重试。"
+        )
+    if model_not_found:
+        return (
+            "AI 服务找不到所配置的模型（HTTP 404）。本地 Ollama 模型可能尚未拉取"
+            "（先执行 `ollama pull <模型名>`），或模型名 / 访问权限填错。"
+            "请到设置页核对对话模型名称后重试。"
         )
     if auth_failed:
         return (
@@ -164,6 +323,17 @@ def describe_llm_failure(exc: BaseException) -> str | None:
         )
     if timed_out:
         return "AI 服务响应超时；请检查网络连通性或稍后重试。"
+    if ssl_failed:
+        return (
+            "无法与 AI 服务建立安全连接（SSL 证书验证失败）。"
+            "常见原因是本地代理 / 杀毒 / 防火墙对 HTTPS 做了中间人拦截，"
+            "或接口地址使用了自签证书。请关闭代理（或把该接口地址加入直连白名单）后重试。"
+        )
+    if connect_failed:
+        return (
+            "无法连接到 AI 服务（网络连接失败）。"
+            "请检查网络、接口地址是否正确，以及代理 / 防火墙设置后重试。"
+        )
     if no_provider:
         return (
             "没有可用的 AI 服务：主 Provider 与备用 Provider 都调用失败，"
@@ -172,6 +342,13 @@ def describe_llm_failure(exc: BaseException) -> str | None:
     if empty_response:
         return "AI 服务返回了空响应或无法解析的内容；请更换模型或稍后重试。"
     return None
+
+
+def safe_llm_failure_message(exc: BaseException) -> str:
+    """Return actionable LLM failure copy without exposing upstream detail."""
+    return describe_llm_failure(exc) or (
+        "AI 服务暂时不可用；请稍后重试，或检查设置中的模型与网络。"
+    )
 
 
 @dataclass
@@ -236,12 +413,11 @@ class LLMProvider(ABC):
             max_tokens: Maximum tokens in response.
             json_mode: Whether to request structured JSON output.
             reasoning_effort: Per-call override for the provider's
-                ``reasoning_effort`` setting (currently honoured by
-                DeepSeek; ignored by other providers). ``None`` means
-                "use the provider's configured default";
-                ``""`` means "explicitly disable thinking for this
-                call" (used by structured tasks like discovery's
-                ``_evaluate_batch`` that don't benefit from reasoning).
+                reasoning control. ``None`` means "use the provider's
+                configured default" (``medium`` for adapters with a portable
+                effort control); ``""`` requests no reasoning for this call.
+                Providers whose models cannot fully disable thinking use the
+                lowest supported level instead.
             model: Optional per-call model override. Empty/whitespace
                 values fall back to the provider's configured default
                 without mutating provider state.
@@ -265,6 +441,12 @@ class LLMProvider(ABC):
             resp = await self.complete(
                 [{"role": "user", "content": "hi"}],
                 max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
+                # A connectivity probe only needs one visible response.
+                # Letting DeepSeek inherit reasoning_effort="max" turns
+                # this tiny probe into a 32K-token thinking request, which
+                # commonly exceeds the guided-init timeout and falsely marks
+                # a healthy provider unavailable.
+                reasoning_effort="",
             )
             return bool(resp.content)
         except Exception:
@@ -289,8 +471,8 @@ class LLMRegistry:
         # consulted and has been removed; empty provider = fallback off).
         self.fallback_provider: str = ""
         # Names of providers that should NOT appear in the chat-completion
-        # fallback chain — typically an Ollama instance registered solely
-        # for embedding (see register(..., chat_capable=False)).
+        # fallback chain — for example a legacy/injected Ollama instance
+        # registered solely for embedding diagnostics.
         self._chat_disabled: set[str] = set()
 
     def register(
@@ -306,21 +488,13 @@ class LLMRegistry:
             provider: LLM provider instance.
             default: Whether to set as default provider.
             chat_capable: When False, the provider is registered for
-                non-chat use (typically Ollama for embedding-only) and
-                will NOT appear in the chat-completion fallback chain.
-                Default True for backward compat — every other call site
-                wants chat capability.
+                non-chat use and will NOT appear in the chat-completion
+                fallback chain. Default True for backward compatibility.
 
-                Why this matters: if the user only set
-                ``[llm.embedding] provider = "ollama"`` and never
-                configured ``[llm.ollama] model``, the embedding service
-                still needs Ollama to be in the registry — but the
-                model on disk is ``bge-m3``, which can't serve
-                ``/api/chat`` requests. Without this flag, when the
-                primary cloud provider hits a transient error, the
-                fallback chain happily picks Ollama, gets a 404 from
-                ``/api/chat``, and the user sees
-                ``All providers failed (openai, ollama)``.
+                Modern embedding builds a dedicated provider outside this
+                registry. The flag remains a defensive boundary for legacy
+                or injected non-chat providers: a local ``bge-m3`` instance
+                must never receive ``/api/chat`` fallback requests.
         """
         self._providers[provider.name] = provider
         if not chat_capable:
@@ -476,9 +650,14 @@ class LLMRegistry:
             raise
 
     async def health_check_all(self) -> dict[str, HealthCheckResult]:
-        """Run health checks for all registered providers."""
+        """Run health checks for all registered chat-capable providers."""
         results: dict[str, HealthCheckResult] = {}
         for provider_name in self.available_providers:
+            # ``health_check`` is a real chat completion. Never send one to
+            # an embedding-only registration: that used to probe an implicit
+            # ``llama3`` model and produced recurring Ollama 404s.
+            if not self.is_chat_capable(provider_name):
+                continue
             provider = self.get(provider_name)
             try:
                 available = await provider.health_check()

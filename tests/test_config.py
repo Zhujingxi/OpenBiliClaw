@@ -1,5 +1,6 @@
 """Tests for configuration management."""
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -15,12 +16,14 @@ from openbiliclaw.config import (
     DiscoveryConfig,
     LLMConfig,
     LLMProviderConfig,
+    NetworkConfig,
     SchedulerConfig,
     SoulConfig,
     SoulPreferenceConfig,
     _build_config,
     load_config,
     load_config_with_diagnostics,
+    normalize_outbound_proxy,
     save_config,
     validate_runtime_config,
 )
@@ -84,7 +87,7 @@ class TestConfigDefaults:
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 3
+        assert config.llm.concurrency == 4
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
@@ -96,6 +99,32 @@ class TestConfigDefaults:
         assert config.api.auth.extension_access_enabled is False
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
+
+    def test_explicit_old_concurrency_is_preserved_and_derives_background(self) -> None:
+        from openbiliclaw.llm.concurrency import background_llm_concurrency
+
+        config = Config(llm=LLMConfig(concurrency=3))
+
+        assert config.llm.concurrency == 3
+        assert background_llm_concurrency(config.llm.concurrency) == 2
+
+    def test_saved_sync_defaults_off_and_round_trips(self, tmp_path: Path) -> None:
+        config = Config()
+        assert config.saved_sync.auto_sync_enabled is False
+
+        config.saved_sync.auto_sync_enabled = True
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+
+        assert load_config(config_path).saved_sync.auto_sync_enabled is True
+
+    def test_example_config_disables_saved_auto_sync(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            example = tomllib.load(handle)
+
+        assert example["saved_sync"] == {"auto_sync_enabled": False}
 
     def test_config_defaults_pool_target_count_to_300(self) -> None:
         config = Config()
@@ -1346,6 +1375,33 @@ def test_save_config_round_trips_empty_deepseek_reasoning_effort(tmp_path: Path)
     assert loaded.llm.deepseek.reasoning_effort == ""
 
 
+def test_save_config_round_trips_supported_provider_reasoning_efforts(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.llm.openai.reasoning_effort = "low"
+    config.llm.claude.reasoning_effort = "high"
+    config.llm.gemini.reasoning_effort = "minimal"
+    config.llm.openrouter.reasoning_effort = "max"
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.llm.openai.reasoning_effort == "low"
+    assert loaded.llm.claude.reasoning_effort == "high"
+    assert loaded.llm.gemini.reasoning_effort == "minimal"
+    assert loaded.llm.openrouter.reasoning_effort == "max"
+
+
+def test_supported_provider_reasoning_effort_defaults_to_medium() -> None:
+    config = Config()
+
+    assert config.llm.openai.reasoning_effort == "medium"
+    assert config.llm.claude.reasoning_effort == "medium"
+    assert config.llm.gemini.reasoning_effort == "medium"
+    assert config.llm.deepseek.reasoning_effort == "medium"
+    assert config.llm.openrouter.reasoning_effort == "medium"
+
+
 def test_llm_and_embedding_fallback_defaults_are_disabled() -> None:
     config = Config()
 
@@ -1372,6 +1428,7 @@ def test_save_config_round_trips_embedding_credentials(tmp_path: Path) -> None:
     config.llm.embedding.similarity_threshold = 0.91
     config.llm.embedding.fallback_enabled = True
     config.llm.embedding.fallback_provider = "openai_compatible"
+    config.llm.embedding.multimodal_enabled = True
 
     save_config(config, config_path)
     loaded = load_config(config_path)
@@ -1384,6 +1441,12 @@ def test_save_config_round_trips_embedding_credentials(tmp_path: Path) -> None:
     assert loaded.llm.embedding.similarity_threshold == 0.91
     assert loaded.llm.embedding.fallback_enabled is True
     assert loaded.llm.embedding.fallback_provider == "openai_compatible"
+    assert loaded.llm.embedding.multimodal_enabled is True
+
+
+def test_embedding_multimodal_enabled_defaults_false() -> None:
+    config = Config()
+    assert config.llm.embedding.multimodal_enabled is False
 
 
 def test_load_config_accepts_legacy_embedding_section_without_api_key(
@@ -2092,6 +2155,7 @@ class TestDiscoveryConfig:
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
         assert config.discovery.multimodal_image_quality == 72
@@ -2152,6 +2216,7 @@ inspiration_replace_merged_keywords = true
 inspiration_search_backends = ["platform_sources", "exa", "you"]
 inspiration_breadth = "high"
 multimodal_evaluation_enabled = true
+candidate_eval_concurrency = 3
 multimodal_batch_size = 4
 multimodal_image_max_px = 512
 multimodal_image_quality = 80
@@ -2178,6 +2243,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is True
+        assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 4
         assert config.discovery.multimodal_image_max_px == 512
         assert config.discovery.multimodal_image_quality == 80
@@ -2199,6 +2265,31 @@ multimodal_image_timeout_seconds = 10
         )
 
     @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            # Scheduler integer settings fall back to their default when a
+            # persisted value exceeds the documented ceiling; they do not
+            # silently retain an unsafe value.
+            (8, 3),
+        ],
+    )
+    def test_discovery_candidate_eval_concurrency_is_limited_to_three(
+        self, tmp_path: Path, configured: int, expected: int
+    ) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            f"[discovery]\ncandidate_eval_concurrency = {configured}\n",
+            encoding="utf-8",
+        )
+
+        config = load_config(toml_path)
+
+        assert config.discovery.candidate_eval_concurrency == expected
+
+    @pytest.mark.parametrize(
         ("field", "literal", "expected"),
         [
             ("kw_cache_high", "0", 30),
@@ -2211,6 +2302,8 @@ multimodal_image_timeout_seconds = 10
             ("claim_lease_minutes", "0", 10),
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
+            ("candidate_eval_concurrency", "0", 3),
+            ("candidate_eval_concurrency", "4", 3),
             ("multimodal_batch_size", "0", 8),
             ("multimodal_batch_size", "13", 8),
             ("multimodal_image_max_px", "127", 384),
@@ -2477,9 +2570,8 @@ def test_collect_issues_blocks_openai_compatible_llm_fallback_without_base_url()
     assert "base_url" in issues[0].message
 
 
-def test_collect_issues_blocks_ollama_llm_fallback_without_model_or_base_url() -> None:
-    """Mirrors `_maybe_ollama_provider`: Ollama only registers with a model
-    or base_url; a bare `fallback_provider = "ollama"` would never fire."""
+def test_collect_issues_blocks_ollama_llm_fallback_without_model() -> None:
+    """An Ollama server URL cannot identify which local chat model to use."""
     config = Config()
     config.llm.default_provider = "openai"
     config.llm.openai.api_key = "sk-main"
@@ -2490,8 +2582,25 @@ def test_collect_issues_blocks_ollama_llm_fallback_without_model_or_base_url() -
     assert issues
     assert all(issue.severity == "blocking" for issue in issues)
 
+    config.llm.ollama.base_url = "http://localhost:11434/v1"
+    assert _llm_fallback_issues(config)
+
     config.llm.ollama.model = "llama3"
     assert _llm_fallback_issues(config) == []
+
+
+def test_collect_issues_blocks_default_ollama_without_model() -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.base_url = "http://localhost:11434/v1"
+
+    issues = _collect_config_issues(config)
+
+    assert any(
+        issue.field == "llm.ollama.model" and issue.severity == "blocking" for issue in issues
+    )
 
 
 def test_collect_issues_allows_gemini_llm_fallback_with_env_key(
@@ -2519,6 +2628,8 @@ def test_collect_issues_allows_empty_and_configured_llm_fallback() -> None:
     config.llm.deepseek.api_key = "sk-fallback"
 
     assert _llm_fallback_issues(config) == []
+
+
 # ── Phase 2 Task 4: inspiration config collapse (13 → 4) ────────────────
 
 
@@ -2668,3 +2779,132 @@ inspiration_breadth = "low"
             "inspiration_search_enabled",
         ]
         assert 'inspiration_breadth = "high"' in inspiration_lines
+
+
+class TestNetworkProxyConfig:
+    """`[network].proxy` — the overseas-outbound proxy for LLM/YouTube/updater.
+
+    Spec: docs/plans/2026-07-11-network-proxy-config-spec.md. CN-direct clients
+    (bilibili/douyin/ollama) never consume this — that isolation is guarded in
+    tests/test_network_proxy_isolation.py.
+    """
+
+    def test_default_network_proxy_is_empty(self) -> None:
+        config = Config()
+        assert isinstance(config.network, NetworkConfig)
+        assert config.network.proxy == ""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("http://127.0.0.1:7890", "http://127.0.0.1:7890"),
+            ("https://proxy.example.com:443", "https://proxy.example.com:443"),
+            ("socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("socks5h://127.0.0.1:1080", "socks5h://127.0.0.1:1080"),
+            ("  socks5://127.0.0.1:1080  ", "socks5://127.0.0.1:1080"),
+            ("SOCKS5://127.0.0.1:1080", "socks5://127.0.0.1:1080"),
+            ("HTTP://Proxy.Example.com:8080", "http://Proxy.Example.com:8080"),
+            ("socks5://user:pass@127.0.0.1:1080", "socks5://user:pass@127.0.0.1:1080"),
+            ("", ""),
+            ("   ", ""),
+        ],
+    )
+    def test_normalize_outbound_proxy_accepts_and_normalizes(self, raw: str, expected: str) -> None:
+        assert normalize_outbound_proxy(raw) == expected
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "ftp://127.0.0.1:1080",
+            "socks4://127.0.0.1:1080",
+            "http://",
+            "socks5://",
+            "not-a-url",
+            "127.0.0.1:1080",
+        ],
+    )
+    def test_normalize_outbound_proxy_rejects_bad_values(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            normalize_outbound_proxy(bad)
+
+    def test_network_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
+        config = Config()
+        config.network.mode = "custom"
+        config.network.proxy = "socks5://127.0.0.1:1080"
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "[network]" in rendered
+        assert 'mode = "custom"' in rendered
+        assert 'proxy = "socks5://127.0.0.1:1080"' in rendered
+        assert loaded.network.mode == "custom"
+        assert loaded.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_network_section_appears_in_rendered_toml(self) -> None:
+        rendered = config_module._render_config_toml(Config())
+        assert "[network]" in rendered
+
+    def test_build_config_normalizes_network_proxy(self) -> None:
+        config = _build_config({"network": {"proxy": "SOCKS5://127.0.0.1:1080"}})
+        assert config.network.mode == "custom"
+        assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    @pytest.mark.parametrize("mode", ["direct", "system", "custom"])
+    def test_build_config_accepts_network_proxy_modes(self, mode: str) -> None:
+        proxy = "socks5://127.0.0.1:1080" if mode == "custom" else ""
+        config = _build_config({"network": {"mode": mode, "proxy": proxy}})
+        assert config.network.mode == mode
+
+    def test_build_config_defaults_missing_network_mode_to_direct(self) -> None:
+        config = _build_config({"network": {}})
+        assert config.network.mode == "direct"
+
+    def test_build_config_migrates_legacy_nonempty_proxy_to_custom(self) -> None:
+        config = _build_config({"network": {"proxy": "http://127.0.0.1:7897"}})
+        assert config.network.mode == "custom"
+
+    def test_build_config_clamps_custom_without_proxy_to_direct(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"mode": "custom", "proxy": ""}})
+        assert config.network.mode == "direct"
+        assert "custom" in caplog.text
+
+    def test_build_config_clamps_unknown_mode_to_direct(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"mode": "auto"}})
+        assert config.network.mode == "direct"
+        assert "mode" in caplog.text.lower()
+
+    def test_build_config_drops_invalid_network_proxy_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING"):
+            config = _build_config({"network": {"proxy": "ftp://127.0.0.1:1"}})
+        assert config.network.proxy == ""
+        assert any("network" in record.message.lower() for record in caplog.records)
+
+    def test_env_override_sets_network_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_PROXY", "socks5://127.0.0.1:1080")
+        config = load_config(config_path)
+        assert config.network.mode == "custom"
+        assert config.network.proxy == "socks5://127.0.0.1:1080"
+
+    def test_env_override_can_explicitly_select_system_proxy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text('[general]\nlanguage = "zh"\n', encoding="utf-8")
+        monkeypatch.setenv("OPENBILICLAW_NETWORK_MODE", "system")
+        config = load_config(config_path)
+        assert config.network.mode == "system"

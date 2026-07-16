@@ -16,6 +16,8 @@ export interface XhsBootstrapNote {
   cover_url: string;
   note_id: string;
   xsec_token: string;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface ExtractBootstrapOptions {
@@ -299,6 +301,15 @@ function firstPathString(value: unknown, paths: string[][]): string {
     if (found) return found;
   }
   return "";
+}
+
+function firstPathPublicationTime(value: unknown, paths: string[][]): string | number | undefined {
+  for (const path of paths) {
+    const found = unwrapReactive(getPath(value, path));
+    if (typeof found === "number" && Number.isFinite(found)) return found;
+    if (typeof found === "string" && found.trim()) return found.trim();
+  }
+  return undefined;
 }
 
 function flattenNotes(value: unknown): unknown[] {
@@ -642,6 +653,14 @@ function normalizeStateNote(
     ["note_card", "cover", "url"],
     ["note_card", "cover", "urlDefault"],
   ]);
+  const publishedAt = firstPathPublicationTime(rawNote, [
+    ["create_time"],
+    ["createTime"],
+    ["publish_time"],
+    ["publishTime"],
+    ["noteCard", "time"],
+    ["note_card", "time"],
+  ]);
 
   if (!title && !url) return null;
 
@@ -653,6 +672,7 @@ function normalizeStateNote(
     cover_url: coverUrl,
     note_id: normalizedNoteId,
     xsec_token: xsecToken,
+    ...(publishedAt !== undefined ? { published_at: publishedAt } : {}),
   };
 }
 

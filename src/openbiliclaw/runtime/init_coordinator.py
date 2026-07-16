@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -26,13 +27,35 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _TOTAL_STAGES = 4
-_STAGE_LABELS = {1: "拉取数据", 2: "分析偏好", 3: "生成画像", 4: "发现内容池"}
+_STAGE_LABELS = {
+    1: "拉取数据",
+    2: "分析偏好",
+    3: "生成并保存完整画像",
+    4: "生成首轮可用推荐",
+}
 _ACTIVE = ("starting", "running")
+_ORPHAN_HEARTBEAT_SECONDS = 120.0
+logger = logging.getLogger(__name__)
+
+# Typical per-stage duration surfaced to the GUI so the progress bar can render
+# an elapsed-based fraction inside a stage (instead of a static half-tick) and
+# show "本阶段通常约 X 分钟". Calibration provenance: stages 2/3 migrated from
+# the live CLI eta constants (``cli.py`` _run_with_progress calls: 180s analyze,
+# 70s profile); stages 1/4 are typical observed values for the fetch and
+# discovery + evaluation + expression-copy phases. These are display-only hints — reopen calibration
+# after any LLM provider / model swap (CLAUDE.md pitfall rule 3).
+_STAGE_ETAS = {1: 90, 2: 180, 3: 70, 4: 300}
 
 
 def _initial_stages() -> list[dict[str, Any]]:
     return [
-        {"n": n, "label": _STAGE_LABELS[n], "status": "pending", "reason": None}
+        {
+            "n": n,
+            "label": _STAGE_LABELS[n],
+            "status": "pending",
+            "reason": None,
+            "eta_seconds": _STAGE_ETAS[n],
+        }
         for n in range(1, _TOTAL_STAGES + 1)
     ]
 
@@ -47,9 +70,11 @@ class InitCoordinator:
     def __init__(self, ctx: Any) -> None:
         self._ctx = ctx
         self._current_task: asyncio.Task[Any] | None = None
+        self._current_run_id: str | None = None
+        self._reconcile_tasks: set[asyncio.Task[None]] = set()
         self._enqueued_task_ids: set[str] = set()
-        # Serializes status writes + event publishes so the parallel stage 3/4
-        # progress updates can't interleave / reorder ``sequence`` (spec §5e).
+        # Serializes status writes + event publishes so liveness heartbeats and
+        # substantive stage progress cannot interleave / reorder ``sequence``.
         self._write_lock = asyncio.Lock()
         self._seq = 0
 
@@ -80,6 +105,8 @@ class InitCoordinator:
         if not self._db.try_reserve_init_starting(run_id):
             return False
         self._enqueued_task_ids = set()
+        self._current_task = None
+        self._current_run_id = run_id
         self._seq = 0
         self._db.update_init_run(
             run_id, stages_json=json.dumps(_initial_stages(), ensure_ascii=False)
@@ -89,10 +116,17 @@ class InitCoordinator:
     def reset_to_idle(self, run_id: str, *, reason: str | None = None) -> None:
         """Roll a reserved-but-not-launched run back (E2 pre-flight reject)."""
         self._db.update_init_run(run_id, status="idle", error_reason=reason)
+        if self._current_run_id == run_id and (
+            self._current_task is None or self._current_task.done()
+        ):
+            self._current_task = None
+            self._current_run_id = None
+            self._enqueued_task_ids.clear()
 
     # ── bootstrap task ownership (consulted by writer-gating, D1) ──────────
     def register_enqueued_task(self, run_id: str, task_id: str) -> None:
-        self._enqueued_task_ids.add(str(task_id))
+        if self._current_run_id == run_id and self.init_active():
+            self._enqueued_task_ids.add(str(task_id))
 
     def is_owned_bootstrap_task(self, task_id: str) -> bool:
         return self.init_active() and str(task_id) in self._enqueued_task_ids
@@ -109,16 +143,111 @@ class InitCoordinator:
 
     # ── background task handle (for cancel) ────────────────────────────────
     def attach_task(self, run_id: str, task: asyncio.Task[Any]) -> None:
+        self._current_run_id = run_id
         self._current_task = task
+
+        def _on_done(_task: asyncio.Task[Any]) -> None:
+            # The normal wrapper persists completed/failed/cancelled before it
+            # exits. If that terminal write itself failed, the DB would still
+            # say running while the only owning task is already gone. Recheck
+            # after every task exit and close that lease deterministically.
+            async def _recover() -> None:
+                try:
+                    await self.reconcile_orphaned_run(run_id, force_task_done=True)
+                except Exception:
+                    logger.exception("failed to reconcile finished init task %s", run_id)
+                finally:
+                    if self._current_run_id == run_id and self._current_task is _task:
+                        self._current_task = None
+                        self._current_run_id = None
+                        self._enqueued_task_ids.clear()
+
+            recovery = asyncio.create_task(_recover())
+            self._reconcile_tasks.add(recovery)
+            recovery.add_done_callback(self._reconcile_tasks.discard)
+
+        task.add_done_callback(_on_done)
 
     async def cancel_current_run(self, run_id: str) -> bool:
         """Request cancellation of the running task. The wrapper's ``finally``
         persists the ``cancelled`` status (single-writer; spec §5f)."""
         task = self._current_task
-        if task is None or task.done():
+        if self._current_run_id != run_id or task is None or task.done():
             return False
         task.cancel()
         return True
+
+    async def reconcile_orphaned_run(
+        self,
+        run_id: str | None = None,
+        *,
+        max_heartbeat_age_seconds: float = _ORPHAN_HEARTBEAT_SECONDS,
+        force_task_done: bool = False,
+    ) -> bool:
+        """Fail an active row whose owning task has disappeared.
+
+        A newly-reserved ``starting`` row intentionally has a short window
+        before :meth:`attach_task`, so a missing handle is only considered an
+        orphan once its heartbeat lease expires. A known completed task is
+        definitive and is reconciled immediately. Returns whether a row was
+        changed.
+        """
+        async with self._write_lock:
+            run = self._db.get_latest_init_run()
+            if run is None or run.get("status") not in _ACTIVE:
+                return False
+            active_run_id = str(run.get("run_id") or "")
+            if run_id is not None and active_run_id != str(run_id):
+                return False
+
+            owns_task = self._current_run_id == active_run_id
+            task = self._current_task if owns_task else None
+            task_done = bool(task is not None and task.done())
+            heartbeat_age = _timestamp_age_seconds(run.get("updated_at"))
+            lease_expired_without_owner = task is None and heartbeat_age >= max(
+                0.0, float(max_heartbeat_age_seconds)
+            )
+            if not task_done and not lease_expired_without_owner:
+                return False
+            if force_task_done and task is not None and not task_done:
+                return False
+
+            stages = json.loads(run["stages_json"]) if run.get("stages_json") else _initial_stages()
+            for stage in stages:
+                if stage.get("status") in ("running", "pending"):
+                    stage["status"] = "failed"
+                    stage["reason"] = "interrupted"
+                    stage.pop("progress", None)
+            self._seq = max(self._seq, int(run.get("sequence") or 0)) + 1
+            now = _utcnow_iso()
+            self._db.update_init_run(
+                active_run_id,
+                status="failed",
+                stages_json=json.dumps(stages, ensure_ascii=False),
+                error_reason="interrupted",
+                error_detail="初始化后台任务已结束，但未能写入终态；已自动释放运行锁。",
+                sequence=self._seq,
+                progress_sequence=self._seq,
+                progress_at=now,
+                finished_at=now,
+            )
+            if self._event_hub is not None:
+                with contextlib.suppress(Exception):
+                    await self._event_hub.publish(
+                        {
+                            "type": "init_failed",
+                            "run_id": active_run_id,
+                            "sequence": self._seq,
+                            "stage": _current_stage(stages),
+                            "total": _TOTAL_STAGES,
+                            "reason": "interrupted",
+                        }
+                    )
+            if owns_task:
+                self._current_task = None
+                self._current_run_id = None
+                self._enqueued_task_ids.clear()
+            return True
 
     # ── single status writer ───────────────────────────────────────────────
     async def _write(
@@ -133,21 +262,50 @@ class InitCoordinator:
         error_reason: str | None = None,
         error_detail: str | None = None,
         finished: bool = False,
+        stage_progress: dict[str, Any] | None = None,
         event_type: str | None = None,
         event_extra: dict[str, Any] | None = None,
+        substantive: bool = True,
     ) -> int:
         async with self._write_lock:
             run = self._db.get_latest_init_run()
-            stages = (
-                json.loads(run["stages_json"])
-                if run and run.get("stages_json")
-                else _initial_stages()
-            )
+            # A terminal run can be followed by a new reservation before every
+            # old callback/heartbeat has unwound. Never let a late writer build
+            # its stage payload from the new run's row or publish a stale event.
+            if run is None or str(run.get("run_id") or "") != str(run_id):
+                return int(run.get("sequence") or self._seq) if run is not None else self._seq
+            # The first terminal write owns the final snapshot. A provider task
+            # can finish just after its sibling failed (or can briefly ignore
+            # cancellation); its late heartbeat/progress must not mutate the
+            # diagnostic timeline or replace failure with completion.
+            if str(run.get("status") or "") not in _ACTIVE:
+                return int(run.get("sequence") or self._seq)
+            stages = json.loads(run["stages_json"]) if run.get("stages_json") else _initial_stages()
+            # Defense in depth for the central initialization invariant: stage
+            # 4 may never observe a draft/missing profile, even if a future
+            # caller accidentally regresses the pipeline ordering.
+            if stage == 4 and stage_status == "running":
+                profile_stage = next((s for s in stages if int(s.get("n", 0)) == 3), None)
+                if profile_stage is None or profile_stage.get("status") not in ("ok", "warning"):
+                    raise RuntimeError(
+                        "cannot start init stage 4 before the full profile stage is committed"
+                    )
             if stage is not None and stage_status is not None:
                 for s in stages:
                     if s["n"] == stage:
                         s["status"] = stage_status
                         s["reason"] = stage_reason
+                        # A stage leaving "running" (ok / warning / failed) has
+                        # no live sub-progress anymore — drop it so the GUI
+                        # doesn't render a stale "第 3/8 批" on a done stage.
+                        if stage_status != "running":
+                            s.pop("progress", None)
+            # A pure sub-progress write attaches the {done,total,note} payload
+            # to the (still-running) stage without touching its status.
+            if stage is not None and stage_progress is not None:
+                for s in stages:
+                    if s["n"] == stage:
+                        s["progress"] = stage_progress
             # On a terminal failure/cancel, downgrade any still-"running" or
             # "pending" stage so status consumers (and the extension checklist,
             # which keys off stage status) don't show a non-terminal timeline
@@ -156,13 +314,17 @@ class InitCoordinator:
                 for s in stages:
                     if s["status"] in ("running", "pending"):
                         s["status"] = status
+                        s.pop("progress", None)
                         if s.get("reason") is None:
                             s["reason"] = error_reason
-            self._seq += 1
+            self._seq = max(self._seq, int(run.get("sequence") or 0) if run else 0) + 1
             fields: dict[str, Any] = {
                 "sequence": self._seq,
                 "stages_json": json.dumps(stages, ensure_ascii=False),
             }
+            if substantive:
+                fields["progress_sequence"] = self._seq
+                fields["progress_at"] = _utcnow_iso()
             if status is not None:
                 fields["status"] = status
             if stage is not None:
@@ -214,14 +376,87 @@ class InitCoordinator:
             event_type="init_progress",
         )
 
-    async def complete(self, run_id: str, *, partial_success: bool = False) -> None:
+    async def stage_progress(
+        self,
+        run_id: str,
+        stage: int,
+        *,
+        done: int = 0,
+        total: int = 0,
+        note: str | None = None,
+        mode: str = "determinate",
+        elapsed_seconds: int | None = None,
+        max_seconds: int | None = None,
+        substantive: bool = True,
+    ) -> None:
+        """Report fine-grained progress within a running stage (spec Phase 0).
+
+        ``done`` is clamped to ``0 ≤ done ≤ total``; a non-positive ``total`` is
+        ignored (no write, no event) so a producer that hasn't sized its work
+        yet can't stamp a meaningless 0/0. Publishes ``init_progress`` carrying
+        the payload so SSE-driven pages advance without waiting for the poll.
+        """
+        normalized_mode = "indeterminate" if mode == "indeterminate" else "determinate"
+        if normalized_mode == "determinate" and total <= 0:
+            return
+        safe_total = max(0, int(total))
+        clamped = max(0, min(int(done), safe_total)) if safe_total else 0
+        payload: dict[str, Any] = {
+            "done": clamped,
+            "total": safe_total,
+            "note": note,
+            "mode": normalized_mode,
+        }
+        if elapsed_seconds is not None:
+            payload["elapsed_seconds"] = max(0, int(elapsed_seconds))
+        if max_seconds is not None:
+            payload["max_seconds"] = max(0, int(max_seconds))
+        await self._write(
+            run_id,
+            stage=stage,
+            stage_progress=payload,
+            event_type="init_progress",
+            event_extra={"progress": payload},
+            substantive=substantive,
+        )
+
+    async def touch(self, run_id: str) -> None:
+        """Liveness heartbeat: bump ``sequence`` + ``updated_at`` only.
+
+        It does not advance ``progress_sequence`` / ``progress_at`` and does not
+        publish an event. Front ends can therefore distinguish "backend owner is
+        alive" from "the current operation made useful progress" without
+        flooding SSE with content-free frames.
+        """
+        await self._write(run_id, substantive=False)
+
+    async def complete(
+        self,
+        run_id: str,
+        *,
+        partial_success: bool = False,
+        reason: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        """Finish a run, retaining a diagnosable partial-success reason.
+
+        A discovery timeout is deliberately not a hard failure once the profile
+        exists. ``reason`` / ``detail`` let status consumers explain that
+        degraded terminal state instead of presenting it as a silent success.
+        """
         await self._write(
             run_id,
             status="completed",
             partial_success=partial_success,
+            error_reason=reason,
+            error_detail=detail,
             finished=True,
             event_type="init_completed",
-            event_extra={"partial_success": partial_success},
+            event_extra={
+                "partial_success": partial_success,
+                "reason": reason or "none",
+                "detail": detail or "",
+            },
         )
 
     async def fail(self, run_id: str, reason: str, detail: str | None = None) -> None:
@@ -263,6 +498,10 @@ class InitCoordinator:
                 "status": "idle",
                 "reason": "none",
                 "detail": "",
+                "last_activity": "",
+                "last_heartbeat_at": "",
+                "last_progress_at": "",
+                "progress_sequence": 0,
             }
         stages = json.loads(run["stages_json"]) if run.get("stages_json") else _initial_stages()
         return {
@@ -276,7 +515,27 @@ class InitCoordinator:
             "status": run["status"],
             "reason": run["error_reason"] or "none",
             "detail": str(run.get("error_detail") or ""),
+            # ``last_activity`` stays as a compatibility alias for old clients.
+            # New clients separately render backend liveness and useful progress.
+            "last_activity": str(run.get("updated_at") or ""),
+            "last_heartbeat_at": str(run.get("updated_at") or ""),
+            "last_progress_at": str(run.get("progress_at") or run.get("updated_at") or ""),
+            "progress_sequence": int(run.get("progress_sequence") or 0),
         }
+
+
+def _timestamp_age_seconds(value: Any) -> float:
+    """Best-effort age for SQLite/ISO timestamps; malformed means expired."""
+    raw = str(value or "").strip()
+    if not raw:
+        return float("inf")
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - parsed.astimezone(UTC)).total_seconds())
+    except (TypeError, ValueError):
+        return float("inf")
 
 
 def _current_stage(stages: Sequence[dict[str, Any]]) -> int:
@@ -284,5 +543,12 @@ def _current_stage(stages: Sequence[dict[str, Any]]) -> int:
     running = [int(s["n"]) for s in stages if s["status"] == "running"]
     if running:
         return min(running)
+    # A terminal write marks the failed/cancelled stage and every later
+    # pending stage terminal so clients never render a live-looking timeline.
+    # The first such stage is the actual stop point; taking the highest would
+    # misleadingly report stage 4 when stage 2 was cancelled.
+    terminal = [int(s["n"]) for s in stages if s["status"] in ("failed", "cancelled")]
+    if terminal:
+        return min(terminal)
     done = [int(s["n"]) for s in stages if s["status"] in ("ok", "warning", "failed")]
     return max(done) if done else 0

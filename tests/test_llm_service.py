@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import openbiliclaw.llm.base as llm_base
 from openbiliclaw.llm.base import (
     LLMFallbackError,
     LLMProviderError,
@@ -15,6 +16,7 @@ from openbiliclaw.llm.base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    classify_llm_failure_kind,
     classify_llm_unavailability,
     describe_llm_failure,
 )
@@ -53,6 +55,7 @@ class FakeRegistry:
         self.calls: list[list[dict[str, object]]] = []
         self.provider_calls: list[dict[str, object]] = []
         self.json_modes: list[bool] = []
+        self.reasoning_efforts: list[str | None] = []
 
     async def complete(
         self,
@@ -65,6 +68,7 @@ class FakeRegistry:
     ) -> LLMResponse:
         self.calls.append(messages)
         self.json_modes.append(json_mode)
+        self.reasoning_efforts.append(reasoning_effort)
         if self.error is not None:
             raise self.error
         return self.response or LLMResponse(content="", provider="openai")
@@ -103,6 +107,12 @@ class FakeMemoryManager:
 
     def render_core_memory_prompt(self) -> str:
         return self.core_prompt
+
+
+def _safe_llm_failure_message(exc: BaseException) -> str:
+    helper = getattr(llm_base, "safe_llm_failure_message", None)
+    assert helper is not None, "safe_llm_failure_message() is not implemented"
+    return str(helper(exc))
 
 
 def test_is_llm_rate_limit_error_detects_wrapped_provider_backoff() -> None:
@@ -158,6 +168,23 @@ def test_classify_llm_unavailability_returns_none_for_unrelated_error() -> None:
     assert classify_llm_unavailability(ValueError("Expected scored JSON array")) is None
 
 
+def test_classify_llm_unavailability_model_not_found_through_chain() -> None:
+    # Real shape from the guided-init log: ollama 404 for a model never pulled,
+    # wrapped up through the preference-analysis path. Loops must treat this as
+    # an expected, calmly-logged deferral — not an "Unexpected error" traceback.
+    try:
+        try:
+            raise LLMProviderError(
+                "ollama request failed: HTTP 404: "
+                '{"message": "model \'llama3\' not found, try pulling it first", '
+                '"type": "not_found_error"}'
+            )
+        except LLMProviderError as inner:
+            raise LLMProviderExecutionError(str(inner)) from inner
+    except LLMProviderExecutionError as wrapped:
+        assert classify_llm_unavailability(wrapped) == "model_not_found"
+
+
 def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
     with pytest.raises(LLMRateLimitError) as exc_info:
         try:
@@ -165,6 +192,72 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
         except LLMFallbackError as np_err:
             raise LLMRateLimitError("rate limit hit") from np_err
     assert classify_llm_unavailability(exc_info.value) == "rate_limited"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "auth_failed"),
+        (
+            LLMProviderError(
+                "ollama request failed: HTTP 404: "
+                '{"code": null, "message": "model \'llama3\' not found, try pulling '
+                'it first", "param": null, "type": "not_found_error"}'
+            ),
+            "model_not_found",
+        ),
+        (
+            LLMProviderError("The model `gpt-x` does not exist or you do not have access to it."),
+            "model_not_found",
+        ),
+        (ConnectionError("connection reset by peer"), "connection"),
+        (OSError("network is unreachable"), "connection"),
+        (
+            LLMProviderError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+            "connection",
+        ),
+        (LLMProviderError("openai_compatible request failed: Connection error."), "connection"),
+        (LLMTimeoutError("request timed out"), "timeout"),
+        (LLMProviderExecutionError("upstream returned HTTP 503"), "server_error"),
+        (LLMResponseError("empty completion"), "invalid_response"),
+        (ValueError("unrelated local failure"), None),
+    ],
+)
+def test_classify_llm_failure_kind(error: BaseException, expected: str | None) -> None:
+    assert classify_llm_failure_kind(error) == expected
+
+
+def test_classify_llm_failure_kind_walks_wrapped_chain() -> None:
+    try:
+        try:
+            raise LLMTimeoutError("provider timeout")
+        except LLMTimeoutError as inner:
+            raise LLMFallbackError("all providers failed") from inner
+    except LLMFallbackError as wrapped:
+        assert classify_llm_failure_kind(wrapped) == "timeout"
+
+
+def test_classify_llm_failure_kind_preserves_auth_precedence_over_wrapper_text() -> None:
+    try:
+        raise LLMProviderError("HTTP 401 unauthorized: invalid api key")
+    except LLMProviderError as inner:
+        wrapped = LLMProviderExecutionError("connection reset while reporting failure")
+        wrapped.__cause__ = inner
+    assert classify_llm_failure_kind(wrapped) == "auth_failed"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FileNotFoundError("missing local file"),
+        PermissionError("local disk denied"),
+        OSError("disk full"),
+    ],
+)
+def test_classify_llm_failure_kind_does_not_treat_local_os_errors_as_connection(
+    error: OSError,
+) -> None:
+    assert classify_llm_failure_kind(error) is None
 
 
 def test_describe_llm_failure_content_moderation_500() -> None:
@@ -183,6 +276,19 @@ def test_describe_llm_failure_content_moderation_500() -> None:
         reason = describe_llm_failure(exc)
     assert reason is not None
     assert "内容合规" in reason
+
+
+def test_describe_llm_failure_model_not_found() -> None:
+    reason = describe_llm_failure(
+        LLMProviderError(
+            "ollama request failed: HTTP 404: "
+            '{"message": "model \'llama3\' not found, try pulling it first", '
+            '"type": "not_found_error"}'
+        )
+    )
+    assert reason is not None
+    assert "404" in reason
+    assert "ollama pull" in reason.lower() or "拉取" in reason
 
 
 def test_describe_llm_failure_no_provider() -> None:
@@ -232,7 +338,91 @@ def test_describe_llm_failure_http_429() -> None:
 
 def test_describe_llm_failure_timeout_and_empty_response() -> None:
     assert "超时" in (describe_llm_failure(LLMTimeoutError("request timed out")) or "")
+    assert "超时" in (describe_llm_failure(TimeoutError("socket stalled")) or "")
     assert "空响应" in (describe_llm_failure(LLMResponseError("empty completion")) or "")
+    assert "空响应" in (
+        describe_llm_failure(LLMResponseContentError("LLM returned an empty response")) or ""
+    )
+
+
+def test_describe_llm_failure_ssl_certificate_chain() -> None:
+    # Issue #113: a local proxy / antivirus MITMs HTTPS, so the openai_compatible
+    # provider's request dies with an SSL cert-verify failure. httpx raises
+    # ConnectError, the SDK wraps it as a connection error, and analyze_events
+    # surfaces it as "All providers failed". Guided init must show the proxy /
+    # cert hint, not a generic "稍后重试".
+    try:
+        try:
+            raise RuntimeError(
+                "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+                "unable to get local issuer certificate (_ssl.c:1010)"
+            )
+        except RuntimeError as ssl_err:
+            raise LLMProviderError(
+                "openai_compatible request failed: Connection error."
+            ) from ssl_err
+    except LLMProviderError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "SSL" in reason
+    assert "代理" in reason
+
+
+def test_describe_llm_failure_connection_error() -> None:
+    # OpenAI SDK's APIConnectionError stringifies as "Connection error." with no
+    # SSL / errno detail; still must map to the network-failure copy.
+    reason = describe_llm_failure(
+        LLMProviderError("openai_compatible request failed: Connection error.")
+    )
+    assert reason is not None
+    assert "无法连接" in reason
+
+
+def test_describe_llm_failure_ssl_wins_over_no_provider() -> None:
+    # SSL cause is more actionable than the coarse "all providers failed" wrapper.
+    try:
+        try:
+            raise RuntimeError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        except RuntimeError as ssl_err:
+            raise LLMFallbackError("No provider was available to process the request.") from ssl_err
+    except LLMFallbackError as exc:
+        reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "SSL" in reason
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_fragment"),
+    [
+        (LLMProviderError("上游内容审查拒绝了请求"), "内容合规"),
+        (LLMProviderError("HTTP 401 unauthorized: invalid api key"), "鉴权失败"),
+        (LLMRateLimitError("HTTP 429 insufficient_quota"), "额度用尽或被限流"),
+        (LLMTimeoutError("provider request timed out"), "响应超时"),
+        (TimeoutError("socket stalled"), "响应超时"),
+        (LLMFallbackError("No provider was available"), "没有可用的 AI 服务"),
+        (LLMResponseError("empty completion"), "空响应"),
+        (LLMResponseContentError("LLM returned an empty response"), "空响应"),
+        (
+            RuntimeError("secret-upstream-detail"),
+            "AI 服务暂时不可用；请稍后重试，或检查设置中的模型与网络。",
+        ),
+    ],
+)
+def test_safe_llm_failure_message_classifies_without_leaking_unknown_detail(
+    exc: BaseException,
+    expected_fragment: str,
+) -> None:
+    message = _safe_llm_failure_message(exc)
+
+    assert expected_fragment in message
+    assert "secret-upstream-detail" not in message
+
+
+def test_safe_llm_failure_message_never_returns_raw_unknown_detail() -> None:
+    message = _safe_llm_failure_message(RuntimeError("secret-upstream-detail"))
+
+    assert message == "AI 服务暂时不可用；请稍后重试，或检查设置中的模型与网络。"
+    assert "secret-upstream-detail" not in message
 
 
 def test_describe_llm_failure_returns_none_for_unrelated_error() -> None:
@@ -341,6 +531,61 @@ async def test_complete_with_core_memory_can_skip_core_memory_for_cacheable_eval
     assert "你是内容评估助手。" in system_content
     assert "## 用户画像" not in system_content
     assert registry.calls[0][1]["content"] == "请评估这个视频。"
+    assert registry.reasoning_efforts == [""]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("caller", "requested", "expected"),
+    [
+        ("discovery.x.keyword_gen", None, ""),
+        ("recommendation.expression", None, ""),
+        ("sources.xhs.keyword_gen", None, ""),
+        ("yt_search.generate_queries", None, ""),
+        ("runtime.bilibili_extension_search.queries", None, ""),
+        ("eval.query_quality", None, ""),
+        ("eval.scenario_gen", None, None),
+        ("soul.profile_build", None, None),
+        ("discovery.evaluate_batch", "max", "max"),
+    ],
+)
+async def test_channel_callers_default_to_no_reasoning(
+    caller: str,
+    requested: str | None,
+    expected: str | None,
+) -> None:
+    registry = FakeRegistry(LLMResponse(content="ok", provider="openai"))
+    service = LLMService(
+        registry=registry,
+        memory=FakeMemoryManager(core_prompt=""),
+    )  # type: ignore[arg-type]
+
+    await service.complete_with_core_memory(
+        system_instruction="A",
+        user_input="B",
+        caller=caller,
+        reasoning_effort=requested,
+    )
+
+    assert registry.reasoning_efforts == [expected]
+
+
+@pytest.mark.asyncio
+async def test_complete_with_core_memory_does_not_normalize_nonstructured_json_text() -> None:
+    registry = FakeRegistry(LLMResponse(content="ok", provider="openai"))
+    memory = FakeMemoryManager(core_prompt="## 用户画像\nportrait")
+    service = LLMService(registry=registry, memory=memory)  # type: ignore[arg-type]
+
+    await service.complete_with_core_memory(
+        system_instruction="输出 JSON。",
+        user_input="普通对话请求。",
+    )
+
+    assert registry.json_modes == [False]
+    assert registry.calls[0][0]["content"] == (
+        "输出 JSON。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
+    )
+    assert registry.calls[0][1]["content"] == "普通对话请求。"
 
 
 @pytest.mark.asyncio
@@ -356,6 +601,25 @@ async def test_complete_structured_task_enables_json_mode() -> None:
 
     assert registry.calls
     assert registry.json_modes == [True]
+    assert registry.calls[0][0]["content"] == (
+        "输出 json。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_task_adds_json_contract_when_absent() -> None:
+    registry = FakeRegistry(LLMResponse(content='{"ok": true}', provider="openai"))
+    service = LLMService(
+        registry=registry,
+        memory=FakeMemoryManager(core_prompt=""),
+    )  # type: ignore[arg-type]
+
+    await service.complete_structured_task(
+        system_instruction="请返回结构化结果。",
+        user_input="请求。",
+    )
+
+    assert registry.calls[0][0]["content"] == "请返回结构化结果。\n\njson"
 
 
 @pytest.mark.asyncio
@@ -378,6 +642,10 @@ async def test_complete_multimodal_structured_task_sends_text_and_images() -> No
     )
 
     assert registry.json_modes == [True]
+    assert registry.reasoning_efforts == [""]
+    assert registry.calls[0][0]["content"] == (
+        "输出 json。\n\n以下是当前用户的 core memory，请作为理解背景：\n\n## 用户画像\nportrait"
+    )
     user_message = registry.calls[0][1]
     assert user_message["role"] == "user"
     assert isinstance(user_message["content"], list)

@@ -111,6 +111,36 @@ async def test_propagate_event_persists_to_sqlite(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_propagate_events_batches_init_imports(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    inserted = await memory.propagate_events(
+        [
+            {
+                "event_type": "view",
+                "url": "https://example.test/1",
+                "title": "批量事件 1",
+                "context": "看完第一条",
+                "metadata": {},
+            },
+            {
+                "event_type": "favorite",
+                "url": "https://example.test/2",
+                "title": "批量事件 2",
+                "context": "收藏第二条",
+                "metadata": {},
+            },
+        ]
+    )
+
+    assert inserted == 2
+    rows = memory.query_events(limit=10)
+    assert {row["title"] for row in rows} == {"批量事件 1", "批量事件 2"}
+    assert all("signal_strength" in row["metadata"] for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_propagate_event_adds_default_signal_strength_without_overriding(
     tmp_path: Path,
 ) -> None:

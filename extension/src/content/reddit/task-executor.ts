@@ -36,6 +36,8 @@ export interface RedditTaskItem {
   search_keyword?: string;
   source_strategy?: string;
   source_keyword_id?: number;
+  published_at?: string | number;
+  published_label?: string;
 }
 
 export interface RedditExecuteMessage {
@@ -173,6 +175,8 @@ export function normalizeRedditListingChild(
   if (score !== undefined) item.score = score;
   const comments = num(data.num_comments);
   if (comments !== undefined) item.num_comments = comments;
+  const publishedAt = num(data.created_utc);
+  if (publishedAt !== undefined) item.published_at = publishedAt;
   const selftext = str(data.selftext);
   if (selftext) item.selftext = selftext;
   const body = str(data.body);

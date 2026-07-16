@@ -51,7 +51,8 @@ extension_token_ttl_hours = 24
 default_provider = "deepseek"
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
-concurrency = 3
+# 总并发 4；后台派生为 3
+concurrency = 4
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # openai_compatible. Allowed range: 10..600. Default 300s.
@@ -77,6 +78,9 @@ auth_mode = ""  # "" / "api_key" / "codex_oauth"
 # API 端点协议: "" / "chat_completions" = /v1/chat/completions (默认);
 # "responses" = /v1/responses (部分第三方网关的 GPT 模型只开放这个端点)。
 api_flavor = ""
+# 支持推理档位的官方模型默认用均衡的 medium；渠道关键词、抽取、评分、
+# 短文案和连通探针会按单次调用降到关闭/最低档。普通 GPT-4 不发送该参数。
+reasoning_effort = "medium"
 
 [llm.claude]
 # 若 default_provider = "claude"，api_key 必填
@@ -87,6 +91,8 @@ model = "claude-sonnet-4-6"
 # 留空 = Anthropic 官方 (https://api.anthropic.com)。使用第三方中转/网关时
 # 填其地址(需实现 Anthropic 协议 /v1/messages)。
 base_url = ""
+# Sonnet 4.6+ / 新版 Opus 支持；旧模型会安全忽略。
+reasoning_effort = "medium"
 
 [llm.gemini]
 # 若 default_provider = "gemini"，推荐设置 GEMINI_API_KEY / GOOGLE_API_KEY；
@@ -97,6 +103,8 @@ base_url = ""
 #     需要绑定付费的 AI Studio / Vertex 项目, 免费档无法调用。
 api_key = ""
 model = "gemini-2.5-flash"
+# Gemini 3 映射为 thinkingLevel；2.5 按输出预算近似中档。
+reasoning_effort = "medium"
 
 [llm.deepseek]
 # 若 default_provider = "deepseek"，api_key 必填
@@ -105,30 +113,26 @@ api_key = ""
 # 旧名 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
-# v4 模型支持 thinking 模式：设置 "high" 或 "max" 开启，空字符串关闭。
-# 开启后会自动附带 thinking={"type": "enabled"} 请求字段。
-#
-# v0.3.26 默认改成空(关闭),因为当时 prompt 没 cache,每次按 32K tokens
-# 预算计费,日花费被放大 5-10x。
-# v0.3.31 改回 "max":配合 prompt-cache 改造(系统 prompt 100% 静态,
-# DeepSeek 自动 cache 90% off 输入)+ caller 标签 + cost 观测台账,
-# reasoning 带来的 LLM 标签质量提升(franchise_key / topic_group 标得更
-# 准、score 更稳)抵消掉了 thinking 阶段的 token 消耗,综合下来比关闭
-# 时还便宜。运行 ``openbiliclaw cost --by caller`` 看实际花费。需要再
-# 关回去就改成 "" 即可。
-reasoning_effort = "max"
+# v4 thinking 默认用均衡档 medium（DeepSeek 官方兼容映射为 high）。
+# 渠道的关键词、抽取、评分和短文案任务仍按单次调用传空并关闭 thinking；
+# 需要最深推理时可改为 "max"，完全关闭可改为 ""。
+reasoning_effort = "medium"
 
 [llm.ollama]
 # Local model via Ollama（本地运行，不要求 api_key）
 # base_url MUST include the /v1 suffix — OpenBiliClaw uses Ollama's
 # OpenAI-compatible shim (`/v1/chat/completions`) for chat, and the
 # native `/api/embeddings` route is derived by stripping that suffix.
-# A bare "http://localhost:11434" makes the OpenAI SDK call
+# A bare "http://127.0.0.1:11434" makes the OpenAI SDK call
 # `/chat/completions` which Ollama 404s.
+# 用 127.0.0.1 而非 localhost：Ollama 默认只监听 IPv4 (127.0.0.1)，而
+# localhost 在部分系统上先解析到 IPv6 (::1)，会导致连接超时/被拒。
 # 当前 (2026-05) 推荐: qwen2.5:7b (中文好) / llama3.2 (Meta 新版) /
 # gemma2 / mistral / deepseek-r1。``ollama list`` 看本地已拉的模型
+# chat 的 model 必须明确填写；仅有 base_url 不会猜测或隐式使用 llama3。
+# 若只用 [llm.embedding] 的 bge-m3，可把本段 model 留空。
 model = "qwen2.5:7b"
-base_url = "http://localhost:11434/v1"
+base_url = "http://127.0.0.1:11434/v1"
 # num_ctx: 上下文窗口大小 (tokens)。0 = 用 Ollama 服务端默认值 (通常 4096),
 # 走 OpenAI 兼容的 /v1 路径。⚠️ /v1 兼容层会"静默丢弃"num_ctx,大批量
 # prompt 一旦超过 4096 就被截断,导致本地小模型 (如 qwen) 输出无法解析的
@@ -146,6 +150,8 @@ model = "openai/gpt-5-nano"
 base_url = "https://openrouter.ai/api/v1"
 http_referer = ""
 x_title = "OpenBiliClaw"
+# OpenRouter 会按目标模型能力把统一档位映射到各家原生参数。
+reasoning_effort = "medium"
 
 [llm.openai_compatible]
 # v0.3.32+ — generic OpenAI-protocol-compatible provider. Use this for
@@ -217,6 +223,16 @@ similarity_threshold = 0.82
 # 插件设置页会在你选择备选 provider 时同步打开 fallback_enabled，以允许借用对应 chat-side 凭据。
 fallback_enabled = false
 fallback_provider = ""
+# Optional cover image embedding (image-only vectors, same space as text).
+# Requires a multimodal embedding model, e.g.:
+#   provider = "gemini"    model = "gemini-embedding-2"
+#   provider = "dashscope" model = "qwen3-vl-embedding"  # 阿里百炼原生多模态向量
+#     api_key = "sk-..."   # or env DASHSCOPE_API_KEY
+#     base_url = ""        # default https://dashscope.aliyuncs.com
+#     # output_dimensionality = 1024  # qwen3-vl: 2560/2048/1536/1024/768/512/256
+# Default off — local ollama/bge-m3 and text-only remote models skip images.
+# Independent of [discovery].multimodal_evaluation_enabled (vision LLM eval).
+multimodal_enabled = false
 
 # Per-module LLM overrides — set provider/model to use a different LLM
 # for specific modules. Leave empty to inherit from [llm] defaults.
@@ -260,6 +276,16 @@ proxy = ""
 executable = ""
 # Use headed mode for debugging
 headed = false
+
+# ── 海外网络路由（仅作用于海外客户端）──
+# 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
+# 的 chat + embedding、YouTube(yt-dlp)、GitHub 自动更新、Codex OAuth。
+# B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
+# direct = 忽略环境 / 系统代理；system = 明确继承；custom = 使用下方 proxy。
+# 支持 http:// | https:// | socks5:// | socks5h://,例如 "socks5://127.0.0.1:1080"。
+[network]
+mode = "direct"
+proxy = ""
 
 # ── 通用 Web / 自定义网页源的浏览器配置 ──
 # 与 [bilibili.browser] 独立：Bilibili 走 agent-browser CLI，
@@ -497,6 +523,10 @@ inspiration_replace_merged_keywords = false
 # max_expansions_per_seed / max_keywords_per_platform）已移除，写了也会被忽略
 # 并在启动提示中给出迁移说明。
 inspiration_breadth = "high"
+# 候选评估期望并发，合法范围 1..3；每个 worker 最多 30 条，因此最多 90 条
+# raw 候选在途。运行时会为聊天等交互保留一个全局 LLM 槽位，因此有效并发为
+# min(本值, max(1, llm.concurrency - 1))。
+candidate_eval_concurrency = 3
 # 可选封面图评估。默认关闭；开启后 discovery evaluator 会在模型支持图像输入时
 # 把已压缩的候选封面一并送入评估器，模型不支持时自动退回纯文本评估。
 multimodal_evaluation_enabled = false
@@ -512,8 +542,12 @@ multimodal_image_timeout_seconds = 6
 # `openbiliclaw autostart enable` 开启，以便同步注册/反注册 OS 自启动项。
 enabled = false
 # 当 LLM / embedding 使用本机 Ollama 时，后端启动时顺带确保 `ollama serve`
-# 已运行。仅管理本机 localhost:11434，远端 Ollama 不会被拉起。
+# 已运行。仅管理本机 127.0.0.1:11434，远端 Ollama 不会被拉起。
 manage_ollama = true
+
+[saved_sync]
+# 同步外部平台收藏的总开关；默认关闭，需由用户明确开启。
+auto_sync_enabled = false
 
 [storage]
 # SQLite database path

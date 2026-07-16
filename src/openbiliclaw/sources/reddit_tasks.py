@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.event_format import SOURCE_REDDIT, build_event
 
 if TYPE_CHECKING:
@@ -215,6 +216,10 @@ def reddit_items_to_contents(
             source_keyword_id = keyword_ids.get(keyword)
         if source_keyword_id is None:
             source_keyword_id = fallback_keyword_id
+        published = normalize_published_time(
+            item.get("published_at") or item.get("created_utc"),
+            label=item.get("published_label"),
+        )
 
         contents.append(
             DiscoveredContent(
@@ -236,6 +241,8 @@ def reddit_items_to_contents(
                 tags=tags,
                 score_threshold=REDDIT_DISCOVERY_SCORE_THRESHOLD,
                 source_keyword_id=source_keyword_id,
+                published_at=published.published_at,
+                published_label=published.published_label,
             )
         )
     return contents
@@ -930,6 +937,27 @@ def _rdt_saved_credential_state() -> tuple[str, str]:
     if saved_at is not None and time.time() - saved_at > _RDT_CREDENTIAL_TTL_SECONDS:
         return "expired", "rdt credential 已过期，请等待插件重新同步或运行 `rdt login`。"
     return "present", "rdt credential 就绪。"
+
+
+def local_reddit_credential_status() -> RedditCommandStatus:
+    """Return the saved rdt credential state without running a command.
+
+    The settings page calls this helper so merely opening or refreshing it
+    never invokes rdt and never sends a request to Reddit.
+    """
+
+    state, message = _rdt_saved_credential_state()
+    if state == "present":
+        return RedditCommandStatus(
+            "rdt",
+            "ready",
+            "Reddit 本地凭据已就绪（未实时访问 Reddit 验证）。",
+        )
+    if state == "expired":
+        return RedditCommandStatus("rdt", "stale", message)
+    if state == "missing":
+        return RedditCommandStatus("rdt", "login_required", message)
+    return RedditCommandStatus("rdt", "error", message)
 
 
 def _rdt_credential_file() -> Path:

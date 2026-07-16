@@ -1,5 +1,7 @@
 # 配置参考
 
+> `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
+
 > `config.toml` 所有配置段落详解。
 
 ## 快速开始
@@ -18,6 +20,8 @@ cp config.example.toml config.toml
 CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露异常，方便开发和部署排查。
 
 ## 配置段落
+
+插件、桌面 Web 和移动 Web 的「保存时自动同步到对应平台」都从 API 读取，默认关闭。插件与移动 Web 的配置 GET/PUT 使用 AbortController 有界 timeout；插件的同一 deadline 从后端地址解析开始，覆盖初次设备会话交换、401 强制换票、受保护请求与响应解析，认证 fetch 接收同一 AbortSignal。移动 Web 使用模态设置对话框：Escape 可关闭、Tab 焦点留在对话框内，关闭后回到原设置按钮；配置 GET 超时或失败时保存与开关保持禁用，用户必须通过「重试加载」成功取得当前值后才能写回，避免用默认 false 覆盖未知远端状态。
 
 ### `[general]`
 
@@ -56,6 +60,28 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 >
 > 撤销纪元 `auth_epoch` 与密码指纹 `password_fingerprint` 是运行时高频可变状态，**不在 config.toml**，由后端写在 SQLite `data/openbiliclaw.db` 的 `auth_state` 表（改密 / 登出所有设备 / 轮换密钥时自增，使旧登录态立即失效）。`session_secret` / `password_hash` 也**永不经 `GET /api/config` 返回**（即便 `reveal_keys=true`）。
 
+### `[saved_sync]`
+
+```toml
+[saved_sync]
+auto_sync_enabled = false
+```
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `auto_sync_enabled` | bool | `false` | 是否在 OpenBiliClaw 本地收藏 / 稍后再看成功后创建对应平台账号写入任务。默认关闭；首次从插件、桌面 Web 或移动 Web 开启时必须确认外部账号修改警告。关闭不影响保存页手动同步。 |
+
+插件 side panel 设置、桌面 Web 和移动 Web 都从 `GET /api/config` 回读该值，并以 `PUT /api/config` 的 `{saved_sync: {auto_sync_enabled}}` 严格保存。卡片保存始终先写本地；平台失败不回滚本地成功。列表页移除只删除 OpenBiliClaw membership，不反向删除平台收藏、书签、Saved、播放列表或稍后观看记录。
+
+六平台授权 E2E 同样从 `auto_sync_enabled = false` 开始并在退出时恢复原值。手动 favorite / watch-later 不修改该开关；自动同步用例只有在用户对 exact platform、action、public content ID 和 expected target 明确同意后才临时开启。配置同意不能替代当次 `allow_state_changing=true` 精确授权。
+
+推荐卡保存不会在前端按平台决定是否同步：只有后端读到 `auto_sync_enabled = true` 才创建 native task。关闭时响应中的 `pending` 不带 task ID，三个图形化保存页仍保留手动同步；带 task ID 的 `pending` / `syncing` 才表示已有任务并禁用重复提交。
+
+旧 `config.toml` 缺少该段时，加载、`GET /api/config` 与 `openbiliclaw config-show` 都按
+`false` 解析；保存其它配置字段不会意外把它改成 `true`。首次在任一图形界面从关闭切到
+开启，必须先确认外部账号写入警告。列表页的手动单项 / 批量同步是独立的显式授权入口，
+即使这里仍为 `false` 也可用。
+
 ### `[autostart]`
 
 当前用户作用域的**开机 / 登录自启动**配置（`AutostartConfig`）。该功能只注册当前用户的桌面登录项，不写系统级服务、不要求管理员权限；Docker / 容器环境和未知平台会显示为不支持。
@@ -63,7 +89,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否期望系统登录后自动拉起 `openbiliclaw start`。可通过插件 / 桌面 Web 设置页或 `openbiliclaw autostart enable/disable` 修改 |
-| `manage_ollama` | bool | `true` | `start` 时如果检测到当前配置需要本机 Ollama，且 endpoint 是默认 `localhost:11434`，会在 Ollama 未运行时尝试后台拉起 `ollama serve`。自定义端口或远端 endpoint 只探测不拉起 |
+| `manage_ollama` | bool | `true` | `start` 时如果检测到当前配置需要本机 Ollama，且 endpoint 是默认 `127.0.0.1:11434`，会在 Ollama 未运行时尝试后台拉起 `ollama serve`。自定义端口或远端 endpoint 只探测不拉起 |
 
 `save_config()` 默认会保留磁盘上已有的 `[autostart].enabled`，避免普通配置保存用陈旧快照覆盖用户刚从 API / CLI 改过的自启动开关。只有 `/api/autostart/apply` 和 `openbiliclaw autostart enable/disable` 会以 `autostart_authoritative=true` 权威写入该字段。
 
@@ -74,10 +100,10 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `default_provider` | string | `"deepseek"` | 默认 Provider：`deepseek` / `openai` / `claude` / `gemini` / `ollama` / `openrouter` / `openai_compatible` |
-| `concurrency` | int | `3` | 全局 LLM 请求并发上限。所有 `LLMService` 调用共享这个优先级队列；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16` |
+| `concurrency` | int | `4` | 单 runtime 的 LLM provider 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。API/OpenClaw/CLI composition 内所有服务共享同一 gate；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16`，显式正数旧值不会被覆盖 |
 | `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider。（v0.3.156+ 移除了从未被读取的 `fallback_enabled` 布尔开关：非空 provider 即启用；存量 config.toml 里的旧 key 会被忽略） |
 
-> **`fallback_provider` 保存校验（v0.3.155+）：** 非空时 `_collect_config_issues` 会按 blocking 级拦下所有「永远不会生效」的死状态——未知 provider 名（含浏览器网页翻译写坏的值，提示关闭网页翻译重选）、与 `default_provider` 同名（同名备选永远不会触发）、以及凭据不足以完成注册：`openai` / `claude` / `gemini` / `deepseek` / `openrouter` / `openai_compatible` 缺 `api_key`（gemini 可用 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 环境变量豁免，openai 在 `auth_mode = "codex_oauth"` 时豁免）、`openai_compatible` 额外缺 `base_url`、`ollama` 的 `[llm.ollama]` 既无 `model` 也无 `base_url`。校验独立于默认 provider 检查——默认 provider 本身写坏也不会遮蔽备选问题；`PUT /api/config` 遇到 blocking issue 返回 400 且不写盘。绕过保存校验（环境变量覆盖 / 手改 config.toml）时，`build_llm_registry` 仍会对死状态按具体原因打一次 WARNING 兜底。
+> **`fallback_provider` 保存校验（v0.3.155+）：** 非空时 `_collect_config_issues` 会按 blocking 级拦下所有「永远不会生效」的死状态——未知 provider 名（含浏览器网页翻译写坏的值，提示关闭网页翻译重选）、与 `default_provider` 同名（同名备选永远不会触发）、以及凭据不足以完成注册：`openai` / `claude` / `gemini` / `deepseek` / `openrouter` / `openai_compatible` 缺 `api_key`（gemini 可用 `GOOGLE_API_KEY` / `GEMINI_API_KEY` 环境变量豁免，openai 在 `auth_mode = "codex_oauth"` 时豁免）、`openai_compatible` 额外缺 `base_url`、`ollama` 缺 `[llm.ollama].model`。Ollama 的 `base_url` 只能定位服务，不能替代模型名；系统不会再隐式补 `llama3`。校验独立于默认 provider 检查——默认 provider 本身写坏也不会遮蔽备选问题；`PUT /api/config` 遇到 blocking issue 返回 400 且不写盘。绕过保存校验（环境变量覆盖 / 手改 config.toml）时，`build_llm_registry` 仍会对死状态按具体原因打一次 WARNING 兜底。
 
 ### `[llm.openai]`
 
@@ -88,6 +114,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `base_url` | string | `""` | 留空使用 OpenAI 官方 `https://api.openai.com/v1`；指向任何 OpenAI 兼容服务的 `/v1` 端点：Azure OpenAI / vLLM / LMStudio / OneAPI / Cloudflare AI Gateway / 自建 LLM 网关 |
 | `auth_mode` | string | `""` | 认证模式：`""` / `"api_key"` 使用 `api_key`；`"codex_oauth"` 使用 `openbiliclaw login codex` 导入的 Codex CLI ChatGPT OAuth 凭据 |
 | `api_flavor` | string | `""` | API 端点协议（issue #72）：`""` / `"chat_completions"` 走 `/v1/chat/completions`（默认）；`"responses"` 走 `/v1/responses`——部分第三方网关的 GPT 模型只开放这个端点。非法值会被 `_collect_config_issues` 以 blocking 级拦下 |
+| `reasoning_effort` | string | `"medium"` | 仅 OpenAI 官方 endpoint 的 GPT-5 / o-series 生效；Chat Completions 映射到 `reasoning_effort`，Responses 映射到 `reasoning.effort`。普通 GPT-4、自定义 Base URL 与泛兼容网关不发送，避免未知后端 400 |
 
 > **「openai」是协议家族，不是厂商。** v0.3.5 起 `init` 向导会显式说明这一点。任何兼容 `POST /v1/chat/completions` 的服务都填到这一段，区别只在 `base_url`。
 > 例如：
@@ -104,6 +131,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `api_key` | string | `""` | Anthropic API Key（default_provider=claude 时必填） |
 | `model` | string | `"claude-sonnet-4-6"` | 模型名称 |
 | `base_url` | string | `""` | 留空 = Anthropic 官方 `https://api.anthropic.com`；使用第三方中转 / 网关时填其地址（需实现 Anthropic 协议 `/v1/messages`，issue #72） |
+| `reasoning_effort` | string | `"medium"` | Claude Sonnet 4.6+、Opus 4.5+ 等已确认型号映射到 `output_config.effort`；旧型号不发送。空渠道调用在支持型号上映射为最低安全档 `low` |
 
 ### `[llm.gemini]`
 
@@ -111,6 +139,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 |----|------|--------|------|
 | `api_key` | string | `""` | Gemini API Key（default_provider=gemini 时，若未填写则回退读取 `GOOGLE_API_KEY` / `GEMINI_API_KEY`） |
 | `model` | string | `"gemini-2.5-flash"` | Gemini 模型名称 |
+| `reasoning_effort` | string | `"medium"` | Gemini 3 映射 `thinkingLevel`；Gemini 2.5 以当前输出上限的 50% budget 近似中档。空渠道调用在 2.5 Flash 关闭 thinking，在不能关闭的 2.5 Pro / Gemini 3 降到最低合法档 |
 
 > Gemini provider 按官方 quickstart 走 `google-genai` SDK 的 Gemini Developer API，不是 Vertex AI。
 
@@ -120,18 +149,20 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 |----|------|--------|------|
 | `api_key` | string | `""` | DeepSeek API Key |
 | `model` | string | `"deepseek-v4-flash"` | 模型名称（可选 `deepseek-v4-pro`；旧 `deepseek-chat` / `deepseek-reasoner` 将于 2026/07/24 弃用） |
-| `base_url` | string | `"https://api.deepseek.com"` | API 地址 |
-| `reasoning_effort` | string | `"max"` | DeepSeek v4 thinking 模式：`""` 关闭，`"high"` / `"max"` 开启。插件 / PC Web 设置页选择空值会显式写入 `reasoning_effort = ""`，不会回落到默认 `"max"` |
+| `base_url` | string | `"https://api.deepseek.com"` | API 地址；可填 DeepSeek-compatible 中转 / 私有网关，registry 会把该值实际传给 SDK，并按这个 endpoint 决定直连或使用 `[network]` 代理 |
+| `reasoning_effort` | string | `"medium"` | 深度任务默认均衡档；DeepSeek 官方会把 portable `low/medium` 映射为 native `high`，`xhigh/max` 映射为 `max`。渠道型 discovery / recommendation / sources 调用仍按单次 `""` 真正关闭 thinking；手动设 `""` 可全局关闭 |
 
 ### `[llm.ollama]`
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `model` | string | `"qwen2.5:7b"` | 本地模型名称 |
-| `base_url` | string | `"http://localhost:11434/v1"` | Ollama OpenAI-compatible `/v1` 服务地址 |
+| `base_url` | string | `"http://127.0.0.1:11434/v1"` | Ollama OpenAI-compatible `/v1` 服务地址。默认用 `127.0.0.1`（而非 `localhost`）与 Ollama 只监听 IPv4 的默认行为对齐，避免 `localhost` 被解析到 IPv6 (`::1`) 导致连接超时 |
 | `num_ctx` | int | `0` | 上下文窗口 (tokens)。`0` = 用 Ollama 服务端默认值（通常 4096），走 `/v1` 兼容层。`>0`（推荐 `8192`）时聊天改走原生 `/api/chat` 端点并传 `options.num_ctx`——`/v1` 兼容层会静默丢弃 `num_ctx`，大批量 prompt 超 4096 即被截断、本地小模型输出无法解析的 JSON。仅 Ollama 生效 |
 
 > Ollama 不需要 API Key，适合本地开发测试。
+
+> **聊天模型必须明确填写：** `model` 为空时 Ollama 不会进入 chat registry，即使 `base_url` 非空、`default_provider/fallback_provider = "ollama"` 也不会猜模型或回退到 `llama3`。只使用 Ollama `bge-m3` 做 embedding 时保持 chat `model` 为空即可；embedding 会走独立 provider，不会触发聊天探针。
 >
 > **`num_ctx` 为何重要：** Ollama 的 OpenAI 兼容 `/v1` 端点不接受 `num_ctx`，模型按服务端默认上下文（多为 4096）加载。发现循环里 discovery 批量评估 / 推荐文案批量生成等 prompt 很容易超 4096，被静默截断后小模型（如 `qwen:7b`）就会吐出非法 JSON、或为整批视频生成同一句重复文案。设 `num_ctx = 8192` 后，OpenBiliClaw 改用原生 `/api/chat` 端点（已实测 `context_length` 真正变为 8192）即可规避。
 
@@ -144,6 +175,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `base_url` | string | `"https://openrouter.ai/api/v1"` | OpenRouter API 地址 |
 | `http_referer` | string | `""` | 可选的 `HTTP-Referer` 请求头 |
 | `x_title` | string | `"OpenBiliClaw"` | 可选的 `X-Title` 请求头 |
+| `reasoning_effort` | string | `"medium"` | 通过 OpenRouter `reasoning.effort` 统一映射目标厂商；空渠道调用不发送（adapter 没有 per-model mandatory metadata，不能安全地对强制推理模型发 `none`） |
 
 > `http_referer` 和 `x_title` 都是可选项；留空时不会阻止请求发送。
 
@@ -177,14 +209,30 @@ Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、rec
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `provider` | string | `""` | 留空 = 不启用 embedding；不会跟随 `[llm].default_provider`。可填 `"openai"` / `"gemini"` / `"ollama"` / `"openai_compatible"` / `"openrouter"`。Claude / DeepSeek 没有 embedding 接口；OpenRouter 走 per-route 路由，必须显式配 `model`（如 `google/gemini-embedding-2-preview`） |
-| `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3`。`openrouter` / `openai_compatible` 无安全默认，需要显式指定 |
+| `provider` | string | `""` | 留空 = 不启用 embedding；不会跟随 `[llm].default_provider`。可填 `"openai"` / `"gemini"` / `"ollama"` / `"openai_compatible"` / `"openrouter"` / **`"dashscope"`**（阿里百炼多模态向量）。Claude / DeepSeek 没有 embedding 接口；OpenRouter 走 per-route 路由，必须显式配 `model`（如 `google/gemini-embedding-2-preview`） |
+| `model` | string | `"gemini-embedding-001"` | embedding 模型名；按 provider 自动填合理默认：`gemini → gemini-embedding-001` / `openai → text-embedding-3-small` / `ollama → bge-m3` / **`dashscope → qwen3-vl-embedding`**。`openrouter` / `openai_compatible` 无安全默认，需要显式指定 |
 | `api_key` | string | `""` | v0.3.32+ embedding 专属 API Key。默认不会借用 `[llm.<provider>].api_key`；只有 `fallback_enabled=true` 时才允许旧配置借用 chat-side 凭据并打一条 WARNING。Ollama 不需要 |
 | `base_url` | string | `""` | v0.3.32+ embedding 专属 base URL。留空使用 provider 默认值（OpenAI → `api.openai.com/v1`、Ollama → `localhost:11434/v1`、Gemini → 官方 API）；Gemini 可填代理地址 |
 | `output_dimensionality` | int | `1024` | embedding 目标向量维度。默认 1024，与本地 Ollama `bge-m3` 对齐；Gemini 会传 `output_dimensionality`，`provider = "openai"` 且模型为 `text-embedding-3-*` 时会传 `dimensions`。Ollama / OpenRouter / 泛 OpenAI-compatible 等未确认支持的后端不传参数，也不会把 cache 标成伪维度。设为 `0` 表示使用 provider 原生默认维度 |
 | `similarity_threshold` | float | `0.82` | 余弦相似度阈值，超过即视为"同主题" |
 | `fallback_enabled` | bool | `false` | 旧兼容开关；插件设置页选择 `fallback_provider` 时会同步写成 `true`，用于允许借用对应 chat provider 凭据 |
 | `fallback_provider` | string | `""` | 第二个 embedding 备选 Provider。留空 = 不 fallback；可填 `openai` / `gemini` / `ollama` / `openai_compatible`，不会再自动走 `ollama → gemini → openai` 链 |
+| `multimodal_enabled` | bool | `false` | 是否启用**封面图单独** embedding（image-only 向量，与文本同一模型空间），供 recommendation `precompute_delight_scores` 的封面视觉加成消费。默认关闭。开启后仍需当前 `model` 支持图像（如 `gemini-embedding-2`，或 `dashscope` + `qwen3-vl-embedding`）；本地 `ollama` + `bge-m3` 等纯文本模型会自动跳过，不报错。与 `[discovery].multimodal_evaluation_enabled`（vision LLM 评估）相互独立。**插件设置页与桌面 Web 设置的 Embedding 段均可直接勾选**（`dashscope` 也已加入 provider 下拉），无需手改 TOML |
+
+#### DashScope / Qwen 多模态 embedding 示例
+
+```toml
+[llm.embedding]
+provider = "dashscope"
+model = "qwen3-vl-embedding"
+api_key = "sk-..."          # 或环境变量 DASHSCOPE_API_KEY
+base_url = ""               # 默认 https://dashscope.aliyuncs.com；国际站可填 https://dashscope-intl.aliyuncs.com
+output_dimensionality = 1024  # qwen3-vl-embedding 支持 2560/2048/1536/1024/768/512/256
+similarity_threshold = 0.82
+multimodal_enabled = true   # 封面 image-only 向量；与文本同一空间
+```
+
+说明：DashScope 多模态向量走**原生** `.../multimodal-embedding/multimodal-embedding` 接口，**不是** `compatible-mode/v1/embeddings`。聊天若要用通义，继续用 `[llm.openai_compatible]` + `compatible-mode/v1`；embedding 与 chat 凭据可共用同一把 `sk-` Key，但配置段彼此独立。
 
 #### 配置页服务探测 API（v0.3.114+）
 
@@ -284,7 +332,7 @@ CPU 即可跑（~100-200ms/次），跨 Mac / Win / Linux 一致。
 运行时路由（v0.3.75+）：
 
 - `LLMService` 不再用 caller 第一段朴素判断模块，而是内置 caller bucket。例：`soul.*` → soul，`discovery.keyword*`、`discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` → discovery，`recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` → evaluation，其他 `recommendation.*` → recommendation。
-- `provider` 非空时走 `LLMRegistry.complete_provider(provider, ...)` 精确调用该 provider，不走 fallback 链；该 provider 被 rate-limit 或返回错误时会直接报错，避免用户指定贵模型给画像却被静默改用默认便宜模型。
+- `provider` 非空时走 `LLMRegistry.complete_provider(provider, ...)` 精确调用该 provider，不走 fallback 链；调用仍以 `api.config_probe` maintenance 流量进入当前 runtime 的共享 total/background gate。该 provider 被 rate-limit 或返回错误时会直接报错，避免用户指定贵模型给画像却被静默改用默认便宜模型。
 - `model` 非空时作为单次调用的 `model=` 参数传给 provider，不会修改 provider 实例的默认模型；`provider` 留空但 `model` 非空时，使用当前 default provider + 该 per-call model。
 - `provider` 拼错或目标 provider 不是 chat-capable（例如 embedding-only Ollama）时，不会让保存配置失败；运行时会按模块 + provider 只 INFO 一次，然后降级到默认 provider 链。
 
@@ -330,6 +378,23 @@ model    = "deepseek-v4-flash"
 > 运行时行为：
 > 如果 `bilibili.cookie` 留空，CLI 命令和本地 API 服务会自动回退到 `auth login` 保存的 `data/bilibili_cookie.json`。
 > 只有在你想显式覆盖本地登录态时，才需要把 cookie 直接写进 `config.toml`。
+
+### `[network]` (v0.3.164+，v0.3.165 路由模式补强，v0.3.166 国内网关豁免)
+
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、GitHub 自动更新、Codex OAuth 令牌刷新。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `mode` | string | `"direct"` | `direct` 显式忽略环境 / 系统代理；`system` 明确继承 `HTTP(S)_PROXY` / OS 代理；`custom` 只使用下方 `proxy` |
+| `proxy` | string | `""` | `custom` 模式的代理 URL。支持 `http://` / `https://` / `socks5://` / `socks5h://`，如 `"socks5://127.0.0.1:1080"` |
+
+> 与 `[bilibili].proxy` 的区别：`[network].proxy` 是「海外出口」，`[bilibili].proxy` 是「B站专用」，两者语义相反、互不影响。
+>
+> **国内直连隔离**：B站 / 抖音 / Ollama / 国内 CDN 图片缓存等所有 `trust_env=False` 客户端**永远不使用**此代理（继承代理曾触发 B站 风控，`df626f3f`）。该隔离由 `tests/test_network_proxy_isolation.py` 守卫测试钉死。
+>
+> **国内大模型网关豁免（v0.3.166）**：即使 `mode` 为 `system` / `custom`，指向国内网关的 LLM 请求也会被识别并**强制直连**——DeepSeek（`api.deepseek.com`）、商汤 SenseNova（`.cn`）、通义千问（`aliyuncs.com`）、智谱、文心千帆、混元、火山方舟、Kimi、MiniMax、阶跃、百川、硅基流动、无问芯穹、PPIO 等，以及 `localhost` / 内网自建端点（cpa、vLLM 等）。识别覆盖 `.cn` 顶级域、已知厂商的非 `.cn` 域名白名单、loopback / 私有 / link-local IP，由 `openbiliclaw.network.is_domestic_endpoint` 裁决。避免「为连墙外模型开了代理 → 国内模型请求被绕道境外 → 总是超时」。豁免按 endpoint 生效，genuine 墙外网关仍走上面的代理策略。
+>
+> 旧配置只有非空 `proxy` 而没有 `mode` 时自动迁移为 `custom`；空旧配置迁移为 `direct`。保存时校验模式、协议与主机，`custom` 缺地址或非法值经 `PUT /api/config` 返回 400、不落盘。桌面 Web 与扩展 popup 都提供模式选择、地址输入和按当前模式真实探测；CLI `config-show` 分别显示模式与地址；移动 Web 无设置页。
 
 ### `[sources.browser]`
 
@@ -458,6 +523,25 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `request_interval_seconds` | int | `3` | 后端等待任务时的轮询间隔 / 插件任务节奏提示；真实平台请求发生在用户已登录浏览器内 |
 | `min_interval_minutes` | int | `60` | `RedditDiscoveryProducer` 两次执行之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行 |
 
+#### 配置页来源状态契约
+
+插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问 Bilibili、小红书、抖音、YouTube、X、知乎或 Reddit，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
+
+状态语义如下：
+
+| 状态 | 配置页文案 | 含义 |
+|------|------------|------|
+| `ok` | 接入可用 | 之前的真实任务 / 健康检查已验证（当前仅 X 健康状态机使用）；读取状态页本身不会再验证 |
+| `ready` | 凭据已就绪 | 本地凭据结构完整，或浏览器刚同步为已登录；不等于本次刷新访问平台成功 |
+| `unverified` | 状态待验证 | 已配置凭据但尚未由实际任务验证，或浏览器登录态从未同步 |
+| `missing` / `login_required` | 需要登录 | 本地无凭据，或浏览器最近明确同步为未登录 |
+| `partial` | 部分可用 | 本地凭据不完整 |
+| `stale` | 需要刷新 | 最近同步的浏览器登录态或 credential 已过期 |
+| `error` | 检查失败 | 本地 credential 文件不可读或格式无效 |
+| `no_auth` | 无需登录 | 公开来源 |
+
+平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件，非 rdt 命令后端在状态页显示 `unverified`。`xsec_token` 只是小红书内容 URL 的访问令牌，配置页即使能展示它也不会据此判断账号已登录。
+
 ### `[scheduler]`
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -540,6 +624,7 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `planner_poll_seconds` | int | `120` | 关键词规划器轮询间隔（秒）；空闲轮询近似零成本。小于 `1` 时回退默认值 |
 | `plan_ttl_hours` | int | `12` | 兜底失效（小时）：即便画像 `profile_kw_digest` 未变，`pending` 关键词超过这个时长也会过期；同画像、同平台需求块、同池子避让提示的 merged keyword 生成结果也按这个 TTL 在进程内复用。小于 `1` 时回退默认值 |
 | `admission_min_score` | float | `0.60` | 普通推荐池统一入池最低分。候选行 / raw payload 显式 `score_threshold` 可作为策略阈值覆盖；来源标签如 `admission_policy="observed"` 不能绕过该分数门。探索类策略可略低于该值，但平台 / 插件来源不能获得特权。必须在 `(0, 1]` 内，非法值回退默认值 |
+| `candidate_eval_concurrency` | int | `3` | 候选 LLM 评估的期望 worker 数，合法范围 `1..3`；每个 worker 最多 30 条，因此总 raw 在途上限为 90。超出范围的手工 TOML / API 值按本段既有整型规则回退默认 `3`。有效值为 `min(本值, max(1, llm.concurrency-1))`，为聊天等交互保留一个全局 LLM 槽位；插件与桌面 Web 设置页可修改，CLI `config-show` 自动显示。移动 Web 没有配置面板，不适用。 |
 | `inspiration_search_enabled` | bool | `false` | 是否启用 query inspiration 脑暴阶段。开启后 `KeywordPlanner` 会通过本机 mcporter 搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
 | `inspiration_search_backends` | list[str] | `["local_cache", "platform_sources", "exa", "you"]` | query inspiration 搜索后端顺序。`local_cache` 会先从本地 `content_cache` 抽取相关标题 / URL / 摘要作为 evidence，本地命中不消耗外部 grounding 预算；证据不足时才 fallback。`platform_sources` 会从用户已启用且当前可同步/可注入 bridge 的平台源里抽样做 inspiration-only grounding（B站 / YouTube / X / Reddit；抖音 direct client；小红书 / 知乎 bridge 可用时），只把标题 / URL / 摘要作为灵感证据，不写候选池；`exa` 调用 `mcporter call exa.web_search_exa`；`you` 调用 `mcporter call you.you-search`（You.com Free MCP profile）。某个后端报错 / 限流 / 返回空结果时会继续尝试后面的后端。远端 MCP server 需要先写入本机 `config/mcporter.json` |
 | `inspiration_replace_merged_keywords` | bool | `false` | 实验性替换模式。仅在 `inspiration_search_enabled=true` 且 inspiration provider 可用时生效：due 平台跳过旧 `discovery.keyword_planner` merged call，只通过 search-backed inspiration flow 产词；当 B 站 explore 到期且有补货空间时，也会用同一轮共享 brainstorm / grounding stage 写入 `keyword_kind="explore"` 的探索词池。开 replace 前应先用 `keyword-inspiration-report` 跑 cohort 门禁，避免无质量数据直接替换 |
@@ -549,6 +634,8 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `multimodal_image_max_px` | int | `384` | 送入评估器前封面图压缩后的最大边。合法范围 `128..768`，超范围回退默认值 |
 | `multimodal_image_quality` | int | `72` | JPEG 压缩质量。合法范围 `40..90`，超范围回退默认值 |
 | `multimodal_image_timeout_seconds` | int | `6` | 单张封面抓取与压缩超时秒数。合法范围 `1..20`，超范围回退默认值 |
+
+默认 `[llm].concurrency=4`、`[discovery].candidate_eval_concurrency=3`，因此有效候选 worker 为 3，并为对话等交互保留一个总槽。高吞吐本地 profile 还可配合 `[scheduler].pool_target_count=600`、`[scheduler].discovery_limit=60`；显式旧值 `[llm].concurrency=3` 会保留为 3，此时后台与有效候选 worker 为 2。该 profile 不改变任何平台 `request_interval_seconds` / `min_interval_minutes`、daily budget、来源 share、raw ceiling 公式或 `admission_min_score`。
 
 > **没有 `fetch_floor` 字段**：抓取最小间隔复用各平台已有的 `min_interval`（小红书 1h / 抖音 30m / YouTube·X 60m / B 站按风控），不在本段重复定义。
 >
@@ -593,6 +680,18 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 - **非法值 → 422**：`ConfigUpdateIn.discovery` 是裸 dict，Pydantic 不校验嵌套 Literal，故 handler 手动校验，非 `legacy`/`hybrid`/`inspiration` 抛 `HTTPException(422)`。
 - **mode 赢冲突**：同一 discovery 更新里若 mode 与显式 `inspiration_*` 布尔同时出现，**mode 赢**——mode 应用块在 discovery 段最后执行，且两个原始布尔本就不在该 handler 的显式白名单里。
 
+### `[saved_sync]`
+
+跨平台原生保存的同步配置契约（`SavedSyncConfig`）。默认值、TOML、配置 API、`config-show` 及桌面 / 移动 Web / 插件设置控件均已接入；平台中立保存 API 会在每次本地保存请求中读取当前热重载值。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `auto_sync_enabled` | bool | `false` | 是否允许把本地收藏自动同步到外部平台。默认关闭，只有用户明确开启后才为后续同步服务提供启用信号；本字段本身不执行同步 |
+
+`GET /api/config` 返回 `saved_sync.auto_sync_enabled`；`PUT /api/config` 接受同形状的部分更新并保存到 `[saved_sync]`。输入采用 presence-aware 严格布尔校验：省略 `saved_sync` 仍是合法的部分更新；显式传 `saved_sync: null`、`auto_sync_enabled: null`、字符串 `"true"` 或数字 `1` 都返回 422。CLI `openbiliclaw config-show` 会显示解析后的「收藏自动同步」状态。
+
+`false` 时 `POST /api/saved/{list_kind}` 只完成本地保存并返回 `pending`；`true` 时同一路径创建由 runtime registry 跟踪的后台平台任务，但仍立即返回本地成功，不等待 B 站网络。显式 `POST /api/saved/{list_kind}/sync` 是本批账号写入授权，始终无视该开关。旧 `/api/watch-later`、`/api/favorites` 不消费该开关。
+
 ### `[storage]`
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -635,7 +734,7 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 - 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、七个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
-保留但不单独暴露的字段主要是目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。
+`[saved_sync].auto_sync_enabled` 已在桌面 / 移动 Web 和插件设置控件中暴露，也可通过 `config.toml` 或严格校验的 `/api/config` 管理。保留但不单独暴露的字段还包括目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。
 
 ## `/api/config` 保存与恢复语义
 
@@ -644,8 +743,9 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 - masked key（例如 `sk-****abcd`）不会写回 `config.toml`，避免把真实密钥覆盖成星号。
 - 已有非空的 `model`、`base_url`、OpenRouter headers 和 embedding `model/base_url/api_key` 不会被空字符串覆盖；空值只在旧值本来为空时写入。
 - DeepSeek `reasoning_effort` 是例外：空字符串是有效配置值，表示关闭 thinking，会被 `/api/config` 保存并热重载。
+- `saved_sync.auto_sync_enabled` 只接受 JSON 布尔值；省略整个段表示“不更新”，但段或字段显式传 `null`、字符串或数字等非布尔输入都由 Pydantic 返回 422，不做 truthy / null 转换。
 - 需要真正清空 API Key 时，调用方必须传 `reset_fields`。当前允许值为 `llm.openai.api_key`、`llm.claude.api_key`、`llm.gemini.api_key`、`llm.deepseek.api_key`、`llm.openrouter.api_key`、`llm.openai_compatible.api_key`、`llm.embedding.api_key`；未知字段返回 400。
-- 安装包 `/setup/` 第一页保存 LLM 配置时会传请求级字段 `suppress_background_llm_work=true`。该字段不写入 `config.toml`，只表示本次保存后热重载组件但暂停 refresh / account-sync 等 LLM 后台循环与 post-reload 探针 / 预热；用户在第二页点击「开始初始化」后才由 guided init 真正生成画像和兴趣探针，init 结束后恢复后台循环。普通设置页保存不传该字段，仍保持原有热重载和后台续跑行为。
+- 安装包 `/setup/` 第一页保存 LLM 配置时会传请求级字段 `suppress_background_llm_work=true`。该字段不写入 `config.toml`，只表示本次保存后热重载组件但暂停 refresh / account-sync 等 LLM 后台循环与 post-reload 探针 / 预热；用户在第二页点击「开始初始化」后，guided init 先严格生成完整画像和首轮可用推荐，init 终态后恢复后台循环并调度兴趣 / 避雷探针。普通设置页保存不传该字段，仍保持原有热重载和后台续跑行为。
 - 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
 - 写盘前会生成 `config.toml.bak`。正常模式下热重载失败会尝试恢复备份，并在响应里设置 `rollback_applied=true`；如果备份恢复也失败，接口返回 500 和人工恢复提示。
 

@@ -189,11 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.161 (2026-07-09)**
+📌 Latest: **v0.3.171 (2026-07-16)**
 
-- **Keyword generation mode in settings** — choose Classic, Hybrid, or Inspiration directly from the config UI to enable search-backed keyword inspiration.
-- **Keyword inspiration axis library** — keyword generation now reuses secondary interests, real search evidence, platform supply advantages, and historical yield for more specific platform-native queries.
-- **Diagnosable inspiration flow** — new dry-run and report surfaces show selected interests, grounding evidence, keyword provenance, and cohort performance.
+- **Sharing data across versions no longer empties the pool** — legacy desktop writers can keep adding Bilibili and Douyin candidates with blank `item_key` values, and the current release repairs and deduplicates them at startup.
+- **“I don't want this” now becomes a real long-term avoidance** — once persisted, exact candidates are purged asynchronously and semantic recall plus model review removes similar content without delaying the reply or full profile rebuild.
+- **Source “Apply now” works in pip/venv installs** — when `uv` is unavailable, the backend syncs runtime dependencies with its current Python and restarts through the module entry point.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -389,7 +389,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X uses server-side cookie replay (the extension only syncs the x.com cookie and captures engagement). None of them need an extra CDP debugging Chrome. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -565,6 +565,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - ⚡ **Instant Reshuffle** — ~0.6s per reshuffle; rapid clicks stay snappy
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
+- ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -573,6 +574,21 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🔧 **Fully Controllable** — swap LLMs per module, edit your profile directly, write custom Skills to extend discovery
 
 ## 🏛️ Architecture Overview
+
+```text
+interactive (dialogue / config probe) ──────────────┐
+                                                    ├─ runtime total gate (default 4) ─ provider
+background ─ background admission (default 3) ──────┘
+             ├─ refill: expression > evaluation > supply
+             │  ├─ low-stock supply includes explore queries / source extraction
+             │  └─ while queued: guarantee 2, may borrow all 3
+             │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
+             └─ maintenance: at most 1 while refill waits;
+                parked when canonical available = 0
+
+guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
+                                                              └→ optional probes after terminal state
+```
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -583,15 +599,38 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
-│      Skills · Dialogue · Runtime scheduling      │
+│ Skills · Dialogue · Runtime · 10s undo barrier   │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Init barrier: profile commit → discover/evaluate/copy → ready │
 │   LLM adapters · Source adapters (SourceAdapter) │
-│   Unified admission · SQLite (events · pool · recs)│
+│ Source-family registry: alias · strategy · URL host │
+│             → pool accounting · viewed identity    │
+│ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
+│ API/OpenClaw startup hook → recover/maintain → expose LLM │
+│ Reshuffle hot path: PoolServeSnapshot → isolated serve DB worker → short rec+shown write │
+│ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
+│ /api/saved/* · router · Bilibili native save      │
+│ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
+│ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
+│ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
+│ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
+│ trusted-local E2E exact auth → one saved-sync item → six-field callback │
+│ unsupported_adapter_missing retryable · unsupported_content_type local-only │
+│ Canonical ID · Local-first sync · Task poll · SQLite (events · pool · recs · saved/tasks)│
+│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
+
+Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
+                                      │                      └new dislike: shared purge → content_cache
+                                      └failure/timeout: rollback provisional history → safe error / failed turn
+
+Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
+
+Overseas traffic: `[network].mode` → direct / system proxy / custom proxy → LLM, YouTube, updater; CN clients remain isolated and direct
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
@@ -608,15 +647,15 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 | **Xiaohongshu** | passive collection · search · creator subscriptions · init import | Extension reads your logged-in pages; zero backend crawling |
 | **Douyin** | init import · search · hot · feed | Extension background tab with real DOM interactions; never steals focus |
 | **YouTube** | init import · Takeout offline import · search / trending / channel | Extension reads profile signals; steady-state refill is backend-direct |
-| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay; the extension only syncs cookies |
+| **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor's first real favorite finished `synced` |
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
-| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli by default; the extension syncs your session automatically |
+| **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor is fixture-tested, but the first real write remains uncertain after a 2xx response lacked old-DOM confirmation |
 | **Generic Web** | browser + LLM extraction | Adapts to any webpage |
 
 What happens after discovery:
 
 - **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization".
-- **Unified evaluation** — raw candidates from all sources land in one shared eval pool, scored in batches against your Soul profile, content text, and recent negative feedback; the "will you like it?" judgment never lives inside platform-specific logic.
+- **Continuous unified evaluation** — raw candidates share one eval pool with 3×30 immediate-refill workers; scheduling counts only available, copy-pending, and evaluated durable stock, while serial admission is capped by current headroom.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 
 > Per-platform task pipelines, pool accounting, and fallback strategies are documented in the [Discovery Engine docs](docs/modules/discovery.md).
@@ -705,6 +744,9 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 - Thanks to [@addtion99](https://github.com/addtion99) for proposing configurable browser-extension backend host / port settings and sharing the popup-side implementation idea in [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8).
 - Thanks to [@jiaobenhaimo](https://github.com/jiaobenhaimo) for contributing Safari extension, watch-later bookmarks, YouTube repost detection, and marketing filter designs in [#53](https://github.com/whiteguo233/OpenBiliClaw/pull/53). The OR-join dedup fix and watch-later feature have been merged into main.
 - Thanks to [@tangle111-design](https://github.com/tangle111-design) for exploring `style_key` viewing modes, recommendation tone, Bilibili initialization, and LLM / profile workflow improvements in [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69). The relevant ideas have been reviewed, split up, and selectively merged into main.
+- Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for polishing desktop web interactions — side-drawer collapse animation, a delight-card drag dead zone, and a stacked toast notification system — in [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102). Merged into main.
+- Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for the desktop web theme-engine rework to oklch in [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) — a single `--hue-primary` control point with a 12-hue tunable color picker, a five-step accent ramp, and unified interaction states. Merged into main.
+- Thanks to [@wuwafly3](https://github.com/wuwafly3) for contributing the DashScope (Alibaba Model Studio) multimodal embedding provider and the image-only cover-embedding design in [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100). The capability was reviewed, fixed (network routing / save-time validation), and reworked into the live cover-visual pipeline (consumed consistently by both delight and the normal feed) before merging into main (see [#116](https://github.com/whiteguo233/OpenBiliClaw/pull/116)).
 
 ## ⭐ Star History
 

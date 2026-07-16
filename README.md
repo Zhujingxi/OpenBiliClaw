@@ -209,11 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.161（2026-07-09）**
+📌 最新版本：**v0.3.171（2026-07-16）**
 
-- **搜索词生成模式可视化** —— 设置页新增「经典 / 混合 / 灵感」下拉，release 包里可直接切换 search-backed keyword inspiration。
-- **Keyword inspiration 轴库上线** —— 搜索词生成会复用二级兴趣、真实搜索证据、平台供给优势和历史 yield，产出更具体的平台化关键词。
-- **灵感链路可诊断** —— 新增 dry-run / report 调试入口，可查看 selected interests、grounding evidence、关键词溯源和 cohort 效果。
+- **跨版本共享数据不再击穿推荐池** —— 旧桌面版向新版数据库写入空 `item_key` 时可继续补入 B 站 / 抖音候选，当前版启动会自动回填和去重。
+- **对话里的“不想看”会成为真正的长期避雷** —— 偏好落盘后立即异步清掉精确命中的候选，再用语义召回与模型精判继续清理相似内容，不等待画像重建也不阻塞回复。
+- **源码版“立即应用”兼容 pip/venv** —— 后端没有安装 `uv` 时会改用当前 Python 同步运行依赖，并通过模块入口安全重启。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -393,7 +393,7 @@ OpenBiliClaw 不保存你的平台密码，也不替你绕过登录。它复用�
 | **知乎** | 在同一浏览器打开 https://www.zhihu.com 正常登录 | `init --yes-zhihu`、`fetch-zhihu`、`discover --source zhihu` 和 `discover-zhihu*` 拉不到数据 |
 | **Reddit** | 在同一浏览器打开 https://www.reddit.com 正常登录；插件会同步 `reddit_session` 给日常 discovery 的 rdt-cli，`rdt login` 仅作为插件不可用时的 fallback | `fetch-reddit --mode bootstrap` 拉不到初始化信号；rdt credential 未同步时 rdt 路径会 fallback 到插件任务 |
 
-小红书、抖音、YouTube、知乎走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 走服务端 cookie 重放（扩展只负责同步 x.com cookie + 捕获互动），都不需要你额外启动 CDP 调试 Chrome。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
+小红书、抖音、YouTube、知乎走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 的 discovery 走服务端 cookie 重放；这些读取链路都不需要你额外启动 CDP 调试 Chrome。Reddit/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6/6 接入并通过 fixture 测试；2026-07-14 的真实账号回归中，六平台 favorite 与 watch-later/fallback 均得到 `synced/already_synced`。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
 
 </details>
 
@@ -569,6 +569,7 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - ⚡ **「换一批」瞬间响应** — reshuffle ~0.6s，连续刷不卡顿
 - 💬 **有温度的推荐理由** — 像朋友一样解释为什么你会喜欢，而不是「因为你看过类似视频」
 - 🔄 **持续学习** — 苏格拉底式对话 + 行为分析 + 反馈即时生效，越用越懂你
+- ⭐ **本地优先收藏 / 稍后看** — 推荐卡先写本地 SQLite，自动同步默认关闭；B站和六个扩展平台均支持收藏与原生稍后看/收藏回退，2026-07-14 七平台两类动作真实账号回归均为 `synced/already_synced`
 - 🧩 **浏览器插件** — Chrome / Edge / Brave / Arc / Firefox，侧边栏推荐 + 跨站行为采集，装上就能用
 - 🚀 **图形化引导初始化** — 安装包 `/setup/`、桌面 Web 和插件都能点一下完成初始化，不碰命令行
 - 🔬 **自动化评测优化** — 5 个模块各带 LLM-as-judge 自优化循环，prompt 质量随轮次自动提升
@@ -577,6 +578,21 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 🔧 **完全可控** — 按模块换 LLM、直接编辑画像、写自定义 Skill 扩展发现策略
 
 ## 🏛️ 架构概览
+
+```text
+interactive（对话 / 配置探测）───────────────────────┐
+                                                    ├─ runtime total gate (default 4) ─ provider
+background ─ background admission (default 3) ──────┘
+             ├─ refill: expression > evaluation > supply
+             │  ├─ 低库存 supply 含探索词 / 来源抽取
+             │  └─ while queued: guarantee 2, may borrow all 3
+             │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
+             └─ maintenance: at most 1 while refill waits;
+                parked when canonical available = 0
+
+引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
+                                                     └→ 终态后再调度可选探针
+```
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -587,14 +603,37 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
 ┌──────────────────────▼─────────────────────────┐
 │                  Agent 编排层                    │
-│        Skill 系统 · 对话管理 · Runtime 调度        │
+│ Skill · 对话 · Runtime · 反馈 10s 可撤销提交屏障    │
 ├─────────┬──────────┬───────────┬───────────────┤
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
-│   统一准入防线 · SQLite（事件 · 候选池 · 推荐 · 对话） │
+│  来源族注册表：alias · strategy · URL host             │
+│             → pool 统计 · 已看身份                     │
+│ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
+│ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
+│ 换屏快路：PoolServeSnapshot → 独立 Serve DB worker → recommendation+shown 短事务 │
+│ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │
+│ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
+│ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
+│ 六平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit       │
+│ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
+│ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
+│ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
+│ unsupported_adapter_missing 可重试 · unsupported_content_type local-only │
+│ Canonical ID · Local-first SavedSync · Task Poll · SQLite（事件 · 候选池 · 推荐 · 保存/任务）│
+│ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
+
+Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
+                                      │                      └新避雷：共享清池 → content_cache
+                                      └失败/超时：回滚临时历史 → 安全错因 / failed turn
+
+桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
+
+海外请求：设置页 `[network].mode` → 直连 / 系统代理 / 自定义代理 → LLM、YouTube、更新；国内平台保持独立直连
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
@@ -611,15 +650,15 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 | **小红书** | 被动收集 · 搜索 · 创作者订阅 · 初始化导入 | 插件在已登录页面读取，零后端爬取 |
 | **抖音** | 初始化导入 · 搜索 · 热点 · 推荐流 | 插件后台 tab 模拟 DOM 操作，不抢用户焦点 |
 | **YouTube** | 初始化导入 · Takeout 离线导入 · 搜索 / 热门 / 频道 | 插件读画像信号，日常发现后端直连补池 |
-| **X（Twitter）** | 初始化导入 · 搜索 · For-You · 关注作者 | 服务端只读 cookie 重放，插件只同步 cookie |
+| **X（Twitter）** | 初始化导入 · 搜索 · For-You · 关注作者 | discovery 使用服务端只读 cookie 重放；原生书签 executor 已接入但未实号验证 |
 | **知乎** | 初始化导入 · 搜索 · 热榜 · 推荐 · 作者 · 相关 | 插件在已登录 tab 内读取，返回文字卡片 |
-| **Reddit** | 初始化导入 · 搜索 · 热门 · Subreddit · 相关 | 默认 rdt-cli 命令行读取，插件自动同步登录态 |
+| **Reddit** | 初始化导入 · 搜索 · 热门 · Subreddit · 相关 | discovery 默认 rdt-cli；Saved executor 已接入但未实号验证 |
 | **通用 Web** | 浏览器 + LLM 抽取 | 适配任意网页 |
 
 发现之后的统一流程：
 
 - **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。
-- **统一评估** — 各来源的原始候选写入同一个待评估池，由共享 evaluator 结合灵魂画像、正文和近期负反馈批量打分；「你会不会喜欢」的判断不分散在各平台逻辑里。
+- **连续统一评估** — 各来源原始候选进入同一待评估池，默认 3×30 worker 任一完成即补位；调度只计可用、待文案与已评估 durable 库存，串行 admission 按实时 headroom 封顶，raw 不会虚增库存。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 
 > 各平台任务链路、候选池计数、fallback 策略等完整机制见 [内容发现引擎文档](docs/modules/discovery.md)。
@@ -716,6 +755,9 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 - 感谢 [@addtion99](https://github.com/addtion99) 在 [#8](https://github.com/whiteguo233/OpenBiliClaw/pull/8) 提出浏览器插件后端地址 / 端口可配置需求，并给出 popup 侧实现思路。
 - 感谢 [@jiaobenhaimo](https://github.com/jiaobenhaimo) 在 [#53](https://github.com/whiteguo233/OpenBiliClaw/pull/53) 贡献 Safari 扩展、稍后再看、YouTube 搬运检测、营销号过滤等功能设计与实现，其中 OR-join 去重修复和稍后再看功能已合入主线。
 - 感谢 [@tangle111-design](https://github.com/tangle111-design) 在 [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69) 贡献 `style_key` 观看模式、推荐语气、B 站初始化和 LLM / 画像流程方面的功能探索；相关思路已拆分评审并选择性合入主线。
+- 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102) 贡献桌面 Web 侧栏折叠动画、delight 卡片拖拽死区、栈式 toast 通知等交互细节打磨，已合入主线。
+- 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) 贡献桌面 Web 主题引擎 oklch 化重构，引入 `--hue-primary` 单一控制点与 12 色相可调拾色器、五级强调色阶与统一交互态，已合入主线。
+- 感谢 [@wuwafly3](https://github.com/wuwafly3) 在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 贡献 DashScope（阿里百炼）多模态 embedding provider 与「封面 image-only 向量」的设计与实现；相关能力经评审、修复（网络路由 / 保存校验）并重做为线上封面视觉链路（惊喜与正常推荐一致消费）后合入主线（见 [#116](https://github.com/whiteguo233/OpenBiliClaw/pull/116)）。
 
 ## ⭐ Star History
 

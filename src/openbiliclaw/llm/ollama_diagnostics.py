@@ -266,9 +266,22 @@ async def diagnose_ollama_embedding(
         try:
             tags = await client.get(f"{root}/api/tags", timeout=_TAGS_TIMEOUT_SECONDS)
         except Exception as exc:
+            # ConnectTimeout（而非 ConnectError/拒绝）通常不是"没启动"：
+            # ① 系统级 TUN 代理 (Clash/V2Ray 增强模式) 在网卡层劫持了
+            #    127.0.0.1，trust_env=False 拦不住它 → 需把本机地址加直连白名单；
+            # ② base_url 用了 localhost，被解析到 IPv6 (::1)，而 Ollama 只听
+            #    IPv4 → 改成 127.0.0.1。所以超时时额外给出这条排查提示。
+            timeout_hint = ""
+            if isinstance(exc, httpx.ConnectTimeout | httpx.PoolTimeout):
+                timeout_hint = (
+                    "（超时而非拒绝：Ollama 多半在跑，但连不上——"
+                    "若开了 Clash/V2Ray 等代理的 TUN/增强模式，请把 127.0.0.1 加入直连白名单；"
+                    "或把 base_url 里的 localhost 改成 127.0.0.1 以避开 IPv6 解析。）"
+                )
             return (
                 DIAG_NOT_RUNNING,
                 f"Ollama 服务无法连接（{root}）：{type(exc).__name__}。"
+                f"{timeout_hint}"
                 "请启动 Ollama（或运行 `ollama serve`）；"
                 "还没安装的话，去 ollama.com/download 下载，"
                 "或在终端运行 `openbiliclaw setup-embedding` 一键装好。",

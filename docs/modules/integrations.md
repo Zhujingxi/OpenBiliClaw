@@ -1,5 +1,9 @@
 # 集成适配层
 
+API runtime generation 拥有且只拥有一个 `ExpressionCopyCoordinator`，它连接候选 admission、推荐分类 callback 与 daemon 生命周期。OpenClaw direct composition 不启动 daemon loop，因此不构造这个 coordinator：候选 inline admission 后会 await 一次最多 4 条的 durable expression-copy drain，且本次不做 split retry；首个 provider batch 中有效的文案立即持久化，剩余行保留 durable pending 交给下一次 OpenClaw 请求，返回前不留下 notify-only owner 或 provider 后台任务。`recommend(refresh_if_needed=True)` 还会把本次 source supply 与 inline evaluation 首批一起限制为 4 条，优先在 adapter 的交互等待窗口内产出可 serve 的有效 subset；若首 batch 全部无效，本次仍可能没有可 serve 行，诊断会如实保留该结果。这不是新的配置项，也不缩小 API daemon 的持续补货波次。
+
+> OpenClaw bootstrap 每个 runtime 只拥有一个 LLM gate，主服务、Soul 与 refresh 按对象身份共享；gate 在任何 provider 调用前从 canonical database available 初始化，candidate snapshot 与 controller readiness 持续同步 refill admission；发现评估并发不再硬编码。
+
 > 面向外部系统的薄适配层，负责把 OpenBiliClaw 现有学习与推荐能力整理成稳定的 integration 接口。
 
 ## 概述
@@ -21,8 +25,9 @@
 
 | 任务 | 状态 | 说明 |
 |------|------|------|
-| OpenClaw bootstrap | ✅ | 新增 `build_openclaw_adapter_services()`，复用现有 API bootstrap 的依赖装配顺序；B 站四个 discovery strategy 共用 adapter database，保证内部 evaluator 能读取近期 negative exemplars；direct controller 会接入同一份 scheduler pause gate、独立 `PresenceTracker` 和 config-backed LLM module overrides；精简/旧配置缺少 `[llm].concurrency` 时回落到默认并发 3 |
-| OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status` |
+| OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 初始化 database/memory 后立刻用 canonical available 配置共享 LLM gate，再构造任何可调用 provider 的 service；暴露 adapter 前同步调用 controller 的幂等 `run_startup_maintenance()`。OpenClaw direct adapter 不启动 daemon `run_forever()`，因此不 attach `CandidateEvalCoordinator` 或 `ExpressionCopyCoordinator`、不把 producer 标为 coordinator-owned；`recommend(refresh_if_needed=True)` 专用 controller 把首轮 source supply 与 inline claim 固定限制为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），后续调用再继续补货。每次 durable admission 会在同一请求内 await `RecommendationEngine.drain_pending_expression_copy(profile, limit=4, max_extra_requests=0)`：首 batch 的有效 subset 立刻成为 canonical available，未完成行保持 pending 由下一请求续补，避免在 45 秒交互窗口内递归拆分；若该 subset 非空且推荐历史为空，`recommend(refresh_if_needed=True)` 会直接 serve 已复制 pool。若首 batch 全部无效，本次仍可能返回空池并由后续请求重试。该首批限制是 bootstrap 内部策略，不新增 `config.toml` 字段，API daemon 的 coordinator、每轮 60 条 copy drain 与 4× supply oversample 保持不变。 |
+| OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status / chat`；chat 失败转为携带安全 LLM 分类文案的 `AdapterOperationError`，不暴露原始上游细节。 |
+| 推荐消费后的 durable inventory 同步 | ✅ | API 与 OpenClaw composition 都给真实 `RecommendationEngine` 注入 post-commit callback；独立 serve DB worker 把 recommendation + shown 在同一短事务提交成功后，callback 直接携带 `pool_counts_after` 更新共享 gate，不再同步重读共享连接。写失败不触发 callback，callback 失败也不改写 durable 提交结果；API 另在响应关键路径外读取精确 canonical snapshot 收敛广播。 |
 | OpenClaw skill descriptors | ✅ | 已提供协议中立的 skill descriptor 列表与 async handler |
 | OpenClaw CLI bridge | ✅ | 已提供 `python -m openbiliclaw.integrations.openclaw.cli`，输出稳定 JSON |
 | OpenClaw 主动探针闭环 | ✅ | OpenClaw 可拉取/响应 `interest.probe` 与 `avoidance.probe`；`listen` 默认转发 `delight.candidate`、`interest.probe` 和 `avoidance.probe` |
@@ -30,8 +35,26 @@
 | integration 异常边界 | ✅ | 新增 initialization / validation / operation 三类 adapter 异常 |
 | adapter 单元测试 | ✅ | 覆盖 DTO 校验、operation 调用、bootstrap 共享依赖 |
 | skill 单元测试 | ✅ | 覆盖 skill 名称、handler 映射与错误返回结构 |
+| Native-save platform adapter contract | ✅ | `saved_sync` 已有首个 B 站实现：capability 声明 favorite / watch-later / named collection，目标和错误状态由后端 adapter 统一归一化，API/UI 不写平台条件分支；runtime 注册与平台中立 HTTP API 均已完成。 |
 
 ## 公开 API
+
+### Native-save 平台集成边界
+
+`src/openbiliclaw/saved_sync/router.py` 的 `NativeSaveAdapter` 是收藏/稍后再看平台写入协议，和本页下方的 OpenClaw integration adapter 不是同一层。首个实现 `BilibiliNativeSaveAdapter` 只消费既有 `BilibiliAPIClient`：favorite 写 exact-title `OpenBiliClaw` 收藏夹，watch-later 写 B 站稍后再看；只有 resource-deal POST 产生的 dedicated favorite duplicate 异常视为重复成功，generic `11201` 保持失败，watch-later `90003` 视为视频不可用失败；登录失效与 GET/POST HTTP/application 限流分别输出稳定状态，不透传 Cookie、CSRF 或 response body。
+
+稳定动作 token 与当前 Phase 1 映射如下：
+
+| 用户意图 | Bilibili resolved action | 真实目标 |
+|---|---|---|
+| `favorite` | `favorite` | `B站 OpenBiliClaw 收藏夹`（按名称精确复用，不存在时创建） |
+| `watch_later` | `watch_later` | `B站稍后再看` |
+
+这张表只描述已经实现并注册的 Bilibili adapter。YouTube、小红书、抖音、X、知乎和
+Reddit 当前可以使用平台中立的本地 membership / 状态 / UI，但平台账号写入 adapter 仍是
+后续独立计划；未注册能力会诚实返回 `unsupported`，不能把本地保存表述成平台同步成功。
+
+平台 adapter 不拥有本地 membership、任务调度、重试或 HTTP 路由。`SavedSyncService` 保持 local-first 顺序，并用独立 task/item ledger 持久化每次请求结果；`RuntimeContext` 与 `/api/saved/*` 已完成平台中立 wiring。共享 task registry 只跟踪顶层 sync runner；service-owned heartbeat、adapter save 与 watchdog 由 service 内部保留到真实 I/O 终止，以维持 owner fence。真实 B 站写入 E2E 属于账号状态变更，必须等待明确授权或测试账号。
 
 ### 构建 adapter
 
@@ -62,6 +85,7 @@ skills = build_openclaw_skills(adapter)
 - `recommend(limit=5, refresh_if_needed=True)`
 - `submit_feedback(request)`
 - `get_runtime_status()`
+- `chat(request)`：成功返回 `ChatResponse`；失败抛出包含 `safe_llm_failure_message()` 分类文案的 `AdapterOperationError`，同时用 `raise ... from exc` 保留内部 cause 供日志/调试，不序列化该 cause
 - `get_next_probe()`
 - `get_next_avoidance_probe()`
 - `respond_avoidance_probe(request)`
@@ -105,7 +129,7 @@ CLI bridge 返回稳定 JSON：
 
 - `recommend --limit <n>` 默认走快路径，不触发 runtime refresh，更适合 OpenClaw 交互场景
 - `recommend --limit <n> --refresh-if-needed` 会显式触发较重的刷新链路，再返回结果
-- 如果显式 refresh 超时或上游请求异常，adapter 会自动回退到缓存推荐，避免 OpenClaw 会话长时间挂住
+- 如果显式 refresh 超时或上游请求异常，adapter 会自动回退到已有历史；历史为空时继续尝试 serve 已完成文案的 canonical pool。若没有任何已复制的 canonical 行（例如首 batch 全部无效），会如实返回空列表而不伪造推荐
 - `doctor` 用于确认 skill pack 路径、发现状态和 skill 名称列表
 - `emit-skill-descriptors` 用于导出可序列化的 skill 定义，便于调试 OpenClaw 接线
 - `next-probe` / `next-avoidance-probe` 会返回下一条待确认的正向兴趣 / 避雷假设，并记录本次 domain / axis，避免连续拉取重复候选
@@ -188,7 +212,7 @@ OpenClaw integration 本身没有新增独立 `config.toml` 段落，直接复�
 1. **先 adapter，后 skill**
    skill 只是 OpenClaw 的接入外皮，核心集成边界应放在 adapter，而不是把业务逻辑直接写进 skill handler。
 2. **复用现有 runtime 主链**
-   推荐、学习、反馈回流仍由 OpenBiliClaw 内核负责，integration 层不复制业务流程。OpenClaw direct bootstrap 使用和 API runtime 相同的 scheduler 频率参数与后台 LLM gate；如果开启 `pause_on_extension_disconnect` 且没有浏览器插件 presence，daemon-owned 后台刷新会在宽限期后暂停，避免集成入口绕过省钱策略。
+   推荐、学习、反馈回流仍由 OpenBiliClaw 内核负责，integration 层不复制业务流程。OpenClaw direct bootstrap 不运行 daemon 的 `run_forever()`，但会在返回可调用 adapter 前执行同一个 controller startup-maintenance hook；若宿主随后也启动该 controller，幂等标记避免重复维护。它仍使用和 API runtime 相同的 scheduler 参数与后台 LLM gate；但因没有启动 candidate / expression coordinator task，`recommend(refresh_if_needed=True)` 的 controller refresh 使用固定 4 条首批 source/evaluation wave，并在 admission 后同步 drain 至多 4 条 durable copy、禁用本请求内的 split retry：有效 subset 立即可服务，未完成行留作下一请求补齐，不会把候选交给未运行的 owner。API daemon 的 30 条 coordinator worker wave 与 60 条 copy drain 不受影响。
 3. **协议中立**
    当前 `skill.py` 只返回 descriptor，不绑定未知的 OpenClaw SDK，避免过早引入外部硬依赖。
 4. **真实 OpenClaw 接入走 skill pack，而不是 Python SDK**

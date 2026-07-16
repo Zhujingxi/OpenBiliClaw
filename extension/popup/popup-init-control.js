@@ -19,9 +19,14 @@ const REASON_TEXT = {
   already_initialized: "已经初始化过了；如需重建，请到设置页。",
   local_only: "只能在本机发起初始化。",
   no_sources_selected: "至少勾选一个数据来源。",
+  analyze_failed: "偏好分析未完成。",
+  profile_failed: "画像生成未完成。",
+  discovery_timeout: "画像已生成，但首轮内容池整理超时。",
+  discovery_partial: "画像已生成，但首轮内容池本次未完成。",
   internal_error: "初始化过程中出错了，请稍后重试。",
   interrupted: "上次初始化被打断（后端重启），可重试。",
   cancelled: "初始化已取消。",
+  collection_timeout: "数据采集达到总等待上限，已停止继续等待平台或扩展。",
   none: "",
 };
 
@@ -33,6 +38,25 @@ export function describeInitReason(reason) {
   return REASON_TEXT[reason] || "";
 }
 
+// Authoritative status explanation for pre-init and partial-success states.
+// Typed backend details carry the concrete cause + recovery action and should
+// win over a short reason-code label. account-sync keeps llm_not_ready while
+// its live probe is red, so recognise its prefixed analysis detail as well.
+export function describeInitStatusReason(status) {
+  const reason = String((status && status.reason) || "");
+  const detail = String((status && status.detail) || "").trim();
+  const detailFirst = [
+    "analyze_failed",
+    "profile_failed",
+    "discovery_timeout",
+    "discovery_partial",
+  ];
+  if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
+    return detail;
+  }
+  return describeInitReason(reason) || detail;
+}
+
 // Human text for a failed/cancelled run. ``status.detail`` carries the
 // backend's stored failure specifics (exception summary / GuidedInitError
 // message, v0.3.156+) — append it so an internal_error is diagnosable from
@@ -40,6 +64,15 @@ export function describeInitReason(reason) {
 export function describeInitFailure(status, progress = null) {
   const base = describeInitReason(status && status.reason) || "";
   const detail = String((status && status.detail) || "").trim();
+  const reason = String((status && status.reason) || "");
+  if (
+    detail &&
+    (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(
+      reason,
+    ) || detail.startsWith("画像分析失败："))
+  ) {
+    return detail;
+  }
   if (base && detail) {
     return `${base}（${detail}）`;
   }
@@ -249,7 +282,13 @@ export function initStartButtonState(status, selected = null) {
     return { enabled: false, label: "初始化进行中…", reason: "" };
   }
   if (status.initialized) {
-    return { enabled: false, label: "已初始化", reason: "如需重建画像，请到设置页。" };
+    return {
+      enabled: false,
+      label: status.partial_success ? "画像已生成" : "已初始化",
+      reason: status.partial_success
+        ? describeInitStatusReason(status)
+        : "如需重建画像，请到设置页。",
+    };
   }
   if (Array.isArray(selected) && selected.length === 0) {
     return { enabled: false, label: "开始初始化", reason: REASON_TEXT.no_sources_selected };
@@ -261,7 +300,7 @@ export function initStartButtonState(status, selected = null) {
     return { enabled: true, label: "开始初始化", reason: "" };
   }
   const reason =
-    describeInitReason(status.reason) ||
+    describeInitStatusReason(status) ||
     (hardPrereqsSatisfied(status, selected) ? "暂时无法开始,请稍后重试。" : "请先满足上面的必需条件。");
   return { enabled: false, label: "开始初始化", reason };
 }
@@ -270,30 +309,224 @@ function stageList(status) {
   return status && Array.isArray(status.stages) ? status.stages : [];
 }
 
+// ── Intra-stage progress + liveness (init-progress-visibility Phase 2) ──────
+//
+// REFERENCE IMPLEMENTATION for the three GUI surfaces: desktop web
+// (web/desktop/assets/js/app.js) and the setup wizard (web/setup/index.html)
+// mirror these pure functions. The three surfaces share no module system, so
+// this duplication is the sanctioned exception to the four-surface contract —
+// keep the formulas in lock-step when editing any copy.
+
+// A running stage's fraction never claims completion: real sub-progress and
+// the elapsed/eta pseudo-progress both cap here so the bar can't hit the next
+// stage tick before the backend confirms it.
+const STAGE_FRACTION_CAP = 0.95;
+// Legacy half-step for statuses without progress/eta fields (old backends):
+// preserves the historic 13/38/63/88 ticks exactly.
+const STAGE_FRACTION_FALLBACK = 0.5;
+// Stall threshold. Calibration: backend heartbeat period 30s × 3 missed beats
+// (api/app.py _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+export const INIT_STALL_THRESHOLD_SECONDS = 90;
+// Expectation copy shared by the idle checklist and the start-button area.
+export const INIT_EXPECTATION_HINT =
+  "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
+
+// Per-run client view state: elapsed-based pseudo-progress anchors (first
+// client observation of each running stage) + the monotonic pct clamp + the
+// staleness change marker. Keyed by run_id; bounded so long sessions can't
+// accumulate stale runs.
+const _runViewState = new Map();
+
+function _viewState(runId) {
+  let st = _runViewState.get(runId);
+  if (!st) {
+    st = {
+      stageStartMs: new Map(),
+      maxPct: 0,
+      lastHeartbeatMark: null,
+      lastHeartbeatChangeMs: 0,
+      lastProgressMark: null,
+      lastProgressChangeMs: 0,
+    };
+    _runViewState.set(runId, st);
+    if (_runViewState.size > 8) {
+      const oldest = _runViewState.keys().next().value;
+      if (oldest !== runId) {
+        _runViewState.delete(oldest);
+      }
+    }
+  }
+  return st;
+}
+
+// Test hook / logout reset: forget all per-run view state.
+export function resetInitProgressViewState() {
+  _runViewState.clear();
+}
+
+// Fraction of a RUNNING stage: real sub-progress (done/total) when the backend
+// exposes it; otherwise an elapsed/eta pseudo-progress (1 - e^-t/eta) anchored
+// at the first client observation of the stage running; otherwise the legacy
+// half-step. ``st`` is null when the status carries no run_id (legacy) — then
+// only the stateless paths apply.
+function _runningStageFraction(stage, st, nowMs) {
+  const prog = stage && stage.progress;
+  if (prog && prog.mode === "indeterminate") {
+    const eta = Number((stage && stage.eta_seconds) || 0);
+    if (eta > 0 && st) {
+      let startMs = st.stageStartMs.get(stage.n);
+      if (startMs === undefined) {
+        startMs = nowMs;
+        st.stageStartMs.set(stage.n, startMs);
+      }
+      return Math.min(
+        STAGE_FRACTION_CAP,
+        1 - Math.exp(-Math.max(0, (nowMs - startMs) / 1000) / eta),
+      );
+    }
+    return STAGE_FRACTION_FALLBACK;
+  }
+  const progTotal = prog ? Number(prog.total || 0) : 0;
+  if (progTotal > 0) {
+    const done = Math.max(0, Math.min(Number(prog.done || 0), progTotal));
+    return Math.min(STAGE_FRACTION_CAP, done / progTotal);
+  }
+  const eta = Number((stage && stage.eta_seconds) || 0);
+  if (eta > 0 && st) {
+    let startMs = st.stageStartMs.get(stage.n);
+    if (startMs === undefined) {
+      startMs = nowMs;
+      st.stageStartMs.set(stage.n, startMs);
+    }
+    const elapsed = Math.max(0, (nowMs - startMs) / 1000);
+    return Math.min(STAGE_FRACTION_CAP, 1 - Math.exp(-elapsed / eta));
+  }
+  return STAGE_FRACTION_FALLBACK;
+}
+
+// Show the calibrated duration before it elapses; afterwards stop repeating an
+// already-broken estimate and surface the real hard ceiling instead.
+export function stageEtaText(stage) {
+  const eta = Number((stage && stage.eta_seconds) || 0);
+  if (eta <= 0) {
+    return "";
+  }
+  const progress = stage && stage.progress;
+  const elapsed = Number((progress && progress.elapsed_seconds) || 0);
+  if (elapsed > eta) {
+    const maxSeconds = Number((progress && progress.max_seconds) || 0);
+    if (maxSeconds > 0) {
+      return `已超常见用时；本轮上限 ${Math.ceil(maxSeconds / 60)} 分钟`;
+    }
+    return "已超常见用时；AI 或平台仍可能在处理";
+  }
+  const halfMinutes = Math.ceil(eta / 30) / 2;
+  return `本阶段通常约 ${halfMinutes} 分钟`;
+}
+
+// Track backend heartbeat and substantive progress separately. The heartbeat
+// proves the worker is connected; progress_sequence only advances at real
+// milestones, so a live-but-stalled provider call is no longer hidden.
+export function stalenessView(status, nowMs = Date.now()) {
+  if (!status || !status.running) {
+    return { fresh: true, staleSeconds: 0, text: "" };
+  }
+  const runId = status.run_id ? String(status.run_id) : "";
+  const heartbeatAt = status.last_heartbeat_at || status.last_activity;
+  const progressAt = status.last_progress_at || status.last_activity;
+  if (!runId || !heartbeatAt) {
+    return { fresh: true, staleSeconds: 0, text: "● 后端已接单 · 正在建立进度" };
+  }
+  const st = _viewState(runId);
+  const heartbeatMark = `${status.sequence ?? ""}|${heartbeatAt}`;
+  if (st.lastHeartbeatMark !== heartbeatMark) {
+    st.lastHeartbeatMark = heartbeatMark;
+    st.lastHeartbeatChangeMs = nowMs;
+  }
+  const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
+  if (st.lastProgressMark !== progressMark) {
+    st.lastProgressMark = progressMark;
+    st.lastProgressChangeMs = nowMs;
+  }
+  const heartbeatStale = Math.max(
+    0,
+    Math.round((nowMs - st.lastHeartbeatChangeMs) / 1000),
+  );
+  const progressStale = Math.max(
+    0,
+    Math.round((nowMs - st.lastProgressChangeMs) / 1000),
+  );
+  if (heartbeatStale > INIT_STALL_THRESHOLD_SECONDS) {
+    const minutes = Math.max(1, Math.round(heartbeatStale / 60));
+    return {
+      fresh: false,
+      staleSeconds: heartbeatStale,
+      text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`,
+    };
+  }
+  if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+    const minutes = Math.max(1, Math.round(progressStale / 60));
+    return {
+      fresh: false,
+      staleSeconds: progressStale,
+      text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`,
+    };
+  }
+  return {
+    fresh: true,
+    staleSeconds: progressStale,
+    text: "● 后端在线 · 正在处理",
+  };
+}
+
 // Progress view for the in-flight init: percentage, current stage label, and
-// terminal flags. ``pct`` counts completed stages plus a half-step for the
-// stage currently running, so the bar advances mid-stage instead of jumping.
-export function initProgressView(status) {
+// terminal flags. ``pct`` counts completed stages plus the running stage's
+// fraction — real sub-progress when available, elapsed/eta pseudo-progress
+// otherwise, legacy half-step for old backends. Rendered pct is monotonic per
+// run_id (stale/regressed polls can't move the bar backwards).
+export function initProgressView(status, nowMs = Date.now()) {
   const total = (status && status.total_stages) || STAGE_TOTAL_FALLBACK;
   const stages = stageList(status);
   const doneCount = stages.filter((s) => s.status === "ok").length;
   const running = Boolean(status && status.running);
+  const runId = status && status.run_id ? String(status.run_id) : "";
+  const st = runId ? _viewState(runId) : null;
   const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
   const current = (status && status.current_stage) || 0;
   const currentStage = stages.find((s) => s.n === current);
-  const stageLabel = currentStage
+  const indeterminate = Boolean(
+    running && currentStage && currentStage.progress?.mode === "indeterminate",
+  );
+  let stageLabel = currentStage
     ? `${currentStage.n}/${total} ${currentStage.label}`
     : "";
-  const inFlight = stages.some((s) => s.status === "running") ? 0.5 : 0;
+  const note = currentStage && currentStage.progress && currentStage.progress.note;
+  if (stageLabel && note) {
+    stageLabel += ` · ${note}`;
+  }
+  const runningStages = stages.filter((s) => s.status === "running");
+  const inFlight = runningStages.length
+    ? runningStages.reduce((sum, s) => sum + _runningStageFraction(s, st, nowMs), 0) /
+      runningStages.length
+    : 0;
   const rawPct = ((doneCount + (running ? inFlight : 0)) / total) * 100;
-  const pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+  let pct = Math.max(0, Math.min(100, Math.round(rawPct)));
+  if (running) {
+    pct = Math.max(pct, 1);
+  }
+  if (st) {
+    st.maxPct = Math.max(st.maxPct, pct);
+    pct = st.maxPct;
+  }
   return {
     active: running,
     total,
     doneCount,
     current,
     stageLabel,
-    pct: running ? Math.max(pct, 1) : pct,
+    etaText: running ? stageEtaText(currentStage) : "",
+    pct,
+    indeterminate,
     failed: Boolean(failedStage),
     failedReason: failedStage ? failedStage.reason || "" : "",
     partial: Boolean(status && status.partial_success),
@@ -307,6 +540,14 @@ export function isInitTerminal(status) {
     return false;
   }
   return Boolean(status.initialized) || initProgressView(status).failed;
+}
+
+// Whether a freshly-loaded popup should re-attach the progress poll instead of
+// painting the idle panel. True only when a run is live (started elsewhere, or
+// the page was reopened / refreshed mid-init, so no click or SSE frame kicked
+// the poll on this instance). Tolerant of missing / legacy status objects.
+export function shouldAttachRunningInitProgress(status) {
+  return Boolean(status && status.running);
 }
 
 // Map an error thrown by startInit() (requestJson attaches .status/.details)

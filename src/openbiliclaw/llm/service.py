@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import heapq
-import itertools
 import logging
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
@@ -14,17 +12,39 @@ from openbiliclaw.soul.profile import SoulProfile, preference_layer_from_dict
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
 from .base import LLMProviderError, LLMRateLimitError
+from .concurrency import (
+    DEFAULT_TOTAL_LLM_CONCURRENCY,
+    LLMConcurrencyGate,
+    PrioritySemaphore,
+    coerce_total_concurrency,
+)
 from .prompts import build_socratic_dialogue_prompt
 
 logger = logging.getLogger(__name__)
-DEFAULT_LLM_CONCURRENCY = 3
+DEFAULT_LLM_CONCURRENCY = DEFAULT_TOTAL_LLM_CONCURRENCY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Iterator, Mapping
 
     from openbiliclaw.memory.manager import MemoryManager
 
     from .base import LLMResponse
+
+
+_BACKGROUND_ADMISSION_BYPASS: ContextVar[bool] = ContextVar(
+    "openbiliclaw_background_admission_bypass",
+    default=False,
+)
+
+
+@contextmanager
+def _background_admission_bypass() -> Iterator[None]:
+    """Bypass background admission within the current task context."""
+    token = _BACKGROUND_ADMISSION_BYPASS.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND_ADMISSION_BYPASS.reset(token)
 
 
 class SupportsComplete(Protocol):
@@ -137,86 +157,9 @@ def module_overrides_from_config(config: object) -> dict[str, ModuleOverride]:
     return overrides
 
 
-class PrioritySemaphore:
-    """Asyncio semaphore that serves waiters in priority order.
-
-    Lower priority numbers go first (1 = highest). Within the same
-    priority bucket, FIFO is preserved via a monotonically increasing
-    sequence counter. The semaphore takes effect only when there is
-    contention — if the slot is free the caller acquires immediately.
-
-    Concurrency is bounded by ``capacity``: only ``capacity`` callers
-    may hold a slot at once.
-    """
-
-    def __init__(self, capacity: int = 1) -> None:
-        if capacity < 1:
-            raise ValueError("capacity must be >= 1")
-        self._capacity = capacity
-        self._in_flight = 0
-        # Heap entries: (priority, sequence, future). The sequence
-        # counter breaks ties so the heap stays FIFO within a bucket.
-        self._waiters: list[tuple[int, int, asyncio.Future[None]]] = []
-        self._counter = itertools.count()
-
-    async def acquire(self, priority: int) -> None:
-        if self._in_flight < self._capacity and not self._waiters:
-            self._in_flight += 1
-            return
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future[None] = loop.create_future()
-        heapq.heappush(self._waiters, (priority, next(self._counter), fut))
-        try:
-            await fut
-        except asyncio.CancelledError:
-            # Drop ourselves from the heap if we hadn't been woken yet.
-            self._waiters = [entry for entry in self._waiters if entry[2] is not fut]
-            heapq.heapify(self._waiters)
-            # If the slot was already handed to us before the cancel
-            # propagated, hand it on to the next waiter so the queue
-            # doesn't deadlock.
-            if fut.done() and not fut.cancelled():
-                self._release_one()
-            raise
-
-    def release(self) -> None:
-        if self._in_flight <= 0:
-            raise RuntimeError("PrioritySemaphore released too many times")
-        self._release_one()
-
-    def _release_one(self) -> None:
-        # Hand the slot to the highest-priority waiter, or just decrement
-        # the in-flight count if no one is waiting.
-        while self._waiters:
-            _, _, fut = heapq.heappop(self._waiters)
-            if not fut.done():
-                fut.set_result(None)
-                return
-        self._in_flight = max(0, self._in_flight - 1)
-
-    @asynccontextmanager
-    async def slot(self, priority: int) -> AsyncIterator[None]:
-        await self.acquire(priority)
-        try:
-            yield
-        finally:
-            self.release()
-
-
 def _coerce_concurrency(value: object) -> int:
     """Return a positive LLM concurrency value, falling back to the default."""
-    if isinstance(value, bool):
-        return DEFAULT_LLM_CONCURRENCY
-    if isinstance(value, int | float):
-        normalized = int(value)
-    elif isinstance(value, str):
-        try:
-            normalized = int(value.strip())
-        except ValueError:
-            return DEFAULT_LLM_CONCURRENCY
-    else:
-        return DEFAULT_LLM_CONCURRENCY
-    return normalized if normalized >= 1 else DEFAULT_LLM_CONCURRENCY
+    return coerce_total_concurrency(value)
 
 
 def _build_priority_semaphore(capacity: int = DEFAULT_LLM_CONCURRENCY) -> PrioritySemaphore:
@@ -256,6 +199,26 @@ class LLMService:
         ("recommendation", "recommendation"),
         ("soul", "soul"),
     )
+    # Channel-facing work is dominated by bounded JSON extraction, scoring,
+    # keyword generation, and short recommendation copy.  Letting these calls
+    # inherit a provider-wide DeepSeek thinking setting can spend the entire
+    # output budget before any final JSON is emitted.  Soul/profile work keeps
+    # the configured provider default; callers can always opt back in by
+    # explicitly passing ``high`` or ``max``.
+    _NO_REASONING_DEFAULT_PREFIXES: ClassVar[tuple[str, ...]] = (
+        "discovery",
+        "recommendation",
+        "sources",
+        "yt_search",
+        "runtime.bilibili_extension_search",
+    )
+    _NO_REASONING_DEFAULT_CALLERS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "eval.query_quality",
+            "eval.relevance",
+            "eval.specificity",
+        }
+    )
 
     registry: SupportsComplete
     memory: MemoryManager
@@ -267,16 +230,23 @@ class LLMService:
     usage_recorder: object | None = None
     module_overrides: Mapping[str, ModuleOverride] = field(default_factory=dict)
     concurrency: int = DEFAULT_LLM_CONCURRENCY
-    # v0.3.63+: lazy-initialised priority gate. ``init=False`` keeps the
-    # semaphore private while ``concurrency`` remains configurable.
-    _priority_sem: PrioritySemaphore = field(init=False, repr=False)
+    concurrency_gate: LLMConcurrencyGate | None = None
     _logged_unknown_override_keys: set[tuple[str, str]] = field(
         default_factory=set, init=False, repr=False
     )
 
     def __post_init__(self) -> None:
         self.concurrency = _coerce_concurrency(self.concurrency)
-        self._priority_sem = _build_priority_semaphore(self.concurrency)
+        if self.concurrency_gate is None:
+            self.concurrency_gate = LLMConcurrencyGate(self.concurrency)
+
+    @asynccontextmanager
+    async def _provider_slot(
+        self, *, caller: str, bypass_background: bool = False
+    ) -> AsyncIterator[None]:
+        gate = cast("LLMConcurrencyGate", self.concurrency_gate)
+        async with gate.slot(caller=caller, bypass_background=bypass_background):
+            yield
 
     @classmethod
     def _resolve_priority(cls, caller: str) -> int:
@@ -343,6 +313,45 @@ class LLMService:
             return None
         return provider, model or None
 
+    @classmethod
+    def _reasoning_effort_for_call(
+        cls,
+        caller: str,
+        requested: str | None,
+    ) -> str | None:
+        """Resolve the per-call thinking mode without mutating provider state."""
+
+        if requested is not None:
+            return requested
+        tag = caller.strip()
+        if tag in cls._NO_REASONING_DEFAULT_CALLERS:
+            return ""
+        if any(
+            cls._caller_matches_route_prefix(tag, prefix)
+            for prefix in cls._NO_REASONING_DEFAULT_PREFIXES
+        ):
+            return ""
+        return None
+
+    @staticmethod
+    def _structured_json_contract(system_instruction: str) -> str:
+        """Ensure JSON-mode instructions carry a lowercase ``json`` token.
+
+        Some OpenAI-compatible endpoints reject ``response_format=json_object``
+        unless a message contains the literal lowercase token. Preserve an
+        existing instruction's meaning by normalizing its uppercase ``JSON``
+        spelling first; only append the minimal contract token when no such
+        spelling exists.
+        """
+
+        instruction = system_instruction.strip()
+        if "json" in instruction:
+            return instruction
+        normalized = instruction.replace("JSON", "json")
+        if "json" in normalized:
+            return normalized
+        return f"{normalized}\n\njson" if normalized else "json"
+
     async def complete_with_core_memory(
         self,
         *,
@@ -363,14 +372,14 @@ class LLMService:
         ``"discovery.eval"``) attached to the usage row so the ``cost``
         report can break spend down by module.
 
-        ``reasoning_effort`` (v0.3.51+) lets a caller force-disable the
-        provider's thinking mode for tasks that don't benefit from it
-        (structured eval / classify / write-expression). ``None`` keeps
-        the provider default; ``""`` explicitly disables for this call.
+        ``reasoning_effort`` (v0.3.51+) lets a caller override the provider's
+        thinking mode. ``""`` explicitly disables it. ``None`` keeps the
+        provider default for Soul/profile work, while channel-facing discovery,
+        recommendation, source extraction, and short evaluation callers default
+        to ``""``. An explicit ``"high"`` / ``"max"`` always wins.
 
-        ``bypass_semaphore`` (v0.3.64+) skips the global concurrency
-        gate entirely. Use for user-initiated interactive requests
-        (e.g. chat dialogue) that must never queue behind background work.
+        ``bypass_semaphore`` (legacy name) skips only background admission;
+        every provider call still respects the runtime total gate.
 
         ``inject_core_memory`` lets hot-path evaluators opt out when
         they already pass a task-specific structured profile in
@@ -386,11 +395,14 @@ class LLMService:
             parts.append("以下是当前用户的 core memory，请作为理解背景：")
             parts.append(core_memory_block)
         system_content = "\n\n".join(parts)
+        effective_reasoning_effort = self._reasoning_effort_for_call(
+            caller,
+            reasoning_effort,
+        )
         messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
         if history:
             messages.extend(history)
         messages.append({"role": "user", "content": user_input})
-        priority = self._resolve_priority(caller)
 
         async def _do_llm_call() -> LLMResponse:
             routed = self._resolve_module_override(caller)
@@ -400,7 +412,7 @@ class LLMService:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
-                    reasoning_effort=reasoning_effort,
+                    reasoning_effort=effective_reasoning_effort,
                 )
             provider, model = routed
             return await self.registry.complete_provider(
@@ -409,16 +421,16 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=effective_reasoning_effort,
                 model=model,
             )
 
         try:
-            if bypass_semaphore:
+            async with self._provider_slot(
+                caller=caller,
+                bypass_background=(bypass_semaphore or _BACKGROUND_ADMISSION_BYPASS.get()),
+            ):
                 response = await _do_llm_call()
-            else:
-                async with self._priority_sem.slot(priority):
-                    response = await _do_llm_call()
         except LLMProviderError as exc:
             raise LLMProviderExecutionError(str(exc)) from exc
         if not response.content.strip():
@@ -455,7 +467,7 @@ class LLMService:
         DeepSeek-V4 cuts a 30-item batch from ~10 min to ~30s.
         """
         return await self.complete_with_core_memory(
-            system_instruction=system_instruction,
+            system_instruction=self._structured_json_contract(system_instruction),
             user_input=user_input,
             history=history,
             temperature=temperature,
@@ -522,11 +534,15 @@ class LLMService:
         if inject_core_memory and self.memory is not None:
             with suppress(Exception):
                 core_memory_block = self.memory.render_core_memory_prompt()
-        parts = [system_instruction.strip()]
+        parts = [self._structured_json_contract(system_instruction)]
         if core_memory_block:
             parts.append("以下是当前用户的 core memory，请作为理解背景：")
             parts.append(core_memory_block)
         system_content = "\n\n".join(parts)
+        effective_reasoning_effort = self._reasoning_effort_for_call(
+            caller,
+            reasoning_effort,
+        )
 
         user_parts: list[dict[str, Any]] = [{"type": "text", "text": user_input}]
         for image in image_inputs:
@@ -550,7 +566,6 @@ class LLMService:
         if history:
             messages.extend(cast("list[dict[str, Any]]", history))
         messages.append({"role": "user", "content": user_parts})
-        priority = self._resolve_priority(caller)
 
         async def _do_llm_call() -> LLMResponse:
             routed = self._resolve_module_override(caller)
@@ -560,7 +575,7 @@ class LLMService:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=True,
-                    reasoning_effort=reasoning_effort,
+                    reasoning_effort=effective_reasoning_effort,
                 )
             provider, model = routed
             return await self.registry.complete_provider(
@@ -569,12 +584,12 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=True,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=effective_reasoning_effort,
                 model=model,
             )
 
         try:
-            async with self._priority_sem.slot(priority):
+            async with self._provider_slot(caller=caller):
                 response = await _do_llm_call()
         except LLMProviderError as exc:
             raise LLMProviderExecutionError(str(exc)) from exc
@@ -673,7 +688,6 @@ class LLMService:
             user_input=user_message,
             history=history,
             caller=caller,
-            bypass_semaphore=True,
         )
 
     def _build_dialogue_tone_profile(self) -> ToneProfile:

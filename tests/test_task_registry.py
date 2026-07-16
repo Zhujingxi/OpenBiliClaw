@@ -5,8 +5,8 @@ Covers the contract documented in ``src/openbiliclaw/runtime/task_registry.py``:
 - ``track`` returns the spawned ``asyncio.Task`` and records it
 - Completed tasks self-untrack via the ``add_done_callback`` hook
 - ``cancel_all`` cancels every tracked task and reports the count
-- A "stuck" task that ignores cancellation triggers a warning log and
-  the registry is still cleared so the new runtime can start clean
+- A "stuck" task that ignores cancellation triggers a warning, returns within
+  the grace budget, and stays tracked for later cleanup
 - ``stats`` groups live tasks by name prefix
 
 All tests are async — pytest's ``asyncio_mode = "auto"`` config applies.
@@ -70,55 +70,68 @@ async def test_cancel_all_cancels_every_task_and_returns_count() -> None:
     assert len(registry._tasks) == 0
 
 
-async def test_cancel_all_with_hung_task_logs_warning_and_clears(
+async def test_cancel_all_with_hung_task_is_bounded_and_remains_tracked(
     caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Force the grace-window timeout path and verify the warning fires.
-
-    Reliably constructing a "task that ignores cancellation" is brittle
-    across asyncio versions — depending on the interpreter, ``shield``
-    may or may not let cancellation propagate before the timer fires.
-    The contract this test cares about is "if ``asyncio.wait_for`` raises
-    ``TimeoutError``, log a warning and still clear the registry", so
-    we patch ``asyncio.wait_for`` to raise unconditionally — the
-    behaviour under the timeout path is what matters, not how realistic
-    the underlying task is.
-    """
+    """A cancellation-swallowing task cannot hold hot reload forever."""
     registry = BackgroundTaskRegistry()
+    started = asyncio.Event()
+    stop = asyncio.Event()
 
-    async def _quick_done() -> None:
-        # An immediate-return coroutine — gather would normally finish
-        # cleanly, but we patch wait_for so the timeout branch fires
-        # regardless. Using a real, simple task ensures the cleanup
-        # path (clearing ``_tasks``) actually has something to clear.
-        return None
+    async def _stubborn() -> None:
+        started.set()
+        while not stop.is_set():
+            try:
+                await stop.wait()
+            except asyncio.CancelledError:
+                continue
 
-    task = registry.track("stuck", _quick_done())
-
-    async def _fake_wait_for(_awaitable: object, *, timeout: float) -> object:
-        raise TimeoutError
-
-    # Patch on the registry's module so the import in cancel_all picks
-    # up the fake implementation.
-    import openbiliclaw.runtime.task_registry as registry_mod
-
-    monkeypatch.setattr(registry_mod.asyncio, "wait_for", _fake_wait_for)
+    task = registry.track("stuck", _stubborn())
+    await started.wait()
 
     try:
         with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.task_registry"):
-            cancelled = await registry.cancel_all(grace_seconds=0.05)
+            cancelled = await asyncio.wait_for(registry.cancel_all(grace_seconds=0.01), timeout=0.2)
         assert cancelled == 1
-        assert len(registry._tasks) == 0
+        assert registry._tasks.get(task) == "stuck"
+        assert not task.done()
         assert any("did not exit within" in record.message for record in caplog.records), (
             f"expected warning log, got {[r.message for r in caplog.records]}"
         )
     finally:
-        # Drain the underlying task so the loop closes cleanly.
-        if not task.done():
-            task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, BaseException):
-            await task
+        stop.set()
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(task, timeout=0.2)
+        await asyncio.sleep(0)
+        assert task not in registry._tasks
+
+
+async def test_cancel_all_does_not_await_foreign_loop_task(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A task retained by an embedded host's prior loop cannot block reload."""
+    registry = BackgroundTaskRegistry()
+
+    class ForeignPendingTask:
+        def done(self) -> bool:
+            return False
+
+        def get_loop(self) -> object:
+            return object()
+
+        def cancel(self) -> None:
+            raise AssertionError("foreign-loop task must not be cancelled cross-loop")
+
+    task = ForeignPendingTask()
+    registry._tasks[task] = "foreign"  # type: ignore[index]
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.task_registry"):
+        cancelled = await asyncio.wait_for(registry.cancel_all(grace_seconds=0.01), timeout=0.2)
+
+    assert cancelled == 1
+    assert registry._tasks.get(task) == "foreign"  # type: ignore[arg-type]
+    assert any("did not exit within" in record.message for record in caplog.records)
+    registry._tasks.clear()
 
 
 async def test_stats_groups_by_name_prefix() -> None:

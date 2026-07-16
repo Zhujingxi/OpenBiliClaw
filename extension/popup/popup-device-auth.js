@@ -108,8 +108,10 @@ async function exchange(options = {}, keyOverride = "") {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key }),
+      signal: options.signal,
     });
-  } catch {
+  } catch (error) {
+    if (options.signal?.aborted) throw options.signal.reason || error;
     lastExchangeError = "backend_unreachable";
     return null;
   }
@@ -201,15 +203,16 @@ export async function popupAuthenticatedFetch(
   fetchImpl = globalThis.fetch.bind(globalThis),
   options = {},
 ) {
+  const signal = options.signal || init?.signal;
   const token = Object.hasOwn(options, "sessionToken")
     ? options.sessionToken
-    : await ensurePopupSession({ fetchImpl });
+    : await ensurePopupSession({ fetchImpl, signal });
   const first = await fetchImpl(url, withBearer(init, token));
   if (first.status !== 401 || !token) return first;
   const current = await readPopupSessionToken();
   const refreshed = current && current !== token
     ? current
-    : await ensurePopupSession({ force: true, fetchImpl });
+    : await ensurePopupSession({ force: true, fetchImpl, signal });
   if (!refreshed) return first;
   return fetchImpl(url, withBearer(init, refreshed));
 }

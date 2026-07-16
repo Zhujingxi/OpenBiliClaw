@@ -40,7 +40,18 @@ _SUPPORTED_OPENAI_API_FLAVORS = {"", "chat_completions", "responses"}
 # embedding service, so saves are validated as blocking (field 2026-07-05:
 # browser page-translation rewrote '奥拉玛' into config via value-less
 # <option> elements).
-_SUPPORTED_EMBEDDING_PROVIDERS = {"", "ollama", "openai", "gemini", "openai_compatible"}
+_SUPPORTED_EMBEDDING_PROVIDERS = {
+    "",
+    "ollama",
+    "openai",
+    "gemini",
+    "openai_compatible",
+    # Alibaba DashScope native multimodal embedding (qwen3-vl). Must stay in
+    # sync with the registry's dedicated embedding providers — otherwise the
+    # backend can build it but config-save validation rejects it (drift caught
+    # by the multimodal cover-embedding E2E, 2026-07-14).
+    "dashscope",
+}
 # Keep in sync with llm/registry.py `build_llm_registry` provider_specs
 # (config cannot import the registry — cycle). Used to validate
 # `[llm].fallback_provider`: an unknown name is silently dropped by the
@@ -102,11 +113,12 @@ _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
     "you",
 )
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
+_DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
 _DEFAULT_MULTIMODAL_IMAGE_QUALITY = 72
 _DEFAULT_MULTIMODAL_IMAGE_TIMEOUT_SECONDS = 6
-DEFAULT_LLM_CONCURRENCY = 3
+DEFAULT_LLM_CONCURRENCY = 4
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
 _DEFAULT_LLM_TIMEOUT = 300
@@ -281,15 +293,12 @@ class LLMProviderConfig:
     api_flavor: str = ""
     http_referer: str = ""
     x_title: str = ""
-    # DeepSeek v4 thinking-mode control. "" disables; "high" / "max" enable
-    # reasoning. v0.3.31 default = "max" — combined with v0.3.29's prompt-cache
-    # refactor (system 100% static, DeepSeek auto-cache 90% off) the
-    # reasoning-token cost becomes affordable, and the LLM produces noticeably
-    # better tags (franchise_key consistent across batch, score_threshold=0.70
-    # still gives healthy pool throughput). Set to "" if the per-day spend
-    # creeps too high and you want to trade off label quality for budget.
-    # Ignored by providers that don't accept ``thinking`` / ``reasoning_effort``.
-    reasoning_effort: str = "max"
+    # Balanced provider-native reasoning default.  LLMService overrides channel
+    # extraction/scoring/copy callers to ""; adapters disable thinking or use
+    # the cheapest supported approximation.  Generic OpenAI-compatible and
+    # Ollama routes ignore this field because their model capabilities are not
+    # safely inferable from the wire protocol alone.
+    reasoning_effort: str = "medium"
     # Ollama-only: context window (tokens). 0 = use Ollama's server default
     # (usually 4096) via the OpenAI-compat ``/v1`` shim. When >0, chat routes
     # through Ollama's native ``/api/chat`` so ``options.num_ctx`` actually
@@ -317,6 +326,11 @@ class EmbeddingConfig:
     similarity_threshold: float = 0.82
     fallback_enabled: bool = False
     fallback_provider: str = ""
+    # Optional cover image embedding (image-only vectors in the same space
+    # as text). Requires a multimodal embedding model such as
+    # gemini-embedding-2 or dashscope qwen3-vl-embedding. Default off so
+    # local bge-m3 / text-only paths pay zero extra cost.
+    multimodal_enabled: bool = False
 
 
 @dataclass
@@ -375,6 +389,29 @@ class BilibiliConfig:
     proxy: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
+
+
+@dataclass
+class NetworkConfig:
+    """Outbound proxy for OVERSEAS clients only.
+
+    Applies to the LLM SDKs (OpenAI/Claude/Gemini/DeepSeek/OpenRouter/
+    openai_compatible chat+embedding), YouTube (yt-dlp), the GitHub updater,
+    and Codex OAuth token refresh. CN-direct clients (bilibili / douyin /
+    ollama / CN-CDN image cache) never consume it — that isolation is pinned
+    by tests/test_network_proxy_isolation.py. This is deliberately distinct
+    from ``[bilibili].proxy`` (which routes B站 requests and is rarely set).
+
+    ``mode`` is one of ``direct`` (default; ignore env/system proxies),
+    ``system`` (inherit HTTP(S)_PROXY / OS settings), or ``custom`` (use
+    ``proxy`` explicitly). Accepted proxy schemes: http / https / socks5 /
+    socks5h.
+
+    See docs/plans/2026-07-11-network-proxy-config-spec.md.
+    """
+
+    mode: str = "direct"
+    proxy: str = ""
 
 
 @dataclass
@@ -486,6 +523,10 @@ class DiscoveryConfig:
     # Unified recommendation-pool admission floor. Source/provenance metadata
     # must never bypass this; explicit strategy thresholds live on candidates.
     admission_min_score: float = _DEFAULT_ADMISSION_MIN_SCORE
+    # Desired candidate-evaluation workers. The approved inventory-safe
+    # 3×30 design caps this at three (90 raw candidates in flight); runtime
+    # also reserves one global LLM slot, so the effective count may be lower.
+    candidate_eval_concurrency: int = _DEFAULT_CANDIDATE_EVAL_CONCURRENCY
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
     multimodal_evaluation_enabled: bool = False
@@ -665,6 +706,13 @@ class StorageConfig:
 
 
 @dataclass
+class SavedSyncConfig:
+    """External platform save synchronization."""
+
+    auto_sync_enabled: bool = False
+
+
+@dataclass
 class LoggingConfig:
     """Logging configuration."""
 
@@ -773,12 +821,16 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
+    # Overseas-outbound proxy (LLM SDKs / YouTube / updater). CN-direct clients
+    # never use it — see NetworkConfig docstring.
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     # Top-level `[discovery]` carries the unified keyword planner / backpressure
     # knobs (P1). Distinct from `[llm.discovery]` (per-module provider override).
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     autostart: AutostartConfig = field(default_factory=AutostartConfig)
+    saved_sync: SavedSyncConfig = field(default_factory=SavedSyncConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
@@ -921,6 +973,78 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
             )
 
 
+# Whitelist for [network].proxy. httpx[socks] (pyproject) covers socks5/socks5h;
+# http/https cover CONNECT proxies. Anything else (ftp, socks4, bare host) is a
+# user error we reject at save time rather than silently ignore (pitfall rule 7).
+_OUTBOUND_PROXY_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+_OUTBOUND_PROXY_MODES = frozenset({"direct", "system", "custom"})
+
+
+def normalize_outbound_proxy_mode(value: str) -> str:
+    """Normalize an overseas routing mode, or raise a user-facing error."""
+    mode = value.strip().lower()
+    if mode not in _OUTBOUND_PROXY_MODES:
+        raise ValueError("网络代理模式仅支持 direct / system / custom")
+    return mode
+
+
+def normalize_outbound_proxy(value: str) -> str:
+    """Normalize an overseas-outbound proxy URL, or raise ``ValueError``.
+
+    Returns ``""`` for empty/whitespace input (proxy disabled). Otherwise
+    strips surrounding whitespace, lowercases the scheme, and validates that
+    the scheme is whitelisted and a host is present. The raise message is a
+    user-facing Chinese reason surfaced directly in the settings UI.
+    """
+    text = value.strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    scheme = parsed.scheme.lower()
+    if scheme not in _OUTBOUND_PROXY_SCHEMES:
+        raise ValueError(
+            f"代理协议不支持:{parsed.scheme or '(缺少协议)'};仅支持 http / https / socks5 / socks5h"
+        )
+    if not parsed.hostname:
+        raise ValueError("代理地址缺少主机名,请填写形如 socks5://127.0.0.1:1080 的地址")
+    # Preserve userinfo/host/port/path verbatim; only the scheme is lowercased.
+    return f"{scheme}{text[len(parsed.scheme) :]}"
+
+
+def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
+    """Assemble ``NetworkConfig`` from the raw ``[network]`` table.
+
+    Invalid on-disk values are logged at WARNING and dropped to the empty
+    default rather than crashing load (pitfall rule 4 clamp-to-default); the
+    save-time API guard is what rejects invalid *writes* with a 400.
+    """
+    network_raw = raw.get("network", {})
+    if not isinstance(network_raw, dict):
+        network_raw = {}
+    proxy_raw = str(network_raw.get("proxy", "") or "")
+    try:
+        proxy = normalize_outbound_proxy(proxy_raw)
+    except ValueError as exc:
+        logger.warning("config: [network].proxy 非法已忽略(%s):%s", proxy_raw, exc)
+        proxy = ""
+    mode_present = "mode" in network_raw
+    mode_raw = str(network_raw.get("mode", "") or "")
+    if not mode_present:
+        # Backward-compatible migration: legacy non-empty [network].proxy was
+        # explicitly configured by the user and therefore remains custom.
+        mode = "custom" if proxy else "direct"
+    else:
+        try:
+            mode = normalize_outbound_proxy_mode(mode_raw)
+        except ValueError as exc:
+            logger.warning("config: [network].mode 非法已回退 direct(%s):%s", mode_raw, exc)
+            mode = "direct"
+    if mode == "custom" and not proxy:
+        logger.warning("config: [network].mode=custom 但 proxy 为空,已回退 direct")
+        mode = "direct"
+    return NetworkConfig(mode=mode, proxy=proxy)
+
+
 def _build_config(raw: dict[str, Any]) -> Config:
     """Build a Config dataclass from raw dict."""
     general = raw.get("general", {})
@@ -935,6 +1059,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
     autostart_raw = raw.get("autostart", {})
     if not isinstance(autostart_raw, dict):
         autostart_raw = {}
+    saved_sync_raw = raw.get("saved_sync", {})
+    if not isinstance(saved_sync_raw, dict):
+        saved_sync_raw = {}
     store_raw = raw.get("storage", {})
     logging_raw = raw.get("logging", {})
 
@@ -965,6 +1092,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     "similarity_threshold",
                     "fallback_enabled",
                     "fallback_provider",
+                    "multimodal_enabled",
                 )
             }
         ),
@@ -1105,6 +1233,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         llm=llm,
         bilibili=bilibili,
+        network=_build_network_config(raw),
         sources=sources,
         scheduler=SchedulerConfig(
             **{
@@ -1211,6 +1340,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
             enabled=_coerce_bool(autostart_raw.get("enabled"), default=False),
             manage_ollama=_coerce_bool(autostart_raw.get("manage_ollama"), default=True),
         ),
+        saved_sync=SavedSyncConfig(
+            auto_sync_enabled=_coerce_bool(saved_sync_raw.get("auto_sync_enabled"), default=False),
+        ),
         storage=StorageConfig(**store_raw),
         logging=LoggingConfig(**logging_raw),
         soul=soul,
@@ -1293,6 +1425,12 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
         admission_min_score=_normalize_probability(
             discovery_raw.get("admission_min_score"),
             default=_DEFAULT_ADMISSION_MIN_SCORE,
+        ),
+        candidate_eval_concurrency=_normalize_scheduler_int(
+            discovery_raw.get("candidate_eval_concurrency"),
+            default=_DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            min_value=1,
+            max_value=3,
         ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),
@@ -1766,7 +1904,7 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     ):
         normalized = str(emb_value or "").strip().lower()
         if normalized not in _SUPPORTED_EMBEDDING_PROVIDERS:
-            supported = '"", "ollama", "openai", "gemini", "openai_compatible"'
+            supported = '"", "ollama", "openai", "gemini", "openai_compatible", "dashscope"'
             issues.append(
                 ConfigIssue(
                     field=f"llm.embedding.{emb_field}",
@@ -1859,21 +1997,16 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 )
             # Keep in sync with llm/registry.py `_maybe_ollama_provider` /
             # `_ollama_is_chat_capable` (config cannot import the registry —
-            # cycle): Ollama only registers when `[llm.ollama]` has a model
-            # or base_url, and naming it as fallback_provider already marks
-            # it chat-capable — so non-registration is the only dead state
-            # left to check here.
-            if (
-                fallback_name == "ollama"
-                and not config.llm.ollama.model.strip()
-                and not config.llm.ollama.base_url.strip()
-            ):
+            # cycle). A base URL cannot identify an installed chat model, so
+            # fallback Ollama always requires an explicit model.
+            if fallback_name == "ollama" and not config.llm.ollama.model.strip():
                 issues.append(
                     ConfigIssue(
                         field="llm.fallback_provider",
                         message=(
                             "备选 provider `ollama` 需要在 `[llm.ollama]` 填 `model` "
-                            "或 `base_url`，否则不会被注册，fallback 永远不会生效。"
+                            "（例如 `qwen2.5:7b`）；仅填写 `base_url` 无法确定聊天模型，"
+                            "fallback 不会生效。"
                         ),
                         severity="blocking",
                     )
@@ -1987,6 +2120,18 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     "默认 provider `openai_compatible` 必须填 `base_url` "
                     "(例如 Groq: https://api.groq.com/openai/v1)。"
                 ),
+            )
+        )
+
+    if provider_name == "ollama" and not config.llm.ollama.model.strip():
+        issues.append(
+            ConfigIssue(
+                field="llm.ollama.model",
+                message=(
+                    "默认 provider `ollama` 必须明确填写聊天 `model` "
+                    "（例如 `qwen2.5:7b`）；系统不会再隐式使用 `llama3`。"
+                ),
+                severity="blocking",
             )
         )
 
@@ -2374,6 +2519,7 @@ def _render_config_toml(
             f"similarity_threshold = {config.llm.embedding.similarity_threshold}",
             f"fallback_enabled = {_toml_bool(config.llm.embedding.fallback_enabled)}",
             f"fallback_provider = {_toml_string(config.llm.embedding.fallback_provider)}",
+            f"multimodal_enabled = {_toml_bool(config.llm.embedding.multimodal_enabled)}",
             "",
             "# Per-module LLM overrides (empty = use global default)",
             "[llm.soul]",
@@ -2404,6 +2550,16 @@ def _render_config_toml(
             "[bilibili.browser]",
             f"executable = {_toml_string(config.bilibili.browser_executable)}",
             f"headed = {_toml_bool(config.bilibili.browser_headed)}",
+            "",
+            "[network]",
+            "# Overseas routing mode: direct (ignore env proxy), system (inherit",
+            "# HTTP(S)_PROXY / OS proxy), custom (use proxy below). Applies to",
+            "# LLM SDKs, YouTube,",
+            "# the GitHub updater, Codex OAuth. B站/抖音/Ollama 等国内直连请求",
+            "# 始终直连,不受此项影响。",
+            "# 支持 http:// | https:// | socks5:// | socks5h://",
+            f"mode = {_toml_string(config.network.mode)}",
+            f"proxy = {_toml_string(config.network.proxy)}",
             "",
             "[sources.browser]",
             f"cdp_url = {_toml_string(config.sources.browser_cdp_url)}",
@@ -2534,6 +2690,7 @@ def _render_config_toml(
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
+            f"candidate_eval_concurrency = {config.discovery.candidate_eval_concurrency}",
             "inspiration_search_enabled = "
             f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
             "inspiration_search_backends = "
@@ -2554,6 +2711,9 @@ def _render_config_toml(
                 on_disk_autostart,
                 autostart_authoritative=autostart_authoritative,
             ),
+            "",
+            "[saved_sync]",
+            f"auto_sync_enabled = {_toml_bool(config.saved_sync.auto_sync_enabled)}",
             "",
             "[storage]",
             f"db_path = {_toml_string(config.storage.db_path)}",
@@ -2593,7 +2753,7 @@ def _render_provider_section(name: str, provider: LLMProviderConfig) -> list[str
         lines.append(f"auth_mode = {_toml_string(provider.auth_mode)}")
     if name in {"openai", "openai_compatible"}:
         lines.append(f"api_flavor = {_toml_string(provider.api_flavor)}")
-    if name == "deepseek":
+    if name in {"openai", "claude", "gemini", "deepseek", "openrouter"}:
         lines.append(f"reasoning_effort = {_toml_string(provider.reasoning_effort)}")
     if name == "openrouter":
         lines.append(f"http_referer = {_toml_string(provider.http_referer)}")

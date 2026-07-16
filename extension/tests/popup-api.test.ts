@@ -32,6 +32,24 @@ import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+test("guided init API calls all have finite request deadlines", () => {
+  const source = readFileSync(resolve("popup/popup-api.js"), "utf8");
+  assert.match(source, /requestJson\("\/init-status", \{ method: "GET", timeoutMs: 45000 \}\)/);
+  assert.match(source, /body: JSON\.stringify\(payload\),\s+timeoutMs: 60000,/);
+  assert.match(source, /requestJson\("\/init\/cancel", \{ method: "POST", timeoutMs: 15000 \}\)/);
+});
+
+test("popup exposes cancel, offline feedback, and indeterminate init progress", () => {
+  const popupJs = readFileSync(resolve("popup/popup.js"), "utf8");
+  const popupHtml = readFileSync(resolve("popup/popup.html"), "utf8");
+  assert.ok(popupJs.includes("handleCancelInitClick"));
+  assert.ok(popupJs.includes("暂时无法连接初始化后台"));
+  assert.ok(popupJs.includes('classList.toggle("indeterminate"'));
+  assert.ok(popupJs.includes('progress.indeterminate ? "100%"'));
+  assert.ok(popupHtml.includes('id="initCancelBtn"'));
+  assert.ok(popupHtml.includes(".init-progress-bar.indeterminate"));
+});
+
 test("health helpers coalesce concurrent popup probes", async () => {
   __resetPopupHealthCacheForTests();
   const calls: Array<{ url: string; options: RequestInit }> = [];
@@ -173,11 +191,14 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
         expression: "先给你捞一条新的。",
         topic_label: "",
         presented: false,
+        item_key: "",
         content_id: "BV1NEW",
         content_url: "",
         source_platform: "bilibili",
         content_type: "video",
         body_text: "",
+        published_at: "",
+        published_label: "",
         view_count: 0,
         like_count: 0,
         comment_count: 0,
@@ -231,11 +252,14 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
         expression: "",
         topic_label: "",
         presented: false,
+        item_key: "",
         content_id: "BV1APPEND",
         content_url: "",
         source_platform: "bilibili",
         content_type: "video",
         body_text: "",
+        published_at: "",
+        published_label: "",
         view_count: 0,
         like_count: 0,
         comment_count: 0,
@@ -329,11 +353,14 @@ test("fetchRecommendations normalizes cover urls from the recommend endpoint", a
       expression: "",
       topic_label: "",
       presented: false,
+      item_key: "",
       content_id: "BV1FETCH",
       content_url: "",
       source_platform: "bilibili",
       content_type: "video",
       body_text: "",
+      published_at: "",
+      published_label: "",
       view_count: 0,
       like_count: 0,
       comment_count: 0,

@@ -6,18 +6,23 @@ import asyncio
 import json
 import logging
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
-from openbiliclaw.llm.base import LLMResponse
+from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.recommendation.engine import (
+    ExpressionBatchMalformed,
+    ExpressionCopyTransientError,
     RecommendationEngine,
     _recommendation_profile_summary,
 )
+from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
 
@@ -240,6 +245,102 @@ def test_select_diversified_batch_keeps_one_accessible_entry_when_available() ->
         }
         for item in batch
     )
+
+
+@pytest.mark.asyncio
+async def test_select_diversified_batch_async_matches_sync_output() -> None:
+    candidates = [
+        DiscoveredContent(
+            bvid=f"BV{i}",
+            title=f"candidate-{i}",
+            topic_group=f"topic-{i % 3}",
+            style_key="tutorial" if i % 2 else "deep_dive",
+            relevance_score=1.0 - i / 20,
+        )
+        for i in range(8)
+    ]
+    embeddings = {
+        item.bvid: [float(index % 3 == axis) for axis in range(3)]
+        for index, item in enumerate(candidates)
+    }
+
+    expected = RecommendationEngine._select_diversified_batch(
+        candidates,
+        limit=5,
+        embeddings=embeddings,
+    )
+    actual = await RecommendationEngine._select_diversified_batch_async(
+        candidates,
+        limit=5,
+        embeddings=embeddings,
+    )
+
+    assert [item.bvid for item in actual] == [item.bvid for item in expected]
+
+
+@pytest.mark.asyncio
+async def test_select_diversified_batch_async_keeps_event_loop_responsive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_thread = threading.get_ident()
+    worker_threads: list[int] = []
+    heartbeat_ran = asyncio.Event()
+
+    def blocking_selector(
+        cls: type[RecommendationEngine],
+        candidates: list[DiscoveredContent],
+        **kwargs: object,
+    ) -> list[DiscoveredContent]:
+        del cls, kwargs
+        worker_threads.append(threading.get_ident())
+        time.sleep(0.08)
+        return candidates[:1]
+
+    monkeypatch.setattr(
+        RecommendationEngine,
+        "_select_diversified_batch",
+        classmethod(blocking_selector),
+    )
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_ran.set()
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    result = await RecommendationEngine._select_diversified_batch_async(
+        [DiscoveredContent(bvid="BV1", title="one")],
+        limit=1,
+    )
+    await heartbeat_task
+
+    assert heartbeat_ran.is_set()
+    assert [item.bvid for item in result] == ["BV1"]
+    assert worker_threads and worker_threads[0] != main_thread
+
+
+@pytest.mark.asyncio
+async def test_supergroup_canonical_map_async_matches_sync_output() -> None:
+    embeddings = {
+        "动漫": [1.0, 0.0],
+        "动漫文化": [0.99, 0.01],
+        "科技": [0.0, 1.0],
+    }
+    kwargs = {
+        "strict": 0.90,
+        "loose": 0.80,
+        "prefix_len": 2,
+    }
+
+    expected = RecommendationEngine._build_supergroup_canonical_map(
+        embeddings,
+        **kwargs,
+    )
+    actual = await RecommendationEngine._build_supergroup_canonical_map_async(
+        embeddings,
+        **kwargs,
+    )
+
+    assert actual == expected == {"动漫文化": "动漫"}
 
 
 def test_select_diversified_batch_caps_newly_confirmed_amplification_direction() -> None:
@@ -1232,6 +1333,45 @@ async def test_serve_returns_immediately_when_pool_available_count_is_zero() -> 
     recommendations = await engine.serve(_build_profile(), limit=5)
 
     assert recommendations == []
+
+
+@pytest.mark.asyncio
+async def test_serve_pool_reads_run_off_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = RecommendationEngine(llm=_DummyLLM(), database=object())  # type: ignore[arg-type]
+    event_loop_thread_id = threading.get_ident()
+    worker_thread_ids: list[int] = []
+    heartbeat_ran = asyncio.Event()
+
+    def readiness() -> dict[str, int]:
+        worker_thread_ids.append(threading.get_ident())
+        return {"available": 1, "raw": 1, "pending": 0}
+
+    def load_candidates(
+        _profile: SoulProfile,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+    ) -> tuple[list[DiscoveredContent], int, int, int, int]:
+        del limit, excluded_bvids
+        worker_thread_ids.append(threading.get_ident())
+        time.sleep(0.08)
+        return [], 0, 0, 0, 0
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.01)
+        heartbeat_ran.set()
+
+    monkeypatch.setattr(engine, "_pool_readiness_counts", readiness)
+    monkeypatch.setattr(engine, "_load_filtered_serve_candidates", load_candidates)
+    heartbeat_task = asyncio.create_task(heartbeat())
+
+    recommendations = await engine.serve(_build_profile(), limit=1)
+    await heartbeat_task
+
+    assert recommendations == []
+    assert heartbeat_ran.is_set()
+    assert worker_thread_ids
+    assert all(thread_id != event_loop_thread_id for thread_id in worker_thread_ids)
 
 
 @pytest.mark.asyncio
@@ -2683,6 +2823,69 @@ async def test_drain_expression_copy_default_batch_size_is_30() -> None:
 
 
 @pytest.mark.asyncio
+async def test_public_expression_drain_caps_sixty_then_processes_tail() -> None:
+    class _RecordingLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+            self.active = 0
+            self.max_active = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                batch = _content_batch_from_prompt(str(kwargs["user_input"]))
+                self.batch_sizes.append(len(batch))
+                await asyncio.sleep(0)
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {
+                                "bvid": item["bvid"],
+                                "expression": f"{item['bvid']} 的推荐文案。",
+                                "topic_label": "持续补货",
+                            }
+                            for item in batch
+                        ],
+                        ensure_ascii=False,
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            finally:
+                self.active -= 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_EXPR_PUBLIC_{index:02d}",
+                    title=f"持续补货 {index}",
+                    up_name="效率实验室",
+                    style_key="deep_dive",
+                    topic_group="效率工具",
+                    relevance_score=0.88,
+                )
+                for index in range(75)
+            ],
+            precomputed=False,
+        )
+        llm = _RecordingLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=75) == 60
+        assert sorted(llm.batch_sizes) == [30, 30]
+        assert llm.max_active == 2
+        llm.batch_sizes.clear()
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 15
+        assert llm.batch_sizes == [15]
+
+
+@pytest.mark.asyncio
 async def test_drain_expression_copy_splits_failed_batch_before_single_fallback() -> None:
     class _SplitRetryExpressionLLM:
         def __init__(self) -> None:
@@ -2759,6 +2962,315 @@ async def test_drain_expression_copy_splits_failed_batch_before_single_fallback(
 
 
 @pytest.mark.asyncio
+async def test_expression_malformed_retry_is_bounded_to_seven_batch_calls() -> None:
+    class _MalformedLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls += 1
+            return LLMResponse(content="not json", provider="test", model="dummy", usage={})
+
+    items = [DiscoveredContent(bvid=f"BV_BOUND_{i}", title=str(i)) for i in range(8)]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _MalformedLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        assert await engine._precompute_batch_with_split_retry(items, _build_profile()) == 0
+    assert llm.calls == 7
+
+
+@pytest.mark.asyncio
+async def test_expression_malformed_singleton_stays_pending_without_single_fallback() -> None:
+    class _MalformedLLM:
+        def __init__(self) -> None:
+            self.callers: list[str] = []
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.callers.append(str(kwargs.get("caller", "")))
+            return LLMResponse(content="not json", provider="test", model="dummy", usage={})
+
+    item = DiscoveredContent(bvid="BV_SINGLE_PENDING", title="pending")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, [item], precomputed=False)
+        llm = _MalformedLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        assert await engine._precompute_batch_with_split_retry([item], _build_profile()) == 0
+        row = next(row for row in db.get_cached_content(limit=10) if row["bvid"] == item.bvid)
+    assert llm.callers == ["recommendation.write_expression"]
+    assert row["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (LLMRateLimitError("429 too many requests"), "rate_limited"),
+        (TimeoutError("request timed out"), "timeout"),
+        (ConnectionError("connection reset"), "connection"),
+        (LLMProviderExecutionError("upstream HTTP 503"), "server_error"),
+    ],
+)
+async def test_public_expression_drain_propagates_transient_after_sibling_progress(
+    error: BaseException, kind: str
+) -> None:
+    error.retry_after = 45  # type: ignore[attr-defined]
+
+    class _OneFailedBatchLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            self.batch_sizes.append(len(batch))
+            if len(batch) > 1:
+                raise error
+            item = batch[0]
+            return LLMResponse(
+                content=json.dumps(
+                    [{"bvid": item["bvid"], "expression": "sibling", "topic_label": "ok"}]
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV_PUBLIC_TRANSIENT_{i:02d}",
+            title=str(i),
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for i in range(31)
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _OneFailedBatchLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=31)
+    assert sorted(llm.batch_sizes) == [1, 30]
+    assert exc_info.value.kind == kind
+    assert exc_info.value.completed == 1
+    assert exc_info.value.retry_after == 45.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        LLMProviderError("HTTP 401 unauthorized: invalid api key"),
+        LLMFallbackError("No provider was available to process the request."),
+    ],
+)
+async def test_public_expression_drain_propagates_auth_and_no_provider(
+    error: BaseException,
+) -> None:
+    class _UnavailableLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            self.calls += 1
+            raise error
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV_PUBLIC_AUTH_{i}",
+            title=str(i),
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for i in range(2)
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _UnavailableLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(type(error)):
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=2)
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_public_expression_drain_carries_partial_progress_into_missing_retry_transient() -> (
+    None
+):
+    class _PartialThenTransientLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            ids = tuple(str(item["bvid"]) for item in batch)
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            error = TimeoutError("missing subset timed out")
+            error.retry_after = 45  # type: ignore[attr-defined]
+            raise error
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        llm = _PartialThenTransientLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=4)
+        rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+    assert exc_info.value.completed == 2
+    assert exc_info.value.retry_after == 45.0
+    assert rows["A"]["pool_expression"] == "copy-A"
+    assert rows["B"]["pool_expression"] == "copy-B"
+    assert rows["C"]["pool_expression"] == ""
+    assert rows["D"]["pool_expression"] == ""
+
+
+@pytest.mark.asyncio
+async def test_expression_partial_progress_is_attached_to_downstream_auth_failure() -> None:
+    class _PartialThenAuthLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            self.calls += 1
+            ids = tuple(str(item["bvid"]) for item in _content_batch_from_prompt(user_input))
+            if self.calls == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            raise LLMProviderError("HTTP 401 unauthorized: invalid api key")
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        engine = RecommendationEngine(llm=_PartialThenAuthLLM(), database=db)
+        with pytest.raises(LLMProviderError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=4)
+    assert getattr(exc_info.value, "completed", 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_expression_coordinator_reports_same_branch_partial_progress() -> None:
+    class _PartialThenTimeoutLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self, *, user_input: str, **kwargs: object
+        ) -> LLMResponse:
+            self.calls += 1
+            ids = tuple(str(item["bvid"]) for item in _content_batch_from_prompt(user_input))
+            if self.calls == 1:
+                return LLMResponse(
+                    content=json.dumps(
+                        [
+                            {"bvid": key, "expression": f"copy-{key}", "topic_label": "ok"}
+                            for key in ids[:2]
+                        ]
+                    ),
+                    provider="test",
+                    model="dummy",
+                    usage={},
+                )
+            raise TimeoutError("missing subset timed out")
+
+    items = [
+        DiscoveredContent(
+            bvid=key,
+            title=key,
+            style_key="deep_dive",
+            topic_group="test",
+            relevance_score=0.8,
+        )
+        for key in ("A", "B", "C", "D")
+    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(db, items, precomputed=False)
+        engine = RecommendationEngine(llm=_PartialThenTimeoutLLM(), database=db)
+        coordinator = ExpressionCopyCoordinator(
+            pending_count_provider=lambda: 4,
+            drain_callback=lambda limit: engine.drain_pending_expression_copy(
+                profile=_build_profile(), limit=limit
+            ),
+            min_items=1,
+            safety_wake_seconds=0.01,
+        )
+        task = asyncio.create_task(coordinator.run_forever())
+        async with asyncio.timeout(2):
+            while coordinator.status_payload()["expression_batch_state"] != "backoff":
+                await asyncio.sleep(0)
+        rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
+        assert coordinator.status_payload()["expression_last_completed"] == 2
+        assert rows["A"]["pool_expression"] == "copy-A"
+        assert rows["B"]["pool_expression"] == "copy-B"
+        assert rows["C"]["pool_expression"] == ""
+        assert rows["D"]["pool_expression"] == ""
+        await coordinator.stop()
+        await task
+
+
+@pytest.mark.asyncio
 async def test_precompute_batch_skips_single_fallback_during_provider_cooldown() -> None:
     class _CooldownExpressionLLM:
         def __init__(self) -> None:
@@ -2793,9 +3305,10 @@ async def test_precompute_batch_skips_single_fallback_during_provider_cooldown()
         _seed_pool(db, items, precomputed=False)
         engine = RecommendationEngine(llm=llm, database=db)
 
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine._precompute_batch_with_split_retry(items, _build_profile())
 
-    assert completed == 0
+    assert exc_info.value.kind == "rate_limited"
     assert llm.calls == 1
 
 
@@ -2845,17 +3358,19 @@ async def test_precompute_batch_matches_expressions_by_bvid_when_response_reorde
         _seed_pool(db, items, precomputed=False)
         engine = RecommendationEngine(llm=_ReorderedExpressionLLM(), database=db)
 
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed) as exc_info:
+            await engine._precompute_batch(items, _build_profile())
 
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
-        assert completed == 2
+        assert exc_info.value.completed == 2
+        assert [item.bvid for item in exc_info.value.missing_items] == ["BV_EXPR_A"]
         assert rows["BV_EXPR_A"]["pool_expression"] == ""
         assert rows["BV_EXPR_B"]["pool_expression"] == "B 视频自己的推荐文案。"
         assert rows["BV_EXPR_C"]["pool_expression"] == "C 视频自己的推荐文案。"
 
 
 @pytest.mark.asyncio
-async def test_precompute_batch_falls_back_to_single_when_multi_item_response_lacks_ids(
+async def test_precompute_batch_keeps_no_id_multi_item_response_pending(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Multi-item batch with no bvid/content_id must not be matched positionally.
@@ -2911,20 +3426,15 @@ async def test_precompute_batch_falls_back_to_single_when_multi_item_response_la
         engine = RecommendationEngine(llm=llm, database=db)
 
         caplog.set_level(logging.WARNING)
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed):
+            await engine._precompute_batch(items, _build_profile())
 
         # One batch attempt, then one single regeneration per item.
-        assert llm.callers == [
-            "recommendation.write_expression",
-            "recommendation.expression",
-            "recommendation.expression",
-        ]
-        assert completed == 2
-        assert "positional matching is unreliable" in caplog.text
+        assert llm.callers == ["recommendation.write_expression"]
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
         # Each row got copy via the keyed single path — never positional batch.
-        assert rows["BV_NOID_A"]["pool_expression"].startswith("单条重写")
-        assert rows["BV_NOID_B"]["pool_expression"].startswith("单条重写")
+        assert rows["BV_NOID_A"]["pool_expression"] == ""
+        assert rows["BV_NOID_B"]["pool_expression"] == ""
 
 
 @pytest.mark.asyncio
@@ -2978,11 +3488,12 @@ async def test_precompute_batch_drops_expression_shared_across_distinct_videos(
         engine = RecommendationEngine(llm=_DuplicateExpressionLLM(), database=db)
 
         caplog.set_level(logging.WARNING)
-        completed = await engine._precompute_batch(items, _build_profile())
+        with pytest.raises(ExpressionBatchMalformed) as exc_info:
+            await engine._precompute_batch(items, _build_profile())
 
         rows = {row["bvid"]: dict(row) for row in db.get_cached_content(limit=10)}
         # Only the unique copy survives; the shared sentence is dropped for both.
-        assert completed == 1
+        assert exc_info.value.completed == 1
         assert rows["BV_DUP_A"]["pool_expression"] == ""
         assert rows["BV_DUP_B"]["pool_expression"] == ""
         assert rows["BV_DUP_C"]["pool_expression"] == "C 独有的文案。"
@@ -3206,6 +3717,335 @@ async def test_precompute_delight_scores_reuses_evo_result_without_llm_call() ->
         assert candidate["delight_score"] == pytest.approx(0.91)
         assert candidate["delight_reason"] == "这条会把你最近想拆清楚系统结构的劲头接住。"
         assert candidate["delight_hook"] == "系统结构"
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_scores_adds_bounded_visual_cover_bonus() -> None:
+    """When image embedding is active, an on-style cover lifts delight_score by
+    a small bounded bonus — reusing the warmed URL-keyed vector (no re-fetch).
+    """
+
+    class _ImageEmb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+        similarity_threshold = 0.82
+
+        def __init__(self) -> None:
+            self.fetched = False
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        def lookup_cached_image(self, cache_key: str) -> list[float]:
+            # Simulate the discovery warmer having already stored the vector:
+            # same direction as the interest anchor → cosine 1.0 → full bonus.
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            self.fetched = True
+            return [1.0, 0.0, 0.0]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1COVER",
+            title="纪录片：一件瓷器的百年旅程",
+            source="search",
+            relevance_score=0.91,
+            cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
+        )
+        emb = _ImageEmb()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+        )
+        try:
+            scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+            assert scored == 1
+            candidate = db.get_delight_candidate(min_delight_score=0.70)
+            assert candidate is not None
+            # 0.91 + full 0.05 bonus, clamped to <= 1.0.
+            assert candidate["delight_score"] == pytest.approx(0.96)
+            # Warm cache hit means the cold fetch/embed path never ran.
+            assert emb.fetched is False
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_precompute_delight_scores_no_visual_bonus_when_inactive() -> None:
+    """Cover present but image embedding inactive => delight_score unchanged."""
+
+    class _TextOnlyEmb:
+        multimodal_enabled = False
+        supports_image_embedding = False
+        similarity_threshold = 0.82
+
+        def image_embedding_active(self) -> bool:
+            return False
+
+        async def embed(self, text: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
+
+        async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+            raise AssertionError("embed_image must not run when inactive")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV1PLAIN",
+            title="纪录片：一件瓷器的百年旅程",
+            source="search",
+            relevance_score=0.91,
+            cover_url="https://i0.hdslb.com/bfs/archive/cover.jpg",
+        )
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_TextOnlyEmb(),  # type: ignore[arg-type]
+        )
+        try:
+            scored = await engine.precompute_delight_scores(profile=_build_profile(), limit=10)
+            assert scored == 1
+            candidate = db.get_delight_candidate(min_delight_score=0.70)
+            assert candidate is not None
+            assert candidate["delight_score"] == pytest.approx(0.91)
+        finally:
+            db.close()
+
+
+class _CoverVisualEmb:
+    """Fake multimodal embedding service for serve()/delight cover-visual tests.
+
+    ``embed`` gives every text anchor the same direction; ``lookup_cached``
+    returns [] so MMR is skipped (base tuple ranking is exercised); cover
+    vectors come from a URL-keyed map. ``embed_image`` raises so a test fails
+    loudly if serve() ever tries to fetch a cover on its hot path.
+    """
+
+    multimodal_enabled = True
+    supports_image_embedding = True
+    similarity_threshold = 0.82
+
+    def __init__(self, key_to_vec: dict[str, list[float]], *, active: bool = True) -> None:
+        self._map = key_to_vec
+        self._active = active
+
+    def image_embedding_active(self) -> bool:
+        return self._active
+
+    async def embed(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
+
+    def lookup_cached(self, text: str) -> list[float]:
+        return []
+
+    def lookup_cached_image(self, cache_key: str) -> list[float]:
+        return list(self._map.get(cache_key, []))
+
+    async def embed_image(self, *args: object, **kwargs: object) -> list[float]:
+        raise AssertionError("serve() hot path must be lookup-only (no cover fetch)")
+
+
+@pytest.mark.asyncio
+async def test_serve_cover_visual_bonus_reorders_when_active() -> None:
+    """When multimodal embedding is on, an on-style cover's bounded bonus can
+    overtake a slightly-higher-relevance candidate — consistent with delight.
+    Off (default), the ranking is unchanged.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    align_url = "https://i0.hdslb.com/bfs/archive/align.jpg"
+    plain_url = "https://i0.hdslb.com/bfs/archive/plain.jpg"
+    key_map = {
+        image_embedding_cache_key_for_url(align_url): [1.0, 0.0, 0.0],  # cos≈1 → +0.05
+        image_embedding_cache_key_for_url(plain_url): [0.0, 1.0, 0.0],  # cos≈0 → +0.0
+    }
+
+    def _seed(db: Database) -> None:
+        # ALIGN has LOWER base relevance; only the visual bonus can lift it
+        # above PLAIN — so the assertion is robust to timestamp/bvid tiebreaks.
+        _seed_visible(
+            db,
+            "BV1ALIGN",
+            title="对味封面",
+            source="search",
+            relevance_score=0.80,
+            cover_url=align_url,
+        )
+        _seed_visible(
+            db,
+            "BV1PLAIN",
+            title="普通封面",
+            source="search",
+            relevance_score=0.83,
+            cover_url=plain_url,
+        )
+
+    # Active → bonus flips ALIGN above PLAIN.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "a.db")
+        db.initialize()
+        _seed(db)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=True),  # type: ignore[arg-type]
+        )
+        try:
+            recs = await engine.serve(_build_profile(), limit=1)
+        finally:
+            db.close()
+        assert [r.content.bvid for r in recs] == ["BV1ALIGN"]
+
+    # Inactive (text-only / default) → no bonus, higher-relevance PLAIN wins.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "b.db")
+        db.initialize()
+        _seed(db)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=False),  # type: ignore[arg-type]
+        )
+        try:
+            recs = await engine.serve(_build_profile(), limit=1)
+        finally:
+            db.close()
+        assert [r.content.bvid for r in recs] == ["BV1PLAIN"]
+
+
+@pytest.mark.asyncio
+async def test_visual_bonus_map_empty_when_inactive() -> None:
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    url = "https://i0.hdslb.com/bfs/archive/x.jpg"
+    key_map = {image_embedding_cache_key_for_url(url): [1.0, 0.0, 0.0]}
+    cands = [DiscoveredContent(bvid="BVX", title="t", cover_url=url)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "c.db")
+        db.initialize()
+        active = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=True),  # type: ignore[arg-type]
+        )
+        inactive = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=_CoverVisualEmb(key_map, active=False),  # type: ignore[arg-type]
+        )
+        try:
+            assert (await active._visual_bonus_map(cands, _build_profile())).get("BVX", 0.0) > 0.0
+            assert await inactive._visual_bonus_map(cands, _build_profile()) == {}
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_visual_bonus_map_withheld_when_pool_mostly_unwarmed() -> None:
+    """Fairness guard: right after enabling multimodal on an existing pool, most
+    covers aren't warmed yet. serve() must withhold the bonus for the whole batch
+    (rather than favour the warmed minority) until coverage is sufficient.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    urls = [f"https://i0.hdslb.com/bfs/archive/{i}.jpg" for i in range(3)]
+    cands = [DiscoveredContent(bvid=f"BV{i}", title="t", cover_url=urls[i]) for i in range(3)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "d.db")
+        db.initialize()
+        try:
+            # Only 1/3 warmed → coverage 0.33 < 0.6 → withhold everything.
+            one = {image_embedding_cache_key_for_url(urls[0]): [1.0, 0.0, 0.0]}
+            engine = RecommendationEngine(
+                llm=_DummyLLM(),
+                database=db,
+                embedding_service=_CoverVisualEmb(one, active=True),  # type: ignore[arg-type]
+            )
+            assert await engine._visual_bonus_map(cands, _build_profile()) == {}
+
+            # All 3 warmed → coverage 1.0 → bonus applies.
+            full = {image_embedding_cache_key_for_url(u): [1.0, 0.0, 0.0] for u in urls}
+            engine_full = RecommendationEngine(
+                llm=_DummyLLM(),
+                database=db,
+                embedding_service=_CoverVisualEmb(full, active=True),  # type: ignore[arg-type]
+            )
+            applied = await engine_full._visual_bonus_map(cands, _build_profile())
+            assert len(applied) == 3 and all(v > 0.0 for v in applied.values())
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_pool_covers_backfills_unwarmed_only(monkeypatch) -> None:
+    """Pool cover prewarm embeds old content whose cover was never warmed
+    (multimodal enabled after admission), skips already-warmed and cover-less.
+    """
+    from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+    warm_url = "https://i0.hdslb.com/bfs/archive/warm.jpg"
+    cold_url = "https://i0.hdslb.com/bfs/archive/cold.jpg"
+    warm_key = image_embedding_cache_key_for_url(warm_url)
+
+    class _Emb:
+        multimodal_enabled = True
+        supports_image_embedding = True
+
+        def __init__(self) -> None:
+            self.embedded_keys: list[str] = []
+
+        def image_embedding_active(self) -> bool:
+            return True
+
+        def lookup_cached_image(self, key: str) -> list[float]:
+            return [0.1, 0.0] if key == warm_key else []
+
+        async def embed_image(
+            self, image_bytes: bytes, *, mime_type: str = "image/jpeg", cache_key: str = ""
+        ) -> list[float]:
+            self.embedded_keys.append(cache_key)
+            return [0.2, 0.3]
+
+    async def fake_prepare(cover_url, *, max_px, quality, timeout_seconds):
+        return b"jpeg-bytes", "image/jpeg"
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.multimodal.prepare_cover_bytes_for_embedding", fake_prepare
+    )
+
+    emb = _Emb()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "e.db")
+        db.initialize()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            embedding_service=emb,  # type: ignore[arg-type]
+        )
+        cands = [
+            DiscoveredContent(bvid="BVWARM", title="t", cover_url=warm_url),
+            DiscoveredContent(bvid="BVCOLD", title="t", cover_url=cold_url),
+            DiscoveredContent(bvid="BVNONE", title="t", cover_url=""),
+        ]
+        try:
+            warmed = await engine._prewarm_pool_covers(cands)
+        finally:
+            db.close()
+
+    assert warmed == 1  # only the cold-missing cover got embedded
+    assert emb.embedded_keys == [image_embedding_cache_key_for_url(cold_url)]
 
 
 @pytest.mark.asyncio
@@ -3478,3 +4318,284 @@ def test_list_servable_pool_platforms_returns_distinct_tokens() -> None:
         )
 
         assert db.list_servable_pool_platforms() == ["bilibili", "zhihu"]
+
+
+@pytest.mark.asyncio
+async def test_reshuffle_exclusions_refill_beyond_the_old_candidate_window() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(60):
+            _seed_visible(
+                db,
+                f"BV{index:04d}",
+                title=f"候选 {index}",
+                up_name=f"UP {index}",
+                source="search",
+                relevance_score=1.0 - index / 1000,
+                relevance_reason=f"候选 {index} 的理由。",
+                pool_expression=f"候选 {index} 的预生成文案。",
+                pool_topic_label=f"主题 {index}",
+                topic_group=f"主题组 {index}",
+            )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+        excluded = frozenset(f"BV{index:04d}" for index in range(40))
+
+        recommendations = await engine.serve(
+            _build_profile(),
+            limit=10,
+            excluded_bvids=excluded,
+            expression_mode="precomputed",
+        )
+
+        assert len(recommendations) == 10
+        assert not ({item.content.bvid for item in recommendations} & excluded)
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_isolated_pool_snapshot_preserves_legacy_bvid_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolated_db = Database(tmp_path / "isolated.db")
+    legacy_db = Database(tmp_path / "legacy.db")
+    isolated_db.initialize()
+    legacy_db.initialize()
+    for index in range(18):
+        for db in (isolated_db, legacy_db):
+            _seed_visible(
+                db,
+                f"BV_ORDER_{index:02d}",
+                title=f"顺序候选 {index}",
+                source="search",
+                relevance_score=0.99 - index / 100,
+                topic_group=f"顺序组 {index}",
+                pool_topic_label=f"顺序主题 {index}",
+            )
+
+    isolated_engine = RecommendationEngine(llm=_DummyLLM(), database=isolated_db)
+    legacy_engine = RecommendationEngine(llm=_DummyLLM(), database=legacy_db)
+    monkeypatch.setattr(legacy_db, "load_pool_serve_snapshot_async", None)
+    monkeypatch.setattr(legacy_db, "persist_pool_serve_async", None)
+
+    isolated_result = await isolated_engine.serve_with_result(_build_profile(), limit=10)
+    isolated = isolated_result.items
+    legacy = await legacy_engine.serve(_build_profile(), limit=10)
+    await asyncio.sleep(0)
+
+    assert [item.content.bvid for item in isolated] == [item.content.bvid for item in legacy]
+    assert isolated_result.pool_counts_after == {
+        "available": 8,
+        "raw": 8,
+        "pending": 0,
+        "admitted_pending_copy": 0,
+        "pending_eval": 0,
+        "evaluated_pending": 0,
+    }
+    assert isolated_result.timings.pool_snapshot_ms > 0
+    assert isolated_result.timings.persist_ms > 0
+    isolated_db.close()
+    legacy_db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_notifies_inventory_only_after_isolated_shown_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1COMMIT", title="durable", relevance_score=0.95)
+        committed = asyncio.Event()
+        observed_counts: list[int] = []
+
+        async def on_commit() -> None:
+            observed_counts.append(db.count_pool_candidates())
+            committed.set()
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=on_commit,
+        )
+
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        await asyncio.wait_for(committed.wait(), timeout=1)
+        assert observed_counts == [0]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_does_not_notify_inventory_when_isolated_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1FAIL", title="failure", relevance_score=0.95)
+        callback_calls = 0
+
+        def on_commit() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+
+        async def fail_persist(
+            _rows: list[dict[str, object]],
+            _bvids: list[str],
+        ) -> None:
+            raise RuntimeError("write failed")
+
+        monkeypatch.setattr(db, "persist_pool_serve_async", fail_persist)
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=on_commit,
+        )
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            await engine.serve(_build_profile(), limit=1)
+        await asyncio.sleep(0)
+        assert callback_calls == 0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_isolated_commit_notifies_after_shown_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1SYNC", title="sync", relevance_score=0.95)
+        observed_counts: list[int] = []
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=lambda: observed_counts.append(
+                db.count_pool_candidates()
+            ),
+        )
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        await asyncio.sleep(0)
+        assert observed_counts == [0]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_isolated_commit_does_not_fail_when_commit_callback_fails() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(db, "BV1CALLBACK", title="callback", relevance_score=0.95)
+
+        def fail_callback() -> None:
+            raise RuntimeError("callback failed")
+
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            pool_inventory_commit_callback=fail_callback,
+        )
+        recommendations = await engine.serve(_build_profile(), limit=1)
+        assert len(recommendations) == 1
+        await asyncio.sleep(0)
+        assert db.count_pool_candidates() == 0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_final_exclusion_blocks_platform_floor_reintroduction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+        allowed = DiscoveredContent(
+            bvid="BV1ALLOWED",
+            title="允许候选",
+            up_name="UP A",
+            source_strategy="search",
+            relevance_score=0.8,
+            relevance_reason="允许候选理由。",
+            pool_expression="允许候选文案。",
+            pool_topic_label="允许主题",
+        )
+        blocked = DiscoveredContent(
+            bvid="BV1BLOCKED",
+            title="应排除候选",
+            up_name="UP B",
+            source_strategy="search",
+            relevance_score=0.9,
+            relevance_reason="应排除候选理由。",
+            pool_expression="应排除候选文案。",
+            pool_topic_label="排除主题",
+        )
+        monkeypatch.setattr(
+            engine,
+            "_pool_readiness_counts",
+            lambda: {"available": 2, "raw": 2, "pending": 0},
+        )
+        monkeypatch.setattr(db, "load_pool_serve_snapshot_async", None)
+        monkeypatch.setattr(db, "persist_pool_serve_async", None)
+        monkeypatch.setattr(engine, "_load_pool_candidates", lambda *, limit: [allowed])
+        monkeypatch.setattr(
+            engine,
+            "_apply_platform_floor",
+            lambda candidates: [blocked, *candidates],
+        )
+
+        recommendations = await engine.serve(
+            _build_profile(),
+            limit=1,
+            excluded_bvids=frozenset({"BV1BLOCKED"}),
+            expression_mode="precomputed",
+        )
+
+        assert [item.content.bvid for item in recommendations] == ["BV1ALLOWED"]
+        db.close()
+
+
+def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
+    """池子整理(classify_pool_backlog)经 row → dataclass → cache_content 重写行;
+    mapper 漏读任何互动字段都会把该字段清零(与封面被空值抹掉同族缺陷)。"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        stats = {
+            "view_count": 14000,
+            "like_count": 673,
+            "favorite_count": 1283,
+            "collect_count": 1283,
+            "comment_count": 65,
+            "share_count": 7,
+            "danmaku_count": 21,
+            "reply_count": 3,
+            "retweet_count": 2,
+            "bookmark_count": 9,
+        }
+        db.cache_content(
+            "BV1stats",
+            title="互动数据齐全的视频",
+            author_name="Rayman小何",
+            cover_url="//i2.hdslb.com/bfs/archive/x.jpg",
+            published_at="2026-07-08T06:30:00Z",
+            published_label="3 天前",
+            source="search",
+            relevance_score=0.9,
+            **stats,
+        )
+        row = dict(
+            db.conn.execute("SELECT * FROM content_cache WHERE bvid = ?", ("BV1stats",)).fetchone()
+        )
+
+        (item,) = engine._rows_to_discovered([row])
+        kwargs = item.to_cache_kwargs()
+
+        for field_name, expected in stats.items():
+            assert kwargs[field_name] == expected, field_name
+        assert kwargs["author_name"] == "Rayman小何"
+        assert kwargs["published_at"] == "2026-07-08T06:30:00Z"
+        assert kwargs["published_label"] == "3 天前"
+        db.close()

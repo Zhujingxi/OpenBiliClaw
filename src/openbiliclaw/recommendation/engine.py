@@ -7,19 +7,22 @@ to the user in a warm, friend-like manner with deep personal insights.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
+from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.json_utils import extract_llm_json_list, extract_llm_json_object
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache, profile_prompt_layers
-from openbiliclaw.llm.service import is_llm_rate_limit_error
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.saved_sync.identity import content_storage_key
 from openbiliclaw.soul.tone import ToneProfile, build_tone_profile
 
 if TYPE_CHECKING:
@@ -35,6 +38,52 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _DEFAULT_EXPRESSION_BATCH_SIZE = 30
 _DEFAULT_EXPRESSION_BATCH_CONCURRENCY = 2
+
+# Cover visual alignment → delight bonus (opt-in, only when
+# [llm.embedding].multimodal_enabled + a multimodal embedding model are active).
+#
+# CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Cross-modal image↔text
+# cosine in shared-space embedders (qwen3-vl-embedding / gemini-embedding-2)
+# runs much lower and more model-specific than same-modal text↔text cosine, so
+# the floor/ceil below are conservative guesses, NOT tuned against a deployed
+# model. Deliberately kept small + additive + one-directional so a mis-guess
+# can only slightly re-rank already-qualifying delight candidates, never demote
+# them, and never touches text-only users (bonus is exactly 0 when image embed
+# is inactive). Reopen calibration after choosing a real multimodal model:
+# raise logging to INFO and read the emitted max_sim distribution, then move the
+# floor/ceil so the bonus spreads across the observed range. See CLAUDE.md
+# pitfall rule 3 (document threshold calibration) and the quality-first rule.
+_VISUAL_COVER_BONUS_MAX = 0.05  # hard cap on the additive nudge to delight_score
+_VISUAL_COVER_SIM_FLOOR = 0.15  # cross-modal cosine at/below → zero bonus
+_VISUAL_COVER_SIM_CEIL = 0.45  # cross-modal cosine at/above → full bonus
+_VISUAL_COVER_MAX_ANCHORS = 8  # profile interest anchors compared per run
+# Fairness guard for the serve() hot path: right after a user enables
+# multimodal, pool content admitted BEFORE the switch has no warmed cover
+# vector yet (serve() is lookup-only and never fetches). Applying the bonus to
+# only the warmed subset would systematically favour freshly-discovered items
+# over older ones — not because their covers are better, but because the old
+# ones simply aren't embedded yet. So serve() withholds the bonus for the whole
+# batch until at least this fraction of cover-bearing candidates are warmed; the
+# background pool-cover prewarm backfills the rest within a refresh cycle. Delight
+# is unaffected (it cold-fetches per candidate, so every item gets its true bonus).
+_VISUAL_COVER_MIN_COVERAGE = 0.6
+
+
+@dataclass
+class ExpressionBatchMalformed(Exception):  # noqa: N818 - specified domain interface
+    """A successful provider response omitted or malformed batch members."""
+
+    missing_items: tuple[DiscoveredContent, ...]
+    completed: int = 0
+
+
+@dataclass
+class ExpressionCopyTransientError(Exception):
+    """A retryable provider failure; coordinators decide when to retry."""
+
+    kind: str
+    completed: int = 0
+    retry_after: float = 0.0
 
 
 def _interests_by_weight(profile: SoulProfile) -> list[InterestTag]:
@@ -96,6 +145,7 @@ def _batch_results_by_content_key(
         valid_keys.update(_content_result_keys(content))
 
     matched: dict[str, dict[str, Any]] = {}
+    duplicated_keys: set[str] = set()
     saw_identifier = False
     for item in payload:
         raw_key = str(item.get("bvid") or item.get("content_id") or "").strip()
@@ -103,6 +153,12 @@ def _batch_results_by_content_key(
             continue
         saw_identifier = True
         if raw_key not in valid_keys:
+            continue
+        if raw_key in duplicated_keys:
+            continue
+        if raw_key in matched:
+            matched.pop(raw_key, None)
+            duplicated_keys.add(raw_key)
             continue
         matched[raw_key] = item
 
@@ -147,6 +203,26 @@ class Recommendation:
     feedback: str | None = None  # User feedback after seeing it
 
 
+@dataclass(frozen=True)
+class ServeTimings:
+    """Phase timings for one recommendation serve request."""
+
+    pool_snapshot_ms: float = 0.0
+    embedding_ms: float = 0.0
+    selector_worker_ms: float = 0.0
+    event_loop_resume_delay_ms: float = 0.0
+    persist_ms: float = 0.0
+
+
+@dataclass(frozen=True)
+class ServeResult:
+    """Recommendation items plus post-commit inventory and timings."""
+
+    items: list[Recommendation]
+    pool_counts_after: dict[str, int]
+    timings: ServeTimings = field(default_factory=ServeTimings)
+
+
 @dataclass
 class PersonalTopic:
     """A deeply personalized recommendation topic.
@@ -179,6 +255,7 @@ class RecommendationEngine:
         embedding_service: SupportsEmbeddingService | None = None,
         task_registry: BackgroundTaskRegistry | None = None,
         xhs_self_info_provider: Callable[[], dict[str, object] | None] | None = None,
+        pool_inventory_commit_callback: Callable[..., object] | None = None,
         expression_batch_concurrency: int = _DEFAULT_EXPRESSION_BATCH_CONCURRENCY,
     ) -> None:
         self._llm = llm
@@ -186,6 +263,8 @@ class RecommendationEngine:
         self._curator = curator
         self._embedding_service = embedding_service
         self._xhs_self_info_provider = xhs_self_info_provider
+        self._pool_inventory_commit_callback = pool_inventory_commit_callback
+        self._copy_pending_callback: Callable[[str], None] | None = None
         self._expression_batch_concurrency = max(1, min(16, int(expression_batch_concurrency)))
         # v0.3.63+: optional registry for detached fire-and-forget tasks
         # (classify_pool_backlog_detached, precompute_delight_scores_detached).
@@ -215,6 +294,10 @@ class RecommendationEngine:
         # calls still avoid duplicate delight writes.
         self._expression_lock = asyncio.Lock()
         self._delight_lock = asyncio.Lock()
+        # Serialize the full snapshot→rank→commit lifecycle. Without this,
+        # two simultaneous reshuffles can read the same fresh rows before
+        # either short write commits and return duplicates.
+        self._serve_lock = asyncio.Lock()
         # Background-computed supergroup canonical map. Populated by
         # prewarm_supergroup_embeddings() during refresh ticks; consumed
         # by serve()'s _merge_topic_supergroups for instant lookup.
@@ -276,6 +359,40 @@ class RecommendationEngine:
         excluded_bvids: frozenset[str] = frozenset(),
         expression_mode: Literal["realtime", "precomputed"] = "precomputed",
     ) -> list[Recommendation]:
+        """Serve recommendations while preserving the legacy list API."""
+        result = await self.serve_with_result(
+            profile,
+            limit=limit,
+            excluded_bvids=excluded_bvids,
+            expression_mode=expression_mode,
+        )
+        return result.items
+
+    async def serve_with_result(
+        self,
+        profile: SoulProfile,
+        *,
+        limit: int = 5,
+        excluded_bvids: frozenset[str] = frozenset(),
+        expression_mode: Literal["realtime", "precomputed"] = "precomputed",
+    ) -> ServeResult:
+        """Serve one serialized batch with inventory/timing metadata."""
+        async with self._serve_lock:
+            return await self._serve_with_result_unlocked(
+                profile,
+                limit=limit,
+                excluded_bvids=excluded_bvids,
+                expression_mode=expression_mode,
+            )
+
+    async def _serve_with_result_unlocked(
+        self,
+        profile: SoulProfile,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+        expression_mode: Literal["realtime", "precomputed"],
+    ) -> ServeResult:
         """Unified recommendation entry point — always picks from the pool.
 
         All recommendation paths (generate, reshuffle, append) converge here.
@@ -291,11 +408,66 @@ class RecommendationEngine:
                 higher quality).
 
         Returns:
-            List of personalized recommendations.
+            Recommendations plus inventory and phase timings.
         """
         label = "realtime" if expression_mode == "realtime" else "pool"
         multiplier = 4 if excluded_bvids else 3
-        pool_readiness = self._pool_readiness_counts()
+        candidate_limit = max(limit * multiplier, 40) + len(excluded_bvids)
+        pool_snapshot_started = time.perf_counter()
+        snapshot_loader = getattr(self._database, "load_pool_serve_snapshot_async", None)
+        curator_snapshot: tuple[list[dict[str, object]], list[dict[str, object]]] | None = None
+        if callable(snapshot_loader):
+            history_limit = max(1, int(getattr(self._curator, "_history_window", 30)))
+            snapshot = await snapshot_loader(
+                limit=candidate_limit,
+                xhs_self_nickname=self._xhs_self_nickname(),
+                curator_history_limit=history_limit,
+            )
+            pool_readiness = dict(snapshot.readiness)
+            candidates = self._rows_to_discovered(list(snapshot.candidate_rows))
+            loaded_count = int(snapshot.loaded_count)
+            if snapshot.platform_topups:
+                logger.info(
+                    "serve platform floor topped up %s",
+                    ", ".join(f"{name}+{count}" for name, count in snapshot.platform_topups),
+                )
+            if excluded_bvids:
+                candidates = [item for item in candidates if item.bvid not in excluded_bvids]
+            after_exclude_count = len(candidates)
+            candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+            after_disliked_count = len(candidates)
+            if snapshot.recent_viewed_bvids:
+                candidates = [
+                    item for item in candidates if item.bvid not in snapshot.recent_viewed_bvids
+                ]
+            after_viewed_count = len(candidates)
+            curator_snapshot = (
+                list(snapshot.curator_signals),
+                list(snapshot.feedback_signals),
+            )
+        else:
+            # Compatibility path for test doubles and third-party adapters.
+            pool_readiness = await asyncio.to_thread(self._pool_readiness_counts)
+            if int(pool_readiness.get("available", 0)) > 0:
+                (
+                    candidates,
+                    loaded_count,
+                    after_exclude_count,
+                    after_disliked_count,
+                    after_viewed_count,
+                ) = await asyncio.to_thread(
+                    self._load_filtered_serve_candidates,
+                    profile,
+                    limit=candidate_limit,
+                    excluded_bvids=excluded_bvids,
+                )
+            else:
+                candidates = []
+                loaded_count = 0
+                after_exclude_count = 0
+                after_disliked_count = 0
+                after_viewed_count = 0
+        pool_snapshot_ms = (time.perf_counter() - pool_snapshot_started) * 1000.0
         servable_pool_count = pool_readiness["available"]
         raw_pool_count = pool_readiness["raw"]
         pending_pool_count = pool_readiness["pending"]
@@ -307,24 +479,17 @@ class RecommendationEngine:
                 pending_pool_count,
             )
             self._last_served_bvids = frozenset()
-            return []
-
-        candidates = self._load_pool_candidates(limit=max(limit * multiplier, 40))
-        loaded_count = len(candidates)
-        candidates = self._apply_platform_floor(candidates)
-        if excluded_bvids:
-            candidates = [c for c in candidates if c.bvid not in excluded_bvids]
-        after_exclude_count = len(candidates)
-        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
-        after_disliked_count = len(candidates)
+            return ServeResult(
+                items=[],
+                pool_counts_after=pool_readiness,
+                timings=ServeTimings(pool_snapshot_ms=pool_snapshot_ms),
+            )
         if after_disliked_count < after_exclude_count:
             logger.info(
                 "serve(/%s) filtered %d candidate(s) by profile disliked_topics",
                 label,
                 after_exclude_count - after_disliked_count,
             )
-        candidates = self._exclude_recently_viewed(candidates)
-        after_viewed_count = len(candidates)
         if after_viewed_count == 0:
             logger.warning(
                 "serve(/%s) loaded 0 usable candidates from servable=%d "
@@ -341,7 +506,11 @@ class RecommendationEngine:
                 after_viewed_count,
             )
             self._last_served_bvids = frozenset()
-            return []
+            return ServeResult(
+                items=[],
+                pool_counts_after=pool_readiness,
+                timings=ServeTimings(pool_snapshot_ms=pool_snapshot_ms),
+            )
 
         # Online supergroup merging — collapses semantically-equivalent
         # topic_groups within this batch (e.g. 动漫/动漫产业/动漫文化) so
@@ -369,21 +538,21 @@ class RecommendationEngine:
                 pending_pool_count,
             )
 
-        logger.info(
-            "Recommendation candidate summary (serve/%s): %s",
-            label,
-            json.dumps(
-                self._build_debug_summary(candidates, prev_bvids=prev_bvids),
-                ensure_ascii=False,
-            ),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Recommendation candidate summary (serve/%s): %s",
+                label,
+                json.dumps(
+                    self._build_debug_summary(candidates, prev_bvids=prev_bvids),
+                    ensure_ascii=False,
+                ),
+            )
 
-        score_override: dict[str, float] | None = None
-        amplification_guard: frozenset[str] = frozenset()
-        if self._curator is not None:
-            context = self._curator.build_context()
-            score_override = self._curator.score_candidates(candidates, context)
-            amplification_guard = context.over_budget_amplification_keys
+        score_override, amplification_guard = await asyncio.to_thread(
+            self._score_candidates_with_curator,
+            candidates,
+            curator_snapshot,
+        )
 
         # v0.3.44+: pre-fetch embeddings for MMR-based diversification.
         # In v0.3.45+ discovery and classify_pool_backlog warm these into
@@ -391,11 +560,9 @@ class RecommendationEngine:
         # the hot path. The elapsed/coverage log below makes regressions
         # in cache warming visible — sustained "elapsed > 500ms" or
         # "coverage < 100%" means warm hooks are missing items.
-        import time as _time
-
-        _embed_t0 = _time.monotonic()
+        _embed_t0 = time.monotonic()
         embeddings = await self._fetch_candidate_embeddings(candidates)
-        _embed_elapsed_ms = (_time.monotonic() - _embed_t0) * 1000.0
+        _embed_elapsed_ms = (time.monotonic() - _embed_t0) * 1000.0
         if candidates:
             logger.info(
                 "MMR embedding fetch: coverage=%d/%d elapsed=%.0fms",
@@ -404,21 +571,33 @@ class RecommendationEngine:
                 _embed_elapsed_ms,
             )
 
-        ranked = self._select_diversified_batch(
+        # Cover-visual bonus (opt-in, multimodal embedding only): nudges the
+        # ranking toward on-style covers, consistent with the delight surface.
+        # Hot-path-safe — lookup-only (never fetches a cover on serve()); empty
+        # map when multimodal is off, so the default feed ranking is unchanged.
+        visual_bonus = await self._visual_bonus_map(candidates, profile)
+
+        (
+            ranked,
+            selector_worker_ms,
+            event_loop_resume_delay_ms,
+        ) = await self._select_diversified_batch_with_timing_async(
             candidates,
             limit=limit,
             score_override=score_override,
             embeddings=embeddings,
             amplification_guard=amplification_guard,
+            relevance_bonus=visual_bonus,
         )
-        logger.info(
-            "Recommendation picked summary (serve/%s): %s",
-            label,
-            json.dumps(
-                self._build_debug_summary(ranked, prev_bvids=prev_bvids),
-                ensure_ascii=False,
-            ),
-        )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Recommendation picked summary (serve/%s): %s",
+                label,
+                json.dumps(
+                    self._build_debug_summary(ranked, prev_bvids=prev_bvids),
+                    ensure_ascii=False,
+                ),
+            )
         # Snapshot for the next call. Use bvid only — title might
         # legitimately repeat across different bvids and we want the
         # carryover signal to be at the canonical-id level.
@@ -451,20 +630,35 @@ class RecommendationEngine:
                     rec.topic_label = self._fallback_topic_label(profile)
             recommendations.append(rec)
 
-        # Critical-path write: only the insert (we need the IDs for the
-        # response). Single transaction, single fsync.
-        ids = self._database.batch_insert_recommendations(
-            [
-                {
-                    "bvid": rec.content.bvid,
-                    "expression": rec.expression,
-                    "topic": rec.topic_label,
-                    "confidence": rec.confidence,
-                    "presented": 0,
-                }
-                for rec in recommendations
-            ]
-        )
+        # Critical-path write: one short transaction on the dedicated serve
+        # worker inserts history and marks the selected pool rows shown. This
+        # removes the old cross-thread shared-connection access and closes the
+        # duplicate window between insert and detached marking.
+        recommendation_rows = [
+            {
+                "bvid": rec.content.bvid,
+                "item_key": rec.content.item_key,
+                "expression": rec.expression,
+                "topic": rec.topic_label,
+                "confidence": rec.confidence,
+                "presented": 0,
+            }
+            for rec in recommendations
+        ]
+        ranked_bvids = [item.bvid for item in ranked]
+        persist_started = time.perf_counter()
+        isolated_persist = getattr(self._database, "persist_pool_serve_async", None)
+        if callable(isolated_persist):
+            persisted = await isolated_persist(recommendation_rows, ranked_bvids)
+            ids = list(persisted.recommendation_ids)
+            shown_committed = True
+        else:
+            ids = await asyncio.to_thread(
+                self._database.batch_insert_recommendations,
+                recommendation_rows,
+            )
+            shown_committed = False
+        persist_ms = (time.perf_counter() - persist_started) * 1000.0
         for rec, rec_id in zip(recommendations, ids, strict=True):
             rec.recommendation_id = rec_id
 
@@ -480,32 +674,91 @@ class RecommendationEngine:
                     topic=rec.topic_label,
                 )
 
-        # v0.3.45+: detach pool_status='shown' update from the response
-        # critical path. Under refresh-tick write contention (eg.
-        # _enforce_pool_cap reactivating 300+ rows) this UPDATE could
-        # wait 0.5-1.5s for the SQLite write lock, blowing the <1s
-        # budget. Within-session double-click protection is already
-        # provided by `_last_served_bvids` (in-memory) so it's safe to
-        # let the persistent flag commit slightly later.
-        ranked_bvids = [item.bvid for item in ranked]
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(self._mark_pool_shown_async(ranked_bvids))
-        except RuntimeError:
-            # serve() is normally invoked from an event loop; only the
-            # rare sync-test path falls through here.
-            self._database.mark_pool_items_shown(ranked_bvids)
-        return recommendations
+        consumed = len(ids)
+        pool_counts_after = {key: max(0, int(value)) for key, value in pool_readiness.items()}
+        for key in ("available", "raw"):
+            if key in pool_counts_after:
+                pool_counts_after[key] = max(0, pool_counts_after[key] - consumed)
+
+        if shown_committed:
+            self._schedule_pool_inventory_commit(pool_counts_after)
+        else:
+            # Compatibility path for adapters without isolated writes.
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._mark_pool_shown_async(ranked_bvids))
+            except RuntimeError:
+                self._database.mark_pool_items_shown(ranked_bvids)
+                await self._notify_pool_inventory_commit(pool_counts_after)
+        return ServeResult(
+            items=recommendations,
+            pool_counts_after=pool_counts_after,
+            timings=ServeTimings(
+                pool_snapshot_ms=pool_snapshot_ms,
+                embedding_ms=_embed_elapsed_ms,
+                selector_worker_ms=selector_worker_ms,
+                event_loop_resume_delay_ms=event_loop_resume_delay_ms,
+                persist_ms=persist_ms,
+            ),
+        )
 
     async def _mark_pool_shown_async(self, bvids: list[str]) -> None:
         """Fire-and-forget pool-marking helper. Never raises."""
         try:
+            # Keep this short UPDATE on the event-loop thread. Unlike the
+            # awaited serve reads/writes above, this task intentionally
+            # outlives ``serve()``; moving it to a worker lets callers close
+            # the shared SQLite connection while the worker is still using
+            # it (and can crash the interpreter inside sqlite3). The costly
+            # mature-database scans remain off-loop, while this bounded write
+            # normally updates only the served batch (10 rows).
             self._database.mark_pool_items_shown(bvids)
+            await self._notify_pool_inventory_commit()
         except Exception:
             logger.exception(
                 "mark_pool_items_shown (detached) failed for %d bvids",
                 len(bvids),
             )
+
+    def set_pool_inventory_commit_callback(self, callback: Callable[..., object] | None) -> None:
+        """Set the hook run only after the shown-state write commits."""
+        self._pool_inventory_commit_callback = callback
+
+    def _schedule_pool_inventory_commit(self, counts: dict[str, int]) -> None:
+        """Notify inventory observers after the response-critical DB commit."""
+        coro = self._notify_pool_inventory_commit(counts)
+        if self.task_registry is not None:
+            self.task_registry.track("recommendation.pool_commit", coro)
+            return
+        asyncio.create_task(coro)
+
+    async def _notify_pool_inventory_commit(
+        self,
+        counts: dict[str, int] | None = None,
+    ) -> None:
+        callback = self._pool_inventory_commit_callback
+        if callback is None:
+            return
+        try:
+            accepts_counts = False
+            try:
+                signature = inspect.signature(callback)
+                accepts_counts = any(
+                    parameter.kind
+                    in (
+                        inspect.Parameter.POSITIONAL_ONLY,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.VAR_POSITIONAL,
+                    )
+                    for parameter in signature.parameters.values()
+                )
+            except (TypeError, ValueError):
+                pass
+            result = callback(counts) if accepts_counts else callback()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("pool inventory commit callback failed")
 
     # Hybrid rule for online supergroup merging:
     #   - Strict embedding alone: sim >= 0.90 (catches 自走棋↔金铲铲之战
@@ -520,6 +773,72 @@ class RecommendationEngine:
     _SUPERGROUP_STRICT_THRESHOLD = 0.90
     _SUPERGROUP_LOOSE_THRESHOLD = 0.80
     _SUPERGROUP_PREFIX_LEN = 2
+
+    @staticmethod
+    def _build_supergroup_canonical_map(
+        embeddings: dict[str, list[float]],
+        *,
+        strict: float,
+        loose: float,
+        prefix_len: int,
+    ) -> dict[str, str]:
+        """Build a deterministic union-find map from topic embeddings."""
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        labels = list(embeddings.keys())
+        parent: dict[str, str] = {label: label for label in labels}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: str, b: str) -> None:
+            ra, rb = find(a), find(b)
+            if ra == rb:
+                return
+            if rb < ra:
+                ra, rb = rb, ra
+            parent[rb] = ra
+
+        for index, first in enumerate(labels):
+            for second in labels[index + 1 :]:
+                similarity = cosine_similarity(embeddings[first], embeddings[second])
+                shared_prefix = (
+                    first[:prefix_len] == second[:prefix_len] and len(first) >= prefix_len
+                )
+                if similarity >= strict or (shared_prefix and similarity >= loose):
+                    union(first, second)
+
+        return {label: canonical for label in labels if (canonical := find(label)) != label}
+
+    @classmethod
+    async def _build_supergroup_canonical_map_async(
+        cls,
+        embeddings: dict[str, list[float]],
+        *,
+        strict: float,
+        loose: float,
+        prefix_len: int,
+    ) -> dict[str, str]:
+        """Build the CPU-heavy pairwise map without blocking the event loop."""
+        started = time.monotonic()
+        result = await asyncio.to_thread(
+            cls._build_supergroup_canonical_map,
+            embeddings,
+            strict=strict,
+            loose=loose,
+            prefix_len=prefix_len,
+        )
+        elapsed = time.monotonic() - started
+        if elapsed > 0.05:
+            logger.warning(
+                "Topic supergroup CPU build took %.0fms in worker thread (%d labels)",
+                elapsed * 1000.0,
+                len(embeddings),
+            )
+        return result
 
     async def _merge_topic_supergroups(
         self,
@@ -641,8 +960,6 @@ class RecommendationEngine:
             self._supergroup_canonical_map = {}
             return len(groups)
 
-        from openbiliclaw.llm.embedding import cosine_similarity
-
         embedding_service = self._embedding_service
 
         async def _embed_with_titles(label: str, titles: list[str]) -> tuple[str, list[float]]:
@@ -658,39 +975,13 @@ class RecommendationEngine:
             self._supergroup_canonical_map = {}
             return len(embeddings)
 
-        # Union-find on the embeddings to derive canonical labels
         labels = list(embeddings.keys())
-        parent: dict[str, str] = {label: label for label in labels}
-
-        def find(x: str) -> str:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        def union(a: str, b: str) -> None:
-            ra, rb = find(a), find(b)
-            if ra == rb:
-                return
-            if rb < ra:
-                ra, rb = rb, ra
-            parent[rb] = ra
-
-        strict = self._SUPERGROUP_STRICT_THRESHOLD
-        loose = self._SUPERGROUP_LOOSE_THRESHOLD
-        prefix_len = self._SUPERGROUP_PREFIX_LEN
-        for i, ga in enumerate(labels):
-            for gb in labels[i + 1 :]:
-                sim = cosine_similarity(embeddings[ga], embeddings[gb])
-                shared_prefix = ga[:prefix_len] == gb[:prefix_len] and len(ga) >= prefix_len
-                if sim >= strict or (shared_prefix and sim >= loose):
-                    union(ga, gb)
-
-        new_map: dict[str, str] = {}
-        for label in labels:
-            canonical = find(label)
-            if canonical != label:
-                new_map[label] = canonical
+        new_map = await self._build_supergroup_canonical_map_async(
+            embeddings,
+            strict=self._SUPERGROUP_STRICT_THRESHOLD,
+            loose=self._SUPERGROUP_LOOSE_THRESHOLD,
+            prefix_len=self._SUPERGROUP_PREFIX_LEN,
+        )
         self._supergroup_canonical_map = new_map
 
         if new_map:
@@ -772,6 +1063,16 @@ class RecommendationEngine:
                 warmed,
                 len(candidates),
             )
+        # Backfill cover embeddings for the same pool window when multimodal is
+        # active — so enabling it later doesn't leave older pool content without
+        # a cover vector while newly-discovered items get warmed at admission.
+        # No-op (and zero cost) when multimodal is off. Best-effort: a cover
+        # failure must not affect the MMR prewarm return contract above.
+        if self._cover_embedding_active():
+            try:
+                await self._prewarm_pool_covers(candidates)
+            except Exception:
+                logger.debug("Pool cover prewarm raised (ignored)", exc_info=True)
         return warmed
 
     async def precompute_pool_copy(
@@ -872,6 +1173,7 @@ class RecommendationEngine:
         profile: SoulProfile,
         limit: int,
         batch_size: int = _DEFAULT_EXPRESSION_BATCH_SIZE,
+        max_extra_requests: int = 6,
     ) -> int:
         """Generate popup copy for classified-but-uncopied pool candidates.
 
@@ -905,6 +1207,7 @@ class RecommendationEngine:
                         results[batch_index] = await self._precompute_batch_with_split_retry(
                             batches[batch_index],
                             profile,
+                            max_extra_requests=max_extra_requests,
                         )
                     except asyncio.CancelledError:
                         raise
@@ -915,10 +1218,79 @@ class RecommendationEngine:
             completed = 0
             for r in results:
                 if isinstance(r, Exception):
-                    logger.warning("Expression batch failed: %s", r)
                     continue
                 completed += int(r or 0)
+            critical: Exception | None = None
+            unavailable: Exception | None = None
+            transient_kind: str | None = None
+            retry_after = 0.0
+            for result in results:
+                if not isinstance(result, Exception):
+                    continue
+                completed += int(getattr(result, "completed", 0) or 0)
+                kind = getattr(result, "kind", None) or classify_llm_failure_kind(result)
+                if kind in {"rate_limited", "timeout", "connection", "server_error"}:
+                    transient_kind = str(kind)
+                    retry_after = max(
+                        retry_after,
+                        self._retry_after_seconds(result),
+                        float(getattr(result, "retry_after", 0.0) or 0.0),
+                    )
+                    critical = result
+                elif kind in {"auth_failed", "no_provider"} and unavailable is None:
+                    unavailable = result
+                else:
+                    logger.warning("Expression batch failed: %s", result)
+            if unavailable is not None:
+                raise unavailable
+            if transient_kind is not None:
+                raise ExpressionCopyTransientError(
+                    kind=transient_kind,
+                    completed=completed,
+                    retry_after=retry_after,
+                ) from critical
+            if critical is not None:
+                raise critical
         return completed
+
+    @staticmethod
+    def _retry_after_seconds(exc: BaseException) -> float:
+        seen: set[int] = set()
+        current: BaseException | None = exc
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            value = getattr(current, "retry_after", None)
+            if isinstance(value, int | float) and value > 0:
+                return float(value)
+            current = current.__cause__ or current.__context__
+        return 0.0
+
+    async def drain_pending_expression_copy(
+        self,
+        *,
+        profile: SoulProfile,
+        limit: int = 60,
+        max_extra_requests: int = 6,
+    ) -> int:
+        """Drain only durable classified rows awaiting expression copy.
+
+        ``max_extra_requests`` controls split retries after a provider returns
+        a malformed or partial batch.  The default preserves the daemon/API
+        repair behavior; short-lived callers may set it to zero to persist a
+        valid subset and leave the remaining rows durable for a later pass.
+        """
+
+        return await self._drain_expression_copy(
+            profile=profile,
+            limit=max(0, min(60, int(limit))),
+            batch_size=_DEFAULT_EXPRESSION_BATCH_SIZE,
+            max_extra_requests=max(0, int(max_extra_requests)),
+        )
+
+    def set_copy_pending_callback(self, callback: Callable[[str], None] | None) -> None:
+        """Register the runtime generation's non-blocking copy notifier."""
+
+        self._copy_pending_callback = callback
 
     # ── Source-agnostic content classification ───────────────────────
     #
@@ -984,10 +1356,15 @@ class RecommendationEngine:
             logger.exception("classify_pool_backlog (detached) failed")
             return 0
         if classified > 0:
-            try:
-                await self._drain_expression_copy(profile=profile, limit=max(limit, classified))
-            except Exception:
-                logger.exception("post-classify expression drain failed")
+            if self._copy_pending_callback is not None:
+                try:
+                    self._copy_pending_callback(f"classified:{classified}")
+                except Exception:
+                    logger.warning("post-classify expression notification failed", exc_info=True)
+            else:
+                await self.drain_pending_expression_copy(
+                    profile=profile, limit=max(limit, classified)
+                )
         return classified
 
     async def _safe_precompute_delight_scores(
@@ -1086,7 +1463,11 @@ class RecommendationEngine:
                     item.topic_key = item.topic_group
                 try:
                     self._database.cache_content(
-                        item.bvid,
+                        content_storage_key(
+                            item.source_platform,
+                            item.content_id or item.bvid,
+                            item.content_url,
+                        ),
                         **item.to_cache_kwargs(),
                     )
                     classified += 1
@@ -1272,6 +1653,13 @@ class RecommendationEngine:
 
         candidates = self._rows_to_discovered(rows)
 
+        # Cover-visual alignment is opt-in (multimodal embedding). Embed the
+        # profile interest anchors ONCE per run — they're identical across all
+        # candidates — so the per-candidate cost is just a cached image lookup
+        # plus cosines. Empty list => bonus stays 0 for every candidate (the
+        # text-only default path is byte-identical to before).
+        visual_anchor_vecs = await self._visual_anchor_vectors(profile)
+
         scored_count = 0
         for candidate in candidates:
             persisted_score = max(0.01, min(1.0, float(candidate.relevance_score or 0.0)))
@@ -1285,23 +1673,237 @@ class RecommendationEngine:
                 scored_count += 1
                 continue
 
+            # Only nudge candidates that ALREADY qualify: visual never changes
+            # who becomes a delight candidate, only their ranking score among
+            # qualifiers, and it can only add (never demote).
+            visual_bonus = await self._visual_cover_bonus(candidate, visual_anchor_vecs)
+            final_score = min(1.0, persisted_score + visual_bonus)
+
             reason = self._evo_delight_reason(candidate)
             hook = self._evo_delight_hook(candidate)
             self._database.update_delight_score(
                 candidate.bvid,
-                delight_score=persisted_score,
+                delight_score=final_score,
                 delight_reason=reason,
                 delight_hook=hook,
             )
             scored_count += 1
             logger.info(
-                "Delight candidate found from Evo result: %s (score=%.3f, hook=%s)",
+                "Delight candidate found from Evo result: %s (score=%.3f, "
+                "visual_bonus=%.3f, hook=%s)",
                 candidate.bvid,
-                persisted_score,
+                final_score,
+                visual_bonus,
                 hook,
             )
 
         return scored_count
+
+    async def _visual_anchor_vectors(self, profile: SoulProfile) -> list[list[float]]:
+        """Embed the profile's top interest names once for cover alignment.
+
+        Returns ``[]`` (disabling the visual bonus) when image embedding is
+        inactive, there's no embedding service, or the profile has no usable
+        interest anchors — so callers can stay on the zero-cost text-only path.
+        """
+        embedding = self._embedding_service
+        if embedding is None:
+            return []
+        active = getattr(embedding, "image_embedding_active", None)
+        if not (callable(active) and active()):
+            return []
+
+        anchors: list[str] = []
+        seen: set[str] = set()
+        for interest in _interests_by_weight(profile)[:_VISUAL_COVER_MAX_ANCHORS]:
+            name = str(getattr(interest, "name", "") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                anchors.append(name)
+        if not anchors:
+            return []
+
+        vectors: list[list[float]] = []
+        for anchor in anchors:
+            try:
+                vec = await embedding.embed(anchor)
+            except Exception:
+                logger.debug("visual anchor embed failed for %r", anchor, exc_info=True)
+                continue
+            if vec:
+                vectors.append(vec)
+        return vectors
+
+    async def _visual_cover_bonus(
+        self,
+        candidate: DiscoveredContent,
+        anchor_vecs: list[list[float]],
+        *,
+        allow_fetch: bool = True,
+    ) -> float:
+        """Bounded additive visual bonus from cover↔interest alignment.
+
+        Reuses the discovery-warmed image vector (URL-keyed) so it's a cache
+        lookup. ``allow_fetch=True`` (delight background path) may pay one cold
+        fetch+embed on a miss; ``allow_fetch=False`` (the latency-sensitive
+        ``serve()`` hot path) must stay lookup-only and contributes 0 on a miss
+        — the warmer fills the cache for the next batch. Returns 0.0 whenever
+        anything is missing/inactive — never raises, never negative. See the
+        ``_VISUAL_COVER_*`` calibration note for why this stays small.
+        """
+        if not anchor_vecs:
+            return 0.0
+        embedding = self._embedding_service
+        if embedding is None:
+            return 0.0
+        embed_image = getattr(embedding, "embed_image", None)
+        if not callable(embed_image):
+            return 0.0
+        cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+        if not cover_url:
+            return 0.0
+
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        cache_key = image_embedding_cache_key_for_url(cover_url)
+        cover_vec: list[float] = []
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if callable(lookup):
+            cover_vec = lookup(cache_key) or []
+        if not cover_vec and allow_fetch:
+            # Cold miss (warmer hasn't run / cache evicted): fetch + embed once.
+            # Only the background path allows this — never on the serve() hot path.
+            try:
+                from openbiliclaw.discovery.multimodal import (
+                    prepare_cover_bytes_for_embedding,
+                )
+
+                prepared = await prepare_cover_bytes_for_embedding(
+                    cover_url, max_px=384, quality=72, timeout_seconds=6
+                )
+                if prepared is None:
+                    return 0.0
+                image_bytes, mime_type = prepared
+                cover_vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=cache_key)
+            except Exception:
+                logger.debug("visual cover embed failed for %s", candidate.bvid, exc_info=True)
+                return 0.0
+        if not cover_vec:
+            return 0.0
+
+        return self._cover_bonus_from_vec(cover_vec, anchor_vecs)
+
+    @staticmethod
+    def _cover_bonus_from_vec(
+        cover_vec: list[float],
+        anchor_vecs: list[list[float]],
+    ) -> float:
+        """Map cover↔anchor cross-modal cosine to the bounded additive bonus."""
+        if not cover_vec or not anchor_vecs:
+            return 0.0
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        max_sim = 0.0
+        for anchor_vec in anchor_vecs:
+            max_sim = max(max_sim, cosine_similarity(cover_vec, anchor_vec))
+        span = _VISUAL_COVER_SIM_CEIL - _VISUAL_COVER_SIM_FLOOR
+        if span <= 0:
+            return 0.0
+        norm = max(0.0, min(1.0, (max_sim - _VISUAL_COVER_SIM_FLOOR) / span))
+        return _VISUAL_COVER_BONUS_MAX * norm
+
+    async def _visual_bonus_map(
+        self,
+        candidates: list[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> dict[str, float]:
+        """Per-candidate cover-visual bonus for the serve() ranking (lookup-only).
+
+        Returns ``{}`` — a no-op that leaves the ranking byte-identical — when
+        multimodal embedding is inactive, the profile has no interest anchors,
+        or too few cover-bearing candidates are warmed yet (fairness guard, see
+        ``_VISUAL_COVER_MIN_COVERAGE``). Never fetches a cover on this hot path:
+        a warm miss contributes no bonus and the pool-cover prewarm backfills it.
+        """
+        anchor_vecs = await self._visual_anchor_vectors(profile)
+        if not anchor_vecs:
+            return {}
+        embedding = self._embedding_service
+        lookup = getattr(embedding, "lookup_cached_image", None)
+        if not callable(lookup):
+            return {}
+
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        with_cover = 0
+        warmed = 0
+        bonuses: dict[str, float] = {}
+        for candidate in candidates:
+            bvid = str(getattr(candidate, "bvid", "") or "")
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not bvid or not cover_url:
+                continue
+            with_cover += 1
+            cover_vec = lookup(image_embedding_cache_key_for_url(cover_url)) or []
+            if not cover_vec:
+                continue
+            warmed += 1
+            bonus = self._cover_bonus_from_vec(cover_vec, anchor_vecs)
+            if bonus > 0.0:
+                bonuses[bvid] = bonus
+        # Fairness guard: withhold the bonus for the whole batch until enough
+        # cover-bearing candidates are warmed, so a half-backfilled pool doesn't
+        # tilt the ranking toward freshly-discovered items over older ones.
+        if with_cover == 0 or warmed / with_cover < _VISUAL_COVER_MIN_COVERAGE:
+            return {}
+        return bonuses
+
+    def _cover_embedding_active(self) -> bool:
+        active = getattr(self._embedding_service, "image_embedding_active", None)
+        return bool(callable(active) and active())
+
+    async def _prewarm_pool_covers(self, candidates: list[DiscoveredContent]) -> int:
+        """Backfill cover embeddings for content already in the pool (URL-keyed).
+
+        Companion to discovery's per-admission ``_warm_cover_embeddings``: covers
+        the case where multimodal was enabled AFTER items were pooled, so the
+        lookup-only ``serve()`` path and delight treat old and new content
+        consistently instead of silently favouring freshly-discovered covers.
+        Idempotent (skips already-warmed keys), best-effort, no-op when off.
+        """
+        if not candidates or not self._cover_embedding_active():
+            return 0
+        embed_image = getattr(self._embedding_service, "embed_image", None)
+        lookup = getattr(self._embedding_service, "lookup_cached_image", None)
+        if not callable(embed_image):
+            return 0
+
+        from openbiliclaw.discovery.multimodal import prepare_cover_bytes_for_embedding
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        warmed = 0
+        for candidate in candidates:
+            cover_url = str(getattr(candidate, "cover_url", "") or "").strip()
+            if not cover_url:
+                continue
+            key = image_embedding_cache_key_for_url(cover_url)
+            if callable(lookup) and lookup(key):
+                continue  # already warm — idempotent
+            try:
+                prepared = await prepare_cover_bytes_for_embedding(
+                    cover_url, max_px=384, quality=72, timeout_seconds=6
+                )
+                if prepared is None:
+                    continue
+                image_bytes, mime_type = prepared
+                vec = await embed_image(image_bytes, mime_type=mime_type, cache_key=key)
+                if vec:
+                    warmed += 1
+            except Exception:
+                logger.debug("pool cover prewarm failed for %s", candidate.bvid, exc_info=True)
+        if warmed:
+            logger.info("Pool cover prewarm: warmed %d cover embedding(s)", warmed)
+        return warmed
 
     @staticmethod
     def _evo_delight_reason(item: DiscoveredContent) -> str:
@@ -1372,8 +1974,8 @@ class RecommendationEngine:
             source_platform=batch[0].source_platform if batch else "bilibili",
         )
 
+        complete_structured = self._llm.complete_structured_task
         try:
-            complete_structured = self._llm.complete_structured_task
             response = await complete_structured(
                 system_instruction=messages[0]["content"],
                 user_input=messages[1]["content"],
@@ -1386,34 +1988,23 @@ class RecommendationEngine:
                 caller="recommendation.write_expression",
                 **without_core_memory_kwargs(complete_structured),
             )
-            payload = extract_llm_json_list(
-                str(response.content),
-                wrapper_keys=("results", "items", "expressions", "data"),
-                allow_singleton=True,
-                item_predicate=lambda item: "expression" in item or "topic_label" in item,
-            )
-            if payload is None:
-                raise ValueError("Expected expression JSON array or compatible wrapper.")
         except Exception as exc:
-            if is_llm_rate_limit_error(exc):
-                logger.warning(
-                    "Batch expression generation skipped single-item fallback for %d items "
-                    "because the LLM provider is rate-limited or cooling down: %s",
-                    len(batch),
-                    exc,
-                )
-                return 0
-            if not fallback_to_single:
-                logger.warning(
-                    "Batch expression generation failed for %d items; will split retry",
-                    len(batch),
-                )
-                raise
-            logger.warning(
-                "Batch expression generation failed for %d items, falling back to single",
-                len(batch),
-            )
-            return await self._precompute_single_fallback(batch, profile)
+            kind = classify_llm_failure_kind(exc)
+            if kind in {"rate_limited", "timeout", "connection", "server_error"}:
+                raise ExpressionCopyTransientError(
+                    kind=kind,
+                    retry_after=self._retry_after_seconds(exc),
+                ) from exc
+            raise
+
+        payload = extract_llm_json_list(
+            str(response.content),
+            wrapper_keys=("results", "items", "expressions", "data"),
+            allow_singleton=True,
+            item_predicate=lambda item: "expression" in item or "topic_label" in item,
+        )
+        if payload is None:
+            raise ExpressionBatchMalformed(tuple(batch))
 
         payload_by_id = _batch_results_by_content_key(payload, batch)
         if payload_by_id is None and len(batch) > 1:
@@ -1428,22 +2019,7 @@ class RecommendationEngine:
             # instead — each single call carries exactly one content item and
             # cannot be misaligned. (A 1-item batch has no ordering ambiguity,
             # so positional matching below stays safe for it.)
-            if not fallback_to_single:
-                logger.warning(
-                    "Batch expression response carried no bvid/content_id for %d "
-                    "items; positional matching is unreliable, will split retry",
-                    len(batch),
-                )
-                raise ValueError(
-                    f"Batch expression response carried no bvid/content_id for {len(batch)} items"
-                )
-            logger.warning(
-                "Batch expression response carried no bvid/content_id for %d "
-                "items; positional matching is unreliable, falling back to "
-                "single generation",
-                len(batch),
-            )
-            return await self._precompute_single_fallback(batch, profile)
+            raise ExpressionBatchMalformed(tuple(batch))
 
         # Gather candidates first (keyed match, or positional for a lone item
         # where order is unambiguous) so we can reject a degenerate batch that
@@ -1479,15 +2055,6 @@ class RecommendationEngine:
             expression for expression, bvids in bvids_by_expression.items() if len(bvids) > 1
         }
         if duplicated:
-            if not fallback_to_single and len(batch) > 1:
-                logger.warning(
-                    "Batch expression produced %d expression(s) shared across "
-                    "distinct videos (model likely repeating itself); will split retry",
-                    len(duplicated),
-                )
-                raise ValueError(
-                    f"Batch expression produced duplicate expressions for {len(batch)} items"
-                )
             logger.warning(
                 "Batch expression produced %d expression(s) shared across "
                 "distinct videos (model likely repeating itself); dropping them",
@@ -1506,12 +2073,20 @@ class RecommendationEngine:
             item.pool_expression = expression
             item.pool_topic_label = topic_label
             completed += 1
+        completed_keys = {
+            item.bvid for item, expression, _ in gathered if expression not in duplicated
+        }
+        missing_items = tuple(item for item in batch if item.bvid not in completed_keys)
+        if missing_items:
+            raise ExpressionBatchMalformed(missing_items, completed)
         return completed
 
     async def _precompute_batch_with_split_retry(
         self,
         batch: list[DiscoveredContent],
         profile: SoulProfile,
+        max_split_depth: int = 3,
+        max_extra_requests: int = 6,
     ) -> int:
         """Try a batch, split failed large batches, then fall back to singles.
 
@@ -1519,23 +2094,48 @@ class RecommendationEngine:
         create nested tasks, so ``expression_batch_concurrency`` remains the
         single concurrency control point.
         """
-        if len(batch) <= 1:
-            return await self._precompute_batch(batch, profile, fallback_to_single=True)
-        try:
-            return await self._precompute_batch(batch, profile, fallback_to_single=False)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            midpoint = max(1, len(batch) // 2)
-            logger.warning(
-                "Expression batch split retry: size=%d -> %d/%d",
-                len(batch),
-                midpoint,
-                len(batch) - midpoint,
-            )
-            left = await self._precompute_batch_with_split_retry(batch[:midpoint], profile)
-            right = await self._precompute_batch_with_split_retry(batch[midpoint:], profile)
-            return left + right
+        budget = {"remaining": max(0, int(max_extra_requests))}
+
+        async def run(items: list[DiscoveredContent], depth: int) -> int:
+            try:
+                return await self._precompute_batch(items, profile, fallback_to_single=False)
+            except ExpressionBatchMalformed as exc:
+                completed = exc.completed
+                missing = list(exc.missing_items)
+                if len(missing) <= 1 or depth >= max_split_depth or budget["remaining"] <= 0:
+                    return completed
+                subsets: tuple[list[DiscoveredContent], ...]
+                if completed > 0:
+                    subsets = (missing,)
+                else:
+                    midpoint = max(1, len(missing) // 2)
+                    subsets = (missing[:midpoint], missing[midpoint:])
+                total = completed
+                for subset in subsets:
+                    if not subset or budget["remaining"] <= 0:
+                        break
+                    budget["remaining"] -= 1
+                    try:
+                        total += await run(subset, depth + 1)
+                    except ExpressionCopyTransientError as downstream:
+                        raise ExpressionCopyTransientError(
+                            kind=downstream.kind,
+                            completed=total + downstream.completed,
+                            retry_after=downstream.retry_after,
+                        ) from downstream
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as downstream:
+                        if classify_llm_failure_kind(downstream) in {
+                            "auth_failed",
+                            "no_provider",
+                        }:
+                            prior = max(0, int(getattr(downstream, "completed", 0) or 0))
+                            downstream.completed = total + prior  # type: ignore[attr-defined]
+                        raise
+                return total
+
+        return await run(batch, 0)
 
     async def _precompute_single_fallback(
         self,
@@ -1577,13 +2177,37 @@ class RecommendationEngine:
         self,
         *,
         profile: SoulProfile,
+        excluded_bvids: list[str] | None = None,
         limit: int = 5,
     ) -> list[Recommendation]:
         """Instantly pick a new batch from the discovery pool.
 
         Delegates to :meth:`serve` with ``expression_mode="precomputed"``.
         """
-        return await self.serve(profile, limit=limit, expression_mode="precomputed")
+        result = await self.reshuffle_recommendations_with_result(
+            profile=profile,
+            excluded_bvids=excluded_bvids,
+            limit=limit,
+        )
+        return result.items
+
+    async def reshuffle_recommendations_with_result(
+        self,
+        *,
+        profile: SoulProfile,
+        excluded_bvids: list[str] | None = None,
+        limit: int = 5,
+    ) -> ServeResult:
+        """Return a reshuffle batch with post-commit inventory metadata."""
+        excluded = frozenset(
+            bvid.strip() for bvid in (excluded_bvids or []) if bvid and bvid.strip()
+        )
+        return await self.serve_with_result(
+            profile,
+            limit=limit,
+            excluded_bvids=excluded,
+            expression_mode="precomputed",
+        )
 
     async def append_recommendations(
         self,
@@ -1596,8 +2220,23 @@ class RecommendationEngine:
 
         Delegates to :meth:`serve` with excluded BVIDs for pagination.
         """
+        result = await self.append_recommendations_with_result(
+            profile=profile,
+            excluded_bvids=excluded_bvids,
+            limit=limit,
+        )
+        return result.items
+
+    async def append_recommendations_with_result(
+        self,
+        *,
+        profile: SoulProfile,
+        excluded_bvids: list[str],
+        limit: int = 10,
+    ) -> ServeResult:
+        """Return an appended page with post-commit inventory metadata."""
         excluded = frozenset(b.strip() for b in excluded_bvids if b and b.strip())
-        return await self.serve(
+        return await self.serve_with_result(
             profile,
             limit=limit,
             excluded_bvids=excluded,
@@ -1744,10 +2383,17 @@ class RecommendationEngine:
         return self._database.get_recommendation_by_id(recommendation_id)
 
     @staticmethod
-    def _ranking_key(item: DiscoveredContent) -> tuple[int, float, float, int, str]:
+    def _ranking_key(
+        item: DiscoveredContent,
+        bonus: dict[str, float] | None = None,
+    ) -> tuple[int, float, float, int, str]:
+        # ``bonus`` (opt-in cover-visual, default empty) is added to the
+        # relevance term only — tier priority and the timestamp/view/bvid
+        # tiebreakers are untouched, so an empty map is byte-identical ranking.
+        visual = (bonus or {}).get(item.bvid, 0.0)
         return (
             0 if item.candidate_tier == "primary" else 1,
-            -item.relevance_score,
+            -(item.relevance_score + visual),
             -RecommendationEngine._timestamp_score(item.last_scored_at or item.discovered_at),
             -item.view_count,
             item.bvid,
@@ -1878,6 +2524,74 @@ class RecommendationEngine:
         return sum(1 for ok in results if ok)
 
     @classmethod
+    async def _select_diversified_batch_async(
+        cls,
+        candidates: list[DiscoveredContent],
+        *,
+        limit: int,
+        score_override: dict[str, float] | None = None,
+        embeddings: dict[str, list[float]] | None = None,
+        amplification_guard: set[str] | frozenset[str] | None = None,
+        mmr_alpha: float = 0.5,
+        mmr_beta: float = 0.5,
+        relevance_bonus: dict[str, float] | None = None,
+    ) -> list[DiscoveredContent]:
+        """Run CPU-heavy ranking in a worker thread to preserve responsiveness."""
+        result, _, _ = await cls._select_diversified_batch_with_timing_async(
+            candidates,
+            limit=limit,
+            score_override=score_override,
+            embeddings=embeddings,
+            amplification_guard=amplification_guard,
+            mmr_alpha=mmr_alpha,
+            mmr_beta=mmr_beta,
+            relevance_bonus=relevance_bonus,
+        )
+        return result
+
+    @classmethod
+    async def _select_diversified_batch_with_timing_async(
+        cls,
+        candidates: list[DiscoveredContent],
+        *,
+        limit: int,
+        score_override: dict[str, float] | None = None,
+        embeddings: dict[str, list[float]] | None = None,
+        amplification_guard: set[str] | frozenset[str] | None = None,
+        mmr_alpha: float = 0.5,
+        mmr_beta: float = 0.5,
+        relevance_bonus: dict[str, float] | None = None,
+    ) -> tuple[list[DiscoveredContent], float, float]:
+        """Return ranking plus worker CPU/wall and loop-resume delay timings."""
+
+        def _select() -> tuple[list[DiscoveredContent], float, float]:
+            worker_started = time.perf_counter()
+            selected = cls._select_diversified_batch(
+                candidates,
+                limit=limit,
+                score_override=score_override,
+                embeddings=embeddings,
+                amplification_guard=amplification_guard,
+                mmr_alpha=mmr_alpha,
+                mmr_beta=mmr_beta,
+                relevance_bonus=relevance_bonus,
+            )
+            worker_finished = time.perf_counter()
+            return selected, (worker_finished - worker_started) * 1000.0, worker_finished
+
+        result, worker_ms, worker_finished = await asyncio.to_thread(_select)
+        resume_delay_ms = max(0.0, (time.perf_counter() - worker_finished) * 1000.0)
+        if worker_ms > 50.0 or resume_delay_ms > 50.0:
+            logger.warning(
+                "Recommendation diversity timing selector_worker_ms=%.1f "
+                "event_loop_resume_delay_ms=%.1f candidates=%d",
+                worker_ms,
+                resume_delay_ms,
+                len(candidates),
+            )
+        return result, worker_ms, resume_delay_ms
+
+    @classmethod
     def _select_diversified_batch(
         cls,
         candidates: list[DiscoveredContent],
@@ -1888,14 +2602,16 @@ class RecommendationEngine:
         amplification_guard: set[str] | frozenset[str] | None = None,
         mmr_alpha: float = 0.5,
         mmr_beta: float = 0.5,
+        relevance_bonus: dict[str, float] | None = None,
     ) -> list[DiscoveredContent]:
+        bonus = relevance_bonus or {}
         if score_override:
             ranked = sorted(
                 candidates,
-                key=lambda item: -score_override.get(item.bvid, 0.0),
+                key=lambda item: -(score_override.get(item.bvid, 0.0) + bonus.get(item.bvid, 0.0)),
             )
         else:
-            ranked = sorted(candidates, key=cls._ranking_key)
+            ranked = sorted(candidates, key=lambda item: cls._ranking_key(item, bonus))
         if limit <= 1 or len(ranked) <= 1:
             return ranked[:limit]
 
@@ -1916,6 +2632,7 @@ class RecommendationEngine:
                 amplification_guard=amplification_guard,
                 alpha=mmr_alpha,
                 beta=mmr_beta,
+                relevance_bonus=relevance_bonus,
             )
 
         def _finalize(items: list[DiscoveredContent]) -> list[DiscoveredContent]:
@@ -2090,6 +2807,7 @@ class RecommendationEngine:
         amplification_guard: set[str] | frozenset[str] | None,
         alpha: float,
         beta: float,
+        relevance_bonus: dict[str, float] | None = None,
     ) -> list[DiscoveredContent]:
         """Greedy Maximum Marginal Relevance pick with existing string caps.
 
@@ -2147,10 +2865,15 @@ class RecommendationEngine:
                 return True
             return style_counts.get(cls._style_token(item), 0) >= per_style_cap
 
+        bonus = relevance_bonus or {}
+
         def _relevance(item: DiscoveredContent) -> float:
-            if score_override:
-                return float(score_override.get(item.bvid, 0.0))
-            return float(item.relevance_score or 0.0)
+            base = (
+                float(score_override.get(item.bvid, 0.0))
+                if score_override
+                else float(item.relevance_score or 0.0)
+            )
+            return base + bonus.get(item.bvid, 0.0)
 
         def _max_cos_to_picked(
             cand: DiscoveredContent,
@@ -2230,7 +2953,7 @@ class RecommendationEngine:
                 cls._normalize_topic_token(item.topic_group) or "unknown" for item in selected
             )
             top_share = picked_topics.most_common(1)[0][1] / len(selected)
-            logger.info(
+            logger.debug(
                 "MMR diversifier: picked %d/%d, alpha=%.2f beta=%.2f, "
                 "unique_topics=%d top_topic_share=%.0f%%",
                 len(selected),
@@ -2490,10 +3213,20 @@ class RecommendationEngine:
                 up_mid=int(row.get("up_mid", 0) or 0),
                 duration=int(row.get("duration", 0) or 0),
                 description=str(row.get("description", "")),
+                published_at=str(row.get("published_at", "") or ""),
+                published_label=str(row.get("published_label", "") or ""),
                 cover_url=str(row.get("cover_url", "")),
                 view_count=int(row.get("view_count", 0) or 0),
                 like_count=int(row.get("like_count", 0) or 0),
+                favorite_count=int(row.get("favorite_count", 0) or 0),
+                collect_count=int(row.get("collect_count", 0) or 0),
+                comment_count=int(row.get("comment_count", 0) or 0),
+                share_count=int(row.get("share_count", 0) or 0),
                 danmaku_count=int(row.get("danmaku_count", 0) or 0),
+                reply_count=int(row.get("reply_count", 0) or 0),
+                retweet_count=int(row.get("retweet_count", 0) or 0),
+                bookmark_count=int(row.get("bookmark_count", 0) or 0),
+                author_name=str(row.get("author_name", "") or ""),
                 tags=self._parse_tags(row.get("tags", "[]")),
                 topic_key=str(row.get("topic_key", "")),
                 topic_group=str(row.get("topic_group", "")),
@@ -2520,6 +3253,53 @@ class RecommendationEngine:
             limit=limit, xhs_self_nickname=self._xhs_self_nickname()
         )
         return self._rows_to_discovered(rows)
+
+    def _load_filtered_serve_candidates(
+        self,
+        profile: SoulProfile,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+    ) -> tuple[list[DiscoveredContent], int, int, int, int]:
+        """Load and filter one serve window outside the asyncio event loop."""
+        candidates = self._load_pool_candidates(limit=limit)
+        loaded_count = len(candidates)
+        candidates = self._apply_platform_floor(candidates)
+        if excluded_bvids:
+            candidates = [item for item in candidates if item.bvid not in excluded_bvids]
+        after_exclude_count = len(candidates)
+        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+        after_disliked_count = len(candidates)
+        candidates = self._exclude_recently_viewed(candidates)
+        return (
+            candidates,
+            loaded_count,
+            after_exclude_count,
+            after_disliked_count,
+            len(candidates),
+        )
+
+    def _score_candidates_with_curator(
+        self,
+        candidates: list[DiscoveredContent],
+        curator_snapshot: tuple[
+            list[dict[str, object]],
+            list[dict[str, object]],
+        ]
+        | None = None,
+    ) -> tuple[dict[str, float] | None, frozenset[str]]:
+        """Build curator context and scores outside the asyncio event loop."""
+        if self._curator is None:
+            return None, frozenset()
+        build_from_rows = getattr(self._curator, "build_context_from_rows", None)
+        if curator_snapshot is not None and callable(build_from_rows):
+            context = build_from_rows(*curator_snapshot)
+        else:
+            context = self._curator.build_context()
+        return (
+            self._curator.score_candidates(candidates, context),
+            context.over_budget_amplification_keys,
+        )
 
     def _apply_platform_floor(self, candidates: list[DiscoveredContent]) -> list[DiscoveredContent]:
         """Guarantee every stocked platform is represented in the serve window.

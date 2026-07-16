@@ -54,6 +54,10 @@ class DouyinDiscoveryProducer:
     sources: tuple[str, ...] = ("search", "hot", "feed")
     evaluate: bool = True
     candidate_pipeline: Any | None = None
+    # API/OpenClaw runtime composition flips this after attaching its shared
+    # CandidateEvalCoordinator. Standalone producer runs preserve the legacy
+    # inline drain path.
+    candidate_evaluation_owned_by_coordinator: bool = False
     per_source_limit: int = 20
     # Unified keyword planner fetch coordinator (P1.7). When wired AND the flag
     # is on, the producer's search source claims words from the keyword store
@@ -166,7 +170,7 @@ class DouyinDiscoveryProducer:
             )
         )
         payload["enqueued"] = enqueued
-        if enqueued > 0:
+        if enqueued > 0 and not self.candidate_evaluation_owned_by_coordinator:
             drain_result = await self.candidate_pipeline.drain_pending(
                 profile=profile,
                 batch_size=requested_limit,

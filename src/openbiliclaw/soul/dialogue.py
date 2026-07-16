@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,6 +63,7 @@ class SocraticDialogue:
         self._llm_service = llm_service
         self._session = session
         self._history: list[DialogueTurn] = []
+        self._respond_lock = asyncio.Lock()
         self._tools = tools or []
         self._tool_dispatcher = tool_dispatcher
         self._module_overrides = dict(module_overrides) if module_overrides is not None else None
@@ -83,43 +84,54 @@ class SocraticDialogue:
         Returns:
             Agent's response.
         """
-        from openbiliclaw.llm.service import LLMServiceError
+        async with self._respond_lock:
+            history_length = len(self._history)
+            self._history.append(DialogueTurn(role="user", content=user_message))
 
-        self._history.append(DialogueTurn(role="user", content=user_message))
+            try:
+                service = self._llm_service or self._build_service()
 
-        try:
-            service = self._llm_service or self._build_service()
-
-            # If tools are configured, try tool-calling path first
-            if self._tools and self._tool_dispatcher:
-                reply = await self._respond_with_tools(service, user_message)
-            else:
-                response = await service.complete_socratic_dialogue(
-                    user_message=user_message,
-                    history=self._history_to_messages(),
-                    caller="soul.dialogue",
-                )
-                reply = response.content
-        except (LLMServiceError, RuntimeError):
-            logger.exception("Failed to generate Socratic dialogue response.")
-            reply = "我刚刚思路断了一下，你可以换个说法再告诉我一次吗？"
-
-        self._history.append(DialogueTurn(role="agent", content=reply))
-        learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
-        if callable(learn_fn):
-
-            async def _background_learn() -> None:
-                try:
-                    await learn_fn(
+                # If tools are configured, try tool-calling path first
+                if self._tools and self._tool_dispatcher:
+                    reply = await self._respond_with_tools(service, user_message)
+                else:
+                    response = await service.complete_socratic_dialogue(
                         user_message=user_message,
-                        assistant_reply=reply,
-                        session=self._session,
+                        history=self._history_to_messages(),
+                        caller="soul.dialogue",
                     )
-                except Exception:
-                    logger.exception("Failed to learn from dialogue turn.")
+                    reply = response.content
+            except BaseException:
+                del self._history[history_length:]
+                logger.exception("Failed to generate Socratic dialogue response.")
+                raise
 
-            asyncio.create_task(_background_learn())
-        return reply
+            self._history.append(DialogueTurn(role="agent", content=reply))
+            learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
+            if callable(learn_fn):
+
+                async def _background_learn() -> None:
+                    try:
+                        # This chain was initiated by an interactive user turn.
+                        # It must keep running even when background admission is
+                        # parked because canonical inventory is empty; otherwise
+                        # the user's explicit correction cannot repair the very
+                        # recommendation state that triggered it. The bypass only
+                        # skips background admission — every provider call still
+                        # respects the runtime-wide total concurrency gate.
+                        from openbiliclaw.llm.service import _background_admission_bypass
+
+                        with _background_admission_bypass():
+                            await learn_fn(
+                                user_message=user_message,
+                                assistant_reply=reply,
+                                session=self._session,
+                            )
+                    except Exception:
+                        logger.exception("Failed to learn from dialogue turn.")
+
+                asyncio.create_task(_background_learn())
+            return reply
 
     async def _respond_with_tools(self, service: Any, user_message: str) -> str:
         """Attempt a tool-calling response, falling back to normal dialogue.
@@ -214,6 +226,9 @@ class SocraticDialogue:
         """Create the shared LLM service when one is not injected."""
         from openbiliclaw.llm.service import LLMService
 
+        shared_service = getattr(self._soul_engine, "_llm_service", None)
+        if shared_service is not None:
+            return cast("LLMService", shared_service)
         memory = getattr(self._soul_engine, "_memory", None)
         if self._llm is None or memory is None:
             raise RuntimeError("Dialogue service is not configured.")
@@ -224,5 +239,6 @@ class SocraticDialogue:
             registry=self._llm,
             memory=memory,
             module_overrides=module_overrides or {},
-            concurrency=int(getattr(self._soul_engine, "_llm_concurrency", 3)),
+            concurrency=int(getattr(self._soul_engine, "_llm_concurrency", 4)),
+            concurrency_gate=getattr(self._soul_engine, "_llm_concurrency_gate", None),
         )

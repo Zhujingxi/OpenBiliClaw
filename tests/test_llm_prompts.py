@@ -97,6 +97,9 @@ def test_build_socratic_dialogue_prompt_includes_dialogue_instructions() -> None
 
     assert "苏格拉底" in messages[0]["content"]
     assert "老B友" in messages[0]["content"]
+    assert "OpenBiliClaw 本地长期画像" in messages[0]["content"]
+    assert "不要声称这些信息只能留在当前聊天上下文" in messages[0]["content"]
+    assert "不能修改 B 站或其他内容平台自身的推荐算法" in messages[0]["content"]
 
 
 def test_build_recommendation_expression_prompt_mentions_old_friend_tone() -> None:

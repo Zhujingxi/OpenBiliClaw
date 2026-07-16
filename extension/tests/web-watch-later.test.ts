@@ -35,7 +35,8 @@ test("mobile recommend delight tray has a watch-later star action", () => {
   const recommendJs = readFileSync(resolve("../src/openbiliclaw/web/js/views/recommend.js"), "utf8");
 
   assert.match(recommendJs, /action:\s*"watch-later"/);
-  assert.match(recommendJs, /addToWatchLater\(d\.bvid\)/);
+  assert.match(recommendJs, /toggleSavedLocally\("watch_later", savedItem\)/);
+  assert.match(recommendJs, /hydrateSavedLocally\("watch_later", savedItem/);
 });
 
 test("desktop web exposes watch-later page, badge, and delight star", () => {
@@ -59,8 +60,8 @@ test("extension delight banner has a watch-later star action", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   assert.match(popupJs, /delightWatchLaterButton/);
-  assert.match(popupJs, /toggleWatchLaterSaved\(delight\.bvid\)/);
-  assert.match(popupJs, /bindWatchLaterToggle\(btn,\s*delight\.bvid\)/);
+  assert.match(popupJs, /toggleSavedWithFeedback\("稍后再看", delight/);
+  assert.match(popupJs, /bindWatchLaterToggle\(btn, delight\)/);
 });
 
 test("extension popup exposes a watch-later tab and list like web surfaces", () => {
@@ -72,10 +73,10 @@ test("extension popup exposes a watch-later tab and list like web surfaces", () 
   assert.match(popupHtml, /id="viewWatchLater"/);
   assert.match(popupHtml, /id="watchLaterList"/);
   assert.match(popupHtml, /id="watchLaterEmpty"/);
-  assert.match(popupJs, /fetchWatchLater/);
+  assert.match(popupJs, /fetchSavedItems/);
   assert.match(popupJs, /function loadWatchLater/);
-  assert.match(popupJs, /function buildWatchLaterCard/);
+  assert.match(popupJs, /function buildSavedCard/);
   // Removal goes through the shared optimistic binder (remove first,
   // restore + 重试 on failure) instead of an inline await-then-remove.
-  assert.match(popupJs, /requestRemove:\s*removeFromWatchLater/);
+  assert.match(popupJs, /requestRemove:\s*\(itemKey\) => removeSavedItem\(listKind, itemKey\)/);
 });

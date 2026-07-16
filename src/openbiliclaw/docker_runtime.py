@@ -240,6 +240,10 @@ def bootstrap_runtime_environment(
                 timeout=timeout,
             )
         )
+        # Container proxy variables are intentional runtime configuration.
+        # Opt into system inheritance unless the user chose a mode explicitly.
+        if any(str(env.get(key, "")).strip() for key in _PROXY_KEYS):
+            env.setdefault("OPENBILICLAW_NETWORK_MODE", "system")
     except Exception as exc:  # noqa: BLE001 - optional step must not block startup
         print(
             f"[docker_runtime] optional host-proxy bootstrap skipped: {exc!r}",

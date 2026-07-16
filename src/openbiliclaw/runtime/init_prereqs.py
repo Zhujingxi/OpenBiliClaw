@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 # DeepSeek bill.
 _CHAT_OK_TTL = 300.0
 _CHAT_FAIL_TTL = 8.0
-_CHAT_PROBE_TIMEOUT = 15.0
+# A local 7B model can need more than 15s for its first response while Ollama
+# loads weights from disk.  Thirty seconds still bounds a broken endpoint, but
+# avoids a false red checklist immediately after selecting a real local model.
+_CHAT_PROBE_TIMEOUT = 30.0
 _BILI_OK_TTL = 60.0
 _BILI_FAIL_TTL = 10.0
 _BILI_PROBE_TIMEOUT = 12.0
@@ -88,6 +91,16 @@ class InitPrereqs:
         """Why the last Bilibili probe failed ("" when it succeeded)."""
         return self._bili_detail
 
+    def has_cached_readiness(self) -> bool:
+        """Whether chat and Bilibili have both completed at least one probe.
+
+        A guided-init run can only start after those probes complete.  Its
+        terminal status can therefore reuse them immediately after failure or
+        cancellation instead of blocking the UI on another cold chat request.
+        A fresh process has no such cache and will correctly probe live.
+        """
+        return self._chat_at != float("-inf") and self._bili_value != "checking"
+
     async def chat_ready(self) -> bool:
         """Whether chat completions can *currently* be served.
 
@@ -112,20 +125,38 @@ class InitPrereqs:
             ttl = _CHAT_OK_TTL if self._chat_value else _CHAT_FAIL_TTL
             if time.monotonic() - self._chat_at < ttl:
                 return self._chat_value
-            ready = await self._probe_chat_provider(registry.get())  # default provider
+            default_name = str(getattr(registry, "default_provider", "") or "").strip()
+            is_chat_capable = getattr(registry, "is_chat_capable", None)
+            default_is_chat_capable = not default_name or not callable(is_chat_capable)
+            if callable(is_chat_capable) and default_name:
+                default_is_chat_capable = bool(is_chat_capable(default_name))
+
+            if default_is_chat_capable:
+                default_provider = registry.get(default_name) if default_name else registry.get()
+                ready = await self._probe_chat_provider(default_provider)
+            else:
+                # Defensive backstop for registries built by older code or
+                # injected by tests/extensions. A readiness probe is a real
+                # chat request and must never hit an embedding-only provider.
+                logger.warning(
+                    "Chat readiness skipped non-chat default provider %s",
+                    default_name,
+                )
+                ready = False
             if not ready:
                 fallback_name = str(getattr(registry, "fallback_provider", "") or "")
                 if (
                     fallback_name
-                    and fallback_name != registry.default_provider
-                    and registry.is_chat_capable(fallback_name)
+                    and fallback_name != default_name
+                    and callable(is_chat_capable)
+                    and is_chat_capable(fallback_name)
                 ):
                     ready = await self._probe_chat_provider(registry.get(fallback_name))
                     if ready:
                         logger.info(
                             "Chat readiness: default provider %s failed the probe but "
                             "fallback provider %s answered — chat is served via fallback.",
-                            registry.default_provider,
+                            default_name,
                             fallback_name,
                         )
             self._chat_value = ready
@@ -160,7 +191,9 @@ class InitPrereqs:
         if cfg is not None:
             cookie = str(getattr(getattr(cfg, "bilibili", None), "cookie", "") or "").strip()
         if cfg is None or not cookie:
+            self._bili_value = "failed"
             self._bili_detail = "后端还没有收到 B站 Cookie。"
+            self._bili_at = time.monotonic()
             return "failed"
 
         ttl = _BILI_OK_TTL if self._bili_value == "ok" else _BILI_FAIL_TTL

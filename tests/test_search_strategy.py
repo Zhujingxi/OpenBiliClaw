@@ -514,6 +514,7 @@ def test_search_strategy_map_search_result_maps_available_metrics() -> None:
             "video_review": "80",
             "review": "70",
             "description": "desc",
+            "pubdate": 1783492200,
         },
         query="纪录片",
         query_index=0,
@@ -527,6 +528,29 @@ def test_search_strategy_map_search_result_maps_available_metrics() -> None:
     assert content.favorite_count == 90
     assert content.danmaku_count == 80
     assert content.comment_count == 70
+    assert content.published_at == "2026-07-08T06:30:00Z"
+
+
+def test_search_strategy_map_search_result_keeps_candidate_without_publication() -> None:
+    from openbiliclaw.discovery.strategies.strategies import SearchStrategy
+
+    strategy = SearchStrategy(
+        llm_service=FakeLLMService("{}"),
+        bilibili_client=FakeBilibiliClient({}),
+        llm_evaluation=False,
+    )
+
+    content = strategy._map_search_result(
+        {"bvid": "BV1no_time", "title": "没有发布时间"},
+        query="纪录片",
+        query_index=0,
+        item_index=0,
+        interest_anchors=[],
+    )
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == ""
 
 
 @dataclass

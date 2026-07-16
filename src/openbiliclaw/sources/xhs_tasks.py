@@ -52,6 +52,10 @@ def _note_key(note: dict[str, Any]) -> str:
     return f"{scope}:{key}" if key else ""
 
 
+def _has_publication_value(value: Any) -> bool:
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
 def xhs_bootstrap_note_key(note: dict[str, Any]) -> str:
     """Return the stable cross-task identity key for one bootstrap note."""
     return _note_key(note)
@@ -64,7 +68,7 @@ def _merge_result_payload(
     notes: list[dict[str, Any]] | None = None,
     scope_counts: dict[str, Any] | None = None,
     debug: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     merged_urls: list[str] = []
     seen_urls: set[str] = set()
     for url in [*(current.get("urls") or []), *(urls or [])]:
@@ -75,6 +79,7 @@ def _merge_result_payload(
 
     merged_notes: list[dict[str, Any]] = []
     seen_notes: set[str] = set()
+    notes_by_key: dict[str, dict[str, Any]] = {}
     for note in current.get("notes") or []:
         if not isinstance(note, dict):
             continue
@@ -83,16 +88,31 @@ def _merge_result_payload(
             continue
         seen_notes.add(key)
         merged_notes.append(note)
+        notes_by_key[key] = note
 
     added_notes: list[dict[str, Any]] = []
+    enriched_notes_by_key: dict[str, dict[str, Any]] = {}
     for note in notes or []:
         if not isinstance(note, dict):
             continue
         key = _note_key(note)
-        if not key or key in seen_notes:
+        if not key:
+            continue
+        if key in seen_notes:
+            existing = notes_by_key[key]
+            enriched = False
+            for field in ("published_at", "published_label"):
+                if not _has_publication_value(existing.get(field)) and _has_publication_value(
+                    note.get(field)
+                ):
+                    existing[field] = note[field]
+                    enriched = True
+            if enriched:
+                enriched_notes_by_key[key] = dict(existing)
             continue
         seen_notes.add(key)
         merged_notes.append(note)
+        notes_by_key[key] = note
         added_notes.append(note)
 
     merged: dict[str, Any] = {"urls": merged_urls}
@@ -127,7 +147,7 @@ def _merge_result_payload(
             merged_debug.update(debug)
         merged["debug"] = merged_debug
 
-    return merged, added_notes
+    return merged, added_notes, list(enriched_notes_by_key.values())
 
 
 def xhs_bootstrap_notes_to_events(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -408,6 +428,27 @@ class XhsTaskQueue:
 
         Returns only notes that were newly added by this merge.
         """
+        added_notes, _enriched_notes = self.merge_result_with_enrichment(
+            task_id,
+            urls=urls,
+            notes=notes,
+            scope_counts=scope_counts,
+            debug=debug,
+            complete=complete,
+        )
+        return added_notes
+
+    def merge_result_with_enrichment(
+        self,
+        task_id: str,
+        *,
+        urls: list[str] | None = None,
+        notes: list[dict[str, Any]] | None = None,
+        scope_counts: dict[str, Any] | None = None,
+        debug: dict[str, Any] | None = None,
+        complete: bool = False,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Merge a result and return separately added and publication-enriched notes."""
         row = self.get(task_id)
         current: dict[str, Any] = {}
         if row and row.get("result_json"):
@@ -418,7 +459,7 @@ class XhsTaskQueue:
             except json.JSONDecodeError:
                 current = {}
 
-        merged, added_notes = _merge_result_payload(
+        merged, added_notes, enriched_notes = _merge_result_payload(
             current,
             urls=urls,
             notes=notes,
@@ -438,7 +479,7 @@ class XhsTaskQueue:
                 (result, task_id),
             )
         self._db.conn.commit()
-        return added_notes
+        return added_notes, enriched_notes
 
     def fail(
         self,

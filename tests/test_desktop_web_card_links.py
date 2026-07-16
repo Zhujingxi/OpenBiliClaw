@@ -3,6 +3,7 @@ from pathlib import Path
 
 APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
 APP_CSS = Path("src/openbiliclaw/web/desktop/assets/css/app.css")
+SAVED_SYNC_CORE = Path("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
 
 
 def test_main_recommendation_card_cover_is_a_real_link_when_url_exists() -> None:
@@ -32,9 +33,12 @@ def test_recommendation_click_tracking_uses_click_and_auxclick_without_window_op
     assert "window.open" not in open_body
     assert "preventDefault" not in open_body
     assert "trackRecommendationClick(item);" in open_body
-    assert 'addEventListener("click", () => openRecommendation(item, card))' in app_js
-    assert 'addEventListener("auxclick", (event)' in app_js
-    assert "event.button === 1" in app_js
+    assert 'cover.addEventListener("click", () => openRecommendation(item, card));' in app_js
+    assert re.search(
+        r'cover\.addEventListener\("auxclick", \(event\) => \{\s*'
+        r"if \(event\.button === 1\) openRecommendation\(item, card\);",
+        app_js,
+    )
 
 
 def test_saved_message_and_delight_content_opens_use_anchor_semantics() -> None:
@@ -63,9 +67,7 @@ def test_delight_view_button_actually_opens_the_content() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
 
     # respondDelight takes an openUrl flag and opens in the view branch.
-    assert (
-        "async function respondDelight(delight, response, el = null, openUrl = false)" in app_js
-    )
+    assert "async function respondDelight(delight, response, el = null, openUrl = false)" in app_js
     view_match = re.search(
         r'if \(response === "view"\) \{(?P<body>.*?)\n        return;\n      \}',
         app_js,
@@ -94,3 +96,29 @@ def test_cover_css_resets_anchor_defaults() -> None:
     assert "display: block;" in cover_body
     assert "text-decoration: none;" in cover_body
     assert "color: inherit;" in cover_body
+
+
+def test_saved_pages_render_manual_sync_without_platform_routing() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+    app_css = APP_CSS.read_text(encoding="utf-8")
+    core = SAVED_SYNC_CORE.read_text(encoding="utf-8")
+
+    assert "function runDesktopSavedSync" in app_js
+    assert "function summarizeDesktopSavedTask" in app_js
+    assert "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。" in core
+    assert "removeDesktopSavedItem(listKind, item.item_key)" in app_js
+    assert "switch (item.source_platform" not in app_js
+    assert ".saved-sync-chip" in app_css
+    assert "min-height: 44px" in app_css
+
+
+def test_unsupported_saved_items_are_truthful_local_only_and_not_sync_eligible() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+    core = SAVED_SYNC_CORE.read_text(encoding="utf-8")
+
+    assert 'unsupported: ["仅本地保存", "neutral", false]' in app_js
+    assert 'errorCode === "unsupported_content_type"' in core
+    assert 'errorCode === "unsupported_adapter_missing"' in core
+    assert (
+        "window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(\n        item.sync_status,"
+    ) in app_js

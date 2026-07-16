@@ -17,12 +17,9 @@ import {
   startChatTurn,
   fetchChatTurn,
   fetchChatTurns,
-  addToWatchLater,
-  removeFromWatchLater,
-  watchLaterStatus,
-  addToFavorite,
-  removeFromFavorite,
-  favoriteStatus,
+  saveItem,
+  removeSavedItem,
+  savedItemStatus,
 } from "../api.js";
 import { state, patchState } from "../state.js";
 import {
@@ -31,6 +28,7 @@ import {
   getRecommendationCoverPreloadUrls,
   getRecommendationImageLoadingAttrs,
   normalizeRecommendation,
+  reconcileRecommendationReplacement,
   recommendationStats,
   normalizeRuntimeStatus,
   mergeRuntimeStatusEvent,
@@ -46,22 +44,22 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   normalizeSourcePlatform,
+  normalizeSavedIdentity,
   getSourceLabel,
   formatRelativeTimestamp,
+  getPublishedTimeDisplay,
   getMobileChatSession,
   shouldAutoAppendRecommendations,
 } from "../view-models.js";
 import { openContentUrl } from "../app-launch.js";
+import { createSavedMutationRegistry } from "../saved-sync-runtime.js";
 
 let $root = null;
 let loaded = false;
 let loading = false;
 let feedbackSheet = null; // { itemId, note, submitState }
 const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
-const watchLaterSaved = new Set(); // bvid strings currently bookmarked
-let watchLaterBusy = false; // mutex for toggle requests
-const favoriteSaved = new Set(); // bvid strings currently favorited
-let favoriteBusy = false; // mutex for favorite toggle requests
+const savedMutations = createSavedMutationRegistry();
 const COVER_PRELOAD_BATCH_SIZE = 12;
 const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
@@ -76,6 +74,19 @@ let autoAppendExhausted = false;
 let autoAppendUserArmed = false;
 let autoAppendTouchY = null;
 let autoAppendIntentInitialized = false;
+const RECOVERY_DELAYS_MS = [1000, 2000, 4000, 8000];
+let recommendationLoadState = "idle";
+let runtimeStatusLoadState = "idle";
+let recommendationRecoveryAttempt = 0;
+let runtimeStatusRecoveryAttempt = 0;
+let recommendationRecoveryTimer = null;
+let runtimeStatusRecoveryTimer = null;
+let recommendationRecoveryInFlight = false;
+let runtimeStatusRecoveryInFlight = false;
+let recommendationRecoveryPending = false;
+let runtimeStatusRecoveryPending = false;
+let runtimeStatusGeneration = 0;
+let recommendationActionMessage = "";
 
 // Delight auto-advance
 let _delightAutoTimer = null;
@@ -88,6 +99,50 @@ function esc(s) {
   const el = document.createElement("span");
   el.textContent = s;
   return el.innerHTML;
+}
+
+export function publishedTimeHtml(item) {
+  const display = getPublishedTimeDisplay(item);
+  if (!display) return "";
+  const title = display.title ? ` title="${esc(display.title)}"` : "";
+  return `<span class="card-published-time"${title}>${esc(display.text)}</span>`;
+}
+
+export function savedIdentity(item = {}) {
+  return normalizeSavedIdentity(item);
+}
+
+function announceSavedAction(message, isError = false) {
+  if (!$root) return;
+  let status = $root.querySelector(".saved-action-status");
+  if (!status) {
+    status = document.createElement("p");
+    status.className = "saved-action-status";
+    status.setAttribute("aria-live", "polite");
+    $root.prepend(status);
+  }
+  if (isError) status.setAttribute("role", "alert");
+  else status.removeAttribute("role");
+  status.textContent = message;
+}
+
+function isSavedLocally(listKind, itemKey) {
+  return savedMutations.isSaved(listKind, itemKey);
+}
+
+function toggleSavedLocally(listKind, item) {
+  return savedMutations.toggle(listKind, item.item_key, {
+    add: () => saveItem(listKind, item),
+    remove: () => removeSavedItem(listKind, item.item_key),
+  });
+}
+
+function hydrateSavedLocally(listKind, item, update) {
+  return savedMutations.hydrate(
+    listKind,
+    item.item_key,
+    () => savedItemStatus(listKind, item.item_key),
+  ).then(() => update(isSavedLocally(listKind, item.item_key)));
 }
 
 // ── Render ────────────────────────────────────────────────────
@@ -122,10 +177,20 @@ function render() {
   // Recommendation cards — hide disliked items
   const recs = state.recommendations.filter((r) => feedbackDone.get(r.id) !== "dislike" && r.feedback_type !== "dislike");
   if (recs.length === 0 && !loading) {
-    const hint = getReadyRecommendationHint(state.runtimeStatus);
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.innerHTML = `<div class="empty-state-icon">\u{1F30A}</div><div class="empty-state-text">${esc(hint.message)}</div>`;
+    empty.innerHTML = `<div class="empty-state-icon">\u{1F30A}</div><div class="empty-state-text">${esc(recommendationEmptyMessage())}</div>`;
+    if (
+      recommendationLoadState === "failed-exhausted" ||
+      runtimeStatusLoadState === "failed-exhausted"
+    ) {
+      const retry = document.createElement("button");
+      retry.className = "btn btn-outline";
+      retry.type = "button";
+      retry.textContent = "重新加载";
+      retry.addEventListener("click", restartFailedRecoveries);
+      empty.appendChild(retry);
+    }
     frag.appendChild(empty);
   }
 
@@ -191,6 +256,13 @@ function renderRecommendationHeader() {
   top.appendChild(refreshBtn);
   header.appendChild(top);
 
+  if (recommendationActionMessage) {
+    const notice = document.createElement("div");
+    notice.className = "recommend-action-note";
+    notice.textContent = recommendationActionMessage;
+    header.appendChild(notice);
+  }
+
   if (headerState.poolChips.length > 0) {
     const grid = document.createElement("div");
     grid.className = "recommend-pool-grid";
@@ -255,7 +327,7 @@ function rerenderRuntimeDependentChrome() {
   rerenderHeaderOnly();
   const emptyText = document.querySelector(".empty-state .empty-state-text");
   if (emptyText) {
-    emptyText.textContent = getReadyRecommendationHint(state.runtimeStatus).message;
+    emptyText.textContent = recommendationEmptyMessage();
   }
 }
 
@@ -390,6 +462,7 @@ function renderDelightTray() {
     : `<span class="delight-thumb is-fallback">\u2728</span>`;
   const reasonText = d.delight_reason || d.delight_hook || "";
   const statsText = recommendationStats(d);
+  const publishedHtml = publishedTimeHtml(d);
 
   tray.innerHTML = `
     ${delights.length > 1 ? `
@@ -415,6 +488,7 @@ function renderDelightTray() {
             <div class="delight-meta">
               <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
               ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
+              ${publishedHtml}
             </div>
           </div>
         ` : `
@@ -422,16 +496,17 @@ function renderDelightTray() {
           <div class="delight-meta">
             <span class="card-source" data-source="${d.source_platform}">${esc(getSourceLabel(d.source_platform))}</span>
             ${uiState.score_label ? `<span>${esc(uiState.score_label)}</span>` : ""}
+            ${publishedHtml}
           </div>
         `}
       </div>
     </div>`;
 
-  if (uiState.handled) {
+  if (uiState.show_status) {
     tray.innerHTML += `<div class="delight-result-state" data-tone="${esc(uiState.response_tone)}">${esc(uiState.response_message)}</div>`;
-  } else {
+  }
+  if (uiState.show_actions) {
     // Action buttons
-    const isChatState = d.state === "chatted" || d.state === "chatting";
     const actions = document.createElement("div");
     actions.className = "delight-actions";
     const btns = [
@@ -445,6 +520,7 @@ function renderDelightTray() {
     for (const b of btns) {
       const btn = document.createElement("button");
       btn.className = `btn ${b.action === "view" ? "btn-brand" : "btn-outline"}`;
+      btn.dataset.delightAction = b.action;
       // 稍后再看 = 时钟 / 收藏 = 星星，紧凑 SVG 图标按钮，状态走 aria-pressed。
       if (b.action === "watch-later" || b.action === "favorite") {
         btn.classList.add("delight-save-toggle");
@@ -455,70 +531,59 @@ function renderDelightTray() {
         btn.textContent = b.label;
       }
       if (b.action === "watch-later") {
-        let busy = false;
+        const savedItem = savedIdentity(d);
         btn.title = "稍后再看";
         btn.addEventListener("click", async () => {
-          if (busy) return;
-          busy = true;
-          const wasSaved = watchLaterSaved.has(d.bvid);
+          if (savedMutations.isBusy("watch_later", savedItem.item_key)) return;
+          btn.disabled = true;
+          const wasSaved = isSavedLocally("watch_later", savedItem.item_key);
+          announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
           btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
           try {
-            if (wasSaved) {
-              await removeFromWatchLater(d.bvid);
-              watchLaterSaved.delete(d.bvid);
-            } else {
-              await addToWatchLater(d.bvid);
-              watchLaterSaved.add(d.bvid);
-            }
+            await toggleSavedLocally("watch_later", savedItem);
+            announceSavedAction(wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。");
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+            announceSavedAction("本地稍后再看操作失败，请重试。", true);
           } finally {
-            busy = false;
+            btn.disabled = false;
           }
         });
-        if (watchLaterSaved.has(d.bvid)) btn.setAttribute("aria-pressed", "true");
-        watchLaterStatus(d.bvid).then((res) => {
-          if (res && res.saved) {
-            watchLaterSaved.add(d.bvid);
-            btn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
+        if (isSavedLocally("watch_later", savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
+        void hydrateSavedLocally("watch_later", savedItem, (saved) => {
+          btn.setAttribute("aria-pressed", saved ? "true" : "false");
+        });
       } else if (b.action === "favorite") {
-        let busy = false;
+        const savedItem = savedIdentity(d);
         btn.title = "收藏";
         btn.addEventListener("click", async () => {
-          if (busy) return;
-          busy = true;
-          const wasSaved = favoriteSaved.has(d.bvid);
+          if (savedMutations.isBusy("favorite", savedItem.item_key)) return;
+          btn.disabled = true;
+          const wasSaved = isSavedLocally("favorite", savedItem.item_key);
+          announceSavedAction(wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…");
           btn.setAttribute("aria-pressed", wasSaved ? "false" : "true");
           try {
-            if (wasSaved) {
-              await removeFromFavorite(d.bvid);
-              favoriteSaved.delete(d.bvid);
-            } else {
-              await addToFavorite(d.bvid);
-              favoriteSaved.add(d.bvid);
-            }
+            await toggleSavedLocally("favorite", savedItem);
+            announceSavedAction(wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。");
           } catch {
             btn.setAttribute("aria-pressed", wasSaved ? "true" : "false");
+            announceSavedAction("本地收藏操作失败，请重试。", true);
           } finally {
-            busy = false;
+            btn.disabled = false;
           }
         });
-        if (favoriteSaved.has(d.bvid)) btn.setAttribute("aria-pressed", "true");
-        favoriteStatus(d.bvid).then((res) => {
-          if (res && res.saved) {
-            favoriteSaved.add(d.bvid);
-            btn.setAttribute("aria-pressed", "true");
-          }
-        }).catch(() => {});
+        if (isSavedLocally("favorite", savedItem.item_key)) btn.setAttribute("aria-pressed", "true");
+        void hydrateSavedLocally("favorite", savedItem, (saved) => {
+          btn.setAttribute("aria-pressed", saved ? "true" : "false");
+        });
       } else {
         btn.addEventListener("click", () => handleDelightAction(d, b.action));
-        if (isChatState && (b.action === "like" || b.action === "reject")) {
-          btn.disabled = true;
+        if (b.action === "like") {
+          btn.setAttribute("aria-pressed", uiState.like_pressed ? "true" : "false");
+          btn.disabled = uiState.like_disabled;
         }
       }
-            actions.appendChild(btn);
+      actions.appendChild(btn);
     }
     tray.appendChild(actions);
   }
@@ -845,7 +910,13 @@ async function handleDelightAction(d, action) {
   if (apiResponse) {
     try {
       await respondToDelight(d.bvid, apiResponse, d.title);
-    } catch { /* best-effort */ }
+    } catch {
+      if (action === "like") {
+        rerenderDelightOnly();
+        return;
+      }
+      /* Other legacy actions remain best-effort. */
+    }
   }
   if (permanent) {
     markDelightSent(d.bvid).catch(() => {});
@@ -1049,6 +1120,7 @@ function renderCard(rawItem, index = 0) {
   const url = buildContentUrl(item);
   const cardMedia = getRecommendationCardKind(item);
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
+  const publishedHtml = publishedTimeHtml(item);
 
   let coverHtml;
   if (cardMedia.kind === "text") {
@@ -1070,6 +1142,7 @@ function renderCard(rawItem, index = 0) {
         <span class="card-source" data-source="${item.source_platform}">${esc(getSourceLabel(item.source_platform))}</span>
         ${item.up_name ? `<span>${esc(item.up_name)}</span>` : ""}
         ${item.topic_label ? `<span style="color:var(--text-muted)">${esc(item.topic_label)}</span>` : ""}
+        ${publishedHtml}
       </div>
       ${recommendationStats(item) ? `<div class="card-stats">${esc(recommendationStats(item))}</div>` : ""}
       ${item.expression ? `<div class="card-expression">${esc(item.expression)}</div>` : ""}
@@ -1154,74 +1227,63 @@ function renderCard(rawItem, index = 0) {
     { ariaLabel: "聊一聊", iconHtml: MESSAGE_SVG_ICON },
   );
 
-  const savedNow = watchLaterSaved.has(item.bvid);
+  const savedItem = savedIdentity(item);
+  const savedNow = isSavedLocally("watch_later", savedItem.item_key);
   const starBtn = createCoverChip(
     CLOCK_SVG_ICON,
     "watch-later-btn",
     async () => {
-      if (watchLaterBusy) return;
-      watchLaterBusy = true;
-      const wasSaved = watchLaterSaved.has(item.bvid);
+      if (savedMutations.isBusy("watch_later", savedItem.item_key)) return;
+      starBtn.disabled = true;
+      const wasSaved = isSavedLocally("watch_later", savedItem.item_key);
+      announceSavedAction(wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
       // optimistic toggle
       setChipState(starBtn, !wasSaved, wasSaved ? "☆" : "★");
       try {
-        if (wasSaved) {
-          await removeFromWatchLater(item.bvid);
-          watchLaterSaved.delete(item.bvid);
-        } else {
-          await addToWatchLater(item.bvid);
-          watchLaterSaved.add(item.bvid);
-        }
+        await toggleSavedLocally("watch_later", savedItem);
+        announceSavedAction(wasSaved ? "已从本地稍后再看移除；平台记录不变。" : "已保存到本地，平台同步状态可在稍后页查看。");
       } catch {
         // revert on failure
         setChipState(starBtn, wasSaved, wasSaved ? "★" : "☆");
+        announceSavedAction("本地稍后再看操作失败，请重试。", true);
       } finally {
-        watchLaterBusy = false;
+        starBtn.disabled = false;
       }
     },
     { label: "稍后再看", pressedLabel: "取消稍后再看" },
   );
   setChipState(starBtn, savedNow, savedNow ? "★" : "☆");
   // lazy-load real state from backend
-  watchLaterStatus(item.bvid).then((res) => {
-    if (res && res.saved) {
-      watchLaterSaved.add(item.bvid);
-      setChipState(starBtn, true, "★");
-    }
-  }).catch(() => {});
+  void hydrateSavedLocally("watch_later", savedItem, (saved) => {
+    setChipState(starBtn, saved, saved ? "★" : "☆");
+  });
 
-  const favNow = favoriteSaved.has(item.bvid);
+  const favNow = isSavedLocally("favorite", savedItem.item_key);
   const favBtn = createCoverChip(
     STAR_SVG_ICON,
     "favorite-btn",
     async () => {
-      if (favoriteBusy) return;
-      favoriteBusy = true;
-      const wasSaved = favoriteSaved.has(item.bvid);
+      if (savedMutations.isBusy("favorite", savedItem.item_key)) return;
+      favBtn.disabled = true;
+      const wasSaved = isSavedLocally("favorite", savedItem.item_key);
+      announceSavedAction(wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…");
       setChipState(favBtn, !wasSaved, wasSaved ? "♡" : "♥");
       try {
-        if (wasSaved) {
-          await removeFromFavorite(item.bvid);
-          favoriteSaved.delete(item.bvid);
-        } else {
-          await addToFavorite(item.bvid);
-          favoriteSaved.add(item.bvid);
-        }
+        await toggleSavedLocally("favorite", savedItem);
+        announceSavedAction(wasSaved ? "已从本地收藏移除；平台记录不变。" : "已保存到本地，平台同步状态可在收藏页查看。");
       } catch {
         setChipState(favBtn, wasSaved, wasSaved ? "♥" : "♡");
+        announceSavedAction("本地收藏操作失败，请重试。", true);
       } finally {
-        favoriteBusy = false;
+        favBtn.disabled = false;
       }
     },
     { label: "收藏", pressedLabel: "取消收藏" },
   );
   setChipState(favBtn, favNow, favNow ? "♥" : "♡");
-  favoriteStatus(item.bvid).then((res) => {
-    if (res && res.saved) {
-      favoriteSaved.add(item.bvid);
-      setChipState(favBtn, true, "♥");
-    }
-  }).catch(() => {});
+  void hydrateSavedLocally("favorite", savedItem, (saved) => {
+    setChipState(favBtn, saved, saved ? "♥" : "♡");
+  });
 
   // Save chips overlay the cover top-right — keeps the bottom action bar light
   // (看看 / 喜欢 / 不感兴趣 / 聊一聊) instead of cramming 6 buttons in one row.
@@ -1387,8 +1449,21 @@ async function handleReshuffle() {
   render();
   try {
     const result = await reshuffleRecommendations();
-    autoAppendExhausted = false;
-    patchState({ recommendations: (result.items || []).map(normalizeRecommendation) });
+    const replacement = reconcileRecommendationReplacement(
+      state.recommendations,
+      result.items || [],
+    );
+    if (replacement.preserved) {
+      recommendationActionMessage = "这次暂时没换出新内容，已保留当前推荐。";
+      clearRecommendationRecovery("ready");
+    } else {
+      recommendationActionMessage = "";
+      applyRecommendationSnapshot(replacement.items, { replace: true });
+    }
+    const requestGeneration = runtimeStatusGeneration;
+    void fetchRuntimeStatus()
+      .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
+      .catch(() => {});
   } catch { /* ignore */ }
   loading = false;
   render();
@@ -1397,6 +1472,7 @@ async function handleReshuffle() {
 async function handleAppend() {
   if (loading) return;
   loading = true;
+  let clearedActionMessage = false;
 
   // Disable the button inline instead of full re-render.
   const loadMoreRow = $root.querySelector(".load-more-row");
@@ -1409,6 +1485,10 @@ async function handleAppend() {
     const result = await appendRecommendations(existing);
     const newItems = (result.items || []).map(normalizeRecommendation);
     autoAppendExhausted = newItems.length === 0;
+    if (newItems.length > 0 && recommendationActionMessage) {
+      recommendationActionMessage = "";
+      clearedActionMessage = true;
+    }
     await warmRecommendationCovers(newItems, { limit: newItems.length, waitForDecode: true });
     patchState({ recommendations: [...state.recommendations, ...newItems] });
 
@@ -1425,6 +1505,7 @@ async function handleAppend() {
   }
 
   loading = false;
+  if (clearedActionMessage) rerenderHeaderOnly();
   // Restore button state.
   if (appendBtnEl) {
     appendBtnEl.disabled = false;
@@ -1533,33 +1614,209 @@ function rememberRecommendationFeedback(normalizedRecs) {
   }
 }
 
+function recommendationEmptyMessage() {
+  if (recommendationLoadState === "failed") {
+    return "推荐加载失败，正在重试。";
+  }
+  if (recommendationLoadState === "failed-exhausted") {
+    return "推荐加载失败，点一下重新加载。";
+  }
+  if (runtimeStatusLoadState === "failed") {
+    return "库存状态同步失败，正在重试。";
+  }
+  if (runtimeStatusLoadState === "failed-exhausted") {
+    return "库存状态同步失败，点一下重新加载。";
+  }
+  return getReadyRecommendationHint(state.runtimeStatus).message;
+}
+
+function clearRecommendationRecovery(nextState) {
+  if (recommendationRecoveryTimer !== null) {
+    clearTimeout(recommendationRecoveryTimer);
+    recommendationRecoveryTimer = null;
+  }
+  recommendationRecoveryAttempt = 0;
+  recommendationRecoveryPending = false;
+  recommendationLoadState = nextState;
+}
+
+function clearRuntimeStatusRecovery(nextState = "ready") {
+  if (runtimeStatusRecoveryTimer !== null) {
+    clearTimeout(runtimeStatusRecoveryTimer);
+    runtimeStatusRecoveryTimer = null;
+  }
+  runtimeStatusRecoveryAttempt = 0;
+  runtimeStatusRecoveryPending = false;
+  runtimeStatusLoadState = nextState;
+}
+
+function applyRecommendationSnapshot(recs, { replace = false } = {}) {
+  const normalizedRecs = recs.map(normalizeRecommendation);
+  if (normalizedRecs.length > 0) {
+    recommendationLoadState = "ready";
+    recommendationActionMessage = "";
+  } else {
+    recommendationLoadState = "empty-success";
+  }
+  clearRecommendationRecovery(recommendationLoadState);
+  if (!replace && state.recommendations.length > 0) return;
+  autoAppendExhausted = false;
+  resetAutoAppendIntent();
+  rememberRecommendationFeedback(normalizedRecs);
+  patchState({ recommendations: normalizedRecs });
+}
+
+function applyRuntimeStatusSnapshot(status, requestGeneration) {
+  if (requestGeneration !== runtimeStatusGeneration) return false;
+  if (!status) throw new Error("runtime status unavailable");
+  runtimeStatusGeneration += 1;
+  clearRuntimeStatusRecovery();
+  patchState({ runtimeStatus: normalizeRuntimeStatus(status) });
+  rerenderRuntimeDependentChrome();
+  return true;
+}
+
+function scheduleRecommendationRecovery() {
+  if (state.recommendations.length > 0) {
+    clearRecommendationRecovery("ready");
+    return;
+  }
+  if (recommendationLoadState !== "failed") return;
+  if (recommendationRecoveryInFlight) {
+    recommendationRecoveryPending = true;
+    return;
+  }
+  if (recommendationRecoveryTimer !== null) return;
+  if (recommendationRecoveryAttempt >= RECOVERY_DELAYS_MS.length) {
+    recommendationLoadState = "failed-exhausted";
+    render();
+    return;
+  }
+  const delayMs = RECOVERY_DELAYS_MS[recommendationRecoveryAttempt];
+  recommendationRecoveryTimer = setTimeout(() => {
+    recommendationRecoveryTimer = null;
+    recommendationRecoveryAttempt += 1;
+    void runRecommendationRecovery();
+  }, delayMs);
+}
+
+async function runRecommendationRecovery() {
+  if (state.recommendations.length > 0) {
+    clearRecommendationRecovery("ready");
+    return;
+  }
+  if (recommendationLoadState !== "failed") return;
+  if (recommendationRecoveryInFlight) {
+    recommendationRecoveryPending = true;
+    return;
+  }
+  recommendationRecoveryInFlight = true;
+  try {
+    const recs = await fetchRecommendations();
+    applyRecommendationSnapshot(recs);
+  } catch {
+    recommendationLoadState = "failed";
+  } finally {
+    recommendationRecoveryInFlight = false;
+    render();
+    if (recommendationRecoveryPending) recommendationRecoveryPending = false;
+    scheduleRecommendationRecovery();
+  }
+}
+
+function scheduleRuntimeStatusRecovery() {
+  if (runtimeStatusLoadState !== "failed") return;
+  if (runtimeStatusRecoveryInFlight) {
+    runtimeStatusRecoveryPending = true;
+    return;
+  }
+  if (runtimeStatusRecoveryTimer !== null) return;
+  if (runtimeStatusRecoveryAttempt >= RECOVERY_DELAYS_MS.length) {
+    runtimeStatusLoadState = "failed-exhausted";
+    render();
+    return;
+  }
+  const delayMs = RECOVERY_DELAYS_MS[runtimeStatusRecoveryAttempt];
+  runtimeStatusRecoveryTimer = setTimeout(() => {
+    runtimeStatusRecoveryTimer = null;
+    runtimeStatusRecoveryAttempt += 1;
+    void runRuntimeStatusRecovery();
+  }, delayMs);
+}
+
+async function runRuntimeStatusRecovery() {
+  if (runtimeStatusLoadState !== "failed") return;
+  if (runtimeStatusRecoveryInFlight) {
+    runtimeStatusRecoveryPending = true;
+    return;
+  }
+  runtimeStatusRecoveryInFlight = true;
+  const requestGeneration = runtimeStatusGeneration;
+  try {
+    applyRuntimeStatusSnapshot(await fetchRuntimeStatus(), requestGeneration);
+  } catch {
+    if (requestGeneration !== runtimeStatusGeneration) return;
+    runtimeStatusLoadState = "failed";
+  } finally {
+    runtimeStatusRecoveryInFlight = false;
+    if (runtimeStatusRecoveryPending) runtimeStatusRecoveryPending = false;
+    scheduleRuntimeStatusRecovery();
+    rerenderRuntimeDependentChrome();
+  }
+}
+
+function restartFailedRecoveries() {
+  let recommendationRestarted = false;
+  let runtimeRestarted = false;
+  if (
+    state.recommendations.length === 0 &&
+    (recommendationLoadState === "failed" || recommendationLoadState === "failed-exhausted")
+  ) {
+    if (recommendationRecoveryTimer !== null) clearTimeout(recommendationRecoveryTimer);
+    recommendationRecoveryTimer = null;
+    recommendationRecoveryAttempt = 0;
+    recommendationLoadState = "failed";
+    scheduleRecommendationRecovery();
+    recommendationRestarted = true;
+  }
+  if (runtimeStatusLoadState === "failed" || runtimeStatusLoadState === "failed-exhausted") {
+    if (runtimeStatusRecoveryTimer !== null) clearTimeout(runtimeStatusRecoveryTimer);
+    runtimeStatusRecoveryTimer = null;
+    runtimeStatusRecoveryAttempt = 0;
+    runtimeStatusLoadState = "failed";
+    scheduleRuntimeStatusRecovery();
+    runtimeRestarted = true;
+  }
+  if (recommendationRestarted) render();
+  else if (runtimeRestarted) rerenderRuntimeDependentChrome();
+}
+
 async function loadData() {
   loading = true;
+  recommendationLoadState = "loading";
   render();
   try {
-    const recs = await fetchRecommendations().catch(() => []);
-    const normalizedRecs = recs.map(normalizeRecommendation);
-    autoAppendExhausted = false;
-    resetAutoAppendIntent();
-    // Restore feedback state from backend so it survives page refresh.
-    rememberRecommendationFeedback(normalizedRecs);
-    patchState({
-      recommendations: normalizedRecs,
-    });
-  } catch { /* ignore */ }
+    applyRecommendationSnapshot(await fetchRecommendations(), { replace: true });
+  } catch {
+    recommendationLoadState = "failed";
+    scheduleRecommendationRecovery();
+  }
   loading = false;
   render();
   void hydrateRecommendSideChannels();
 }
 
 function hydrateRecommendSideChannels() {
+  if (runtimeStatusLoadState !== "ready") runtimeStatusLoadState = "loading";
+  const requestGeneration = runtimeStatusGeneration;
   fetchRuntimeStatus()
-    .then((status) => {
-      if (!status) return;
-      patchState({ runtimeStatus: normalizeRuntimeStatus(status) });
+    .then((status) => applyRuntimeStatusSnapshot(status, requestGeneration))
+    .catch(() => {
+      if (requestGeneration !== runtimeStatusGeneration) return;
+      runtimeStatusLoadState = "failed";
+      scheduleRuntimeStatusRecovery();
       rerenderRuntimeDependentChrome();
-    })
-    .catch(() => {});
+    });
 
   fetchActivityFeed({ limit: 5 })
     .then((activityFeed) => {
@@ -1588,9 +1845,15 @@ export function initRecommendView(root) {
     initPullRefresh();
     initAutoAppendIntent();
     loadData();
+  } else {
+    restartFailedRecoveries();
   }
-  // Tab switch back: don't refetch — just re-render with existing state.
-  // Pull-to-refresh or WebSocket events handle live updates.
+  // Tab switch back preserves existing cards. Only failed empty resources
+  // start a fresh bounded recovery round.
+}
+
+export function onStreamConnect() {
+  restartFailedRecoveries();
 }
 
 export function onStreamEvent(payload) {
@@ -1599,10 +1862,26 @@ export function onStreamEvent(payload) {
     // Merge pool status only. Do not replace recommendation cards here:
     // users may have appended older cards that /api/recommendations would not
     // return in its latest top window.
-    patchState({
-      runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, payload.data || payload),
-    });
+    const poolEvent = payload.data || payload;
+    patchState({ runtimeStatus: mergeRuntimeStatusEvent(state.runtimeStatus, poolEvent) });
+    if (typeof poolEvent?.pool_available_count === "number") {
+      runtimeStatusGeneration += 1;
+      clearRuntimeStatusRecovery();
+    }
     rerenderRuntimeDependentChrome();
+    if (
+      state.recommendations.length === 0 &&
+      recommendationLoadState === "failed-exhausted"
+    ) {
+      recommendationRecoveryAttempt = 0;
+      recommendationLoadState = "failed";
+    }
+    if (
+      state.recommendations.length === 0 &&
+      recommendationLoadState === "failed"
+    ) {
+      scheduleRecommendationRecovery();
+    }
   } else if (type === "refresh.started" || type === "refresh.strategy") {
     patchState({ runtimeEvent: payload.data || payload });
     rerenderRuntimeDependentChrome();

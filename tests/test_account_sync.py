@@ -384,6 +384,88 @@ async def test_account_sync_returns_partial_success_when_one_source_fails() -> N
     assert {event["event_type"] for event in memory.events} == {"view", "follow"}
 
 
+@pytest.mark.asyncio
+async def test_account_sync_records_profile_analysis_error_without_advancing_cursor() -> None:
+    """A chat-LLM failure during analyze_events must be diagnosable, not silent.
+
+    Regression for the guided-init "stuck forever" report: analyze_events was
+    a bare await, so a 404/401/timeout bubbled up with nothing written to the
+    user-visible last_sync_error, and the whole tick was lost with no reason.
+    """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _FailingAnalyzeSoul(_BootstrapSoulEngine):
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            raise RuntimeError("model 'llama3' not found")
+
+    memory = _FakeMemoryManager()
+    soul = _FailingAnalyzeSoul(ready=False)
+    client = _FakeClient(
+        history_items=[_history_item("BVERR", 101, "seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(memory_manager=memory, bilibili_client=client, soul_engine=soul)
+
+    with pytest.raises(RuntimeError):
+        await service.sync_now()
+
+    # Failure reason is now user-visible.
+    assert "画像分析失败" in str(memory.state["last_sync_error"])
+    assert "找不到所配置的模型" in str(memory.state["last_sync_error"])
+    assert "ollama pull" in str(memory.state["last_sync_error"])
+    # Cursor / throttle are NOT advanced → next tick retries the same events.
+    assert memory.state["last_history_view_at"] == 0
+    assert memory.state["last_account_sync_at"] == ""
+    # The one-shot bootstrap chance is not burned on an unavailable model.
+    assert soul.bootstrap_calls == []
+    assert soul.ready_checks == 0
+
+
+@pytest.mark.asyncio
+async def test_account_sync_bounds_hung_profile_analysis_and_records_reason() -> None:
+    """A provider's 300s retries must not hold account sync indefinitely."""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _HangingAnalyzeSoul(_BootstrapSoulEngine):
+        def __init__(self) -> None:
+            super().__init__(ready=False)
+            self.cancelled = False
+
+        async def analyze_events(self, events: list[dict[str, Any]]) -> None:
+            self.calls.append(events)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    memory = _FakeMemoryManager()
+    soul = _HangingAnalyzeSoul()
+    client = _FakeClient(
+        history_items=[_history_item("BVTIMEOUT", 101, "seed")],
+        favorites=[],
+        following=[],
+    )
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=client,
+        soul_engine=soul,
+        profile_analysis_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(TimeoutError, match="偏好分析等待模型服务超过 6 分钟"):
+        await service.sync_now()
+
+    assert soul.cancelled is True
+    assert "画像分析失败" in str(memory.state["last_sync_error"])
+    assert "超过 6 分钟" in str(memory.state["last_sync_error"])
+    assert "Base URL" in str(memory.state["last_sync_error"])
+    assert "模型名" in str(memory.state["last_sync_error"])
+    assert memory.state["last_history_view_at"] == 0
+    assert memory.state["last_account_sync_at"] == ""
+
+
 @dataclass
 class _CookieAwareClient:
     """Client whose ``is_authenticated`` flips False→True after one tick.
@@ -479,11 +561,12 @@ async def test_account_sync_if_due_skips_without_fetching_when_llm_work_paused()
         is_authenticated=True,
     )
     soul = _FakeSoulEngine()
+    gate = {"allowed": False}
     service = AccountSyncService(
         memory_manager=memory,
         bilibili_client=client,
         soul_engine=soul,
-        llm_work_allowed=lambda: False,
+        llm_work_allowed=lambda: gate["allowed"],
     )
 
     result = await service.sync_if_due()
@@ -497,6 +580,15 @@ async def test_account_sync_if_due_skips_without_fetching_when_llm_work_paused()
     assert soul.calls == []
     assert memory.events == []
     assert not memory.state.get("last_account_sync_at")
+    assert service._last_seen_authenticated is False
+
+    # The first allowed tick must still be treated as the auth-ready
+    # transition and perform the fetch; a paused tick must not consume it.
+    gate["allowed"] = True
+    resumed = await service.sync_if_due()
+    assert resumed["synced"] is True
+    assert client.history_calls == 1
+    assert service._last_seen_authenticated is True
 
 
 @pytest.mark.asyncio

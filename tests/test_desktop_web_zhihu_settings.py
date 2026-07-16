@@ -53,6 +53,15 @@ def test_desktop_source_status_js_has_pending_and_unsaved_states() -> None:
     assert "保存后生效" in js
 
 
+def test_desktop_source_status_labels_distinguish_local_readiness() -> None:
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'ready: { tone: "ready", label: "凭据已就绪" }' in js
+    assert 'login_required: { tone: "warning", label: "需要登录" }' in js
+    assert 'error: { tone: "danger", label: "检查失败" }' in js
+    assert "xsec_token 内容令牌已保存（不代表账号登录）" in js
+
+
 def test_desktop_cookie_fields_are_override_only() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")

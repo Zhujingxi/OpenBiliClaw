@@ -56,6 +56,21 @@ async def test_diagnose_not_running_on_connect_error() -> None:
     )
     assert code == DIAG_NOT_RUNNING
     assert "ollama serve" in detail
+    # A plain refusal is "not started" — no proxy/IPv6 hint.
+    assert "127.0.0.1" not in detail
+
+
+async def test_diagnose_connect_timeout_adds_proxy_and_ipv6_hint() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out", request=request)
+
+    code, detail = await diagnose_ollama_embedding(
+        BASE_URL, "bge-m3", transport=_transport(handler)
+    )
+    assert code == DIAG_NOT_RUNNING
+    # ConnectTimeout (vs refused) surfaces the TUN-proxy / IPv6 root-cause hint.
+    assert "127.0.0.1" in detail
+    assert "TUN" in detail
 
 
 async def test_diagnose_model_missing_when_absent_from_tags(monkeypatch) -> None:

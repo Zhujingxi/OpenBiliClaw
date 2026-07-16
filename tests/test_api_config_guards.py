@@ -164,6 +164,55 @@ def test_put_config_round_trips_explicit_fallback_providers(monkeypatch, tmp_pat
     assert body["llm"]["embedding"]["fallback_provider"] == "ollama"
 
 
+def test_put_config_round_trips_embedding_multimodal_enabled(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    # Default off, and GET echoes it so the settings page can render the toggle.
+    assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is False
+
+    response = client.put(
+        "/api/config",
+        json={"llm": {"embedding": {"multimodal_enabled": True}}},
+    )
+    assert response.status_code == 200
+
+    loaded = load_config_from_path(config_path)
+    assert loaded.llm.embedding.multimodal_enabled is True
+    assert client.get("/api/config").json()["llm"]["embedding"]["multimodal_enabled"] is True
+
+
+def test_put_config_accepts_dashscope_embedding_provider(monkeypatch, tmp_path) -> None:
+    """Regression (found by the multimodal E2E, 2026-07-14): `dashscope` must be
+    an accepted embedding provider at config-save validation, not just in the
+    registry. Otherwise the settings-page dropdown option 400s on save.
+    """
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    response = client.put(
+        "/api/config",
+        json={
+            "llm": {
+                "embedding": {
+                    "provider": "dashscope",
+                    "model": "qwen3-vl-embedding",
+                    "api_key": "sk-dashscope-e2e",
+                    "multimodal_enabled": True,
+                }
+            }
+        },
+    )
+    assert response.status_code == 200, response.json()
+
+    loaded = load_config_from_path(config_path)
+    assert loaded.llm.embedding.provider == "dashscope"
+    assert loaded.llm.embedding.model == "qwen3-vl-embedding"
+    assert loaded.llm.embedding.multimodal_enabled is True
+
+    body = client.get("/api/config").json()["llm"]["embedding"]
+    assert body["provider"] == "dashscope"
+    assert body["multimodal_enabled"] is True
+
+
 def test_put_config_round_trips_embedding_output_dimensionality(monkeypatch, tmp_path) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
 
@@ -420,3 +469,93 @@ def test_get_config_exposes_douyin_and_x_cookies_like_bilibili(monkeypatch, tmp_
     assert revealed["bilibili"]["cookie"] == (
         "SESSDATA=real-sess; bili_jct=real-csrf; DedeUserID=42"
     )
+
+
+# ── [network].proxy API exposure ────────────────────────────────────────────
+
+
+def _proxy_config(proxy: str) -> Config:
+    cfg = _base_config()
+    cfg.network.mode = "custom" if proxy else "direct"
+    cfg.network.proxy = proxy
+    return cfg
+
+
+def test_get_config_exposes_network_proxy(monkeypatch, tmp_path) -> None:
+    client, _cfg, _path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://127.0.0.1:1080")
+    )
+    body = client.get("/api/config").json()
+    assert body["network"]["mode"] == "custom"
+    assert body["network"]["proxy"] == "socks5://127.0.0.1:1080"
+
+
+def test_get_config_masks_proxy_userinfo(monkeypatch, tmp_path) -> None:
+    client, _cfg, _path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://user:secret@127.0.0.1:1080")
+    )
+    body = client.get("/api/config").json()
+    assert "secret" not in body["network"]["proxy"]
+    assert body["network"]["proxy"] == "socks5://***@127.0.0.1:1080"
+
+
+def test_put_config_writes_valid_network_proxy(monkeypatch, tmp_path) -> None:
+    from openbiliclaw import network
+
+    network.reset_outbound_proxy_for_tests()
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    response = client.put("/api/config", json={"network": {"proxy": "socks5://127.0.0.1:1080"}})
+
+    assert response.status_code == 200
+    assert load_config_from_path(config_path).network.proxy == "socks5://127.0.0.1:1080"
+    # Hot path updated the process-level source of truth.
+    assert network.outbound_proxy_mode() == "custom"
+    assert network.outbound_proxy_url() == "socks5://127.0.0.1:1080"
+    network.reset_outbound_proxy_for_tests()
+
+
+def test_put_config_rejects_invalid_network_proxy(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = config_path.read_text(encoding="utf-8")
+
+    response = client.put("/api/config", json={"network": {"proxy": "ftp://127.0.0.1:1"}})
+
+    assert response.status_code == 400
+    # config.toml is untouched on rejection.
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_put_config_switches_to_direct_and_ignores_environment_proxy(monkeypatch, tmp_path) -> None:
+    from openbiliclaw import network
+
+    client, _cfg, config_path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("http://127.0.0.1:7897")
+    )
+
+    response = client.put("/api/config", json={"network": {"mode": "direct"}})
+
+    assert response.status_code == 200
+    assert load_config_from_path(config_path).network.mode == "direct"
+    assert network.outbound_httpx_kwargs() == {"trust_env": False}
+
+
+def test_put_config_rejects_custom_mode_without_proxy(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = config_path.read_text(encoding="utf-8")
+
+    response = client.put("/api/config", json={"network": {"mode": "custom", "proxy": ""}})
+
+    assert response.status_code == 400
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_put_config_ignores_masked_proxy_echo(monkeypatch, tmp_path) -> None:
+    client, _cfg, config_path = _make_client(
+        monkeypatch, tmp_path, _proxy_config("socks5://user:secret@127.0.0.1:1080")
+    )
+
+    response = client.put("/api/config", json={"network": {"proxy": "socks5://***@127.0.0.1:1080"}})
+
+    assert response.status_code == 200
+    assert load_config_from_path(config_path).network.proxy == "socks5://user:secret@127.0.0.1:1080"

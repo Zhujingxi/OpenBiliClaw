@@ -27,8 +27,13 @@ from openbiliclaw.llm.prompt_cache import (
     profile_prompt_layers,
     stable_json_digest,
 )
-from openbiliclaw.llm.service import is_llm_rate_limit_error
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
+from openbiliclaw.saved_sync.identity import (
+    canonical_source_platform,
+    content_storage_key,
+    make_item_key,
+)
+from openbiliclaw.sources.platforms import normalize_source_platform
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
@@ -39,10 +44,38 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_BILIBILI_CONTENT_ID_PATTERN = re.compile(r"^BV[0-9A-Za-z]+$")
+_CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
+    {
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+        "web",
+    }
+)
 _EVALUATE_BATCH_HARD_CAP_DEFAULT: int = 90
 _DEFAULT_EVAL_BATCH_SIZE: int = 45
 _DEFAULT_EVAL_BATCH_CONCURRENCY: int = 2
 _LLM_EVAL_OVERSAMPLE_FACTOR: int = 2
+
+
+def _namespaced_storage_identity(value: str) -> tuple[str, str] | None:
+    raw_platform, separator, raw_content_id = value.strip().partition(":")
+    platform = canonical_source_platform(raw_platform)
+    if (
+        not separator
+        or platform != raw_platform.strip().lower()
+        or platform not in _CANONICAL_STORAGE_KEY_PLATFORMS
+        or not raw_content_id.strip()
+    ):
+        return None
+    return platform, raw_content_id.strip()
+
+
 _LLM_EVAL_MIN_WINDOW: int = 6
 _RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "openbiliclaw_discovery_raw_candidate_mode",
@@ -398,6 +431,7 @@ def _batch_results_by_content_key(
         valid_keys.update(_content_result_keys(content))
 
     matched: dict[str, dict[str, Any]] = {}
+    duplicated_keys: set[str] = set()
     saw_identifier = False
     for item in payload:
         raw_key = str(item.get("bvid") or item.get("content_id") or "").strip()
@@ -405,6 +439,12 @@ def _batch_results_by_content_key(
             continue
         saw_identifier = True
         if raw_key not in valid_keys:
+            continue
+        if raw_key in duplicated_keys:
+            continue
+        if raw_key in matched:
+            matched.pop(raw_key, None)
+            duplicated_keys.add(raw_key)
             continue
         matched[raw_key] = item
 
@@ -447,6 +487,8 @@ class DiscoveredContent:
     # ("提瓦特摄影" → 原神, "宝可梦" → 精灵宝可梦, etc.).
     franchise_key: str = ""
     description: str = ""
+    published_at: str = ""
+    published_label: str = ""
     source_strategy: str = ""  # Which strategy found this
     relevance_score: float = 0.0  # 0.0 - 1.0 (based on user soul)
     relevance_reason: str = ""  # Why this is relevant to the user
@@ -458,6 +500,7 @@ class DiscoveredContent:
 
     # ── Multi-source fields (Phase 0) ───────────────────────────────
     content_id: str = ""  # Universal content ID; equals bvid for Bilibili content
+    item_key: str = field(init=False, default="")  # Canonical platform-qualified identity
     content_url: str = ""  # Direct clickable URL
     source_platform: str = ""  # "bilibili" | "xiaohongshu" | "web" | ...
     author_name: str = ""  # Universal author name; equals up_name for Bilibili
@@ -471,14 +514,33 @@ class DiscoveredContent:
     source_keyword_id: int | None = None
 
     def __post_init__(self) -> None:
+        storage_identity = _namespaced_storage_identity(self.bvid) if self.bvid else None
         if not self.content_id and self.bvid:
-            self.content_id = self.bvid
+            if storage_identity is not None and (
+                not self.source_platform
+                or canonical_source_platform(self.source_platform) == storage_identity[0]
+            ):
+                self.content_id = storage_identity[1]
+            else:
+                self.content_id = self.bvid
         if not self.source_platform and self.bvid:
-            self.source_platform = "bilibili"
+            self.source_platform = (
+                storage_identity[0] if storage_identity is not None else "bilibili"
+            )
         if not self.author_name and self.up_name:
             self.author_name = self.up_name
-        if not self.content_url and self.bvid:
-            self.content_url = f"https://www.bilibili.com/video/{self.bvid}"
+        if (
+            not self.content_url
+            and canonical_source_platform(self.source_platform) == "bilibili"
+            and _BILIBILI_CONTENT_ID_PATTERN.fullmatch(self.content_id.strip()) is not None
+        ):
+            self.content_url = f"https://www.bilibili.com/video/{self.content_id.strip()}"
+        if self.source_platform and (self.content_id or self.content_url):
+            self.item_key = make_item_key(
+                self.source_platform,
+                self.content_id,
+                self.content_url,
+            )
 
     def to_cache_kwargs(self) -> dict[str, object]:
         """Build the kwargs dict for ``Database.cache_content()``.
@@ -498,6 +560,8 @@ class DiscoveredContent:
             "style_key": self.style_key,
             "franchise_key": self.franchise_key,
             "description": self.description,
+            "published_at": self.published_at,
+            "published_label": self.published_label,
             "cover_url": self.cover_url,
             "view_count": self.view_count,
             "like_count": self.like_count,
@@ -513,6 +577,7 @@ class DiscoveredContent:
             "relevance_reason": self.relevance_reason,
             "candidate_tier": self.candidate_tier,
             "source": self.source_strategy,
+            "item_key": self.item_key,
             "source_platform": self.source_platform or "bilibili",
             "content_id": self.content_id or self.bvid,
             "content_url": self.content_url,
@@ -1521,15 +1586,10 @@ class ContentDiscoveryEngine:
 
     @staticmethod
     def _candidate_view_keys(content: DiscoveredContent) -> set[str]:
-        platform = (content.source_platform or ("bilibili" if content.bvid else "")).strip().lower()
-        if platform == "xhs":
-            platform = "xiaohongshu"
-        elif platform == "dy":
-            platform = "douyin"
-        elif platform == "yt":
-            platform = "youtube"
-        elif platform == "bili":
-            platform = "bilibili"
+        platform = normalize_source_platform(
+            content.source_platform,
+            default="bilibili" if content.bvid else "",
+        )
 
         keys: set[str] = set()
         for value in {content.bvid, content.content_id}:
@@ -1638,14 +1698,14 @@ class ContentDiscoveryEngine:
             f"profile:{profile_digest}:neg:{negative_digest}"
         )
 
-    async def _evaluate_batch(
+    async def _evaluate_batch_once(
         self,
         batch: list[DiscoveredContent],
         profile: SoulProfile,
         *,
         source_context: str = "",
         negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
-    ) -> list[float]:
+    ) -> list[float | None]:
         """Send one LLM call for a batch of items."""
         from openbiliclaw.discovery.candidate_pool import resolve_content_type
         from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
@@ -1746,7 +1806,7 @@ class ContentDiscoveryEngine:
                     "system_instruction": messages[0]["content"],
                     "user_input": messages[1]["content"],
                     "image_inputs": image_inputs,
-                    "max_tokens": 16384,
+                    "max_tokens": 4096,
                     "reasoning_effort": "",
                     "caller": "discovery.evaluate_batch",
                 }
@@ -1760,43 +1820,30 @@ class ContentDiscoveryEngine:
                     # task is structured scoring (return JSON array), not
                     # reasoning — production logs showed 8-16 min/batch
                     # with reasoning enabled, dropping to ~30s without.
-                    # 16384 max_tokens is plenty for the 1500-3000 token
-                    # output a 30-item JSON array now needs.
-                    "max_tokens": 16384,
-                    "reasoning_effort": "",
+                    # 4096 max_tokens covers the observed 1500-3000 token
+                    # output of a 30-item JSON array without making providers
+                    # reserve an unnecessarily large per-request quota.
+                    "max_tokens": 4096,
                     "caller": "discovery.evaluate_batch",
                 }
+                from openbiliclaw.llm.task_options import call_accepts_keyword
+
                 complete_structured = self._llm_service.complete_structured_task
+                if call_accepts_keyword(complete_structured, "reasoning_effort"):
+                    kwargs["reasoning_effort"] = ""
                 kwargs.update(without_core_memory_kwargs(complete_structured))
                 llm_call = complete_structured(**kwargs)
             if self._concurrency is not None:
                 response = await self._concurrency.run_llm(llm_call)
             else:
                 response = await llm_call
-            raw = str(getattr(response, "content", "")).strip()
-            payload = _parse_batch_evaluation_payload(raw)
-            if payload is None:
-                raise ValueError("Expected scored JSON array from batch evaluation")
-        except Exception as exc:
-            if is_llm_rate_limit_error(exc):
-                logger.warning(
-                    "Batch evaluation is rate-limited for %d items; "
-                    "propagating transient failure so callers can retry later: %s",
-                    len(batch),
-                    exc,
-                )
-                raise
-            logger.warning(
-                "Batch evaluation failed for %d items (%s: %s), falling back to single eval",
-                len(batch),
-                type(exc).__name__,
-                exc,
-            )
-            # Fallback: evaluate individually
-            return [
-                await self.evaluate_content(c, profile, source_context=source_context)
-                for c in batch
-            ]
+        except Exception:
+            raise
+
+        raw = str(getattr(response, "content", "")).strip()
+        payload = _parse_batch_evaluation_payload(raw)
+        if payload is None:
+            return [None] * len(batch)
 
         payload_by_id = _batch_results_by_content_key(payload, batch)
         if payload_by_id is None and len(payload) != len(batch):
@@ -1806,12 +1853,9 @@ class ContentDiscoveryEngine:
                 len(payload),
                 len(batch),
             )
-            return [
-                await self.evaluate_content(c, profile, source_context=source_context)
-                for c in batch
-            ]
+            return [None] * len(batch)
 
-        results: list[float] = []
+        results: list[float | None] = []
         for i, content in enumerate(batch):
             if payload_by_id is None:
                 raw_item = payload[i] if i < len(payload) else None
@@ -1825,10 +1869,10 @@ class ContentDiscoveryEngine:
                     None,
                 )
             if raw_item is None:
-                results.append(0.0)
+                results.append(None)
                 continue
             if not isinstance(raw_item, dict):
-                results.append(0.0)
+                results.append(None)
                 continue
             item_result: dict[str, Any] = raw_item
             score = self._clamp_score(item_result.get("score", 0.0))
@@ -1872,7 +1916,8 @@ class ContentDiscoveryEngine:
         if cap > 0 and batch:
             buckets: dict[str, list[int]] = {}
             for i, content in enumerate(batch):
-                if i >= len(results) or results[i] <= 0:
+                capped_score = results[i] if i < len(results) else None
+                if capped_score is None or capped_score <= 0:
                     continue
                 key = (content.franchise_key or "").strip().lower()
                 if not key:
@@ -1883,7 +1928,7 @@ class ContentDiscoveryEngine:
                 if len(indices) <= cap:
                     continue
                 # Keep top ``cap`` by score, drop the rest.
-                indices.sort(key=lambda idx: results[idx], reverse=True)
+                indices.sort(key=lambda idx: results[idx] or 0.0, reverse=True)
                 for idx in indices[cap:]:
                     results[idx] = 0.0
                     batch[idx].relevance_score = 0.0
@@ -1908,7 +1953,8 @@ class ContentDiscoveryEngine:
         if style_cap > 0 and batch:
             style_buckets: dict[str, list[int]] = {}
             for i, content in enumerate(batch):
-                if i >= len(results) or results[i] <= 0:
+                capped_score = results[i] if i < len(results) else None
+                if capped_score is None or capped_score <= 0:
                     continue
                 style_key = normalize_style_key(content.style_key)
                 if not style_key:
@@ -1918,7 +1964,7 @@ class ContentDiscoveryEngine:
             for _style_key, indices in style_buckets.items():
                 if len(indices) <= style_cap:
                     continue
-                indices.sort(key=lambda idx: results[idx], reverse=True)
+                indices.sort(key=lambda idx: results[idx] or 0.0, reverse=True)
                 for idx in indices[style_cap:]:
                     results[idx] = 0.0
                     batch[idx].relevance_score = 0.0
@@ -1934,6 +1980,57 @@ class ContentDiscoveryEngine:
                 )
 
         return results
+
+    async def _evaluate_batch(
+        self,
+        batch: list[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        source_context: str = "",
+        negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
+        max_split_depth: int = 3,
+        max_extra_requests: int = 6,
+    ) -> list[float]:
+        """Retry only missing members from successful malformed responses."""
+        results: list[float | None] = [None] * len(batch)
+        budget = {"remaining": max(0, int(max_extra_requests))}
+
+        async def run(indices: list[int], depth: int) -> None:
+            subset = [batch[index] for index in indices]
+            subset_results = await self._evaluate_batch_once(
+                subset,
+                profile,
+                source_context=source_context,
+                negative_examples=negative_examples,
+            )
+            missing: list[int] = []
+            for index, score in zip(indices, subset_results, strict=True):
+                results[index] = score
+                if score is None:
+                    missing.append(index)
+            if not missing or depth >= max_split_depth or budget["remaining"] <= 0:
+                return
+            children: tuple[list[int], ...]
+            if len(missing) < len(indices):
+                children = (missing,)
+            else:
+                midpoint = max(1, len(missing) // 2)
+                children = (missing[:midpoint], missing[midpoint:])
+            for child in children:
+                if not child or budget["remaining"] <= 0:
+                    break
+                budget["remaining"] -= 1
+                await run(child, depth + 1)
+
+        await run(list(range(len(batch))), 0)
+        final: list[float] = []
+        for content, score in zip(batch, results, strict=True):
+            if score is None:
+                content.relevance_reason = "evaluation_response_missing"
+                final.append(0.0)
+            else:
+                final.append(score)
+        return final
 
     @staticmethod
     def _clamp_score(raw_value: object) -> float:
@@ -2226,6 +2323,8 @@ class ContentDiscoveryEngine:
                     topic_group=str(row.get("topic_group", "")),
                     style_key=str(row.get("style_key", "")),
                     description=str(row.get("description", "")),
+                    published_at=str(row.get("published_at", "") or ""),
+                    published_label=str(row.get("published_label", "") or ""),
                     cover_url=str(row.get("cover_url", "")),
                     view_count=int(row.get("view_count", 0) or 0),
                     like_count=int(row.get("like_count", 0) or 0),
@@ -2682,14 +2781,14 @@ class ContentDiscoveryEngine:
         database = getattr(self, "_database", None)
         if database is None or not results:
             return 0
-        keys = [item.bvid or item.content_id for item in results if item.bvid or item.content_id]
+        keys = [item.item_key for item in results if item.item_key]
         if not keys:
             return 0
         try:
             conn = database.conn
             placeholders = ", ".join("?" for _ in keys)
             cursor = conn.execute(
-                f"SELECT COUNT(*) AS count FROM content_cache WHERE bvid IN ({placeholders})",
+                f"SELECT COUNT(*) AS count FROM content_cache WHERE item_key IN ({placeholders})",
                 keys,
             )
             row = cursor.fetchone()
@@ -2795,7 +2894,12 @@ class ContentDiscoveryEngine:
                     skipped_franchise[franchise_key] = skipped_franchise.get(franchise_key, 0) + 1
                     continue
             try:
-                self._database.cache_content(item.bvid or item.content_id, **item.to_cache_kwargs())
+                storage_key = content_storage_key(
+                    item.source_platform,
+                    item.content_id or item.bvid,
+                    item.content_url,
+                )
+                self._database.cache_content(storage_key, **item.to_cache_kwargs())
                 persisted.append(item)
                 if franchise_key:
                     round_franchise_counts[franchise_key] = (
@@ -2846,6 +2950,7 @@ class ContentDiscoveryEngine:
                 # fall through silently rather than raise.
                 return
             loop.create_task(self._warm_mmr_embeddings(persisted))
+            loop.create_task(self._warm_cover_embeddings(persisted))
 
     def _backfill_keyword_yield(self, item: DiscoveredContent) -> None:
         """Credit one admitted item to its producing keyword (P1.8), if any.
@@ -2891,6 +2996,62 @@ class ContentDiscoveryEngine:
             except Exception:
                 logger.debug(
                     "discovery._warm_mmr_embeddings: embed failed for %s",
+                    item.bvid,
+                    exc_info=True,
+                )
+
+        await asyncio.gather(*(_warm(item) for item in items))
+
+    async def _warm_cover_embeddings(
+        self,
+        items: list[DiscoveredContent],
+    ) -> None:
+        """Pre-warm image-only cover embeddings when multimodal embedding is active.
+
+        Independent of discovery vision evaluation. Stores the vector under a
+        URL-derived key (``image_embedding_cache_key_for_url``) so the delight
+        hot path can look it up by cover URL alone, without re-fetching bytes.
+        Best-effort — never raises; text-only / disabled configs no-op.
+        """
+        embedding_service = self._embedding_service
+        if embedding_service is None or not items:
+            return
+        active = getattr(embedding_service, "image_embedding_active", None)
+        if not (callable(active) and active()):
+            return
+        embed_image = getattr(embedding_service, "embed_image", None)
+        if not callable(embed_image):
+            return
+
+        from openbiliclaw.discovery import multimodal as multimodal_mod
+        from openbiliclaw.llm.embedding import image_embedding_cache_key_for_url
+
+        max_px = int(getattr(self, "multimodal_image_max_px", 384))
+        quality = int(getattr(self, "multimodal_image_quality", 72))
+        timeout_seconds = int(getattr(self, "multimodal_image_timeout_seconds", 6))
+
+        async def _warm(item: DiscoveredContent) -> None:
+            cover_url = (item.cover_url or "").strip()
+            if not cover_url:
+                return
+            try:
+                prepared = await multimodal_mod.prepare_cover_bytes_for_embedding(
+                    cover_url,
+                    max_px=max_px,
+                    quality=quality,
+                    timeout_seconds=timeout_seconds,
+                )
+                if prepared is None:
+                    return
+                image_bytes, mime_type = prepared
+                await embed_image(
+                    image_bytes,
+                    mime_type=mime_type,
+                    cache_key=image_embedding_cache_key_for_url(cover_url),
+                )
+            except Exception:
+                logger.debug(
+                    "discovery._warm_cover_embeddings: embed failed for %s",
                     item.bvid,
                     exc_info=True,
                 )

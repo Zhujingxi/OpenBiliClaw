@@ -38,20 +38,33 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw.sources.platforms import (
+    PLATFORM_BILIBILI as PLATFORM_BILIBILI,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_DOUYIN as PLATFORM_DOUYIN,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_REDDIT as PLATFORM_REDDIT,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_TWITTER as PLATFORM_TWITTER,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_XIAOHONGSHU as PLATFORM_XIAOHONGSHU,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_YOUTUBE as PLATFORM_YOUTUBE,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_ZHIHU as PLATFORM_ZHIHU,
+)
+
 if TYPE_CHECKING:
     from openbiliclaw.config import DiscoveryConfig
 
 logger = logging.getLogger(__name__)
 
-# Canonical long-form platform identifiers — these are the keys the keyword
-# store + planner share (NOT short codes xhs/dy/yt/bili).
-PLATFORM_BILIBILI = "bilibili"
-PLATFORM_XIAOHONGSHU = "xiaohongshu"
-PLATFORM_DOUYIN = "douyin"
-PLATFORM_YOUTUBE = "youtube"
-PLATFORM_TWITTER = "twitter"
-PLATFORM_ZHIHU = "zhihu"
-PLATFORM_REDDIT = "reddit"
 KEYWORD_KIND_REGULAR = "regular"
 KEYWORD_KIND_EXPLORE = "explore"
 

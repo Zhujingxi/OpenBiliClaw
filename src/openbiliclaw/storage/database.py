@@ -6,18 +6,26 @@ content cache, and recommendation history.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import re
+import secrets
 import sqlite3
 import statistics
+import threading
 import time
+import unicodedata
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from uuid import UUID
 
 from openbiliclaw.discovery.admission import (
     DEFAULT_ADMISSION_MIN_SCORE,
@@ -30,11 +38,141 @@ from openbiliclaw.discovery.inspiration import (
     _normalize_match_text,
     derive_inspiration_axis_id,
 )
+from openbiliclaw.published_time import normalize_published_time
+from openbiliclaw.saved_sync.identity import (
+    canonical_source_platform,
+    content_storage_key,
+    make_item_key,
+)
+from openbiliclaw.saved_sync.models import (
+    NATIVE_SAVE_STATUSES,
+    NATIVE_SAVE_TERMINAL_STATUSES,
+    SavedItemInput,
+    SavedListKind,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_BILIBILI as _BILIBILI_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_DOUYIN as _DOUYIN_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_REDDIT as _REDDIT_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_XIAOHONGSHU as _XHS_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    PLATFORM_YOUTUBE as _YOUTUBE_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    infer_source_platform_from_url,
+    normalize_source_platform,
+)
+from openbiliclaw.sources.platforms import (
+    source_family as _source_family,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PoolMaintenanceResult:
+    """Observable outcome of one bounded recommendation-pool maintenance pass."""
+
+    available_before: int
+    available_after: int
+    target: int
+    protected_available: int
+    recovered_suppressed: int
+    trimmed_stale: int
+    trimmed_explore_cluster: int
+    trimmed_ready_reserve: int
+    trimmed_evaluated: int
+    trimmed_raw: int
+    trimmed_by_source: dict[str, int]
+    deferred_topic_trim: int
+    deferred_source_trim: int
+    deferred_stale_trim: int
+    deferred_explore_cluster_trim: int
+    raw_before: int
+    raw_after: int
+    raw_ceiling: int
+    untrimmed_raw_excess: int
+    rolled_back: bool
+    reason: str = ""
+    mutation_count: int = 0
+    has_more: bool = False
+    lock_wait_ms: float = 0.0
+    recovery_ms: float = 0.0
+    stale_trim_ms: float = 0.0
+    explore_trim_ms: float = 0.0
+    topic_trim_ms: float = 0.0
+    source_trim_ms: float = 0.0
+    raw_trim_ms: float = 0.0
+    write_ms: float = 0.0
+    total_ms: float = 0.0
+
+    @property
+    def at_target(self) -> bool:
+        return self.available_after >= self.target
+
+
+class PoolMaintenanceInvariantError(RuntimeError):
+    """Raised when a maintenance transaction would violate availability."""
+
+
+class PoolMaintenanceSnapshotUnavailableError(RuntimeError):
+    """Raised when maintenance cannot acquire a canonical pre-change snapshot."""
+
+
+class PoolMaintenanceDeferredError(PoolMaintenanceSnapshotUnavailableError):
+    """Raised when interactive SQLite work owns the writer lock.
+
+    Maintenance intentionally uses a short busy timeout. A lock collision is
+    therefore a normal "try next tick" outcome rather than a 30-second wait.
+    """
+
+
+@dataclass(frozen=True)
+class PoolServeSnapshot:
+    """One consistent, connection-isolated read for the recommendation hot path."""
+
+    readiness: dict[str, int]
+    candidate_rows: tuple[dict[str, Any], ...]
+    loaded_count: int
+    platform_topups: tuple[tuple[str, int], ...]
+    recent_viewed_bvids: frozenset[str]
+    curator_signals: tuple[dict[str, Any], ...]
+    feedback_signals: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PoolServePersistResult:
+    """IDs committed by the recommendation hot path's isolated write."""
+
+    recommendation_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _ContentTrimPlan:
+    victim_bvids: tuple[str, ...] = ()
+    deferred: int = 0
+
+
+@dataclass(frozen=True)
+class _RawTrimPlan:
+    content_bvids: tuple[str, ...] = ()
+    candidate_ids: tuple[int, ...] = ()
+    candidate_statuses: tuple[tuple[int, str], ...] = ()
+    untrimmed_excess: int = 0
+
+
 # v0.3.62+: retry budget tightened from 5×100ms (worst-case 500ms
 # blocking the asyncio event loop on lock contention) to 8×20ms
 # (worst-case 160ms). Same total absolute timeout floor (~160-500ms)
@@ -49,6 +187,66 @@ logger = logging.getLogger(__name__)
 # pragmatic middle ground.
 _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
+# CALIBRATION PROVENANCE: the recommendation endpoint has a 3s hard tail
+# target. Recommendation persistence inherits the existing eight-attempt retry
+# loop, so each attempt waits at most 250ms (about 2.14s including retry sleeps)
+# rather than waiting 2.5s eight separate times. Maintenance waits only 75ms:
+# it is retryable background work and must yield to user traffic instead of
+# inheriting the process-wide 30s timeout. Revisit against production P99 lock
+# telemetry if the endpoint SLO changes.
+_INTERACTIVE_DB_BUSY_TIMEOUT_MS = 250
+_MAINTENANCE_DB_BUSY_TIMEOUT_MS = 75
+# CALIBRATION PROVENANCE: 25-50 rows was the rollout range proposed for the
+# 100MB / 300-500 candidate production shape. Fifty amortizes ranked scans
+# while bounding every write transaction; the async runner releases the lock
+# and yields the loop between batches.
+_POOL_MAINTENANCE_BATCH_SIZE = 50
+_NATIVE_INTERNAL_RUNNER_PREFIX = "__openbiliclaw_"
+_LEGACY_NATIVE_SAVE_RUNNER_ID = f"{_NATIVE_INTERNAL_RUNNER_PREFIX}legacy_runner__"
+_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS = {
+    "youtube": "yt",
+    "xiaohongshu": "xhs",
+    "douyin": "dy",
+    "twitter": "x",
+    "zhihu": "zhihu",
+    "reddit": "reddit",
+}
+_EXTENSION_NATIVE_SAVE_HOSTS = {
+    "youtube": ("youtube.com", "youtu.be"),
+    "xiaohongshu": ("xiaohongshu.com",),
+    "douyin": ("douyin.com", "iesdouyin.com"),
+    "twitter": ("x.com", "twitter.com"),
+    "zhihu": ("zhihu.com",),
+    "reddit": ("reddit.com", "redd.it"),
+}
+_EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS = {
+    "youtube": frozenset({"v"}),
+    "xiaohongshu": frozenset({"xsec_token", "xsec_source"}),
+}
+_EXTENSION_NATIVE_SAVE_ACTIONS = frozenset({"favorite", "watch_later"})
+_EXTENSION_NATIVE_SAVE_RESULT_STATUSES = frozenset(
+    {"synced", "already_synced", "login_required", "rate_limited", "unsupported", "failed"}
+)
+_EXTENSION_NATIVE_SAVE_SLUGS = frozenset(_EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS.values())
+_EXTENSION_NATIVE_SAVE_RESULT_MESSAGES = {
+    ("synced", ""): "",
+    ("already_synced", ""): "",
+    ("login_required", ""): "Platform login required",
+    ("rate_limited", ""): "Platform native save rate limited",
+    ("unsupported", "unsupported_content_type"): (
+        "Content type is unsupported for platform native save"
+    ),
+    ("failed", "native_save_failed"): "Platform native save failed",
+    ("failed", "native_save_timeout"): "Platform native-save task timed out",
+    ("failed", "native_content_not_ready"): "Platform content did not become ready",
+    ("failed", "native_control_not_found"): "Platform save control was not found",
+    ("failed", "native_dialog_not_opened"): "Platform save dialog did not open",
+    ("failed", "native_target_not_found"): "Platform save target was not found uniquely",
+    ("failed", "native_request_rejected"): "Platform native-save request was rejected",
+    ("failed", "native_confirmation_not_observed"): (
+        "Platform native-save confirmation was not observed"
+    ),
+}
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _VIEW_CONTENT_ID_METADATA_KEYS = (
@@ -493,18 +691,6 @@ _LEGACY_STYLE_KEY_MAP: dict[str, str] = {
     "sci_fact": "curiosity_spark",
 }
 
-_XHS_SOURCE_FAMILY = "xiaohongshu"
-_XHS_SOURCE_PREFIXES = ("xhs-", "xhs_", "xiaohongshu")
-_DOUYIN_SOURCE_FAMILY = "douyin"
-_DOUYIN_SOURCE_PREFIXES = ("dy-", "dy_", "douyin")
-_BILIBILI_SOURCE_FAMILY = "bilibili"
-_BILIBILI_SOURCE_KEYS = ("search", "related_chain", "trending", "explore")
-_YOUTUBE_SOURCE_FAMILY = "youtube"
-_YOUTUBE_SOURCE_PREFIXES = ("yt-", "yt_", "youtube")
-_TWITTER_SOURCE_FAMILY = "twitter"
-_TWITTER_SOURCE_PREFIXES = ("x-", "x_", "twitter")
-_REDDIT_SOURCE_FAMILY = "reddit"
-_REDDIT_SOURCE_PREFIXES = ("reddit-", "reddit_")
 _EXPLORE_HIGH_RISK_CLUSTERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "manufacturing",
@@ -539,6 +725,7 @@ CREATE TABLE IF NOT EXISTS events (
 -- Content cache (discovered/evaluated content)
 CREATE TABLE IF NOT EXISTS content_cache (
     bvid        TEXT PRIMARY KEY,
+    item_key    TEXT NOT NULL DEFAULT '',
     title       TEXT,
     up_name     TEXT,
     up_mid      INTEGER,
@@ -548,6 +735,8 @@ CREATE TABLE IF NOT EXISTS content_cache (
     style_key   TEXT DEFAULT '',
     franchise_key TEXT DEFAULT '',  -- LLM IP/series; see _ensure_content_cache_topic_columns
     description TEXT,
+    published_at TEXT NOT NULL DEFAULT '',
+    published_label TEXT NOT NULL DEFAULT '',
     cover_url   TEXT,
     view_count  INTEGER DEFAULT 0,
     like_count  INTEGER DEFAULT 0,
@@ -600,6 +789,8 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     up_name               TEXT NOT NULL DEFAULT '',
     up_mid                INTEGER NOT NULL DEFAULT 0,
     description           TEXT NOT NULL DEFAULT '',
+    published_at          TEXT NOT NULL DEFAULT '',
+    published_label       TEXT NOT NULL DEFAULT '',
     cover_url             TEXT NOT NULL DEFAULT '',
     duration              INTEGER NOT NULL DEFAULT 0,
     view_count            INTEGER NOT NULL DEFAULT 0,
@@ -631,6 +822,7 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     claimed_at            TIMESTAMP,
+    claim_token           TEXT,
     evaluated_at          TIMESTAMP,
     cached_at             TIMESTAMP
 );
@@ -645,6 +837,7 @@ CREATE INDEX IF NOT EXISTS idx_discovery_candidates_content_id
 CREATE TABLE IF NOT EXISTS recommendations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     bvid        TEXT NOT NULL,
+    item_key    TEXT NOT NULL DEFAULT '',
     expression  TEXT,                -- Friend-style recommendation text
     topic       TEXT,                -- Personal topic label
     confidence  REAL DEFAULT 0.0,
@@ -709,42 +902,12 @@ CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider, model);
 
 def _pool_source_family(source: object, source_platform: object = "") -> str:
     """Return the source family key used by pool share accounting."""
-    platform = str(source_platform or "").strip().lower()
-    raw_source = str(source or "").strip()
-    source_key = raw_source.lower()
-    if platform in {_XHS_SOURCE_FAMILY, "xhs"} or source_key.startswith(_XHS_SOURCE_PREFIXES):
-        return _XHS_SOURCE_FAMILY
-    if platform in {_DOUYIN_SOURCE_FAMILY, "dy"} or source_key.startswith(_DOUYIN_SOURCE_PREFIXES):
-        return _DOUYIN_SOURCE_FAMILY
-    if platform in {_YOUTUBE_SOURCE_FAMILY, "yt"} or source_key.startswith(
-        _YOUTUBE_SOURCE_PREFIXES
-    ):
-        return _YOUTUBE_SOURCE_FAMILY
-    if platform in {_TWITTER_SOURCE_FAMILY, "x"} or source_key.startswith(_TWITTER_SOURCE_PREFIXES):
-        return _TWITTER_SOURCE_FAMILY
-    if platform in {_REDDIT_SOURCE_FAMILY, "rd"} or source_key.startswith(_REDDIT_SOURCE_PREFIXES):
-        return _REDDIT_SOURCE_FAMILY
-    if platform in {_BILIBILI_SOURCE_FAMILY, "bili"} or source_key in _BILIBILI_SOURCE_KEYS:
-        return _BILIBILI_SOURCE_FAMILY
-    return raw_source or "unknown"
+    return _source_family(source, source_platform)
 
 
 def _normalize_source_platform_key(source_platform: object) -> str:
     """Return the canonical source key used in cross-source content IDs."""
-    raw = str(source_platform or "").strip().lower()
-    if raw in {_XHS_SOURCE_FAMILY, "xhs"}:
-        return _XHS_SOURCE_FAMILY
-    if raw in {_DOUYIN_SOURCE_FAMILY, "dy"}:
-        return _DOUYIN_SOURCE_FAMILY
-    if raw in {_YOUTUBE_SOURCE_FAMILY, "yt"}:
-        return _YOUTUBE_SOURCE_FAMILY
-    if raw in {_TWITTER_SOURCE_FAMILY, "x"}:
-        return _TWITTER_SOURCE_FAMILY
-    if raw in {_REDDIT_SOURCE_FAMILY, "rd"}:
-        return _REDDIT_SOURCE_FAMILY
-    if raw in {_BILIBILI_SOURCE_FAMILY, "bili"}:
-        return _BILIBILI_SOURCE_FAMILY
-    return raw
+    return normalize_source_platform(source_platform)
 
 
 def _normalize_style_key_for_storage(value: object) -> str:
@@ -791,6 +954,144 @@ def _xhs_self_author_guard_params(xhs_self_nickname: str | None) -> tuple[str, s
     return (nickname, nickname, nickname)
 
 
+def _validated_extension_native_save_uuid(value: object, field_name: str) -> str:
+    raw_text = str(value or "")
+    if any(unicodedata.category(character).startswith("C") for character in raw_text):
+        raise ValueError(f"{field_name} must not contain control characters")
+    text = raw_text.strip()
+    try:
+        parsed = UUID(text)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"{field_name} must be a UUID") from exc
+    if str(parsed) != text.lower():
+        raise ValueError(f"{field_name} must be a canonical UUID")
+    return text.lower()
+
+
+def _validated_extension_native_save_text(
+    value: object,
+    field_name: str,
+    *,
+    max_length: int,
+    allow_blank: bool = False,
+) -> str:
+    raw_text = str(value or "")
+    if any(unicodedata.category(character).startswith("C") for character in raw_text):
+        raise ValueError(f"{field_name} must not contain control characters")
+    text = raw_text.strip()
+    if not text and not allow_blank:
+        raise ValueError(f"{field_name} must not be blank")
+    if len(text) > max_length:
+        raise ValueError(f"{field_name} must be at most {max_length} characters")
+    return text
+
+
+def _canonical_extension_native_save_url(platform: str, value: object) -> str:
+    raw_url = _validated_extension_native_save_text(value, "content_url", max_length=2048)
+    try:
+        parts = urlsplit(raw_url)
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("content_url must use an allow-listed platform HTTPS host") from exc
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    allowed_hosts = _EXTENSION_NATIVE_SAVE_HOSTS[platform]
+    if (
+        parts.scheme.lower() != "https"
+        or not hostname
+        or port not in {None, 443}
+        or parts.username is not None
+        or parts.password is not None
+        or not any(hostname == host or hostname.endswith(f".{host}") for host in allowed_hosts)
+    ):
+        raise ValueError("content_url must use an allow-listed platform HTTPS host")
+    retained_fields = _EXTENSION_NATIVE_SAVE_IDENTITY_QUERY_FIELDS.get(platform, frozenset())
+    retained_query = [
+        (key, item)
+        for key, item in parse_qsl(parts.query, keep_blank_values=True)
+        if key in retained_fields
+    ]
+    if platform == "youtube" and retained_query:
+        videos = [item for key, item in retained_query if key == "v"]
+        if len(videos) != 1 or not videos[0]:
+            raise ValueError("content_url has an invalid YouTube navigation query")
+    if platform == "xiaohongshu" and retained_query:
+        seen_fields: set[str] = set()
+        for key, item in retained_query:
+            if key in seen_fields or not item:
+                raise ValueError("content_url has an invalid Xiaohongshu navigation query")
+            seen_fields.add(key)
+        if "xsec_token" not in seen_fields:
+            raise ValueError("content_url has an invalid Xiaohongshu navigation query")
+    query = urlencode(retained_query)
+    return urlunsplit(("https", hostname, parts.path or "/", query, ""))
+
+
+def _validated_extension_native_save_job(
+    job: ExtensionNativeSaveJob,
+) -> dict[str, str]:
+    job_id = _validated_extension_native_save_uuid(job.job_id, "job_id")
+    platform = canonical_source_platform(job.platform)
+    if platform != job.platform or platform not in _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS:
+        raise ValueError("platform must be a supported canonical platform")
+    platform_slug = _validated_extension_native_save_text(
+        job.platform_slug, "platform_slug", max_length=16
+    ).lower()
+    if platform_slug != _EXTENSION_NATIVE_SAVE_PLATFORM_SLUGS[platform]:
+        raise ValueError("platform_slug does not match platform")
+    content_id = _validated_extension_native_save_text(job.content_id, "content_id", max_length=512)
+    content_url = _canonical_extension_native_save_url(platform, job.content_url)
+    item_key = _validated_extension_native_save_text(job.item_key, "item_key", max_length=768)
+    if item_key != make_item_key(platform, content_id, content_url):
+        raise ValueError("item_key does not match the canonical platform identity")
+    content_type = _validated_extension_native_save_text(
+        job.content_type, "content_type", max_length=128
+    )
+    requested_action = _validated_extension_native_save_text(
+        job.requested_action, "requested_action", max_length=32
+    )
+    resolved_action = _validated_extension_native_save_text(
+        job.resolved_action, "resolved_action", max_length=32
+    )
+    if requested_action not in _EXTENSION_NATIVE_SAVE_ACTIONS:
+        raise ValueError("requested_action is invalid")
+    if resolved_action not in _EXTENSION_NATIVE_SAVE_ACTIONS:
+        raise ValueError("resolved_action is invalid")
+    target_label = _validated_extension_native_save_text(
+        job.target_label, "target_label", max_length=256
+    )
+    return {
+        "job_id": job_id,
+        "platform": platform,
+        "platform_slug": platform_slug,
+        "item_key": item_key,
+        "content_id": content_id,
+        "content_url": content_url,
+        "content_type": content_type,
+        "requested_action": requested_action,
+        "resolved_action": resolved_action,
+        "target_label": target_label,
+    }
+
+
+def _validated_extension_native_save_result(
+    status: object, error_code: object, error_message: object
+) -> tuple[str, str, str]:
+    safe_status = _validated_extension_native_save_text(status, "status", max_length=32)
+    if safe_status not in _EXTENSION_NATIVE_SAVE_RESULT_STATUSES:
+        raise ValueError("status is invalid")
+    safe_code = _validated_extension_native_save_text(
+        error_code, "error_code", max_length=128, allow_blank=True
+    )
+    _validated_extension_native_save_text(
+        error_message, "error_message", max_length=512, allow_blank=True
+    )
+    try:
+        safe_message = _EXTENSION_NATIVE_SAVE_RESULT_MESSAGES[(safe_status, safe_code)]
+    except KeyError as exc:
+        raise ValueError("status and error_code combination is invalid") from exc
+    return safe_status, safe_code, safe_message
+
+
 def _normalize_admission_min_score(value: object) -> float:
     if isinstance(value, bool):
         return _DEFAULT_ADMISSION_MIN_SCORE
@@ -815,6 +1116,23 @@ class Database:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
         self._admission_min_score = _DEFAULT_ADMISSION_MIN_SCORE
+        self._preserve_read_transaction = False
+        # The two queues must remain separate: a slow/background maintenance
+        # batch must never sit in front of an interactive recommendation read.
+        # Executors are lazy so short-lived CLI/tests that never use async DB
+        # work do not create threads.
+        self._worker_init_lock = threading.Lock()
+        self._maintenance_executor: ThreadPoolExecutor | None = None
+        self._serve_executor: ThreadPoolExecutor | None = None
+        # Recent-view identity extraction parses up to 2,000 event payloads.
+        # Cache immutable snapshots by latest view-event id and share the cache
+        # with isolated worker wrappers; one cheap MAX(id) query keeps external
+        # writers visible without repeating JSON/URL parsing on every request.
+        self._recent_view_state_lock = threading.Lock()
+        self._recent_view_state_cache: dict[
+            tuple[int, int],
+            tuple[frozenset[str], frozenset[str]],
+        ] = {}
 
     def set_admission_min_score(self, value: object) -> None:
         """Set the unified recommendation-pool admission floor."""
@@ -836,6 +1154,7 @@ class Database:
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
         self._ensure_content_cache_multisource_columns()
+        self._ensure_content_identity_columns()
         self._ensure_recommendation_read_indexes()
         self._ensure_source_recipes_table()
         self._ensure_xhs_observed_urls_table()
@@ -846,6 +1165,7 @@ class Database:
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
+        self._ensure_saved_sync_tables()
         self._ensure_auth_state_table()
         self._ensure_init_runs_table()
         self.reset_stale_discovery_candidate_evaluations()
@@ -912,8 +1232,211 @@ class Database:
             raise RuntimeError("Database not initialized. Call initialize() first.")
         conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
+
+    def _executor(self, *, maintenance: bool) -> ThreadPoolExecutor:
+        """Return the lazily-created single-thread SQLite worker."""
+        executor = self._maintenance_executor if maintenance else self._serve_executor
+        if executor is not None:
+            return executor
+        with self._worker_init_lock:
+            executor = self._maintenance_executor if maintenance else self._serve_executor
+            if executor is None:
+                prefix = (
+                    "openbiliclaw-pool-maintenance" if maintenance else "openbiliclaw-pool-serve"
+                )
+                executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=prefix)
+                if maintenance:
+                    self._maintenance_executor = executor
+                else:
+                    self._serve_executor = executor
+        return executor
+
+    async def maintain_pool_inventory_async(self, **kwargs: Any) -> PoolMaintenanceResult:
+        """Run one bounded maintenance batch on its dedicated worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=True)
+        return await loop.run_in_executor(executor, partial(self.maintain_pool_inventory, **kwargs))
+
+    async def load_pool_serve_snapshot_async(
+        self,
+        *,
+        limit: int,
+        xhs_self_nickname: str = "",
+        curator_history_limit: int = 30,
+    ) -> PoolServeSnapshot:
+        """Load a recommendation snapshot on the interactive SQLite worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            partial(
+                self.load_pool_serve_snapshot,
+                limit=limit,
+                xhs_self_nickname=xhs_self_nickname,
+                curator_history_limit=curator_history_limit,
+            ),
+        )
+
+    async def persist_pool_serve_async(
+        self,
+        items: list[dict[str, Any]],
+        shown_bvids: list[str],
+    ) -> PoolServePersistResult:
+        """Commit one serve batch on the interactive SQLite worker."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            self.persist_pool_serve,
+            items,
+            shown_bvids,
+        )
+
+    async def count_pool_readiness_isolated_async(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+    ) -> dict[str, int]:
+        """Read exact inventory without touching the process-shared connection."""
+        loop = asyncio.get_running_loop()
+        executor = self._executor(maintenance=False)
+        return await loop.run_in_executor(
+            executor,
+            partial(
+                self.count_pool_readiness_isolated,
+                xhs_self_nickname=xhs_self_nickname,
+            ),
+        )
+
+    def _isolated_database(self, *, busy_timeout_ms: int) -> Database:
+        """Return a lightweight wrapper bound to a short-lived connection.
+
+        The wrapper reuses all connection-aware SQL already implemented by
+        ``Database`` without swapping ``self._conn`` (which would race the
+        process-shared connection). It owns no worker threads of its own.
+        """
+        conn = self.open_connection()
+        conn.execute(f"PRAGMA busy_timeout = {max(0, int(busy_timeout_ms))}")
+        isolated = Database(self._db_path)
+        isolated._conn = conn
+        isolated._admission_min_score = self._admission_min_score
+        isolated._recent_view_state_lock = self._recent_view_state_lock
+        isolated._recent_view_state_cache = self._recent_view_state_cache
+        return isolated
+
+    def load_pool_serve_snapshot(
+        self,
+        *,
+        limit: int,
+        xhs_self_nickname: str = "",
+        curator_history_limit: int = 30,
+    ) -> PoolServeSnapshot:
+        """Load all hot-path pool state through one isolated read snapshot."""
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        isolated._preserve_read_transaction = True
+        try:
+            isolated.conn.execute("BEGIN")
+            # View history is the most CPU-heavy part of a pool read: extracting
+            # source-aware identities parses up to 2,000 JSON events and URLs.
+            # Every helper below used to repeat that work, turning one snapshot
+            # into five identical scans and holding the GIL for hundreds of ms.
+            viewed_content_keys, recent_viewed_bvids = isolated._recent_viewed_state_on(
+                isolated.conn
+            )
+            readiness = isolated.count_pool_readiness(
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            rows = isolated.get_pool_candidates(
+                limit=max(0, int(limit)),
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            loaded_count = len(rows)
+
+            platforms = isolated.list_servable_pool_platforms(
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            present = {
+                str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
+                for row in rows
+            }
+            seen = {str(row.get("bvid", "")) for row in rows if row.get("bvid")}
+            topups: list[tuple[str, int]] = []
+            if len(platforms) > 1:
+                for platform in platforms:
+                    token = str(platform).strip().lower()
+                    if not token or token in present:
+                        continue
+                    added = 0
+                    for row in isolated.get_pool_candidates_for_platform(
+                        token,
+                        limit=5,
+                        xhs_self_nickname=xhs_self_nickname,
+                        _viewed_content_keys=viewed_content_keys,
+                    ):
+                        bvid = str(row.get("bvid", ""))
+                        if bvid and bvid in seen:
+                            continue
+                        if bvid:
+                            seen.add(bvid)
+                        rows.append(row)
+                        added += 1
+                    if added:
+                        topups.append((token, added))
+
+            viewed = frozenset(recent_viewed_bvids)
+            history_limit = max(1, int(curator_history_limit))
+            curator_signals = isolated.get_recent_recommendation_signals(limit=history_limit)
+            feedback_signals = isolated.get_feedback_signals(limit=history_limit)
+            isolated.conn.commit()
+            return PoolServeSnapshot(
+                readiness={key: max(0, int(value)) for key, value in readiness.items()},
+                candidate_rows=tuple(rows),
+                loaded_count=loaded_count,
+                platform_topups=tuple(topups),
+                recent_viewed_bvids=viewed,
+                curator_signals=tuple(curator_signals),
+                feedback_signals=tuple(feedback_signals),
+            )
+        except Exception:
+            isolated.conn.rollback()
+            raise
+        finally:
+            isolated._preserve_read_transaction = False
+            isolated.close()
+
+    def persist_pool_serve(
+        self,
+        items: list[dict[str, Any]],
+        shown_bvids: list[str],
+    ) -> PoolServePersistResult:
+        """Persist recommendation rows and shown state on an isolated connection."""
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        try:
+            ids = isolated.batch_insert_recommendations_and_mark_shown(
+                items,
+                shown_bvids,
+            )
+            return PoolServePersistResult(recommendation_ids=tuple(ids))
+        finally:
+            isolated.close()
+
+    def count_pool_readiness_isolated(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+    ) -> dict[str, int]:
+        """Read exact inventory using a short-lived connection."""
+        isolated = self._isolated_database(busy_timeout_ms=_INTERACTIVE_DB_BUSY_TIMEOUT_MS)
+        try:
+            return isolated.count_pool_readiness(xhs_self_nickname=xhs_self_nickname)
+        finally:
+            isolated.close()
 
     def _ensure_fresh_read(self) -> None:
         """Close any implicit transaction so the next SELECT sees the latest WAL state.
@@ -923,7 +1446,7 @@ class Database:
         implicit transaction.  Committing closes that transaction so the next
         query starts a new one against the current WAL head.
         """
-        if self.conn.in_transaction:
+        if self.conn.in_transaction and not self._preserve_read_transaction:
             self.conn.commit()
 
     def _execute_write(
@@ -993,6 +1516,18 @@ class Database:
         Returns:
             Inserted row ID.
         """
+        cursor = self._execute_write(
+            "INSERT INTO events "
+            "(event_type, url, title, context, metadata, "
+            " inferred_satisfaction, satisfaction_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            self._event_insert_params(event_type, kwargs),
+        )
+        return cursor.lastrowid or 0
+
+    @staticmethod
+    def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
+        """Normalize one event into the canonical SQLite row shape."""
         import json
 
         from openbiliclaw.sources.event_format import classify_event_satisfaction
@@ -1003,15 +1538,8 @@ class Database:
         elif raw_context is None:
             context_text = ""
         else:
-            # Legacy dict / list payload — JSON-encode for storage.
             context_text = json.dumps(raw_context, ensure_ascii=False)
-
         metadata_payload = kwargs.get("metadata", {})
-
-        # Single classification owner. Reconstruct the event dict shape
-        # the classifier expects (event_type + url + title + metadata).
-        # API ingest may set dwell fields at the top level as well; pass
-        # those through so the click rules read either location.
         classifier_event: dict[str, Any] = {
             "event_type": event_type,
             "url": kwargs.get("url", ""),
@@ -1022,23 +1550,45 @@ class Database:
             if top_level_key in kwargs and kwargs[top_level_key] is not None:
                 classifier_event[top_level_key] = kwargs[top_level_key]
         inferred_satisfaction, satisfaction_reason = classify_event_satisfaction(classifier_event)
-
-        cursor = self._execute_write(
-            "INSERT INTO events "
-            "(event_type, url, title, context, metadata, "
-            " inferred_satisfaction, satisfaction_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                event_type,
-                kwargs.get("url", ""),
-                kwargs.get("title", ""),
-                context_text,
-                json.dumps(metadata_payload, ensure_ascii=False),
-                inferred_satisfaction,
-                satisfaction_reason,
-            ),
+        return (
+            event_type,
+            kwargs.get("url", ""),
+            kwargs.get("title", ""),
+            context_text,
+            json.dumps(metadata_payload, ensure_ascii=False),
+            inferred_satisfaction,
+            satisfaction_reason,
         )
-        return cursor.lastrowid or 0
+
+    def insert_events_batch(self, events: Sequence[Mapping[str, Any]]) -> int:
+        """Insert many normalized events in one isolated transaction.
+
+        Guided init can import hundreds of rows. Using an isolated connection
+        keeps SQLite's busy wait off the API event loop and one transaction
+        avoids hundreds of commit windows competing with background writers.
+        """
+        rows = [
+            self._event_insert_params(
+                str(event.get("event_type") or event.get("type") or "").strip(),
+                event,
+            )
+            for event in events
+        ]
+        if not rows:
+            return 0
+        conn = self.open_connection()
+        try:
+            conn.executemany(
+                "INSERT INTO events "
+                "(event_type, url, title, context, metadata, "
+                " inferred_satisfaction, satisfaction_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+            return len(rows)
+        finally:
+            conn.close()
 
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get recent events.
@@ -1632,10 +2182,29 @@ class Database:
         """
         import json
 
+        published = normalize_published_time(
+            kwargs.get("published_at"),
+            label=kwargs.get("published_label"),
+        )
+        source_platform = str(kwargs.get("source_platform", "bilibili") or "").strip()
+        raw_content_id = str(kwargs.get("content_id", bvid) or "").strip()
+        identity_content_id = raw_content_id if source_platform else bvid.strip()
+        item_key = str(kwargs.get("item_key", "") or "").strip() or make_item_key(
+            source_platform or "bilibili",
+            identity_content_id,
+            str(kwargs.get("content_url", "") or ""),
+        )
+        existing_identity_row = self.conn.execute(
+            "SELECT bvid FROM content_cache WHERE item_key = ?",
+            (item_key,),
+        ).fetchone()
+        if existing_identity_row is not None:
+            bvid = str(existing_identity_row["bvid"])
         self._execute_write(
             """
             INSERT INTO content_cache (
                 bvid,
+                item_key,
                 title,
                 up_name,
                 up_mid,
@@ -1646,6 +2215,8 @@ class Database:
                 style_key,
                 franchise_key,
                 description,
+                published_at,
+                published_label,
                 cover_url,
                 view_count,
                 like_count,
@@ -1673,7 +2244,8 @@ class Database:
                 source_keyword_id
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
@@ -1708,7 +2280,21 @@ class Database:
                     ''
                 ),
                 description = excluded.description,
-                cover_url = excluded.cover_url,
+                published_at = COALESCE(
+                    NULLIF(excluded.published_at, ''),
+                    content_cache.published_at,
+                    ''
+                ),
+                published_label = COALESCE(
+                    NULLIF(excluded.published_label, ''),
+                    content_cache.published_label,
+                    ''
+                ),
+                cover_url = COALESCE(
+                    NULLIF(excluded.cover_url, ''),
+                    content_cache.cover_url,
+                    ''
+                ),
                 view_count = excluded.view_count,
                 like_count = excluded.like_count,
                 favorite_count = excluded.favorite_count,
@@ -1765,6 +2351,7 @@ class Database:
                     ELSE content_cache.pool_status
                 END,
                 source = excluded.source,
+                item_key = excluded.item_key,
                 content_id = excluded.content_id,
                 content_url = excluded.content_url,
                 source_platform = excluded.source_platform,
@@ -1793,6 +2380,7 @@ class Database:
             """,
             (
                 bvid,
+                item_key,
                 kwargs.get("title", ""),
                 kwargs.get("up_name", ""),
                 kwargs.get("up_mid", 0),
@@ -1803,6 +2391,8 @@ class Database:
                 _normalize_style_key_for_storage(kwargs.get("style_key", "")),
                 kwargs.get("franchise_key", ""),
                 kwargs.get("description", ""),
+                published.published_at,
+                published.published_label,
                 kwargs.get("cover_url", ""),
                 kwargs.get("view_count", 0),
                 kwargs.get("like_count", 0),
@@ -1895,6 +2485,10 @@ class Database:
                 self._candidate_value(candidate, "raw_payload", {}),
                 default={},
             )
+            published = normalize_published_time(
+                self._candidate_value(candidate, "published_at", ""),
+                label=self._candidate_value(candidate, "published_label", ""),
+            )
             score_threshold = float(self._candidate_value(candidate, "score_threshold", 0.0) or 0.0)
             cursor = self._execute_write(
                 """
@@ -1914,6 +2508,8 @@ class Database:
                     up_name,
                     up_mid,
                     description,
+                    published_at,
+                    published_label,
                     cover_url,
                     duration,
                     view_count,
@@ -1934,7 +2530,7 @@ class Database:
                 )
                 VALUES (
                     ?, 'pending_eval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -1952,6 +2548,8 @@ class Database:
                     str(self._candidate_value(candidate, "up_name", "") or ""),
                     int(self._candidate_value(candidate, "up_mid", 0) or 0),
                     str(self._candidate_value(candidate, "description", "") or ""),
+                    published.published_at,
+                    published.published_label,
                     str(self._candidate_value(candidate, "cover_url", "") or ""),
                     int(self._candidate_value(candidate, "duration", 0) or 0),
                     int(self._candidate_value(candidate, "view_count", 0) or 0),
@@ -1981,10 +2579,12 @@ class Database:
             self._execute_write(
                 """
                 UPDATE discovery_candidates
-                SET last_seen_at = CURRENT_TIMESTAMP
+                SET last_seen_at = CURRENT_TIMESTAMP,
+                    published_at = COALESCE(NULLIF(?, ''), published_at, ''),
+                    published_label = COALESCE(NULLIF(?, ''), published_label, '')
                 WHERE candidate_key = ?
                 """,
-                (candidate_key,),
+                (published.published_at, published.published_label, candidate_key),
             )
         if max_pending_per_source is not None:
             max_pending = max(0, int(max_pending_per_source))
@@ -2002,11 +2602,11 @@ class Database:
         source_platform: str,
         max_pending: int,
     ) -> int:
-        """Drop oldest candidate rows for one source over a queue cap.
+        """Terminalize unclaimed active rows over one source's queue cap.
 
-        In-flight ``evaluating`` rows are never deleted. Terminal rows are
-        trimmed before pending/evaluated rows so active raw material is kept
-        whenever possible.
+        Terminal history does not consume the cap. Token-owned and
+        ``evaluating`` rows remain untouched; victims retain an auditable row
+        with ``status='trimmed_capacity'``.
         """
 
         source = str(source_platform or "").strip()
@@ -2019,6 +2619,7 @@ class Database:
             SELECT COUNT(*) AS count
             FROM discovery_candidates
             WHERE source_platform = ?
+              AND status IN ('pending_eval', 'evaluating', 'evaluated')
             """,
             (source,),
         ).fetchone()
@@ -2026,33 +2627,30 @@ class Database:
         excess = current - cap
         if excess <= 0:
             return 0
+        family = _pool_source_family("", source)
         cursor = self._execute_write(
             """
-            DELETE FROM discovery_candidates
+            UPDATE discovery_candidates
+            SET status = 'trimmed_capacity',
+                eval_error = ?,
+                claimed_at = NULL,
+                claim_token = NULL
             WHERE id IN (
                 SELECT id
                 FROM discovery_candidates
                 WHERE source_platform = ?
-                  AND status != 'evaluating'
+                  AND status IN ('pending_eval', 'evaluated')
+                  AND claim_token IS NULL
                 ORDER BY
-                    CASE
-                        WHEN status IN (
-                            'cached',
-                            'rejected_low_score',
-                            'rejected_duplicate',
-                            'rejected_cache_admission',
-                            'rejected_recently_viewed',
-                            'rejected_franchise_quota',
-                            'failed_eval'
-                        ) THEN 0
-                        ELSE 1
-                    END ASC,
+                    CASE status WHEN 'pending_eval' THEN 0 ELSE 1 END ASC,
                     last_seen_at ASC,
                     id ASC
                 LIMIT ?
             )
+              AND status IN ('pending_eval', 'evaluated')
+              AND claim_token IS NULL
             """,
-            (source, excess),
+            (f"source_raw_ceiling:{family}", source, excess),
         )
         return int(cursor.rowcount)
 
@@ -2080,6 +2678,7 @@ class Database:
                 UPDATE discovery_candidates
                 SET status = 'pending_eval',
                     claimed_at = NULL,
+                    claim_token = NULL,
                     eval_error = 'orphaned evaluating claim reset'
                 WHERE status = 'evaluating'
                 """
@@ -2090,6 +2689,7 @@ class Database:
             UPDATE discovery_candidates
             SET status = 'pending_eval',
                 claimed_at = NULL,
+                claim_token = NULL,
                 eval_error = 'stale evaluating claim reset'
             WHERE status = 'evaluating'
               AND (claimed_at IS NULL OR claimed_at < datetime('now', ?))
@@ -2098,7 +2698,12 @@ class Database:
         )
         return int(cursor.rowcount)
 
-    def claim_discovery_candidates_for_eval(self, *, limit: int) -> list[dict[str, Any]]:
+    def claim_discovery_candidates_for_eval(
+        self,
+        *,
+        limit: int,
+        claim_token: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Claim a mixed-source batch of pending candidates for evaluation."""
 
         claim_limit = max(0, int(limit))
@@ -2146,31 +2751,33 @@ class Database:
 
         ids = [int(row["id"]) for row in selected]
         placeholders = ", ".join("?" for _ in ids)
+        token = str(claim_token or secrets.token_hex(16))
         self._execute_write(
             f"""
             UPDATE discovery_candidates
             SET status = 'evaluating',
                 claimed_at = CURRENT_TIMESTAMP,
+                claim_token = ?,
                 eval_error = ''
             WHERE id IN ({placeholders})
               AND status = 'pending_eval'
             """,
-            ids,
+            (token, *ids),
         )
         claimed_rows = self.conn.execute(
             f"""
-            SELECT id
+            SELECT *
             FROM discovery_candidates
             WHERE id IN ({placeholders})
               AND status = 'evaluating'
+              AND claim_token = ?
             """,
-            ids,
+            (*ids, token),
         ).fetchall()
-        claimed_ids = {int(row["id"]) for row in claimed_rows}
-        claimed = [row for row in selected if int(row["id"]) in claimed_ids]
-        for row in claimed:
-            row["status"] = "evaluating"
-        return claimed
+        claimed_by_id = {int(row["id"]): dict(row) for row in claimed_rows}
+        return [
+            claimed_by_id[candidate_id] for candidate_id in ids if candidate_id in claimed_by_id
+        ]
 
     def get_evaluated_discovery_candidates_for_admission(
         self,
@@ -2221,7 +2828,9 @@ class Database:
                     eval_error = ?,
                     eval_attempts = 0,
                     batch_eval_attempts = 0,
-                    evaluated_at = CURRENT_TIMESTAMP
+                    evaluated_at = CURRENT_TIMESTAMP,
+                    claimed_at = NULL,
+                    claim_token = NULL
                 WHERE id = ?
                   AND status = 'evaluating'
                 """,
@@ -2242,6 +2851,142 @@ class Database:
             if cursor.rowcount > 0:
                 updated += 1
         return updated
+
+    def persist_claimed_discovery_candidate_evaluations(
+        self,
+        evaluations: Sequence[Mapping[str, Any]],
+        *,
+        claim_token: str,
+    ) -> set[int]:
+        """Persist outputs only while the caller still owns the claim token."""
+
+        updated_ids: set[int] = set()
+        token = str(claim_token)
+        for evaluation in evaluations:
+            candidate_id = int(evaluation.get("candidate_id") or evaluation.get("id") or 0)
+            if candidate_id <= 0:
+                continue
+            cursor = self._execute_write(
+                """
+                UPDATE discovery_candidates
+                SET status = ?,
+                    topic_key = ?,
+                    topic_group = ?,
+                    style_key = ?,
+                    franchise_key = ?,
+                    relevance_score = ?,
+                    relevance_reason = ?,
+                    pool_expression = ?,
+                    pool_topic_label = ?,
+                    eval_error = ?,
+                    eval_attempts = 0,
+                    batch_eval_attempts = 0,
+                    evaluated_at = CURRENT_TIMESTAMP,
+                    claimed_at = NULL,
+                    claim_token = NULL
+                WHERE id = ?
+                  AND status = 'evaluating'
+                  AND claim_token = ?
+                """,
+                (
+                    str(evaluation.get("status") or "evaluated"),
+                    str(evaluation.get("topic_key") or ""),
+                    str(evaluation.get("topic_group") or ""),
+                    _normalize_style_key_for_storage(evaluation.get("style_key")),
+                    str(evaluation.get("franchise_key") or ""),
+                    float(evaluation.get("relevance_score") or evaluation.get("score") or 0.0),
+                    str(evaluation.get("relevance_reason") or evaluation.get("reason") or ""),
+                    str(evaluation.get("pool_expression") or ""),
+                    str(evaluation.get("pool_topic_label") or ""),
+                    str(evaluation.get("eval_error") or ""),
+                    candidate_id,
+                    token,
+                ),
+            )
+            if cursor.rowcount > 0:
+                updated_ids.add(candidate_id)
+        return updated_ids
+
+    def reset_claimed_discovery_candidates_to_pending(
+        self,
+        candidate_ids: Sequence[int],
+        *,
+        claim_token: str,
+        reason: str = "",
+        max_attempts: int = 5,
+        max_batch_attempts: int = 50,
+        increment_attempts: bool = True,
+    ) -> int:
+        """Release candidates only while the caller still owns their claim."""
+
+        ids = [int(candidate_id) for candidate_id in candidate_ids if int(candidate_id) > 0]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        token = str(claim_token)
+        if not increment_attempts:
+            batch_attempts_limit = max(1, int(max_batch_attempts))
+            cursor = self._execute_write(
+                f"""
+                UPDATE discovery_candidates
+                SET batch_eval_attempts = batch_eval_attempts + 1,
+                    status = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN 'failed_eval'
+                        ELSE 'pending_eval'
+                    END,
+                    claimed_at = NULL,
+                    claim_token = NULL,
+                    eval_error = ?,
+                    evaluated_at = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
+                        ELSE evaluated_at
+                    END,
+                    last_seen_at = CASE
+                        WHEN batch_eval_attempts + 1 >= ? THEN last_seen_at
+                        ELSE CURRENT_TIMESTAMP
+                    END
+                WHERE id IN ({placeholders})
+                  AND status = 'evaluating'
+                  AND claim_token = ?
+                """,
+                (
+                    batch_attempts_limit,
+                    str(reason),
+                    batch_attempts_limit,
+                    batch_attempts_limit,
+                    *ids,
+                    token,
+                ),
+            )
+            return int(cursor.rowcount)
+
+        attempts_limit = max(1, int(max_attempts))
+        cursor = self._execute_write(
+            f"""
+            UPDATE discovery_candidates
+            SET eval_attempts = eval_attempts + 1,
+                status = CASE
+                    WHEN eval_attempts + 1 >= ? THEN 'failed_eval'
+                    ELSE 'pending_eval'
+                END,
+                claimed_at = NULL,
+                claim_token = NULL,
+                eval_error = ?,
+                evaluated_at = CASE
+                    WHEN eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
+                    ELSE evaluated_at
+                END,
+                last_seen_at = CASE
+                    WHEN eval_attempts + 1 >= ? THEN last_seen_at
+                    ELSE CURRENT_TIMESTAMP
+                END
+            WHERE id IN ({placeholders})
+              AND status = 'evaluating'
+              AND claim_token = ?
+            """,
+            (attempts_limit, str(reason), attempts_limit, attempts_limit, *ids, token),
+        )
+        return int(cursor.rowcount)
 
     def reset_discovery_candidates_to_pending(
         self,
@@ -2269,6 +3014,7 @@ class Database:
                         ELSE 'pending_eval'
                     END,
                     claimed_at = NULL,
+                    claim_token = NULL,
                     eval_error = ?,
                     evaluated_at = CASE
                         WHEN batch_eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
@@ -2301,6 +3047,7 @@ class Database:
                     ELSE 'pending_eval'
                 END,
                 claimed_at = NULL,
+                claim_token = NULL,
                 eval_error = ?,
                 evaluated_at = CASE
                     WHEN eval_attempts + 1 >= ? THEN CURRENT_TIMESTAMP
@@ -2328,6 +3075,8 @@ class Database:
                 eval_error = '',
                 eval_attempts = 0,
                 batch_eval_attempts = 0
+                , claimed_at = NULL
+                , claim_token = NULL
             WHERE id = ?
               AND status IN ('evaluating', 'evaluated')
             """,
@@ -2348,7 +3097,9 @@ class Database:
             UPDATE discovery_candidates
             SET status = ?,
                 eval_error = ?,
-                evaluated_at = COALESCE(evaluated_at, CURRENT_TIMESTAMP)
+                evaluated_at = COALESCE(evaluated_at, CURRENT_TIMESTAMP),
+                claimed_at = NULL,
+                claim_token = NULL
             WHERE id = ?
               AND status IN ('evaluating', 'evaluated')
             """,
@@ -2416,6 +3167,22 @@ class Database:
                     existing.add(bvid)
                 if content_id:
                     existing.add(content_id)
+        return existing
+
+    def get_existing_content_cache_item_keys(self, item_keys: Sequence[str]) -> set[str]:
+        """Return canonical identities already present in the evaluated content cache."""
+        clean = _unique_clean_strings(item_keys)
+        if not clean:
+            return set()
+        self._ensure_fresh_read()
+        existing: set[str] = set()
+        for chunk in _chunks(clean, 900):
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self.conn.execute(
+                f"SELECT item_key FROM content_cache WHERE item_key IN ({placeholders})",
+                chunk,
+            )
+            existing.update(str(row["item_key"]) for row in cursor.fetchall())
         return existing
 
     def count_discovery_candidates_by_source_status(self) -> dict[str, dict[str, int]]:
@@ -2564,6 +3331,7 @@ class Database:
         *,
         max_per_topic_group: int = 3,
         xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Get fresh recommendation candidates directly from the discovery pool.
 
@@ -2693,14 +3461,25 @@ class Database:
             )
         cursor = self.conn.execute(sql, params)
         rows = [dict(row) for row in cursor.fetchall()]
+        viewed_content_keys = (
+            self.get_recent_viewed_content_keys()
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows = self._exclude_viewed_rows(
             rows,
-            self.get_recent_viewed_content_keys(),
+            viewed_content_keys,
             limit=len(rows),
         )
         return self._balance_pool_rows(rows, limit=limit)
 
-    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
+    def _pool_servable_where_clause_on(
+        self,
+        conn: sqlite3.Connection,
+        xhs_self_nickname: str,
+        *,
+        pool_status: str = "fresh",
+    ) -> tuple[str, tuple[Any, ...]]:
         """Shared WHERE fragment + params defining a ``serve()``-loadable row.
 
         Central definition of "servable right now", mirroring the gate baked
@@ -2714,12 +3493,12 @@ class Database:
         admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_threshold = self.dynamic_delight_threshold(
-            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        delight_threshold = self._dynamic_delight_threshold_on(
+            conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
         )
         delight_guard_sql = _delight_claim_guard_sql()
         clause = f"""
-            COALESCE(pool_status, 'fresh') = 'fresh'
+            COALESCE(pool_status, 'fresh') = ?
               AND COALESCE(feedback_type, '') != 'dislike'
               AND {admission_sql}
               AND COALESCE(pool_expression, '') != ''
@@ -2738,7 +3517,10 @@ class Database:
                 WHERE r.bvid = content_cache.bvid
               )
         """
-        return clause, (*admission_params, *guard_params, delight_threshold)
+        return clause, (pool_status, *admission_params, *guard_params, delight_threshold)
+
+    def _pool_servable_where_clause(self, xhs_self_nickname: str) -> tuple[str, tuple[Any, ...]]:
+        return self._pool_servable_where_clause_on(self.conn, xhs_self_nickname)
 
     def get_pool_candidates_for_platform(
         self,
@@ -2746,6 +3528,7 @@ class Database:
         limit: int = 5,
         *,
         xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch up to ``limit`` servable pool rows for one platform token.
 
@@ -2779,7 +3562,11 @@ class Database:
         """
         # Over-fetch so viewed / non-linkable drops still leave up to `limit`.
         cursor = self.conn.execute(sql, (*where_params, token, fetch_limit * 4 + 8))
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = (
+            self.get_recent_viewed_content_keys()
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -2798,7 +3585,12 @@ class Database:
                 break
         return rows
 
-    def list_servable_pool_platforms(self, *, xhs_self_nickname: str = "") -> list[str]:
+    def list_servable_pool_platforms(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+    ) -> list[str]:
         """Return the distinct platform tokens among currently-servable rows.
 
         Same servability gate as ``get_pool_candidates`` (via
@@ -2809,7 +3601,10 @@ class Database:
         ``"bilibili"`` when ``source_platform`` is blank, matching
         ``RecommendationEngine._platform_token``.
         """
-        rows = self._load_available_pool_candidate_rows(xhs_self_nickname=xhs_self_nickname)
+        rows = self._load_available_pool_candidate_rows(
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
+        )
         platforms: set[str] = set()
         for row in rows:
             token = str(row.get("source_platform", "") or "").strip().lower() or "bilibili"
@@ -2817,7 +3612,11 @@ class Database:
         return sorted(platforms)
 
     def count_pool_candidates(
-        self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> int:
         """Return how many fresh candidates are immediately available for reshuffle.
 
@@ -2838,11 +3637,33 @@ class Database:
             self._load_available_pool_candidate_rows(
                 max_per_topic_group=max_per_topic_group,
                 xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=_viewed_content_keys,
             )
         )
 
     def _load_available_pool_candidate_rows(
-        self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
+        self,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load rows counted by the frontend-visible pool availability gate."""
+        self._ensure_fresh_read()
+        return self._load_available_pool_candidate_rows_on(
+            self.conn,
+            max_per_topic_group=max_per_topic_group,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
+        )
+
+    def _load_available_pool_candidate_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        max_per_topic_group: int = 3,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Load rows counted by the frontend-visible pool availability gate.
 
@@ -2850,19 +3671,19 @@ class Database:
         the availability count never includes surprise-channel rows serve()
         would refuse to load.
         """
-        self._ensure_fresh_read()
         admission_sql, admission_params = self._pool_admission_sql()
         guard_sql = _xhs_self_author_guard_sql()
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_threshold = self.dynamic_delight_threshold(
-            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        delight_threshold = self._dynamic_delight_threshold_on(
+            conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
         )
         delight_guard_sql = _delight_claim_guard_sql()
         if max_per_topic_group > 0:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 f"""
                 WITH ranked AS (
-                    SELECT bvid, source, source_platform, content_url,
+                    SELECT bvid, source, source_platform, content_url, topic_group,
+                           candidate_tier, relevance_score, last_scored_at, view_count,
                            ROW_NUMBER() OVER (
                                PARTITION BY topic_group
                                ORDER BY
@@ -2891,16 +3712,24 @@ class Database:
                         WHERE r.bvid = content_cache.bvid
                       )
                 )
-                SELECT bvid, source, source_platform, content_url
+                SELECT bvid, source, source_platform, content_url, topic_group,
+                       candidate_tier, relevance_score, last_scored_at, view_count
                 FROM ranked
                 WHERE group_rank <= ?
+                ORDER BY
+                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                    relevance_score DESC,
+                    last_scored_at DESC,
+                    view_count DESC,
+                    bvid ASC
                 """,
                 (*admission_params, *guard_params, delight_threshold, max_per_topic_group),
             )
         else:
-            cursor = self.conn.execute(
+            cursor = conn.execute(
                 f"""
-                SELECT bvid, source, source_platform, content_url
+                SELECT bvid, source, source_platform, content_url, topic_group,
+                       candidate_tier, relevance_score, last_scored_at, view_count
                 FROM content_cache
                 WHERE COALESCE(pool_status, 'fresh') = 'fresh'
                   AND COALESCE(feedback_type, '') != 'dislike'
@@ -2920,10 +3749,20 @@ class Database:
                     FROM recommendations AS r
                     WHERE r.bvid = content_cache.bvid
                   )
+                ORDER BY
+                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                    relevance_score DESC,
+                    last_scored_at DESC,
+                    view_count DESC,
+                    bvid ASC
                 """,
                 (*admission_params, *guard_params, delight_threshold),
             )
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -2957,8 +3796,17 @@ class Database:
     def _load_pool_raw_material_rows(self) -> list[dict[str, Any]]:
         """Load raw fresh material rows governed by the raw ceiling."""
         self._ensure_fresh_read()
+        return self._load_pool_raw_material_rows_on(self.conn)
+
+    def _load_pool_raw_material_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        _viewed_content_keys: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Connection-aware raw content-cache rows governed by the ceiling."""
         admission_sql, admission_params = self._pool_admission_sql()
-        cursor = self.conn.execute(
+        cursor = conn.execute(
             f"""
             SELECT
                 bvid,
@@ -2981,7 +3829,11 @@ class Database:
             """,
             admission_params,
         )
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         rows: list[dict[str, Any]] = []
         for row in cursor.fetchall():
             row_dict = dict(row)
@@ -2997,6 +3849,26 @@ class Database:
         return (
             len(self._load_pool_raw_material_rows()) + self._count_pending_discovery_raw_material()
         )
+
+    def _count_pool_raw_material_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        _viewed_content_keys: set[str] | None = None,
+    ) -> int:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM discovery_candidates
+            WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+            """
+        ).fetchone()
+        return len(
+            self._load_pool_raw_material_rows_on(
+                conn,
+                _viewed_content_keys=_viewed_content_keys,
+            )
+        ) + int(row["count"] if row else 0)
 
     def count_pool_raw_material_by_source(self) -> dict[str, int]:
         """Return raw fresh material grouped by source family.
@@ -3021,7 +3893,12 @@ class Database:
             counts[source_family] += int(row["count"])
         return dict(counts)
 
-    def count_pool_readiness(self, *, xhs_self_nickname: str = "") -> dict[str, int]:
+    def count_pool_readiness(
+        self,
+        *,
+        xhs_self_nickname: str = "",
+        _viewed_content_keys: set[str] | None = None,
+    ) -> dict[str, int]:
         """Return pool inventory split by immediately servable and pending rows.
 
         ``available`` is the public "可换" count. ``raw`` is broad fresh
@@ -3074,7 +3951,11 @@ class Database:
             """,
             (*admission_params, *guard_params),
         )
-        viewed_content_keys = self.get_recent_viewed_content_keys()
+        viewed_content_keys = (
+            self.get_recent_viewed_content_keys()
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
         pending_count = 0
         for row in pending_cursor.fetchall():
             item = dict(row)
@@ -3101,12 +3982,98 @@ class Database:
         discovery_pending_count = pending_eval_count + evaluated_pending_count
 
         return {
-            "available": self.count_pool_candidates(xhs_self_nickname=xhs_self_nickname),
+            "available": self.count_pool_candidates(
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            ),
             "raw": raw_count + discovery_pending_count,
             "pending": pending_count + discovery_pending_count,
+            "admitted_pending_copy": len(
+                self._load_admitted_pending_copy_rows_on(
+                    self.conn,
+                    xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+            ),
             "pending_eval": pending_eval_count,
             "evaluated_pending": evaluated_pending_count,
         }
+
+    def _load_admitted_pending_copy_rows_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        xhs_self_nickname: str = "",
+        limit: int | None = None,
+        _viewed_content_keys: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load admitted, classified rows whose recommendation copy is incomplete."""
+
+        admission_sql, admission_params = self._pool_admission_sql()
+        guard_sql = _xhs_self_author_guard_sql()
+        guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
+        delight_threshold = self._dynamic_delight_threshold_on(
+            conn, default_threshold=_DELIGHT_CLAIM_MIN_SCORE
+        )
+        delight_guard_sql = _delight_claim_guard_sql()
+        max_rows = None if limit is None else max(0, int(limit))
+        if max_rows == 0:
+            return []
+        cursor = conn.execute(
+            f"""
+            SELECT *
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND {admission_sql}
+              AND COALESCE(style_key, '') != ''
+              AND COALESCE(topic_group, '') != ''
+              AND (
+                COALESCE(pool_expression, '') = ''
+                OR COALESCE(pool_topic_label, '') = ''
+              )
+              AND (
+                source_platform != 'xiaohongshu'
+                OR content_url LIKE '%xsec_token=%'
+              )
+              {guard_sql}
+              {delight_guard_sql}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM recommendations AS r
+                WHERE r.bvid = content_cache.bvid
+              )
+            ORDER BY
+                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                relevance_score DESC,
+                last_scored_at DESC,
+                view_count DESC,
+                bvid ASC
+            """,
+            (*admission_params, *guard_params, delight_threshold),
+        )
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
+        rows: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            item = dict(row)
+            if not str(item.get("bvid", "")).strip():
+                continue
+            if self._is_viewed_row(item, viewed_content_keys):
+                continue
+            if not _is_linkable_pool_source(
+                item.get("source"),
+                item.get("source_platform"),
+                item.get("content_url"),
+            ):
+                continue
+            rows.append(item)
+            if max_rows is not None and len(rows) >= max_rows:
+                break
+        return rows
 
     def count_pool_candidates_by_source(self) -> dict[str, int]:
         """Return fresh pool counts grouped by discovery source family."""
@@ -3444,6 +4411,834 @@ class Database:
             key=lambda g: (-group_count[g], -group_max_score.get(g, 0.0), g),
         )
         return [(group, by_group[group]) for group in ranked[:top_n_groups]]
+
+    @staticmethod
+    def _clean_pool_quotas(quotas: Mapping[str, int]) -> dict[str, int]:
+        clean: dict[str, int] = {}
+        for source, quota in quotas.items():
+            try:
+                clean[_pool_source_family("", source)] = max(0, int(quota))
+            except (TypeError, ValueError):
+                continue
+        return clean
+
+    def _plan_stale_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        max_age_days: int,
+    ) -> _ContentTrimPlan:
+        rows = conn.execute(
+            """
+            SELECT bvid
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND discovered_at < datetime('now', '-' || ? || ' days')
+              AND NOT EXISTS (
+                SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+              )
+            ORDER BY discovered_at ASC, bvid ASC
+            """,
+            (max_age_days,),
+        ).fetchall()
+        stale_ids = [str(row["bvid"]) for row in rows]
+        return _ContentTrimPlan(
+            victim_bvids=tuple(bvid for bvid in stale_ids if bvid not in protected_ids),
+            deferred=sum(bvid in protected_ids for bvid in stale_ids),
+        )
+
+    def _plan_explore_cluster_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        max_per_cluster: int,
+    ) -> _ContentTrimPlan:
+        admission_sql, admission_params = self._pool_admission_sql()
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT bvid, title, topic_key, relevance_score, last_scored_at
+                FROM content_cache
+                WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+                  AND COALESCE(feedback_type, '') != 'dislike'
+                  AND {admission_sql}
+                  AND COALESCE(source, '') = 'explore'
+                """,
+                admission_params,
+            ).fetchall()
+        ]
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            cluster = self._explore_risk_cluster(row)
+            if cluster:
+                grouped[cluster].append(row)
+        victims: list[str] = []
+        deferred = 0
+        cap = max(0, max_per_cluster)
+        for items in grouped.values():
+            protected = [row for row in items if str(row["bvid"]) in protected_ids]
+            deferred += max(0, len(protected) - cap)
+            remaining = max(0, cap - len(protected))
+            unprotected = sorted(
+                (row for row in items if str(row["bvid"]) not in protected_ids),
+                key=lambda row: (
+                    -float(row.get("relevance_score", 0.0) or 0.0),
+                    -self._sort_timestamp_score(str(row.get("last_scored_at", ""))),
+                    str(row.get("bvid", "")),
+                ),
+            )
+            victims.extend(str(row["bvid"]) for row in unprotected[remaining:])
+        return _ContentTrimPlan(tuple(victims), deferred)
+
+    def _plan_topic_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        max_per_topic_group: int,
+    ) -> _ContentTrimPlan:
+        if max_per_topic_group <= 0:
+            return _ContentTrimPlan()
+        admission_sql, admission_params = self._pool_admission_sql()
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT bvid, source, source_platform, content_url, topic_group,
+                       relevance_score, last_scored_at, pool_expression,
+                       pool_topic_label, style_key
+                FROM content_cache
+                WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+                  AND COALESCE(feedback_type, '') != 'dislike'
+                  AND {admission_sql}
+                  AND COALESCE(topic_group, '') != ''
+                  AND NOT EXISTS (
+                    SELECT 1 FROM recommendations AS r WHERE r.bvid = content_cache.bvid
+                  )
+                """,
+                admission_params,
+            ).fetchall()
+        ]
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            if not self._content_is_ready_reserve(row):
+                continue
+            grouped[str(row["topic_group"]).strip().lower()].append(row)
+        victims: list[str] = []
+        deferred = 0
+        for items in grouped.values():
+            protected = [row for row in items if str(row["bvid"]) in protected_ids]
+            deferred += max(0, len(protected) - max_per_topic_group)
+            remaining = max(0, max_per_topic_group - len(protected))
+            unprotected = sorted(
+                (row for row in items if str(row["bvid"]) not in protected_ids),
+                key=lambda row: (
+                    -float(row.get("relevance_score", 0.0) or 0.0),
+                    -self._sort_timestamp_score(str(row.get("last_scored_at", ""))),
+                    str(row.get("bvid", "")),
+                ),
+            )
+            victims.extend(str(row["bvid"]) for row in unprotected[remaining:])
+        return _ContentTrimPlan(tuple(victims), deferred)
+
+    def _plan_source_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        source_share_quotas: Mapping[str, int],
+        _viewed_content_keys: set[str] | None = None,
+    ) -> _ContentTrimPlan:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in self._load_pool_raw_material_rows_on(
+            conn,
+            _viewed_content_keys=_viewed_content_keys,
+        ):
+            if not self._content_is_ready_reserve(row):
+                continue
+            grouped[_pool_source_family(row["source"], row["source_platform"])].append(row)
+        victims: list[str] = []
+        deferred = 0
+        for family, quota in source_share_quotas.items():
+            items = grouped.get(family, [])
+            protected = [row for row in items if str(row["bvid"]) in protected_ids]
+            deferred += max(0, len(protected) - quota)
+            remaining = max(0, quota - len(protected))
+            unprotected = sorted(
+                (row for row in items if str(row["bvid"]) not in protected_ids),
+                key=self._pool_trim_keep_key,
+            )
+            victims.extend(str(row["bvid"]) for row in unprotected[remaining:])
+        return _ContentTrimPlan(tuple(victims), deferred)
+
+    @staticmethod
+    def _content_is_ready_reserve(row: Mapping[str, Any]) -> bool:
+        return all(
+            str(row.get(field, "") or "").strip()
+            for field in ("pool_expression", "pool_topic_label", "style_key", "topic_group")
+        ) and _is_linkable_pool_source(
+            row.get("source"),
+            row.get("source_platform"),
+            row.get("content_url"),
+        )
+
+    def _raw_victim_key(
+        self,
+        row: Mapping[str, Any],
+        *,
+        family_counts: Mapping[str, int],
+        quotas: Mapping[str, int],
+        candidate: bool = False,
+    ) -> tuple[int, float, float, int, str]:
+        source = row.get("source_strategy" if candidate else "source", "")
+        family = _pool_source_family(source, row.get("source_platform", ""))
+        quota = quotas.get(family)
+        over_quota = quota is not None and family_counts.get(family, 0) > quota
+        timestamp = row.get("last_seen_at" if candidate else "last_scored_at", "")
+        stable_id = row.get("id" if candidate else "bvid", "")
+        return (
+            0 if over_quota else 1,
+            float(row.get("relevance_score", 0.0) or 0.0),
+            self._sort_timestamp_score(str(timestamp or "")),
+            0 if str(source or "").strip().lower() == "explore" else 1,
+            str(stable_id),
+        )
+
+    def _plan_raw_trim_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        protected_ids: set[str],
+        raw_ceiling: int,
+        raw_source_share_quotas: Mapping[str, int],
+        _viewed_content_keys: set[str] | None = None,
+    ) -> _RawTrimPlan:
+        content_rows = self._load_pool_raw_material_rows_on(
+            conn,
+            _viewed_content_keys=_viewed_content_keys,
+        )
+        candidate_rows = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT id, status, source_platform, source_strategy,
+                       relevance_score, last_seen_at, claim_token
+                FROM discovery_candidates
+                WHERE status IN ('pending_eval', 'evaluating', 'evaluated')
+                """
+            ).fetchall()
+        ]
+        raw_count = len(content_rows) + len(candidate_rows)
+        excess = max(0, raw_count - raw_ceiling)
+        if excess <= 0:
+            return _RawTrimPlan()
+
+        family_counts: dict[str, int] = defaultdict(int)
+        for row in content_rows:
+            family_counts[_pool_source_family(row["source"], row["source_platform"])] += 1
+        for row in candidate_rows:
+            family_counts[_pool_source_family(row["source_strategy"], row["source_platform"])] += 1
+
+        unprotected_content = [row for row in content_rows if str(row["bvid"]) not in protected_ids]
+        unready = sorted(
+            (row for row in unprotected_content if not self._content_is_ready_reserve(row)),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+            ),
+        )
+        pending = sorted(
+            (
+                row
+                for row in candidate_rows
+                if row["status"] == "pending_eval" and row["claim_token"] is None
+            ),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+                candidate=True,
+            ),
+        )
+        evaluated = sorted(
+            (
+                row
+                for row in candidate_rows
+                if row["status"] == "evaluated" and row["claim_token"] is None
+            ),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+                candidate=True,
+            ),
+        )
+        ready_reserve = sorted(
+            (row for row in unprotected_content if self._content_is_ready_reserve(row)),
+            key=lambda row: self._raw_victim_key(
+                row,
+                family_counts=family_counts,
+                quotas=raw_source_share_quotas,
+            ),
+        )
+        ordered: list[tuple[str, dict[str, Any]]] = [
+            *(("content", row) for row in unready),
+            *(("candidate", row) for row in pending),
+            *(("candidate", row) for row in evaluated),
+            *(("content", row) for row in ready_reserve),
+        ]
+        selected = ordered[:excess]
+        content_ids = tuple(str(row["bvid"]) for kind, row in selected if kind == "content")
+        candidate_statuses = tuple(
+            (int(row["id"]), str(row["status"])) for kind, row in selected if kind == "candidate"
+        )
+        return _RawTrimPlan(
+            content_bvids=content_ids,
+            candidate_ids=tuple(candidate_id for candidate_id, _ in candidate_statuses),
+            candidate_statuses=candidate_statuses,
+            untrimmed_excess=max(0, excess - len(selected)),
+        )
+
+    @staticmethod
+    def _apply_content_status_on(
+        conn: sqlite3.Connection,
+        bvids: Sequence[str],
+        *,
+        status: str,
+    ) -> int:
+        if not bvids:
+            return 0
+        placeholders = ", ".join("?" for _ in bvids)
+        cursor = conn.execute(
+            f"""
+            UPDATE content_cache
+            SET pool_status = ?
+            WHERE bvid IN ({placeholders})
+              AND COALESCE(pool_status, 'fresh') = 'fresh'
+            """,
+            (status, *bvids),
+        )
+        return int(cursor.rowcount)
+
+    def _apply_content_suppression_on(
+        self,
+        conn: sqlite3.Connection,
+        bvids: Sequence[str],
+    ) -> int:
+        return self._apply_content_status_on(conn, bvids, status="suppressed")
+
+    def _apply_raw_trim_on(self, conn: sqlite3.Connection, plan: _RawTrimPlan) -> None:
+        self._apply_content_suppression_on(conn, plan.content_bvids)
+        if not plan.candidate_ids:
+            return
+        placeholders = ", ".join("?" for _ in plan.candidate_ids)
+        conn.execute(
+            f"""
+            UPDATE discovery_candidates
+            SET status = 'trimmed_capacity',
+                eval_error = ?,
+                claimed_at = NULL,
+                claim_token = NULL
+            WHERE id IN ({placeholders})
+              AND status IN ('pending_eval', 'evaluated')
+              AND claim_token IS NULL
+            """,
+            ("pool_raw_ceiling", *plan.candidate_ids),
+        )
+
+    @staticmethod
+    def _validate_pool_maintenance_invariant(
+        *,
+        available_before: int,
+        available_after: int,
+        target: int,
+    ) -> None:
+        minimum = min(available_before, target)
+        if available_after < minimum:
+            raise PoolMaintenanceInvariantError(
+                f"available inventory fell below protected floor: "
+                f"before={available_before} after={available_after} target={target}"
+            )
+
+    def _recover_suppressed_pool_inventory_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        deficit: int,
+        source_share_quotas: Mapping[str, int],
+        xhs_self_nickname: str,
+        max_restore: int = _POOL_MAINTENANCE_BATCH_SIZE,
+        _viewed_content_keys: set[str] | None = None,
+    ) -> list[str]:
+        """Restore a bounded set of paid-for rows without rescanning per row.
+
+        The former implementation re-ran the full servability window after
+        every restored row. A 300-row recovery therefore performed hundreds
+        of window-function scans while holding ``BEGIN IMMEDIATE``. We model
+        the availability/source counters in memory and let a later bounded
+        maintenance batch pick up any topic-cap displacement edge case.
+        """
+        clean_deficit = max(0, int(deficit))
+        clean_limit = max(0, int(max_restore))
+        if clean_deficit <= 0 or clean_limit <= 0:
+            return []
+
+        available_rows = self._load_available_pool_candidate_rows_on(
+            conn,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=_viewed_content_keys,
+        )
+        desired_available = len(available_rows) + clean_deficit
+        current_family_count: dict[str, int] = defaultdict(int)
+        current_topic_count: dict[str, int] = defaultdict(int)
+        for row in available_rows:
+            current_family_count[
+                _pool_source_family(row.get("source"), row.get("source_platform"))
+            ] += 1
+            topic = str(row.get("topic_group", "") or "").strip().lower()
+            if topic:
+                current_topic_count[topic] += 1
+
+        where_clause, where_params = self._pool_servable_where_clause_on(
+            conn,
+            xhs_self_nickname,
+            pool_status="suppressed",
+        )
+        candidate_rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT *
+                FROM content_cache
+                WHERE {where_clause}
+                  AND recommended_at IS NULL
+                """,
+                where_params,
+            ).fetchall()
+        ]
+        viewed_content_keys = (
+            self._recent_viewed_content_keys_on(conn)
+            if _viewed_content_keys is None
+            else _viewed_content_keys
+        )
+        eligible_rows = [
+            row
+            for row in candidate_rows
+            if str(row.get("bvid", "")).strip()
+            and not self._is_viewed_row(row, viewed_content_keys)
+            and _is_linkable_pool_source(
+                row.get("source"),
+                row.get("source_platform"),
+                row.get("content_url"),
+            )
+        ]
+        restored_ids: list[str] = []
+        remaining_rows = list(eligible_rows)
+        simulated_available = len(available_rows)
+        # Public pool availability uses the default per-topic window of three.
+        availability_topic_cap = 3
+        while (
+            remaining_rows
+            and len(restored_ids) < clean_limit
+            and simulated_available < desired_available
+        ):
+            row = min(
+                remaining_rows,
+                key=lambda candidate: (
+                    0
+                    if current_family_count[
+                        _pool_source_family(
+                            candidate.get("source"), candidate.get("source_platform")
+                        )
+                    ]
+                    < source_share_quotas.get(
+                        _pool_source_family(
+                            candidate.get("source"), candidate.get("source_platform")
+                        ),
+                        0,
+                    )
+                    else 1,
+                    -float(candidate.get("relevance_score", 0.0) or 0.0),
+                    -self._sort_timestamp_score(str(candidate.get("last_scored_at", "") or "")),
+                    str(candidate.get("bvid", "")),
+                ),
+            )
+            remaining_rows.remove(row)
+            bvid = str(row["bvid"])
+            cursor = conn.execute(
+                """
+                UPDATE content_cache
+                SET pool_status = 'fresh'
+                WHERE bvid = ? AND pool_status = 'suppressed'
+                """,
+                (bvid,),
+            )
+            if cursor.rowcount:
+                restored_ids.append(bvid)
+                topic = str(row.get("topic_group", "") or "").strip().lower()
+                if not topic or current_topic_count[topic] < availability_topic_cap:
+                    simulated_available += 1
+                    if topic:
+                        current_topic_count[topic] += 1
+                    current_family_count[
+                        _pool_source_family(row.get("source"), row.get("source_platform"))
+                    ] += 1
+        return restored_ids
+
+    def maintain_pool_inventory(
+        self,
+        *,
+        target: int,
+        raw_ceiling: int,
+        source_share_quotas: Mapping[str, int],
+        raw_source_share_quotas: Mapping[str, int] | None = None,
+        max_per_topic_group: int = 3,
+        max_per_explore_cluster: int = 3,
+        stale_max_age_days: int = 14,
+        xhs_self_nickname: str = "",
+        recover_suppressed: bool = True,
+        max_mutations: int = _POOL_MAINTENANCE_BATCH_SIZE,
+    ) -> PoolMaintenanceResult:
+        """Maintain pool diversity and raw capacity in one bounded transaction.
+
+        At most ``max_mutations`` rows are changed per call. The async runtime
+        commits each batch, yields the event loop, then schedules another batch
+        when ``PoolMaintenanceResult.has_more`` is true.
+        """
+        total_started = time.perf_counter()
+        clean_target = max(0, int(target))
+        clean_raw_ceiling = max(0, int(raw_ceiling))
+        clean_topic_cap = max(0, int(max_per_topic_group))
+        clean_explore_cap = max(0, int(max_per_explore_cluster))
+        clean_stale_days = max(0, int(stale_max_age_days))
+        clean_source_quotas = self._clean_pool_quotas(source_share_quotas)
+        clean_raw_source_quotas = self._clean_pool_quotas(
+            raw_source_share_quotas or source_share_quotas
+        )
+        mutation_budget = max(1, min(500, int(max_mutations)))
+        conn: sqlite3.Connection | None = None
+        snapshot_acquired = False
+        available_before = 0
+        raw_before = 0
+        protected_ids: set[str] = set()
+        lock_wait_ms = 0.0
+        recovery_ms = 0.0
+        stale_trim_ms = 0.0
+        explore_trim_ms = 0.0
+        topic_trim_ms = 0.0
+        source_trim_ms = 0.0
+        raw_trim_ms = 0.0
+        write_ms = 0.0
+        try:
+            conn = self.open_connection()
+            if isinstance(conn, sqlite3.Connection):
+                conn.execute(f"PRAGMA busy_timeout = {_MAINTENANCE_DB_BUSY_TIMEOUT_MS}")
+            lock_started = time.perf_counter()
+            conn.execute("BEGIN IMMEDIATE")
+            lock_wait_ms = (time.perf_counter() - lock_started) * 1000.0
+            # All maintenance reads share one write transaction, so the view
+            # event snapshot cannot change underneath us. Parse it once: the
+            # source-aware extractor is Python-heavy and repeated scans used
+            # to dominate otherwise bounded batches.
+            viewed_content_keys = self._recent_viewed_content_keys_on(conn)
+            before_rows = self._load_available_pool_candidate_rows_on(
+                conn,
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            available_before = len(before_rows)
+            snapshot_acquired = True
+            raw_before = self._count_pool_raw_material_on(
+                conn,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            protected_ids = {
+                str(row["bvid"]) for row in before_rows[: min(len(before_rows), clean_target)]
+            }
+            recovered_ids: list[str] = []
+            if recover_suppressed:
+                phase_started = time.perf_counter()
+                recovered_ids = self._recover_suppressed_pool_inventory_on(
+                    conn,
+                    deficit=max(0, clean_target - available_before),
+                    source_share_quotas=clean_source_quotas,
+                    xhs_self_nickname=xhs_self_nickname,
+                    max_restore=mutation_budget,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+                recovery_ms = (time.perf_counter() - phase_started) * 1000.0
+                recovered_available_rows = self._load_available_pool_candidate_rows_on(
+                    conn,
+                    xhs_self_nickname=xhs_self_nickname,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+                recovered_set = set(recovered_ids)
+                protected_ids.update(
+                    str(row["bvid"])
+                    for row in recovered_available_rows
+                    if str(row["bvid"]) in recovered_set
+                )
+            initial_raw_rows = {
+                str(row["bvid"]): row
+                for row in self._load_pool_raw_material_rows_on(
+                    conn,
+                    _viewed_content_keys=viewed_content_keys,
+                )
+            }
+
+            phase_started = time.perf_counter()
+            stale_plan = self._plan_stale_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                max_age_days=clean_stale_days,
+            )
+            stale_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            phase_started = time.perf_counter()
+            explore_plan = self._plan_explore_cluster_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                max_per_cluster=clean_explore_cap,
+            )
+            explore_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            phase_started = time.perf_counter()
+            topic_plan = self._plan_topic_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                max_per_topic_group=clean_topic_cap,
+            )
+            topic_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            phase_started = time.perf_counter()
+            source_plan = self._plan_source_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                source_share_quotas=clean_source_quotas,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            source_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+
+            remaining_budget = max(0, mutation_budget - len(recovered_ids))
+            omitted_mutations = 0
+            claimed_content_ids: set[str] = set()
+
+            def _take_content(victim_bvids: Sequence[str]) -> set[str]:
+                nonlocal omitted_mutations, remaining_budget
+                eligible = [bvid for bvid in victim_bvids if bvid not in claimed_content_ids]
+                claimed_content_ids.update(eligible)
+                selected = eligible[:remaining_budget]
+                omitted_mutations += len(eligible) - len(selected)
+                remaining_budget -= len(selected)
+                return set(selected)
+
+            stale_ids = _take_content(stale_plan.victim_bvids)
+            explore_ids = _take_content(explore_plan.victim_bvids)
+            topic_ids = _take_content(topic_plan.victim_bvids)
+            source_ids = _take_content(source_plan.victim_bvids)
+
+            write_started = time.perf_counter()
+            self._apply_content_status_on(conn, sorted(stale_ids), status="stale")
+            self._apply_content_suppression_on(conn, sorted(explore_ids))
+            self._apply_content_suppression_on(conn, sorted(topic_ids))
+            self._apply_content_suppression_on(conn, sorted(source_ids))
+            write_ms += (time.perf_counter() - write_started) * 1000.0
+
+            phase_started = time.perf_counter()
+            full_raw_plan = self._plan_raw_trim_on(
+                conn,
+                protected_ids=protected_ids,
+                raw_ceiling=clean_raw_ceiling,
+                raw_source_share_quotas=clean_raw_source_quotas,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            selected_raw_content = full_raw_plan.content_bvids[:remaining_budget]
+            remaining_budget -= len(selected_raw_content)
+            candidate_statuses_by_id = dict(full_raw_plan.candidate_statuses)
+            selected_raw_candidate_ids = full_raw_plan.candidate_ids[:remaining_budget]
+            selected_raw_candidate_statuses = tuple(
+                (candidate_id, candidate_statuses_by_id[candidate_id])
+                for candidate_id in selected_raw_candidate_ids
+            )
+            omitted_mutations += (
+                len(full_raw_plan.content_bvids)
+                - len(selected_raw_content)
+                + len(full_raw_plan.candidate_ids)
+                - len(selected_raw_candidate_ids)
+            )
+            raw_plan = _RawTrimPlan(
+                content_bvids=selected_raw_content,
+                candidate_ids=selected_raw_candidate_ids,
+                candidate_statuses=selected_raw_candidate_statuses,
+                untrimmed_excess=full_raw_plan.untrimmed_excess,
+            )
+            raw_trim_ms = (time.perf_counter() - phase_started) * 1000.0
+            write_started = time.perf_counter()
+            self._apply_raw_trim_on(conn, raw_plan)
+            write_ms += (time.perf_counter() - write_started) * 1000.0
+            after_rows = self._load_available_pool_candidate_rows_on(
+                conn,
+                xhs_self_nickname=xhs_self_nickname,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            raw_after = self._count_pool_raw_material_on(
+                conn,
+                _viewed_content_keys=viewed_content_keys,
+            )
+            self._validate_pool_maintenance_invariant(
+                available_before=available_before,
+                available_after=len(after_rows),
+                target=clean_target,
+            )
+
+            all_content_victims = (
+                stale_ids | explore_ids | topic_ids | source_ids | set(raw_plan.content_bvids)
+            )
+            candidate_statuses = dict(raw_plan.candidate_statuses)
+            trimmed_ready_reserve = sum(
+                self._content_is_ready_reserve(initial_raw_rows[bvid])
+                for bvid in all_content_victims
+                if bvid in initial_raw_rows
+            )
+            trimmed_raw = sum(
+                not self._content_is_ready_reserve(initial_raw_rows[bvid])
+                for bvid in all_content_victims
+                if bvid in initial_raw_rows
+            ) + sum(status == "pending_eval" for status in candidate_statuses.values())
+            trimmed_evaluated = sum(status == "evaluated" for status in candidate_statuses.values())
+            trimmed_by_source: dict[str, int] = defaultdict(int)
+            for bvid in all_content_victims:
+                row = initial_raw_rows.get(bvid)
+                if row is not None:
+                    trimmed_by_source[
+                        _pool_source_family(row["source"], row["source_platform"])
+                    ] += 1
+            if raw_plan.candidate_ids:
+                placeholders = ", ".join("?" for _ in raw_plan.candidate_ids)
+                for row in conn.execute(
+                    f"""
+                    SELECT source_platform, source_strategy
+                    FROM discovery_candidates
+                    WHERE id IN ({placeholders})
+                    """,
+                    raw_plan.candidate_ids,
+                ).fetchall():
+                    trimmed_by_source[
+                        _pool_source_family(row["source_strategy"], row["source_platform"])
+                    ] += 1
+
+            recovered_suppressed = 0
+            if recovered_ids:
+                placeholders = ", ".join("?" for _ in recovered_ids)
+                recovered_suppressed = int(
+                    conn.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM content_cache
+                        WHERE bvid IN ({placeholders}) AND pool_status = 'fresh'
+                        """,
+                        recovered_ids,
+                    ).fetchone()[0]
+                )
+
+            commit_started = time.perf_counter()
+            conn.commit()
+            write_ms += (time.perf_counter() - commit_started) * 1000.0
+            result = PoolMaintenanceResult(
+                available_before=available_before,
+                available_after=len(after_rows),
+                target=clean_target,
+                protected_available=len(protected_ids),
+                recovered_suppressed=recovered_suppressed,
+                trimmed_stale=len(stale_ids),
+                trimmed_explore_cluster=len(explore_ids),
+                trimmed_ready_reserve=trimmed_ready_reserve,
+                trimmed_evaluated=trimmed_evaluated,
+                trimmed_raw=trimmed_raw,
+                trimmed_by_source=dict(trimmed_by_source),
+                deferred_topic_trim=topic_plan.deferred,
+                deferred_source_trim=source_plan.deferred,
+                deferred_stale_trim=stale_plan.deferred,
+                deferred_explore_cluster_trim=explore_plan.deferred,
+                raw_before=raw_before,
+                raw_after=raw_after,
+                raw_ceiling=clean_raw_ceiling,
+                untrimmed_raw_excess=max(0, raw_after - clean_raw_ceiling),
+                rolled_back=False,
+                mutation_count=(
+                    len(recovered_ids) + len(all_content_victims) + len(raw_plan.candidate_ids)
+                ),
+                has_more=(
+                    omitted_mutations > 0
+                    or raw_after > clean_raw_ceiling
+                    or (len(after_rows) < clean_target and len(recovered_ids) >= mutation_budget)
+                ),
+                lock_wait_ms=lock_wait_ms,
+                recovery_ms=recovery_ms,
+                stale_trim_ms=stale_trim_ms,
+                explore_trim_ms=explore_trim_ms,
+                topic_trim_ms=topic_trim_ms,
+                source_trim_ms=source_trim_ms,
+                raw_trim_ms=raw_trim_ms,
+                write_ms=write_ms,
+                total_ms=(time.perf_counter() - total_started) * 1000.0,
+            )
+            if result.untrimmed_raw_excess > 0:
+                logger.error(
+                    "pool maintenance retained protected/token-owned raw excess: %s",
+                    result.untrimmed_raw_excess,
+                )
+            return result
+        except Exception as exc:
+            if conn is not None:
+                conn.rollback()
+            if not snapshot_acquired:
+                if "locked" in str(exc).lower():
+                    logger.info("pool maintenance deferred by SQLite writer: %s", exc)
+                    raise PoolMaintenanceDeferredError(
+                        "pool maintenance snapshot unavailable: writer busy"
+                    ) from exc
+                logger.error("pool maintenance snapshot unavailable: %s", exc)
+                raise PoolMaintenanceSnapshotUnavailableError(
+                    "pool maintenance snapshot unavailable"
+                ) from exc
+            logger.error("pool maintenance rolled back: %s", exc)
+            return PoolMaintenanceResult(
+                available_before=available_before,
+                available_after=available_before,
+                target=clean_target,
+                protected_available=len(protected_ids),
+                recovered_suppressed=0,
+                trimmed_stale=0,
+                trimmed_explore_cluster=0,
+                trimmed_ready_reserve=0,
+                trimmed_evaluated=0,
+                trimmed_raw=0,
+                trimmed_by_source={},
+                deferred_topic_trim=0,
+                deferred_source_trim=0,
+                deferred_stale_trim=0,
+                deferred_explore_cluster_trim=0,
+                raw_before=raw_before,
+                raw_after=raw_before,
+                raw_ceiling=clean_raw_ceiling,
+                untrimmed_raw_excess=max(0, raw_before - clean_raw_ceiling),
+                rolled_back=True,
+                reason=str(exc),
+                lock_wait_ms=lock_wait_ms,
+                recovery_ms=recovery_ms,
+                stale_trim_ms=stale_trim_ms,
+                explore_trim_ms=explore_trim_ms,
+                topic_trim_ms=topic_trim_ms,
+                source_trim_ms=source_trim_ms,
+                raw_trim_ms=raw_trim_ms,
+                write_ms=write_ms,
+                total_ms=(time.perf_counter() - total_started) * 1000.0,
+            )
+        finally:
+            if conn is not None:
+                conn.close()
 
     def trim_explore_cluster_overflow(self, *, max_per_cluster: int = 3) -> int:
         """Suppress excess fresh explore items from high-risk topic clusters."""
@@ -3942,7 +5737,42 @@ class Database:
         Keys are source-aware (``source_platform:content_id``) and include
         raw BVIDs for legacy Bilibili callers.
         """
-        cursor = self.conn.execute(
+        return self._recent_viewed_content_keys_on(self.conn, limit=limit)
+
+    def _recent_viewed_content_keys_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        limit: int = 2000,
+    ) -> set[str]:
+        """Connection-aware recent viewed identity extraction."""
+        viewed_keys, _ = self._recent_viewed_state_on(conn, limit=limit)
+        return viewed_keys
+
+    def _recent_viewed_state_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        limit: int = 2000,
+    ) -> tuple[set[str], set[str]]:
+        """Return source-aware identities and BVIDs from one event scan."""
+        clean_limit = max(0, int(limit))
+        latest_row = conn.execute(
+            """
+            SELECT COALESCE(MAX(id), 0) AS latest_id
+            FROM events
+            WHERE event_type = 'view'
+            """
+        ).fetchone()
+        latest_id = int(latest_row["latest_id"] if latest_row else 0)
+        cache_key = (latest_id, clean_limit)
+        with self._recent_view_state_lock:
+            cached = self._recent_view_state_cache.get(cache_key)
+        if cached is not None:
+            cached_keys, cached_bvids = cached
+            return set(cached_keys), set(cached_bvids)
+
+        cursor = conn.execute(
             """
             SELECT url, metadata
             FROM events
@@ -3950,12 +5780,22 @@ class Database:
             ORDER BY id DESC
             LIMIT ?
             """,
-            (limit,),
+            (clean_limit,),
         )
         viewed_keys: set[str] = set()
+        viewed_bvids: set[str] = set()
         for row in cursor.fetchall():
-            viewed_keys.update(self._extract_content_keys_from_view_event(dict(row)))
-        return viewed_keys
+            keys, bvid = self._extract_view_event_identities(dict(row))
+            viewed_keys.update(keys)
+            if bvid:
+                viewed_bvids.add(bvid)
+        with self._recent_view_state_lock:
+            self._recent_view_state_cache.clear()
+            self._recent_view_state_cache[cache_key] = (
+                frozenset(viewed_keys),
+                frozenset(viewed_bvids),
+            )
+        return viewed_keys, viewed_bvids
 
     @staticmethod
     def _explore_risk_cluster(row: dict[str, Any]) -> str:
@@ -4199,45 +6039,12 @@ class Database:
         unclassified items (e.g. raw XHS notes) from getting an expression
         and leaking through the serve gate without proper relevance scoring.
         """
-        admission_sql, admission_params = self._pool_admission_sql()
-        guard_sql = _xhs_self_author_guard_sql()
-        guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        cursor = self.conn.execute(
-            f"""
-            SELECT *
-            FROM content_cache
-            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-              AND COALESCE(feedback_type, '') != 'dislike'
-              AND {admission_sql}
-              AND COALESCE(style_key, '') != ''
-              AND COALESCE(topic_group, '') != ''
-              AND (
-                COALESCE(pool_expression, '') = ''
-                OR COALESCE(pool_topic_label, '') = ''
-              )
-              {guard_sql}
-              AND NOT EXISTS (
-                SELECT 1
-                FROM recommendations AS r
-                WHERE r.bvid = content_cache.bvid
-              )
-            ORDER BY
-                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                relevance_score DESC,
-                last_scored_at DESC,
-                view_count DESC,
-                bvid ASC
-            LIMIT ?
-            """,
-            (*admission_params, *guard_params, limit),
+        self._ensure_fresh_read()
+        return self._load_admitted_pending_copy_rows_on(
+            self.conn,
+            xhs_self_nickname=xhs_self_nickname,
+            limit=limit,
         )
-        rows = [dict(row) for row in cursor.fetchall()]
-        rows = self._exclude_viewed_rows(
-            rows,
-            self.get_recent_viewed_content_keys(),
-            limit=len(rows),
-        )
-        return rows[:limit]
 
     def update_pool_copy(
         self,
@@ -4288,6 +6095,7 @@ class Database:
         self,
         bvid: str,
         *,
+        item_key: str = "",
         confidence: float,
         expression: str = "",
         topic: str = "",
@@ -4296,12 +6104,38 @@ class Database:
         """Insert a recommendation history record."""
         cursor = self._execute_write(
             """
-            INSERT INTO recommendations (bvid, expression, topic, confidence, presented)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO recommendations
+                (bvid, item_key, expression, topic, confidence, presented)
+            VALUES (
+                ?,
+                COALESCE(
+                    NULLIF(?, ''),
+                    (SELECT item_key FROM content_cache WHERE bvid = ?),
+                    ?
+                ),
+                ?, ?, ?, ?
+            )
             """,
-            (bvid, expression, topic, confidence, presented),
+            (
+                bvid,
+                item_key.strip(),
+                bvid,
+                self._fallback_recommendation_item_key(bvid),
+                expression,
+                topic,
+                confidence,
+                presented,
+            ),
         )
         return cursor.lastrowid or 0
+
+    @staticmethod
+    def _fallback_recommendation_item_key(bvid: str) -> str:
+        """Build a canonical fallback when no cache identity row is available."""
+        storage_key = bvid.strip()
+        if ":" in storage_key:
+            return storage_key
+        return make_item_key("bilibili", storage_key)
 
     def batch_insert_recommendations(
         self,
@@ -4347,11 +6181,22 @@ class Database:
                         cursor.execute(
                             """
                             INSERT INTO recommendations
-                                (bvid, expression, topic, confidence, presented)
-                            VALUES (?, ?, ?, ?, ?)
+                                (bvid, item_key, expression, topic, confidence, presented)
+                            VALUES (
+                                ?,
+                                COALESCE(
+                                    NULLIF(?, ''),
+                                    (SELECT item_key FROM content_cache WHERE bvid = ?),
+                                    ?
+                                ),
+                                ?, ?, ?, ?
+                            )
                             """,
                             (
                                 str(item.get("bvid", "")),
+                                str(item.get("item_key", "")).strip(),
+                                str(item.get("bvid", "")),
+                                self._fallback_recommendation_item_key(str(item.get("bvid", ""))),
                                 str(item.get("expression", "")),
                                 str(item.get("topic", "")),
                                 float(item.get("confidence", 0.0) or 0.0),
@@ -4446,7 +6291,7 @@ class Database:
         cursor = self.conn.execute(
             """
             SELECT r.feedback_type, c.up_mid, c.up_name, c.topic_key,
-                   c.source, c.title, c.franchise_key
+                   c.topic_group, c.source, c.title, c.franchise_key
             FROM recommendations AS r
             JOIN content_cache AS c ON c.bvid = COALESCE(
                 (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
@@ -4490,7 +6335,19 @@ class Database:
         cursor = self.conn.execute(
             f"""
             SELECT
-                r.*,
+                r.id,
+                r.bvid,
+                COALESCE(NULLIF(r.item_key, ''), c.item_key, '') AS item_key,
+                r.expression,
+                r.topic,
+                r.confidence,
+                r.presented,
+                r.feedback,
+                r.feedback_type,
+                r.feedback_note,
+                r.created_at,
+                r.presented_at,
+                r.feedback_at,
                 COALESCE(c.title, '') AS title,
                 COALESCE(c.up_name, '') AS up_name,
                 COALESCE(c.cover_url, '') AS cover_url,
@@ -4499,6 +6356,8 @@ class Database:
                 COALESCE(c.source_platform, '') AS source_platform,
                 COALESCE(c.content_type, 'video') AS content_type,
                 COALESCE(c.body_text, '') AS body_text,
+                COALESCE(c.published_at, '') AS published_at,
+                COALESCE(c.published_label, '') AS published_label,
                 COALESCE(c.franchise_key, '') AS franchise_key,
                 COALESCE(c.duration, 0) AS duration,
                 COALESCE(c.view_count, 0) AS view_count,
@@ -4508,9 +6367,14 @@ class Database:
                 COALESCE(c.comment_count, 0) AS comment_count,
                 COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
-            LEFT JOIN content_cache AS c ON c.bvid = COALESCE(
-                (SELECT bvid FROM content_cache WHERE bvid = r.bvid),
-                (SELECT bvid FROM content_cache WHERE content_id = r.bvid LIMIT 1)
+            LEFT JOIN content_cache AS c ON c.item_key = COALESCE(
+                NULLIF(r.item_key, ''),
+                (SELECT item_key FROM content_cache WHERE bvid = r.bvid),
+                (
+                    SELECT CASE WHEN COUNT(*) = 1 THEN MIN(item_key) END
+                    FROM content_cache
+                    WHERE content_id = r.bvid
+                )
             )
             WHERE (
                 COALESCE(c.source_platform, '') != 'xiaohongshu'
@@ -4518,7 +6382,7 @@ class Database:
             )
             AND {admission_sql}
             {processed_clause}
-            ORDER BY created_at DESC, id DESC
+            ORDER BY r.created_at DESC, r.id DESC
             LIMIT ?
             """,
             (*admission_params, limit),
@@ -4681,10 +6545,16 @@ class Database:
         )
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Close the database connection and owned SQLite workers."""
         if self._conn:
             self._conn.close()
             self._conn = None
+        for attribute in ("_maintenance_executor", "_serve_executor"):
+            executor = getattr(self, attribute)
+            if executor is None:
+                continue
+            executor.shutdown(wait=True, cancel_futures=True)
+            setattr(self, attribute, None)
 
     def _ensure_llm_usage_cache_columns(self) -> None:
         """Backfill v0.3.28+ prompt-cache columns on existing llm_usage tables."""
@@ -4845,6 +6715,8 @@ class Database:
             "reply_count": "INTEGER DEFAULT 0",
             "retweet_count": "INTEGER DEFAULT 0",
             "bookmark_count": "INTEGER DEFAULT 0",
+            "published_at": "TEXT NOT NULL DEFAULT ''",
+            "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: the discovery_keywords.id that produced this
             # row (NULL for legacy / non-search / flag-off). Nullable, additive.
             "source_keyword_id": "INTEGER",
@@ -4858,6 +6730,219 @@ class Database:
         if added:
             self.conn.execute("UPDATE content_cache SET content_id = bvid WHERE content_id = ''")
 
+    def _ensure_content_identity_columns(self) -> None:
+        """Backfill canonical identities without breaking legacy cache writers.
+
+        Desktop v0.3.166 and older omit ``content_cache.item_key``. A full
+        unique index therefore turns every legacy insert after the first into
+        ``UNIQUE constraint failed`` because the additive column defaults to an
+        empty string. Keep uniqueness for canonical, non-empty identities while
+        allowing legacy rows to remain blank until a current runtime starts and
+        repairs them here.
+        """
+        cache_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        }
+        if "item_key" not in cache_columns:
+            self.conn.execute(
+                "ALTER TABLE content_cache ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+
+        cache_rows = self.conn.execute(
+            """
+            SELECT bvid, item_key, source_platform, content_id, content_url
+            FROM content_cache
+            WHERE item_key = ''
+            """
+        ).fetchall()
+        identity_index = self.conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_content_cache_item_key'
+            """
+        ).fetchone()
+        index_sql = str(identity_index["sql"] or "") if identity_index is not None else ""
+        normalized_index_sql = " ".join(index_sql.lower().split())
+        expected_partial_predicate = "where item_key != ''"
+        index_needs_rebuild = identity_index is not None and not normalized_index_sql.endswith(
+            expected_partial_predicate
+        )
+        # Drop the uniqueness guard while blank identities are expanded. A
+        # blank legacy row can normalize to an identity already held by a
+        # current row; consolidation below must see both rows before the guard
+        # is restored.
+        if cache_rows or index_needs_rebuild:
+            self.conn.execute("DROP INDEX IF EXISTS idx_content_cache_item_key")
+        for row in cache_rows:
+            storage_key = str(row["bvid"] or "").strip()
+            source_platform = str(row["source_platform"] or "").strip()
+            platform = canonical_source_platform(source_platform or "bilibili")
+            content_id = str(row["content_id"] or "").strip()
+            if not source_platform:
+                content_id = storage_key
+            item_key = make_item_key(
+                platform,
+                content_id or storage_key,
+                str(row["content_url"] or ""),
+            )
+            self.conn.execute(
+                "UPDATE content_cache SET item_key = ? WHERE bvid = ?",
+                (item_key, storage_key),
+            )
+
+        recommendation_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(recommendations)").fetchall()
+        }
+        if "item_key" not in recommendation_columns:
+            self.conn.execute(
+                "ALTER TABLE recommendations ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+        self._consolidate_content_identity_duplicates()
+        self.conn.execute(
+            """
+            UPDATE recommendations AS r
+            SET item_key = COALESCE(
+                (SELECT c.item_key FROM content_cache AS c WHERE c.bvid = r.bvid),
+                ''
+            )
+            WHERE r.item_key = ''
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key
+            ON content_cache (item_key)
+            WHERE item_key != ''
+            """
+        )
+        if cache_rows:
+            logger.info(
+                "Repaired %d legacy content-cache row(s) with blank canonical identity",
+                len(cache_rows),
+            )
+        if index_needs_rebuild:
+            logger.info(
+                "Made content-cache identity index compatible with legacy blank-key writers"
+            )
+
+    @staticmethod
+    def _content_identity_metadata_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() in {"", "[]", "{}"}
+        if isinstance(value, (int, float)):
+            return value == 0
+        return False
+
+    def _consolidate_content_identity_duplicates(self) -> None:
+        """Merge legacy cache rows that normalize to one canonical identity."""
+        duplicate_keys = self.conn.execute(
+            """
+            SELECT item_key
+            FROM content_cache
+            WHERE item_key != ''
+            GROUP BY item_key
+            HAVING COUNT(*) > 1
+            ORDER BY item_key
+            """
+        ).fetchall()
+        if not duplicate_keys:
+            return
+
+        columns = [
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        ]
+        merge_columns = [column for column in columns if column not in {"bvid", "item_key"}]
+        for duplicate in duplicate_keys:
+            item_key = str(duplicate["item_key"])
+            members = [
+                dict(row)
+                for row in self.conn.execute(
+                    "SELECT * FROM content_cache WHERE item_key = ? ORDER BY bvid",
+                    (item_key,),
+                ).fetchall()
+            ]
+            canonical_members: list[dict[str, Any]] = []
+            for member in members:
+                if str(member["bvid"]) == item_key:
+                    canonical_members.append(member)
+                    continue
+                platform = canonical_source_platform(
+                    str(member.get("source_platform") or "bilibili")
+                )
+                content_id = str(member.get("content_id") or member.get("bvid") or "")
+                try:
+                    expected_storage_key = content_storage_key(
+                        platform,
+                        content_id,
+                        str(member.get("content_url") or ""),
+                    )
+                except ValueError:
+                    continue
+                if str(member["bvid"]) == expected_storage_key:
+                    canonical_members.append(member)
+            keeper = min(canonical_members or members, key=lambda row: str(row["bvid"]))
+            keeper_bvid = str(keeper["bvid"])
+            merged = dict(keeper)
+            for member in members:
+                for column in merge_columns:
+                    if self._content_identity_metadata_missing(
+                        merged.get(column)
+                    ) and not self._content_identity_metadata_missing(member.get(column)):
+                        merged[column] = member[column]
+
+            changed_columns = [
+                column for column in merge_columns if merged.get(column) != keeper.get(column)
+            ]
+            if changed_columns:
+                assignments = ", ".join(f"{column} = ?" for column in changed_columns)
+                self.conn.execute(
+                    f"UPDATE content_cache SET {assignments} WHERE bvid = ?",
+                    [*(merged[column] for column in changed_columns), keeper_bvid],
+                )
+
+            member_bvids = [str(member["bvid"]) for member in members]
+            self._redirect_legacy_saved_identity(member_bvids, item_key)
+            placeholders = ", ".join("?" for _ in member_bvids)
+            self.conn.execute(
+                f"""
+                UPDATE recommendations
+                SET bvid = ?, item_key = ?
+                WHERE bvid IN ({placeholders}) OR item_key = ?
+                """,
+                [keeper_bvid, item_key, *member_bvids, item_key],
+            )
+            removed_bvids = [bvid for bvid in member_bvids if bvid != keeper_bvid]
+            if removed_bvids:
+                removed_placeholders = ", ".join("?" for _ in removed_bvids)
+                self.conn.execute(
+                    f"DELETE FROM content_cache WHERE bvid IN ({removed_placeholders})",
+                    removed_bvids,
+                )
+
+    def _redirect_legacy_saved_identity(self, storage_keys: list[str], item_key: str) -> None:
+        """Preserve legacy saved-list identity before duplicate cache rows are removed."""
+        if not storage_keys:
+            return
+        placeholders = ", ".join("?" for _ in storage_keys)
+        for table_name in ("watch_later", "favorites"):
+            exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            if exists is None:
+                continue
+            self._ensure_legacy_saved_item_key_column(table_name)
+            self.conn.execute(
+                f"UPDATE {table_name} SET item_key = ? WHERE bvid IN ({placeholders})",
+                [item_key, *storage_keys],
+            )
+
     def _ensure_discovery_candidate_columns(self) -> None:
         """Backfill discovery-candidate lifecycle columns for existing databases."""
 
@@ -4869,6 +6954,7 @@ class Database:
             "score_threshold": "REAL NOT NULL DEFAULT 0.0",
             "eval_attempts": "INTEGER NOT NULL DEFAULT 0",
             "batch_eval_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "claim_token": "TEXT",
             "body_text": "TEXT NOT NULL DEFAULT ''",
             "favorite_count": "INTEGER NOT NULL DEFAULT 0",
             "collect_count": "INTEGER NOT NULL DEFAULT 0",
@@ -4878,6 +6964,8 @@ class Database:
             "reply_count": "INTEGER NOT NULL DEFAULT 0",
             "retweet_count": "INTEGER NOT NULL DEFAULT 0",
             "bookmark_count": "INTEGER NOT NULL DEFAULT 0",
+            "published_at": "TEXT NOT NULL DEFAULT ''",
+            "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
             "source_keyword_id": "INTEGER",
         }
@@ -4909,12 +6997,29 @@ class Database:
                 )
 
     def _ensure_recommendation_read_indexes(self) -> None:
-        """Create indexes used by recommendation and activity-feed reads."""
+        """Create indexes used by recommendation and activity-feed reads.
+
+        Pool readiness and maintenance repeatedly exclude rows already present
+        in ``recommendations`` by BVID.  Without the BVID index, each
+        ``NOT EXISTS`` probe scans the full recommendation history and can hold
+        the API event loop for tens of seconds on a mature database.
+        """
         self.conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_recommendations_created_id
                 ON recommendations (created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_bvid
+                ON recommendations (bvid);
+            CREATE INDEX IF NOT EXISTS idx_events_type_id
+                ON events (event_type, id DESC);
             CREATE INDEX IF NOT EXISTS idx_content_cache_content_id
                 ON content_cache (content_id);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_content_cache_item_key
+                ON content_cache (item_key)
+                WHERE item_key != '';
+            CREATE INDEX IF NOT EXISTS idx_content_cache_item_key_lookup
+                ON content_cache (item_key);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_item_key
+                ON recommendations (item_key);
         """)
 
     def _ensure_source_recipes_table(self) -> None:
@@ -4976,11 +7081,13 @@ class Database:
             CREATE TABLE IF NOT EXISTS watch_later (
                 bvid     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                note     TEXT DEFAULT ''
+                note     TEXT DEFAULT '',
+                item_key TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_watch_later_added
                 ON watch_later(added_at DESC);
         """)
+        self._ensure_legacy_saved_item_key_column("watch_later")
 
     def _ensure_discovery_keywords_table(self) -> None:
         """Create the unified search-keyword store + planner single-flight lock.
@@ -7106,60 +9213,61 @@ class Database:
 
     def add_to_watch_later(self, bvid: str, note: str = "") -> bool:
         """Bookmark a video. Returns True if newly inserted, False if updated."""
+        item = self._bilibili_saved_item_input(bvid)
+        self.upsert_saved_membership("watch_later", item, note)
         self._execute_write(
             """
-            INSERT INTO watch_later (bvid, note)
-            VALUES (?, ?)
+            INSERT INTO watch_later (bvid, note, item_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 added_at = CURRENT_TIMESTAMP,
-                note = excluded.note
+                note = excluded.note,
+                item_key = excluded.item_key
             """,
-            (bvid.strip(), note),
+            (bvid.strip(), note, item.item_key),
         )
         return self.conn.total_changes > 0
 
     def remove_from_watch_later(self, bvid: str) -> bool:
         """Remove a bookmark. Returns True if a row was deleted."""
-        self._execute_write(
-            "DELETE FROM watch_later WHERE bvid = ?",
-            (bvid.strip(),),
-        )
-        return self.conn.total_changes > 0
+        item_key = self._resolve_legacy_saved_item_key("watch_later", bvid)
+        if item_key is None:
+            return False
+        return self.remove_saved_membership("watch_later", item_key)
 
     def is_in_watch_later(self, bvid: str) -> bool:
         """Check whether a video is bookmarked."""
-        row = self.conn.execute(
-            "SELECT 1 FROM watch_later WHERE bvid = ?",
-            (bvid.strip(),),
-        ).fetchone()
-        return row is not None
+        item_key = self._resolve_legacy_saved_item_key("watch_later", bvid)
+        return (
+            item_key is not None and self.get_saved_membership("watch_later", item_key) is not None
+        )
 
     def count_watch_later(self) -> int:
         """Return total number of bookmarked videos."""
-        row = self.conn.execute("SELECT COUNT(*) FROM watch_later").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM saved_memberships WHERE list_kind = ?",
+            ("watch_later",),
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def list_watch_later(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return bookmarked videos with content_cache metadata, newest first."""
-        cursor = self.conn.execute(
-            """
-            SELECT
-                w.bvid,
-                w.added_at,
-                w.note,
-                COALESCE(c.title, '') AS title,
-                COALESCE(c.up_name, '') AS up_name,
-                COALESCE(c.cover_url, '') AS cover_url,
-                COALESCE(c.content_url, '') AS content_url,
-                COALESCE(c.source_platform, '') AS source_platform
-            FROM watch_later AS w
-            LEFT JOIN content_cache AS c ON c.bvid = w.bvid
-            ORDER BY w.added_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            {
+                "bvid": row["content_id"],
+                "item_key": row["item_key"],
+                "content_id": row["content_id"],
+                "added_at": row["added_at"],
+                "note": row["note"],
+                "title": row["title"],
+                "up_name": row["author_name"],
+                "cover_url": row["cover_url"],
+                "content_url": row["content_url"],
+                "source_platform": row["source_platform"],
+                "content_type": row["content_type"],
+            }
+            for row in self.list_saved_memberships("watch_later", limit, offset)
+        ]
 
     def _ensure_favorites_table(self) -> None:
         """Create the favorites (收藏夹) table for existing databases.
@@ -7172,11 +9280,2105 @@ class Database:
             CREATE TABLE IF NOT EXISTS favorites (
                 bvid     TEXT PRIMARY KEY,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                note     TEXT DEFAULT ''
+                note     TEXT DEFAULT '',
+                item_key TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_favorites_added
                 ON favorites(added_at DESC);
         """)
+        self._ensure_legacy_saved_item_key_column("favorites")
+
+    def _ensure_legacy_saved_item_key_column(self, table_name: str) -> None:
+        """Add the stable normalized identity link to a trusted legacy saved table."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if "item_key" not in columns:
+            self.conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN item_key TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _ensure_saved_sync_tables(self) -> None:
+        """Create normalized saved-content tables and import legacy saved rows once."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS saved_items (
+                item_key        TEXT PRIMARY KEY,
+                source_platform TEXT NOT NULL,
+                content_id      TEXT NOT NULL,
+                content_url     TEXT NOT NULL DEFAULT '',
+                content_type    TEXT NOT NULL DEFAULT 'video',
+                title           TEXT NOT NULL DEFAULT '',
+                author_name     TEXT NOT NULL DEFAULT '',
+                cover_url       TEXT NOT NULL DEFAULT '',
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS saved_memberships (
+                list_kind TEXT NOT NULL CHECK (list_kind IN ('favorite', 'watch_later')),
+                item_key  TEXT NOT NULL REFERENCES saved_items(item_key) ON DELETE CASCADE,
+                note      TEXT NOT NULL DEFAULT '',
+                added_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (list_kind, item_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_memberships_item_key
+                ON saved_memberships(item_key);
+            CREATE TABLE IF NOT EXISTS native_save_states (
+                list_kind          TEXT NOT NULL,
+                item_key           TEXT NOT NULL,
+                requested_action   TEXT NOT NULL,
+                resolved_action    TEXT NOT NULL DEFAULT '',
+                resolved_target    TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN (
+                        'pending', 'syncing', 'synced', 'already_synced',
+                        'login_required', 'unsupported', 'rate_limited',
+                        'extension_required', 'failed'
+                    )),
+                task_id            TEXT NOT NULL DEFAULT '',
+                execution_id       TEXT NOT NULL DEFAULT '',
+                task_claimed_at    TIMESTAMP,
+                task_started_at    TIMESTAMP,
+                task_heartbeat_at  TIMESTAMP,
+                task_runner_id     TEXT NOT NULL DEFAULT '',
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                last_attempt_at    TIMESTAMP,
+                synced_at          TIMESTAMP,
+                PRIMARY KEY (list_kind, item_key),
+                FOREIGN KEY (list_kind, item_key)
+                    REFERENCES saved_memberships(list_kind, item_key) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS native_save_tasks (
+                task_id     TEXT PRIMARY KEY,
+                list_kind   TEXT NOT NULL CHECK (list_kind IN ('favorite', 'watch_later')),
+                trigger     TEXT NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS native_save_task_items (
+                task_id            TEXT NOT NULL
+                    REFERENCES native_save_tasks(task_id) ON DELETE CASCADE,
+                item_key           TEXT NOT NULL,
+                ordinal            INTEGER NOT NULL,
+                requested_action   TEXT NOT NULL,
+                resolved_action    TEXT NOT NULL DEFAULT '',
+                resolved_target    TEXT NOT NULL DEFAULT '',
+                status             TEXT NOT NULL
+                    CHECK (status IN (
+                        'pending', 'syncing', 'synced', 'already_synced',
+                        'login_required', 'unsupported', 'rate_limited',
+                        'extension_required', 'failed'
+                    )),
+                is_live            INTEGER NOT NULL DEFAULT 0 CHECK (is_live IN (0, 1)),
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                updated_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (task_id, item_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_native_save_task_items_order
+                ON native_save_task_items(task_id, ordinal, item_key);
+            CREATE TABLE IF NOT EXISTS extension_native_save_jobs (
+                job_id             TEXT PRIMARY KEY,
+                platform           TEXT NOT NULL,
+                platform_slug      TEXT NOT NULL,
+                item_key           TEXT NOT NULL,
+                content_id         TEXT NOT NULL,
+                content_url        TEXT NOT NULL,
+                content_type       TEXT NOT NULL,
+                requested_action   TEXT NOT NULL
+                    CHECK(requested_action IN ('favorite', 'watch_later')),
+                resolved_action    TEXT NOT NULL
+                    CHECK(resolved_action IN ('favorite', 'watch_later')),
+                target_label       TEXT NOT NULL,
+                status             TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending', 'in_progress', 'synced', 'already_synced',
+                        'login_required', 'rate_limited', 'unsupported', 'failed',
+                        'extension_required', 'cancelled'
+                    )),
+                claimed_at         TIMESTAMP,
+                completed_at       TIMESTAMP,
+                last_error_code    TEXT NOT NULL DEFAULT '',
+                last_error_message TEXT NOT NULL DEFAULT '',
+                created_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at         TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_extension_native_save_jobs_claim
+                ON extension_native_save_jobs(platform_slug, status, created_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_extension_native_save_jobs_active_item
+                ON extension_native_save_jobs(platform, item_key, requested_action)
+                WHERE status IN ('pending', 'in_progress');
+            CREATE TABLE IF NOT EXISTS saved_sync_migrations (
+                name       TEXT PRIMARY KEY,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        native_state_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(native_save_states)").fetchall()
+        }
+        if "execution_id" not in native_state_columns:
+            self.conn.execute(
+                "ALTER TABLE native_save_states ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "task_runner_id" not in native_state_columns:
+            self.conn.execute(
+                "ALTER TABLE native_save_states ADD COLUMN task_runner_id TEXT NOT NULL DEFAULT ''"
+            )
+        for column_name in ("task_claimed_at", "task_started_at", "task_heartbeat_at"):
+            if column_name not in native_state_columns:
+                self.conn.execute(
+                    f"ALTER TABLE native_save_states ADD COLUMN {column_name} TIMESTAMP"
+                )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_claimed_at = CURRENT_TIMESTAMP
+            WHERE status = 'pending' AND task_id != '' AND task_claimed_at IS NULL
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_heartbeat_at = CURRENT_TIMESTAMP
+            WHERE status IN ('pending', 'syncing')
+              AND task_id != '' AND task_started_at IS NOT NULL
+              AND task_heartbeat_at IS NULL
+            """
+        )
+        self.conn.execute(
+            """
+            UPDATE native_save_states
+            SET task_runner_id = ?
+            WHERE status IN ('pending', 'syncing')
+              AND task_id != '' AND task_started_at IS NOT NULL
+              AND task_runner_id = ''
+              AND task_heartbeat_at IS NOT NULL
+            """,
+            (_LEGACY_NATIVE_SAVE_RUNNER_ID,),
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO native_save_tasks (task_id, list_kind, trigger, created_at)
+            SELECT task_id, MIN(list_kind), 'legacy',
+                   COALESCE(MIN(task_claimed_at), MIN(last_attempt_at), CURRENT_TIMESTAMP)
+            FROM native_save_states
+            WHERE task_id != ''
+            GROUP BY task_id
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO native_save_task_items (
+                task_id, item_key, ordinal, requested_action, resolved_action,
+                resolved_target, status, is_live, last_error_code, last_error_message,
+                updated_at
+            )
+            SELECT
+                task_id,
+                item_key,
+                ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY item_key) - 1,
+                requested_action,
+                resolved_action,
+                resolved_target,
+                status,
+                CASE WHEN status IN ('pending', 'syncing') THEN 1 ELSE 0 END,
+                last_error_code,
+                last_error_message,
+                COALESCE(last_attempt_at, task_claimed_at, CURRENT_TIMESTAMP)
+            FROM native_save_states
+            WHERE task_id != ''
+            """
+        )
+        self.conn.commit()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            migrated = self.conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                ("legacy_saved_tables_v1",),
+            ).fetchone()
+            if migrated is None:
+                self._migrate_legacy_saved_list("watch_later", "watch_later")
+                self._migrate_legacy_saved_list("favorites", "favorite")
+                self.conn.execute(
+                    "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                    ("legacy_saved_tables_v1",),
+                )
+            stable_links = self.conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                ("legacy_saved_item_keys_v2",),
+            ).fetchone()
+            if stable_links is None:
+                self._backfill_legacy_saved_item_keys("watch_later", "watch_later")
+                self._backfill_legacy_saved_item_keys("favorites", "favorite")
+                self.conn.execute(
+                    "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                    ("legacy_saved_item_keys_v2",),
+                )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        self.migrate_legacy_native_save_unsupported()
+
+    def migrate_legacy_native_save_unsupported(self) -> int:
+        """Mark only pre-adapter unsupported rows for the six extension sources."""
+        migration_name = "extension_adapter_missing_unsupported_v1"
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            migrated = conn.execute(
+                "SELECT 1 FROM saved_sync_migrations WHERE name = ?",
+                (migration_name,),
+            ).fetchone()
+            if migrated is not None:
+                conn.commit()
+                return 0
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET last_error_code = 'unsupported_adapter_missing',
+                    last_error_message =
+                        'Native save adapter was unavailable; retry is now supported'
+                WHERE status = 'unsupported'
+                  AND last_error_code IN ('', 'unsupported')
+                  AND item_key IN (
+                      SELECT item_key
+                      FROM saved_items
+                      WHERE source_platform IN (
+                          'youtube', 'xiaohongshu', 'douyin',
+                          'twitter', 'zhihu', 'reddit'
+                      )
+                  )
+                """
+            )
+            conn.execute(
+                "INSERT INTO saved_sync_migrations (name) VALUES (?)",
+                (migration_name,),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_or_reuse_extension_native_save_job(
+        self, job: ExtensionNativeSaveJob
+    ) -> dict[str, Any]:
+        """Atomically persist or reuse one active extension native-save job."""
+        payload = _validated_extension_native_save_job(job)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                """
+                SELECT * FROM extension_native_save_jobs
+                WHERE platform = ? AND item_key = ? AND requested_action = ?
+                  AND status IN ('pending', 'in_progress')
+                """,
+                (
+                    payload["platform"],
+                    payload["item_key"],
+                    payload["requested_action"],
+                ),
+            ).fetchone()
+            if active is None:
+                conn.execute(
+                    """
+                    INSERT INTO extension_native_save_jobs (
+                        job_id, platform, platform_slug, item_key, content_id,
+                        content_url, content_type, requested_action, resolved_action,
+                        target_label
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["job_id"],
+                        payload["platform"],
+                        payload["platform_slug"],
+                        payload["item_key"],
+                        payload["content_id"],
+                        payload["content_url"],
+                        payload["content_type"],
+                        payload["requested_action"],
+                        payload["resolved_action"],
+                        payload["target_label"],
+                    ),
+                )
+                active = conn.execute(
+                    "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
+                    (payload["job_id"],),
+                ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if active is None:
+            raise RuntimeError("extension native-save job insert did not persist")
+        return dict(active)
+
+    def claim_extension_native_save_job(
+        self, platform_slug: str, lease_seconds: float
+    ) -> dict[str, Any] | None:
+        """Claim the oldest pending platform job after expiring uncertain stale claims."""
+        slug = self._validated_extension_native_save_slug(platform_slug)
+        lease = self._validated_extension_native_save_lease(lease_seconds)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_stale_extension_native_save_jobs_in_transaction(conn, slug, lease)
+            pending = conn.execute(
+                """
+                SELECT job_id FROM extension_native_save_jobs
+                WHERE platform_slug = ? AND status = 'pending'
+                ORDER BY created_at, job_id
+                LIMIT 1
+                """,
+                (slug,),
+            ).fetchone()
+            claimed = None
+            if pending is not None:
+                job_id = str(pending["job_id"])
+                cursor = conn.execute(
+                    """
+                    UPDATE extension_native_save_jobs
+                    SET status = 'in_progress',
+                        claimed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                    WHERE job_id = ? AND status = 'pending'
+                    """,
+                    (job_id,),
+                )
+                if cursor.rowcount == 1:
+                    claimed = conn.execute(
+                        "SELECT * FROM extension_native_save_jobs WHERE job_id = ?",
+                        (job_id,),
+                    ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return dict(claimed) if claimed is not None else None
+
+    def complete_extension_native_save_job(
+        self,
+        job_id: str,
+        platform_slug: str,
+        item_key: str,
+        status: str,
+        error_code: str,
+        error_message: str,
+    ) -> bool:
+        """Complete one claimed job when slug, UUID, and item identity match."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        safe_slug = self._validated_extension_native_save_slug(platform_slug)
+        safe_item_key = _validated_extension_native_save_text(item_key, "item_key", max_length=768)
+        safe_status, safe_code, safe_message = _validated_extension_native_save_result(
+            status, error_code, error_message
+        )
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = ?, last_error_code = ?, last_error_message = ?,
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND platform_slug = ? AND item_key = ?
+                  AND status = 'in_progress'
+                """,
+                (safe_status, safe_code, safe_message, safe_job_id, safe_slug, safe_item_key),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def cancel_unclaimed_extension_native_save_job(self, job_id: str) -> bool:
+        """Cancel a pending job without touching a possibly state-changing claimed job."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = 'cancelled',
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND status = 'pending'
+                """,
+                (safe_job_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def mark_unclaimed_extension_native_save_job_extension_required(self, job_id: str) -> bool:
+        """Durably mark a still-pending job when no extension claims it in time."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE extension_native_save_jobs
+                SET status = 'extension_required',
+                    last_error_code = 'extension_unavailable',
+                    last_error_message = 'OpenBiliClaw extension is unavailable',
+                    completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE job_id = ? AND status = 'pending'
+                """,
+                (safe_job_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+        finally:
+            conn.close()
+
+    def get_extension_native_save_job(self, job_id: str) -> dict[str, Any] | None:
+        """Return a copied durable extension job row by canonical UUID."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                "SELECT * FROM extension_native_save_jobs WHERE job_id = ?", (safe_job_id,)
+            ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def owns_extension_native_save_job(self, job_id: str, platform_slug: str | None = None) -> bool:
+        """Return global job ownership, optionally restricted to one exact slug."""
+        safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
+        conn = self.open_connection()
+        if platform_slug is None:
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ?",
+                    (safe_job_id,),
+                ).fetchone()
+                return row is not None
+            finally:
+                conn.close()
+        try:
+            safe_slug = self._validated_extension_native_save_slug(platform_slug)
+            row = conn.execute(
+                "SELECT 1 FROM extension_native_save_jobs WHERE job_id = ? AND platform_slug = ?",
+                (safe_job_id, safe_slug),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def expire_stale_extension_native_save_jobs(
+        self, platform_slug: str, lease_seconds: float
+    ) -> int:
+        """Fail stale claimed writes without returning them to the pending queue."""
+        slug = self._validated_extension_native_save_slug(platform_slug)
+        lease = self._validated_extension_native_save_lease(lease_seconds)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            count = self._expire_stale_extension_native_save_jobs_in_transaction(conn, slug, lease)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return count
+
+    def _expire_stale_extension_native_save_jobs_in_transaction(
+        self, conn: sqlite3.Connection, platform_slug: str, lease_seconds: float
+    ) -> int:
+        cursor = conn.execute(
+            """
+            UPDATE extension_native_save_jobs
+            SET status = 'failed',
+                last_error_code = 'extension_task_timeout',
+                last_error_message = 'Extension native-save task timed out',
+                completed_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE platform_slug = ? AND status = 'in_progress'
+              AND claimed_at IS NOT NULL
+              AND (JULIANDAY('now') - JULIANDAY(claimed_at)) * 86400.0 >= ?
+            """,
+            (platform_slug, lease_seconds),
+        )
+        return cursor.rowcount
+
+    @staticmethod
+    def _validated_extension_native_save_slug(platform_slug: object) -> str:
+        slug = _validated_extension_native_save_text(
+            platform_slug, "platform_slug", max_length=16
+        ).lower()
+        if slug not in _EXTENSION_NATIVE_SAVE_SLUGS:
+            raise ValueError("platform_slug is invalid")
+        return slug
+
+    @staticmethod
+    def _validated_extension_native_save_lease(lease_seconds: object) -> float:
+        if isinstance(lease_seconds, bool):
+            raise ValueError("lease_seconds must be a positive finite number")
+        try:
+            lease = float(cast("Any", lease_seconds))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("lease_seconds must be a positive finite number") from exc
+        if not math.isfinite(lease) or lease <= 0:
+            raise ValueError("lease_seconds must be a positive finite number")
+        return lease
+
+    def _migrate_legacy_saved_list(self, table_name: str, list_kind: SavedListKind) -> None:
+        """Copy one trusted legacy saved table into normalized storage."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        platform_sql, content_id_sql, item_key_sql = self._legacy_saved_identity_sql()
+        cache_join_sql = """
+            c.bvid = COALESCE(
+                (SELECT exact.bvid FROM content_cache AS exact WHERE exact.bvid = legacy.bvid),
+                (
+                    SELECT linked.bvid
+                    FROM content_cache AS linked
+                    WHERE linked.item_key = NULLIF(TRIM(legacy.item_key), '')
+                )
+            )
+        """
+
+        self.conn.execute(
+            f"""
+            INSERT OR IGNORE INTO saved_items (
+                item_key, source_platform, content_id, content_url, content_type,
+                title, author_name, cover_url, created_at, updated_at
+            )
+            SELECT
+                {item_key_sql},
+                {platform_sql},
+                {content_id_sql},
+                COALESCE(c.content_url, ''),
+                COALESCE(NULLIF(c.content_type, ''), 'video'),
+                COALESCE(c.title, ''),
+                COALESCE(NULLIF(c.author_name, ''), c.up_name, ''),
+                COALESCE(c.cover_url, ''),
+                legacy.added_at,
+                legacy.added_at
+            FROM {table_name} AS legacy
+            LEFT JOIN content_cache AS c ON {cache_join_sql}
+            """
+        )
+        self.conn.execute(
+            f"""
+            INSERT OR IGNORE INTO saved_memberships (list_kind, item_key, note, added_at)
+            SELECT ?, {item_key_sql}, COALESCE(legacy.note, ''), legacy.added_at
+            FROM {table_name} AS legacy
+            LEFT JOIN content_cache AS c ON {cache_join_sql}
+            """,
+            (list_kind,),
+        )
+        self._backfill_legacy_saved_item_keys(table_name, list_kind)
+
+    @staticmethod
+    def _legacy_saved_identity_sql() -> tuple[str, str, str]:
+        """Return shared SQL expressions for canonicalizing one joined legacy saved row."""
+        complete_identity_sql = """
+            NULLIF(TRIM(c.source_platform), '') IS NOT NULL
+            AND NULLIF(TRIM(c.content_id), '') IS NOT NULL
+        """
+        platform_sql = f"""
+            CASE WHEN {complete_identity_sql} THEN
+                CASE LOWER(TRIM(c.source_platform))
+                    WHEN 'bili' THEN 'bilibili'
+                    WHEN 'xhs' THEN 'xiaohongshu'
+                    WHEN 'dy' THEN 'douyin'
+                    WHEN 'yt' THEN 'youtube'
+                    WHEN 'x' THEN 'twitter'
+                    WHEN 'zh' THEN 'zhihu'
+                    WHEN 'rd' THEN 'reddit'
+                    ELSE LOWER(TRIM(c.source_platform))
+                END
+            ELSE 'bilibili'
+            END
+        """
+        content_id_sql = (
+            f"CASE WHEN {complete_identity_sql} THEN TRIM(c.content_id) ELSE legacy.bvid END"
+        )
+        item_key_sql = f"({platform_sql}) || ':' || ({content_id_sql})"
+        return platform_sql, content_id_sql, item_key_sql
+
+    def _backfill_legacy_saved_item_keys(
+        self,
+        table_name: str,
+        list_kind: SavedListKind,
+    ) -> None:
+        """Persist the migration-time identity link without creating memberships."""
+        if table_name not in {"watch_later", "favorites"}:
+            raise ValueError(f"unsupported legacy saved table: {table_name}")
+        _, _, item_key_sql = self._legacy_saved_identity_sql()
+        self.conn.execute(
+            f"""
+            UPDATE {table_name} AS legacy
+            SET item_key = COALESCE(
+                (
+                    SELECT {item_key_sql}
+                    FROM content_cache AS c
+                    JOIN saved_memberships AS m
+                      ON m.list_kind = ? AND m.item_key = ({item_key_sql})
+                    WHERE c.bvid = legacy.bvid
+                    LIMIT 1
+                ),
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.list_kind = ?
+                      AND m.item_key = 'bilibili:' || legacy.bvid
+                ) THEN 'bilibili:' || legacy.bvid ELSE '' END
+            )
+            WHERE item_key = ''
+            """,
+            (list_kind, list_kind),
+        )
+
+    @staticmethod
+    def _saved_list_kind(value: str) -> SavedListKind:
+        list_kind = value.strip()
+        if list_kind not in {"favorite", "watch_later"}:
+            raise ValueError("list_kind must be 'favorite' or 'watch_later'")
+        return cast("SavedListKind", list_kind)
+
+    @staticmethod
+    def _native_task_id(value: str) -> str:
+        task_id = value.strip()
+        if not task_id:
+            raise ValueError("task_id must not be blank")
+        return task_id
+
+    @staticmethod
+    def _native_execution_id(value: str) -> str:
+        execution_id = value.strip()
+        if not execution_id:
+            raise ValueError("execution_id must not be blank")
+        return execution_id
+
+    @staticmethod
+    def _native_runner_id(value: str) -> str:
+        runner_id = value.strip()
+        if not runner_id:
+            raise ValueError("runner_id must not be blank")
+        if runner_id.startswith(_NATIVE_INTERNAL_RUNNER_PREFIX):
+            raise ValueError("runner_id uses a reserved internal prefix")
+        return runner_id
+
+    def _bilibili_saved_item_input(self, bvid: str) -> SavedItemInput:
+        """Build a Bilibili compatibility input with any cached metadata snapshot."""
+        content_id = bvid.strip()
+        row = self.conn.execute(
+            """
+            SELECT title, up_name, author_name, cover_url, content_url, content_type
+            FROM content_cache
+            WHERE bvid = ?
+            """,
+            (content_id,),
+        ).fetchone()
+        if row is None:
+            return SavedItemInput(source_platform="bilibili", content_id=content_id)
+        return SavedItemInput(
+            source_platform="bilibili",
+            content_id=content_id,
+            content_url=str(row["content_url"] or ""),
+            content_type=str(row["content_type"] or "video"),
+            title=str(row["title"] or ""),
+            author_name=str(row["author_name"] or row["up_name"] or ""),
+            cover_url=str(row["cover_url"] or ""),
+        )
+
+    def _resolve_legacy_saved_item_key(self, list_kind: str, content_id: str) -> str | None:
+        """Resolve a legacy raw-ID removal to one unambiguous normalized membership."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_content_id = content_id.strip()
+        bilibili_key = f"bilibili:{normalized_content_id}"
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT m.item_key
+            FROM saved_memberships AS m
+            JOIN saved_items AS i ON i.item_key = m.item_key
+            WHERE m.list_kind = ?
+              AND (m.item_key = ? OR i.content_id = ?)
+            ORDER BY CASE WHEN m.item_key = ? THEN 0 ELSE 1 END, m.item_key
+            """,
+            (normalized_kind, bilibili_key, normalized_content_id, bilibili_key),
+        ).fetchall()
+        if rows and str(rows[0]["item_key"]) == bilibili_key:
+            return bilibili_key
+        if len(rows) == 1:
+            return str(rows[0]["item_key"])
+        if len(rows) > 1:
+            return None
+        return bilibili_key
+
+    @staticmethod
+    def _saved_membership_select() -> str:
+        return """
+            SELECT
+                m.list_kind,
+                i.item_key,
+                i.source_platform,
+                i.content_id,
+                i.content_url,
+                i.content_type,
+                i.title,
+                i.author_name,
+                i.cover_url,
+                i.created_at,
+                i.updated_at,
+                m.note,
+                m.added_at,
+                COALESCE(n.requested_action, '') AS requested_action,
+                COALESCE(n.resolved_action, '') AS resolved_action,
+                COALESCE(n.resolved_target, '') AS resolved_target,
+                COALESCE(n.status, 'pending') AS sync_status,
+                COALESCE(n.task_id, '') AS sync_task_id,
+                COALESCE(n.last_error_code, '') AS last_error_code,
+                COALESCE(n.last_error_message, '') AS last_error_message,
+                n.last_attempt_at,
+                n.synced_at
+            FROM saved_memberships AS m
+            JOIN saved_items AS i ON i.item_key = m.item_key
+            LEFT JOIN native_save_states AS n
+                ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+        """
+
+    def upsert_saved_membership(
+        self,
+        list_kind: str,
+        item: SavedItemInput,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """Atomically upsert an item snapshot and its local list membership."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        item_key = item.item_key
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO saved_items (
+                    item_key, source_platform, content_id, content_url, content_type,
+                    title, author_name, cover_url
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(item_key) DO UPDATE SET
+                    source_platform = excluded.source_platform,
+                    content_id = excluded.content_id,
+                    content_url = excluded.content_url,
+                    content_type = excluded.content_type,
+                    title = excluded.title,
+                    author_name = excluded.author_name,
+                    cover_url = excluded.cover_url,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    item_key,
+                    item.platform,
+                    item.content_id.strip(),
+                    item.content_url.strip(),
+                    item.content_type.strip() or "video",
+                    item.title.strip(),
+                    item.author_name.strip(),
+                    item.cover_url.strip(),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO saved_memberships (list_kind, item_key, note)
+                VALUES (?, ?, ?)
+                ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                    note = excluded.note,
+                    added_at = CURRENT_TIMESTAMP
+                """,
+                (normalized_kind, item_key, note),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        row = self.get_saved_membership(normalized_kind, item_key)
+        if row is None:  # pragma: no cover - transaction succeeded but row vanished externally
+            raise RuntimeError("saved membership disappeared after upsert")
+        return row
+
+    def remove_saved_membership(self, list_kind: str, item_key: str) -> bool:
+        """Remove a normalized membership and any matching legacy compatibility row."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        legacy_table = "favorites" if normalized_kind == "favorite" else "watch_later"
+        legacy_bvid = (
+            normalized_key.removeprefix("bilibili:")
+            if normalized_key.startswith("bilibili:")
+            else None
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active_state = conn.execute(
+                """
+                SELECT task_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                  AND status IN ('pending', 'syncing') AND task_id != ''
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if active_state is not None:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'not_saved_locally',
+                        last_error_message = 'Item is not saved locally',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status IN ('pending', 'syncing')
+                    """,
+                    (str(active_state["task_id"]), normalized_key),
+                )
+            cursor = conn.execute(
+                "DELETE FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            )
+            removed = int(cursor.rowcount or 0) > 0
+            direct_bilibili_clause = "bvid = ? OR" if legacy_bvid is not None else ""
+            legacy_params = (legacy_bvid, normalized_key) if legacy_bvid else (normalized_key,)
+            legacy_cursor = conn.execute(
+                f"""
+                DELETE FROM {legacy_table}
+                WHERE {direct_bilibili_clause} item_key = ?
+                """,
+                legacy_params,
+            )
+            removed = removed or int(legacy_cursor.rowcount or 0) > 0
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        self._ensure_fresh_read()
+        return removed
+
+    def get_saved_membership(self, list_kind: str, item_key: str) -> dict[str, Any] | None:
+        """Return one normalized membership with its current native-sync state."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            self._saved_membership_select() + " WHERE m.list_kind = ? AND m.item_key = ?",
+            (normalized_kind, item_key.strip()),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_saved_memberships(
+        self,
+        list_kind: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List normalized memberships newest first with native-sync state."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            self._saved_membership_select()
+            + " WHERE m.list_kind = ? ORDER BY m.added_at DESC, m.item_key ASC LIMIT ? OFFSET ?",
+            (normalized_kind, limit, offset),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def upsert_native_save_state(
+        self,
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+        resolved_action: str = "",
+        resolved_target: str = "",
+        status: str = "pending",
+        task_id: str = "",
+        execution_id: str = "",
+        last_error_code: str = "",
+        last_error_message: str = "",
+    ) -> None:
+        """Persist the latest native-save routing and execution state for one item."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        normalized_task_id = task_id.strip()
+        if not isinstance(status, str) or status not in NATIVE_SAVE_STATUSES:
+            raise ValueError("invalid native save status")
+        if task_id and not normalized_task_id:
+            raise ValueError("task_id must not be blank")
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            membership = conn.execute(
+                "SELECT 1 FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if membership is None:
+                raise ValueError(
+                    f"saved membership does not exist: {normalized_kind}/{normalized_key}"
+                )
+            if execution_id or status == "syncing" or (status == "pending" and normalized_task_id):
+                raise ValueError("active task ownership must use the atomic claim APIs")
+            current = conn.execute(
+                """
+                SELECT status, task_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if (
+                current is not None
+                and str(current["status"]) in {"pending", "syncing"}
+                and str(current["task_id"])
+            ):
+                raise ValueError("active task ownership must use the atomic claim APIs")
+            if current is not None and status == "pending" and str(current["status"]) != "pending":
+                raise ValueError("invalid native save status transition to pending")
+            conn.execute(
+                """
+                INSERT INTO native_save_states (
+                    list_kind, item_key, requested_action, resolved_action, resolved_target,
+                    status, task_id, execution_id, last_error_code, last_error_message,
+                    last_attempt_at, synced_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    CASE WHEN ? = 'pending' THEN NULL ELSE CURRENT_TIMESTAMP END,
+                    CASE WHEN ? IN ('synced', 'already_synced')
+                        THEN CURRENT_TIMESTAMP ELSE NULL END
+                )
+                ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                    requested_action = excluded.requested_action,
+                    resolved_action = excluded.resolved_action,
+                    resolved_target = excluded.resolved_target,
+                    status = excluded.status,
+                    task_id = excluded.task_id,
+                    execution_id = excluded.execution_id,
+                    last_error_code = excluded.last_error_code,
+                    last_error_message = excluded.last_error_message,
+                    last_attempt_at = CASE
+                        WHEN excluded.status = 'pending' THEN native_save_states.last_attempt_at
+                        ELSE CURRENT_TIMESTAMP
+                    END,
+                    synced_at = CASE
+                        WHEN excluded.status IN ('synced', 'already_synced')
+                            THEN CURRENT_TIMESTAMP
+                        ELSE native_save_states.synced_at
+                    END
+                """,
+                (
+                    normalized_kind,
+                    normalized_key,
+                    requested_action,
+                    resolved_action,
+                    resolved_target,
+                    status,
+                    normalized_task_id,
+                    "",
+                    last_error_code,
+                    last_error_message,
+                    status,
+                    status,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def ensure_native_save_state(
+        self,
+        list_kind: str,
+        item_key: str,
+        requested_action: str,
+    ) -> dict[str, Any]:
+        """Insert a pending state only when absent and return the effective state.
+
+        Existing active, claimed, syncing, retryable, and terminal rows are never
+        modified. This closes the local-save/task-claim read-then-write race.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            membership = conn.execute(
+                "SELECT 1 FROM saved_memberships WHERE list_kind = ? AND item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            if membership is None:
+                raise ValueError(
+                    f"saved membership does not exist: {normalized_kind}/{normalized_key}"
+                )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO native_save_states (
+                    list_kind, item_key, requested_action, status
+                ) VALUES (?, ?, ?, 'pending')
+                """,
+                (normalized_kind, normalized_key, requested_action),
+            )
+            row = conn.execute(
+                """
+                SELECT requested_action, resolved_action, resolved_target, status,
+                       task_id, execution_id, last_error_code, last_error_message,
+                       last_attempt_at, synced_at, task_claimed_at, task_started_at,
+                       task_heartbeat_at, task_runner_id
+                FROM native_save_states
+                WHERE list_kind = ? AND item_key = ?
+                """,
+                (normalized_kind, normalized_key),
+            ).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if row is None:  # pragma: no cover - insert/select share one write transaction
+            raise RuntimeError("native save state disappeared during ensure")
+        return dict(row)
+
+    def claim_native_sync_task(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None,
+        task_id: str,
+    ) -> list[str]:
+        """Atomically assign eligible memberships to one durable pending task.
+
+        A pending row with a non-empty task owner is deliberately ineligible so
+        duplicate/manual task creation cannot steal it and invalidate polling for
+        the original task ID.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        params: list[Any] = [normalized_kind]
+        item_filter = ""
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND m.item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT m.item_key
+                FROM saved_memberships AS m
+                LEFT JOIN native_save_states AS n
+                  ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                WHERE m.list_kind = ?
+                  AND (
+                      n.status IS NULL
+                      OR (n.status = 'pending' AND n.task_id = '')
+                      OR n.status IN (
+                          'login_required', 'rate_limited',
+                          'extension_required', 'failed'
+                      )
+                  )
+                """
+                + item_filter
+                + " ORDER BY m.added_at DESC, m.item_key ASC",
+                params,
+            ).fetchall()
+            claimed_keys = [str(row["item_key"]) for row in rows]
+            for item_key in claimed_keys:
+                conn.execute(
+                    """
+                    INSERT INTO native_save_states (
+                        list_kind, item_key, requested_action, status, task_id,
+                        execution_id, resolved_action, resolved_target,
+                        last_error_code, last_error_message, last_attempt_at,
+                        task_claimed_at, task_started_at
+                    )
+                    VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL,
+                            CURRENT_TIMESTAMP, NULL)
+                    ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                        requested_action = excluded.requested_action,
+                        status = 'pending',
+                        task_id = excluded.task_id,
+                        execution_id = '',
+                        resolved_action = '',
+                        resolved_target = '',
+                        last_error_code = '',
+                        last_error_message = '',
+                        task_claimed_at = CURRENT_TIMESTAMP,
+                        task_started_at = NULL,
+                        task_heartbeat_at = NULL,
+                        task_runner_id = ''
+                    """,
+                    (normalized_kind, item_key, normalized_kind, normalized_task_id),
+                )
+            conn.commit()
+            return claimed_keys
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_native_sync_task_snapshot(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None,
+        task_id: str,
+        trigger: str,
+    ) -> list[dict[str, Any]]:
+        """Create one durable task ledger and atomically claim its live items.
+
+        ``item_keys is None`` selects every currently eligible membership. An
+        explicit selection snapshots every requested key in caller order:
+        missing keys become terminal ``not_saved_locally`` failures, terminal
+        native states become terminal no-ops, and rows already owned by another
+        task become terminal ``sync_already_in_progress`` no-ops.
+        """
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_trigger = trigger.strip()
+        if not normalized_trigger:
+            raise ValueError("trigger must not be blank")
+        explicit_selection = item_keys is not None
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if (
+            raw_keys
+            and len(cleaned_keys) != len(dict.fromkeys(raw_keys))
+            and any(not key.strip() for key in raw_keys)
+        ):
+            raise ValueError("item_keys must not contain blank keys")
+
+        retryable_statuses = {
+            "login_required",
+            "rate_limited",
+            "extension_required",
+            "failed",
+        }
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO native_save_tasks (task_id, list_kind, trigger)
+                VALUES (?, ?, ?)
+                """,
+                (normalized_task_id, normalized_kind, normalized_trigger),
+            )
+            if explicit_selection:
+                selected_keys = cleaned_keys
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT m.item_key
+                    FROM saved_memberships AS m
+                    LEFT JOIN native_save_states AS n
+                      ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                    WHERE m.list_kind = ?
+                      AND (
+                          n.status IS NULL
+                          OR (n.status = 'pending' AND n.task_id = '')
+                          OR n.status IN (
+                              'login_required', 'rate_limited',
+                              'extension_required', 'failed'
+                          )
+                          OR (
+                              n.status = 'unsupported'
+                              AND n.last_error_code = 'unsupported_adapter_missing'
+                          )
+                      )
+                    ORDER BY m.added_at DESC, m.item_key ASC
+                    """,
+                    (normalized_kind,),
+                ).fetchall()
+                selected_keys = [str(row["item_key"]) for row in rows]
+
+            for ordinal, item_key in enumerate(selected_keys):
+                row = conn.execute(
+                    """
+                    SELECT
+                        m.item_key,
+                        n.requested_action,
+                        n.resolved_action,
+                        n.resolved_target,
+                        n.status,
+                        n.task_id,
+                        n.last_error_code,
+                        n.last_error_message
+                    FROM saved_memberships AS m
+                    LEFT JOIN native_save_states AS n
+                      ON n.list_kind = m.list_kind AND n.item_key = m.item_key
+                    WHERE m.list_kind = ? AND m.item_key = ?
+                    """,
+                    (normalized_kind, item_key),
+                ).fetchone()
+                requested_action: str = normalized_kind
+                resolved_action: str = normalized_kind
+                resolved_target = ""
+                status: str = "failed"
+                is_live = 0
+                error_code = "not_saved_locally"
+                error_message = "Item is not saved locally"
+
+                if row is not None:
+                    current_status = str(row["status"] or "pending")
+                    current_task_id = str(row["task_id"] or "")
+                    requested_action = str(row["requested_action"] or normalized_kind)
+                    resolved_action = str(row["resolved_action"] or normalized_kind)
+                    resolved_target = str(row["resolved_target"] or "")
+                    error_code = str(row["last_error_code"] or "")
+                    error_message = str(row["last_error_message"] or "")
+                    eligible = (
+                        row["status"] is None
+                        or (current_status == "pending" and not current_task_id)
+                        or current_status in retryable_statuses
+                        or (
+                            current_status == "unsupported"
+                            and error_code == "unsupported_adapter_missing"
+                        )
+                    )
+                    if eligible:
+                        status = "pending"
+                        is_live = 1
+                        resolved_action = normalized_kind
+                        resolved_target = ""
+                        error_code = ""
+                        error_message = ""
+                        conn.execute(
+                            """
+                            INSERT INTO native_save_states (
+                                list_kind, item_key, requested_action, status, task_id,
+                                execution_id, resolved_action, resolved_target,
+                                last_error_code, last_error_message, last_attempt_at,
+                                task_claimed_at, task_started_at
+                            )
+                            VALUES (?, ?, ?, 'pending', ?, '', '', '', '', '', NULL,
+                                    CURRENT_TIMESTAMP, NULL)
+                            ON CONFLICT(list_kind, item_key) DO UPDATE SET
+                                requested_action = excluded.requested_action,
+                                status = 'pending',
+                                task_id = excluded.task_id,
+                                execution_id = '',
+                                resolved_action = '',
+                                resolved_target = '',
+                                last_error_code = '',
+                                last_error_message = '',
+                                task_claimed_at = CURRENT_TIMESTAMP,
+                                task_started_at = NULL,
+                                task_heartbeat_at = NULL,
+                                task_runner_id = ''
+                            """,
+                            (
+                                normalized_kind,
+                                item_key,
+                                normalized_kind,
+                                normalized_task_id,
+                            ),
+                        )
+                    elif current_status in NATIVE_SAVE_TERMINAL_STATUSES:
+                        status = current_status
+                    else:
+                        status = "failed"
+                        error_code = "sync_already_in_progress"
+                        error_message = "Item already belongs to an active sync task"
+
+                conn.execute(
+                    """
+                    INSERT INTO native_save_task_items (
+                        task_id, item_key, ordinal, requested_action, resolved_action,
+                        resolved_target, status, is_live, last_error_code,
+                        last_error_message
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_task_id,
+                        item_key,
+                        ordinal,
+                        requested_action,
+                        resolved_action,
+                        resolved_target,
+                        status,
+                        is_live,
+                        error_code,
+                        error_message,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.list_native_sync_task_items(normalized_task_id)
+
+    def native_sync_task_exists(self, task_id: str) -> bool:
+        """Return whether a durable task ledger exists, including empty tasks."""
+        normalized_task_id = self._native_task_id(task_id)
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            "SELECT 1 FROM native_save_tasks WHERE task_id = ?",
+            (normalized_task_id,),
+        ).fetchone()
+        return row is not None
+
+    def list_native_sync_task_items(self, task_id: str) -> list[dict[str, Any]]:
+        """Return immutable task membership with its task-scoped result snapshot."""
+        normalized_task_id = self._native_task_id(task_id)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT
+                t.list_kind,
+                i.task_id,
+                i.item_key,
+                i.ordinal,
+                i.requested_action,
+                i.resolved_action,
+                i.resolved_target,
+                i.status,
+                i.is_live,
+                i.last_error_code,
+                i.last_error_message,
+                i.updated_at
+            FROM native_save_task_items AS i
+            JOIN native_save_tasks AS t ON t.task_id = i.task_id
+            WHERE i.task_id = ?
+            ORDER BY i.ordinal ASC, i.item_key ASC
+            """,
+            (normalized_task_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def discard_native_sync_task(self, task_id: str) -> bool:
+        """Delete an unreturned task ledger after task-starter registration fails."""
+        normalized_task_id = self._native_task_id(task_id)
+        cursor = self._execute_write(
+            "DELETE FROM native_save_tasks WHERE task_id = ?",
+            (normalized_task_id,),
+        )
+        return int(cursor.rowcount or 0) > 0
+
+    def release_native_sync_task(self, task_id: str) -> int:
+        """Release pending ownership when a task could not be registered."""
+        normalized_task_id = self._native_task_id(task_id)
+        cursor = self._execute_write(
+            """
+            UPDATE native_save_states
+            SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+            WHERE task_id = ? AND status = 'pending' AND execution_id = ''
+            """,
+            (normalized_task_id,),
+        )
+        return int(cursor.rowcount or 0)
+
+    def release_stale_pending_native_sync_tasks(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Release pending owners whose task never started or lost its heartbeat."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        item_filter = ""
+        params: list[Any] = [normalized_kind]
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        age = max(0, int(stale_after_seconds))
+        cutoff = f"-{age} seconds"
+        params.extend((cutoff, cutoff))
+        where_sql = (
+            """
+            WHERE list_kind = ? AND status = 'pending' AND task_id != ''
+            """
+            + item_filter
+            + """
+              AND (
+                  (task_started_at IS NULL AND task_claimed_at IS NOT NULL
+                   AND task_claimed_at <= datetime('now', ?))
+                  OR
+                  (task_started_at IS NOT NULL
+                   AND (task_heartbeat_at IS NULL
+                        OR task_heartbeat_at <= datetime('now', ?)))
+              )
+            """
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT task_id, item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (str(row["task_id"]), str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                    task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_stale_pending_native_sync_task(
+        self,
+        task_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Release stale pending rows while polling one known task."""
+        normalized_task_id = self._native_task_id(task_id)
+        age = max(0, int(stale_after_seconds))
+        cutoff = f"-{age} seconds"
+        params = (normalized_task_id, cutoff, cutoff)
+        where_sql = """
+            WHERE task_id = ? AND status = 'pending'
+              AND (
+                  (task_started_at IS NULL AND task_claimed_at IS NOT NULL
+                   AND task_claimed_at <= datetime('now', ?))
+                  OR
+                  (task_started_at IS NOT NULL
+                   AND (task_heartbeat_at IS NULL
+                        OR task_heartbeat_at <= datetime('now', ?)))
+              )
+        """
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (normalized_task_id, str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                    task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_native_sync_task_runner(
+        self,
+        task_id: str,
+        runner_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> bool:
+        """Atomically acquire the single batch-runner lease for a task."""
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        age = max(0, int(stale_after_seconds))
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                """
+                SELECT 1
+                FROM native_save_states
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                LIMIT 1
+                """,
+                (normalized_task_id,),
+            ).fetchone()
+            if active is None:
+                conn.commit()
+                return True
+            conflicting = conn.execute(
+                """
+                SELECT 1
+                FROM native_save_states
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                  AND task_runner_id NOT IN ('', ?)
+                  AND task_heartbeat_at IS NOT NULL
+                  AND task_heartbeat_at > datetime('now', ?)
+                LIMIT 1
+                """,
+                (normalized_task_id, normalized_runner_id, f"-{age} seconds"),
+            ).fetchone()
+            if conflicting is not None:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_runner_id = ?,
+                    task_started_at = COALESCE(task_started_at, CURRENT_TIMESTAMP),
+                    task_heartbeat_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND status IN ('pending', 'syncing')
+                """,
+                (normalized_runner_id, normalized_task_id),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def heartbeat_native_sync_task(self, task_id: str, runner_id: str) -> int:
+        """Refresh the task lease protecting all remaining batch rows."""
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_heartbeat_at = CURRENT_TIMESTAMP
+                WHERE task_id = ? AND task_runner_id = ? AND task_started_at IS NOT NULL
+                  AND status IN ('pending', 'syncing')
+                """,
+                (normalized_task_id, normalized_runner_id),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def release_pending_native_sync_task(self, task_id: str, runner_id: str) -> int:
+        """Release unclaimed pending rows when a runner exits normally or by cancellation."""
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        params = (normalized_task_id, normalized_runner_id)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT item_key
+                FROM native_save_states
+                WHERE task_id = ? AND task_runner_id = ?
+                  AND status = 'pending' AND execution_id = ''
+                """,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (normalized_task_id, str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET task_id = '', execution_id = '', task_claimed_at = NULL,
+                    task_started_at = NULL, task_heartbeat_at = NULL, task_runner_id = ''
+                WHERE task_id = ? AND task_runner_id = ?
+                  AND status = 'pending' AND execution_id = ''
+                """,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def claim_native_save_item(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        runner_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Atomically claim one pending task item for adapter execution."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_runner_id = self._native_runner_id(runner_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET status = 'syncing', execution_id = ?, last_attempt_at = CURRENT_TIMESTAMP
+                WHERE list_kind = ? AND item_key = ? AND task_id = ? AND task_runner_id = ?
+                  AND status = 'pending' AND execution_id = ''
+                """,
+                (
+                    normalized_execution_id,
+                    normalized_kind,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_runner_id,
+                ),
+            )
+            claimed = int(cursor.rowcount or 0) > 0
+            if claimed:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'syncing', updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status = 'pending'
+                    """,
+                    (normalized_task_id, normalized_key),
+                )
+            conn.commit()
+            return claimed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def update_native_save_claim_route(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        resolved_action: str,
+        resolved_target: str,
+    ) -> bool:
+        """Persist the router-owned destination for a live execution claim."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET resolved_action = ?, resolved_target = ?
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    resolved_action,
+                    resolved_target,
+                    normalized_kind,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            updated = int(cursor.rowcount or 0) > 0
+            if updated:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET resolved_action = ?, resolved_target = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status = 'syncing'
+                    """,
+                    (
+                        resolved_action,
+                        resolved_target,
+                        normalized_task_id,
+                        normalized_key,
+                    ),
+                )
+            conn.commit()
+            return updated
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def heartbeat_native_save_claim(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+    ) -> bool:
+        """Refresh a live adapter lease only while the execution owner matches."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        conn = self.open_connection()
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET last_attempt_at = CURRENT_TIMESTAMP
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    normalized_kind,
+                    item_key.strip(),
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0) > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_native_save_claim(
+        self,
+        list_kind: str,
+        item_key: str,
+        task_id: str,
+        execution_id: str,
+        *,
+        requested_action: str,
+        resolved_action: str,
+        resolved_target: str,
+        status: str,
+        last_error_code: str = "",
+        last_error_message: str = "",
+    ) -> bool:
+        """Complete one item only when the caller still owns its execution claim."""
+        if not isinstance(status, str) or status not in NATIVE_SAVE_TERMINAL_STATUSES:
+            raise ValueError("completion requires a terminal status")
+        normalized_kind = self._saved_list_kind(list_kind)
+        normalized_task_id = self._native_task_id(task_id)
+        normalized_execution_id = self._native_execution_id(execution_id)
+        normalized_key = item_key.strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET requested_action = ?, resolved_action = ?, resolved_target = ?,
+                    status = ?, execution_id = '', task_runner_id = '', last_error_code = ?,
+                    last_error_message = ?,
+                    synced_at = CASE WHEN ? IN ('synced', 'already_synced')
+                        THEN CURRENT_TIMESTAMP ELSE synced_at END
+                WHERE list_kind = ? AND item_key = ? AND task_id = ?
+                  AND status = 'syncing' AND execution_id = ?
+                """,
+                (
+                    requested_action,
+                    resolved_action,
+                    resolved_target,
+                    status,
+                    last_error_code,
+                    last_error_message,
+                    status,
+                    normalized_kind,
+                    normalized_key,
+                    normalized_task_id,
+                    normalized_execution_id,
+                ),
+            )
+            completed = int(cursor.rowcount or 0) > 0
+            if completed:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET requested_action = ?, resolved_action = ?, resolved_target = ?,
+                        status = ?, is_live = 0, last_error_code = ?,
+                        last_error_message = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                      AND status = 'syncing'
+                    """,
+                    (
+                        requested_action,
+                        resolved_action,
+                        resolved_target,
+                        status,
+                        last_error_code,
+                        last_error_message,
+                        normalized_task_id,
+                        normalized_key,
+                    ),
+                )
+            conn.commit()
+            return completed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def reconcile_stale_native_save_claims(
+        self,
+        task_id: str,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Turn abandoned syncing leases into explicit retryable failures."""
+        normalized_task_id = self._native_task_id(task_id)
+        age = max(0, int(stale_after_seconds))
+        params = (normalized_task_id, f"-{age} seconds")
+        where_sql = """
+            WHERE task_id = ? AND status = 'syncing'
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at <= datetime('now', ?)
+        """
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (normalized_task_id, str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET status = 'failed', execution_id = '', task_runner_id = '',
+                    last_error_code = 'interrupted',
+                    last_error_message = 'Native save was interrupted'
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def reconcile_stale_native_save_claims_for_list(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+        *,
+        stale_after_seconds: int = 300,
+    ) -> int:
+        """Recover stale syncing rows selected by a normal manual-list action."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        raw_keys = list(item_keys or ())
+        cleaned_keys = list(dict.fromkeys(key.strip() for key in raw_keys if key.strip()))
+        if raw_keys and not cleaned_keys:
+            raise ValueError("item_keys must contain at least one non-blank key")
+        item_filter = ""
+        params: list[Any] = [normalized_kind]
+        if cleaned_keys:
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        age = max(0, int(stale_after_seconds))
+        params.append(f"-{age} seconds")
+        where_sql = (
+            """
+            WHERE list_kind = ? AND status = 'syncing'
+            """
+            + item_filter
+            + """
+              AND last_attempt_at IS NOT NULL
+              AND last_attempt_at <= datetime('now', ?)
+            """
+        )
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT task_id, item_key FROM native_save_states " + where_sql,
+                params,
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    """
+                    UPDATE native_save_task_items
+                    SET status = 'failed', is_live = 0,
+                        last_error_code = 'interrupted',
+                        last_error_message = 'Native save was interrupted',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE task_id = ? AND item_key = ? AND is_live = 1
+                    """,
+                    (str(row["task_id"]), str(row["item_key"])),
+                )
+            cursor = conn.execute(
+                """
+                UPDATE native_save_states
+                SET status = 'failed', execution_id = '', task_runner_id = '',
+                    last_error_code = 'interrupted',
+                    last_error_message = 'Native save was interrupted'
+                """
+                + where_sql,
+                params,
+            )
+            conn.commit()
+            return int(cursor.rowcount or 0)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_native_sync_eligible(
+        self,
+        list_kind: str,
+        item_keys: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """List memberships eligible for an initial sync or a manual retry."""
+        normalized_kind = self._saved_list_kind(list_kind)
+        params: list[Any] = [normalized_kind]
+        item_filter = ""
+        if item_keys:
+            cleaned_keys = [item_key.strip() for item_key in item_keys]
+            placeholders = ", ".join("?" for _ in cleaned_keys)
+            item_filter = f" AND m.item_key IN ({placeholders})"
+            params.extend(cleaned_keys)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            self._saved_membership_select()
+            + """
+            WHERE m.list_kind = ?
+              AND (
+                  n.status IS NULL
+                  OR (n.status = 'pending' AND n.task_id = '')
+                  OR n.status IN (
+                      'login_required', 'rate_limited',
+                      'extension_required', 'failed'
+                  )
+                  OR (
+                      n.status = 'unsupported'
+                      AND n.last_error_code = 'unsupported_adapter_missing'
+                  )
+              )
+            """
+            + item_filter
+            + " ORDER BY m.added_at DESC, m.item_key ASC",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_native_save_states_by_task(self, task_id: str) -> list[dict[str, Any]]:
+        """Return all persisted item results for a native-save task."""
+        normalized_task_id = self._native_task_id(task_id)
+        self._ensure_fresh_read()
+        rows = self.conn.execute(
+            """
+            SELECT
+                n.list_kind,
+                n.item_key,
+                i.source_platform,
+                i.content_id,
+                i.content_url,
+                i.content_type,
+                i.title,
+                i.author_name,
+                i.cover_url,
+                m.note,
+                m.added_at,
+                n.requested_action,
+                n.resolved_action,
+                n.resolved_target,
+                n.status,
+                n.task_id,
+                n.execution_id,
+                n.task_claimed_at,
+                n.task_started_at,
+                n.task_heartbeat_at,
+                n.task_runner_id,
+                n.last_error_code,
+                n.last_error_message,
+                n.last_attempt_at,
+                n.synced_at
+            FROM native_save_states AS n
+            JOIN saved_memberships AS m
+                ON m.list_kind = n.list_kind AND m.item_key = n.item_key
+            JOIN saved_items AS i ON i.item_key = n.item_key
+            WHERE n.task_id = ?
+            ORDER BY m.added_at DESC, n.item_key ASC
+            """,
+            (normalized_task_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # ── Auth state (password gate revocation epoch) ──────────────
 
@@ -7218,6 +11420,12 @@ class Database:
                 -- an internal_error is diagnosable without server logs.
                 error_detail    TEXT,
                 sequence        INTEGER NOT NULL DEFAULT 0,
+                -- ``updated_at`` is the worker heartbeat; these two fields
+                -- advance only when a lifecycle milestone or real unit of
+                -- work completes. Keeping them separate lets clients tell a
+                -- live-but-slow provider call from a dead backend.
+                progress_sequence INTEGER NOT NULL DEFAULT 0,
+                progress_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 started_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 finished_at     TIMESTAMP
@@ -7228,6 +11436,16 @@ class Database:
         }
         if "error_detail" not in existing_columns:
             self.conn.execute("ALTER TABLE init_runs ADD COLUMN error_detail TEXT")
+        if "progress_sequence" not in existing_columns:
+            self.conn.execute(
+                "ALTER TABLE init_runs ADD COLUMN progress_sequence INTEGER NOT NULL DEFAULT 0"
+            )
+        if "progress_at" not in existing_columns:
+            self.conn.execute("ALTER TABLE init_runs ADD COLUMN progress_at TIMESTAMP")
+            self.conn.execute(
+                "UPDATE init_runs SET progress_at = COALESCE(updated_at, CURRENT_TIMESTAMP) "
+                "WHERE progress_at IS NULL"
+            )
 
     def get_latest_init_run(self) -> dict[str, Any] | None:
         """Return the most recent init run as a dict, or None if none exist.
@@ -7260,12 +11478,16 @@ class Database:
                 return False
             conn.execute(
                 """
-                INSERT INTO init_runs (run_id, status, stage, sequence, started_at, updated_at)
-                VALUES (?, 'starting', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                INSERT INTO init_runs (
+                    run_id, status, stage, sequence, progress_sequence,
+                    progress_at, started_at, updated_at
+                )
+                VALUES (?, 'starting', 0, 0, 0,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(run_id) DO UPDATE SET
-                    status='starting', stage=0, sequence=0, partial_success=0,
+                    status='starting', stage=0, sequence=0, progress_sequence=0,
                     error_reason=NULL, error_detail=NULL, finished_at=NULL,
-                    updated_at=CURRENT_TIMESTAMP
+                    progress_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
                 """,
                 (run_id,),
             )
@@ -7288,6 +11510,8 @@ class Database:
             "error_reason",
             "error_detail",
             "sequence",
+            "progress_sequence",
+            "progress_at",
             "finished_at",
         }
         unknown = set(fields) - allowed
@@ -7312,6 +11536,9 @@ class Database:
             """
             UPDATE init_runs
                SET status = 'failed', error_reason = 'interrupted',
+                   sequence = sequence + 1,
+                   progress_sequence = sequence + 1,
+                   progress_at = CURRENT_TIMESTAMP,
                    finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE status IN ('starting','running')
             """
@@ -7334,6 +11561,50 @@ class Database:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"corrupt auth_epoch value: {row[0]!r}") from exc
 
+    def _set_browser_login_state(
+        self,
+        *,
+        state_key: str,
+        timestamp_key: str,
+        logged_in: bool,
+        when_iso: str,
+    ) -> None:
+        """Persist a browser heartbeat on an isolated FastAPI-safe connection."""
+        conn = self.open_connection()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
+                [
+                    (state_key, "1" if logged_in else "0"),
+                    (timestamp_key, when_iso),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _get_browser_login_state(
+        self,
+        *,
+        state_key: str,
+        timestamp_key: str,
+    ) -> tuple[bool, str]:
+        """Read a browser heartbeat without sharing the process connection."""
+        conn = self.open_connection()
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
+                (state_key, timestamp_key),
+            ).fetchall()
+        finally:
+            conn.close()
+        values = {str(row["key"]): str(row["value"]) for row in rows}
+        state = values.get(state_key)
+        when_iso = values.get(timestamp_key, "").strip()
+        if state not in {"0", "1"} or not when_iso:
+            return False, ""
+        return state == "1", when_iso
+
     def set_xhs_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
         """Persist the latest browser-observed xhs login state.
 
@@ -7346,27 +11617,19 @@ class Database:
             from datetime import UTC, datetime
 
             when_iso = datetime.now(UTC).isoformat()
-        self._execute_many_write(
-            "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
-            [
-                ("xhs_login_state", "1" if logged_in else "0"),
-                ("xhs_login_state_at", str(when_iso)),
-            ],
+        self._set_browser_login_state(
+            state_key="xhs_login_state",
+            timestamp_key="xhs_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
         )
 
     def get_xhs_login_state(self) -> tuple[bool, str]:
         """Return ``(logged_in, iso_timestamp)`` for xhs, or ``(False, "")``."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
-            ("xhs_login_state", "xhs_login_state_at"),
-        ).fetchall()
-        values = {str(row["key"]): str(row["value"]) for row in rows}
-        state = values.get("xhs_login_state")
-        when_iso = values.get("xhs_login_state_at", "").strip()
-        if state not in {"0", "1"} or not when_iso:
-            return False, ""
-        return state == "1", when_iso
+        return self._get_browser_login_state(
+            state_key="xhs_login_state",
+            timestamp_key="xhs_login_state_at",
+        )
 
     def set_zhihu_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
         """Persist the latest browser-observed Zhihu login state.
@@ -7380,27 +11643,19 @@ class Database:
             from datetime import UTC, datetime
 
             when_iso = datetime.now(UTC).isoformat()
-        self._execute_many_write(
-            "INSERT OR REPLACE INTO auth_state (key, value) VALUES (?, ?)",
-            [
-                ("zhihu_login_state", "1" if logged_in else "0"),
-                ("zhihu_login_state_at", str(when_iso)),
-            ],
+        self._set_browser_login_state(
+            state_key="zhihu_login_state",
+            timestamp_key="zhihu_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
         )
 
     def get_zhihu_login_state(self) -> tuple[bool, str]:
         """Return ``(logged_in, iso_timestamp)`` for Zhihu, or ``(False, "")``."""
-        self._ensure_fresh_read()
-        rows = self.conn.execute(
-            "SELECT key, value FROM auth_state WHERE key IN (?, ?)",
-            ("zhihu_login_state", "zhihu_login_state_at"),
-        ).fetchall()
-        values = {str(row["key"]): str(row["value"]) for row in rows}
-        state = values.get("zhihu_login_state")
-        when_iso = values.get("zhihu_login_state_at", "").strip()
-        if state not in {"0", "1"} or not when_iso:
-            return False, ""
-        return state == "1", when_iso
+        return self._get_browser_login_state(
+            state_key="zhihu_login_state",
+            timestamp_key="zhihu_login_state_at",
+        )
 
     def bump_auth_epoch(self) -> int:
         """Atomically increment and return the revocation epoch.
@@ -7539,75 +11794,80 @@ class Database:
 
     def add_to_favorites(self, bvid: str, note: str = "") -> bool:
         """Save a video to favorites. Returns True if newly inserted."""
+        item = self._bilibili_saved_item_input(bvid)
+        self.upsert_saved_membership("favorite", item, note)
         self._execute_write(
             """
-            INSERT INTO favorites (bvid, note)
-            VALUES (?, ?)
+            INSERT INTO favorites (bvid, note, item_key)
+            VALUES (?, ?, ?)
             ON CONFLICT(bvid) DO UPDATE SET
                 added_at = CURRENT_TIMESTAMP,
-                note = excluded.note
+                note = excluded.note,
+                item_key = excluded.item_key
             """,
-            (bvid.strip(), note),
+            (bvid.strip(), note, item.item_key),
         )
         return self.conn.total_changes > 0
 
     def remove_from_favorites(self, bvid: str) -> bool:
         """Remove a favorite. Returns True if a row was deleted."""
-        self._execute_write(
-            "DELETE FROM favorites WHERE bvid = ?",
-            (bvid.strip(),),
-        )
-        return self.conn.total_changes > 0
+        item_key = self._resolve_legacy_saved_item_key("favorite", bvid)
+        if item_key is None:
+            return False
+        return self.remove_saved_membership("favorite", item_key)
 
     def is_in_favorites(self, bvid: str) -> bool:
         """Check whether a video is favorited."""
-        row = self.conn.execute(
-            "SELECT 1 FROM favorites WHERE bvid = ?",
-            (bvid.strip(),),
-        ).fetchone()
-        return row is not None
+        item_key = self._resolve_legacy_saved_item_key("favorite", bvid)
+        return item_key is not None and self.get_saved_membership("favorite", item_key) is not None
 
     def count_favorites(self) -> int:
         """Return total number of favorited videos."""
-        row = self.conn.execute("SELECT COUNT(*) FROM favorites").fetchone()
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM saved_memberships WHERE list_kind = ?",
+            ("favorite",),
+        ).fetchone()
         return int(row[0]) if row else 0
 
     def list_favorites(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
         """Return favorited videos with content_cache metadata, newest first."""
-        cursor = self.conn.execute(
-            """
-            SELECT
-                f.bvid,
-                f.added_at,
-                f.note,
-                COALESCE(c.title, '') AS title,
-                COALESCE(c.up_name, '') AS up_name,
-                COALESCE(c.cover_url, '') AS cover_url,
-                COALESCE(c.content_url, '') AS content_url,
-                COALESCE(c.source_platform, '') AS source_platform
-            FROM favorites AS f
-            LEFT JOIN content_cache AS c ON c.bvid = f.bvid
-            ORDER BY f.added_at DESC
-            LIMIT ? OFFSET ?
-            """,
-            (limit, offset),
-        )
-        return [dict(row) for row in cursor.fetchall()]
+        return [
+            {
+                "bvid": row["content_id"],
+                "item_key": row["item_key"],
+                "content_id": row["content_id"],
+                "added_at": row["added_at"],
+                "note": row["note"],
+                "title": row["title"],
+                "up_name": row["author_name"],
+                "cover_url": row["cover_url"],
+                "content_url": row["content_url"],
+                "source_platform": row["source_platform"],
+                "content_type": row["content_type"],
+            }
+            for row in self.list_saved_memberships("favorite", limit, offset)
+        ]
 
     def iter_cover_lifecycle(self) -> list[tuple[str, str, bool]]:
         """Return ``(cover_url, pool_status, is_saved)`` for every cached-cover candidate.
 
-        ``is_saved`` is True when the bvid is in favorites or watch_later. Consumed
-        by the image-cache cleanup (:mod:`openbiliclaw.runtime.image_cache`) to decide
-        which cached cover files are safe to evict: covers of saved or still-pending
-        content are kept; covers of consumed, unsaved content are eligible for removal.
+        ``is_saved`` is True when the canonical item key has a normalized saved
+        membership, with legacy Bilibili tables retained as a compatibility fallback.
+        Consumed by the image-cache cleanup (:mod:`openbiliclaw.runtime.image_cache`)
+        to decide which cached cover files are safe to evict: covers of saved or
+        still-pending content are kept; covers of consumed, unsaved content are
+        eligible for removal.
         """
         cursor = self.conn.execute(
             """
             SELECT
                 COALESCE(cc.cover_url, '') AS cover_url,
                 COALESCE(cc.pool_status, 'fresh') AS pool_status,
-                CASE WHEN f.bvid IS NOT NULL OR w.bvid IS NOT NULL THEN 1 ELSE 0 END AS is_saved
+                CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.item_key = cc.item_key
+                ) OR f.bvid IS NOT NULL OR w.bvid IS NOT NULL THEN 1 ELSE 0 END AS is_saved
             FROM content_cache AS cc
             LEFT JOIN favorites AS f ON f.bvid = cc.bvid
             LEFT JOIN watch_later AS w ON w.bvid = cc.bvid
@@ -7639,6 +11899,11 @@ class Database:
               AND cc.discovered_at >= datetime('now', ?)
               AND (
                 COALESCE(cc.pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
+                OR EXISTS (
+                    SELECT 1
+                    FROM saved_memberships AS m
+                    WHERE m.item_key = cc.item_key
+                )
                 OR f.bvid IS NOT NULL
                 OR w.bvid IS NOT NULL
               )
@@ -7777,14 +12042,26 @@ class Database:
         too homogeneous for a meaningful percentile, the caller-provided
         default is returned unchanged.
         """
+        self._ensure_fresh_read()
+        return self._dynamic_delight_threshold_on(
+            self.conn,
+            default_threshold=default_threshold,
+        )
+
+    def _dynamic_delight_threshold_on(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        default_threshold: float,
+    ) -> float:
+        """Connection-aware dynamic delight threshold calculation."""
         try:
             floor = float(default_threshold)
         except (TypeError, ValueError):
             floor = _DELIGHT_CLAIM_MIN_SCORE
         floor = min(1.0, max(0.0, floor))
 
-        self._ensure_fresh_read()
-        cursor = self.conn.execute(
+        cursor = conn.execute(
             """
             SELECT COALESCE(delight_score, 0.0) AS score
             FROM content_cache
@@ -8026,12 +12303,32 @@ class Database:
 
     @classmethod
     def _extract_content_keys_from_view_event(cls, row: dict[str, Any]) -> set[str]:
+        keys, _ = cls._extract_view_event_identities(row)
+        return keys
+
+    @classmethod
+    def _extract_view_event_identities(
+        cls,
+        row: dict[str, Any],
+    ) -> tuple[set[str], str]:
+        """Extract source-aware keys and BVID without decoding metadata twice."""
         metadata = cls._decode_event_metadata(row)
         url = str(row.get("url", "")).strip()
 
+        bvid = str(metadata.get("bvid", "")).strip()
+        bvid_match = _BVID_PATTERN.search(url)
+        if not bvid and bvid_match:
+            bvid = bvid_match.group(1)
         platform = _normalize_source_platform_key(metadata.get("source_platform", ""))
         if not platform:
-            platform = cls._infer_source_platform_from_url(url)
+            # Nearly all Bilibili view events already carry a BVID. Avoid the
+            # generic URL classifier (and its urlparse) when the same URL has
+            # an explicit BVID; fall back for cross-platform or malformed rows.
+            platform = (
+                _BILIBILI_SOURCE_FAMILY
+                if bvid and (not url or bvid_match is not None)
+                else cls._infer_source_platform_from_url(url)
+            )
 
         content_ids: set[str] = set()
         for key in _VIEW_CONTENT_ID_METADATA_KEYS:
@@ -8051,7 +12348,6 @@ class Database:
         if url_content_id:
             content_ids.add(url_content_id)
 
-        bvid = cls._extract_bvid_from_view_event(row)
         if bvid:
             content_ids.add(bvid)
             platform = platform or _BILIBILI_SOURCE_FAMILY
@@ -8062,36 +12358,19 @@ class Database:
                 keys.add(content_id)
             if platform:
                 keys.add(f"{platform}:{content_id}")
-        return keys
+        return keys, bvid
 
     @staticmethod
     def _infer_source_platform_from_url(url: str) -> str:
-        if not url:
-            return ""
-        host = urlparse(url).netloc.lower()
-        if "bilibili.com" in host or host == "b23.tv":
-            return _BILIBILI_SOURCE_FAMILY
-        if "xiaohongshu.com" in host or "xhslink.com" in host:
-            return _XHS_SOURCE_FAMILY
-        if "douyin.com" in host:
-            return _DOUYIN_SOURCE_FAMILY
-        if "youtube.com" in host or host == "youtu.be":
-            return _YOUTUBE_SOURCE_FAMILY
-        if (
-            host == "x.com"
-            or host.endswith(".x.com")
-            or host == "twitter.com"
-            or host.endswith(".twitter.com")
-        ):
-            return _TWITTER_SOURCE_FAMILY
-        if host == "reddit.com" or host.endswith(".reddit.com") or host == "redd.it":
-            return _REDDIT_SOURCE_FAMILY
-        return ""
+        return infer_source_platform_from_url(url)
 
     @staticmethod
     def _extract_content_id_from_url(platform: str, url: str) -> str:
         if not url:
             return ""
+        if platform == _BILIBILI_SOURCE_FAMILY:
+            match = _BVID_PATTERN.search(url)
+            return match.group(1) if match else ""
         parsed = urlparse(url)
         path_parts = [part for part in parsed.path.split("/") if part]
         if platform == _XHS_SOURCE_FAMILY:
@@ -8114,10 +12393,6 @@ class Database:
                     prefix_index = path_parts.index(prefix)
                     if len(path_parts) > prefix_index + 1:
                         return path_parts[prefix_index + 1]
-        if platform == _BILIBILI_SOURCE_FAMILY:
-            match = _BVID_PATTERN.search(url)
-            if match:
-                return match.group(1)
         if platform == _REDDIT_SOURCE_FAMILY:
             host = parsed.netloc.lower()
             if host == "redd.it" and path_parts:

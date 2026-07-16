@@ -202,6 +202,7 @@ def test_keyword_inspiration_preview_threads_persist_axes(
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.LLMService",
         FakeLLMService,
@@ -299,6 +300,7 @@ def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.module_overrides_from_config",
@@ -449,6 +451,31 @@ def test_config_show_displays_runtime_pause_fields(
     assert "是" in result.stdout
     assert "浏览器断开后暂停" in result.stdout
     assert "开启（宽限 45s）" in result.stdout
+
+
+def test_config_show_displays_saved_auto_sync_status(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    cfg = config_module.Config()
+
+    class FakeRegistry:
+        default_provider = "openai"
+        available_providers = ["openai"]
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "收藏自动同步" in result.stdout
+    assert "关闭" in result.stdout
 
 
 def test_health_check_reports_provider_statuses(
@@ -1340,6 +1367,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     import openbiliclaw.llm.service as llm_service_module
     import openbiliclaw.memory.manager as memory_module
     import openbiliclaw.recommendation.engine as recommendation_module
+    import openbiliclaw.soul.engine as soul_module
     import openbiliclaw.storage.database as database_module
 
     created_databases: list[object] = []
@@ -1373,12 +1401,14 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             usage_recorder: object | None = None,
             module_overrides: object | None = None,
             concurrency: int = 1,
+            concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
             self.module_overrides = module_overrides
             self.concurrency = concurrency
+            self.concurrency_gate = concurrency_gate
 
     class FakeRecommendationEngine:
         def __init__(
@@ -1414,10 +1444,35 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+    class FakeSoulEngine:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
         llm=SimpleNamespace(concurrency=3),
+        soul=SimpleNamespace(preference=SimpleNamespace(satisfaction_filter_enabled=True)),
+        scheduler=SimpleNamespace(
+            speculation_interval_minutes=10,
+            speculation_ttl_days=3,
+            speculation_cooldown_days=7,
+            speculation_confirmation_threshold=3,
+            speculation_max_active=5,
+            speculation_max_primary_interests=15,
+            speculation_max_secondary_interests=60,
+            avoidance_speculation_interval_minutes=10,
+            avoidance_speculation_ttl_days=3,
+            avoidance_speculation_cooldown_days=7,
+            avoidance_speculation_confirmation_threshold=3,
+            avoidance_speculation_max_active=5,
+            speculator_idle_interval_minutes=30,
+            profile_consolidation_enabled=True,
+            profile_consolidation_interval_hours=12,
+            profile_consolidation_like_target_upper=512,
+            profile_consolidation_like_target_soft=450,
+            profile_consolidation_archive_enabled=True,
+        ),
     )
 
     monkeypatch.setattr(cli_module, "_RUNTIME_COMPONENTS", {}, raising=False)
@@ -1428,6 +1483,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(memory_module, "MemoryManager", FakeMemoryManager)
     monkeypatch.setattr(llm_service_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(recommendation_module, "RecommendationEngine", FakeRecommendationEngine)
+    monkeypatch.setattr(soul_module, "SoulEngine", FakeSoulEngine)
     monkeypatch.setattr(discovery_module, "ContentDiscoveryEngine", FakeDiscoveryEngine)
     monkeypatch.setattr(strategy_module, "SearchStrategy", FakeStrategy)
     monkeypatch.setattr(strategy_module, "TrendingStrategy", FakeStrategy)
@@ -1436,6 +1492,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
 
     recommendation_engine = cli_module._build_recommendation_engine()
     discovery_engine = cli_module._build_discovery_engine()
+    soul_engine = cli_module._build_soul_engine()
 
     assert len(created_databases) == 1
     assert created_databases[0].initialized == 1
@@ -1448,6 +1505,11 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     assert recorder is not None
     assert recorder is discovery_engine.llm_service.usage_recorder
     assert recorder._sink is created_databases[0]
+    assert (
+        recommendation_engine.llm.concurrency_gate is discovery_engine.llm_service.concurrency_gate
+    )
+    assert soul_engine.kwargs["llm_concurrency_gate"] is recommendation_engine.llm.concurrency_gate
+    assert discovery_engine.concurrency.llm_evaluation_concurrency == 2
 
 
 def test_start_accepts_explicit_host_and_port(
@@ -2221,6 +2283,40 @@ def test_chat_runs_single_turn_and_prints_reply(
     assert "我听见你在说：我最近总在刷讲结构的视频。" in result.stdout
 
 
+def test_chat_reports_safe_turn_failure_and_keeps_loop_usable(
+    monkeypatch: pytest.MonkeyPatch, runner: CliRunner
+) -> None:
+    from openbiliclaw.llm.service import LLMResponseContentError
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(personality_portrait="稳定用户画像" * 30)
+
+    class FakeDialogue:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def respond(self, user_message: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMResponseContentError("sk-live-secret")
+            return f"第二轮成功：{user_message}"
+
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(
+        cli_module, "_build_dialogue", lambda soul_engine: FakeDialogue(), raising=False
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["chat"], input="第一轮\n第二轮\nexit\n")
+
+    assert result.exit_code == 0
+    assert "空响应" in result.stdout
+    assert "sk-live-secret" not in result.stdout
+    assert "第二轮成功：第二轮" in result.stdout
+
+
 def test_chat_exits_cleanly_on_exit_command(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
@@ -2363,11 +2459,30 @@ def test_recommend_displays_results_and_marks_them_presented(
                         bvid="BV1REC",
                         title="讲透城市与建筑的空间叙事",
                         up_name="城市观察局",
+                        published_at="2020-07-08T06:30:00Z",
+                        published_label="3 days ago",
                     ),
                     expression="这条会对上你最近那种想把结构想透的劲头。",
                     topic_label="你最近那股想把结构想透的劲头",
                     confidence=0.88,
-                )
+                ),
+                Recommendation(
+                    recommendation_id=8,
+                    content=DiscoveredContent(
+                        bvid="BV1LABEL",
+                        title="只有来源相对时间的推荐",
+                        up_name="时间观察局",
+                        published_label="3 days ago",
+                    ),
+                ),
+                Recommendation(
+                    recommendation_id=9,
+                    content=DiscoveredContent(
+                        bvid="BV1EMPTY",
+                        title="没有可靠时间的推荐",
+                        up_name="空值观察局",
+                    ),
+                ),
             ]
 
         def mark_presented(self, recommendation_ids: list[int]) -> None:
@@ -2394,7 +2509,10 @@ def test_recommend_displays_results_and_marks_them_presented(
     assert "这条会对上你最近那种想把结构想透的劲头。" in result.stdout
     assert "话题标签" in result.stdout
     assert "BV1REC" in result.stdout
-    assert fake_engine.marked_ids == [7]
+    assert "2020-07-08" in result.stdout
+    assert "3 days ago" in result.stdout
+    assert result.stdout.count("发布时间") == 2
+    assert fake_engine.marked_ids == [7, 8, 9]
 
 
 def test_feedback_command_updates_recommendation_and_records_event(
@@ -2915,7 +3033,10 @@ def test_init_runs_history_preference_profile_and_discovery(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3060,7 +3181,10 @@ def test_init_caps_bilibili_history_and_favorites_at_500_and_following_at_100(
             self.built_history: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3169,7 +3293,10 @@ def test_init_accepts_custom_bilibili_history_favorites_and_following_limits(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3276,6 +3403,7 @@ def test_init_includes_xhs_bootstrap_events(
             self,
             events: list[dict[str, object]],
             event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3333,11 +3461,6 @@ def test_init_includes_xhs_bootstrap_events(
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
     )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     # v0.3.21+: init now uses split enqueue/collect APIs so the
     # XHS task can run in parallel with B站 fetches. The test fakes
@@ -3365,7 +3488,9 @@ def test_init_includes_xhs_bootstrap_events(
         raising=False,
     )
 
-    result = runner.invoke(app, ["init"])
+    # Selection is opt-in: unselected collectors must not run or consume their
+    # wait budget. Explicitly select XHS so this test exercises its pipeline.
+    result = runner.invoke(app, ["init", "--yes-xhs"])
 
     assert result.exit_code == 0
     assert "小红书" in result.stdout
@@ -3432,6 +3557,7 @@ def test_init_includes_douyin_bootstrap_events_in_analysis_and_profile(
             self,
             events: list[dict[str, object]],
             event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -3496,11 +3622,6 @@ def test_init_includes_douyin_bootstrap_events_in_analysis_and_profile(
         cli_module,
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
     )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_xhs_bootstrap_task", fail_xhs_enqueue, raising=False)
@@ -3903,7 +4024,10 @@ def test_init_youtube_env_skip_overrides_yes_flag(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -3933,11 +4057,6 @@ def test_init_youtube_env_skip_overrides_yes_flag(
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine())
     monkeypatch.setattr(cli_module, "_run_with_progress", passthrough_progress)
     monkeypatch.setattr(cli_module, "_run_init_discovery_backfill_async", fake_discovery_backfill)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
-    )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(cli_module, "_enqueue_yt_bootstrap_task", fake_enqueue_youtube)
 
@@ -4105,7 +4224,10 @@ def test_init_no_xhs_flag_skips_enqueue(
             self.analyzed_events: list[list[dict[str, object]]] = []
 
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             self.analyzed_events.append(events)
 
@@ -4154,11 +4276,6 @@ def test_init_no_xhs_flag_skips_enqueue(
         cli_module,
         "_run_init_discovery_backfill_async",
         fake_discovery_backfill,
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(preferences=PreferenceLayer()),
     )
     monkeypatch.setattr(cli_module, "_notify_running_server_init_completed", lambda: None)
     monkeypatch.setattr(
@@ -4212,7 +4329,10 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4220,7 +4340,12 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
             return SoulProfile(
                 personality_portrait="稳定用户画像" * 30,
                 core_traits=["理性"],
-                preferences=PreferenceLayer(),
+                preferences=PreferenceLayer(
+                    interests=[
+                        InterestTag(name="人工智能", category="科技", weight=0.96),
+                        InterestTag(name="篮球战术", category="体育", weight=0.72),
+                    ]
+                ),
             )
 
     class FakeDatabase:
@@ -4288,19 +4413,6 @@ def test_init_backfills_pool_in_stages_until_target_is_reached(
     )
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: fake_database, raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
-    monkeypatch.setattr(
-        cli_module,
-        "_build_draft_profile_for_discover",
-        lambda memory: SoulProfile(
-            preferences=PreferenceLayer(
-                interests=[
-                    InterestTag(name="人工智能", category="科技", weight=0.96),
-                    InterestTag(name="篮球战术", category="体育", weight=0.72),
-                ]
-            )
-        ),
-        raising=False,
-    )
 
     result = runner.invoke(app, ["init"])
 
@@ -4360,7 +4472,10 @@ def test_init_skips_backfill_when_pool_target_is_already_reached(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4468,7 +4583,10 @@ def test_init_reports_partial_success_when_discovery_fails(
 
     class FakeSoulEngine:
         async def analyze_events(
-            self, events: list[dict[str, object]], event_chunk_size: int = 0
+            self,
+            events: list[dict[str, object]],
+            event_chunk_size: int = 0,
+            **_: object,
         ) -> None:
             return None
 
@@ -4643,7 +4761,7 @@ def test_save_embedding_config_writes_to_toml(
     reloaded, _ = load_config_with_diagnostics()
     assert reloaded.llm.embedding.provider == "ollama"
     assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://localhost:11434/v1"
+    assert reloaded.llm.embedding.base_url == "http://127.0.0.1:11434/v1"
 
 
 def test_save_embedding_config_custom_openai_compat(
@@ -7011,7 +7129,6 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
         raising=False,
     )
     monkeypatch.setattr(cli_module, "_maybe_update_init_source_shares", lambda counts: None)
-    monkeypatch.setattr(cli_module, "_build_draft_profile_for_discover", lambda memory: object())
 
     class _Memory:
         async def propagate_event(self, event: dict[str, Any]) -> None:
@@ -7308,3 +7425,35 @@ def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -
     assert captured["include_bili"] is False
     assert captured["include_reddit"] is True
     assert "Reddit" in result.output
+
+
+@pytest.mark.asyncio
+async def test_run_with_progress_heartbeat_reports_status_and_honest_eta(monkeypatch) -> None:
+    """Heartbeat appends the live sub-progress and never pins the ETA at ~0s.
+
+    Guards the desktop.log stall-visibility fix: past ``eta_seconds`` the tick
+    reads "已超预估" (not a lying "预计还需 ~0s") and carries the
+    ``status_provider`` suffix so a frozen "已完成 X/N 批" localises the hang.
+    """
+    import asyncio as _asyncio
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+
+    async def _work() -> str:
+        await _asyncio.sleep(0.16)
+        return "ok"
+
+    result = await cli_module._run_with_progress(
+        _work(),
+        label="分析偏好（分片批处理）",
+        eta_seconds=0,
+        tick_seconds=0.05,
+        status_provider=lambda: "已完成 2/5 批",
+    )
+
+    out = buf.getvalue()
+    assert result == "ok"
+    assert "已超预估" in out
+    assert "已完成 2/5 批" in out
+    assert "预计还需 ~0s" not in out

@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 import httpx
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.douyin_signature import XBogusSigner
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,7 @@ def normalize_aweme_item(
     if not isinstance(raw_statistics, dict):
         raw_statistics = item.get("stats")
     statistics: dict[str, Any] = raw_statistics if isinstance(raw_statistics, dict) else {}
+    published = normalize_published_time(item.get("create_time"))
 
     return DiscoveredContent(
         bvid=f"dy:{aweme_id}",
@@ -99,6 +101,8 @@ def normalize_aweme_item(
         content_url=f"https://www.douyin.com/video/{aweme_id}",
         source_platform="douyin",
         author_name=author,
+        published_at=published.published_at,
+        published_label=published.published_label,
     )
 
 

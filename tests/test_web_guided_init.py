@@ -1,5 +1,50 @@
+import asyncio
 import re
 from pathlib import Path
+
+import pytest
+
+
+def test_profile_analysis_default_budget_scales_with_chunk_count() -> None:
+    import openbiliclaw.cli as cli
+
+    assert cli._profile_analysis_timeout_seconds(event_count=0, requested=None) == 600
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=400, requested=None, concurrency=1) == 900
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=None, concurrency=1)
+        == 2100
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=None, concurrency=2)
+        == 1200
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=None, concurrency=3)
+        == 900
+    )
+    assert (
+        cli._profile_analysis_timeout_seconds(event_count=1100, requested=12.5, concurrency=1)
+        == 12.5
+    )
+    assert cli._profile_analysis_timeout_seconds(event_count=1100, requested=0) is None
+
+
+def test_profile_analysis_concurrency_reads_soul_llm_service() -> None:
+    import openbiliclaw.cli as cli
+
+    class Service:
+        concurrency = 3
+
+    class Analyzer:
+        registry = Service()
+
+    class Engine:
+        _preference_analyzer = Analyzer()
+
+    assert cli._profile_analysis_concurrency(Engine()) == 3
+    assert cli._profile_analysis_concurrency(object()) == 1
 
 
 def test_setup_wizard_static_contract_uses_guided_init_endpoint() -> None:
@@ -7,8 +52,9 @@ def test_setup_wizard_static_contract_uses_guided_init_endpoint() -> None:
     html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
     assert 'data-panel="3"' in html
-    assert "GET /api/init-status" in html or 'fetch("/api/init-status"' in html
-    assert 'fetch("/api/init"' in html
+    assert 'fetchWithTimeout("/api/init-status"' in html
+    assert 'fetchWithTimeout("/api/init"' in html
+    assert 'fetchWithTimeout("/api/init/cancel"' in html
     assert "init_progress" in html
     assert "/api/init-completed" not in html
 
@@ -57,6 +103,19 @@ def test_unknown_init_reasons_remain_diagnosable() -> None:
     assert "未知初始化状态" in app_js
     assert re.search(r"INIT_REASON_TEXT\[reason\]\s*\|\|\s*`未知初始化状态", setup_html)
     assert re.search(r"INIT_REASON_TEXT\[reason\]\s*\|\|\s*`未知初始化状态", app_js)
+
+
+def test_typed_timeout_reasons_prefer_backend_detail_in_web_surfaces() -> None:
+    """Timeout details contain the cause/action; a short map label must not hide them."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    for source in (setup_html, app_js):
+        assert "analyze_failed" in source
+        assert "profile_failed" in source
+        assert "discovery_timeout" in source
+        assert "detailFirst" in source
+        assert "initStatusReasonText(status)" in source
 
 
 def test_web_surfaces_no_longer_block_reddit_only_init() -> None:
@@ -133,12 +192,33 @@ def test_init_onboarding_gate_trusts_init_status_when_runtime_status_is_unavaila
 
 
 def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
-    """requestJson resolves null instead of rejecting, so the hydrate fallback
-    to the Promise.all runtime snapshot must be `||`, never `.catch()`."""
+    """Progressive runtime reads apply and recover independently."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    assert "async function hydrateFromBackend()" in app_js
+    hydrate = app_js.split("async function hydrateFromBackend()", 1)[1]
+    hydrate = hydrate.split("\n    function renderAll()", 1)[0]
 
-    assert "(await requestJson(ENDPOINTS.runtimeStatus)) || runtime" in app_js
-    assert "requestJson(ENDPOINTS.runtimeStatus).catch(" not in app_js
+    # The first runtime read has its own immediate application/recovery branch.
+    assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in hydrate
+    assert "const runtimePromise = readRuntimeSnapshot();" in hydrate
+    assert "const runtimeApplicationPromise = runtimePromise.then(" in hydrate
+    assert "(snapshot) => applyInitialRuntimeSnapshot(snapshot)" in hydrate
+    assert "() => markDesktopRuntimeFailedAndRecover()" in hydrate
+    assert "if (firstRuntimeGeneration !== desktopRuntimeGeneration) return;" in hydrate
+    assert "applyDesktopRuntimeSnapshot(snapshot, firstRuntimeGeneration)" in hydrate
+
+    # Recommendation settlement starts a separate freshness reread, guarded
+    # against newer runtime-stream generations.
+    assert "const runtimeReconciliationPromise = recommendationApplicationPromise.then(" in hydrate
+    assert "() => reconcileRuntimeAfterRecommendations()" in hydrate
+    assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in hydrate
+    assert "await readRuntimeSnapshot()" in hydrate
+    assert "if (runtimeReconciliationGeneration !== desktopRuntimeGeneration) return;" in hydrate
+
+    # Initial rejection enters the existing bounded runtime recovery owner.
+    assert 'desktopRuntimeLoadState = "failed";' in hydrate
+    assert "scheduleDesktopRuntimeRecovery();" in hydrate
+    assert "renderDesktopRuntimeFailure();" in hydrate
 
 
 def test_bili_checklist_label_reflects_probe_result_and_surfaces_detail() -> None:
@@ -169,10 +249,19 @@ def test_runtime_stream_open_rehydrates_when_backend_data_never_loaded() -> None
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     open_handler = app_js.split('socket.addEventListener("open"', 1)[1]
-    open_handler = open_handler.split("});", 1)[0]
-    assert (
-        "if (!state.initStatus && !state.runtimeStatus) scheduleBackendHydration();" in open_handler
-    )
+    open_handler = open_handler.split('socket.addEventListener("message"', 1)[0]
+    guard = "if (!state.initStatus && !state.runtimeStatus) {"
+    authenticate = "void ensureAuthenticated()"
+    schedule = ".then(scheduleBackendHydration)"
+    safe_rejection = ".catch(() => {})"
+
+    assert guard in open_handler
+    assert authenticate in open_handler
+    assert schedule in open_handler
+    assert safe_rejection in open_handler
+    assert open_handler.index(guard) < open_handler.index(authenticate)
+    assert open_handler.index(authenticate) < open_handler.index(schedule)
+    assert open_handler.index(schedule) < open_handler.index(safe_rejection)
 
 
 def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> None:
@@ -186,7 +275,7 @@ def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> 
     assert "renderInitProgress(status)" in guard
     assert "connectInitStream()" in guard
     assert "if (status.initialized)" in guard
-    assert "renderWaitingForFirstPool()" in guard
+    assert "showInitCompletion(status)" in guard
 
 
 def test_setup_wizard_allows_saved_api_key_to_be_reused_without_reentry() -> None:
@@ -199,15 +288,15 @@ def test_setup_wizard_allows_saved_api_key_to_be_reused_without_reentry() -> Non
     assert "已保存，留空则沿用当前 Key" in setup_html
 
 
-def test_setup_wizard_first_pool_wait_has_web_escape_hatch() -> None:
-    """The 95% waiting state must never park the user on a disabled button with
-    no way out of the wizard."""
+def test_setup_wizard_terminal_partial_success_allows_entry_without_second_wait() -> None:
+    """A completed partial run must not create a frontend-owned 95% wait."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
-    assert 'id="initEscape"' in setup_html
-    assert '<a href="/web">' in setup_html
-    waiting = setup_html.split("function renderWaitingForFirstPool()", 1)[1].split("\n    }", 1)[0]
-    assert '$("#initEscape").className = "msg show info";' in waiting
+    assert "function showInitCompletion(status = null)" in setup_html
+    assert "你现在可以先进入应用" in setup_html
+    assert "setStep(3);" in setup_html
+    assert "renderWaitingForFirstPool" not in setup_html
+    assert '"95%"' not in setup_html
 
 
 def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
@@ -280,3 +369,537 @@ def test_web_surfaces_offer_embedding_repair_and_progress() -> None:
     assert "handleEmbeddingRepairClick" in app_js
     assert ".init-repair-btn" in setup_html
     assert ".init-repair-btn" in app_css
+
+
+# ── init-progress-visibility Phase 0: API models + heartbeat task ────────────
+
+
+def _progress_coord(tmp_path):
+    from types import SimpleNamespace
+
+    from openbiliclaw.runtime.init_coordinator import InitCoordinator
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "hb.db")
+    db.initialize()
+    ctx = SimpleNamespace(database=db, event_hub=None, runtime_controller=None)
+    return InitCoordinator(ctx), db
+
+
+def test_init_stage_out_accepts_and_omits_progress_fields() -> None:
+    """InitStageOut stays backward-compatible: old stage dicts (no progress /
+    eta_seconds) parse, and new ones nest InitStageProgressOut."""
+    from openbiliclaw.api.models import InitStageOut, InitStageProgressOut
+
+    legacy = InitStageOut(n=2, label="分析偏好", status="pending", reason=None)
+    assert legacy.progress is None
+    assert legacy.eta_seconds is None
+
+    rich = InitStageOut(
+        n=2,
+        label="分析偏好",
+        status="running",
+        reason=None,
+        progress={"done": 3, "total": 8, "note": "第 3/8 批"},
+        eta_seconds=180,
+    )
+    assert isinstance(rich.progress, InitStageProgressOut)
+    assert rich.progress.done == 3 and rich.progress.total == 8
+    assert rich.eta_seconds == 180
+
+
+def test_init_status_out_has_last_activity_default() -> None:
+    from openbiliclaw.api.models import InitStatusOut
+
+    status = InitStatusOut()
+    assert status.last_activity == ""
+    assert status.last_heartbeat_at == ""
+    assert status.last_progress_at == ""
+    assert status.progress_sequence == 0
+
+
+def test_heartbeat_interval_bounds_last_activity_freshness() -> None:
+    """Goal metric 1 fallback: the heartbeat period must be ≤30s so that a
+    65s hung stage still lands ≥2 touches (last_activity stays ≤30s fresh)."""
+    from openbiliclaw.api.app import _INIT_HEARTBEAT_INTERVAL_SECONDS
+
+    assert _INIT_HEARTBEAT_INTERVAL_SECONDS <= 30
+
+
+async def test_heartbeat_task_keeps_touching_until_cancelled(tmp_path) -> None:
+    import asyncio
+    from contextlib import suppress
+
+    from openbiliclaw.api.app import _run_init_heartbeat
+
+    coord, db = _progress_coord(tmp_path)
+    coord.try_start("run-1")
+    await coord.mark_running("run-1")
+    seq_before = db.get_latest_init_run()["sequence"]
+
+    task = asyncio.create_task(_run_init_heartbeat(coord, "run-1", interval=0.01))
+    await asyncio.sleep(0.06)
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+    seq_after = db.get_latest_init_run()["sequence"]
+    # At least two heartbeat touches landed while the task ran.
+    assert seq_after - seq_before >= 2
+    assert coord.get_status()["last_activity"] != ""
+
+
+async def test_heartbeat_swallows_touch_errors(tmp_path) -> None:
+    import asyncio
+    from contextlib import suppress
+
+    from openbiliclaw.api.app import _run_init_heartbeat
+
+    class _BoomCoord:
+        async def touch(self, run_id: str) -> None:
+            raise RuntimeError("db gone")
+
+    # A failing touch must not kill the heartbeat loop (it just logs WARNING).
+    task = asyncio.create_task(_run_init_heartbeat(_BoomCoord(), "run-1", interval=0.01))
+    await asyncio.sleep(0.03)
+    assert not task.done()
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+def test_init_status_endpoint_surfaces_last_activity(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.api.app import create_app
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "e1.db")
+    db.initialize()
+    app = create_app(memory_manager=object(), database=db, soul_engine=object())
+    with TestClient(app) as client:
+        body = client.get("/api/init-status").json()
+    assert "last_activity" in body
+    assert isinstance(body["last_activity"], str)
+    assert "last_heartbeat_at" in body
+    assert "last_progress_at" in body
+    assert "progress_sequence" in body
+
+
+# ── init-progress-visibility Phase 1: run_guided_init producer wiring ─────────
+
+
+class _RecordingCoordinator:
+    """Records the progress signals run_guided_init emits (no DB needed)."""
+
+    def __init__(self) -> None:
+        self.stage_progress_calls: list[dict] = []
+        self.started_stages: list[int] = []
+        self.done_stages: list[int] = []
+        self.events: list[tuple[str, int]] = []
+
+    async def stage_started(self, run_id: str, n: int) -> None:
+        self.started_stages.append(n)
+        self.events.append(("started", n))
+
+    async def stage_done(self, run_id: str, n: int, *, status: str = "ok", reason=None) -> None:
+        self.done_stages.append(n)
+        self.events.append(("done", n))
+
+    async def stage_progress(
+        self,
+        run_id: str,
+        stage: int,
+        *,
+        done: int,
+        total: int,
+        note=None,
+        mode="determinate",
+        elapsed_seconds=None,
+        max_seconds=None,
+        substantive=True,
+    ) -> None:
+        self.stage_progress_calls.append(
+            {
+                "stage": stage,
+                "done": done,
+                "total": total,
+                "note": note,
+                "mode": mode,
+                "elapsed_seconds": elapsed_seconds,
+                "max_seconds": max_seconds,
+                "substantive": substantive,
+            }
+        )
+
+    def register_enqueued_task(self, run_id: str, task_id: str) -> None:
+        pass
+
+
+class _StubEngine:
+    def __init__(self, chunk_reports: int = 3) -> None:
+        self.chunk_reports = chunk_reports
+        self.received_callback = None
+        self.profile = object()
+        self.discover_profiles: list[object] = []
+
+    async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
+        self.received_callback = progress_callback
+        if progress_callback is not None:
+            for i in range(1, self.chunk_reports + 1):
+                await progress_callback(i, self.chunk_reports)
+
+    async def build_initial_profile(self, history):
+        return self.profile
+
+
+class _StubMemory:
+    async def propagate_event(self, event) -> None:
+        pass
+
+
+def _patch_run_guided_init_collectors(monkeypatch, engine) -> None:
+    import openbiliclaw.cli as cli
+
+    async def _fetch_bili(client, *, history_limit, favorite_limit, follow_limit):
+        return ([{"title": "hist-1"}], [], [])
+
+    async def _rwp(coro, **kwargs):
+        return await coro
+
+    async def _discover_backfill(
+        profile,
+        *,
+        target_pool_count,
+        label_suffix="",
+        progress_callback=None,
+    ):
+        engine.discover_profiles.append(profile)
+        if progress_callback is not None:
+            await progress_callback(4, 4, "首轮内容池已就绪（测试）")
+        return 0
+
+    monkeypatch.setattr(cli, "_fetch_bilibili_init_data", _fetch_bili)
+    monkeypatch.setattr(
+        cli, "_history_item_to_event", lambda item: {"event_type": "view", "title": "hist-1"}
+    )
+    monkeypatch.setattr(cli, "_collect_xhs_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_dy_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_yt_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_zhihu_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_collect_reddit_bootstrap_events", lambda tid: ([], {}, "timeout"))
+    monkeypatch.setattr(cli, "_enqueue_reddit_bootstrap_task", lambda kick=True: "task-r")
+    monkeypatch.setattr(cli, "_kick_task_dispatcher", lambda source: None)
+    monkeypatch.setattr(cli, "_run_with_progress", _rwp)
+    monkeypatch.setattr(cli, "_print_section_title", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_maybe_update_init_source_shares", lambda *a, **k: None)
+    return _discover_backfill
+
+
+async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monkeypatch) -> None:
+    from contextlib import contextmanager
+    from contextvars import ContextVar
+
+    import openbiliclaw.cli as cli
+
+    scope_active = ContextVar("guided_init_test_scope", default=False)
+    scope_observations: list[tuple[str, bool]] = []
+
+    @contextmanager
+    def _scope():
+        token = scope_active.set(True)
+        try:
+            yield
+        finally:
+            scope_active.reset(token)
+
+    class _ScopedEngine(_StubEngine):
+        async def analyze_events(self, *args, **kwargs):
+            scope_observations.append(("analyze", scope_active.get()))
+            await super().analyze_events(*args, **kwargs)
+
+        async def build_initial_profile(self, *args, **kwargs):
+            scope_observations.append(("profile", scope_active.get()))
+            return await super().build_initial_profile(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_background_admission_bypass", _scope)
+    engine = _ScopedEngine(chunk_reports=3)
+    base_discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    async def discover_backfill(*args, **kwargs):
+        scope_observations.append(("discover", scope_active.get()))
+        return await base_discover_backfill(*args, **kwargs)
+
+    coord = _RecordingCoordinator()
+
+    await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        include_x=False,
+        include_zhihu=False,
+        include_reddit=True,
+        target_pool_count=0,
+        discover_backfill=discover_backfill,
+        coordinator=coord,
+        run_id="run-1",
+    )
+
+    stage1 = [c for c in coord.stage_progress_calls if c["stage"] == 1]
+    # Two selected sources: B站 then Reddit — note switches, done increments 0→1.
+    assert [(c["done"], c["total"], c["note"]) for c in stage1] == [
+        (0, 2, "正在采集 B 站"),
+        (1, 2, "正在采集 Reddit · 扩展未响应会在约 3 分钟后自动跳过"),
+    ]
+
+    stage2 = [c for c in coord.stage_progress_calls if c["stage"] == 2]
+    assert [(c["done"], c["total"]) for c in stage2] == [
+        (0, 1),
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert stage2[0]["note"] == "已完成 0/1 批 · AI 开始处理（并发上限 1）"
+    assert stage2[-1]["note"] == "第 3/3 批"
+    assert stage2[0]["elapsed_seconds"] == 0
+    assert all(call["max_seconds"] == 600 for call in stage2)
+    assert ("analyze", True) in scope_observations
+    assert ("profile", True) in scope_observations
+    assert ("discover", False) in scope_observations
+    assert engine.discover_profiles == [engine.profile]
+    assert coord.events.index(("done", 3)) < coord.events.index(("started", 4))
+
+    stage3 = [c for c in coord.stage_progress_calls if c["stage"] == 3]
+    assert stage3[0]["note"] == "正在综合偏好、历史与认知线索"
+    assert stage3[-1]["note"] == "完整画像已保存，下一步将严格基于它生成内容"
+    stage4 = [c for c in coord.stage_progress_calls if c["stage"] == 4]
+    assert stage4[0]["note"] == "完整画像已就绪，准备发现候选内容"
+    assert "可直接浏览" in stage4[-1]["note"]
+
+    # Stages all completed (Task 1 clears any progress residue on stage_done).
+    assert coord.done_stages == [1, 2, 3, 4]
+
+
+async def test_run_guided_init_cli_path_uses_console_progress_callback(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine(chunk_reports=2)
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    # No coordinator (CLI path): analyze_events must still receive a callback,
+    # and invoking it must not raise (it prints instead of hitting a coordinator).
+    await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        include_x=False,
+        include_zhihu=False,
+        include_reddit=False,
+        target_pool_count=0,
+        discover_backfill=discover_backfill,
+        coordinator=None,
+        run_id=None,
+    )
+    assert engine.received_callback is not None
+    await engine.received_callback(1, 2)  # prints without error
+
+
+async def test_run_guided_init_bounds_hung_preference_analysis(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    class _HangingAnalyzeEngine(_StubEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled = False
+
+        async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    engine = _HangingAnalyzeEngine()
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+    coord = _RecordingCoordinator()
+
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=object(),
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=True,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=discover_backfill,
+            coordinator=coord,
+            run_id="run-timeout",
+            profile_analysis_timeout_seconds=0.01,
+        )
+
+    assert excinfo.value.reason == "analyze_failed"
+    assert "本轮 1 分钟上限" in excinfo.value.message
+    assert "Base URL" in excinfo.value.message
+    assert "模型名" in excinfo.value.message
+    assert "重试初始化" in excinfo.value.message
+    assert engine.cancelled is True
+    assert engine.discover_profiles == []
+    assert coord.started_stages == [1, 2]
+    assert coord.done_stages == [1]
+
+
+async def test_run_guided_init_bounds_stage1_and_stops_extension_worker(monkeypatch) -> None:
+    import threading
+
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine()
+    _patch_run_guided_init_collectors(monkeypatch, engine)
+    cancel_seen = threading.Event()
+
+    def _blocking_collector(
+        task_id,
+        *,
+        max_wait_seconds=None,
+        cancel_event=None,
+    ):
+        assert task_id == "xhs-timeout"
+        assert cancel_event is not None
+        cancel_event.wait(2)
+        if cancel_event.is_set():
+            cancel_seen.set()
+        return [], {}, "timeout"
+
+    monkeypatch.setattr(cli, "_enqueue_xhs_bootstrap_task", lambda **kwargs: "xhs-timeout")
+    monkeypatch.setattr(cli, "_kick_task_dispatcher", lambda source: None)
+    monkeypatch.setattr(cli, "_collect_xhs_bootstrap_events", _blocking_collector)
+
+    class _RichCoordinator(_RecordingCoordinator):
+        async def stage_progress(self, run_id, stage, **kwargs):
+            self.stage_progress_calls.append({"stage": stage, **kwargs})
+
+    coord = _RichCoordinator()
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=None,
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=False,
+            include_xhs=True,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=lambda *args, **kwargs: None,
+            coordinator=coord,
+            run_id="run-collection-timeout",
+            collection_timeout_seconds=0.03,
+        )
+
+    assert excinfo.value.reason == "collection_timeout"
+    assert "总等待上限" in excinfo.value.message
+    assert cancel_seen.wait(1), "blocking extension collector did not receive cancellation"
+    countdowns = [
+        call
+        for call in coord.stage_progress_calls
+        if call["stage"] == 1 and call.get("mode") == "indeterminate"
+    ]
+    assert countdowns
+    assert countdowns[-1]["substantive"] is False
+    assert "阶段剩余最多" in countdowns[-1]["note"]
+
+
+async def test_run_guided_init_bounds_hung_profile_build(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    class _HangingProfileEngine(_StubEngine):
+        def __init__(self) -> None:
+            super().__init__(chunk_reports=0)
+            self.cancelled = False
+
+        async def build_initial_profile(self, history):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    engine = _HangingProfileEngine()
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=object(),
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=True,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=discover_backfill,
+            profile_build_timeout_seconds=0.01,
+        )
+
+    assert excinfo.value.reason == "profile_failed"
+    assert "超过 6 分钟" in excinfo.value.message
+    assert "Base URL" in excinfo.value.message
+    assert "模型名" in excinfo.value.message
+    assert "重试初始化" in excinfo.value.message
+    assert engine.cancelled is True
+    assert engine.discover_profiles == []
+
+
+async def test_run_guided_init_treats_hung_discovery_as_partial_success(monkeypatch) -> None:
+    import openbiliclaw.cli as cli
+
+    engine = _StubEngine(chunk_reports=0)
+    _patch_run_guided_init_collectors(monkeypatch, engine)
+    discovery_cancelled = False
+
+    async def _hanging_discovery(profile, *, target_pool_count, label_suffix=""):
+        nonlocal discovery_cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            discovery_cancelled = True
+
+    result = await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        target_pool_count=0,
+        discover_backfill=_hanging_discovery,
+        discovery_timeout_seconds=0.01,
+    )
+
+    assert result.discovery_error is True
+    assert isinstance(result.discover_exc, TimeoutError)
+    assert result.discovery_reason == "discovery_timeout"
+    assert "超过 10 分钟" in result.discovery_detail
+    assert "部分完成" in result.discovery_detail
+    assert "后台继续补池" in result.discovery_detail
+    assert discovery_cancelled is True

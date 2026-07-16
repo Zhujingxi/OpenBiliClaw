@@ -570,6 +570,14 @@ export function handleCookieSyncRuntimeEvent(event: Record<string, unknown>): bo
     void syncRedditCookieToBackend("runtime-stream-request");
     return true;
   }
+  if (eventType === "xhs_login_state_sync_requested") {
+    void syncXhsLoginStateToBackend("runtime-stream-request");
+    return true;
+  }
+  if (eventType === "zhihu_login_state_sync_requested") {
+    void syncZhihuLoginStateToBackend("runtime-stream-request");
+    return true;
+  }
   return false;
 }
 

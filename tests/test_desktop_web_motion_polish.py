@@ -67,3 +67,20 @@ def test_open_panel_cancels_in_flight_close() -> None:
     assert 'removeEventListener("animationend"' in open_body
     assert 'panel.classList.remove("is-closing")' in open_body
     assert 'panel.classList.add("is-open")' in open_body
+
+
+def test_delight_drag_thresholds_and_autoload_margin_remain_calibrated() -> None:
+    app_js = APP_JS.read_text(encoding="utf-8")
+
+    assert "const _DELIGHT_DRAG_DEAD_ZONE = 10;" in app_js
+    assert "Math.abs(dx) < _DELIGHT_DRAG_DEAD_ZONE" in app_js
+    assert "wasActive && Math.abs(dx) >= 50" in app_js
+    assert "const AUTO_LOAD_ROOT_MARGIN_PX = 50;" in app_js
+
+
+def test_desktop_delight_has_available_width_container_rules() -> None:
+    app_css = APP_CSS.read_text(encoding="utf-8")
+
+    assert "container-type: inline-size" in app_css
+    assert "container-name: desktop-main" in app_css
+    assert "@container desktop-main (max-width:" in app_css

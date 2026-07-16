@@ -169,6 +169,8 @@ def test_bili_task_result_enqueues_videos_into_discovery_candidates(
                     "comment_count": 55,
                     "share_count": 44,
                     "description": "轴体与配列",
+                    "published_at": 1783492200,
+                    "published_label": "3小时前",
                 }
             ],
         },
@@ -196,6 +198,8 @@ def test_bili_task_result_enqueues_videos_into_discovery_candidates(
     assert row["danmaku_count"] == 66
     assert row["comment_count"] == 55
     assert row["share_count"] == 44
+    assert row["published_at"] == "2026-07-08T06:30:00Z"
+    assert row["published_label"] == "3小时前"
     assert row["score_threshold"] == 0.60
     assert row["source_keyword_id"] == 7
     raw_payload = json.loads(str(row["raw_payload"]))

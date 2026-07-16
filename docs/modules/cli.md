@@ -77,14 +77,19 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 ### `openbiliclaw config-show`
 
 显示当前加载的配置、已注册的 LLM Provider 和最终生效的默认 Provider。
-配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数，以及「开机自启动」配置 / 系统注册状态，方便确认插件设置页里的调度与自启动配置是否已经写入后端配置。
+配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 
 ```bash
 $ openbiliclaw config-show
 当前配置概览
 配置项
+  收藏自动同步  关闭
 Provider 概览
 ```
+
+`config-show` 只读取并展示配置，不创建保存任务，也不会执行平台账号写入。当前没有默认执行
+原生保存写入的 CLI smoke；Bilibili `favorite` / `watch_later` 的真实 E2E 通过平台中立
+`/api/saved/*` 明确选择命名 BV ID，并且必须先取得当次用户授权或使用测试账号。
 
 ### `openbiliclaw health-check`
 
@@ -503,14 +508,18 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 6. best-effort 等待插件导入 YouTube 初始化信号
 7. best-effort 等待插件导入知乎初始化信号
 8. 写入事件层并分析偏好
-9. 生成初始画像
-10. 按阶段自动补首轮内容池
+9. 生成、校验并保存完整初始画像
+10. 严格使用该画像执行发现、个性化评估和推荐文案生成，至少验证一条 canonical 推荐可直接浏览
 
 > v0.3.118+：B 站不再是必选基座——`--no-bilibili`（或 `OPENBILICLAW_NO_BILIBILI=1`）可跳过 B 站，
 > 但 init **至少需要一个数据来源**：全部来源都关闭时命令直接报错退出（exit 1）。
 > 所有所选来源都没拉到任何信号时，流水线以 `empty_signals` 失败。
 
 > v0.3.102+：第 3–9 步的核心抽成共享异步流水线 `cli.run_guided_init`，CLI 用单次 `asyncio.run(run_guided_init(...))` 驱动（交互提示 / 摘要仍在命令里），后端图形化初始化 `POST /api/init` 复用同一协程。CLI 行为 / 输出 / 退出码不变。**也可以不进终端**：插件「推荐」tab 未初始化时直接点「开始初始化」，详见 [init 模块文档](init.md) 与 [extension 模块文档](extension.md)。
+
+> Issue #113（v0.3.168+）：共享流水线仅在阶段 2 偏好分析和阶段 3 画像任务的 task-local scope 内绕过库存敏感的后台 admission，避免首次空库存与画像生成互相等待；阶段 4 只在完整画像落盘后开始且不继承 bypass，并同步完成发现、评估、推荐文案与 canonical 可用性校验。正向兴趣 / 避雷探针移到 init wrapper 恢复 runtime 后调度，普通后台任务、LLM 总并发 gate 及 Soul 公开 API 不变。
+
+> 阶段 2 的 ETA 心跳会附带实时分片进度 `已完成 X/N 批` 和实际 LLM 并发上限，超过原始预估后明确显示“已超预估、仍在处理”，不再长期显示“预计还需 ~0s”。默认墙钟预算按并发执行波次自适应：每波 300 秒，再固定预留 300 秒给一次 reasoning-only / 临时限流恢复；1100 条事件拆成 6 批时，并发 1 / 2 / 3 分别允许 2100 / 1200 / 900 秒，最小单波预算 600 秒。分片完成行在 CLI 与 API 初始化路径都会写到 stdout，便于桌面端 `desktop.log` 直接定位进度；更细的分片起止、耗时、限流重试和取消记录写入 `openbiliclaw.log`。
 
 安装渠道里的首选路径是 `scripts/agent_bootstrap.py` 自动运行 init：Bash / PowerShell 人类一行安装会先在终端向导里按顺序确认 LLM、embedding、B 站 Cookie 和各来源 opt-in；Docker / AI agent / CI 非交互安装则通过显式 flags 和 `BOOTSTRAP_STATUS` 推进，不会阻塞读 stdin。bootstrap 随后会对默认 LLM provider 与 embedding 服务各做一次轻量真实调用；两者都可用才触发本命令。若 bootstrap 返回 `service_check_failed`，说明 `openbiliclaw init` 尚未运行，应先修 API key / base_url / model / Ollama，再重跑 bootstrap。直接执行 `openbiliclaw init` 仍保留为高级手动 fallback 和重复初始化入口。
 
@@ -528,14 +537,17 @@ $ openbiliclaw init
   YouTube 观看历史 40 条 / 订阅 12 个 / 点赞 20 个
   知乎 浏览 80 条 / 收藏 42 条 / 点赞 16 条
 2/4 分析偏好
-3/4 生成画像
-4/4 发现内容
+3/4 生成并保存完整画像
+4/4 建立首轮可用内容池
+  首轮内容池：完整画像已就绪，准备发现候选内容（0/4）
 补货阶段 1/3: search + related_chain
-当前池子 0/100，本轮请求上限 100
-阶段完成: 当前池子 28/100，本轮发现 18 条
+当前池子 0/15，本轮请求上限 15
+阶段完成: 当前池子 8/15，本轮发现 8 条
 补货阶段 2/3: trending
-当前池子 28/100，本轮请求上限 72
-阶段完成: 当前池子 104/100，本轮发现 76 条
+当前池子 8/15，本轮请求上限 7
+阶段完成: 当前池子 15/15，本轮发现 7 条
+  首轮内容池：已生成推荐文案，正在验证首轮内容可用性（3/4）
+  首轮内容池：首轮内容池已就绪（15 条可直接浏览）（4/4）
 初始化完成
 初始化摘要
   B 站观看历史: 500 条
@@ -724,10 +736,13 @@ $ openbiliclaw recommend
 推荐 1
   标题: 讲透城市与建筑的空间叙事
   UP 主: 城市观察局
+  发布时间: 3 天前
   话题标签: 你最近那股想把结构想透的劲头
   推荐理由: 这条会对上你最近那种想把结构想透的劲头，它不是快餐内容，而是会慢慢把结构给你铺开。
   BV号: BV1REC
 ```
+
+`发布时间` 复用后端统一 formatter：精确 `published_at` 按本地时区显示为“刚刚 / N 小时前 / N 天前 / 月日 / 年-月-日”，精确值缺失时回退到来源 `published_label`；两者都为空时整行不输出。CLI 不展示原始 UTC 字符串，也不以发现时间或推荐生成时间代替发布时间。
 
 如果当前还没有可推荐内容，会提示先执行：
 
@@ -1022,7 +1037,7 @@ openbiliclaw init
 
 ### `openbiliclaw chat`
 
-进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。输入 `exit`、`quit` 或空行可结束。聊天内容会先记录为 `dialogue` 事件，并以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
+进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。输入 `exit`、`quit` 或空行可结束。聊天内容仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。
 
 ```bash
 $ openbiliclaw chat

@@ -16,8 +16,10 @@ import locale
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -722,7 +724,13 @@ class AutoUpdateService:
         channel: str,
         verify_tls: bool,
     ) -> _BackendTagSelection:
-        async with httpx.AsyncClient(timeout=30, verify=verify_tls) as client:
+        # GitHub is overseas for many users → honor [network].proxy alongside
+        # the TLS-verify toggle. Empty proxy leaves construction unchanged.
+        from openbiliclaw.network import outbound_httpx_kwargs
+
+        async with httpx.AsyncClient(
+            timeout=30, verify=verify_tls, **outbound_httpx_kwargs()
+        ) as client:
             tag_names: list[str] = []
             for page in range(1, _MAX_TAG_PAGES + 1):
                 try:
@@ -833,16 +841,7 @@ class AutoUpdateService:
         remote = await self._run_git(["config", "--get", "remote.origin.url"], root)
         remote_url = remote.stdout.strip() if remote.returncode == 0 else ""
         if not remote_url:
-            logger.warning(
-                "Auto-update apply refused: no 'origin' remote configured in %s (git stderr: %s)",
-                root,
-                remote.stderr.strip() or "<empty>",
-            )
-            self._guard_detail = (
-                f"未配置 origin 远端({root});"
-                f"运行:git -C {root} remote add origin {DEFAULT_ALLOWED_REMOTES[0]}"
-            )
-            return "untrusted_remote"
+            return await self._refuse_unreadable_origin(root, remote)
         redacted = _redact_remote_url(remote_url)
         if _remote_has_credentials(remote_url):
             logger.warning("Auto-update apply refused: remote URL embeds credentials")
@@ -919,6 +918,76 @@ class AutoUpdateService:
             return "branch_not_fast_forwardable"
         return ""
 
+    async def _refuse_unreadable_origin(
+        self,
+        root: Path,
+        config_result: subprocess.CompletedProcess[str],
+    ) -> str:
+        """Classify an empty ``remote.origin.url`` read and emit the right fix.
+
+        ``git config --get remote.origin.url`` comes back empty for several very
+        different reasons, and the old blanket "运行:git remote add origin"
+        advice was actively wrong for most of them: an install whose origin
+        already exists — just url-less, holding multiple urls, or blocked by
+        Windows *dubious ownership* — hits "error: remote origin already exists"
+        when it follows that hint. That is the exact contradiction users report:
+        the status card says 未配置 origin 远端, yet ``git remote add origin``
+        answers "already exists". Probe ``git remote get-url origin`` to tell the
+        cases apart and write the remediation that actually applies. Always
+        reported as ``origin_remote_unusable`` — distinct from
+        ``untrusted_remote``, which is a *readable* remote rejected by the
+        allowlist / credential check.
+        """
+        fix_url = DEFAULT_ALLOWED_REMOTES[0]
+        probe = await self._run_git(["remote", "get-url", "origin"], root)
+        config_err = config_result.stderr.strip()
+        probe_err = probe.stderr.strip()
+
+        if "dubious ownership" in f"{config_err}\n{probe_err}".lower():
+            # Windows secondary drives / service accounts: the repo dir is owned
+            # by a different account than the backend process, so git refuses to
+            # open it at all. The origin remote itself is fine — safe.directory
+            # is the fix, and it must run as whatever account launches the
+            # backend (the user's own shell reads the repo without complaint,
+            # which is why manual `git remote add` there says "already exists").
+            self._guard_detail = (
+                f"git 拒绝读取仓库({root}):检测到 dubious ownership"
+                f"(仓库属主与运行后端的账户不一致,Windows 副盘/服务账户常见);"
+                f"以运行后端的账户执行:git config --global --add safe.directory {root}"
+            )
+        elif probe.returncode != 0 and "no such remote" in probe_err.lower():
+            # Genuinely no origin remote — the only case where "remote add" fits.
+            self._guard_detail = (
+                f"未配置 origin 远端({root});运行:git -C {root} remote add origin {fix_url}"
+            )
+        elif probe.returncode != 0 and (config_err or probe_err):
+            # Any other git failure reading the repo (lock, corrupt config, git
+            # missing on the backend's PATH, …): surface the real error instead
+            # of a misleading "remote add" hint the user can't act on.
+            git_err = (config_err or probe_err).splitlines()[0].strip()
+            self._guard_detail = (
+                f"git 无法读取 origin 远端({root}):{git_err};请查看后端日志的完整 git 报错后修复"
+            )
+        else:
+            # origin exists but its url is blank / can't be resolved (the
+            # "already exists" trap): set-url overwrites it, remote add is
+            # refused. This is what reproduces the reported card contradiction.
+            self._guard_detail = (
+                f"origin 远端已存在但地址无法解析({root});"
+                f"运行:git -C {root} remote set-url origin {fix_url}"
+            )
+
+        logger.warning(
+            "Auto-update apply refused: remote.origin.url unreadable in %s "
+            "(config rc=%s stderr=%s; get-url rc=%s stderr=%s)",
+            root,
+            config_result.returncode,
+            config_err or "<empty>",
+            probe.returncode,
+            probe_err or "<empty>",
+        )
+        return "origin_remote_unusable"
+
     async def _apply_update_to_tag(self, tag: str) -> None:
         """Fast-forward to *tag*, reinstall dependencies, and restart."""
         root = _project_root()
@@ -934,9 +1003,42 @@ class AutoUpdateService:
                 return
 
             install_cmd = self._detect_install_command(root)
-            install = await self._run_command(install_cmd, root, timeout=300)
+            logger.info("Auto-update syncing dependencies with: %s", install_cmd)
+            try:
+                install = await self._run_command(install_cmd, root, timeout=300)
+            except FileNotFoundError as exc:
+                missing = Path(str(exc.filename or "dependency tool")).name
+                logger.exception("Auto-update dependency tool is unavailable: %s", missing)
+                await self._mark_apply_failed(
+                    "dependency_sync_failed",
+                    detail=f"依赖同步工具不可用({missing});请重新运行安装器修复运行环境",
+                )
+                return
+            except subprocess.TimeoutExpired:
+                logger.exception("Auto-update dependency sync timed out after 300 seconds")
+                await self._mark_apply_failed(
+                    "dependency_sync_failed",
+                    detail=(
+                        f"依赖同步超时({self._install_tool_name(install_cmd)},300 秒);"
+                        "请检查网络后重试"
+                    ),
+                )
+                return
             if install.returncode != 0:
-                await self._mark_apply_failed("dependency_sync_failed")
+                output = install.stderr.strip() or install.stdout.strip() or "<no output>"
+                logger.error(
+                    "Auto-update dependency sync failed (exit=%s, command=%s): %s",
+                    install.returncode,
+                    install_cmd,
+                    output,
+                )
+                await self._mark_apply_failed(
+                    "dependency_sync_failed",
+                    detail=(
+                        f"依赖同步失败({self._install_tool_name(install_cmd)},"
+                        f"退出码 {install.returncode});请查看后端日志中的完整错误"
+                    ),
+                )
                 return
 
             self._state = "restart_pending"
@@ -958,10 +1060,10 @@ class AutoUpdateService:
             logger.exception("Auto-update apply failed")
             await self._mark_apply_failed("dependency_sync_failed")
 
-    async def _mark_apply_failed(self, reason: str) -> None:
+    async def _mark_apply_failed(self, reason: str, *, detail: str = "") -> None:
         self._state = "error"
         self._reason = reason
-        self._update_error = reason
+        self._update_error = detail or reason
         await self._publish_event({"type": "backend_update_failed", "reason": reason})
 
     async def _publish_event(self, event: dict[str, object]) -> None:
@@ -1033,15 +1135,66 @@ class AutoUpdateService:
 
     @staticmethod
     def _detect_install_command(root: Path) -> list[str]:
-        """Detect the best install command based on the project environment."""
-        # Prefer uv if uv.lock exists
-        if (root / "uv.lock").exists():
-            return ["uv", "sync"]
-        # Fallback to pip
+        """Choose a dependency-only sync command available to this daemon.
+
+        A repository always contains ``uv.lock``, including installs created by
+        the supported pip/venv fallback.  Treating the lockfile itself as proof
+        that the daemon can execute ``uv`` made those installs fast-forward the
+        source and then fail with ``FileNotFoundError('uv')``.  Probe PATH
+        explicitly and otherwise use the pip belonging to the running Python.
+
+        Neither command reinstalls the editable OpenBiliClaw project.  The
+        running console entry point can be locked on Windows, while the source
+        checkout is already live through the editable install and will be
+        re-imported after restart.  ``--inexact`` keeps that editable project
+        (and any user-selected extras) while uv synchronizes runtime deps.
+        """
+        if (root / "uv.lock").exists() and shutil.which("uv") is not None:
+            return ["uv", "sync", "--no-install-project", "--inexact"]
+
+        dependencies = AutoUpdateService._read_runtime_dependencies(root)
+        if dependencies:
+            return [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-input",
+                *dependencies,
+            ]
+
+        # Defensive compatibility for an unusual legacy checkout whose
+        # pyproject metadata cannot be read.  Normal releases always take one
+        # of the dependency-only paths above.
         return [sys.executable, "-m", "pip", "install", "-e", "."]
 
     @staticmethod
+    def _read_runtime_dependencies(root: Path) -> list[str]:
+        """Read PEP 508 runtime requirements from ``pyproject.toml``."""
+        try:
+            with (root / "pyproject.toml").open("rb") as file:
+                payload = tomllib.load(file)
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            logger.warning("Auto-update could not read pyproject dependencies: %s", exc)
+            return []
+        project = payload.get("project")
+        if not isinstance(project, dict):
+            return []
+        dependencies = project.get("dependencies")
+        if not isinstance(dependencies, list):
+            return []
+        return [item.strip() for item in dependencies if isinstance(item, str) and item.strip()]
+
+    @staticmethod
+    def _install_tool_name(command: Sequence[str]) -> str:
+        if len(command) >= 3 and command[1:3] == ["-m", "pip"]:
+            return "pip"
+        return Path(command[0]).name if command else "unknown"
+
+    @staticmethod
     def _restart_process() -> None:
-        """Restart the current process with the same arguments."""
-        logger.info("Restarting process: %s %s", sys.executable, sys.argv)
-        os.execv(sys.executable, [sys.executable, *sys.argv])
+        """Restart the git-install CLI through a cross-platform module entry."""
+        argv = [sys.executable, "-m", "openbiliclaw.cli", *sys.argv[1:]]
+        logger.info("Restarting process: %s", argv)
+        os.execv(sys.executable, argv)

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from openbiliclaw.llm.service import ModuleOverride, SupportsComplete
     from openbiliclaw.memory.manager import MemoryManager
@@ -132,7 +132,8 @@ class SoulEngine:
         usage_recorder: Any | None = None,
         satisfaction_filter_enabled: bool = True,
         module_overrides: Mapping[str, ModuleOverride] | None = None,
-        llm_concurrency: int = 3,
+        llm_concurrency: int = 4,
+        llm_concurrency_gate: Any | None = None,
         speculation_interval_minutes: int = 10,
         speculation_ttl_days: int = 3,
         speculation_cooldown_days: int = 7,
@@ -161,6 +162,7 @@ class SoulEngine:
         self._feedback_batch_lock = asyncio.Lock()
         self._module_overrides = dict(module_overrides or {})
         self._llm_concurrency = llm_concurrency
+        self._llm_concurrency_gate = llm_concurrency_gate
         # Pass usage_recorder through so internal LLM calls
         # (preference / awareness / insight / profile_builder / speculator
         # / dialogue_insight) appear in the cost ledger with their caller
@@ -174,6 +176,7 @@ class SoulEngine:
             usage_recorder=usage_recorder,
             module_overrides=self._module_overrides,
             concurrency=llm_concurrency,
+            concurrency_gate=llm_concurrency_gate,
         )
         self._awareness_analyzer = AwarenessAnalyzer(self._llm_service)
         self._dialogue_insight_analyzer = DialogueInsightAnalyzer(self._llm_service)
@@ -240,9 +243,10 @@ class SoulEngine:
             speculator_idle_interval_minutes=speculator_idle_interval_minutes,
             profile_consolidator=self._profile_consolidator,
         )
-        # Detached post-edit work (the dislike pool purge runs an LLM+embedding
-        # recall that must not block the edit response). Tracked so it isn't
-        # garbage-collected mid-flight and can be awaited in tests / shutdown.
+        # Detached dislike writeback from manual edits, feedback batches, and
+        # dialogue learning. The purge runs an LLM+embedding recall that must
+        # not block the interactive response, so keep a strong task reference
+        # and expose a deterministic wait hook for tests / shutdown.
         self._background_edit_tasks: set[asyncio.Task[Any]] = set()
         self._init_cognition_context: dict[str, object] = {}
 
@@ -268,6 +272,7 @@ class SoulEngine:
         events: list[dict[str, Any]],
         *,
         event_chunk_size: int = 0,
+        progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> None:
         """Analyze new behavioral events and update all memory layers.
 
@@ -295,6 +300,7 @@ class SoulEngine:
             events=events,
             existing_preference=preference_layer.data,
             event_chunk_size=event_chunk_size,
+            progress_callback=progress_callback,
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
@@ -351,52 +357,12 @@ class SoulEngine:
             _time.monotonic() - t0,
         )
 
-        # Trigger speculator immediately after init to seed speculative interests
-        try:
-            load_runtime_state = getattr(self._memory, "load_discovery_runtime_state", None)
-
-            def _load_runtime_history(key: str) -> object:
-                if not callable(load_runtime_state):
-                    return []
-                runtime_state = load_runtime_state()
-                if not isinstance(runtime_state, dict):
-                    return []
-                return runtime_state.get(key, [])
-
-            feedback_history = _load_runtime_history("probe_feedback_history")
-            avoidance_feedback_history = _load_runtime_history("avoidance_probe_feedback_history")
-            try:
-                await self._speculator.force_tick(
-                    profile,
-                    feedback_history=feedback_history,
-                    feedback_history_loader=lambda: _load_runtime_history("probe_feedback_history"),
-                )
-            except TypeError:
-                try:
-                    await self._speculator.force_tick(
-                        profile,
-                        feedback_history=feedback_history,
-                    )
-                except TypeError:
-                    await self._speculator.force_tick(profile)
-            try:
-                await self._avoidance_speculator.force_tick(
-                    profile,
-                    feedback_history=avoidance_feedback_history,
-                    feedback_history_loader=lambda: _load_runtime_history(
-                        "avoidance_probe_feedback_history"
-                    ),
-                )
-            except TypeError:
-                try:
-                    await self._avoidance_speculator.force_tick(
-                        profile,
-                        feedback_history=avoidance_feedback_history,
-                    )
-                except TypeError:
-                    await self._avoidance_speculator.force_tick(profile)
-        except Exception:
-            logger.debug("Speculator force_tick after init failed", exc_info=True)
+        # This return is the strict profile-commit barrier for guided init.
+        # Initial interest/avoidance probes are intentionally scheduled by
+        # RuntimeContext.restart_background_tasks *after* the first serviceable
+        # content pool is attempted. Keeping them out of this method prevents a
+        # non-essential maintenance task from extending or deadlocking the
+        # load-bearing profile stage.
 
         return profile
 
@@ -611,10 +577,9 @@ class SoulEngine:
         return {"ok": True, "target": target, "op": op}
 
     def _schedule_dislike_purge(self, **kwargs: Any) -> None:
-        """Run the dislike pool purge detached from the edit request.
+        """Run a learned-dislike pool purge outside the interactive request.
 
-        ``apply_user_edit`` is always invoked inside a running event loop, so a
-        task is scheduled there. Failures are swallowed inside
+        Every caller runs inside an event loop. Failures are swallowed inside
         ``_purge_for_new_dislikes``; the done-callback only drops the tracking
         reference.
         """
@@ -623,7 +588,7 @@ class SoulEngine:
         task.add_done_callback(self._background_edit_tasks.discard)
 
     async def wait_for_pending_edits(self) -> None:
-        """Await any detached post-edit work (the dislike pool purge).
+        """Await detached dislike-purge work from any learning path.
 
         Used by tests and graceful shutdown so the background purge can finish
         deterministically. No-op when nothing is pending.
@@ -641,10 +606,10 @@ class SoulEngine:
         embedding_service: Any | None,
         llm_service: Any | None,
     ) -> None:
-        """Reuse the confirmed-avoidance pool purge for a manual dislike add."""
+        """Reuse the confirmed-avoidance purge for a newly learned dislike."""
         db = database if database is not None else getattr(self._memory, "_database", None)
         if db is None:
-            logger.info("skip manual-dislike pool purge: no database available")
+            logger.info("skip learned-dislike pool purge: no database available")
             return
         embedding = embedding_service if embedding_service is not None else self._embedding_service
         llm = llm_service if llm_service is not None else self._llm_service
@@ -659,7 +624,7 @@ class SoulEngine:
                 all_dislikes=all_dislikes,
             )
         except Exception:
-            logger.exception("manual-dislike pool purge failed")
+            logger.exception("learned-dislike pool purge failed")
 
     def _sync_speculators_for_edit(self, *, target: str, op: str, value: object) -> None:
         """Keep the interest / avoidance speculators consistent with the edit.
@@ -904,9 +869,33 @@ class SoulEngine:
             ],
             existing_preference=existing_preference,
         )
+        old_disliked = {
+            str(item).strip()
+            for item in self._as_str_list(existing_preference.get("disliked_topics", []))
+            if str(item).strip()
+        }
+        new_disliked = {
+            str(item).strip()
+            for item in self._as_str_list(updated_preference.get("disliked_topics", []))
+            if str(item).strip()
+        }
+        newly_added_dislikes = sorted(new_disliked - old_disliked)
         preference_layer.data.clear()
         preference_layer.data.update(updated_preference)
         preference_layer.save()
+
+        if newly_added_dislikes:
+            # Start the deterministic purge as soon as the durable preference
+            # write succeeds. A full profile rebuild can take tens of seconds;
+            # it must not delay removing an explicitly rejected topic from the
+            # active pool. Semantic recall continues detached in parallel.
+            self._schedule_dislike_purge(
+                newly_added=newly_added_dislikes,
+                all_dislikes=sorted(new_disliked),
+                database=getattr(self._memory, "_database", None),
+                embedding_service=self._embedding_service,
+                llm_service=self._llm_service,
+            )
 
         profile_rebuilt = False
         if self._preference_changed_significantly(existing_preference, updated_preference):

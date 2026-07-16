@@ -53,6 +53,10 @@ class YoutubeDiscoveryProducer:
     daily_channel_budget: int = 0
     strategies: tuple[str, ...] = YOUTUBE_DISCOVERY_STRATEGIES
     candidate_pipeline: Any | None = None
+    # API/OpenClaw runtime composition flips this after attaching its shared
+    # CandidateEvalCoordinator. Standalone producer runs preserve the legacy
+    # inline drain path.
+    candidate_evaluation_owned_by_coordinator: bool = False
     # Unified keyword planner fetch coordinator (P1.7). When wired AND the flag
     # is on, the ``yt_search`` strategy claims words from the keyword store and
     # injects them as ``queries``; the words are marked ``used`` once the raw
@@ -184,7 +188,7 @@ class YoutubeDiscoveryProducer:
         }
         if self.candidate_pipeline is not None:
             payload["enqueued"] = enqueued_total
-            if enqueued_total > 0:
+            if enqueued_total > 0 and not self.candidate_evaluation_owned_by_coordinator:
                 drain_result = await self.candidate_pipeline.drain_pending(
                     profile=profile,
                     batch_size=requested_limit,

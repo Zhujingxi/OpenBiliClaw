@@ -55,6 +55,70 @@ def test_plain_tweet_maps_core_fields() -> None:
     assert "async" in content.tags
 
 
+def test_plain_tweet_maps_publication_time() -> None:
+    raw = _load("plain_tweet.json")
+    raw["createdAtISO"] = "2026-07-08T06:30:00Z"
+    raw["createdAtLocal"] = "Jul 8, 2026"
+
+    content = normalize_tweet(raw)
+
+    assert content is not None
+    assert content.published_at == "2026-07-08T06:30:00Z"
+    assert content.published_label == ""
+
+
+def test_plain_tweet_uses_created_at_when_iso_is_missing() -> None:
+    raw = _load("plain_tweet.json")
+    raw.pop("createdAtISO", None)
+    raw["createdAt"] = "Wed Jul 08 06:30:00 +0000 2026"
+    raw["createdAtLocal"] = "2026-07-08T14:30:00+08:00"
+
+    content = normalize_tweet(raw)
+
+    assert content is not None
+    assert content.published_at == "2026-07-08T06:30:00Z"
+    assert content.published_label == ""
+
+
+def test_plain_tweet_uses_timezone_aware_created_at_local_as_exact_time() -> None:
+    raw = _load("plain_tweet.json")
+    raw.pop("createdAtISO", None)
+    raw.pop("createdAt", None)
+    raw["createdAtLocal"] = "2026-07-08T14:30:00+08:00"
+
+    content = normalize_tweet(raw)
+
+    assert content is not None
+    assert content.published_at == "2026-07-08T06:30:00Z"
+    assert content.published_label == ""
+
+
+def test_plain_tweet_rejects_timezone_less_created_at_local() -> None:
+    raw = _load("plain_tweet.json")
+    raw.pop("createdAtISO", None)
+    raw.pop("createdAt", None)
+    raw["createdAtLocal"] = "2026-07-08 14:30:00"
+
+    content = normalize_tweet(raw)
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == ""
+
+
+def test_plain_tweet_without_publication_time_is_still_normalized() -> None:
+    raw = _load("plain_tweet.json")
+    raw.pop("createdAtISO", None)
+    raw.pop("createdAt", None)
+    raw.pop("createdAtLocal", None)
+
+    content = normalize_tweet(raw)
+
+    assert content is not None
+    assert content.published_at == ""
+    assert content.published_label == ""
+
+
 def test_plain_tweet_title_truncates_long_first_line() -> None:
     raw = _load("plain_tweet.json")
     raw["text"] = "x" * 400

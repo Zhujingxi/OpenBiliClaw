@@ -11,9 +11,11 @@ import logging
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import httpx
 from openai import AsyncOpenAI
 
 from .base import (
+    DEFAULT_REASONING_EFFORT,
     LLMProvider,
     LLMProviderError,
     LLMRateLimitError,
@@ -77,6 +79,9 @@ class OpenAIProvider(LLMProvider):
         timeout: float = 300.0,
         embedding_output_dimensionality: int = 0,
         api_flavor: str = "",
+        proxy: str = "",
+        trust_env: bool = True,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     ) -> None:
         self._model = model
         self._provider_name = provider_name
@@ -88,11 +93,23 @@ class OpenAIProvider(LLMProvider):
         self._token_provider = token_provider
         self._timeout = timeout
         self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))
+        self._reasoning_effort = reasoning_effort.strip()
+        # Overseas routing policy: custom injects a proxy, direct injects a
+        # proxy-env-immune client, and system leaves SDK construction untouched.
+        self._proxy = proxy.strip()
+        self._trust_env = bool(trust_env and not self._proxy)
+        client_kwargs: dict[str, Any] = {}
+        if self._proxy or not self._trust_env:
+            httpx_kwargs: dict[str, Any] = {"timeout": timeout, "trust_env": self._trust_env}
+            if self._proxy:
+                httpx_kwargs["proxy"] = self._proxy
+            client_kwargs["http_client"] = httpx.AsyncClient(**httpx_kwargs)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url or None,
             max_retries=0,
             timeout=timeout,
+            **client_kwargs,
         )
 
     @property
@@ -109,19 +126,17 @@ class OpenAIProvider(LLMProvider):
         reasoning_effort: str | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        # ``reasoning_effort`` is consumed by ``DeepSeekProvider``; the
-        # base OpenAI provider accepts it for signature compatibility
-        # but doesn't act on it (vanilla GPT-4o has no thinking knob).
-        del reasoning_effort
         if self._api_flavor == "responses":
             return await self._complete_via_responses(
                 messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
+                reasoning_effort=reasoning_effort,
                 model=model,
             )
         effective_model = (model or "").strip() or self._model
+        effective_reasoning_effort = self._effective_reasoning_effort(reasoning_effort)
         kwargs: dict[str, Any] = {
             "model": effective_model,
             "messages": messages,
@@ -135,7 +150,13 @@ class OpenAIProvider(LLMProvider):
         extra_headers = self._extra_headers()
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
-        extra_body = self._extra_body()
+        openai_effort = self._openai_reasoning_effort(
+            effective_model,
+            effective_reasoning_effort,
+        )
+        if openai_effort is not None:
+            kwargs["reasoning_effort"] = openai_effort
+        extra_body = self._extra_body(reasoning_effort=effective_reasoning_effort)
         if extra_body:
             kwargs["extra_body"] = extra_body
 
@@ -218,6 +239,7 @@ class OpenAIProvider(LLMProvider):
         temperature: float,
         max_tokens: int,
         json_mode: bool,
+        reasoning_effort: str | None,
         model: str | None,
     ) -> LLMResponse:
         """Serve ``complete()`` through the ``/v1/responses`` endpoint.
@@ -227,6 +249,7 @@ class OpenAIProvider(LLMProvider):
         ``max_output_tokens``; ``json_mode`` → ``text.format``.
         """
         effective_model = (model or "").strip() or self._model
+        effective_reasoning_effort = self._effective_reasoning_effort(reasoning_effort)
         instructions = ""
         input_messages: list[dict[str, str]] = []
         for msg in messages:
@@ -248,7 +271,13 @@ class OpenAIProvider(LLMProvider):
         extra_headers = self._extra_headers()
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
-        extra_body = self._extra_body()
+        openai_effort = self._openai_reasoning_effort(
+            effective_model,
+            effective_reasoning_effort,
+        )
+        if openai_effort is not None:
+            kwargs["reasoning"] = {"effort": openai_effort}
+        extra_body = self._extra_body(reasoning_effort=effective_reasoning_effort)
         if extra_body:
             kwargs["extra_body"] = extra_body
 
@@ -567,13 +596,53 @@ class OpenAIProvider(LLMProvider):
         """Return optional provider-specific request headers."""
         return {}
 
-    def _extra_body(self) -> dict[str, Any]:
+    def _effective_reasoning_effort(self, requested: str | None) -> str:
+        """Resolve a per-call override without mutating shared provider state."""
+
+        return self._reasoning_effort if requested is None else requested.strip()
+
+    def _openai_reasoning_effort(self, model: str, effort: str) -> str | None:
+        """Map the portable effort to an official OpenAI reasoning request.
+
+        Only api.openai.com gets this native field.  Generic compatible
+        gateways, Azure deployment aliases, Ollama, and ordinary GPT-4 models
+        may reject it even though they share the OpenAI wire format.
+        """
+
+        if not self._is_official_openai_endpoint() or not self._is_openai_reasoning_model(model):
+            return None
+        normalized = effort.strip().lower()
+        # ``low`` is the broadest portable low-cost level across GPT-5 and the
+        # o-series.  Some generations reject ``none`` / ``minimal`` / ``xhigh``.
+        if normalized in {"", "none", "minimal"}:
+            return "low"
+        if normalized in {"max", "xhigh"}:
+            return "high"
+        if normalized in {"low", "medium", "high"}:
+            return normalized
+        return DEFAULT_REASONING_EFFORT
+
+    def _is_official_openai_endpoint(self) -> bool:
+        if not self.base_url.strip():
+            return self._provider_name == "openai"
+        parsed = urlparse(self.base_url if "://" in self.base_url else f"https://{self.base_url}")
+        return (
+            self._provider_name == "openai" and (parsed.hostname or "").lower() == "api.openai.com"
+        )
+
+    @staticmethod
+    def _is_openai_reasoning_model(model: str) -> bool:
+        name = model.strip().lower()
+        return name.startswith("gpt-5") or (len(name) > 1 and name[0] == "o" and name[1].isdigit())
+
+    def _extra_body(self, *, reasoning_effort: str | None = None) -> dict[str, Any]:
         """Return optional provider-specific request body fields.
 
         Used for non-standard keys like DeepSeek's ``thinking`` and
         ``reasoning_effort``. Keys returned here are passed verbatim via
         ``extra_body`` of the OpenAI SDK.
         """
+        del reasoning_effort
         return {}
 
     def _empty_content_error(self, choice: Any) -> LLMResponseError:
@@ -626,7 +695,7 @@ class DeepSeekProvider(OpenAIProvider):
     """DeepSeek provider (OpenAI-compatible API).
 
     Supports the v4 ``thinking`` mode via ``reasoning_effort``. When
-    ``reasoning_effort`` is set (``"high"`` or ``"max"``), requests are
+    ``reasoning_effort`` is set (``"medium"``, ``"high"`` or ``"max"``), requests are
     sent with ``thinking={"type": "enabled"}`` and the requested effort
     level as top-level body fields (the DeepSeek API accepts both
     schemas).
@@ -644,15 +713,20 @@ class DeepSeekProvider(OpenAIProvider):
         api_key: str,
         model: str = "deepseek-v4-flash",
         *,
-        reasoning_effort: str = "",
+        base_url: str = "https://api.deepseek.com",
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         timeout: float = 300.0,
+        proxy: str = "",
+        trust_env: bool = True,
     ) -> None:
         super().__init__(
             api_key=api_key,
             model=model,
-            base_url="https://api.deepseek.com",
+            base_url=base_url,
             provider_name="deepseek",
             timeout=timeout,
+            proxy=proxy,
+            trust_env=trust_env,
         )
         self._reasoning_effort = reasoning_effort.strip()
 
@@ -672,65 +746,77 @@ class DeepSeekProvider(OpenAIProvider):
         # structured tasks like discovery's eval_batch — observed in
         # 2026-05-05 logs as 8-16 min/batch with reasoning, expected
         # ~30s without).
-        previous_effort = self._reasoning_effort
-        applied_effort = reasoning_effort if reasoning_effort is not None else previous_effort
-        # Temporarily mutate the instance attribute so ``_extra_body``
-        # and the empty-content retry path see the per-call value.
-        self._reasoning_effort = applied_effort
-        try:
-            effort = applied_effort
-            if effort:
-                floor = _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR.get(effort, 16384)
-                if max_tokens < floor:
-                    logger.debug(
-                        "deepseek: bumping max_tokens from %s to %s for effort=%s",
-                        max_tokens,
-                        floor,
-                        effort,
-                    )
-                    max_tokens = floor
-            try:
-                return await super().complete(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=json_mode,
-                    model=model,
-                )
-            except LLMResponseError:
-                if not effort:
-                    logger.warning("deepseek: empty content; retrying once")
-                    return await super().complete(
-                        messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        json_mode=json_mode,
-                        model=model,
-                    )
-                # Max-effort reasoning occasionally burns through the entire
-                # output budget before the model emits any ``content``. Retry
-                # once with thinking disabled so structured pipelines get a
-                # usable response instead of hard-failing.
-                logger.warning(
-                    "deepseek: empty content with reasoning_effort=%s; "
-                    "retrying with thinking disabled",
+        requested_effort = (
+            reasoning_effort if reasoning_effort is not None else self._reasoning_effort
+        ).strip()
+        effort = self._normalize_deepseek_effort(requested_effort)
+        if effort:
+            floor = _DEEPSEEK_THINKING_MAX_TOKENS_FLOOR.get(effort, 16384)
+            if max_tokens < floor:
+                logger.debug(
+                    "deepseek: bumping max_tokens from %s to %s for effort=%s",
+                    max_tokens,
+                    floor,
                     effort,
                 )
-                self._reasoning_effort = ""
+                max_tokens = floor
+        try:
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort=effort,
+                model=model,
+            )
+        except LLMResponseError:
+            if not effort:
+                logger.warning("deepseek: empty content; retrying once")
                 return await super().complete(
                     messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
+                    reasoning_effort="",
                     model=model,
                 )
-        finally:
-            self._reasoning_effort = previous_effort
+            # Max-effort reasoning occasionally burns through the entire
+            # output budget before the model emits any ``content``. Retry
+            # once with thinking disabled so structured pipelines get a
+            # usable response instead of hard-failing.
+            logger.warning(
+                "deepseek: empty content with reasoning_effort=%s; retrying with thinking disabled",
+                effort,
+            )
+            return await super().complete(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                reasoning_effort="",
+                model=model,
+            )
 
-    def _extra_body(self) -> dict[str, Any]:
-        if not self._reasoning_effort:
+    def _extra_body(self, *, reasoning_effort: str | None = None) -> dict[str, Any]:
+        requested = self._reasoning_effort if reasoning_effort is None else reasoning_effort
+        effort = self._normalize_deepseek_effort(requested)
+        if not effort:
             return {"thinking": {"type": "disabled"}}
         return {
             "thinking": {"type": "enabled"},
-            "reasoning_effort": self._reasoning_effort,
+            "reasoning_effort": effort,
         }
+
+    @staticmethod
+    def _normalize_deepseek_effort(effort: str) -> str:
+        """Map portable levels to DeepSeek V4's native high/max ladder."""
+
+        normalized = effort.strip().lower()
+        if normalized in {"", "none"}:
+            return ""
+        if normalized in {"max", "xhigh"}:
+            return "max"
+        # DeepSeek documents low/medium as compatibility aliases for high.
+        # Treat minimal and unknown future aliases as high rather than sending
+        # a value that a strict relay may reject before it reaches DeepSeek.
+        return "high"

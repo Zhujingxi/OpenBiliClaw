@@ -27,6 +27,7 @@ from openbiliclaw.discovery.strategies._utils import (
     search_cooldown_remaining,
     to_int,
 )
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from openbiliclaw.soul.profile import SoulProfile
@@ -461,6 +462,7 @@ class RelatedChainStrategy(DiscoveryStrategy):
         # Prefer B站分区名 (tname) for topic_key, fall back to seed's key
         tname = str(item.get("tname", "")).strip()
         item_topic_key = re.sub(r"\s+", "", tname).lower()[:16] if tname else seed_topic_key
+        published = normalize_published_time(item.get("pubdate") or item.get("publish_time"))
         return DiscoveredContent(
             bvid=bvid,
             title=title_text,
@@ -483,6 +485,8 @@ class RelatedChainStrategy(DiscoveryStrategy):
                 source_strategy=self.name,
             ),
             source_strategy=self.name,
+            published_at=published.published_at,
+            published_label=published.published_label,
         )
 
     @staticmethod

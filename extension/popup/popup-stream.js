@@ -64,7 +64,9 @@ export function createRuntimeStreamClient({
       socket = null;
       if (wasConnected) {
         wasConnected = false;
-        onDisconnect();
+        if (!stopped) {
+          onDisconnect();
+        }
       }
       scheduleReconnect();
     };

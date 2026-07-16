@@ -228,6 +228,24 @@ export function normalizeSourcePlatform(item) {
   return explicit || "bilibili";
 }
 
+/** Preserve canonical saved identity without treating UI row IDs or namespaced IDs as content IDs. */
+export function normalizeSavedIdentity(item = {}) {
+  const sourcePlatform = normalizeSourcePlatform(item);
+  const legacyId = normalizeText(item?.bvid);
+  const contentId = normalizeText(
+    item?.content_id || (legacyId && !legacyId.includes(":") ? legacyId : ""),
+  );
+  return {
+    ...item,
+    item_key: normalizeText(item?.item_key) || (contentId ? `${sourcePlatform}:${contentId}` : ""),
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: normalizeText(item?.content_url || item?.url),
+    content_type: normalizeText(item?.content_type)
+      || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
+  };
+}
+
 export function getSourceLabel(source) {
   return SOURCE_LABEL_MAP[source] || source || "Web";
 }
@@ -308,25 +326,74 @@ export function buildRecommendationClickPayload(item, contentUrl = "") {
 // ── Recommendation Normalization ─────────────────────────────
 
 export function normalizeRecommendation(item) {
+  const bvid = normalizeText(item?.bvid);
+  const sourcePlatform = normalizeSourcePlatform(item);
+  const contentId = normalizeText(item?.content_id)
+    || (bvid && !bvid.includes(":") ? bvid : "");
   return {
     id: Number(item?.id ?? 0),
-    bvid: normalizeText(item?.bvid),
+    bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
     up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
     presented: Boolean(item?.presented),
-    content_id: normalizeText(item?.content_id) || normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: contentId,
     content_url: normalizeText(item?.content_url) || "",
-    source_platform: normalizeSourcePlatform(item),
-    content_type: normalizeText(item?.content_type) || "video",
+    source_platform: sourcePlatform,
+    content_type: normalizeText(item?.content_type)
+      || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
     body_text: normalizeText(item?.body_text),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
+  };
+}
+
+export function reconcileRecommendationReplacement(currentItems, incomingItems) {
+  const current = Array.isArray(currentItems) ? currentItems : [];
+  const incoming = Array.isArray(incomingItems) ? incomingItems : [];
+  const preserved = incoming.length === 0 && current.length > 0;
+  return {
+    items: preserved ? current : incoming,
+    preserved,
+  };
+}
+
+export function formatPublishedTime(item, now = Date.now()) {
+  const parsed = Date.parse(String(item?.published_at || ""));
+  if (Number.isFinite(parsed)) {
+    const diff = now - parsed;
+    if (diff >= -300_000 && diff < 60_000) return "刚刚";
+    if (diff >= 0 && diff < 86_400_000) {
+      return `${Math.max(1, Math.floor(diff / 3_600_000))} 小时前`;
+    }
+    if (diff >= 0 && diff < 604_800_000) {
+      return `${Math.floor(diff / 86_400_000)} 天前`;
+    }
+    const date = new Date(parsed);
+    const current = new Date(now);
+    if (date.getFullYear() === current.getFullYear()) {
+      return `${date.getMonth() + 1}月${date.getDate()}日`;
+    }
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+  return String(item?.published_label || "").replace(/\s+/g, " ").trim().slice(0, 64);
+}
+
+export function getPublishedTimeDisplay(item, now = Date.now()) {
+  const text = formatPublishedTime(item, now);
+  if (!text) return null;
+  const parsed = Date.parse(String(item?.published_at || ""));
+  return {
+    text,
+    title: Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : "",
   };
 }
 
@@ -419,6 +486,8 @@ export function getCommentSubmitUiState(state) {
 export function normalizeDelightCandidate(item) {
   return {
     bvid: normalizeText(item?.bvid),
+    item_key: normalizeText(item?.item_key),
+    content_id: normalizeText(item?.content_id),
     title: normalizeText(item?.title) || DEFAULT_DELIGHT_TITLE,
     delight_reason: normalizeText(item?.delight_reason) || DEFAULT_DELIGHT_REASON,
     delight_score: Number(item?.delight_score ?? 0),
@@ -426,6 +495,10 @@ export function normalizeDelightCandidate(item) {
     cover_url: normalizeCoverUrl(item?.cover_url),
     content_url: normalizeText(item?.content_url),
     source_platform: normalizeSourcePlatform(item),
+    published_at: normalizeText(item?.published_at),
+    published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
+    content_type: normalizeText(item?.content_type),
+    body_text: normalizeText(item?.body_text),
     state: normalizeText(item?.state) || "pending",
     response_message: normalizeText(item?.response_message),
     chat_reply: normalizeText(item?.chat_reply),
@@ -447,6 +520,8 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
   if (!normalized.bvid) {
     return {
       visible: false, highlighted: false, handled: false,
+      show_status: false, show_actions: false,
+      like_pressed: false, like_disabled: false,
       score_label: "", response_tone: "info", response_message: "",
     };
   }
@@ -456,40 +531,50 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
     score >= 0.65 ? "这条可能会拐到你" :
     "有点出其不意";
   const highlight = normalizeText(highlightBvid) === normalized.bvid;
+  const base = {
+    visible: true,
+    highlighted: highlight,
+    handled: false,
+    show_status: Boolean(normalized.response_message),
+    show_actions: true,
+    like_pressed: false,
+    like_disabled: false,
+    score_label: scoreLabel,
+    response_tone: "info",
+    response_message: normalized.response_message,
+  };
 
   if (normalized.state === "viewed") {
     return {
-      visible: true, highlighted: highlight, handled: true,
-      score_label: scoreLabel, response_tone: "success",
+      ...base, handled: true, show_status: true, show_actions: false,
+      like_disabled: true, response_tone: "success",
       response_message: normalized.response_message || "已打开，阿B 会把这次点击当成强信号。",
     };
   }
   if (normalized.state === "liked") {
     return {
-      visible: true, highlighted: highlight, handled: true,
-      score_label: scoreLabel, response_tone: "success",
+      ...base, show_status: true, show_actions: true,
+      like_pressed: true, like_disabled: true, response_tone: "success",
       response_message: normalized.response_message || "好，这类多来点。",
     };
   }
   if (normalized.state === "rejected") {
     return {
-      visible: true, highlighted: highlight, handled: true,
-      score_label: scoreLabel, response_tone: "info",
+      ...base, handled: true, show_status: true, show_actions: false,
+      like_disabled: true,
       response_message: normalized.response_message || "记下了，这类惊喜先少来点。",
     };
   }
   if (normalized.state === "chatted" || normalized.state === "chatting") {
+    const responseMessage = normalized.response_message
+      || (normalized.state === "chatted" ? "这句已经记下，后面会更会试探。" : "");
     return {
-      visible: true, highlighted: highlight, handled: false,
-      score_label: scoreLabel, response_tone: "info",
-      response_message: normalized.response_message || "这句已经记下，后面会更会试探。",
+      ...base,
+      show_status: Boolean(responseMessage),
+      response_message: responseMessage,
     };
   }
-  return {
-    visible: true, highlighted: highlight, handled: false,
-    score_label: scoreLabel, response_tone: "info",
-    response_message: normalized.response_message,
-  };
+  return base;
 }
 
 /**
@@ -522,18 +607,18 @@ export function getDelightMessageActions() {
 
 export function getProbeMessageActions() {
   return [
-    { label: "喜欢", action: "confirm", primary: true },
-    { label: "暂时忽略", action: "defer", primary: false },
-    { label: "不喜欢", action: "reject", primary: false },
+    { label: "确认喜欢", action: "confirm", primary: true },
+    { label: "暂时搁置", action: "defer", primary: false },
+    { label: "确认不喜欢", action: "reject", primary: false },
     { label: "多聊聊", action: "chat", primary: false },
   ];
 }
 
 export function getAvoidanceProbeMessageActions() {
   return [
-    { label: "确实不喜欢", action: "confirm", primary: true },
-    { label: "暂时忽略", action: "defer", primary: false },
-    { label: "不是", action: "reject", primary: false },
+    { label: "确认避雷", action: "confirm", primary: true },
+    { label: "搁置避雷", action: "defer", primary: false },
+    { label: "不是雷点", action: "reject", primary: false },
     { label: "多聊聊", action: "chat", primary: false },
   ];
 }
@@ -589,6 +674,10 @@ export function mergeRuntimeStatusEvent(status, event) {
   const runtime = normalizeRuntimeStatus(status);
   const next = { ...runtime };
   if (typeof event?.pool_available_count === "number") {
+    // A pool snapshot can only be emitted by a running, initialized backend.
+    // Promote the partial stream payload so first-load HTTP timeouts do not
+    // hide otherwise authoritative inventory from the mobile header.
+    next.initialized = true;
     next.pool_available_count = Number(event.pool_available_count);
   }
   if (typeof event?.pool_raw_count === "number") {

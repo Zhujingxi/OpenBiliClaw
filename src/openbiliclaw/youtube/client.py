@@ -29,9 +29,11 @@ import re
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
-from urllib import request as urllib_request
+
+import httpx
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -70,6 +72,22 @@ _YTDLP_FLAT_OPTIONS: dict[str, Any] = {
 }
 
 
+def _ytdlp_options(**extra: Any) -> dict[str, Any]:
+    """Base flat yt-dlp options plus the overseas outbound proxy when set.
+
+    YouTube is an overseas source, so it honors ``[network].proxy``. yt-dlp's
+    native ``proxy`` option routes its HTTP through it; omitting the key keeps
+    yt-dlp's default (env-inheriting) behavior — zero drift when unset.
+    """
+    from openbiliclaw.network import outbound_ytdlp_proxy
+
+    options: dict[str, Any] = {**_YTDLP_FLAT_OPTIONS, **extra}
+    proxy = outbound_ytdlp_proxy()
+    if proxy is not None:
+        options["proxy"] = proxy
+    return options
+
+
 @dataclass(frozen=True)
 class InnerTubeConfig:
     api_key: str = _INNERTUBE_KEY
@@ -87,7 +105,17 @@ def _scrapetube_search(query: str, limit: int) -> list[dict[str, Any]]:
     try:
         import scrapetube  # type: ignore[import-untyped]
 
-        results = [dict(v) for v in scrapetube.get_search(query, results_type="video", limit=limit)]
+        from openbiliclaw.network import outbound_requests_proxies
+
+        results = [
+            dict(v)
+            for v in scrapetube.get_search(
+                query,
+                results_type="video",
+                limit=limit,
+                proxies=outbound_requests_proxies(),
+            )
+        ]
         if results:
             return results
         logger.info("scrapetube.search(%r) returned 0 items; falling back to yt-dlp", query)
@@ -108,7 +136,7 @@ def _ytdlp_search(query: str, limit: int) -> list[dict[str, Any]]:
     try:
         from yt_dlp import YoutubeDL  # type: ignore[import-untyped]
 
-        with YoutubeDL(_YTDLP_FLAT_OPTIONS) as ydl:
+        with YoutubeDL(_ytdlp_options()) as ydl:
             info = ydl.extract_info(f"ytsearch{max(1, limit)}:{query}", download=False)
         return _ytdlp_entries(info, limit)
     except Exception as exc:
@@ -120,15 +148,28 @@ def _scrapetube_channel(channel_id: str, limit: int) -> list[dict[str, Any]]:
     try:
         import scrapetube
 
+        from openbiliclaw.network import outbound_requests_proxies
+
+        proxies = outbound_requests_proxies()
         if channel_id.startswith("@") or channel_id.startswith("UC"):
             results = [
                 dict(v)
                 for v in scrapetube.get_channel(
-                    channel_url=None, channel_id=channel_id, limit=limit
+                    channel_url=None,
+                    channel_id=channel_id,
+                    limit=limit,
+                    proxies=proxies,
                 )
             ]
         else:
-            results = [dict(v) for v in scrapetube.get_channel(channel_url=channel_id, limit=limit)]
+            results = [
+                dict(v)
+                for v in scrapetube.get_channel(
+                    channel_url=channel_id,
+                    limit=limit,
+                    proxies=proxies,
+                )
+            ]
         if results:
             return results
     except Exception as exc:
@@ -164,7 +205,7 @@ def _ytdlp_channel(channel_ref: str, limit: int) -> list[dict[str, Any]]:
     try:
         from yt_dlp import YoutubeDL
 
-        with YoutubeDL({**_YTDLP_FLAT_OPTIONS, "playlistend": limit}) as ydl:
+        with YoutubeDL(_ytdlp_options(playlistend=limit)) as ydl:
             info = ydl.extract_info(url, download=False)
         return _ytdlp_entries(info, limit)
     except Exception as exc:
@@ -224,23 +265,22 @@ def _innertube_trending_feed(region_code: str, limit: int) -> list[dict[str, Any
         ).encode()
 
         url = f"https://www.youtube.com/youtubei/v1/browse?key={config.api_key}"
-        req = urllib_request.Request(
-            url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "X-YouTube-Client-Name": config.client_name_header,
-                "X-YouTube-Client-Version": config.client_version,
-            },
-            method="POST",
-        )
-        with urllib_request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "X-YouTube-Client-Name": config.client_name_header,
+            "X-YouTube-Client-Version": config.client_version,
+        }
+        from openbiliclaw.network import outbound_httpx_kwargs
+
+        with httpx.Client(timeout=15, **outbound_httpx_kwargs()) as client:
+            response = client.post(url, content=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
 
         return list(_extract_innertube_videos(data, limit=limit))
     except Exception as exc:
@@ -282,21 +322,21 @@ def _topic_page_trending(
 
 
 def _fetch_youtube_html(url: str) -> str:
-    req = urllib_request.Request(
-        url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-            "Cookie": "CONSENT=YES+1",
-        },
-    )
-    with urllib_request.urlopen(req, timeout=20) as resp:
-        html: str = resp.read().decode("utf-8", "ignore")
-        return html
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cookie": "CONSENT=YES+1",
+    }
+    from openbiliclaw.network import outbound_httpx_kwargs
+
+    with httpx.Client(timeout=20, **outbound_httpx_kwargs()) as client:
+        response = client.get(url, headers=headers)
+        response.raise_for_status()
+        return response.text
 
 
 def _extract_yt_initial_data_videos(html: str, limit: int) -> list[dict[str, Any]]:
@@ -356,19 +396,20 @@ def _fetch_innertube_config(region_code: str) -> InnerTubeConfig:
     """Read the current web client config from YouTube's trending page."""
     try:
         url = f"https://www.youtube.com/feed/trending?gl={region_code}"
-        req = urllib_request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Accept-Language": "en-US,en;q=0.9",
-            },
-        )
-        with urllib_request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", "ignore")
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        from openbiliclaw.network import outbound_httpx_kwargs
+
+        with httpx.Client(timeout=15, **outbound_httpx_kwargs()) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+            html = response.text
         return _extract_innertube_config(html)
     except Exception as exc:
         logger.debug("Failed to read YouTube InnerTube config; using fallback: %s", exc)
@@ -546,6 +587,13 @@ def normalize_yt_video(
 
     # Description snippet
     description = _extract_text(raw.get("descriptionSnippet") or raw.get("description") or "")[:300]
+    published = normalize_published_time(
+        raw.get("timestamp")
+        or raw.get("release_timestamp")
+        or raw.get("upload_date")
+        or raw.get("publishedAt"),
+        label=_extract_text(raw.get("publishedTimeText") or ""),
+    )
 
     return DiscoveredContent(
         content_id=video_id,
@@ -561,6 +609,8 @@ def normalize_yt_video(
         comment_count=comment_count,
         description=description,
         source_strategy=source_strategy,
+        published_at=published.published_at,
+        published_label=published.published_label,
     )
 
 

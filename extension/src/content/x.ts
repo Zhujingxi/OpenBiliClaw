@@ -25,6 +25,8 @@ import type {
   XEventType,
 } from "../main/x-graphql-tap.js";
 import type { BehaviorEvent } from "../shared/types.js";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveX } from "./native-save/x.ts";
 
 // Keep CapturedXRequest referenced so the type import survives tree-shaking
 // (the tap and this file share the same engagement contract).
@@ -129,6 +131,7 @@ if (typeof window !== "undefined" && typeof chrome !== "undefined") {
     startCollector(twitterAdapter);
   });
   registerE2EExecutor("twitter");
+  installNativeSaveExecutor("twitter", saveX);
 
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;

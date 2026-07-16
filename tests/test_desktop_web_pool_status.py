@@ -2,6 +2,16 @@ import re
 from pathlib import Path
 
 
+def _function_body(app_js: str, name: str) -> str:
+    match = re.search(
+        rf"(?:async )?function {re.escape(name)}\([^)]*\) \{{(?P<body>.*?)\n    \}}",
+        app_js,
+        flags=re.S,
+    )
+    assert match is not None, f"desktop {name} function not found"
+    return match.group("body")
+
+
 def test_desktop_web_starts_with_empty_recommendation_list() -> None:
     """Desktop web must not show built-in demo cards as real recommendations."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
@@ -27,9 +37,55 @@ def test_desktop_backend_hydration_clears_empty_recommendations() -> None:
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    assert "const recommendationItems = Array.isArray(recs) ? recs : asArray(recs?.items);" in body
-    assert "state.videos = normalizeRecommendationList(recommendationItems);" in body
-    assert "if (recommendationItems.length) state.videos" not in body
+    assert "const recommendationsPromise = readRecommendationSnapshot();" in body
+    assert "function applyInitialRecommendations(items)" in body
+    assert "applyDesktopRecommendationSnapshot(items, { replace: true });" in body
+    assert 'desktopRecommendationLoadState = "empty-success"' in app_js
+
+
+def test_desktop_hydration_does_not_gate_cards_on_secondary_resources() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    body = _function_body(app_js, "hydrateFromBackend")
+
+    assert "Promise.all([" not in body
+    assert "recommendationsPromise.then" in body
+    assert "runtimePromise.then" in body
+    assert "Promise.allSettled(secondaryPromises)" in body
+    assert "ENDPOINTS.ping" in body
+
+
+def test_desktop_failed_chat_turn_renders_durable_error() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'status === "failed"' in app_js
+    assert 'turn.error || "这句还没发出去，稍后再试。"' in app_js
+
+
+def test_desktop_inline_poll_checks_failed_before_stale_reply() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    probe_start = app_js.index("async function pollInlineMessageChatTurn")
+    probe_end = app_js.index("function openInlineMessageProbeChat", probe_start)
+    chat_start = app_js.index("async function sendChat")
+    chat_end = app_js.index("async function refreshRecommendations", chat_start)
+    probe_body = app_js[probe_start:probe_end]
+    chat_body = app_js[chat_start:chat_end]
+    for body in (probe_body, chat_body):
+        failed_index = body.index('status === "failed"')
+        completed_index = body.index('status === "completed"')
+        reply_index = body.index(".reply")
+        assert failed_index < completed_index
+        assert failed_index < reply_index
+
+
+def test_desktop_auth_probe_times_out_without_assuming_authentication() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    body = _function_body(app_js, "fetchAuthStatus")
+
+    assert "new AbortController()" in body
+    assert "controller.abort()" in body
+    assert "5000" in body
+    assert "authenticated: true" not in body
 
 
 def test_desktop_pool_status_shows_available_count() -> None:
@@ -55,11 +111,10 @@ def test_desktop_hydration_refetches_runtime_after_recommendation_bootstrap() ->
     )
     assert hydrate is not None, "desktop hydrateFromBackend not found"
     body = hydrate.group("body")
-    # requestJson resolves null on failure (never rejects), so the fallback to
-    # the Promise.all snapshot must be `||`, not a dead `.catch()`.
-    assert "(await requestJson(ENDPOINTS.runtimeStatus)) || runtime" in body
-    assert "requestJson(ENDPOINTS.runtimeStatus).catch(" not in body
-    assert "applyRuntimeStatus(effectiveRuntime?.status || effectiveRuntime);" in body
+    assert "const firstRuntimeGeneration = desktopRuntimeGeneration;" in body
+    assert "const secondRuntimeGeneration = desktopRuntimeGeneration;" in body
+    assert "applyDesktopRuntimeSnapshot(" in body
+    assert "secondRuntimeGeneration" in body
 
 
 def test_desktop_pool_status_labels_pending_signals_as_discovery_context() -> None:
@@ -123,6 +178,9 @@ def test_desktop_recommendation_filters_include_enabled_sources() -> None:
 def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     """Desktop web should not render text-only X tweets as empty/broken covers."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    saved_sync_js = Path("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js").read_text(
+        encoding="utf-8"
+    )
     app_css = Path("src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
 
     normalize_recommendation = re.search(
@@ -134,7 +192,10 @@ def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     normalize_body = normalize_recommendation.group("body")
     assert "content_type" in normalize_body
     assert "body_text" in normalize_body
-    assert "normalizeSourcePlatform" in normalize_body
+    assert "OpenBiliClawSavedSync.normalizeSavedItem" in normalize_body
+    assert "PLATFORM_ALIASES[explicit] || explicit" in saved_sync_js
+    assert 'x: "twitter"' in saved_sync_js
+    assert 'host === "x.com"' in saved_sync_js
 
     render_videos = re.search(
         r"function renderVideos\(\) \{(?P<body>.*?)\n    \}",
@@ -143,16 +204,16 @@ def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     )
     assert render_videos is not None, "desktop renderVideos not found"
     render_body = render_videos.group("body")
-    assert "recommendationMediaHtml(item)" in render_body
+    assert "recommendationMediaHtml(item, index)" in render_body
 
     media_html = re.search(
-        r"function recommendationMediaHtml\(item\) \{(?P<body>.*?)\n    \}",
+        r"function recommendationMediaHtml\(item, index = 0\) \{(?P<body>.*?)\n    \}",
         app_js,
         flags=re.S,
     )
     assert media_html is not None, "desktop recommendationMediaHtml not found"
     assert "cover-text" in media_html.group("body")
-    assert "coverImg(item)" in media_html.group("body")
+    assert "coverImg(item, { eager })" in media_html.group("body")
 
     cover_class = re.search(
         r"function recommendationCoverClass\(item\) \{(?P<body>.*?)\n    \}",
@@ -184,7 +245,7 @@ def test_desktop_click_payload_keeps_x_source_metadata() -> None:
 
 
 def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
-    """Desktop feedback should match mobile: like stays, negative feedback hides."""
+    """Desktop feedback mutates one card and defers durable writes for undo."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     decision = re.search(
@@ -195,16 +256,20 @@ def test_desktop_positive_feedback_keeps_recommendation_card_visible() -> None:
     assert decision is not None, "desktop feedback removal decision helper not found"
     assert 'return normalized === "dislike" || normalized === "dismiss";' in decision.group("body")
 
-    feedback_branch = re.search(
-        r'const feedbackType = action === "like"(?P<body>.*?)\n      \} catch',
-        app_js,
-        flags=re.S,
+    start = app_js.index("function stageRecommendationFeedback(item, card, feedbackType)")
+    end = app_js.index("\n    function finishRecommendationFeedback", start)
+    body = app_js[start:end]
+    assert "pendingActions.schedule(key" in body
+    assert "undo.dataset.feedbackUndo = key;" in body
+    assert "item.feedback_type = feedbackType;" in body
+    assert "renderAll()" not in body
+    assert "removeRecommendationCard" not in body
+    assert 'committed: "已记录喜欢，推荐会继续保留在当前列表。"' in body
+    assert "function feedbackActionKey(item)" in app_js
+    assert "`recommendation:${platform}:${contentId}`" in app_js
+    assert (
+        'window.addEventListener("pagehide", () => { void pendingActions.flushAll(); });' in app_js
     )
-    assert feedback_branch is not None, "desktop feedback branch not found"
-    body = feedback_branch.group("body")
-    assert 'like: ["已记录喜欢，推荐会继续保留在当前列表。", "已记录喜欢"]' in body
-    assert "if (shouldRemoveRecommendationAfterFeedback(feedbackType))" in body
-    assert "finishRecommendationFeedback(card, feedbackType);" in body
 
 
 def test_desktop_recommendation_hydration_filters_only_negative_feedback() -> None:
@@ -253,6 +318,47 @@ def test_desktop_pool_update_does_not_replace_recommendation_list() -> None:
     assert "recommendation.reshuffled" not in trigger
     assert "config_reloaded" in trigger
     assert "init_completed" not in trigger
+
+
+def test_desktop_failed_recommendation_read_schedules_empty_only_recovery() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "readRecommendationSnapshot" in app_js
+    assert "scheduleDesktopRecommendationRecovery" in app_js
+    assert "if (state.videos.length > 0)" in app_js
+    assert 'desktopRecommendationLoadState = "failed"' in app_js
+    assert 'desktopRecommendationLoadState = "empty-success"' in app_js
+
+
+def test_desktop_runtime_failure_recovers_independently() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "scheduleDesktopRuntimeRecovery" in app_js
+    assert "[1000, 2000, 4000, 8000]" in app_js
+    assert 'desktopRuntimeLoadState = "failed"' in app_js
+    assert "let desktopRuntimeGeneration = 0;" in app_js
+    assert "if (requestGeneration !== desktopRuntimeGeneration) return;" in app_js
+
+
+def test_desktop_runtime_failure_survives_full_render_and_is_keyboard_retryable() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    render_pool = re.search(
+        r"function renderPoolStatus\(.*?\) \{(?P<body>.*?)\n    \}",
+        app_js,
+        flags=re.S,
+    )
+    assert render_pool is not None
+    assert "renderDesktopRuntimeFailure();" in render_pool.group("body")
+    assert "poolAvailable.onkeydown" in app_js
+    assert 'event.key === "Enter" || event.key === " "' in app_js
+
+
+def test_desktop_healthy_stream_reconnect_does_not_rebuild_cards() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "if (recommendationRestarted) renderVideos();" in app_js
+    assert "if (runtimeRestarted) renderDesktopRuntimeFailure();" in app_js
 
 
 def test_desktop_web_shows_github_star_cta() -> None:
@@ -306,3 +412,18 @@ def test_desktop_append_more_renders_before_cover_decode() -> None:
     assert render_index < warm_index
     assert "await warmCoverImages(freshItems" not in body
     assert "void warmCoverImages(freshItems" in body
+
+
+def test_desktop_reshuffle_swaps_before_background_dismiss() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    start = app_js.index("async function reshuffle()")
+    end = app_js.index("\n    async function appendMore()", start)
+    body = app_js[start:end]
+
+    assert "visibleForExclusion" in body
+    assert "excluded_bvids" in body
+    assert "state.dismissOnReshuffle" in body
+    assert "await dismissVisibleRecommendationsBeforeReshuffle" not in body
+    swap_index = body.index("state.videos = fresh;")
+    dismiss_index = body.index("dismissVisibleRecommendationsBeforeReshuffle(")
+    assert swap_index < dismiss_index

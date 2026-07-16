@@ -14,6 +14,23 @@ test("popup header keeps compact status inline with brand row", () => {
   assert.doesNotMatch(popupMarkup, /id="statusText"/);
 });
 
+test("popup separates backend reachability from runtime stream reconnects", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const streamBlock =
+    popupJs.match(/function connectRuntimeStream\(\) \{[\s\S]*?\n\}\n\nfunction renderActivityHistory/)?.[0] ??
+    "";
+
+  assert.match(popupJs, /createBackendConnectionCoordinator/);
+  assert.match(popupJs, /markHttpReachable\(\)/);
+  assert.match(popupJs, /markOffline\(\)/);
+  assert.match(streamBlock, /markStreamConnected\(\)/);
+  assert.match(streamBlock, /markStreamDisconnected\(\)/);
+  assert.doesNotMatch(streamBlock, /state\.online\s*=\s*false/);
+  assert.match(popupHtml, /\.status-badge\[data-tone="reconnecting"\]/);
+  assert.match(popupHtml, /\.status-dot\.reconnecting/);
+});
+
 test("popup header exposes a local mobile web QR entry", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");

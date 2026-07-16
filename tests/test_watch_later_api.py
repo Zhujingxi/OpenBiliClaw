@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
+from openbiliclaw.saved_sync.models import SavedItemInput
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
@@ -63,11 +64,31 @@ def test_watch_later_endpoints_round_trip_with_metadata(
 ) -> None:
     client, _db = watch_later_client
 
-    assert client.get("/api/watch-later/BV1WATCH").json() == {"saved": False, "total": 0}
+    assert client.get("/api/watch-later/BV1WATCH").json() == {
+        "saved": False,
+        "total": 0,
+        "item_key": "bilibili:BV1WATCH",
+        "sync_status": None,
+        "sync_task_id": "",
+        "resolved_action": "",
+        "resolved_target": "",
+        "error_code": "",
+        "error_message": "",
+    }
 
     response = client.post("/api/watch-later", json={"bvid": " BV1WATCH "})
     assert response.status_code == 200
-    assert response.json() == {"saved": True, "total": 1}
+    assert response.json() == {
+        "saved": True,
+        "total": 1,
+        "item_key": "bilibili:BV1WATCH",
+        "sync_status": "pending",
+        "sync_task_id": "",
+        "resolved_action": "",
+        "resolved_target": "",
+        "error_code": "",
+        "error_message": "",
+    }
 
     list_response = client.get("/api/watch-later?limit=20&offset=0")
     assert list_response.status_code == 200
@@ -75,12 +96,21 @@ def test_watch_later_endpoints_round_trip_with_metadata(
         "items": [
             {
                 "bvid": "BV1WATCH",
+                "item_key": "bilibili:BV1WATCH",
+                "content_id": "BV1WATCH",
                 "title": "稍后再看测试视频",
                 "up_name": "测试 UP",
                 "cover_url": "https://i0.hdslb.com/bfs/archive/watch.jpg",
                 "content_url": "https://www.bilibili.com/video/BV1WATCH",
                 "source_platform": "bilibili",
+                "content_type": "video",
                 "added_at": list_response.json()["items"][0]["added_at"],
+                "sync_status": "pending",
+                "sync_task_id": "",
+                "resolved_action": "",
+                "resolved_target": "",
+                "error_code": "",
+                "error_message": "",
             }
         ],
         "total": 1,
@@ -88,7 +118,17 @@ def test_watch_later_endpoints_round_trip_with_metadata(
 
     remove_response = client.delete("/api/watch-later/BV1WATCH")
     assert remove_response.status_code == 200
-    assert remove_response.json() == {"saved": False, "total": 0}
+    assert remove_response.json() == {
+        "saved": False,
+        "total": 0,
+        "item_key": "bilibili:BV1WATCH",
+        "sync_status": None,
+        "sync_task_id": "",
+        "resolved_action": "",
+        "resolved_target": "",
+        "error_code": "",
+        "error_message": "",
+    }
 
 
 def test_watch_later_list_paginates_newest_first(
@@ -98,12 +138,12 @@ def test_watch_later_list_paginates_newest_first(
     db.add_to_watch_later("BV1WATCH")
     db.add_to_watch_later("BV2WATCH")
     db.conn.execute(
-        "UPDATE watch_later SET added_at = ? WHERE bvid = ?",
-        ("2026-05-28 09:00:00", "BV1WATCH"),
+        "UPDATE saved_memberships SET added_at = ? WHERE list_kind = ? AND item_key = ?",
+        ("2026-05-28 09:00:00", "watch_later", "bilibili:BV1WATCH"),
     )
     db.conn.execute(
-        "UPDATE watch_later SET added_at = ? WHERE bvid = ?",
-        ("2026-05-28 09:01:00", "BV2WATCH"),
+        "UPDATE saved_memberships SET added_at = ? WHERE list_kind = ? AND item_key = ?",
+        ("2026-05-28 09:01:00", "watch_later", "bilibili:BV2WATCH"),
     )
     db.conn.commit()
 
@@ -122,3 +162,26 @@ def test_watch_later_list_rejects_invalid_pagination(
 
     assert client.get("/api/watch-later?limit=0").status_code == 422
     assert client.get("/api/watch-later?offset=-1").status_code == 422
+
+
+def test_watch_later_list_preserves_non_bilibili_identity(
+    watch_later_client: tuple[TestClient, Database],
+) -> None:
+    client, db = watch_later_client
+    db.upsert_saved_membership(
+        "watch_later",
+        SavedItemInput(
+            source_platform="twitter",
+            content_id="123",
+            content_url="https://x.com/u/status/123",
+            content_type="tweet",
+            title="一条推文",
+        ),
+    )
+
+    payload = client.get("/api/watch-later").json()["items"][0]
+    assert payload["item_key"] == "twitter:123"
+    assert payload["content_id"] == "123"
+    assert payload["source_platform"] == "twitter"
+    assert payload["content_url"] == "https://x.com/u/status/123"
+    assert payload["content_type"] == "tweet"

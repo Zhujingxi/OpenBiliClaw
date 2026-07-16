@@ -283,7 +283,7 @@ docker compose up -d --build
 
 ### Clash 代理
 
-容器启动时自动探测宿主机 Clash 代理（默认 `host.docker.internal:7897`）。
+容器启动时自动探测宿主机 Clash 代理（默认 `host.docker.internal:7897`）。发现可用代理，或容器环境中已显式设置 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 时，启动器会在用户没有明确选择的前提下设置 `OPENBILICLAW_NETWORK_MODE=system`，让海外客户端继承这些变量；本机回环与 `host.docker.internal` 仍加入 `NO_PROXY`。如需强制忽略容器代理，可显式设置 `OPENBILICLAW_NETWORK_MODE=direct`。
 
 自定义代理端口：
 

@@ -4,7 +4,7 @@
     "description": "跨平台内容发现 AI Agent — 行为采集、画像与智能推荐",
     "browser_specific_settings": {
         "gecko": {
-            "id": "openbiliclaw@whiteguo233.github.io",
+            "id": "openbiliclaw-firefox@whiteguo233.github.io",
             "data_collection_permissions": {
                 "required": [
                     "authenticationInfo",

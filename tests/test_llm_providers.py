@@ -65,6 +65,62 @@ async def test_openai_provider_normalizes_response(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
+async def test_openai_reasoning_model_defaults_to_medium_and_channel_empty_maps_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key", model="gpt-5.5")
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete([{"role": "user", "content": "deep"}])
+    await provider.complete(
+        [{"role": "user", "content": "channel"}],
+        reasoning_effort="",
+    )
+
+    assert calls[0]["reasoning_effort"] == "medium"
+    assert calls[1]["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "base_url", "provider_name"),
+    [
+        ("gpt-4o", "", "openai"),
+        ("gpt-5.5", "https://relay.example.com/v1", "openai_compatible"),
+    ],
+)
+async def test_openai_does_not_send_effort_to_nonreasoning_or_compatible_routes(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    base_url: str,
+    provider_name: str,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model=model,
+        base_url=base_url,
+        provider_name=provider_name,
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.asyncio
 async def test_openai_provider_accepts_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -384,6 +440,33 @@ async def test_claude_provider_accepts_per_call_model_override(
 
 
 @pytest.mark.asyncio
+async def test_claude_supported_model_defaults_to_medium_and_channel_empty_maps_low(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ClaudeProvider(api_key="test-key", model="claude-sonnet-4-6")
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        return SimpleNamespace(
+            model="claude-sonnet-4-6",
+            content=[SimpleNamespace(text="ok")],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+        )
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete([{"role": "user", "content": "deep"}])
+    await provider.complete(
+        [{"role": "user", "content": "channel"}],
+        reasoning_effort="",
+    )
+
+    assert calls[0]["output_config"] == {"effort": "medium"}
+    assert calls[1]["output_config"] == {"effort": "low"}
+
+
+@pytest.mark.asyncio
 async def test_claude_provider_marks_system_with_ephemeral_cache_control(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -497,6 +580,59 @@ async def test_claude_provider_does_not_retry_rate_limit(
 def test_deepseek_provider_defaults() -> None:
     provider = DeepSeekProvider(api_key="test-key")
     assert provider.name == "deepseek"
+    assert provider._reasoning_effort == "medium"
+    assert str(provider._client.base_url).rstrip("/") == "https://api.deepseek.com"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_provider_sends_medium_thinking_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DeepSeekProvider(api_key="test-key")
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert captured["max_tokens"] == 16384
+    assert captured["extra_body"] == {
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+    }
+
+
+def test_deepseek_provider_accepts_custom_base_url() -> None:
+    provider = DeepSeekProvider(
+        api_key="test-key",
+        base_url="https://deepseek-relay.example.com/v1",
+    )
+
+    assert provider.base_url == "https://deepseek-relay.example.com/v1"
+    assert str(provider._client.base_url).rstrip("/") == "https://deepseek-relay.example.com/v1"
+
+
+@pytest.mark.asyncio
+async def test_deepseek_health_check_disables_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DeepSeekProvider(api_key="test-key", reasoning_effort="max")
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    assert await provider.health_check() is True
+    assert captured["max_tokens"] == LLM_CONNECTIVITY_PROBE_MAX_TOKENS
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert provider._reasoning_effort == "max"
 
 
 @pytest.mark.asyncio
@@ -597,6 +733,11 @@ def test_ollama_provider_defaults() -> None:
     assert provider.name == "ollama"
 
 
+def test_ollama_provider_requires_explicit_model() -> None:
+    with pytest.raises(ValueError, match="explicitly configured"):
+        OllamaProvider()
+
+
 @pytest.mark.asyncio
 async def test_ollama_provider_accepts_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
@@ -621,10 +762,10 @@ async def test_ollama_provider_accepts_per_call_model_override(
 
 
 def test_ollama_provider_native_root_strips_v1_suffix() -> None:
-    provider = OllamaProvider(base_url="http://localhost:11434/v1")
+    provider = OllamaProvider(model="qwen2.5:7b", base_url="http://localhost:11434/v1")
     assert provider._native_root() == "http://localhost:11434"
     # Trailing slash also handled
-    provider2 = OllamaProvider(base_url="http://localhost:11434/v1/")
+    provider2 = OllamaProvider(model="qwen2.5:7b", base_url="http://localhost:11434/v1/")
     assert provider2._native_root() == "http://localhost:11434"
 
 
@@ -665,7 +806,7 @@ async def test_ollama_provider_embed_calls_native_endpoint(
 
     monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
 
-    provider = OllamaProvider(base_url="http://localhost:11434/v1")
+    provider = OllamaProvider(model="bge-m3", base_url="http://localhost:11434/v1")
     result = await provider.embed("hello world", model="bge-m3")
 
     assert captured_url == ["http://localhost:11434/api/embeddings"]
@@ -695,7 +836,7 @@ async def test_ollama_provider_embed_returns_empty_on_failure(
 
     monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
 
-    provider = OllamaProvider(base_url="http://localhost:11434/v1")
+    provider = OllamaProvider(model="bge-m3", base_url="http://localhost:11434/v1")
     result = await provider.embed("hello", model="bge-m3")
     assert result == []
 
@@ -795,7 +936,9 @@ async def test_ollama_provider_native_json_mode_sets_format(
         captured_payload=captured_payload,
     )
 
-    provider = OllamaProvider(base_url="http://localhost:11434/v1", num_ctx=4096)
+    provider = OllamaProvider(
+        model="qwen2.5:7b", base_url="http://localhost:11434/v1", num_ctx=4096
+    )
     await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
 
     assert captured_payload[0]["format"] == "json"
@@ -856,7 +999,9 @@ async def test_ollama_provider_native_retries_without_format_on_empty(
 
     monkeypatch.setattr(httpx, "AsyncClient", _TwoShotClient)
 
-    provider = OllamaProvider(base_url="http://localhost:11434/v1", num_ctx=4096)
+    provider = OllamaProvider(
+        model="qwen2.5:7b", base_url="http://localhost:11434/v1", num_ctx=4096
+    )
     response = await provider.complete([{"role": "user", "content": "hi"}], json_mode=True)
 
     assert len(captured_payload) == 2
@@ -869,7 +1014,9 @@ async def test_ollama_provider_native_retries_without_format_on_empty(
 async def test_ollama_provider_native_reports_thinking_only_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = OllamaProvider(base_url="http://localhost:11434/v1", num_ctx=4096)
+    provider = OllamaProvider(
+        model="qwen2.5:7b", base_url="http://localhost:11434/v1", num_ctx=4096
+    )
 
     async def fake_post_chat(_: dict[str, object]) -> dict[str, object]:
         return {
@@ -927,7 +1074,29 @@ async def test_openrouter_provider_inherits_per_call_model_override(
 
     assert response.content == "openrouter-ok"
     assert captured["model"] == "anthropic/claude-sonnet-4.5"
+    assert captured["extra_body"] == {"reasoning": {"effort": "medium"}}
     assert provider._model == "openai/default"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_channel_empty_omits_unsafe_disable_for_mandatory_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenRouterProvider(api_key="test-key", model="google/gemini-3.1-pro-preview")
+    captured: dict[str, object] = {}
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await provider.complete(
+        [{"role": "user", "content": "hi"}],
+        reasoning_effort="",
+    )
+
+    assert "extra_body" not in captured
 
 
 @pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
@@ -1037,7 +1206,7 @@ async def test_gemini_provider_normalizes_response(
     config = captured["config"]
     assert config.response_mime_type == "application/json"  # type: ignore[attr-defined]
     assert config.thinking_config is not None  # type: ignore[attr-defined]
-    assert config.thinking_config.thinking_budget == 0  # type: ignore[attr-defined]
+    assert config.thinking_config.thinking_budget == 2048  # type: ignore[attr-defined]
     assert config.automatic_function_calling is not None  # type: ignore[attr-defined]
     assert config.automatic_function_calling.disable is True  # type: ignore[attr-defined]
 
@@ -1070,24 +1239,27 @@ async def test_gemini_provider_accepts_per_call_model_override(
     assert captured["model"] == "gemini-3.1-pro-preview"
     assert provider._model == "gemini-2.5-flash"
     config = captured["config"]
-    assert config.thinking_config is None  # type: ignore[attr-defined]
+    assert config.thinking_config is not None  # type: ignore[attr-defined]
+    assert config.thinking_config.thinking_level.value == "MEDIUM"  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
 @pytest.mark.parametrize(
-    "model",
+    ("model", "field_name", "expected"),
     [
-        "gemini-3.1-pro-preview",
-        "gemini-2.5-pro",
+        ("gemini-3.1-pro-preview", "thinking_level", "MEDIUM"),
+        ("gemini-2.5-pro", "thinking_budget", 2048),
     ],
 )
-async def test_gemini_reasoning_model_skips_thinking_budget_in_json_mode(
+async def test_gemini_reasoning_model_uses_medium_without_invalid_zero_budget(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
+    field_name: str,
+    expected: object,
 ) -> None:
-    # Regression: gemini-3.x and 2.5-pro reject thinking_budget=0 with
-    # 400 INVALID_ARGUMENT. json_mode must not attach the budget on them.
+    # Regression: Gemini 3.x and 2.5-pro reject thinking_budget=0.  Their
+    # medium mapping must use thinking_level or a valid positive budget.
     provider = GeminiProvider(api_key="test-key", model=model)
     captured: dict[str, object] = {}
 
@@ -1105,16 +1277,19 @@ async def test_gemini_reasoning_model_skips_thinking_budget_in_json_mode(
 
     config = captured["config"]
     assert config.response_mime_type == "application/json"  # type: ignore[attr-defined]
-    assert config.thinking_config is None  # type: ignore[attr-defined]
+    assert config.thinking_config is not None  # type: ignore[attr-defined]
+    actual = getattr(config.thinking_config, field_name)  # type: ignore[attr-defined]
+    if hasattr(actual, "value"):
+        actual = actual.value
+    assert actual == expected
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
-async def test_gemini_25_flash_still_sets_thinking_budget_in_json_mode(
+async def test_gemini_25_flash_defaults_to_medium_budget_in_json_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Cost-saver path: 2.5-flash legitimately accepts thinking_budget=0.
-    # Locks in the carve-out so the reasoning-first check doesn't widen.
+    # The portable medium default maps to half of the 4096 output window.
     provider = GeminiProvider(api_key="test-key", model="gemini-2.5-flash")
     captured: dict[str, object] = {}
 
@@ -1132,7 +1307,45 @@ async def test_gemini_25_flash_still_sets_thinking_budget_in_json_mode(
 
     config = captured["config"]
     assert config.thinking_config is not None  # type: ignore[attr-defined]
-    assert config.thinking_config.thinking_budget == 0  # type: ignore[attr-defined]
+    assert config.thinking_config.thinking_budget == 2048  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
+@pytest.mark.parametrize(
+    ("model", "field_name", "expected"),
+    [
+        ("gemini-2.5-flash", "thinking_budget", 0),
+        ("gemini-2.5-pro", "thinking_budget", 128),
+        ("gemini-3.1-pro-preview", "thinking_level", "LOW"),
+        ("gemini-3-flash-preview", "thinking_level", "MINIMAL"),
+    ],
+)
+async def test_gemini_channel_empty_uses_lowest_supported_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    field_name: str,
+    expected: object,
+) -> None:
+    provider = GeminiProvider(api_key="test-key", model=model)
+    captured: dict[str, object] = {}
+
+    async def fake_generate_content(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(text="ok", model_version=model, usage_metadata=None)
+
+    monkeypatch.setattr(provider._client.aio.models, "generate_content", fake_generate_content)
+
+    await provider.complete(
+        [{"role": "user", "content": "hi"}],
+        reasoning_effort="",
+    )
+
+    config = captured["config"]
+    actual = getattr(config.thinking_config, field_name)  # type: ignore[attr-defined]
+    if hasattr(actual, "value"):
+        actual = actual.value
+    assert actual == expected
 
 
 @pytest.mark.asyncio
@@ -1193,6 +1406,7 @@ async def test_health_check_uses_connectivity_probe_token_budget(
 
     assert await provider.health_check() is True
     assert captured["max_tokens"] == LLM_CONNECTIVITY_PROBE_MAX_TOKENS
+    assert captured["reasoning_effort"] == ""
 
 
 @pytest.mark.asyncio
@@ -1287,6 +1501,28 @@ async def test_openai_provider_responses_flavor_maps_params_and_usage(
 
 
 @pytest.mark.asyncio
+async def test_official_openai_responses_flavor_sends_medium_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(
+        api_key="test-key",
+        model="gpt-5.5",
+        api_flavor="responses",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_create(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _responses_response("ok")
+
+    monkeypatch.setattr(provider._client.responses, "create", fake_create)
+
+    await provider.complete([{"role": "user", "content": "hi"}])
+
+    assert captured["reasoning"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
 async def test_openai_provider_responses_flavor_walks_output_without_output_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1370,3 +1606,138 @@ async def test_openai_provider_default_flavor_still_uses_chat_completions(
     response = await provider.complete([{"role": "user", "content": "hi"}])
 
     assert response.content == "chat-path"
+
+
+# ── [network] routing policy → overseas SDK client wiring ───────────────────
+
+
+def test_openai_provider_injects_proxy_into_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import openai_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    httpx_kwargs: dict[str, object] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: sdk_kwargs.update(kw))
+
+    def _fake_client(**kw: object) -> object:
+        httpx_kwargs.update(kw)
+        return sentinel
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _fake_client)
+
+    provider = OpenAIProvider(api_key="k", proxy="socks5://127.0.0.1:1080")
+
+    assert provider._proxy == "socks5://127.0.0.1:1080"
+    assert httpx_kwargs.get("proxy") == "socks5://127.0.0.1:1080"
+    assert httpx_kwargs.get("trust_env") is False
+    assert sdk_kwargs.get("http_client") is sentinel
+
+
+def test_openai_provider_empty_proxy_is_zero_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import openai_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    httpx_called = False
+
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **kw: sdk_kwargs.update(kw))
+
+    def _fake_client(**kw: object) -> object:
+        nonlocal httpx_called
+        httpx_called = True
+        return object()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _fake_client)
+
+    OpenAIProvider(api_key="k", proxy="")
+
+    assert httpx_called is False
+    assert "http_client" not in sdk_kwargs
+
+
+def test_openai_provider_direct_mode_disables_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import openai_provider as mod
+
+    httpx_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncOpenAI", lambda **_kw: None)
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda **kw: httpx_kwargs.update(kw))
+
+    OpenAIProvider(api_key="k", trust_env=False)
+
+    assert httpx_kwargs["trust_env"] is False
+    assert "proxy" not in httpx_kwargs
+
+
+def test_claude_provider_injects_proxy_into_http_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import claude_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    httpx_kwargs: dict[str, object] = {}
+    sentinel = object()
+
+    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: sdk_kwargs.update(kw))
+    monkeypatch.setattr(mod.httpx, "AsyncClient", lambda **kw: httpx_kwargs.update(kw) or sentinel)
+
+    provider = ClaudeProvider(api_key="k", proxy="http://127.0.0.1:7890")
+
+    assert provider._proxy == "http://127.0.0.1:7890"
+    assert httpx_kwargs.get("proxy") == "http://127.0.0.1:7890"
+    assert httpx_kwargs.get("trust_env") is False
+    assert sdk_kwargs.get("http_client") is sentinel
+
+
+def test_claude_provider_empty_proxy_is_zero_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import claude_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod, "AsyncAnthropic", lambda **kw: sdk_kwargs.update(kw))
+
+    ClaudeProvider(api_key="k", proxy="")
+
+    assert "http_client" not in sdk_kwargs
+
+
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai not installed")
+def test_gemini_provider_injects_proxy_into_http_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import gemini_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod.genai, "Client", lambda **kw: sdk_kwargs.update(kw))
+
+    provider = GeminiProvider(api_key="k", proxy="socks5://127.0.0.1:1080")
+
+    http_options = sdk_kwargs.get("http_options")
+    assert isinstance(http_options, dict)
+    expected = {"proxy": "socks5://127.0.0.1:1080", "trust_env": False}
+    assert http_options.get("client_args") == expected
+    assert http_options.get("async_client_args") == expected
+    assert provider._proxy == "socks5://127.0.0.1:1080"
+
+
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai not installed")
+def test_gemini_provider_empty_proxy_is_zero_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.llm import gemini_provider as mod
+
+    sdk_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(mod.genai, "Client", lambda **kw: sdk_kwargs.update(kw))
+
+    GeminiProvider(api_key="k", proxy="")
+
+    http_options = sdk_kwargs.get("http_options")
+    assert isinstance(http_options, dict)
+    assert "client_args" not in http_options
+    assert "async_client_args" not in http_options

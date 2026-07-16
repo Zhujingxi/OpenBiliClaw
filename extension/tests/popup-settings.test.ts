@@ -13,6 +13,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgDataDir",
     "cfgLlmFallbackProvider",
     "cfgEmbeddingFallbackProvider",
+    "cfgEmbeddingMultimodalEnabled",
     "cfgOpenaiAuthMode",
     "cfgDeepseekReasoning",
     "cfgOpenrouterReferer",
@@ -356,6 +357,7 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
   for (const id of [
+    "cfgCandidateEvalConcurrency",
     "cfgMultimodalEvaluationEnabled",
     "cfgMultimodalBatchSize",
     "cfgMultimodalImageMaxPx",
@@ -366,6 +368,15 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
   }
 
+  assert.match(
+    popupHtml,
+    /id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3"/,
+  );
+
+  assert.match(
+    popupJs,
+    /setVal\("cfgCandidateEvalConcurrency", cfg\.discovery\?\.candidate_eval_concurrency\)/,
+  );
   assert.match(
     popupJs,
     /multimodalEvaluation\.checked = cfg\.discovery\?\.multimodal_evaluation_enabled === true/,
@@ -387,12 +398,40 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     /setVal\("cfgMultimodalImageTimeout", cfg\.discovery\?\.multimodal_image_timeout_seconds\)/,
   );
   assert.match(popupJs, /multimodal_evaluation_enabled: checked\("cfgMultimodalEvaluationEnabled"\)/);
+  assert.match(
+    popupJs,
+    /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
+  );
+  assert.match(popupJs, /setVal\("cfgLlmConcurrency", cfg\.llm\?\.concurrency \?\? 4\)/);
+  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrency", 4\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);
   assert.match(
     popupJs,
     /multimodal_image_timeout_seconds: getInt\("cfgMultimodalImageTimeout", 6\)/,
+  );
+});
+
+test("settings page round-trips embedding multimodal cover toggle + dashscope provider", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // DashScope must be selectable as an embedding provider (not TOML-only).
+  assert.match(
+    popupHtml,
+    /<select id="cfgEmbeddingProvider">[\s\S]*<option value="dashscope"/,
+    "dashscope should be an embedding provider option",
+  );
+  // The image-only cover embedding toggle must exist and be wired both ways.
+  assert.match(popupHtml, /id="cfgEmbeddingMultimodalEnabled" type="checkbox"/);
+  assert.match(
+    popupJs,
+    /embMultimodal\.checked = cfg\.llm\?\.embedding\?\.multimodal_enabled === true/,
+  );
+  assert.match(
+    popupJs,
+    /multimodal_enabled: checked\("cfgEmbeddingMultimodalEnabled"\)/,
   );
 });
 
@@ -484,6 +523,26 @@ test("settings page exposes and wires LLM and embedding probe buttons", () => {
   assert.match(popupJs, /probeConfigService\("embedding", collectForm\(\)\)/);
   assert.match(popupJs, /probeConfigService\("llm_fallback", collectForm\(\)\)/);
   assert.match(popupJs, /function renderProbeResult/);
+});
+
+test("settings general tab exposes and wires the network proxy field (aligned with desktop web)", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // Field + probe control + copy stating CN requests stay direct.
+  assert.match(popupHtml, /id="cfgNetworkProxyMode"/);
+  assert.match(popupHtml, /id="cfgNetworkProxy"/);
+  assert.match(popupHtml, /id="cfgProbeNetworkProxy"/);
+  assert.match(popupHtml, /id="cfgProbeNetworkProxyStatus"/);
+  assert.match(popupHtml, /海外/);
+  assert.match(popupHtml, /国内请求始终直连/);
+
+  // Restore mode + proxy, collect both into payload.network, probe wired.
+  assert.match(popupJs, /setVal\("cfgNetworkProxyMode", cfg\.network\?\.mode \|\| "direct"\)/);
+  assert.match(popupJs, /setVal\("cfgNetworkProxy", cfg\.network\?\.proxy \|\| ""\)/);
+  assert.match(popupJs, /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/);
+  assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ mode, proxy \} \}\)/);
+  assert.match(popupJs, /function runNetworkProxyConfigProbe/);
 });
 
 test("settings page guards against a same-name LLM fallback (aligned with desktop web)", () => {
@@ -654,4 +713,13 @@ test("settings page wires the keyword generation mode selector (matches desktop 
     popupJs.indexOf(spread) !== -1 && popupJs.indexOf(spread) < popupJs.indexOf(saveKey),
     "keyword_generation_mode must be written after the discovery spread",
   );
+});
+
+test("settings source status labels distinguish local readiness", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /ready: "凭据已就绪"/);
+  assert.match(popupJs, /unverified: "状态待验证"/);
+  assert.match(popupJs, /login_required: "需要登录"/);
+  assert.match(popupJs, /error: "检查失败"/);
 });

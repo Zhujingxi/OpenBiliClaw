@@ -308,6 +308,10 @@
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 255, 250, 0.92));
     }
 
+    .status-badge[data-tone="reconnecting"] {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 249, 235, 0.94));
+    }
+
     .status-badge[data-tone="offline"] {
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 245, 247, 0.92));
     }
@@ -319,6 +323,11 @@
       background: var(--success);
       box-shadow: 0 0 0 4px rgba(48, 185, 128, 0.14);
       flex-shrink: 0;
+    }
+
+    .status-dot.reconnecting {
+      background: #d28a25;
+      box-shadow: 0 0 0 4px rgba(210, 138, 37, 0.14);
     }
 
     .status-dot.offline {
@@ -742,6 +751,15 @@
       letter-spacing: 0.02em;
     }
 
+    .delight-banner-platform {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.05);
+    }
+
     .delight-banner-counter {
       font-size: 10px;
       font-weight: 600;
@@ -833,6 +851,15 @@
       padding: 2px 6px;
       border-radius: 999px;
       background: rgba(168, 85, 247, 0.12);
+      align-self: flex-start;
+    }
+    .message-delight-platform {
+      font-size: 10px;
+      font-weight: 600;
+      color: #6b7280;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: rgba(107, 114, 128, 0.12);
       align-self: flex-start;
     }
     .message-delight-title {
@@ -1705,6 +1732,11 @@
       color: var(--text-muted);
     }
 
+    .recommendation-published-time {
+      margin-left: 6px;
+      color: var(--text-muted);
+    }
+
     .feedback-status {
       margin-top: 10px;
       font-size: 11px;
@@ -2180,6 +2212,7 @@
     }
     .speculative-item .spec-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 6px;
       margin-top: 4px;
     }
@@ -2260,6 +2293,7 @@
 
     .probe-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -2274,6 +2308,11 @@
       transition: all 0.15s ease;
     }
 
+    .probe-btn:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
     .probe-btn.is-confirm {
       background: rgba(63, 185, 80, 0.15);
       color: #1a7f37;
@@ -2281,6 +2320,15 @@
     }
     .probe-btn.is-confirm:hover {
       background: rgba(63, 185, 80, 0.25);
+    }
+
+    .probe-btn.is-neutral {
+      background: var(--warning-soft);
+      color: #9a6420;
+      border-color: rgba(235, 190, 140, 0.45);
+    }
+    .probe-btn.is-neutral:hover {
+      background: rgba(255, 189, 110, 0.3);
     }
 
     .probe-btn.is-reject {
@@ -3107,6 +3155,29 @@
       cursor: not-allowed;
     }
 
+    .init-control-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .init-control-actions .init-start-btn {
+      flex: 1;
+      width: auto;
+    }
+
+    .init-cancel-btn {
+      padding: 10px 12px;
+      border: 1px solid var(--border, #d8d8e0);
+      border-radius: 12px;
+      background: var(--surface, #fff);
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .init-cancel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
     .init-checklist li.init-hint-row {
       color: var(--text-secondary);
       font-size: 11px;
@@ -3119,6 +3190,20 @@
       line-height: 1.6;
       color: var(--text-secondary);
       text-align: center;
+    }
+
+    /* Liveness / expectation line under the progress bar (init-progress
+       Phase 2): quiet while fresh, amber once >90s without backend activity. */
+    .init-stall-hint {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      text-align: center;
+    }
+
+    .init-stall-hint.stale {
+      color: #b45309;
     }
 
     .init-sources {
@@ -3183,6 +3268,13 @@
       background: linear-gradient(90deg, #fb7299, #5aa9ff);
       transition: width 0.4s ease;
     }
+
+    .init-progress-bar.indeterminate {
+      background-size: 220% 100%;
+      animation: init-progress-shimmer 1.35s linear infinite;
+    }
+
+    @keyframes init-progress-shimmer { to { background-position: -220% 0; } }
 
     .init-progress-label {
       margin-top: 6px;
@@ -3979,6 +4071,7 @@
 
     .message-actions {
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
     }
 
@@ -4430,6 +4523,9 @@
       justify-content: center;
       min-width: 38px;
     }
+    #watchLaterSyncAll,
+    #favoritesSyncAll { min-inline-size: 190px; }
+    .saved-card-sync { min-inline-size: 68px; }
     .saved-toggle svg,
     .delight-save-toggle svg { width: 16px; height: 16px; }
     .saved-toggle.watch-later-btn[aria-pressed="true"],
@@ -4515,6 +4611,74 @@
     .saved-card-remove:hover {
       background: var(--brand-soft, rgba(200,85,61,0.1));
       color: var(--brand, #c8553d);
+    }
+    .saved-sync-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .saved-sync-status {
+      min-height: 1.4em;
+      color: var(--text-muted, #777);
+      font-size: 11px;
+    }
+    .saved-card-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .saved-card-sync,
+    .saved-card-remove {
+      min-height: 36px;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 8px;
+      cursor: pointer;
+      color: var(--text-muted, #777);
+      background: transparent;
+    }
+    .saved-card-sync { color: var(--brand, #c8553d); }
+    .saved-card-sync:disabled { opacity: 0.45; cursor: not-allowed; }
+    .saved-card-sync:focus-visible,
+    .saved-card-remove:focus-visible,
+    .saved-sync-toolbar button:focus-visible {
+      outline: 2px solid var(--brand, #c8553d);
+      outline-offset: 2px;
+    }
+    .saved-sync-line {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      margin-top: 5px;
+      min-width: 0;
+      font-size: 10px;
+    }
+    .saved-sync-chip {
+      flex: 0 0 auto;
+      border-radius: 999px;
+      padding: 2px 6px;
+      background: rgba(120, 128, 145, 0.12);
+    }
+    .saved-sync-chip[data-tone="success"] { color: #1a7a4a; background: var(--lime-soft); }
+    .saved-sync-chip[data-tone="warning"] { color: #8a6520; background: var(--warning-soft); }
+    .saved-sync-chip[data-tone="error"] { color: #c0404e; background: rgba(239, 122, 134, 0.15); }
+    .saved-sync-chip[data-tone="info"] { color: var(--brand, #c8553d); background: var(--brand-soft); }
+    .saved-sync-target {
+      overflow: hidden;
+      color: var(--text-muted, #777);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    @media (max-width: 520px), (pointer: coarse) {
+      .saved-toggle,
+      .delight-save-toggle { min-width: 44px; min-height: 44px; }
+      .saved-card-sync,
+      .saved-card-remove,
+      .saved-sync-toolbar button,
+      .saved-load-retry { min-width: 44px; min-height: 44px; }
     }
 
   </style>
@@ -4631,10 +4795,14 @@
               <div class="init-progress-track">
                 <div id="initProgressBar" class="init-progress-bar"></div>
               </div>
-              <p id="initProgressLabel" class="init-progress-label"></p>
+              <p id="initProgressLabel" class="init-progress-label" role="status" aria-live="polite" aria-atomic="true"></p>
             </div>
-            <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
-            <p id="initStartReason" class="init-start-reason" hidden></p>
+            <p id="initStallHint" class="init-stall-hint" hidden></p>
+            <div class="init-control-actions">
+              <button id="initStartBtn" type="button" class="init-start-btn">开始初始化</button>
+              <button id="initCancelBtn" type="button" class="init-cancel-btn" hidden>取消</button>
+            </div>
+            <p id="initStartReason" class="init-start-reason" hidden role="status" aria-live="polite" aria-atomic="true"></p>
           </div>
         </div>
         <div id="recommendationList" class="recommendation-list"></div>
@@ -4643,8 +4811,12 @@
       <section id="viewWatchLater" class="view" role="tabpanel" aria-labelledby="tabWatchLater" hidden>
         <div class="view-intro">
           <p class="view-kicker">Watch later</p>
-          <h2>稍后再看</h2>
+          <h2 data-saved-heading tabindex="-1">稍后再看</h2>
           <p class="view-subtitle">点时钟图标加入临时队列，看完可以随手移除。</p>
+          <div class="saved-sync-toolbar">
+            <button id="watchLaterSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+            <span id="watchLaterSyncStatus" class="saved-sync-status" aria-live="polite"></span>
+          </div>
         </div>
         <div id="watchLaterEmpty" class="empty-state" hidden>
           <h3>还没有稍后再看的内容</h3>
@@ -4656,8 +4828,12 @@
       <section id="viewFavorites" class="view" role="tabpanel" aria-labelledby="tabFavorites" hidden>
         <div class="view-intro">
           <p class="view-kicker">Favorites</p>
-          <h2>我的收藏</h2>
+          <h2 data-saved-heading tabindex="-1">我的收藏</h2>
           <p class="view-subtitle">点星标收藏的内容会长期留在这里，和稍后再看互相独立。</p>
+          <div class="saved-sync-toolbar">
+            <button id="favoritesSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+            <span id="favoritesSyncStatus" class="saved-sync-status" aria-live="polite"></span>
+          </div>
         </div>
         <div id="favoritesEmpty" class="empty-state" hidden>
           <h3>还没有收藏</h3>
@@ -4883,7 +5059,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgLlmConcurrency">LLM 并发数</label>
-          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="3">
+          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="4">
         </div>
         <div class="settings-field">
           <label for="cfgLlmTimeout">LLM 超时 (秒)</label>
@@ -4974,6 +5150,7 @@
             <label for="cfgDeepseekReasoning">Reasoning Effort</label>
             <select id="cfgDeepseekReasoning">
               <option value="">关闭</option>
+              <option value="medium">medium（默认）</option>
               <option value="high">high</option>
               <option value="max">max</option>
             </select>
@@ -5047,6 +5224,7 @@
             <option value="gemini">Gemini</option>
             <option value="ollama">Ollama (本地)</option>
             <option value="openai_compatible">OpenAI 协议兼容 (Together/vLLM/Azure 等)</option>
+            <option value="dashscope">DashScope 阿里百炼 (qwen3-vl 多模态)</option>
           </select>
         </div>
         <div class="settings-field">
@@ -5080,6 +5258,11 @@
           <label for="cfgEmbeddingSimilarity">相似度阈值 (0~1)</label>
           <input id="cfgEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
         </div>
+        <div class="settings-field-row">
+          <input id="cfgEmbeddingMultimodalEnabled" type="checkbox">
+          <label for="cfgEmbeddingMultimodalEnabled">启用封面视觉加成 (image-only)</label>
+        </div>
+        <p class="settings-hint">需多模态 embedding 模型（Gemini <code>gemini-embedding-2</code> 或 DashScope <code>qwen3-vl-embedding</code>）。开启后封面图会单独编码为向量，为惊喜推荐的“封面对味度”加一点分；纯文本模型（如 bge-m3）自动跳过、零成本。默认关闭。</p>
       </div>
 
       <!-- Module LLM Overrides -->
@@ -5544,6 +5727,15 @@
           <p class="settings-hint" id="cfgAutostartHint">读取开机自启动状态中…</p>
           <p class="settings-note">只影响下次登录拉起后端，不启停当前进程；本机 Ollama 配置可能随启动预检一起拉起。若依赖 shell 环境变量，建议先写入 config.toml。</p>
         </div>
+        <div class="settings-field" id="savedSyncControlField">
+          <label>保存与平台同步</label>
+          <div class="settings-field-row">
+            <input id="cfgSavedAutoSync" type="checkbox">
+            <label for="cfgSavedAutoSync">保存时自动同步到对应平台</label>
+          </div>
+          <p class="settings-hint">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</p>
+          <p id="cfgSavedAutoSyncStatus" class="settings-probe-status" aria-live="polite"></p>
+        </div>
         <div class="settings-field">
           <label for="cfgLanguage">语言</label>
           <select id="cfgLanguage">
@@ -5558,6 +5750,23 @@
         <div class="settings-field">
           <label for="cfgStorageDbPath">SQLite 数据库路径</label>
           <input id="cfgStorageDbPath" type="text" placeholder="data/openbiliclaw.db">
+        </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxyMode">海外网络模式</label>
+          <select id="cfgNetworkProxyMode">
+            <option value="direct">直连（忽略系统代理）</option>
+            <option value="system">跟随系统代理</option>
+            <option value="custom">自定义代理</option>
+          </select>
+        </div>
+        <div class="settings-field">
+          <label for="cfgNetworkProxy">自定义代理地址</label>
+          <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
+        </div>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
+        <div class="settings-probe-row">
+          <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
+          <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>
         </div>
       </div>
       </div>
@@ -5654,6 +5863,11 @@
           </select>
         </div>
         <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
+        <div class="settings-field">
+          <label for="cfgCandidateEvalConcurrency">候选评估并发</label>
+          <input id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3">
+        </div>
+        <p class="settings-hint">范围 1–3，默认 3（每批最多 30 条、最多 90 条在途）；后端会为聊天等交互保留一个全局 LLM 槽位，实际并发可能更低。</p>
         <div class="settings-field-row">
           <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
           <label for="cfgMultimodalEvaluationEnabled">启用封面图评估</label>

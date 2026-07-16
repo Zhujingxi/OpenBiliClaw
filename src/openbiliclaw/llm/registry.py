@@ -7,8 +7,11 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from openbiliclaw import network
+
 from .base import LLMProvider, LLMProviderError, LLMRegistry
 from .claude_provider import ClaudeProvider
+from .dashscope_provider import DashScopeEmbeddingProvider
 from .gemini_provider import GeminiProvider, gemini_sdk_available
 from .ollama_provider import OllamaProvider
 from .openai_provider import DeepSeekProvider, OpenAIProvider
@@ -58,10 +61,10 @@ def build_llm_registry(
     for _name, provider in provider_specs:
         if provider is None:
             continue
-        # Ollama gets a special chat-capability check: the registry needs
-        # it for embedding even when the user never configured a chat
-        # model, but in that case it MUST stay out of the chat fallback
-        # chain (see _ollama_is_chat_capable + base.py:_fallback_order).
+        # Production Ollama registration already requires an explicit chat
+        # model. Keep the capability check as a defensive boundary for
+        # provider_overrides / legacy integrations that inject a non-chat
+        # Ollama instance into this registry.
         chat_capable = True
         if _name == "ollama" and not _ollama_is_chat_capable(config):
             chat_capable = False
@@ -80,10 +83,15 @@ def build_llm_registry(
         raise RegistryBuildError("No LLM providers are available from the current configuration.")
 
     configured_default = config.llm.default_provider
+    chat_providers = [
+        name for name in registry.available_providers if registry.is_chat_capable(name)
+    ]
+    if not chat_providers:
+        raise RegistryBuildError(
+            "No chat-capable LLM providers are available from the current configuration."
+        )
     effective_default = (
-        configured_default
-        if configured_default in registry.available_providers
-        else registry.available_providers[0]
+        configured_default if configured_default in chat_providers else chat_providers[0]
     )
     registry._default = effective_default
 
@@ -104,7 +112,7 @@ def build_llm_registry(
         elif fallback not in registry.available_providers:
             logger.warning(
                 "llm.fallback_provider=%r is not registered (likely missing "
-                "credentials such as api_key / base_url) — the fallback will "
+                "credentials such as api_key / base_url / model) — the fallback will "
                 "never be used.",
                 fallback,
             )
@@ -134,6 +142,10 @@ _EMBEDDING_CAPABLE_PROVIDERS: tuple[str, ...] = (
     # users must opt in by setting ``[llm.embedding].provider =
     # "openrouter"`` with an explicit ``model``.
     "openrouter",
+    # Alibaba DashScope multimodal embedding (Qwen3-VL / Tongyi vision).
+    # Native API — not OpenAI /v1/embeddings. Opt-in via
+    # ``[llm.embedding].provider = "dashscope"``.
+    "dashscope",
 )
 _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
     "gemini": "gemini-embedding-001",
@@ -142,6 +154,7 @@ _DEFAULT_EMBEDDING_MODEL_BY_PROVIDER: dict[str, str] = {
     # No safe default for openai_compatible — depends entirely on the
     # upstream service. Users must specify an explicit model.
     "openai_compatible": "text-embedding-3-small",
+    "dashscope": "qwen3-vl-embedding",
 }
 # Module-level set so the back-compat WARNING fires once per provider per
 # process (not once per build_embedding_service call — runtime_context
@@ -241,6 +254,7 @@ def build_embedding_service(
             cache_model=cache_model,
             similarity_threshold=emb_cfg.similarity_threshold,
             persistent_cache=l2_cache,
+            multimodal_enabled=bool(getattr(emb_cfg, "multimodal_enabled", False)),
         )
     except Exception:
         return None
@@ -314,7 +328,7 @@ def _build_dedicated_embedding_provider(
         if not use_embedding_creds and requested_name != "ollama" and not has_chat_ollama_config:
             return None
         if not base_url:
-            base_url = "http://localhost:11434/v1"
+            base_url = "http://127.0.0.1:11434/v1"
         if not base_url.rstrip("/").endswith("/v1"):
             base_url = base_url.rstrip("/") + "/v1"
         return (
@@ -335,6 +349,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -350,6 +366,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 embedding_output_dimensionality=output_dimensionality,
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -366,6 +384,8 @@ def _build_dedicated_embedding_provider(
                 model=effective_model,
                 base_url=base_url,
                 provider_name="openai_compatible",
+                proxy=_outbound_proxy(base_url),
+                trust_env=_outbound_trust_env(base_url),
             ),
             effective_model,
         )
@@ -389,11 +409,39 @@ def _build_dedicated_embedding_provider(
                 base_url=base_url or "https://openrouter.ai/api/v1",
                 http_referer=chat_openrouter.http_referer,
                 x_title=chat_openrouter.x_title,
+                proxy=_outbound_proxy(base_url or "https://openrouter.ai/api/v1"),
+                trust_env=_outbound_trust_env(base_url or "https://openrouter.ai/api/v1"),
+            ),
+            effective_model,
+        )
+
+    if candidate == "dashscope":
+        if not api_key:
+            api_key = _dashscope_env_api_key()
+        if not api_key:
+            return None
+        return (
+            DashScopeEmbeddingProvider(
+                api_key=api_key,
+                model=effective_model,
+                base_url=base_url,
+                embedding_output_dimensionality=output_dimensionality,
             ),
             effective_model,
         )
 
     return None
+
+
+def _dashscope_env_api_key() -> str:
+    """Optional DASHSCOPE_API_KEY / ALIBABA_CLOUD env fallback."""
+    import os
+
+    for name in ("DASHSCOPE_API_KEY", "DASHSCOPE_API_KEY_CN"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _embedding_output_dimensionality(emb_cfg: Any) -> int:
@@ -423,6 +471,13 @@ def _embedding_provider_honors_output_dimensionality(
         return True
     if provider_name == "openai":
         return model.startswith("text-embedding-3-")
+    if provider_name == "dashscope":
+        # qwen3-vl-embedding accepts dimension=; older tongyi fixed-dim
+        # models ignore it — only claim honor when we actually pass it.
+        name = (model or "").lower()
+        return "qwen3-vl-embedding" in name or (
+            "tongyi-embedding-vision" in name and "2026-03-06" in name
+        )
     return False
 
 
@@ -450,6 +505,26 @@ def summarize_registry(config: Config, registry: LLMRegistry) -> RegistrySummary
     )
 
 
+def _outbound_proxy(base_url: str = "") -> str:
+    """Outbound proxy for a provider endpoint from the process-level source of
+    truth (or "").
+
+    Domestic / local endpoints (DeepSeek / SenseNova / 通义 / self-hosted, …)
+    always resolve to direct — the overseas proxy would route a domestic
+    request out and back and time out. See ``network.is_domestic_endpoint``.
+    """
+    return network.proxy_for_endpoint(base_url) or ""
+
+
+def _outbound_trust_env(base_url: str = "") -> bool:
+    """Whether an SDK client for ``base_url`` should inherit env/system proxies.
+
+    Domestic / local endpoints never inherit env proxies; overseas endpoints
+    follow the process-wide ``system`` policy.
+    """
+    return network.trust_env_for_endpoint(base_url)
+
+
 def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
     if "openai" in overrides:
         return overrides["openai"]
@@ -472,6 +547,9 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),
             api_flavor=config.llm.openai.api_flavor,
+            proxy=_outbound_proxy(config.llm.openai.base_url),
+            trust_env=_outbound_trust_env(config.llm.openai.base_url),
+            reasoning_effort=config.llm.openai.reasoning_effort,
         )
     if not config.llm.openai.api_key.strip():
         return None
@@ -481,6 +559,9 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url=config.llm.openai.base_url,
         timeout=float(config.llm.timeout),
         api_flavor=config.llm.openai.api_flavor,
+        proxy=_outbound_proxy(config.llm.openai.base_url),
+        trust_env=_outbound_trust_env(config.llm.openai.base_url),
+        reasoning_effort=config.llm.openai.reasoning_effort,
     )
 
 
@@ -494,6 +575,9 @@ def _maybe_claude_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         model=config.llm.claude.model or "claude-sonnet-4-20250514",
         timeout=float(config.llm.timeout),
         base_url=config.llm.claude.base_url,
+        proxy=_outbound_proxy(config.llm.claude.base_url),
+        trust_env=_outbound_trust_env(config.llm.claude.base_url),
+        reasoning_effort=config.llm.claude.reasoning_effort,
     )
 
 
@@ -504,11 +588,15 @@ def _maybe_deepseek_provider(
         return overrides["deepseek"]
     if not config.llm.deepseek.api_key.strip():
         return None
+    base_url = config.llm.deepseek.base_url.strip() or "https://api.deepseek.com"
     return DeepSeekProvider(
         api_key=config.llm.deepseek.api_key,
         model=config.llm.deepseek.model or "deepseek-v4-flash",
+        base_url=base_url,
         reasoning_effort=config.llm.deepseek.reasoning_effort,
         timeout=float(config.llm.timeout),
+        proxy=_outbound_proxy(base_url),
+        trust_env=_outbound_trust_env(base_url),
     )
 
 
@@ -530,13 +618,15 @@ def _maybe_gemini_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         api_key=api_key,
         model=config.llm.gemini.model or "gemini-2.5-flash",
         timeout=float(config.llm.timeout),
+        proxy=_outbound_proxy(config.llm.gemini.base_url),
+        trust_env=_outbound_trust_env(config.llm.gemini.base_url),
+        reasoning_effort=config.llm.gemini.reasoning_effort,
     )
 
 
 def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) -> LLMProvider | None:
-    # Keep the "model or base_url required" registration condition in sync
-    # with config.py `_collect_config_issues` (the `[llm].fallback_provider`
-    # ollama check — config cannot import the registry, cycle).
+    # Keep the explicit-model requirement in sync with config.py
+    # `_collect_config_issues` (config cannot import the registry, cycle).
     if "ollama" in overrides:
         return overrides["ollama"]
 
@@ -549,9 +639,14 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
     # longer need the old ``embedding_wants_ollama`` auto-register hack:
     # the chat registry stays clean, and Ollama is only registered here
     # when the user actually wants chat completions through it.
-    if not model and not raw_base_url:
+    # A URL only identifies an Ollama server; it says nothing about which
+    # chat model exists there. Historically this path substituted ``llama3``
+    # for an empty model, so an embedding-only desktop config repeatedly
+    # probed a model the user never selected. Chat now requires an explicit
+    # model; embedding builds its own provider above.
+    if not model:
         return None
-    base_url = raw_base_url or "http://localhost:11434/v1"
+    base_url = raw_base_url or "http://127.0.0.1:11434/v1"
     # Normalise: Ollama's OpenAI-compat shim lives at `/v1/...`. Older
     # config.example.toml shipped `http://localhost:11434` (no /v1),
     # which makes the OpenAI SDK call `/chat/completions` — Ollama 404s
@@ -561,7 +656,7 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         base_url = base_url.rstrip("/") + "/v1"
     return OllamaProvider(
         api_key=config.llm.ollama.api_key or "ollama",
-        model=model or "llama3",
+        model=model,
         base_url=base_url,
         timeout=float(config.llm.timeout),
         num_ctx=int(config.llm.ollama.num_ctx),
@@ -569,47 +664,13 @@ def _maybe_ollama_provider(config: Config, overrides: dict[str, LLMProvider]) ->
 
 
 def _ollama_is_chat_capable(config: Config) -> bool:
-    """Decide whether the registered Ollama instance can serve chat
-    completions, or only embedding requests.
+    """Return whether Ollama has an explicitly configured chat model.
 
-    The user opts in to chat capability by any of:
-      * setting ``[llm.ollama] model`` (their explicit chat model), or
-      * picking ``ollama`` as ``[llm].default_provider``, or
-      * naming ``ollama`` as ``[llm].fallback_provider`` — an explicit
-        request to use local Ollama as the chat fallback, or
-      * using it in any per-module override.
-
-    If none of those are true and we only registered Ollama because the
-    embedding section pointed there, treat it as embedding-only. The
-    fallback chain will skip it for chat completions, avoiding the
-    "All providers failed (..., ollama). Last error: ollama request
-    failed: 404" path when the only model on disk is bge-m3.
-
-    Note: when chat capability comes *solely* from ``fallback_provider``
-    (no explicit ``[llm.ollama] model``), the provider is built with the
-    ``llama3`` default — so the user must have a chat model pulled
-    locally for the fallback to actually serve requests. That's the
-    user's stated intent though, so a 404 at fallback time is a louder,
-    more honest failure than silently dropping Ollama from the chain.
-
-    Keep in sync with config.py `_collect_config_issues` (the
-    `[llm].fallback_provider` ollama check replicates the minimal
-    registration/chat-capability condition — config cannot import the
-    registry, cycle).
+    Naming Ollama as a default, fallback, or module provider is not enough:
+    unlike remote providers, its server URL cannot identify a model and the
+    runtime must never invent one. Keep this rule in sync with config.py.
     """
-    if config.llm.ollama.model.strip():
-        return True
-    if config.llm.default_provider.strip().lower() == "ollama":
-        return True
-    if config.llm.fallback_provider.strip().lower() == "ollama":
-        return True
-    for module in ("soul", "discovery", "recommendation", "evaluation"):
-        module_cfg = getattr(config.llm, module, None)
-        if module_cfg is None:
-            continue
-        if str(getattr(module_cfg, "provider", "")).strip().lower() == "ollama":
-            return True
-    return False
+    return bool(config.llm.ollama.model.strip())
 
 
 def _maybe_openrouter_provider(
@@ -626,6 +687,11 @@ def _maybe_openrouter_provider(
         http_referer=config.llm.openrouter.http_referer,
         x_title=config.llm.openrouter.x_title,
         timeout=float(config.llm.timeout),
+        proxy=_outbound_proxy(config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"),
+        trust_env=_outbound_trust_env(
+            config.llm.openrouter.base_url or "https://openrouter.ai/api/v1"
+        ),
+        reasoning_effort=config.llm.openrouter.reasoning_effort,
     )
 
 
@@ -656,4 +722,6 @@ def _maybe_openai_compatible_provider(
         provider_name="openai_compatible",
         timeout=float(config.llm.timeout),
         api_flavor=cfg.api_flavor,
+        proxy=_outbound_proxy(cfg.base_url),
+        trust_env=_outbound_trust_env(cfg.base_url),
     )

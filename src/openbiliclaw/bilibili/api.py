@@ -20,12 +20,35 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _cookie_value(raw_cookie: str, name: str) -> str:
+    """Extract one exact name from a browser-style Cookie request header.
+
+    Chrome may include non-RFC segments that make ``SimpleCookie`` stop parsing
+    the remainder of an otherwise valid request header. Ignoring malformed or
+    unrelated segments matches browser request semantics without accepting
+    partial cookie-name matches.
+    """
+    for segment in raw_cookie.split(";"):
+        key, separator, value = segment.strip().partition("=")
+        if separator and key == name:
+            return value.strip()
+    return ""
+
+
 class BilibiliAPIError(RuntimeError):
     """Raised when a Bilibili API request returns an application error."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class BilibiliAuthExpiredError(BilibiliAPIError):
     """Raised when Bilibili reports the current Cookie is logged out."""
+
+
+class BilibiliFavoriteDuplicateError(BilibiliAPIError):
+    """Raised only when the favorite resource-deal endpoint reports a duplicate."""
 
 
 def _json_object(value: Any) -> dict[str, Any]:
@@ -227,6 +250,7 @@ class BilibiliAPIClient:
         self._last_request_at = 0.0
         self._cached_wbi_keys: tuple[str, str] | None = None
         self._wbi_keys_fetched_at: float = 0.0
+        self._favorite_folder_locks: dict[str, asyncio.Lock] = {}
         self._client = httpx.AsyncClient(
             headers={
                 "User-Agent": (
@@ -330,6 +354,23 @@ class BilibiliAPIClient:
         cls._search_cooldown_level = 0
         cls._search_voucher_block_streak = 0
 
+    @staticmethod
+    def _sanitized_http_error(
+        method: str,
+        path: str,
+        exc: httpx.HTTPError,
+    ) -> BilibiliAPIError:
+        """Map transport failures without exposing request or response payloads."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            if status_code in {412, 429}:
+                code = -status_code
+                return BilibiliAPIError(
+                    f"Bilibili API {method} rate limited on {path} (code {code})",
+                    code=code,
+                )
+        return BilibiliAPIError(f"Bilibili API {method} failed on {path}")
+
     async def _get_json(
         self,
         path: str,
@@ -347,22 +388,73 @@ class BilibiliAPIClient:
             )
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            raise BilibiliAPIError(str(exc)) from exc
+            raise self._sanitized_http_error("GET", path, exc) from exc
 
         payload = _json_object(resp.json())
         code = int(payload.get("code", 0))
+        if code == -101:
+            detail = (
+                f"Bilibili session expired on {path} (-101). "
+                "Please re-authenticate in the browser or keep the extension "
+                "online to sync a fresh Cookie."
+            )
+            logger.warning("%s", detail)
+            raise BilibiliAuthExpiredError(detail, code=code)
         if code != 0:
             message = str(payload.get("message", "Bilibili API request failed"))
-            if path == "/x/web-interface/nav" and code == -101:
-                detail = (
-                    f"Bilibili session expired on {path} (-101): {message}. "
-                    "Please re-authenticate in the browser or keep the extension "
-                    "online to sync a fresh Cookie."
-                )
-                logger.warning("%s", detail)
-                raise BilibiliAuthExpiredError(detail)
-            raise BilibiliAPIError(message)
+            raise BilibiliAPIError(message, code=code)
         return _json_object(payload.get("data", {}))
+
+    def _csrf_token(self) -> str:
+        """Return the CSRF token after validating the authenticated Cookie."""
+        session = _cookie_value(self._cookie, "SESSDATA")
+        csrf = _cookie_value(self._cookie, "bili_jct")
+        if not session or not csrf:
+            raise BilibiliAuthExpiredError(
+                "Bilibili login required for native save",
+                code=-101,
+            )
+        return csrf
+
+    async def _post_json(self, path: str, *, data: dict[str, Any]) -> dict[str, Any]:
+        """Perform an authenticated form POST and return its decoded data object."""
+        self._csrf_token()
+        await self._respect_rate_limit()
+        try:
+            resp = await self._client.post(f"{self._BASE_URL}{path}", data=data)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise self._sanitized_http_error("POST", path, exc) from exc
+
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise BilibiliAPIError(f"Bilibili API returned invalid JSON on {path}") from exc
+        if not isinstance(payload, dict):
+            raise BilibiliAPIError(f"Bilibili API returned invalid data on {path}")
+
+        raw_code = payload.get("code", 0)
+        try:
+            code = int(raw_code)
+        except (TypeError, ValueError) as exc:
+            raise BilibiliAPIError(f"Bilibili API returned invalid code on {path}") from exc
+        if code == -101:
+            raise BilibiliAuthExpiredError(
+                f"Bilibili login required for native save (code {code})",
+                code=code,
+            )
+        if code != 0:
+            raise BilibiliAPIError(
+                f"Bilibili API request failed on {path} (code {code})",
+                code=code,
+            )
+
+        result = payload.get("data", {})
+        if result is None:
+            return {}
+        if not isinstance(result, dict):
+            raise BilibiliAPIError(f"Bilibili API returned invalid data on {path}")
+        return cast("dict[str, Any]", result)
 
     async def _get_wbi_keys(self) -> tuple[str, str]:
         """Fetch and cache the WBI image/sub keys used for signed search requests.
@@ -699,6 +791,77 @@ class BilibiliAPIClient:
             )
             for folder in folders
         ]
+
+    async def ensure_favorite_folder(self, title: str) -> FavoriteFolder:
+        """Return an exact-title favorite folder, creating it when absent."""
+        csrf = self._csrf_token()
+        lock = self._favorite_folder_locks.setdefault(title, asyncio.Lock())
+        async with lock:
+            for folder in await self.get_favorite_folders():
+                if folder.title == title:
+                    if folder.media_id <= 0:
+                        raise BilibiliAPIError("Bilibili returned an invalid favorite folder id")
+                    return folder
+
+            data = await self._post_json(
+                "/x/v3/fav/folder/add",
+                data={
+                    "title": title,
+                    "intro": "",
+                    "privacy": 0,
+                    "csrf": csrf,
+                },
+            )
+            raw_media_id = data.get("id")
+            try:
+                if isinstance(raw_media_id, bool) or not isinstance(raw_media_id, (int, str)):
+                    raise ValueError
+                media_id = int(raw_media_id)
+            except (TypeError, ValueError) as exc:
+                raise BilibiliAPIError("Bilibili returned an invalid favorite folder id") from exc
+            if media_id <= 0:
+                raise BilibiliAPIError("Bilibili returned an invalid favorite folder id")
+            return FavoriteFolder(media_id=media_id, title=title)
+
+    async def add_video_to_favorite(self, bvid: str, media_id: int) -> None:
+        """Add a Bilibili video to an existing favorite folder."""
+        csrf = self._csrf_token()
+        aid = await self._resolve_aid(bvid)
+        try:
+            await self._post_json(
+                "/x/v3/fav/resource/deal",
+                data={
+                    "rid": aid,
+                    "type": 2,
+                    "add_media_ids": str(media_id),
+                    "del_media_ids": "",
+                    "csrf": csrf,
+                },
+            )
+        except BilibiliAPIError as exc:
+            if exc.code == 11201:
+                raise BilibiliFavoriteDuplicateError(
+                    "Bilibili favorite already contains this video (code 11201)",
+                    code=11201,
+                ) from exc
+            raise
+
+    async def add_video_to_watch_later(self, bvid: str) -> None:
+        """Add a Bilibili video to the authenticated account's watch-later list."""
+        csrf = self._csrf_token()
+        aid = await self._resolve_aid(bvid)
+        await self._post_json(
+            "/x/v2/history/toview/add",
+            data={"aid": aid, "csrf": csrf},
+        )
+
+    async def _resolve_aid(self, bvid: str) -> int:
+        """Resolve a BV ID through the application-code-aware view endpoint."""
+        data = await self._get_json("/x/web-interface/view", params={"bvid": bvid})
+        aid = data.get("aid")
+        if isinstance(aid, bool) or not isinstance(aid, int) or aid <= 0:
+            raise BilibiliAPIError("Bilibili returned an invalid video aid")
+        return aid
 
     async def get_all_favorites(
         self,
