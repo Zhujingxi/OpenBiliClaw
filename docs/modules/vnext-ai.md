@@ -13,7 +13,7 @@
 - `AIHealthService` 逐一检查三个稳定别名，只返回 alias、可用性、`healthy/degraded/unavailable` 与有限 reason，不返回 LiteLLM deployment/provider 详情。任一 deployment 健康即 alias 可用；部分失败时显式 degraded。
 - `grounding.py` 提供不调用模型的 Latin token / CJK n-gram grounding primitive，供 production output validator 与离线 evaluator 复用。
 - `evaluators.py` 提供四个 versioned Pydantic Evals evaluator；它们从 case metadata 读取约束，不把示例 expected output 当成唯一正确答案。
-- `TaskRunnerProfileDeltaAI`、`TaskRunnerBatchAssessor` 与 `TaskRunnerChatResponder` 把 application Protocol 接到共享 runner；`TransactionalAIRunRecorder` 在独立短事务中记录 lifecycle。
+- `TaskRunnerProfileDeltaAI`、`TaskRunnerBatchAssessor` 与 `TaskRunnerChatResponder` 把 application Protocol 接到共享 runner；`TransactionalAIRunRecorder` 在独立短事务中记录 lifecycle。Profile application 在调用 runner 前记录 expected base revision，runner 返回后若 latest 已变化则拒绝陈旧 delta，由后台 job 以 transient conflict 重算，不会把旧 proposal 应用到新画像。
 - `SQLAlchemyAIRunRepository` 只记录任务名、别名、状态、provider-neutral usage、错误类型和时间。ORM、Alembic 与 repository API 都不存在 input/output payload 通道，因此无需依赖字段名启发式脱敏。
 
 ```text

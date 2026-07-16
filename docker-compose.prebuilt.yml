@@ -123,6 +123,7 @@ services:
       OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
+      OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
     # ``host.docker.internal`` resolves the host machine from inside the
     # container (proxy auto-detect, host-side Ollama). Required on Linux
     # Docker; auto-provided by Docker Desktop on Mac / Windows.

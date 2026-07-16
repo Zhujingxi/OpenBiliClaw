@@ -93,6 +93,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("dispatched_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_job_runs")),
         sa.UniqueConstraint("idempotency_key", name=op.f("uq_job_runs_idempotency_key")),
     )
@@ -305,6 +306,25 @@ def upgrade() -> None:
         ),
     )
     op.create_table(
+        "profile_consumed_evidence",
+        sa.Column("activity_event_id", sa.String(length=36), nullable=False),
+        sa.Column("profile_revision", sa.Integer(), nullable=False),
+        sa.Column("consumed_at", sa.DateTime(timezone=True), nullable=False),
+        sa.ForeignKeyConstraint(
+            ["activity_event_id"],
+            ["activity_events.id"],
+            name=op.f("fk_profile_consumed_evidence_activity_event_id_activity_events"),
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["profile_revision"],
+            ["profile_revisions.revision"],
+            name=op.f("fk_profile_consumed_evidence_profile_revision_profile_revisions"),
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("activity_event_id", name=op.f("pk_profile_consumed_evidence")),
+    )
+    op.create_table(
         "feed_entries",
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("content_id", sa.String(length=36), nullable=False),
@@ -344,6 +364,7 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f("ix_feed_entries_content_id"))
 
     op.drop_table("feed_entries")
+    op.drop_table("profile_consumed_evidence")
     op.drop_table("profile_evidence")
     with op.batch_alter_table("interactions", schema=None) as batch_op:
         batch_op.drop_index(batch_op.f("ix_interactions_content_id"))

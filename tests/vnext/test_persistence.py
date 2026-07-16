@@ -36,6 +36,7 @@ EXPECTED_TABLES = {
     "activity_events",
     "profile_revisions",
     "profile_evidence",
+    "profile_consumed_evidence",
     "content_items",
     "candidate_assessments",
     "feed_entries",
@@ -77,9 +78,7 @@ def test_fresh_migration_creates_only_vnext_schema_and_predefined_collections(
     ai_run_columns = {column["name"] for column in inspect(engine).get_columns("ai_runs")}
     assert "input_payload" not in ai_run_columns
     assert "output_payload" not in ai_run_columns
-    source_task_columns = {
-        column["name"] for column in inspect(engine).get_columns("source_tasks")
-    }
+    source_task_columns = {column["name"] for column in inspect(engine).get_columns("source_tasks")}
     assert "request_deadline_at" in source_task_columns
     assert source_task_columns == set(SourceTaskModel.__table__.columns.keys())
     source_task_indexes = {

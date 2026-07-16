@@ -9,14 +9,14 @@
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 活动证据 | ✅ | `ActivityEvent` 统一来源事件；`ProfileSignal` 强制至少一条 evidence |
-| 证据画像 | ✅ | `ProfileSnapshot` / `ProfileDelta` 冻结修订输入；`apply_profile_delta()` 保护用户覆盖并合并重复 facet |
+| 证据画像 | ✅ | `ProfileSnapshot` / `ProfileDelta` 冻结修订输入；`apply_profile_delta()` 保护用户覆盖并合并重复 facet；application 层另以 expected base revision 与独立 consumed ledger 保护并发/重复投影 |
 | 候选与 Feed | ✅ | `ContentItem`、`CandidateAssessment`、`FeedEntry`、`Interaction` 统一内容和反馈边界 |
 | 本地收藏 | ✅ | `CollectionItem` 只表达 favorites / watch-later 本地集合成员关系 |
 | 持久化聊天 | ✅ | `ChatTurn` 表达 user / assistant 对话轮次 |
 | 来源能力 | ✅ | `SourceId` / `SourceManifest` 分开声明稳定 capability 与带 auth/result/transport metadata 的 concrete operation；`SourceConnector` 只返回规范化活动或内容对象 |
 | 来源任务合同 | ✅ | `SourceTaskRequest`、`ClaimedSourceTask`、`SourceTaskSnapshot`、`SourceTaskCompletion` 冻结通用任务边界；claim/snapshot 暴露 durable request deadline 与 `cancelled/abandoned` 终态，lease 策略见相邻 vNext 来源模块 |
 | 相邻持久化与 worker adapter | ✅ | 独立 vNext SQLAlchemy/Alembic 基础和四任务 worker 已实现，但不属于本领域模块；公开请求路径仍未切换 |
-| 运行时接线 | 🚧 | AI 与来源 adapter 基础已实现；use case、API、数据迁移与现有前端切换由后续任务实现 |
+| 运行时接线 | 🚧 | AI、来源 adapter、application use case 与独立 worker 已实现；公开 API、数据迁移与现有前端切换由后续任务实现 |
 
 ## 公开 API
 

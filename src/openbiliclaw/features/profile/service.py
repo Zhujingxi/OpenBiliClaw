@@ -19,15 +19,27 @@ if TYPE_CHECKING:
 
     from openbiliclaw.features.activity.domain import ProfileSignal
 
+_UNSET = object()
+
 
 class InvalidProfileDeltaError(ValueError):
     """Raised when a proposed delta violates deterministic evidence policy."""
+
+
+class StaleProfileRevisionError(RuntimeError):
+    """Raised when an AI proposal no longer targets the latest profile revision."""
 
 
 class ProfileRepository(Protocol):
     def latest(self) -> ProfileSnapshot | None: ...
 
     def append(self, snapshot: ProfileSnapshot, expected_revision: int | None) -> None: ...
+
+    def consumed_evidence_ids(self) -> frozenset[UUID]: ...
+
+    def mark_evidence_consumed(
+        self, evidence_ids: frozenset[UUID], *, profile_revision: int
+    ) -> None: ...
 
 
 class ProfileUnitOfWork(Protocol):
@@ -105,13 +117,23 @@ class ProfileService:
         delta: ProfileDelta,
         *,
         evidence_ids: frozenset[UUID],
+        expected_base_revision: int | None | object = _UNSET,
+        checkpoint: Callable[[], None] | None = None,
     ) -> ProfileSnapshot:
         """Validate and append without splitting read/write across transactions."""
 
         validate_profile_delta(delta, evidence_ids)
+        if checkpoint is not None:
+            checkpoint()
         with self._uow_factory() as uow:
             current = uow.profiles.latest()
-            expected_revision = None if current is None else current.revision
+            actual_revision = None if current is None else current.revision
+            if expected_base_revision is not _UNSET and actual_revision != expected_base_revision:
+                raise StaleProfileRevisionError(
+                    f"profile proposal targeted revision {expected_base_revision}, "
+                    f"latest is {actual_revision}"
+                )
+            expected_revision = actual_revision
             if current is None:
                 snapshot = ProfileSnapshot(
                     id=uuid4(),
@@ -127,16 +149,23 @@ class ProfileService:
             else:
                 snapshot = apply_profile_delta(current, delta)
             uow.profiles.append(snapshot, expected_revision=expected_revision)
+            uow.profiles.mark_evidence_consumed(evidence_ids, profile_revision=snapshot.revision)
             uow.commit()
         return snapshot
 
-    async def project(self, signals: tuple[ProfileSignal, ...]) -> ProfileSnapshot:
+    async def project(
+        self,
+        signals: tuple[ProfileSignal, ...],
+        *,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> ProfileSnapshot:
         """Optionally ask typed AI for a delta, then enforce application-owned policy."""
 
         if not signals:
             raise ValueError("profile projection requires evidence signals")
         with self._uow_factory() as uow:
             current = uow.profiles.latest()
+        expected_base_revision = None if current is None else current.revision
         base = current or ProfileSnapshot(id=uuid4(), revision=0)
         delta = await self._ai.propose(base, signals) if self._ai else _signal_delta(signals)
         if self._ai and any(facet.overridden for facet in delta.upserts):
@@ -146,6 +175,8 @@ class ProfileService:
             evidence_ids=frozenset(
                 evidence_id for signal in signals for evidence_id in signal.evidence_ids
             ),
+            expected_base_revision=expected_base_revision,
+            checkpoint=checkpoint,
         )
 
 
@@ -153,5 +184,6 @@ __all__ = [
     "InvalidProfileDeltaError",
     "ProfileDeltaAI",
     "ProfileService",
+    "StaleProfileRevisionError",
     "validate_profile_delta",
 ]

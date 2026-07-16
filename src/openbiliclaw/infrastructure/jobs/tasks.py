@@ -53,6 +53,7 @@ class JobRunSnapshot(BaseModel):
     updated_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: AwareDatetime | None = None
     finished_at: AwareDatetime | None = None
+    dispatched_at: AwareDatetime | None = None
 
 
 class TransientJobError(RuntimeError):
@@ -63,6 +64,10 @@ class PermanentJobError(RuntimeError):
     """Invalid or unsupported work that retrying cannot repair."""
 
 
+class JobCancelledError(RuntimeError):
+    """Cooperative signal raised when application state cancels in-flight work."""
+
+
 class JobRunRepository(Protocol):
     def create_or_get(
         self, *, job_name: str, idempotency_key: str, priority: int
@@ -71,6 +76,12 @@ class JobRunRepository(Protocol):
     def get(self, run_id: UUID) -> JobRunSnapshot | Mapping[str, object]: ...
 
     def claim(self, run_id: UUID) -> bool: ...
+
+    def mark_dispatched(self, run_id: UUID) -> None: ...
+
+    def pending_undispatched(self) -> tuple[UUID, ...]: ...
+
+    def checkpoint(self, run_id: UUID, progress: float) -> bool: ...
 
     def update(
         self,
@@ -130,9 +141,16 @@ _DEFAULT_PRIORITY = {
 class JobService:
     """Own scheduling, inspection, cancellation, and restart recovery in the app DB."""
 
-    def __init__(self, uow_factory: Callable[[], JobUnitOfWork], *, queue: JobQueue) -> None:
+    def __init__(
+        self,
+        uow_factory: Callable[[], JobUnitOfWork],
+        *,
+        queue: JobQueue,
+        source_sync_interval_minutes: Callable[[], int] | None = None,
+    ) -> None:
         self._uow_factory = uow_factory
         self._queue = queue
+        self._source_sync_interval_minutes = source_sync_interval_minutes or (lambda: 30)
 
     def schedule(
         self,
@@ -148,15 +166,49 @@ class JobService:
         resolved_priority = _DEFAULT_PRIORITY[job_name] if priority is None else priority
         durable_key = f"{job_name}:{idempotency_key}"
         with self._uow_factory() as uow:
-            run_id, created = uow.job_runs.create_or_get(
+            run_id, _created = uow.job_runs.create_or_get(
                 job_name=job_name,
                 idempotency_key=durable_key,
                 priority=resolved_priority,
             )
             uow.commit()
-        if created:
-            self._queue.enqueue(job_name, run_id, resolved_priority)
+        snapshot = self.inspect(run_id)
+        if snapshot.status is JobRunStatus.PENDING and snapshot.dispatched_at is None:
+            self._dispatch(snapshot)
         return self.inspect(run_id)
+
+    def _dispatch(self, snapshot: JobRunSnapshot) -> None:
+        """Publish first, then mark; duplicates after a crash are claim-safe."""
+
+        self._queue.enqueue(snapshot.job_name, snapshot.id, snapshot.priority)
+        with self._uow_factory() as uow:
+            uow.job_runs.mark_dispatched(snapshot.id)
+            uow.commit()
+
+    def reconcile_pending_dispatches(self) -> tuple[UUID, ...]:
+        """Republish every durable pending row that has no successful handoff marker."""
+
+        with self._uow_factory() as uow:
+            pending = uow.job_runs.pending_undispatched()
+        dispatched: list[UUID] = []
+        for run_id in pending:
+            snapshot = self.inspect(run_id)
+            self._dispatch(snapshot)
+            dispatched.append(run_id)
+        return tuple(dispatched)
+
+    def schedule_periodic(
+        self, job_name: JobName, *, now: datetime | None = None
+    ) -> JobRunSnapshot:
+        resolved_now = now or datetime.now(UTC)
+        if job_name == "source_sync":
+            interval = self._source_sync_interval_minutes()
+            if interval < 1:
+                raise ValueError("source sync interval must be positive")
+            bucket = int(resolved_now.timestamp() // 60) // interval
+        else:
+            bucket = int(resolved_now.timestamp() // 60)
+        return self.schedule(job_name, idempotency_key=f"periodic:{bucket}")
 
     def inspect(self, run_id: UUID) -> JobRunSnapshot:
         with self._uow_factory() as uow:
@@ -174,6 +226,19 @@ class JobService:
             claimed = uow.job_runs.claim(run_id)
             uow.commit()
         return claimed
+
+    def checkpoint(self, run_id: UUID, progress: float) -> JobRunSnapshot:
+        if not 0 <= progress <= 1:
+            raise ValueError("job progress must be between zero and one")
+        with self._uow_factory() as uow:
+            running = uow.job_runs.checkpoint(run_id, progress)
+            uow.commit()
+        snapshot = self.inspect(run_id)
+        if not running:
+            if snapshot.status is JobRunStatus.CANCELLED:
+                raise JobCancelledError(f"job was cancelled: {run_id}")
+            raise RuntimeError(f"job is not running: {run_id}")
+        return snapshot
 
     def succeed(self, run_id: UUID) -> None:
         self._update(run_id, status=JobRunStatus.SUCCEEDED, progress=1.0)
@@ -214,10 +279,8 @@ class JobService:
     def recover_interrupted(self) -> tuple[UUID, ...]:
         with self._uow_factory() as uow:
             recovered = uow.job_runs.recover_running()
-            snapshots = tuple(_snapshot(run_id, uow.job_runs.get(run_id)) for run_id in recovered)
             uow.commit()
-        for snapshot in snapshots:
-            self._queue.enqueue(snapshot.job_name, snapshot.id, snapshot.priority)
+        self.reconcile_pending_dispatches()
         return recovered
 
     def cleanup_finished(self, *, retention_days: int = 30) -> int:
@@ -231,7 +294,18 @@ class JobService:
         return removed
 
 
-JobHandler = Callable[[UUID], None | Awaitable[None]]
+class JobExecutionContext:
+    """Application-state checkpoint used for progress and cooperative cancellation."""
+
+    def __init__(self, service: JobService, run_id: UUID) -> None:
+        self._service = service
+        self.run_id = run_id
+
+    def checkpoint(self, progress: float) -> JobRunSnapshot:
+        return self._service.checkpoint(self.run_id, progress)
+
+
+JobHandler = Callable[[UUID, JobExecutionContext], None | Awaitable[None]]
 _runtime_lock = Lock()
 _service: JobService | None = None
 _handlers: dict[str, JobHandler] = {}
@@ -254,8 +328,7 @@ def _run_job(job_name: str, run_id: str | None, task: Any | None) -> None:
     if service is None:
         raise PermanentJobError("job runtime is not configured")
     if run_id is None:
-        bucket = datetime.now(UTC).strftime("%Y%m%d%H%M")
-        service.schedule(job_name, idempotency_key=f"periodic:{bucket}")
+        service.schedule_periodic(job_name)
         return
     resolved_id = UUID(run_id)
     if not service.claim(resolved_id):
@@ -266,10 +339,15 @@ def _run_job(job_name: str, run_id: str | None, task: Any | None) -> None:
         service.fail(resolved_id, error)
         raise CancelExecution(retry=False)
     try:
-        result = handler(resolved_id)
+        context = JobExecutionContext(service, resolved_id)
+        context.checkpoint(0.01)
+        result = handler(resolved_id, context)
         if inspect.isawaitable(result):
             asyncio.run(_await_handler(result))
+        context.checkpoint(0.99)
         service.succeed(resolved_id)
+    except JobCancelledError as error:
+        raise CancelExecution(retry=False) from error
     except BaseException as error:
         retries_remaining = int(getattr(task, "retries", 0))
         if classify_retry(error) and retries_remaining > 0:
@@ -286,7 +364,7 @@ async def _await_handler(result: Awaitable[None]) -> None:
 # All schedules are deliberately bounded and serve only as transport triggers. Their durable
 # idempotency buckets and outcomes live in job_runs, not Huey's periodic/result storage.
 @huey.periodic_task(  # type: ignore[untyped-decorator]
-    crontab(minute="*/30"),
+    crontab(minute="*"),
     retries=2,
     retry_delay=30,
     priority=PRIORITY_SCHEDULED,
@@ -348,17 +426,22 @@ _TASKS = {
 class HueyJobQueue:
     """Transport adapter that never returns or exposes Huey result handles."""
 
+    def __init__(self, tasks: Mapping[str, Any] | None = None) -> None:
+        self._tasks = dict(tasks or _TASKS)
+
     def enqueue(self, job_name: str, run_id: UUID, priority: int) -> None:
         try:
-            wrapper = _TASKS[job_name]
+            wrapper = self._tasks[job_name]
         except KeyError as exc:
             raise ValueError(f"unknown job name: {job_name}") from exc
-        wrapper.schedule((str(run_id),), priority=priority, id=str(run_id))
+        wrapper(str(run_id), priority=priority)
 
 
 __all__ = [
     "JOB_NAMES",
     "HueyJobQueue",
+    "JobCancelledError",
+    "JobExecutionContext",
     "JobRunSnapshot",
     "JobRunStatus",
     "JobService",

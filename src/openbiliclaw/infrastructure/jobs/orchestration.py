@@ -8,18 +8,22 @@ from typing import TYPE_CHECKING, Any, cast
 from openbiliclaw.features.activity.domain import ActivityEvent
 from openbiliclaw.features.activity.service import ActivityService, project_activity_event
 from openbiliclaw.features.feed.service import FeedService
-from openbiliclaw.features.profile.service import ProfileService
+from openbiliclaw.features.profile.service import ProfileService, StaleProfileRevisionError
 from openbiliclaw.features.sources.domain import SourceOperation, SourceResultKind
 from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.ai.use_cases import (
     TaskRunnerBatchAssessor,
     TaskRunnerProfileDeltaAI,
 )
+from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.tasks import (
+    JobExecutionContext,
     JobHandler,
+    JobQueue,
     JobService,
     PermanentJobError,
+    TransientJobError,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +44,7 @@ class WorkerDependencies:
     session_factory: sessionmaker[Session]
     source_registry: SourceRegistry
     task_runner: TaskRunner
+    job_queue: JobQueue | None = None
 
 
 class WorkerOrchestrator:
@@ -64,13 +69,17 @@ class WorkerOrchestrator:
         )
         self._jobs = job_service
 
-    async def source_sync(self, _run_id: UUID) -> None:
+    async def source_sync(self, _run_id: UUID, context: JobExecutionContext) -> None:
         """Import deterministic activity from every enabled bootstrap connector."""
 
         settings = self._settings.get()
-        for source_id in sorted(settings.source_enabled):
-            if not settings.source_enabled[source_id]:
-                continue
+        enabled_sources = [
+            source_id
+            for source_id in sorted(settings.source_enabled)
+            if settings.source_enabled[source_id]
+        ]
+        for index, source_id in enumerate(enabled_sources):
+            context.checkpoint(0.05 + 0.75 * index / max(1, len(enabled_sources)))
             try:
                 connector = self._dependencies.source_registry.get(source_id)
             except LookupError as exc:
@@ -91,38 +100,51 @@ class WorkerOrchestrator:
                     f"enabled source does not support activity sync: {source_id}"
                 )
             result = await connector.execute(SourceOperation.BOOTSTRAP_IMPORT, limit=100)
+            context.checkpoint(0.1 + 0.75 * (index + 1) / max(1, len(enabled_sources)))
             if not all(isinstance(event, ActivityEvent) for event in result):
                 raise TypeError(f"source sync returned non-activity data: {source_id}")
             for event in cast("tuple[ActivityEvent, ...]", result):
+                context.checkpoint(0.9)
                 self._activity.ingest(event)
+        context.checkpoint(0.95)
 
-    async def profile_projection(self, _run_id: UUID) -> None:
+    async def profile_projection(self, _run_id: UUID, context: JobExecutionContext) -> None:
         """Project only activity evidence absent from the latest immutable revision."""
 
         with self._uow_factory() as uow:
             events = uow.activities.list_all()
-            current = uow.profiles.latest()
-        projected = {
-            evidence_id
-            for facet in (() if current is None else current.facets)
-            for evidence_id in facet.evidence_ids
-        }
+            consumed = uow.profiles.consumed_evidence_ids()
+        context.checkpoint(0.15)
         signals: list[ProfileSignal] = []
         for event in events:
-            if event.id not in projected:
+            if event.id not in consumed:
                 signals.extend(project_activity_event(event))
         if signals:
-            await self._profile.project(tuple(signals))
 
-    async def feed_replenishment(self, _run_id: UUID) -> None:
+            def before_profile_commit() -> None:
+                context.checkpoint(0.8)
+
+            try:
+                await self._profile.project(tuple(signals), checkpoint=before_profile_commit)
+            except (StaleProfileRevisionError, ProfileRevisionConflict) as exc:
+                raise TransientJobError("profile revision changed during projection") from exc
+        context.checkpoint(0.95)
+
+    async def feed_replenishment(self, _run_id: UUID, context: JobExecutionContext) -> None:
         """Run deterministic collection and bounded typed batch admission."""
 
-        await self._feed.replenish()
+        def checkpoint(progress: float) -> None:
+            context.checkpoint(progress)
 
-    def cleanup(self, _run_id: UUID) -> None:
+        await self._feed.replenish(checkpoint=checkpoint)
+        context.checkpoint(0.95)
+
+    def cleanup(self, _run_id: UUID, context: JobExecutionContext) -> None:
         """Delete only terminal business-job history older than retention."""
 
+        context.checkpoint(0.5)
         self._jobs.cleanup_finished(retention_days=30)
+        context.checkpoint(0.95)
 
     def handlers(self) -> Mapping[str, JobHandler]:
         return {
@@ -143,7 +165,12 @@ def build_worker_runtime(
     def uow_factory() -> UnitOfWork:
         return UnitOfWork(dependencies.session_factory)
 
-    service = JobService(cast("Callable[[], Any]", uow_factory), queue=HueyJobQueue())
+    settings = SettingsService(cast("Callable[[], Any]", uow_factory))
+    service = JobService(
+        cast("Callable[[], Any]", uow_factory),
+        queue=dependencies.job_queue or HueyJobQueue(),
+        source_sync_interval_minutes=lambda: settings.get().source_sync_interval_minutes,
+    )
     orchestrator = WorkerOrchestrator(dependencies, service)
     return service, orchestrator.handlers()
 

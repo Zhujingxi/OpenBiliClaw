@@ -106,6 +106,20 @@ class ProfileEvidenceModel(Base):
     )
 
 
+class ProfileConsumedEvidenceModel(Base):
+    """Atomic projection ledger independent of the facets that survive later revisions."""
+
+    __tablename__ = "profile_consumed_evidence"
+
+    activity_event_id: Mapped[str] = mapped_column(
+        ForeignKey("activity_events.id", ondelete="RESTRICT"), primary_key=True
+    )
+    profile_revision: Mapped[int] = mapped_column(
+        ForeignKey("profile_revisions.revision", ondelete="RESTRICT"), nullable=False
+    )
+    consumed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ContentItemModel(Base):
     """Source-neutral content with a unique source/external identity."""
 
@@ -270,6 +284,7 @@ class JobRunModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AIRunModel(Base):

@@ -21,8 +21,8 @@ features: Activity ──► Profile ─────┐
 infrastructure.database
         ├─ SQLAlchemy mappings + repositories + UnitOfWork
         ├─ Alembic 0001 ──► data/vnext/openbiliclaw.db
-        └─ settings / source_accounts / activity / profile / content / feed
-           / collections / chat / source_tasks / job_runs / ai_runs
+        └─ settings / source_accounts / activity / profile + consumed evidence / content
+           / feed / collections / chat / source_tasks / job_runs / ai_runs
         │
         └─ infrastructure.security.CredentialCipher
               OPENBILICLAW_SECRET_KEY ──► derived Fernet key ──► opaque ciphertext only
@@ -41,7 +41,7 @@ profile/feed/chat use cases ──► reusable TaskSpec + PydanticAI Agent
 
 Huey scheduler/transport (data/vnext/huey.db, result enabled)
         └─► source_sync / profile_projection / feed_replenishment / cleanup
-              └─► JobService ─► job_runs (authoritative status/idempotency/cancel/recovery)
+              └─► JobService ─► job_runs (dispatch/status/idempotency/cancel/progress/recovery)
 
 Implemented: domain contracts/policies; seven source manifests/connectors/settings;
              lease-safe generic source tasks; isolated schema/migration; repository/UoW;
@@ -57,7 +57,7 @@ vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legac
 
 AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。六个 task 覆盖 profile、keyword、单候选、batch candidate、chat 和 recommendation；profile/feed worker 已构造共享 runner adapter，chat adapter 等待 HTTP 接线。四份 versioned Pydantic Evals dataset 继续覆盖既有核心任务。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
 
-worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。Huey 只负责 transport、priority、periodic、retry 和 lock，哪怕 result storage 存在值，产品状态仍只读取应用库 `job_runs`。本节不是公开运行时切换声明：当前生产 API、legacy runtime、CLI 和前端尚未构造这些 use case，扩展也尚未改用 generic claim/complete。下面的 v0.3 系统概览仍描述现有用户请求和 legacy 数据路径。
+worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动 reconcile 遗漏 handoff，enqueue 后崩溃导致的重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，哪怕 result storage 存在值，产品状态、运行中取消和单调 progress 仍只读取应用库 `job_runs`。四 handler 在外部边界后和持久化前 checkpoint；profile 的 expected base revision 与独立 consumed ledger 防陈旧/重复投影，Feed 的 durable assessment/admission history 防重复准入。Compose backend/worker 明确共享 vNext app DB，Huey 文件隔离。本节不是公开运行时切换声明：当前生产 API、legacy runtime、CLI 和前端尚未构造这些 use case，扩展也尚未改用 generic claim/complete。下面的 v0.3 系统概览仍描述现有用户请求和 legacy 数据路径。
 
 ## 当前 v0.3 系统概览
 

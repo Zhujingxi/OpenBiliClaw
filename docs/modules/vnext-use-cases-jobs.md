@@ -11,17 +11,19 @@ feature service 只依赖自身声明的 repository、AI、settings 和 source P
 | 用例 | 行为 |
 |---|---|
 | activity ingestion | 先幂等持久化不可变 `ActivityEvent`，再产生带原 event UUID 的确定性 `ProfileSignal`；显式画像编辑是 confidence=1 的 override |
-| profile projection | 可通过 analysis lane 生成 typed `ProfileDelta`；应用规则拒绝未知/重复 evidence、重复 upsert/removal、AI override，并在一个 UoW 内 optimistic append 一个 revision |
-| feed replenishment | 读取 typed source enable/weight settings，以稳定 SourceId tie-break 的 largest-remainder 算法精确分配有限候选预算；只调用 manifest 支持的只读 operation，按 `(source_id, external_id)` 去重，只做一次有界 batch assessment，再执行 score、novelty、source/topic diversity admission |
+| profile projection | 可通过 analysis lane 生成 typed `ProfileDelta`；proposal 携带应用拥有的 base revision，latest 已变化时拒绝陈旧 delta 并让 job 重算；unknown/duplicate evidence、重复 action 与 AI override 均被拒绝。所有送入投影的 evidence（含 narrative-only、no-op 或日后 facet 被删除）与新 revision 在同一 UoW 写入独立 consumed ledger |
+| feed replenishment | 读取 typed source enable/weight settings，以稳定 SourceId tie-break 的 largest-remainder 算法精确分配有限候选预算；batch 前排除同 revision 已评估及历史 admitted/interacted/dismissed 内容，并有界扩量寻找新候选。所有评估都会持久化；topic hard cap 在任一 declared topic 饱和时拒绝该候选，只对实际 admitted 内容计数 |
 | feedback | 同一事务写 `Interaction` 和确定性 feedback `ActivityEvent`；repository rank adjustment 会让后续排序读取该反馈 |
 | library | 只写本地 `favorites` / `watch_later`，不调用平台账号 mutation |
 | chat | 直接调用共享 `TaskRunner` 的 `obc-interactive` lane，不进入 Huey；持久化 user/assistant 两轮并输出可直接渲染为 SSE 的 typed delta/done chunks；opt-in learning 只写 activity evidence |
 
 ## 四个任务与权威状态
 
-只注册以下四个 Huey task：`source_sync`、`profile_projection`、`feed_replenishment`、`cleanup`。`source_sync` 执行已启用 connector 的真实 bootstrap activity operation；`profile_projection` 只处理最新画像尚未引用的事件；`feed_replenishment` 调用上述有界用例；`cleanup` 只删除超过保留期的 terminal `job_runs`。
+只注册以下四个 Huey task：`source_sync`、`profile_projection`、`feed_replenishment`、`cleanup`。`source_sync` 执行已启用 connector 的真实 bootstrap activity operation；`profile_projection` 只处理 consumed ledger 尚未登记的事件；`feed_replenishment` 调用上述有界用例；`cleanup` 只删除超过保留期的 terminal `job_runs`。`source_sync` 的 Huey periodic wrapper 每分钟做一次轻量 tick，真实幂等时间桶读取 `UserSettings.source_sync_interval_minutes`；其它任务类型不增加。
 
-Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priority、有限 retry、periodic schedule 与 task lock；结果只属于 transport。产品状态、幂等键、取消、重启恢复、attempt/progress/error/timestamps 全部以应用库 `job_runs` 为权威，`JobService.inspect()` 从不读取 Huey Result。consumer 异常退出后，启动入口会把 application DB 中遗留的 `running` 重置为 `pending` 并重新排队。
+Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priority、有限 retry、periodic schedule 与 task lock；结果只属于 transport。应用先持久化 pending `job_runs`，再通过 TaskWrapper immediate enqueue 发布，成功后写 `dispatched_at`。queue failure 保留 undispatched row；重复 schedule 与 worker startup 会 reconcile。若进程在 enqueue 后、marker 前崩溃，允许重复 transport message，但业务原子 claim 保证只执行一次。产品状态、幂等键、协作式运行中取消、attempt、单调 progress、error/timestamps 全部以应用库为权威，`JobService.inspect()` 从不读取 Huey Result。consumer 异常退出后会把遗留 running 重置为 pending/undispatched 并重新发布。
+
+四个 handler 都使用 `JobExecutionContext.checkpoint()`：每个外部 source/model 边界之后、每个持久化 side effect 之前重新读取应用 DB cancellation，并提交可见且不回退的 progress。取消后的 source event、profile revision/evidence、feed batch 或 cleanup effect 不会继续写入；retry 保留已达到的最高 progress。
 
 三个 priority 常量按 `interactive > user-triggered > scheduled-maintenance` 排序；chat 虽使用 interactive lane，但永不进入后台队列。worker 使用最多四个 thread workers，并通过 `python -m openbiliclaw.infrastructure.jobs.worker` 启动。源码与预构建 Compose 都挂载独立 Huey 文件；legacy `openbiliclaw-backend` 服务在 Task 21 前不改名。
 
@@ -29,7 +31,7 @@ Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priorit
 
 `UserSettings.source_weights` 默认给七个平台相同合法权重，`source_enabled` 默认全部关闭。零权重来源不分配预算；负数、非有限权重和未知 SourceId 拒绝保存。worker composition 固定注册七个平台；启用来源缺少可用账户、凭据密文无法解密或缺少 Cookie 时，会以 `MissingSourceConfigurationError` 明确失败，不会发起匿名调用或伪装为空成功。
 
-worker 默认迁移隔离 vNext 数据库，构造 SQLAlchemy UoW、`SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。production composition 逐项构造 Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，不扫描 entry point、不加载动态 source factory。direct/CLI client 在第一次真实调用时才从 `source_accounts` 读取 enabled account，并用 `CredentialCipher`/`OPENBILICLAW_SECRET_KEY` 解密；构造 registry 与全部来源 disabled 时不读取凭据、不创建网络 client。extension-assisted operation 统一使用 durable `QueuedBrowserTransport`；当前扩展 dispatcher 尚未切换，因此启用这类 operation 会等待 generic task callback。模型只读取 `OPENBILICLAW_LITELLM_BASE_URL` 与 `OPENBILICLAW_LITELLM_API_KEY`，provider credential 仍只存在于 LiteLLM。
+worker 默认迁移隔离 vNext 数据库，构造 SQLAlchemy UoW、`SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。Compose 中 backend/API 与 worker 使用同一个 mounted `OPENBILICLAW_DATABASE_URL`，Huey 仍使用独立文件。production composition 逐项构造 Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，不扫描 entry point、不加载动态 source factory。direct/CLI client 在第一次真实调用时才从 `source_accounts` 读取 enabled account，并用 `CredentialCipher`/`OPENBILICLAW_SECRET_KEY` 解密；构造 registry 与全部来源 disabled 时不读取凭据、不创建网络 client。extension-assisted operation 统一使用 durable `QueuedBrowserTransport`；当前扩展 dispatcher 尚未切换，因此启用这类 operation 会等待 generic task callback。模型只读取 `OPENBILICLAW_LITELLM_BASE_URL` 与 `OPENBILICLAW_LITELLM_API_KEY`，provider credential 仍只存在于 LiteLLM。
 
 ## 公开 Python API
 
@@ -39,7 +41,7 @@ worker 默认迁移隔离 vNext 数据库，构造 SQLAlchemy UoW、`SettingsSer
 - `features.library.service.LibraryService`
 - `features.chat.service.ChatService`, `ChatChunk`
 - `infrastructure.ai.use_cases` 的三个共享 TaskRunner adapter
-- `infrastructure.jobs.tasks.JobService`, `JobRunSnapshot`, 四个 task wrapper
+- `infrastructure.jobs.tasks.JobService`, `JobExecutionContext`, `JobRunSnapshot`, 四个 task wrapper
 - `infrastructure.jobs.orchestration.build_worker_runtime()`
 - `infrastructure.jobs.worker.build_default_source_registry()`
 - `infrastructure.jobs.worker.run_worker()`

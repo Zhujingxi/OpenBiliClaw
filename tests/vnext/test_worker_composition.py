@@ -33,6 +33,7 @@ from openbiliclaw.infrastructure.jobs.orchestration import (
     WorkerDependencies,
     build_worker_runtime,
 )
+from openbiliclaw.infrastructure.jobs.tasks import JobExecutionContext
 from openbiliclaw.infrastructure.jobs.worker import (
     MissingSourceConfigurationError,
     build_default_source_registry,
@@ -123,6 +124,11 @@ class MockTaskRunner:
         raise AssertionError(f"unexpected task: {spec.name}")
 
 
+class Queue:
+    def enqueue(self, job_name: str, run_id: UUID, priority: int) -> None:
+        del job_name, run_id, priority
+
+
 @pytest.fixture
 def runtime(tmp_path: Path) -> tuple[Any, Any, Any]:
     database = tmp_path / "vnext.db"
@@ -146,6 +152,7 @@ def runtime(tmp_path: Path) -> tuple[Any, Any, Any]:
             session_factory=session_factory,
             source_registry=SourceRegistry((MockConnector(),)),
             task_runner=MockTaskRunner(),  # type: ignore[arg-type]
+            job_queue=Queue(),
         )
     )
     yield session_factory, service, handlers
@@ -156,12 +163,17 @@ def runtime(tmp_path: Path) -> tuple[Any, Any, Any]:
 async def test_all_four_production_handlers_execute_real_use_cases(
     runtime: tuple[Any, Any, Any],
 ) -> None:
-    session_factory, _service, handlers = runtime
+    session_factory, service, handlers = runtime
 
-    await handlers["source_sync"](RUN_ID)
-    await handlers["profile_projection"](RUN_ID)
-    await handlers["feed_replenishment"](RUN_ID)
-    handlers["cleanup"](RUN_ID)
+    for index, name in enumerate(
+        ("source_sync", "profile_projection", "feed_replenishment", "cleanup")
+    ):
+        run = service.schedule(name, idempotency_key=f"smoke:{index}")
+        assert service.claim(run.id)
+        result = handlers[name](run.id, JobExecutionContext(service, run.id))
+        if result is not None:
+            await result
+        assert service.inspect(run.id).progress > 0
 
     with UnitOfWork(session_factory) as uow:
         assert len(uow.activities.list_all()) == 1

@@ -26,7 +26,11 @@ from openbiliclaw.features.feed.service import (
 from openbiliclaw.features.library.domain import CollectionKind
 from openbiliclaw.features.library.service import LibraryService
 from openbiliclaw.features.profile.domain import ProfileDelta, ProfileFacet, ProfileSnapshot
-from openbiliclaw.features.profile.service import InvalidProfileDeltaError, ProfileService
+from openbiliclaw.features.profile.service import (
+    InvalidProfileDeltaError,
+    ProfileService,
+    StaleProfileRevisionError,
+)
 from openbiliclaw.features.sources.domain import (
     SourceCapability,
     SourceId,
@@ -54,6 +58,7 @@ class MemoryState:
     interactions: list[Interaction] = field(default_factory=list)
     collections: list[Any] = field(default_factory=list)
     turns: list[Any] = field(default_factory=list)
+    consumed_evidence: set[UUID] = field(default_factory=set)
 
 
 class MemoryRepository:
@@ -89,6 +94,15 @@ class MemoryRepository:
             raise RuntimeError("revision conflict")
         self.state.profiles.append(snapshot)
 
+    def consumed_evidence_ids(self) -> frozenset[UUID]:
+        return frozenset(self.state.consumed_evidence)
+
+    def mark_evidence_consumed(
+        self, evidence_ids: frozenset[UUID], *, profile_revision: int
+    ) -> None:
+        del profile_revision
+        self.state.consumed_evidence.update(evidence_ids)
+
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None:
         return next(
             (
@@ -98,6 +112,9 @@ class MemoryRepository:
             ),
             None,
         )
+
+    def flush(self) -> None:
+        return None
 
     def unseen_count(self) -> int:
         seen = {item.content_id for item in self.state.interactions}
@@ -113,6 +130,22 @@ class MemoryRepository:
                 adjustment += 0.2 if interaction.kind is InteractionKind.POSITIVE else 0.0
                 adjustment -= 0.5 if interaction.kind is InteractionKind.NEGATIVE else 0.0
         return adjustment
+
+    def excluded_content_ids(self, profile_revision: int) -> frozenset[UUID]:
+        assessed = {
+            assessment.content_id
+            for assessment in self.state.assessments
+            if assessment.profile_revision == profile_revision
+        }
+        admitted = {entry.content_id for entry in self.state.feed}
+        interacted = {interaction.content_id for interaction in self.state.interactions}
+        return frozenset(assessed | admitted | interacted)
+
+    def excluded_content_identities(self, profile_revision: int) -> frozenset[tuple[str, str]]:
+        excluded = self.excluded_content_ids(profile_revision)
+        return frozenset(
+            (item.source_id, item.external_id) for item in self.state.content if item.id in excluded
+        )
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool:
         before = len(self.state.collections)
@@ -164,6 +197,25 @@ class BatchAssessor:
                 novelty=0.9,
                 risk=0,
                 topics=("python" if index < 2 else "architecture",),
+            )
+            for index, item in enumerate(content)
+        )
+
+
+class TopicAssessor:
+    async def assess_batch(
+        self, profile: ProfileSnapshot, content: tuple[ContentItem, ...]
+    ) -> tuple[CandidateAssessment, ...]:
+        topics = (("python",), ("python", "new"), ("other",))
+        return tuple(
+            CandidateAssessment(
+                content_id=item.id,
+                profile_revision=profile.revision,
+                relevance=0.9,
+                quality=0.9,
+                novelty=0.9,
+                risk=0,
+                topics=topics[index],
             )
             for index, item in enumerate(content)
         )
@@ -236,6 +288,54 @@ async def test_profile_delta_is_validated_and_appended_atomically() -> None:
         service.apply_delta(bad, evidence_ids=frozenset({EVENT_ID}))
 
 
+@pytest.mark.asyncio
+async def test_profile_projection_marks_narrative_only_evidence_consumed() -> None:
+    state = MemoryState()
+
+    class NarrativeAI:
+        async def propose(self, profile: ProfileSnapshot, signals: tuple[Any, ...]) -> ProfileDelta:
+            del profile, signals
+            return ProfileDelta(narrative="A stable narrative without facets")
+
+    signal = project_activity_event(
+        ActivityEvent(
+            id=EVENT_ID,
+            source_id="local",
+            kind=ActivityKind.CHAT_LEARNING,
+            text="architecture",
+        )
+    )[0]
+
+    await ProfileService(lambda: MemoryUow(state), ai=NarrativeAI()).project((signal,))
+
+    assert state.consumed_evidence == {EVENT_ID}
+
+
+@pytest.mark.asyncio
+async def test_profile_projection_rejects_delta_when_base_revision_changes_during_ai() -> None:
+    original = ProfileSnapshot(id=PROFILE_ID, revision=0)
+    state = MemoryState(profiles=[original])
+
+    class RacingAI:
+        async def propose(self, profile: ProfileSnapshot, signals: tuple[Any, ...]) -> ProfileDelta:
+            del profile, signals
+            state.profiles.append(original.model_copy(update={"revision": 1}))
+            return ProfileDelta(narrative="stale proposal")
+
+    signal = project_activity_event(
+        ActivityEvent(
+            id=EVENT_ID,
+            source_id="local",
+            kind=ActivityKind.CHAT_LEARNING,
+            text="architecture",
+        )
+    )[0]
+
+    with pytest.raises(StaleProfileRevisionError):
+        await ProfileService(lambda: MemoryUow(state), ai=RacingAI()).project((signal,))
+    assert [profile.revision for profile in state.profiles] == [0, 1]
+
+
 def test_source_allocation_is_deterministic_and_exact() -> None:
     assert allocate_source_limits(5, ("youtube", "bilibili", "reddit")) == {
         "bilibili": 2,
@@ -301,6 +401,35 @@ async def test_feed_replenishment_dedupes_batches_and_enforces_diversity() -> No
     assert len(assessor.calls) == 1  # typed batch, never candidate-by-candidate N+1
     assert len({(item.source_id, item.external_id) for item in state.content}) == len(state.content)
     assert [entry.position for entry in entries] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_feed_rejects_multi_topic_candidate_when_any_topic_is_saturated() -> None:
+    state = MemoryState(profiles=[ProfileSnapshot(id=PROFILE_ID, revision=0)])
+    items = tuple(
+        ContentItem(
+            source_id="bilibili",
+            external_id=f"topic-{index}",
+            url=f"https://example.com/topic/{index}",
+            title=f"Topic {index}",
+        )
+        for index in range(3)
+    )
+    service = FeedService(
+        lambda: MemoryUow(state),
+        connectors=(Connector(SourceId.BILIBILI, items),),
+        assessor=TopicAssessor(),
+        policy=FeedPolicy(
+            low_watermark=1,
+            high_watermark=2,
+            max_per_source=3,
+            max_per_topic=1,
+        ),
+    )
+
+    entries = await service.replenish()
+
+    assert [entry.content_id for entry in entries] == [items[0].id, items[2].id]
 
 
 def test_feedback_persists_interaction_and_activity_that_changes_later_rank() -> None:

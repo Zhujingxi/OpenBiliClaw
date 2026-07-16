@@ -63,9 +63,15 @@ class ContentRepository(Protocol):
 
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None: ...
 
+    def flush(self) -> None: ...
+
 
 class AssessmentRepository(Protocol):
     def add(self, assessment: CandidateAssessment) -> None: ...
+
+    def excluded_content_ids(self, profile_revision: int) -> frozenset[UUID]: ...
+
+    def excluded_content_identities(self, profile_revision: int) -> frozenset[tuple[str, str]]: ...
 
 
 class FeedRepository(Protocol):
@@ -224,10 +230,22 @@ class FeedService:
         self._policy = policy or FeedPolicy()
         self._settings = settings
 
-    async def replenish(self) -> tuple[FeedEntry, ...]:
+    async def replenish(
+        self, *, checkpoint: Callable[[float], None] | None = None
+    ) -> tuple[FeedEntry, ...]:
         with self._uow_factory() as uow:
             profile = uow.profiles.latest()
             current_unseen = uow.feed.unseen_count()
+            excluded = (
+                frozenset()
+                if profile is None
+                else uow.assessments.excluded_content_ids(profile.revision)
+            )
+            excluded_identities = (
+                frozenset()
+                if profile is None
+                else uow.assessments.excluded_content_identities(profile.revision)
+            )
         if profile is None:
             raise RuntimeError("feed replenishment requires a profile")
         settings = self._settings.get() if self._settings else None
@@ -265,29 +283,44 @@ class FeedService:
             limit = allocations.get(connector.manifest.source_id.value, 0)
             if not limit:
                 continue
+            if checkpoint is not None:
+                checkpoint(0.15)
             query = _query(profile) if operation.requires_input else None
-            result = await connector.execute(operation, query=query, limit=limit)
+            request_limit = min(100, limit + len(excluded))
+            result = await connector.execute(operation, query=query, limit=request_limit)
+            if checkpoint is not None:
+                checkpoint(0.35)
+            accepted_from_source = 0
             for item in result:
                 if not isinstance(item, ContentItem):
                     raise TypeError("content discovery operation returned activity evidence")
                 identity = (item.source_id, item.external_id)
-                if identity not in identities:
+                if (
+                    identity not in identities
+                    and identity not in excluded_identities
+                    and item.id not in excluded
+                ):
                     identities.add(identity)
                     candidates.append(item)
+                    accepted_from_source += 1
+                    if accepted_from_source == limit:
+                        break
         if not candidates:
             return ()
 
         normalized: list[ContentItem] = []
+        new_content: list[ContentItem] = []
         with self._uow_factory() as uow:
             for candidate in candidates:
                 existing = uow.content.get_by_identity(candidate.source_id, candidate.external_id)
                 normalized.append(existing or candidate)
                 if existing is None:
-                    uow.content.add(candidate)
-            uow.commit()
+                    new_content.append(candidate)
 
         batch = tuple(normalized)
         assessment_values = await self._assessor.assess_batch(profile, batch)
+        if checkpoint is not None:
+            checkpoint(0.7)
         assessments = _validate_assessments(profile, batch, assessment_values)
         with self._uow_factory() as uow:
             adjustment = {item.id: uow.interactions.adjustment(item.id) for item in batch}
@@ -313,7 +346,7 @@ class FeedService:
                 continue
             if source_counts.get(item.source_id, 0) >= self._policy.max_per_source:
                 continue
-            if topics and all(
+            if topics and any(
                 topic_counts.get(topic, 0) >= self._policy.max_per_topic for topic in topics
             ):
                 continue
@@ -325,10 +358,16 @@ class FeedService:
                 break
 
         entries: list[FeedEntry] = []
+        if checkpoint is not None:
+            checkpoint(0.85)
         with self._uow_factory() as uow:
+            for item in new_content:
+                uow.content.add(item)
+            uow.content.flush()
+            for assessment in assessments.values():
+                uow.assessments.add(assessment)
             position = uow.feed.next_position()
             for index, (item, assessment) in enumerate(admitted):
-                uow.assessments.add(assessment)
                 entry = FeedEntry(
                     content_id=item.id,
                     assessment_id=assessment.id,

@@ -24,6 +24,7 @@ from openbiliclaw.infrastructure.database.models import (
     FeedEntryModel,
     InteractionModel,
     JobRunModel,
+    ProfileConsumedEvidenceModel,
     ProfileEvidenceModel,
     ProfileRevisionModel,
     SettingModel,
@@ -114,6 +115,12 @@ class ProfileRepository(Protocol):
 
     def append(self, snapshot: ProfileSnapshot, expected_revision: int | None) -> None: ...
 
+    def consumed_evidence_ids(self) -> frozenset[UUID]: ...
+
+    def mark_evidence_consumed(
+        self, evidence_ids: frozenset[UUID], *, profile_revision: int
+    ) -> None: ...
+
 
 class ContentRepository(Protocol):
     """Persistence port for normalized content."""
@@ -122,11 +129,17 @@ class ContentRepository(Protocol):
 
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None: ...
 
+    def flush(self) -> None: ...
+
 
 class AssessmentRepository(Protocol):
     """Persistence port for profile-relative candidate assessments."""
 
     def add(self, assessment: CandidateAssessment) -> None: ...
+
+    def excluded_content_ids(self, profile_revision: int) -> frozenset[UUID]: ...
+
+    def excluded_content_identities(self, profile_revision: int) -> frozenset[tuple[str, str]]: ...
 
 
 class FeedRepository(Protocol):
@@ -372,6 +385,28 @@ class SQLAlchemyProfileRepository:
                     )
                 )
 
+    def consumed_evidence_ids(self) -> frozenset[UUID]:
+        return frozenset(
+            UUID(value)
+            for value in self._session.scalars(
+                select(ProfileConsumedEvidenceModel.activity_event_id)
+            ).all()
+        )
+
+    def mark_evidence_consumed(
+        self, evidence_ids: frozenset[UUID], *, profile_revision: int
+    ) -> None:
+        now = _utc_now()
+        existing = self.consumed_evidence_ids()
+        for evidence_id in sorted(evidence_ids - existing, key=str):
+            self._session.add(
+                ProfileConsumedEvidenceModel(
+                    activity_event_id=str(evidence_id),
+                    profile_revision=profile_revision,
+                    consumed_at=now,
+                )
+            )
+
 
 def _profile_from_row(row: ProfileRevisionModel) -> ProfileSnapshot:
     created_at = _aware(row.created_at)
@@ -407,6 +442,9 @@ class SQLAlchemyContentRepository:
                 content_metadata=_json_metadata(item),
             )
         )
+
+    def flush(self) -> None:
+        self._session.flush()
 
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None:
         row = self._session.scalar(
@@ -453,6 +491,27 @@ class SQLAlchemyAssessmentRepository:
                 explanation=assessment.explanation,
             )
         )
+
+    def excluded_content_ids(self, profile_revision: int) -> frozenset[UUID]:
+        assessed = self._session.scalars(
+            select(CandidateAssessmentModel.content_id).where(
+                CandidateAssessmentModel.profile_revision == profile_revision
+            )
+        ).all()
+        admitted = self._session.scalars(select(FeedEntryModel.content_id)).all()
+        interacted = self._session.scalars(select(InteractionModel.content_id)).all()
+        return frozenset(UUID(value) for value in {*assessed, *admitted, *interacted})
+
+    def excluded_content_identities(self, profile_revision: int) -> frozenset[tuple[str, str]]:
+        excluded = tuple(str(value) for value in self.excluded_content_ids(profile_revision))
+        if not excluded:
+            return frozenset()
+        rows = self._session.execute(
+            select(ContentItemModel.source_id, ContentItemModel.external_id).where(
+                ContentItemModel.id.in_(excluded)
+            )
+        ).all()
+        return frozenset((source_id, external_id) for source_id, external_id in rows)
 
 
 class SQLAlchemyFeedRepository:
@@ -607,6 +666,7 @@ class SQLAlchemyJobRunRepository:
                 updated_at=now,
                 started_at=None,
                 finished_at=None,
+                dispatched_at=None,
             )
         )
         return run_id
@@ -660,6 +720,38 @@ class SQLAlchemyJobRunRepository:
         )
         return bool(getattr(result, "rowcount", 0))
 
+    def mark_dispatched(self, run_id: UUID) -> None:
+        self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status == JobRunStatus.PENDING.value,
+                JobRunModel.dispatched_at.is_(None),
+            )
+            .values(dispatched_at=_utc_now(), updated_at=_utc_now())
+        )
+
+    def pending_undispatched(self) -> tuple[UUID, ...]:
+        rows = self._session.scalars(
+            select(JobRunModel)
+            .where(
+                JobRunModel.status == JobRunStatus.PENDING.value,
+                JobRunModel.dispatched_at.is_(None),
+            )
+            .order_by(JobRunModel.created_at, JobRunModel.id)
+        ).all()
+        return tuple(UUID(row.id) for row in rows)
+
+    def checkpoint(self, run_id: UUID, progress: float) -> bool:
+        row = self._session.get(JobRunModel, str(run_id))
+        if row is None:
+            raise LookupError(f"job run does not exist: {run_id}")
+        if row.status != JobRunStatus.RUNNING.value:
+            return False
+        row.progress = max(row.progress, max(0.0, min(1.0, progress)))
+        row.updated_at = _utc_now()
+        return True
+
     def update(
         self,
         run_id: UUID,
@@ -683,6 +775,8 @@ class SQLAlchemyJobRunRepository:
             if status in {JobRunStatus.SUCCEEDED, JobRunStatus.FAILED, JobRunStatus.CANCELLED}
             else None
         )
+        if status is JobRunStatus.PENDING:
+            row.dispatched_at = None
 
     def cancel(self, run_id: UUID) -> bool:
         row = self._session.get(JobRunModel, str(run_id))
@@ -710,6 +804,7 @@ class SQLAlchemyJobRunRepository:
             row.error = "WorkerInterrupted"
             row.updated_at = now
             row.started_at = None
+            row.dispatched_at = None
         return tuple(UUID(row.id) for row in rows)
 
     def cleanup_finished(self, *, older_than: datetime) -> int:
@@ -745,6 +840,7 @@ def _job_snapshot(row: JobRunModel) -> JobRunSnapshot:
         updated_at=updated_at,
         started_at=_aware(row.started_at),
         finished_at=_aware(row.finished_at),
+        dispatched_at=_aware(row.dispatched_at),
     )
 
 

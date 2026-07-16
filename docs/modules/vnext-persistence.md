@@ -11,10 +11,10 @@
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 独立数据库配置 | ✅ | `DatabaseSettings` 默认指向 `sqlite:///data/vnext/openbiliclaw.db`；URL、echo 与有限 SQLite busy timeout 可通过 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS` 覆盖 |
-| SQLAlchemy schema | ✅ | 15 张 vNext 业务表覆盖设置、来源账户、活动、画像、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
+| SQLAlchemy schema | ✅ | 16 张 vNext 业务表覆盖设置、来源账户、活动、画像与独立 consumed-evidence ledger、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
 | Alembic 基线 | ✅ | `0001_vnext_baseline` 支持从空库 upgrade、downgrade 后重建，并预置 `favorites` / `watch_later` 两个本地集合 |
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
-| 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移 |
+| 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
 | worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
@@ -25,12 +25,12 @@
 | 数据域 | 表 |
 |--------|----|
 | 系统与来源 | `settings`, `source_accounts` |
-| 活动与画像 | `activity_events`, `profile_revisions`, `profile_evidence` |
+| 活动与画像 | `activity_events`, `profile_revisions`, `profile_evidence`, `profile_consumed_evidence` |
 | 内容与推荐 | `content_items`, `candidate_assessments`, `feed_entries`, `interactions` |
 | 本地集合与聊天 | `collections`, `collection_items`, `chat_turns` |
 | 后续执行基础 | `source_tasks`, `job_runs`, `ai_runs` |
 
-内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 evidence 以外键关联活动证据；来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
+内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger 都以外键关联活动证据，后者不受后续 facet 删除影响。`job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，progress 只允许单调前进。来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
 
 ## 公开 API
 
@@ -42,7 +42,7 @@
 | `infrastructure.security` | `CredentialCipher`, `EncryptedCredential` |
 | `infrastructure.security.credentials` | `MissingCredentialKeyError`, `SECRET_KEY_ENV` |
 
-`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`activities` 支持幂等导入，feed/interaction/collection adapter 提供用例所需查询与删除，`job_runs` 提供幂等 schedule、claim、取消、重启恢复和 terminal cleanup。worker 中的 `TaskRunner` 会写 `ai_runs`，但该表只记录 task、model alias、状态、时间、usage 与错误分类；ORM、Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。`source_tasks` 已由 queued browser transport 使用，但现有浏览器扩展 dispatcher 尚未切到 generic claim/complete。
+`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`activities` 支持幂等导入，profile repository 提供独立 consumed ledger，assessment adapter 可查询同 revision 已评估与历史 admitted/interacted 内容，`job_runs` 提供幂等 schedule、dispatch reconciliation、原子 claim、运行中取消、progress checkpoint、重启恢复和 terminal cleanup。worker 中的 `TaskRunner` 会写 `ai_runs`，但该表只记录 task、model alias、状态、时间、usage 与错误分类；ORM、Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。`source_tasks` 已由 queued browser transport 使用，但现有浏览器扩展 dispatcher 尚未切到 generic claim/complete。
 
 `UserSettings` 的当前完整契约如下：
 
