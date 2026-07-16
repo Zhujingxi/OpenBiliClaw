@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from inspect import signature
 from pathlib import Path
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from openbiliclaw.infrastructure.database.base import (
     DatabaseSettings,
     create_engine_and_session,
 )
+from openbiliclaw.infrastructure.database.models import AIRunModel
 from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 
@@ -72,6 +74,9 @@ def test_fresh_migration_creates_only_vnext_schema_and_predefined_collections(
     )
 
     assert set(inspect(engine).get_table_names()) == {"alembic_version", *EXPECTED_TABLES}
+    assert "input_payload" not in {
+        column["name"] for column in inspect(engine).get_columns("ai_runs")
+    }
     with UnitOfWork(session_factory) as uow:
         collections = uow.collections.list_predefined()
     assert [(collection.slug, collection.display_name) for collection in collections] == [
@@ -209,7 +214,30 @@ def test_concurrent_profile_writers_raise_domain_conflict(migrated_database: Pat
         first.profiles.append(first_update, expected_revision=0)
         with pytest.raises(ProfileRevisionConflict, match="written concurrently"):
             second.profiles.append(second_update, expected_revision=0)
+        first.commit()
 
+    with UnitOfWork(session_factory) as uow:
+        assert uow.profiles.latest() == first_update
+
+    engine.dispose()
+
+
+def test_ai_run_repository_has_no_raw_input_persistence_channel(
+    migrated_database: Path,
+) -> None:
+    engine, session_factory = create_engine_and_session(
+        DatabaseSettings(url=_url(migrated_database))
+    )
+    with UnitOfWork(session_factory) as uow:
+        assert "input_payload" not in signature(uow.ai_runs.add_started).parameters
+        run_id = uow.ai_runs.add_started(task_name="profile_delta", model_alias="obc-analysis")
+        uow.commit()
+
+    with session_factory() as session:
+        row = session.get(AIRunModel, str(run_id))
+        assert row is not None
+        assert row.task_name == "profile_delta"
+        assert row.model_alias == "obc-analysis"
     engine.dispose()
 
 

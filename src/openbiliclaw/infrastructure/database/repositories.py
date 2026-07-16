@@ -168,9 +168,7 @@ class JobRunRepository(Protocol):
 class AIRunRepository(Protocol):
     """Persistence port on which Task 18 builds auditable typed AI runs."""
 
-    def add_started(
-        self, *, task_name: str, model_alias: str, input_payload: dict[str, object]
-    ) -> UUID: ...
+    def add_started(self, *, task_name: str, model_alias: str) -> UUID: ...
 
 
 class SQLAlchemySettingsRepository:
@@ -553,9 +551,7 @@ class SQLAlchemyAIRunRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def add_started(
-        self, *, task_name: str, model_alias: str, input_payload: dict[str, object]
-    ) -> UUID:
+    def add_started(self, *, task_name: str, model_alias: str) -> UUID:
         run_id = uuid4()
         self._session.add(
             AIRunModel(
@@ -563,7 +559,6 @@ class SQLAlchemyAIRunRepository:
                 task_name=task_name,
                 model_alias=model_alias,
                 status="running",
-                input_payload=input_payload,
                 output_payload=None,
                 usage=None,
                 error=None,

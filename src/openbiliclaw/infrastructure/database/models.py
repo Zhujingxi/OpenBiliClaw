@@ -270,7 +270,6 @@ class AIRunModel(Base):
     task_name: Mapped[str] = mapped_column(String(100), nullable=False)
     model_alias: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
-    input_payload: Mapped[JsonObject] = mapped_column(JSON, nullable=False)
     output_payload: Mapped[JsonObject | None] = mapped_column(JSON, nullable=True)
     usage: Mapped[JsonObject | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

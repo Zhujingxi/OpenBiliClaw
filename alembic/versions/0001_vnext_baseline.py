@@ -26,7 +26,6 @@ def upgrade() -> None:
         sa.Column("task_name", sa.String(length=100), nullable=False),
         sa.Column("model_alias", sa.String(length=80), nullable=False),
         sa.Column("status", sa.String(length=30), nullable=False),
-        sa.Column("input_payload", sa.JSON(), nullable=False),
         sa.Column("output_payload", sa.JSON(), nullable=True),
         sa.Column("usage", sa.JSON(), nullable=True),
         sa.Column("error", sa.Text(), nullable=True),
