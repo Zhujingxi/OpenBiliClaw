@@ -1,6 +1,27 @@
 # 架构设计
 
-## 系统概览
+## vNext 领域基础（未接线）
+
+backend-first vNext 当前只交付 `src/openbiliclaw/features/*/domain.py` 领域边界。该边界使用冻结 Pydantic 契约表达活动证据、证据画像、候选评估、Feed 交互、本地集合、聊天与来源能力，并以纯函数实现画像合并和 Feed 低水位缺口；它不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。
+
+```text
+features.sources.SourceManifest + SourceConnector
+          ├─ import_activity() ──► tuple[features.activity.ActivityEvent, ...]
+          └─ discover() ─────────► tuple[features.feed.ContentItem, ...]
+
+features.activity：ActivityEvent + ProfileSignal（事件投影 use case 待接入）
+features.profile ：ProfileSnapshot + ProfileDelta + apply_profile_delta()
+features.feed    ：ContentItem + CandidateAssessment + FeedEntry + Interaction
+features.library ：CollectionItem（引用 content_id）
+features.chat    ：ChatTurn（独立的持久化对话契约）
+
+已实现：冻结契约、递归不可变 JSON metadata、确定性纯策略
+未实现：repository / AI runner / source adapter / use case / job / /api/v1 接线
+```
+
+因此本节不是运行时切换声明。下面的 v0.3 系统概览仍描述当前实际执行路径；vNext persistence、AI、adapter、use case、API 和前端切换会在后续任务逐层接入。
+
+## 当前 v0.3 系统概览
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 

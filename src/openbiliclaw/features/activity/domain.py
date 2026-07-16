@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, model_validator
+
+from openbiliclaw.features._metadata import FrozenMetadata, empty_metadata
 
 
 class ActivityKind(StrEnum):
@@ -41,7 +42,7 @@ class ActivityEvent(BaseModel):
     title: str | None = Field(default=None, max_length=1000)
     text: str | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMetadata = Field(default_factory=empty_metadata)
 
 
 class ProfileSignal(BaseModel):

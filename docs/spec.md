@@ -207,6 +207,34 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ## 3. 系统架构
 
+### 3.1 vNext 领域基础（仅契约阶段）
+
+v0.4.0 的第一步只冻结 feature-oriented 领域契约和确定性策略，尚未替换 v0.3 的 API、runtime、storage 或四端客户端。当前新增边界如下；连线同时标出已冻结的规范化结果和后续 use case 的预期关系，不表示生产请求已经走通。
+
+```text
+Future source adapters
+        │
+        ▼
+SourceManifest + SourceConnector
+        ├────────► ActivityEvent ──► ProfileSignal
+        │                               │ evidence
+        │                               ▼
+        │                    ProfileSnapshot + ProfileDelta
+        │                               │
+        │                               ▼
+        │                    apply_profile_delta()
+        │
+        └────────► ContentItem ──► CandidateAssessment ──► FeedEntry ──► Interaction
+                         ├────────► CollectionItem
+                         └────────► ChatTurn
+
+Implemented now: frozen Pydantic contracts, recursively immutable JSON metadata,
+                 deterministic profile merge and feed-deficit policies
+Deferred: persistence, AI, source adapters, use cases/jobs, /api/v1, frontend cutover
+```
+
+### 3.2 当前 v0.3 生产架构
+
 ```text
 interactive ─────────────────────────────────────────┐
                                                     ├─ runtime total gate (default 4) ─ global Chat route

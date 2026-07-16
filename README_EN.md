@@ -576,6 +576,22 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
+### vNext Domain Foundation (contracts only)
+
+v0.4.0 now includes the framework-independent domain contracts, but they are **not yet wired into the current API, runtime, database, or frontend**. Later backend-first tasks will add persistence, AI, source adapters, use cases, and `/api/v1` above this boundary. Until that cutover, the v0.3 architecture below remains the live path.
+
+```text
+SourceManifest + SourceConnector ──normalized results──► ActivityEvent | ContentItem
+Activity: ActivityEvent + ProfileSignal (event-projection use case deferred)
+Profile: ProfileSnapshot + ProfileDelta + apply_profile_delta()
+Feed: ContentItem + CandidateAssessment + FeedEntry + Interaction
+Library: CollectionItem (content_id reference)    Chat: ChatTurn (standalone contract)
+
+Current state: frozen Pydantic contracts + pure policies; no runtime/storage/API wiring
+```
+
+### Current v0.3 Runtime Architecture
+
 ```text
 interactive ─────────────────────────────────────────┐
                                                     ├─ runtime total gate (default 4) ─ global Chat route

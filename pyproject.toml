@@ -111,11 +111,7 @@ select = [
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
     "TCH",  # flake8-type-checking
-    "C901", # McCabe complexity
 ]
-
-[tool.ruff.lint.mccabe]
-max-complexity = 12
 
 [tool.ruff.lint.per-file-ignores]
 "src/openbiliclaw/llm/prompts.py" = ["E501"]  # Prompt templates contain long JSON examples

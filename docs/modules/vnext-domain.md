@@ -27,10 +27,10 @@
 | `features.chat.domain` | `ChatRole`, `ChatTurn` |
 | `features.sources.domain` | `SourceCapability`, `SourceManifest`, `SourceConnector` |
 
-所有 Pydantic 契约均使用 `frozen=True` 与 `extra="forbid"`，支持 JSON 序列化后由同类型无损还原。`SourceConnector` 是 runtime-checkable Protocol，不是 transport payload 容器。
+所有 Pydantic 契约均使用 `frozen=True` 与 `extra="forbid"`，支持 JSON 序列化后由同类型无损还原。`ActivityEvent`、`ContentItem` 与 `Interaction` 的 metadata 只接受 JSON 值，并把对象递归冻结为只读 mapping、数组递归冻结为 tuple；序列化时还原为普通 JSON object/array。`SourceConnector` 是 runtime-checkable Protocol，不是 transport payload 容器，其 normalized result annotations 可在运行时解析。
 
 ## 确定性策略
 
-`apply_profile_delta()` 以 `(facet name, value.casefold())` 识别同一 facet，按 confidence 加权合并 weight，并保留去重后的全部 evidence。用户覆盖自动获得 `confidence=1.0`，普通 delta 不能删除或弱化它。策略保留 snapshot 的稳定 ID 与创建时间，只递增 revision，因此相同输入得到相同输出。
+`apply_profile_delta()` 以 `(facet name, value.casefold())` 识别同一 facet，按 confidence 加权合并普通 facet 的 weight，并在普通/覆盖合并的两个方向都保留稳定去重后的全部 evidence。用户覆盖自动获得 `confidence=1.0`，其 value、weight 与覆盖语义不被普通 delta 改写或删除。策略保留 snapshot 的稳定 ID 与创建时间，只递增 revision，因此相同输入得到相同输出。
 
 `CandidateAssessment` 将 relevance、quality、novelty、risk 的有限数值钳制到 `0..1`，并将组合 score 再次钳制到同一区间。`feed_deficit()` 仅在 unseen 数量严格低于 low watermark 时返回补至 high watermark 所需数量；等于或高于 low watermark 时返回 `0`。

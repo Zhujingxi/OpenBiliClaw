@@ -82,10 +82,11 @@ def _merge_evidence(current: ProfileFacet, proposed: ProfileFacet) -> tuple[UUID
 
 
 def _merge_facet(current: ProfileFacet, proposed: ProfileFacet) -> ProfileFacet:
+    evidence_ids = _merge_evidence(current, proposed)
     if current.overridden and not proposed.overridden:
-        return current
+        return current.model_copy(update={"evidence_ids": evidence_ids})
     if proposed.overridden:
-        return proposed
+        return proposed.model_copy(update={"evidence_ids": evidence_ids})
 
     confidence_total = current.confidence + proposed.confidence
     weight = proposed.weight
@@ -97,7 +98,7 @@ def _merge_facet(current: ProfileFacet, proposed: ProfileFacet) -> ProfileFacet:
         update={
             "weight": max(-1.0, min(1.0, weight)),
             "confidence": max(current.confidence, proposed.confidence),
-            "evidence_ids": _merge_evidence(current, proposed),
+            "evidence_ids": evidence_ids,
         }
     )
 

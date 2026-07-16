@@ -1,15 +1,12 @@
 """Capability declarations and the normalized source connector boundary."""
 
-from __future__ import annotations
-
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-if TYPE_CHECKING:
-    from openbiliclaw.features.activity.domain import ActivityEvent
-    from openbiliclaw.features.feed.domain import ContentItem
+from openbiliclaw.features.activity.domain import ActivityEvent
+from openbiliclaw.features.feed.domain import ContentItem
 
 
 class SourceCapability(StrEnum):

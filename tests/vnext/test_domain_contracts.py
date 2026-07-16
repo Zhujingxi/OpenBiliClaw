@@ -1,11 +1,11 @@
 """Characterization tests for the frozen vNext domain boundary."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, get_type_hints
 from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, HttpUrl, JsonValue, ValidationError
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind, ProfileSignal
 from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
@@ -37,6 +37,8 @@ ASSESSMENT_ID = UUID("00000000-0000-0000-0000-000000000003")
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000004")
 ACCOUNT_ID = UUID("00000000-0000-0000-0000-000000000005")
 CONVERSATION_ID = UUID("00000000-0000-0000-0000-000000000006")
+BILI_URL = HttpUrl("https://www.bilibili.com/video/BV1contract")
+METADATA_URL = HttpUrl("https://www.bilibili.com/video/BV1metadata")
 
 
 def _contracts() -> tuple[BaseModel, ...]:
@@ -55,7 +57,7 @@ def _contracts() -> tuple[BaseModel, ...]:
             kind=ActivityKind.VIEW,
             occurred_at=NOW,
             content_external_id="BV1contract",
-            url="https://www.bilibili.com/video/BV1contract",
+            url=BILI_URL,
             title="Domain contracts",
             text="watched",
             duration_seconds=42.5,
@@ -82,7 +84,7 @@ def _contracts() -> tuple[BaseModel, ...]:
             id=CONTENT_ID,
             source_id="bilibili",
             external_id="BV1contract",
-            url="https://www.bilibili.com/video/BV1contract",
+            url=BILI_URL,
             title="Domain contracts",
             summary="A focused introduction.",
             creator="OpenBiliClaw",
@@ -140,13 +142,36 @@ def _contracts() -> tuple[BaseModel, ...]:
     )
 
 
+def _metadata_contracts() -> tuple[ActivityEvent, ContentItem, Interaction]:
+    metadata: dict[str, JsonValue] = {"nested": {"enabled": True, "labels": ["stable", "json"]}}
+    return (
+        ActivityEvent(
+            source_id="bilibili",
+            kind=ActivityKind.VIEW,
+            metadata=metadata,
+        ),
+        ContentItem(
+            source_id="bilibili",
+            external_id="BV1metadata",
+            url=METADATA_URL,
+            title="Immutable metadata",
+            metadata=metadata,
+        ),
+        Interaction(
+            content_id=CONTENT_ID,
+            kind=InteractionKind.OPEN,
+            metadata=metadata,
+        ),
+    )
+
+
 @pytest.mark.parametrize("contract", _contracts(), ids=lambda value: type(value).__name__)
 def test_frozen_contracts_json_round_trip(contract: BaseModel) -> None:
     restored = type(contract).model_validate_json(contract.model_dump_json())
 
     assert restored == contract
     with pytest.raises(ValidationError, match="frozen"):
-        contract.id = UUID(int=0)  # type: ignore[attr-defined,misc]
+        contract.id = UUID(int=0)  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(
@@ -174,6 +199,43 @@ def test_frozen_contracts_json_round_trip(contract: BaseModel) -> None:
 def test_frozen_contracts_without_ids_reject_assignment(contract: BaseModel, field: str) -> None:
     with pytest.raises(ValidationError, match="frozen"):
         setattr(contract, field, "changed")
+
+
+@pytest.mark.parametrize("contract", _metadata_contracts(), ids=lambda value: type(value).__name__)
+def test_metadata_is_recursively_immutable(
+    contract: ActivityEvent | ContentItem | Interaction,
+) -> None:
+    metadata: Any = contract.metadata
+
+    with pytest.raises(TypeError):
+        metadata["added"] = "not allowed"
+    with pytest.raises(TypeError):
+        metadata["nested"]["enabled"] = False
+    with pytest.raises(TypeError):
+        metadata["nested"]["labels"][0] = "changed"
+
+
+@pytest.mark.parametrize(
+    "invalid_metadata",
+    [
+        {"unsupported": object()},
+        {"unsupported": b"bytes"},
+        {"unsupported": {"not", "an", "array"}},
+        {"unsupported": float("nan")},
+        {"unsupported": {1: "non-string key"}},
+    ],
+    ids=["object", "bytes", "set", "non-finite", "non-string-key"],
+)
+@pytest.mark.parametrize("contract", _metadata_contracts(), ids=lambda value: type(value).__name__)
+def test_metadata_rejects_non_json_values(
+    contract: ActivityEvent | ContentItem | Interaction,
+    invalid_metadata: object,
+) -> None:
+    payload = contract.model_dump(mode="python")
+    payload["metadata"] = invalid_metadata
+
+    with pytest.raises(ValidationError, match="metadata"):
+        type(contract).model_validate(payload)
 
 
 @pytest.mark.parametrize("contract_type", [ProfileSignal, ProfileFacet])
@@ -258,7 +320,8 @@ def test_duplicate_facets_merge_case_insensitively_with_all_evidence() -> None:
     assert updated.facets[0].weight == pytest.approx(0.64)
 
 
-def test_non_override_update_cannot_replace_user_override() -> None:
+def test_current_override_keeps_semantics_and_merges_proposal_evidence() -> None:
+    proposal_event = UUID("00000000-0000-0000-0000-000000000013")
     override = ProfileFacet(
         name="interests",
         value="Python",
@@ -272,7 +335,7 @@ def test_non_override_update_cannot_replace_user_override() -> None:
         value="python",
         weight=-1,
         confidence=0.9,
-        evidence_ids=(UUID("00000000-0000-0000-0000-000000000013"),),
+        evidence_ids=(proposal_event,),
     )
 
     updated = apply_profile_delta(
@@ -280,7 +343,43 @@ def test_non_override_update_cannot_replace_user_override() -> None:
         ProfileDelta(upserts=(proposal,)),
     )
 
-    assert updated.facets == (override,)
+    merged = updated.facets[0]
+    assert merged.value == override.value
+    assert merged.weight == override.weight
+    assert merged.confidence == 1.0
+    assert merged.overridden is True
+    assert merged.evidence_ids == (EVENT_ID, proposal_event)
+
+
+def test_proposed_override_keeps_semantics_and_merges_current_evidence() -> None:
+    override_event = UUID("00000000-0000-0000-0000-000000000014")
+    current = ProfileFacet(
+        name="avoidances",
+        value="Spoilers",
+        weight=-0.4,
+        confidence=0.6,
+        evidence_ids=(EVENT_ID,),
+    )
+    override = ProfileFacet(
+        name="avoidances",
+        value="spoilers",
+        weight=-1,
+        confidence=0.1,
+        evidence_ids=(override_event,),
+        overridden=True,
+    )
+
+    updated = apply_profile_delta(
+        ProfileSnapshot(revision=2, facets=(current,)),
+        ProfileDelta(upserts=(override,)),
+    )
+
+    merged = updated.facets[0]
+    assert merged.value == override.value
+    assert merged.weight == override.weight
+    assert merged.confidence == 1.0
+    assert merged.overridden is True
+    assert merged.evidence_ids == (EVENT_ID, override_event)
 
 
 def test_apply_profile_delta_is_deterministic() -> None:
@@ -368,3 +467,11 @@ def test_source_connector_is_a_runtime_checkable_capability_contract() -> None:
     connector: Any = FakeConnector()
 
     assert isinstance(connector, SourceConnector)
+
+
+def test_source_connector_annotations_resolve_at_runtime() -> None:
+    activity_hints = get_type_hints(SourceConnector.import_activity)
+    discovery_hints = get_type_hints(SourceConnector.discover)
+
+    assert activity_hints["return"] == tuple[ActivityEvent, ...]
+    assert discovery_hints["return"] == tuple[ContentItem, ...]

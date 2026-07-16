@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -16,6 +15,8 @@ from pydantic import (
     HttpUrl,
     field_validator,
 )
+
+from openbiliclaw.features._metadata import FrozenMetadata, empty_metadata
 
 
 class ContentItem(BaseModel):
@@ -32,7 +33,7 @@ class ContentItem(BaseModel):
     creator: str | None = Field(default=None, max_length=500)
     published_at: AwareDatetime | None = None
     media_type: str = Field(default="link", min_length=1, max_length=50)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMetadata = Field(default_factory=empty_metadata)
 
 
 class CandidateAssessment(BaseModel):
@@ -104,7 +105,7 @@ class Interaction(BaseModel):
     content_id: UUID
     kind: InteractionKind
     occurred_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMetadata = Field(default_factory=empty_metadata)
 
 
 def feed_deficit(current_unseen: int, low_watermark: int, high_watermark: int) -> int:
