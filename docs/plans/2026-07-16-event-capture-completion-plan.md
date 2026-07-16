@@ -28,7 +28,7 @@
 
 **Files:** 新增 `src/openbiliclaw/sources/identity_keys.py`(从 `runtime/account_sync.py:41-87` 提升 `_bvid_from_url`/`_mid_from_url`/`_tweet_id_from_url`/`_dedup_key`,**新增 xhs note_id 键型**);修改 `runtime/account_sync.py` 改为引用共享模块(行为零变化);修改 `src/openbiliclaw/storage/database.py`;新增 `tests/test_identity_keys.py`、`tests/test_event_retraction_discount.py`。
 
-**Interfaces:** Consumes: identity urls、retracted_action。**无时间窗口**(identity key 全局唯一无误伤面;撤销数月前的 like 正是应标注场景,codex r2 finding 10)。Produces: 标记行数;被标记行 `metadata.retracted=true`、`metadata.signal_strength=min(现值, 0.2)`。
+**Interfaces:** Consumes: identity urls、retracted_action、**`retraction_at: datetime`(因果过滤:只标记事件时间早于它的行,时间不可得保守不标——与内存面同规则,r5)**。无时间窗口(identity key 全局唯一无误伤面;撤销数月前的 like 正是应标注场景,codex r2 finding 10)。Produces: 标记行数;被标记行 `metadata.retracted=true`、`metadata.signal_strength=min(现值, 0.2)`。
 
 **Steps:**
 
@@ -36,8 +36,8 @@
 - [ ] Run `PYTHONPATH=$PWD/src <venv>/python -m pytest tests/test_identity_keys.py -q` and confirm FAIL。
 - [ ] 提升共享模块 + 加 note 键型;account_sync 引用改造后跑 `pytest tests/test_account_sync.py -q` 断言零回归。
 - [ ] Failing test:同 identity key(而非裸 url 相等)的 like 行被标记、patch 正确、返回计数。
-- [ ] 实现 `mark_positive_events_retracted`(单事务读 metadata → dict update → 写回;无窗口,按 identity key 全表匹配对应 event_type 行)。
-- [ ] 补测试:零命中返回 0;跨 event_type 不误伤;幂等(强度不叠折);行数与非 metadata 列不变(不变量 3);四键型(tweet/bvid/mid/note)。
+- [ ] 实现 `mark_positive_events_retracted`(单事务读 metadata → dict update → 写回;无窗口,按 identity key 匹配对应 event_type 行,**且仅事件时间早于 `retraction_at` 的行;时间不可得保守不标**)。
+- [ ] 补测试:零命中返回 0;跨 event_type 不误伤;幂等(强度不叠折);行数与非 metadata 列不变(不变量 3);四键型(tweet/bvid/mid/note);**事件时间晚于 retraction_at / 时间不可得 → 不标记**。
 - [ ] Run `ruff format/check` + `mypy` + `pytest tests/test_database.py tests/test_account_sync.py -q` 回归。
 
 **Acceptance:**
