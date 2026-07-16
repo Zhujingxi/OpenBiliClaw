@@ -1735,6 +1735,11 @@ def create_app(
         method = request.method.upper()
         allowed = (
             method == "OPTIONS"
+            # Degraded mode is an API capability boundary, not a frontend
+            # availability boundary.  Keep every HTML shell and static asset
+            # reachable so users can open the desktop/mobile/setup UI and
+            # repair the model route through the allow-listed APIs below.
+            or not path.startswith("/api/")
             or path == "/api/ping"
             or path == "/api/qr-info"
             or path == "/api/health"
@@ -1752,7 +1757,6 @@ def create_app(
             or path == "/api/model-connection-types"
             or path == "/api/model-config/probe"
             or path.startswith("/api/auth")
-            or path.startswith("/m")
         )
         if allowed:
             return await call_next(request)

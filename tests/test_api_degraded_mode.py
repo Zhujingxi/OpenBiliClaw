@@ -282,7 +282,35 @@ def test_model_config_save_fully_recovers_degraded_runtime_before_reload_event(
         assert client.get("/api/profile-summary").status_code == 200
 
 
-def test_degraded_mode_keeps_mobile_static_shell_assets_reachable(
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/",
+        "/web",
+        "/web/",
+        "/web/assets/css/app.css",
+        "/web/shared/model-config-state.js",
+        "/setup/",
+        "/m/",
+        "/m/js/app.js",
+        "/favicon.ico",
+    ],
+)
+def test_degraded_mode_keeps_frontend_shells_and_assets_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    path: str,
+) -> None:
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    response = client.get(path)
+
+    assert response.status_code == 200
+
+
+def test_degraded_mode_keeps_favicon_content_type(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -290,12 +318,10 @@ def test_degraded_mode_keeps_mobile_static_shell_assets_reachable(
     _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
     client = TestClient(create_app())
 
-    mobile_response = client.get("/m/")
-    favicon_response = client.get("/favicon.ico")
+    response = client.get("/favicon.ico")
 
-    assert mobile_response.status_code == 200
-    assert favicon_response.status_code == 200
-    assert favicon_response.headers.get("content-type", "").startswith("image/png")
+    assert response.status_code == 200
+    assert response.headers.get("content-type", "").startswith("image/png")
 
 
 @pytest.mark.parametrize(
