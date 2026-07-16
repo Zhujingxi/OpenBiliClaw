@@ -6,6 +6,14 @@
  * enabled when a bootstrap task explicitly sets max_scroll_rounds > 0.
  */
 
+import {
+  NOTE_ANCHOR_SELECTOR,
+  NOTE_AUTHOR_SELECTOR,
+  NOTE_CARD_CONTAINER_SELECTOR,
+  NOTE_COVER_SELECTOR,
+  NOTE_TITLE_SELECTOR,
+} from "./selectors.ts";
+
 export type XhsBootstrapScope = "saved" | "liked" | "xhs_history";
 
 export interface XhsBootstrapNote {
@@ -99,7 +107,7 @@ const OWN_PROFILE_EXACT_SELECTORS = [
   "nav .user a[href*='/user/profile/']",
   "aside .user a[href*='/user/profile/']",
 ];
-const ANCHOR_SELECTOR = 'a[href*="/explore/"], a[href*="/discovery/item/"]';
+const ANCHOR_SELECTOR = NOTE_ANCHOR_SELECTOR;
 const SCROLL_CONTAINER_SELECTOR = [
   ".feeds-container",
   ".feeds-page",
@@ -818,18 +826,10 @@ export function extractBootstrapNotesFromDocument(
     if (!key || seen.has(key)) return;
     seen.add(key);
 
-    const card =
-      anchor.closest(".note-item, section, [class*='note'], [class*='card']") ??
-      anchor;
-    const titleEl = card.querySelector(
-      ".title, .note-title, [class*='title'] span, [class*='title']",
-    );
-    const authorEl = card.querySelector(
-      ".author-wrapper .name, .author .name, .user-name, [class*='author'] .name, .nickname",
-    );
-    const coverImg = card.querySelector(
-      "img.cover, .cover img, img[src*='xhscdn'], img[src*='sns-img'], img",
-    );
+    const card = anchor.closest(NOTE_CARD_CONTAINER_SELECTOR) ?? anchor;
+    const titleEl = card.querySelector(NOTE_TITLE_SELECTOR);
+    const authorEl = card.querySelector(NOTE_AUTHOR_SELECTOR);
+    const coverImg = card.querySelector(NOTE_COVER_SELECTOR);
     const parsed = new URL(url);
 
     notes.push({

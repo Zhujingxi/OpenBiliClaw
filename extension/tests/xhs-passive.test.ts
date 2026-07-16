@@ -240,6 +240,48 @@ test("extractNoteMetadataFromAnchor reads visible metric chips", () => {
   assert.equal("published_at" in meta!, false);
 });
 
+test("extractNoteMetadataFromAnchor returns null when the title selector fully misses (degradation contract)", () => {
+  // Locked behavior (passive.ts): an empty title → null, so blank cards never
+  // reach the backend and never waste LLM classification budget. This is the
+  // deliberate fail-closed contract, NOT changed to "return partial data".
+  const card = new FakeDomElement({ selectorMap: {} }); // no title/author/cover match
+  const anchorEl = new FakeDomElement({
+    href: "/explore/note-empty?xsec_token=tok",
+    closestElement: card,
+  });
+  const meta = extractNoteMetadataFromAnchor(
+    anchorEl as unknown as HTMLAnchorElement,
+    "https://www.xiaohongshu.com/search_result?keyword=x",
+  );
+  assert.equal(meta, null);
+});
+
+test("extractNoteMetadataFromAnchor returns partial data when only some selectors miss (no throw)", () => {
+  // Title present, author + cover selectors miss → partial metadata, not an
+  // exception. Missing metric chips simply stay absent (never 0-valued keys).
+  const titleEl = new FakeDomElement({ textContent: "只有标题的笔记" });
+  const card = new FakeDomElement({
+    selectorMap: {
+      ".title, .note-title, [class*='title'] span, [class*='title']": [titleEl],
+      // author, cover, metrics deliberately absent
+    },
+  });
+  const anchorEl = new FakeDomElement({
+    href: "/explore/note-partial?xsec_token=tok",
+    closestElement: card,
+  });
+  const meta = extractNoteMetadataFromAnchor(
+    anchorEl as unknown as HTMLAnchorElement,
+    "https://www.xiaohongshu.com/search_result?keyword=x",
+  );
+  assert.deepEqual(meta, {
+    url: "https://www.xiaohongshu.com/explore/note-partial?xsec_token=tok",
+    title: "只有标题的笔记",
+    author: "",
+    cover_url: "",
+  });
+});
+
 test("dedupeObservedUrls removes previously reported URLs", () => {
   const seen = new Set<string>(["https://www.xiaohongshu.com/explore/aaa?xsec_token=1"]);
   const fresh = dedupeObservedUrls(
