@@ -68,6 +68,7 @@ class _BackendTagSelection:
     version_text: str = ""
     ignored_prerelease_version: tuple[int, ...] | None = None
     error_reason: str = ""
+    error_detail: str = ""
 
 
 def _project_root() -> Path:
@@ -368,6 +369,23 @@ def _decode_process_output(data: bytes | str | None) -> str:
     return data.decode(encoding, errors="replace")
 
 
+def _describe_exc(exc: BaseException) -> str:
+    """Return a non-empty exception description suitable for logs and status."""
+    message = str(exc).strip()
+    name = type(exc).__name__
+    return f"{name}: {message}" if message else name
+
+
+def _process_failure_detail(
+    operation: str,
+    result: subprocess.CompletedProcess[str],
+) -> str:
+    output = result.stderr.strip() or result.stdout.strip()
+    if output:
+        return f"{operation}: {output}"
+    return f"{operation}: process exited with code {result.returncode}"
+
+
 def _dirty_paths_besides_uv_lock(porcelain: str) -> list[str]:
     """Return dirty paths from ``git status --porcelain``, ignoring uv.lock.
 
@@ -527,8 +545,8 @@ class AutoUpdateService:
         if selection.error_reason:
             self._state = "error"
             self._reason = selection.error_reason
-            self._update_error = selection.error_reason
-            logger.warning("Auto-update version check failed: %s", selection.error_reason)
+            self._update_error = selection.error_detail or selection.error_reason
+            logger.warning("Auto-update version check failed: %s", self._update_error)
             return self.get_update_status()
 
         self._latest_tag = selection.tag
@@ -592,13 +610,32 @@ class AutoUpdateService:
                     accepted=False,
                 )
 
-            guard_reason = await self._check_apply_guards(target_tag)
+            try:
+                guard_reason = await self._check_apply_guards(target_tag)
+            except FileNotFoundError as exc:
+                guard_reason = "git_unavailable"
+                self._guard_detail = _describe_exc(exc)
+                logger.error("Auto-update git guard failed: %s", self._guard_detail)
+            except subprocess.TimeoutExpired as exc:
+                guard_reason = "git_command_timeout"
+                self._guard_detail = _describe_exc(exc)
+                logger.error("Auto-update git guard failed: %s", self._guard_detail)
+            except Exception as exc:
+                guard_reason = "git_guard_failed"
+                self._guard_detail = _describe_exc(exc)
+                logger.exception("Auto-update git guard failed: %s", self._guard_detail)
             if guard_reason:
                 self._state = (
                     "unsupported"
                     if guard_reason in ("unsupported_install_mode", "docker_install_mode")
                     else "error"
-                    if guard_reason == "github_unreachable"
+                    if guard_reason
+                    in {
+                        "github_unreachable",
+                        "git_unavailable",
+                        "git_command_timeout",
+                        "git_guard_failed",
+                    }
                     else "blocked"
                 )
                 self._reason = guard_reason
@@ -750,9 +787,23 @@ class AutoUpdateService:
                     )
                 except Exception as exc:
                     if verify_tls and _is_tls_verification_error(exc):
-                        return _BackendTagSelection(error_reason="tls_verification_failed")
-                    logger.warning("Auto-update tag check failed: %s", exc)
-                    return _BackendTagSelection(error_reason="github_unreachable")
+                        return _BackendTagSelection(
+                            error_reason="tls_verification_failed",
+                            error_detail=_describe_exc(exc),
+                        )
+                    detail = _describe_exc(exc)
+                    logger.warning("Auto-update tag check failed: %s", detail)
+                    atom_selection = await self._fetch_latest_candidate_from_atom(
+                        client,
+                        channel=channel,
+                    )
+                    if not atom_selection.error_reason:
+                        logger.info("Auto-update tag check recovered via GitHub tags Atom feed")
+                        return atom_selection
+                    return _BackendTagSelection(
+                        error_reason="github_unreachable",
+                        error_detail=detail,
+                    )
                 if resp.status_code != 200:
                     reason = (
                         "github_rate_limited"
@@ -773,12 +824,23 @@ class AutoUpdateService:
                             logger.info("Auto-update tag check recovered via GitHub tags Atom feed")
                             return atom_selection
                     return _BackendTagSelection(error_reason=reason)
-                tags = resp.json()
+                try:
+                    tags = resp.json()
+                except Exception as exc:
+                    detail = _describe_exc(exc)
+                    logger.warning("Auto-update tag check returned invalid JSON: %s", detail)
+                    return _BackendTagSelection(
+                        error_reason="invalid_github_response",
+                        error_detail=detail,
+                    )
                 if not tags:
                     break
                 if not isinstance(tags, list):
                     logger.warning("Auto-update tag check failed: unexpected tags payload")
-                    return _BackendTagSelection(error_reason="github_unreachable")
+                    return _BackendTagSelection(
+                        error_reason="invalid_github_response",
+                        error_detail=f"unexpected tags payload: {type(tags).__name__}",
+                    )
                 for tag_payload in tags:
                     if not isinstance(tag_payload, Mapping):
                         continue
@@ -803,15 +865,22 @@ class AutoUpdateService:
                 headers={"Accept": "application/atom+xml"},
             )
         except Exception as exc:
-            logger.warning("Auto-update Atom tag fallback failed: %s", exc)
-            return _BackendTagSelection(error_reason="github_unreachable")
+            detail = _describe_exc(exc)
+            logger.warning("Auto-update Atom tag fallback failed: %s", detail)
+            return _BackendTagSelection(
+                error_reason="github_unreachable",
+                error_detail=detail,
+            )
         if resp.status_code != 200:
             logger.warning("Auto-update Atom tag fallback failed: HTTP %s", resp.status_code)
             return _BackendTagSelection(error_reason="github_unreachable")
         tag_names = _tag_names_from_atom(resp.text)
         if not tag_names:
             logger.warning("Auto-update Atom tag fallback failed: unexpected tags payload")
-            return _BackendTagSelection(error_reason="github_unreachable")
+            return _BackendTagSelection(
+                error_reason="invalid_github_response",
+                error_detail="unexpected Atom tags payload",
+            )
         return _select_latest_candidate_from_tag_names(
             tag_names,
             allow_prerelease=self.allow_prerelease,
@@ -1029,11 +1098,19 @@ class AutoUpdateService:
             # Drop the local uv.lock rewrite (stale-lock releases make uv sync
             # dirty it on install) so --ff-only is not refused for "local
             # changes would be overwritten"; the post-merge sync regenerates it.
-            await self._run_git(["checkout", "--", "uv.lock"], root)
+            checkout = await self._run_git(["checkout", "--", "uv.lock"], root)
+            if checkout.returncode != 0:
+                await self._mark_apply_failed(
+                    "worktree_prepare_failed",
+                    detail=_process_failure_detail("git checkout uv.lock failed", checkout),
+                )
+                return
 
             merge = await self._run_git(["merge", "--ff-only", tag], root, timeout=120)
             if merge.returncode != 0:
-                await self._mark_apply_failed("branch_not_fast_forwardable")
+                detail = _process_failure_detail("git merge --ff-only failed", merge)
+                reason = "git_worktree_locked" if "index.lock" in detail.lower() else "merge_failed"
+                await self._mark_apply_failed(reason, detail=detail)
                 return
 
             install_cmd = self._detect_install_command(root)
@@ -1088,11 +1165,21 @@ class AutoUpdateService:
                 logger.info("Auto-update applied; restarting process for %s", tag)
                 self._restart_process()
             except Exception as exc:
-                logger.error("Auto-update restart failed: %s", exc)
-                await self._mark_apply_failed("restart_failed")
-        except Exception:
-            logger.exception("Auto-update apply failed")
-            await self._mark_apply_failed("dependency_sync_failed")
+                detail = _describe_exc(exc)
+                logger.error("Auto-update restart failed: %s", detail)
+                await self._mark_apply_failed("restart_failed", detail=detail)
+        except FileNotFoundError as exc:
+            detail = _describe_exc(exc)
+            logger.exception("Auto-update git executable is unavailable: %s", detail)
+            await self._mark_apply_failed("git_unavailable", detail=detail)
+        except subprocess.TimeoutExpired as exc:
+            detail = _describe_exc(exc)
+            logger.exception("Auto-update git command timed out: %s", detail)
+            await self._mark_apply_failed("git_command_timeout", detail=detail)
+        except Exception as exc:
+            detail = _describe_exc(exc)
+            logger.exception("Auto-update apply failed: %s", detail)
+            await self._mark_apply_failed("apply_failed", detail=detail)
 
     async def _mark_apply_failed(self, reason: str, *, detail: str = "") -> None:
         self._state = "error"

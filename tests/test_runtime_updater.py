@@ -308,6 +308,78 @@ async def test_manual_check_uses_atom_fallback_when_tags_api_quota_exhausted(
 
 
 @pytest.mark.asyncio
+async def test_atom_fallback_recovers_from_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class _TransportThenAtomClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get(self, url: str, **_kwargs: object) -> _FakeResponse:
+            calls.append(url)
+            if url == updater._GITHUB_TAGS:
+                raise httpx.ConnectError("connection refused")
+            return _FakeResponse(
+                200,
+                None,
+                text="""
+                <feed xmlns="http://www.w3.org/2005/Atom">
+                  <entry>
+                    <link rel="alternate" href="https://github.com/whiteguo233/OpenBiliClaw/releases/tag/backend-v0.3.140"/>
+                  </entry>
+                </feed>
+                """,
+            )
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", _TransportThenAtomClient)
+    monkeypatch.setattr(openbiliclaw, "__version__", "0.3.139")
+
+    backend = await updater.AutoUpdateService().check_now()
+
+    assert backend["state"] == "update_available"
+    assert backend["latest_tag"] == "backend-v0.3.140"
+    assert calls == [updater._GITHUB_TAGS, updater._GITHUB_TAGS_ATOM]
+
+
+@pytest.mark.asyncio
+async def test_describe_empty_transport_exception_in_log_and_status(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _FakeAsyncClient.error = httpx.ReadTimeout("")
+    service = updater.AutoUpdateService()
+
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.updater"):
+        backend = await service.check_now()
+
+    assert backend["reason"] == "github_unreachable"
+    assert "ReadTimeout" in str(backend["last_error"])
+    assert "ReadTimeout" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_classify_malformed_tags_json_without_raising() -> None:
+    class _MalformedResponse(_FakeResponse):
+        def json(self) -> object:
+            raise ValueError("malformed json")
+
+    _FakeAsyncClient.responses = {1: _MalformedResponse(200, None)}
+
+    backend = await updater.AutoUpdateService().check_now()
+
+    assert backend["state"] == "error"
+    assert backend["reason"] == "invalid_github_response"
+    assert "malformed json" in str(backend["last_error"])
+
+
+@pytest.mark.asyncio
 async def test_manual_check_publishes_backend_update_available_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -773,6 +845,89 @@ async def test_apply_dependency_failure_publishes_backend_update_failed(
     )
     assert "dependency failed" in caplog.text
     assert events == [{"type": "backend_update_failed", "reason": "dependency_sync_failed"}]
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected_reason", "detail_fragment"),
+    [
+        (FileNotFoundError(2, "No such file or directory", "git"), "git_unavailable", "git"),
+        (
+            subprocess.TimeoutExpired(["git", "status"], 30),
+            "git_command_timeout",
+            "timed out",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_classify_git_guard_execution_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    exc: Exception,
+    expected_reason: str,
+    detail_fragment: str,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        raise exc
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    status_code, payload = await service.request_apply(tag="backend-v0.3.140")
+
+    assert status_code == 409
+    assert payload["reason"] == expected_reason
+    assert detail_fragment in str(service.get_update_status()["last_error"])
+
+
+@pytest.mark.asyncio
+async def test_classify_uv_lock_checkout_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+    calls: list[list[str]] = []
+
+    async def _run_command(command, _root, *, timeout):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 1, "", "uv.lock checkout refused")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._apply_update_to_tag("backend-v0.3.140")
+
+    assert service.get_update_status()["reason"] == "worktree_prepare_failed"
+    assert "uv.lock checkout refused" in str(service.get_update_status()["last_error"])
+    assert calls == [["git", "checkout", "--", "uv.lock"]]
+
+
+@pytest.mark.asyncio
+async def test_classify_merge_index_lock_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        if command == ["git", "merge", "--ff-only", "backend-v0.3.140"]:
+            return subprocess.CompletedProcess(
+                command,
+                128,
+                "",
+                "fatal: Unable to create '.git/index.lock': File exists.",
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._apply_update_to_tag("backend-v0.3.140")
+
+    assert service.get_update_status()["reason"] == "git_worktree_locked"
+    assert "index.lock" in str(service.get_update_status()["last_error"])
 
 
 def test_install_command_uses_uv_only_when_available(
