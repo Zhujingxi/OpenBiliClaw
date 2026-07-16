@@ -1,45 +1,46 @@
 """Static regressions for PCWeb model service probe controls."""
 
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_desktop_web_settings_exposes_and_wires_model_probe_controls() -> None:
+def test_desktop_web_settings_exposes_and_wires_exact_model_probe_controls() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
-    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
     css = (ROOT / "src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
 
-    assert 'id="probeLlm"' in html
-    assert 'id="probeEmbedding"' in html
-    assert 'id="probeLlmStatus"' in html
-    assert 'id="probeEmbeddingStatus"' in html
+    assert 'id="modelProbeButton"' in html
+    assert 'id="modelProbeStatus"' in html
     assert 'aria-live="polite"' in html
 
-    assert 'configProbe: "/config/probe-service"' in js
-    assert "function probeConfigService(kind, config)" in js
-    assert 'probeConfigService("llm", buildConfigUpdate())' in js
-    assert 'probeConfigService("embedding", buildConfigUpdate())' in js
-    assert "function renderProbeResult" in js
+    assert '"/api/model-config/probe"' in js
+    assert "revision:" in js
+    assert "connection:" in js
+    assert "provider:" in js
+    assert "settings:" in js
+    assert "observed_dimension" in js
+    assert "probed_at" in js
 
     assert ".settings-probe-row" in css
     assert ".settings-probe-status" in css
 
 
-def test_desktop_web_settings_exposes_and_wires_llm_fallback_probe() -> None:
-    """The fallback subtab must offer a 「测试备选 Provider」 probe wired to
-    POST /api/config/probe-service kind="llm_fallback" — previously only the
-    default provider was testable, so a dead fallback stayed invisible."""
-    html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
-    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+def test_desktop_web_model_probe_has_one_exact_selected_row_owner() -> None:
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
+    probe = js.split("async function probeSelected()", 1)[1].split("function retainSelection", 1)[0]
 
-    assert 'id="probeLlmFallback"' in html
-    assert 'id="probeLlmFallbackStatus"' in html
-
-    assert "function runLlmFallbackConfigProbe()" in js
-    assert 'probeConfigService("llm_fallback", buildConfigUpdate())' in js
-    assert 'safeBind("#probeLlmFallback"' in js
+    assert "const kind = state.activeRoute;" in probe
+    assert "const record = selectedRecord(state, kind);" in probe
+    assert "createProbeSignature(state, kind, record.id)" in probe
+    assert "applyProbeResult(state, signature" in probe
+    assert "probeRequestVisible(signature)" in probe
+    assert "llm_fallback" not in js
+    assert "probeConfigService" not in js
 
 
 def test_desktop_web_settings_exposes_and_wires_network_proxy() -> None:
@@ -64,13 +65,8 @@ def test_desktop_web_settings_exposes_and_wires_network_proxy() -> None:
     assert 'safeBind("#probeNetworkProxy"' in js
 
 
-def test_desktop_web_settings_always_sends_deepseek_reasoning_effort() -> None:
+def test_desktop_web_general_config_payload_never_sends_legacy_llm() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    body = js.split("function buildConfigUpdate()", 1)[1].split("function configErrorMessage", 1)[0]
 
-    assert 'if (deepseekReasoning || provider === "deepseek"' not in js
-    assert re.search(
-        r"const deepseekReasoning = getInput\(\"deepseekReasoning\"\);"
-        r"\s+llm\.deepseek = \{"
-        r"(?s:.*?)reasoning_effort: deepseekReasoning",
-        js,
-    )
+    assert "llm" not in body

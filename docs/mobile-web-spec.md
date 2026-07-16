@@ -2,7 +2,7 @@
 
 ## 目标
 
-在同局域网内通过手机浏览器访问 OpenBiliClaw，查看推荐、画像、对话，体验对齐浏览器插件。
+在同局域网内通过手机浏览器访问 OpenBiliClaw，查看推荐、画像、对话并编辑模型路由，体验对齐浏览器插件。
 
 ## 决策记录
 
@@ -19,7 +19,7 @@
 | PWA | 提供 manifest.json + iOS Web Clip 元数据，支持添加到主屏幕（暂不做 service worker / 离线缓存） |
 | 行为采集 | 不做（无 bilibili 页面上下文） |
 | 源管理/爬取 | 不做 |
-| 设置页 | 不做（配置走 config.toml） |
+| 设置页 | 顶部 overlay 提供 Saved Sync 与 Models 两个独立 section；Models 复用三端权威模型 API 与共享 reducer |
 
 ## 功能范围
 
@@ -64,12 +64,26 @@
    - 下拉刷新手势（推荐页）
    - PWA manifest（添加到主屏幕，不做 service worker 离线缓存）
 
+5. **设置页**
+   - 顶部设置 overlay 保留 Saved Sync，并新增独立 Models section；两者分别保存，模型草稿不会进入通用 `/api/config` payload
+   - Models 按 Chat / Embedding / Runtime 三个 tab 组织；Chat 与 Embedding 均先显示最多 10 项的稳定-ID 有序列表，再进入详情
+   - 详情页通过 Back 回列表且保留草稿和选中 ID；移动排序以 44px 触摸区的 Move Up / Move Down 为主，不依赖拖拽
+   - 连接类型完全由 descriptor 分组、搜索、preset 与字段定义驱动；credentials 使用 `keep / set / env / clear` 显式动作
+   - Embedding 的 model、维度、相似度阈值和多模态开关是 route 共享设置；Runtime 编辑 Chat concurrency 与 timeout
+   - 保存使用 revisioned `PUT /api/model-config`，失败保留草稿，`409` 与字段错误就地展示；精确 probe 绑定 revision、route kind、稳定 ID 与 draft fingerprint
+   - snapshot 与 descriptor 分别维护 readiness 与 latest-request gate；Saved Sync 先收到 `config_reloaded` 仍会在首次进入 Models 补载 descriptor，descriptor 失败可由显式按钮或重新进入 Models 单独重试；旧 snapshot 被较新 reload 取代后，即使 reload 失败或仍未结束，完整加载一旦 settled-not-ready 就显示重试并保持锁定，迟到的胜出 reload 或后续重试可自动恢复；两项都 ready 前锁定编辑器。锁定/inert 与 `aria-busy` 分开：首次/在途加载和重试为 busy，settled-not-ready/error 仍锁定但 busy=false，ready 后解锁且 busy=false；实时状态与重试入口位于 inert 边界之外，销毁后的 readiness 通知不再写 DOM
+   - model / preset / credential / Embedding 共享设置变更同步刷新列表、probe health 与错误投影；单纯 Back 导航保留仍有效的服务端字段错误
+   - 保存与 exact probe 前统一校验 Runtime concurrency 为 1–16 的整数、timeout 为至少 10 秒的整数、每个 Chat `num_ctx`/Embedding 输出维度为非负整数、相似度阈值为 0–1 的有限数值；空输入保持为空，非法值保留草稿、字段/摘要提示且不序列化请求，显式 `0` 仍是后三项的合法下界
+   - 数值错误随每次草稿 mutation 与权威 hydration 重新推导；Pydantic `422 detail` 不回显 input/msg，只映射安全路径、固定消息和当前稳定 ID；prototype-like ID/字段既只作为 own property 存储，读取时也逐级检查 own property，因此 `constructor` 连接的真实 `name` 错误可显示，缺失项不会回落到对象原型
+   - 关闭设置或从 Models 切到 Saved Sync 时仅在模型草稿 dirty 时确认；关闭、列表/详情返回都恢复合理焦点，shell 重绘替换 opener 后按稳定 ID 聚焦当前 live 设置按钮
+   - 移动端不提供一键本地 Ollama，避免把窄屏编辑器变成隐式覆盖入口
+
 ### 不包含
 
 - 行为采集（content script）
 - Cookie 同步
 - 源管理（XHS/抖音/YouTube）
-- 设置页
+- 通用配置全集（移动设置当前只覆盖 Saved Sync 与权威 Models）
 - 观看时长追踪（离开移动端 Web 后无法可靠追踪）
 - 离线缓存 / 后台推送型 PWA
 
@@ -91,10 +105,12 @@ src/openbiliclaw/web/
 │   ├── stream.js       # WebSocket 客户端（同插件 popup-stream.js）
 │   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
 │   ├── app-launch.js   # 移动端深链拉起目标平台 App + 网页回落
+│   ├── mobile-model-settings-controller.js # Models 资源 readiness、精确草稿渲染与保存校验
 │   ├── views/
 │   │   ├── recommend.js  # 推荐页渲染 & 交互
 │   │   ├── profile.js    # 画像页渲染 & 交互
-│   │   └── chat.js       # 对话页渲染 & 交互
+│   │   ├── chat.js       # 对话页渲染 & 交互
+│   │   └── model-settings.js # Saved Sync / Models overlay 与顺序式列表→详情
 │   └── components/
 │       ├── tab-bar.js       # 底部导航
 │       ├── status-bar.js    # 顶部状态栏
@@ -104,6 +120,8 @@ src/openbiliclaw/web/
 │       ├── mbti.js          # MBTI 展示
 │       ├── messages.js      # 消息收件箱 overlay
 │       └── pull-refresh.js  # 下拉刷新
+└── shared/
+    └── model-config-state.js # 桌面与移动 Web 共用的 DOM-free 模型草稿/竞态状态
 ```
 
 ### 后端改动
@@ -168,6 +186,8 @@ if web_dir.is_dir():
 | 活动流 | `GET /api/activity-feed` |
 | 兴趣探测 | `GET /api/interest-probes/pending`, `POST /api/interest-probes/respond` |
 | 避雷探针 | `GET /api/avoidance-probes/pending`, `POST /api/avoidance-probes/respond` |
+| Saved Sync | `GET /api/config`, `PUT /api/config`（仅 `saved_sync.auto_sync_enabled`） |
+| Models | `GET/PUT /api/model-config`, `GET /api/model-connection-types`, `POST /api/model-config/probe` |
 | 实时 | `WS /api/runtime-stream` |
 | 健康 | `GET /api/health` |
 
@@ -208,6 +228,7 @@ Delight UI 投影矩阵：
 - `profile_updated` → 刷新画像
 - `interest.probe` → 弹出探测通知
 - `activity.added` → 更新活动流
+- `config_reloaded` → clean 模型草稿重新 hydration；dirty 草稿保留并显示远端更新提示
 
 ## 实施计划
 

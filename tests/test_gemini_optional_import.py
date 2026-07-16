@@ -22,7 +22,8 @@ def test_registry_module_imports_without_google_genai(monkeypatch: pytest.Monkey
 
         module = importlib.import_module("openbiliclaw.llm.registry")
 
-        assert module.build_llm_registry is not None
+        assert module.build_ordered_chat_route is not None
+        assert module.build_ordered_embedding_service is not None
     finally:
         if llm_package is not None:
             if original_registry_attr is None:

@@ -4,7 +4,7 @@ services:
   # seeds it into the store before serving, so the container reaches
   # embedding-ready with ZERO network pull (offline / China-network friendly).
   # The daemon runs on the internal Docker network at http://ollama:11434;
-  # the backend's [llm.embedding] is seeded to point here on first bootstrap.
+  # the backend's [models.embedding.providers] route is seeded here on first bootstrap.
   #
   # Disable this entire block by removing it (and the depends_on +
   # OPENBILICLAW_SEED_OLLAMA_DEFAULTS env in the backend service) if
@@ -60,8 +60,8 @@ services:
       OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
       OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
       OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
-      # On first config bootstrap, seed [llm.ollama] base_url and
-      # [llm.embedding] to point at the bundled sidecar above. Lets
+      # On first config bootstrap, seed one native stable Embedding provider
+      # plus shared [models.embedding.settings] pointing at the sidecar above. Lets
       # Docker users have local embedding out of the box, even if they
       # later pick OpenAI / Claude / etc for chat. Existing config.toml
       # is never overwritten.

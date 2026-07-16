@@ -36,11 +36,11 @@ async def run_update_pipeline(
 ) -> Any:
     """Run init + incremental update in an isolated temp environment."""
     from openbiliclaw.config import load_config
-    from openbiliclaw.llm.registry import build_llm_registry
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.engine import SoulEngine
     from openbiliclaw.soul.pipeline import signals_from_events
     from openbiliclaw.soul.profile import OnionProfile
+    from _model_runtime import build_script_model_bundle
 
     cfg = load_config()
 
@@ -49,8 +49,12 @@ async def run_update_pipeline(
         memory = MemoryManager(data_dir)
         memory.initialize()
 
-        registry = build_llm_registry(cfg)
-        engine = SoulEngine(llm=registry, memory=memory)
+        model_bundle = build_script_model_bundle(cfg, memory)
+        engine = SoulEngine(
+            llm=model_bundle.chat_route,
+            memory=memory,
+            embedding_service=model_bundle.embedding_service,
+        )
 
         # Phase 1: Init baseline profile from init_events
         history = [

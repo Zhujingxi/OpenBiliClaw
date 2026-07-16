@@ -12,6 +12,8 @@ from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.storage.database import Database
 
+from .model_route_helpers import use_native_ollama
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -22,8 +24,7 @@ def db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Database:
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     config = Config()
     config.scheduler.enabled = False
-    config.llm.default_provider = "ollama"
-    config.llm.ollama.model = "llama3"
+    use_native_ollama(config)
     save_config(config, project_root / "config.toml")
     database = Database(tmp_path / "identity-pipeline.db")
     database.initialize()

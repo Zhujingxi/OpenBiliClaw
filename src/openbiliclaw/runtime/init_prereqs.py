@@ -96,11 +96,10 @@ class InitPrereqs:
         ``health_check`` (tiny completion) — cached, single-flighted, and
         strict on timeout (matches embedding readiness).
 
-        The default provider is probed first; when it fails and a usable
-        ``[llm].fallback_provider`` is registered, that provider is probed
-        too — every runtime chat call goes through the fallback chain, so a
-        healthy fallback means chat genuinely works and init must not be
-        blocked just because the primary is down.
+        Ordered route connections are probed in configured priority order.
+        Every runtime chat call uses that same fallback chain, so a healthy
+        fallback means chat genuinely works and init must not be blocked just
+        because an earlier connection is down.
         """
         registry = getattr(self._ctx, "llm_registry", None)
         if registry is None:
@@ -112,25 +111,26 @@ class InitPrereqs:
             ttl = _CHAT_OK_TTL if self._chat_value else _CHAT_FAIL_TTL
             if time.monotonic() - self._chat_at < ttl:
                 return self._chat_value
-            ready = await self._probe_chat_provider(registry.get())  # default provider
-            if not ready:
-                fallback_name = str(getattr(registry, "fallback_provider", "") or "")
-                if (
-                    fallback_name
-                    and fallback_name != registry.default_provider
-                    and registry.is_chat_capable(fallback_name)
-                ):
-                    ready = await self._probe_chat_provider(registry.get(fallback_name))
-                    if ready:
-                        logger.info(
-                            "Chat readiness: default provider %s failed the probe but "
-                            "fallback provider %s answered — chat is served via fallback.",
-                            registry.default_provider,
-                            fallback_name,
-                        )
+            route_connections = getattr(registry, "connections", ())
+            ready = await self._probe_ordered_chat_route(tuple(route_connections))
             self._chat_value = ready
             self._chat_at = time.monotonic()
             return ready
+
+    async def _probe_ordered_chat_route(self, connections: tuple[Any, ...]) -> bool:
+        """Probe bound adapters in the same priority order as runtime calls."""
+        for position, connection in enumerate(connections):
+            provider = getattr(connection, "adapter", None)
+            if provider is None or not await self._probe_chat_provider(provider):
+                continue
+            if position:
+                logger.info(
+                    "Chat readiness: connection %s answered after %d earlier route failure(s).",
+                    str(getattr(connection, "id", "") or position),
+                    position,
+                )
+            return True
+        return False
 
     async def _probe_chat_provider(self, provider: Any) -> bool:
         """One strict, bounded health_check; False on timeout or any error."""

@@ -113,15 +113,13 @@ async def main(args: argparse.Namespace) -> None:
     from openbiliclaw.config import load_config
     from openbiliclaw.eval.discovery_scenario import ScenarioPool
     from openbiliclaw.eval.persona_pool import PersonaPool
-    from openbiliclaw.llm.registry import build_llm_registry
-    from openbiliclaw.llm.service import LLMService
     from openbiliclaw.memory.manager import MemoryManager
+    from _model_runtime import build_script_model_bundle
 
     cfg = load_config()
-    registry = build_llm_registry(cfg)
     memory = MemoryManager(PROJECT_ROOT / "data")
     memory.initialize()
-    llm_service = LLMService(registry=registry, memory=memory)
+    llm_service = build_script_model_bundle(cfg, memory).llm_service
 
     persona_pool = PersonaPool(PROJECT_ROOT / "data" / "eval" / "persona_pool")
     scenario_pool = ScenarioPool(PROJECT_ROOT / "data" / "eval" / "scenario_pool")

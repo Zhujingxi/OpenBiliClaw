@@ -48,6 +48,23 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
     cfg.scheduler.speculator_idle_interval_minutes = 11
 
     captured: dict[str, object] = {}
+    bundle_calls = 0
+    chat_route = object()
+    embedding_service = object()
+    usage_recorder = object()
+    concurrency_gate = object()
+
+    def build_model_bundle() -> object:
+        nonlocal bundle_calls
+        bundle_calls += 1
+        return SimpleNamespace(
+            chat_route=chat_route,
+            embedding_service=embedding_service,
+            llm_service=SimpleNamespace(
+                usage_recorder=usage_recorder,
+                concurrency_gate=concurrency_gate,
+            ),
+        )
 
     class FakeSoulEngine:
         def __init__(self, **kwargs: object) -> None:
@@ -55,7 +72,12 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
 
     monkeypatch.setattr(config_module, "load_config", lambda: cfg)
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
-    monkeypatch.setattr(cli_module, "_build_registry", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_model_bundle", build_model_bundle)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_registry",
+        lambda: pytest.fail("SoulEngine must consume the model bundle directly"),
+    )
     monkeypatch.setattr("openbiliclaw.soul.engine.SoulEngine", FakeSoulEngine)
 
     cli_module._build_soul_engine()
@@ -68,6 +90,11 @@ def test_build_soul_engine_forwards_scheduler_speculation_config(monkeypatch) ->
     assert captured["speculation_max_primary_interests"] == 17
     assert captured["speculation_max_secondary_interests"] == 66
     assert captured["speculator_idle_interval_minutes"] == 11
+    assert bundle_calls == 1
+    assert captured["llm"] is chat_route
+    assert captured["embedding_service"] is embedding_service
+    assert captured["usage_recorder"] is usage_recorder
+    assert captured["llm_concurrency_gate"] is concurrency_gate
 
 
 def _write_example_config(project_root: Path) -> None:
@@ -200,17 +227,18 @@ def test_keyword_inspiration_preview_threads_persist_axes(
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_model_bundle",
+        lambda: SimpleNamespace(llm_service=FakeLLMService()),
+        raising=False,
+    )
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
     monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr(
         "openbiliclaw.llm.service.LLMService",
         FakeLLMService,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "openbiliclaw.llm.service.module_overrides_from_config",
-        lambda loaded_cfg: {},
         raising=False,
     )
     monkeypatch.setattr(
@@ -298,15 +326,16 @@ def test_keyword_inspiration_preview_one_shot_overrides_apply_on_derived_params(
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_model_bundle",
+        lambda: SimpleNamespace(llm_service=FakeLLMService()),
+        raising=False,
+    )
     monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
     monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
     monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
     monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
-    monkeypatch.setattr(
-        "openbiliclaw.llm.service.module_overrides_from_config",
-        lambda loaded_cfg: {},
-        raising=False,
-    )
     monkeypatch.setattr(
         "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
         FakePlanner,
@@ -407,20 +436,125 @@ def test_recommend_reports_clear_config_error(
 def test_config_show_displays_registered_providers(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
-    class FakeRegistry:
-        default_provider = "claude"
-        available_providers = ["claude", "ollama"]
+    from openbiliclaw.model_config import (
+        ChatConnection,
+        ChatRouteConfig,
+        CredentialConfig,
+        EmbeddingModelSettings,
+        EmbeddingProviderConfig,
+        EmbeddingRouteConfig,
+        ModelConfig,
+    )
 
-    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    cfg = config_module.Config(
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="claude-primary",
+                        name="Claude",
+                        type="anthropic_compatible",
+                        model="claude-sonnet",
+                        preset="anthropic",
+                        base_url="https://api.anthropic.com",
+                        credential=CredentialConfig(
+                            source="inline",
+                            value="test-secret-config-show-never-print",
+                        ),
+                    ),
+                    ChatConnection(
+                        id="ollama-fallback",
+                        name="Ollama",
+                        type="ollama",
+                        model="llama3",
+                        base_url="http://127.0.0.1:11434/v1",
+                    ),
+                ),
+            ),
+            embedding=EmbeddingRouteConfig(
+                enabled=True,
+                settings=EmbeddingModelSettings(
+                    model="shared-embedding",
+                    output_dimensionality=768,
+                    similarity_threshold=0.75,
+                ),
+                providers=(
+                    EmbeddingProviderConfig(
+                        id="embedding-env",
+                        name="Embedding Env",
+                        type="openai_compatible",
+                        preset="custom",
+                        base_url="https://embedding.example.test/v1",
+                        credential=CredentialConfig(source="env", value="EMBEDDING_API_KEY"),
+                    ),
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+    )
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
     result = runner.invoke(app, ["config-show"])
 
     assert result.exit_code == 0
-    assert "已注册 Provider" in result.stdout
-    assert "claude, ollama" in result.stdout
-    assert "最终默认 Provider" in result.stdout
-    assert "claude" in result.stdout
+    assert "Chat 路由" in result.stdout
+    assert "Claude" in result.stdout
+    assert "Ollama" in result.stdout
+    assert "Primary" in result.stdout
+    assert "Fallback 1" in result.stdout
+    assert "credential=inline" in result.stdout
+    assert "credential=none" in result.stdout
+    assert "shared-embedding" in result.stdout
+    assert "embedding-env" in result.stdout
+    assert "credential=env:EMBEDDING_API_KEY" in result.stdout
+    assert "test-secret-config-show-never-print" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("proxy", "expected"),
+    [
+        ("http://user:pass@proxy.example:8080", "http://***@proxy.example:8080"),
+        ("https://user:pass@proxy.example:8443", "https://***@proxy.example:8443"),
+        ("socks5://user:pass@127.0.0.1:1080", "socks5://***@127.0.0.1:1080"),
+        ("socks5h://user%40mail:p%40ss@proxy.example:1080", "socks5h://***@proxy.example:1080"),
+        ("socks5://proxy.example:1080", "socks5://proxy.example:1080"),
+    ],
+)
+def test_shared_proxy_masker_preserves_endpoint_and_redacts_userinfo(
+    proxy: str,
+    expected: str,
+) -> None:
+    masker = getattr(config_module, "mask_proxy_userinfo", None)
+    assert callable(masker)
+    assert masker(proxy) == expected
+
+
+def test_config_show_redacts_encoded_proxy_userinfo(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config()
+    cfg.network.mode = "custom"
+    cfg.network.proxy = "socks5h://mail%40example.com:p%40ss-secret@proxy.example:1080"
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "socks5h://***@proxy.example:1080" in result.stdout
+    assert "mail%40example.com" not in result.stdout
+    assert "p%40ss-secret" not in result.stdout
+    assert "mail@example.com" not in result.stdout
+    assert "p@ss-secret" not in result.stdout
 
 
 def test_config_show_displays_runtime_pause_fields(
@@ -481,27 +615,39 @@ def test_config_show_displays_saved_auto_sync_status(
 def test_health_check_reports_provider_statuses(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
-    class FakeResult:
-        def __init__(self, available: bool, is_default: bool, error: str | None = None) -> None:
+    class FakeAdapter:
+        def __init__(self, *, available: bool, error: str = "") -> None:
             self.available = available
-            self.is_default = is_default
             self.error = error
 
-    class FakeRegistry:
-        async def health_check_all(self) -> dict[str, FakeResult]:
-            return {
-                "openai": FakeResult(True, True),
-                "ollama": FakeResult(False, False, "connection refused"),
-            }
+        async def health_check(self) -> bool:
+            if self.error:
+                raise RuntimeError(self.error)
+            return self.available
 
-    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    route = SimpleNamespace(
+        connections=(
+            SimpleNamespace(
+                id="openai-primary",
+                model="gpt-test",
+                adapter=FakeAdapter(available=True),
+            ),
+            SimpleNamespace(
+                id="ollama-fallback",
+                model="llama3",
+                adapter=FakeAdapter(available=False, error="connection refused"),
+            ),
+        )
+    )
+
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: route)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
     result = runner.invoke(app, ["health-check"])
 
     assert result.exit_code == 0
     assert "Provider 健康检查" in result.stdout
-    assert "openai" in result.stdout
+    assert "openai-primary" in result.stdout
     assert "可用" in result.stdout
     assert "connection refused" in result.stdout
 
@@ -1369,6 +1515,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     import openbiliclaw.recommendation.engine as recommendation_module
     import openbiliclaw.soul.engine as soul_module
     import openbiliclaw.storage.database as database_module
+    from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 
     created_databases: list[object] = []
     created_memories: list[object] = []
@@ -1399,14 +1546,12 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
             registry: object,
             memory: object,
             usage_recorder: object | None = None,
-            module_overrides: object | None = None,
             concurrency: int = 1,
             concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
-            self.module_overrides = module_overrides
             self.concurrency = concurrency
             self.concurrency_gate = concurrency_gate
 
@@ -1452,6 +1597,20 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
         llm=SimpleNamespace(concurrency=3),
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="ollama-main",
+                        name="Ollama",
+                        type="ollama",
+                        model="llama3",
+                        base_url="http://127.0.0.1:11434/v1",
+                    ),
+                ),
+                concurrency=3,
+            )
+        ),
         soul=SimpleNamespace(preference=SimpleNamespace(satisfaction_filter_enabled=True)),
         scheduler=SimpleNamespace(
             speculation_interval_minutes=10,
@@ -2739,6 +2898,8 @@ def test_init_reports_authentication_failure(
 def test_init_guides_missing_runtime_config_interactively(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner, tmp_path: Path
 ) -> None:
+    from openbiliclaw import cli_models as cli_models_module
+
     class FakeAuthManager:
         async def get_status(self) -> AuthStatus:
             return AuthStatus(
@@ -2754,22 +2915,12 @@ def test_init_guides_missing_runtime_config_interactively(
         async def get_user_history(self, max_items: int = 100) -> list[dict[str, object]]:
             return []
 
-    captured: dict[str, object] = {}
-    config_errors = iter(["llm.openai.api_key", None])
-
-    def fake_save_runtime_config(
-        provider: str,
-        *,
-        api_key: str = "",
-        base_url: str = "",
-        model: str = "",
-    ) -> None:
-        captured["provider"] = provider
-        captured["api_key"] = api_key
-        captured["base_url"] = base_url
-        captured["model"] = model
+    guided_calls: list[str] = []
+    validation_calls: list[str] = []
+    config_errors = iter(["models.chat.connections[0].credential: missing", None])
 
     def fake_load_runtime_config_error(*, render: bool = True) -> str | None:
+        validation_calls.append("validate")
         return next(config_errors)
 
     monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True, raising=False)
@@ -2777,22 +2928,14 @@ def test_init_guides_missing_runtime_config_interactively(
         cli_module, "_maybe_setup_password_in_init", lambda **_: None, raising=False
     )
     monkeypatch.setattr(
-        cli_module,
-        "_save_runtime_provider_config",
-        fake_save_runtime_config,
-        raising=False,
+        cli_models_module,
+        "guided_chat_editor",
+        lambda: guided_calls.append("chat"),
     )
     monkeypatch.setattr(
-        cli_module,
-        "_save_embedding_config",
-        lambda **_: None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "_save_module_overrides",
-        lambda *_: None,
-        raising=False,
+        cli_models_module,
+        "guided_embedding_editor",
+        lambda: guided_calls.append("embedding"),
     )
     monkeypatch.setattr(
         cli_module,
@@ -2814,23 +2957,11 @@ def test_init_guides_missing_runtime_config_interactively(
         raising=False,
     )
 
-    # Wizard + source-prompt inputs:
-    #   1. menu choice: "gemini"
-    #   2. API key
-    #   3. model (accept default)
-    #   4. embedding choice "3" (disable embedding; avoids host-dependent Ollama prompts)
-    #   5. "n" — skip module overrides
-    #   6. "y" — allow LAN access
-    #   7-9. "" — accept Bili history/favorite/follow init limits
-    #   10+. "n" — skip optional source prompts (xhs / douyin / youtube / X / zhihu / reddit)
+    # Native model editors are injected above, so only the ordinary init source
+    # prompts remain: allow LAN, accept Bili limits, skip optional sources.
     wizard_input = (
         "\n".join(
             [
-                "gemini",
-                "gemini-key",
-                "",
-                "3",
-                "n",
                 "y",
                 "",
                 "",
@@ -2848,11 +2979,117 @@ def test_init_guides_missing_runtime_config_interactively(
     result = runner.invoke(app, ["init"], input=wizard_input)
 
     assert result.exit_code == 1
-    assert captured["provider"] == "gemini"
-    assert captured["api_key"] == "gemini-key"
+    assert guided_calls == ["chat", "embedding"]
+    assert validation_calls == ["validate", "validate"]
     assert "初始化前配置引导" in result.stdout
-    assert "DeepSeek" in result.stdout  # menu now leads with DeepSeek (v0.3.20+)
+    assert "按连接类型配置 Chat 与 Embedding" in result.stdout
+    assert "module override" not in result.stdout.lower()
     assert "历史为空" in result.stdout
+
+
+def test_init_does_not_open_model_editors_for_unrelated_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    from openbiliclaw import cli_models as cli_models_module
+
+    guided_calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: "api.auth.password_hash: invalid password hash",
+    )
+    monkeypatch.setattr(
+        cli_models_module,
+        "guided_chat_editor",
+        lambda: guided_calls.append("chat"),
+    )
+    monkeypatch.setattr(
+        cli_models_module,
+        "guided_embedding_editor",
+        lambda: guided_calls.append("embedding"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_auth_manager",
+        lambda: pytest.fail("unrelated config errors must stop before auth"),
+    )
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert guided_calls == []
+    assert "配置错误" in result.output
+    assert "api.auth.password_hash" in result.output
+
+
+def test_init_revalidates_after_guided_models_and_stops_before_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    errors = iter(
+        [
+            "models.chat.connections[0].credential: missing",
+            "api.auth.password_hash: invalid password hash",
+        ]
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: next(errors),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_interactive_runtime_config_setup",
+        lambda: calls.append("models"),
+    )
+
+    def unexpected_auth() -> object:
+        calls.append("auth")
+        raise RuntimeError("auth must not be reached")
+
+    monkeypatch.setattr(cli_module, "_build_auth_manager", unexpected_auth)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 1
+    assert calls == ["models"]
+    assert "配置错误" in result.output
+    assert "api.auth.password_hash" in result.output
+
+
+def test_init_treats_legacy_llm_validation_as_model_related(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = iter(["llm.openai.api_key: missing", None])
+    calls: list[str] = []
+
+    class FakeAuthManager:
+        async def get_status(self) -> SimpleNamespace:
+            return SimpleNamespace(authenticated=True)
+
+    monkeypatch.setattr(cli_module, "_is_interactive_terminal", lambda: True)
+    monkeypatch.setattr(
+        cli_module,
+        "_load_runtime_config_error",
+        lambda *, render=True: next(errors),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_interactive_runtime_config_setup",
+        lambda: calls.append("models"),
+    )
+    monkeypatch.setattr(cli_module, "_build_auth_manager", FakeAuthManager)
+
+    status = cli_module._prepare_init_runtime()
+
+    assert status.authenticated is True
+    assert calls == ["models"]
 
 
 def test_init_guides_missing_auth_interactively(
@@ -4672,7 +4909,7 @@ def test_init_reports_partial_success_when_discovery_fails(
 
 
 # ---------------------------------------------------------------------------
-# Local Ollama embedding wizard helpers
+# Local Ollama compatibility helpers used by desktop packaging
 # ---------------------------------------------------------------------------
 
 
@@ -4759,190 +4996,36 @@ def test_ollama_has_model_matches_tagged_and_untagged(
     assert cli_module._ollama_has_model("nomic-embed-text") is False
 
 
-def test_save_embedding_config_writes_to_toml(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Verify the wizard's persistence helper writes both provider and model
-    to [llm.embedding] in config.toml. Round-trips: start from a default
-    config, run the helper, reload, assert the embedding section persisted."""
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    initial = Config(llm=LLMConfig(default_provider="gemini"))
-    save_config(initial, config_path)
-
-    # Redirect _project_root() to tmp_path. monkeypatch.chdir alone is
-    # NOT enough — _project_root() checks the package install dir first
-    # and would happily clobber the developer's real config.toml.
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    cli_module._save_embedding_config(provider="ollama", model="bge-m3")
-
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.embedding.provider == "ollama"
-    assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://127.0.0.1:11434/v1"
+def test_legacy_model_setup_writers_are_removed() -> None:
+    assert not hasattr(cli_module, "_save_embedding_config")
+    assert not hasattr(cli_module, "_save_runtime_provider_config")
 
 
-def test_save_embedding_config_custom_openai_compat(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Phase 3 option 3: a vLLM-style OpenAI-compatible embedding gateway.
-
-    The wizard collects provider="openai" plus a custom base_url / api_key /
-    model, and the helper has to write all four into config.toml: the
-    embedding section gets provider+model, and the [llm.openai] block gets
-    base_url+api_key so the LLM registry can resolve the endpoint.
-    """
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    save_config(Config(llm=LLMConfig(default_provider="claude")), config_path)
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    cli_module._save_embedding_config(
-        provider="openai",
-        model="bge-m3",
-        base_url="http://localhost:8000/v1",
-        api_key="sk-local",
-    )
-
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.embedding.provider == "openai"
-    assert reloaded.llm.embedding.model == "bge-m3"
-    assert reloaded.llm.embedding.base_url == "http://localhost:8000/v1"
-    assert reloaded.llm.embedding.api_key == "sk-local"
-
-
-def test_save_module_overrides_writes_per_module_blocks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Phase 4: per-module overrides round-trip through config.toml."""
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    save_config(Config(llm=LLMConfig(default_provider="openai")), config_path)
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    cli_module._save_module_overrides(
-        {
-            "discovery": {"provider": "deepseek", "model": "deepseek-chat"},
-            "soul": {"provider": "claude", "model": "claude-sonnet-4-5-20250929"},
-            "evaluation": {"provider": "", "model": ""},  # no-op leaves defaults
-        }
-    )
-
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.discovery.provider == "deepseek"
-    assert reloaded.llm.discovery.model == "deepseek-chat"
-    assert reloaded.llm.soul.provider == "claude"
-    assert reloaded.llm.soul.model == "claude-sonnet-4-5-20250929"
-    assert reloaded.llm.evaluation.provider == ""
-    assert reloaded.llm.evaluation.model == ""
-
-
-def test_build_recommendation_engine_wires_module_overrides(
+def test_build_recommendation_engine_uses_bundle_service(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from types import SimpleNamespace
 
-    from openbiliclaw.config import Config, LLMConfig, save_config
+    from openbiliclaw.config import Config, save_config
 
     config_path = tmp_path / "config.toml"
-    config = Config(llm=LLMConfig(default_provider="openai"))
-    config.llm.recommendation.provider = "deepseek"
-    config.llm.recommendation.model = "deepseek-chat"
-    save_config(config, config_path)
+    save_config(Config(), config_path)
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
     monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object())
+    shared_service = SimpleNamespace()
     monkeypatch.setattr(
         cli_module,
-        "_build_registry",
-        lambda: SimpleNamespace(default_provider="openai"),
+        "_build_model_bundle",
+        lambda: SimpleNamespace(llm_service=shared_service, embedding_service=None),
     )
-    monkeypatch.setattr("openbiliclaw.llm.registry.build_embedding_service", lambda *_: None)
 
     engine = cli_module._build_recommendation_engine()
 
-    assert engine._llm.module_overrides["recommendation"].provider == "deepseek"
-    assert engine._llm.module_overrides["recommendation"].model == "deepseek-chat"
+    assert engine._llm is shared_service
 
 
-def test_save_runtime_provider_config_persists_triplet(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Phase 2: full triplet (api_key, base_url, model) round-trips,
-    and empty values do not clobber existing config (so a user pressing
-    Enter at the prompt accepts the saved value rather than blanking it).
-    """
-    from openbiliclaw.config import (
-        Config,
-        LLMConfig,
-        LLMProviderConfig,
-        load_config_with_diagnostics,
-        save_config,
-    )
-
-    config_path = tmp_path / "config.toml"
-    save_config(
-        Config(
-            llm=LLMConfig(
-                default_provider="claude",
-                openai=LLMProviderConfig(
-                    api_key="sk-old",
-                    base_url="https://old.example.com/v1",
-                    model="gpt-old",
-                ),
-            )
-        ),
-        config_path,
-    )
-    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-
-    # Write triplet — should switch default provider and overwrite all three.
-    cli_module._save_runtime_provider_config(
-        "openai",
-        api_key="sk-new",
-        base_url="https://new.example.com/v1",
-        model="gpt-4o-mini",
-    )
-    reloaded, _ = load_config_with_diagnostics()
-    assert reloaded.llm.default_provider == "openai"
-    assert reloaded.llm.openai.api_key == "sk-new"
-    assert reloaded.llm.openai.base_url == "https://new.example.com/v1"
-    assert reloaded.llm.openai.model == "gpt-4o-mini"
-
-    # Now an "accept defaults" follow-up: empty params must NOT blank the
-    # values written above.
-    cli_module._save_runtime_provider_config("openai", api_key="", base_url="", model="")
-    reloaded2, _ = load_config_with_diagnostics()
-    assert reloaded2.llm.openai.api_key == "sk-new"
-    assert reloaded2.llm.openai.base_url == "https://new.example.com/v1"
-    assert reloaded2.llm.openai.model == "gpt-4o-mini"
-
-
-# ---------------------------------------------------------------------------
 # Douyin bootstrap CLI helpers (Task 6 of douyin import plan)
 # ---------------------------------------------------------------------------
 

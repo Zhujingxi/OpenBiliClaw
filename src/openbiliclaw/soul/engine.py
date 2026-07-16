@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
-    from openbiliclaw.llm.service import ModuleOverride, SupportsComplete
+    from openbiliclaw.llm.service import SupportsComplete
     from openbiliclaw.memory.manager import MemoryManager
 
 from openbiliclaw.llm.service import LLMService
@@ -131,7 +131,6 @@ class SoulEngine:
         cognition_cycle_interval_seconds: int | None = None,
         usage_recorder: Any | None = None,
         satisfaction_filter_enabled: bool = True,
-        module_overrides: Mapping[str, ModuleOverride] | None = None,
         llm_concurrency: int = 4,
         llm_concurrency_gate: Any | None = None,
         speculation_interval_minutes: int = 10,
@@ -160,7 +159,6 @@ class SoulEngine:
         self._satisfaction_filter_enabled = satisfaction_filter_enabled
         self._feedback_batch_threshold = max(1, feedback_batch_threshold)
         self._feedback_batch_lock = asyncio.Lock()
-        self._module_overrides = dict(module_overrides or {})
         self._llm_concurrency = llm_concurrency
         self._llm_concurrency_gate = llm_concurrency_gate
         # Pass usage_recorder through so internal LLM calls
@@ -174,7 +172,6 @@ class SoulEngine:
             registry=llm,
             memory=memory,
             usage_recorder=usage_recorder,
-            module_overrides=self._module_overrides,
             concurrency=llm_concurrency,
             concurrency_gate=llm_concurrency_gate,
         )

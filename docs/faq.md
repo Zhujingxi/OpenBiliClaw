@@ -59,7 +59,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 
 ### 不想为 embedding 单独配 API Key？
 
-装一次 [Ollama](https://ollama.com/download)，然后运行 `openbiliclaw setup-embedding`，向导会自动拉取 `bge-m3`（约 568MB，CPU 可跑）并写入配置。桌面安装包已内置，无需额外操作。
+装一次 [Ollama](https://ollama.com/download)，手动运行 `ollama pull bge-m3`，再运行 `openbiliclaw setup-embedding`。该命令只负责配置并写入原生 `[models.embedding]`，不会安装、启动、下载或访问网络；需要连通性检查时另行运行 `openbiliclaw models probe <id>`。桌面安装包已内置运行时和默认模型，无需额外安装。
 
 ### 手机打不开移动端 Web（`/m/`）？
 

@@ -17,7 +17,7 @@
       display: flex; align-items: center; justify-content: center; padding: 32px 16px;
     }
     .card {
-      width: 100%; max-width: 560px; background: var(--panel); border: 1px solid var(--line);
+      width: 100%; max-width: 860px; background: var(--panel); border: 1px solid var(--line);
       border-radius: 20px; box-shadow: 0 24px 60px rgba(0,0,0,.45); overflow: hidden;
     }
     .head { padding: 26px 28px 18px; border-bottom: 1px solid var(--line); }
@@ -96,6 +96,39 @@
       background: var(--accent); color: #fff; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; }
     .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3);
       border-top-color: #fff; border-radius: 50%; animation: rot .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+    .model-setup-layout { display: grid; grid-template-columns: minmax(190px, 230px) minmax(0, 1fr); gap: 18px; align-items: start; }
+    .model-connection-list-pane { min-width: 0; }
+    .connection-type-list { display: grid; gap: 8px; max-height: 440px; overflow: auto; padding-right: 3px; }
+    .connection-type-option {
+      width: 100%; padding: 12px 13px; background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 11px; text-align: left; font-weight: 700;
+    }
+    .connection-type-option:hover { border-color: #596174; }
+    .connection-type-option[aria-selected="true"] { border-color: var(--accent); background: rgba(251,114,153,.1); }
+    .connection-type-option span, .connection-type-option small { display: block; }
+    .connection-type-option small { margin-top: 2px; color: var(--muted); font-size: 11.5px; font-weight: 500; }
+    .model-connection-editor { min-width: 0; padding: 2px 16px 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(32,36,46,.45); }
+    .model-connection-heading { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin: 14px 0 4px; }
+    .model-connection-heading strong { font-size: 16px; }
+    .model-connection-heading code { color: var(--muted); font-size: 11px; }
+    .model-descriptor-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
+    .model-field.full { grid-column: 1 / -1; }
+    .model-field .hint { line-height: 1.4; }
+    .credential-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .credential-actions button { padding: 7px 10px; font-size: 12px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+    .credential-actions button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+    .model-type-back { display: none; margin: 12px 0 2px; padding: 7px 10px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
+    @media (max-width: 680px) {
+      .card { max-width: 560px; }
+      .model-setup-layout { grid-template-columns: 1fr; }
+      .connection-type-list { max-height: none; grid-template-columns: 1fr; }
+      .model-setup-layout[data-narrow-view="list"] .model-connection-editor { display: none; }
+      .model-setup-layout[data-narrow-view="detail"] .model-connection-list-pane { display: none; }
+      .model-setup-layout[data-narrow-view="list"] ~ .row-actions { display: none; }
+      .model-type-back { display: inline-flex; align-items: center; }
+      .model-descriptor-fields { grid-template-columns: 1fr; }
+      .model-field.full { grid-column: auto; }
+    }
     @keyframes rot { to { transform: rotate(360deg); } }
   </style>
 </head>
@@ -114,52 +147,29 @@
 
       <!-- Step 0: 连接 AI -->
       <section class="panel active" data-panel="0">
-        <h2>连接 AI 大脑</h2>
-        <p class="sub">OpenBiliClaw 用大模型理解你、生成推荐解释。选一个服务商,填入它的 API Key 即可。</p>
-        <label for="provider">AI 服务商</label>
-        <select id="provider">
-          <option value="deepseek">DeepSeek（推荐 · 便宜好用）</option>
-          <option value="openai">OpenAI</option>
-          <option value="claude">Claude（Anthropic）</option>
-          <option value="gemini">Gemini（Google）</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="openai_compatible">OpenAI 兼容接口（自建 / 第三方）</option>
-          <option value="ollama">本地 Ollama（免 key，需自备聊天模型）</option>
-        </select>
-
-        <div id="keyWrap">
-          <label for="apiKey">API Key</label>
-          <input id="apiKey" type="password" placeholder="粘贴你的 API Key" autocomplete="off">
-          <div class="hint" id="keyHint"></div>
+        <h2>设置 Chat 模型路由</h2>
+        <p class="sub">先选连接类型，再选对应 preset。OpenAI、DeepSeek 和 OpenRouter 统一归入 OpenAI-compatible；OAuth 登录单独列出。</p>
+        <div id="modelSetupLayout" class="model-setup-layout" data-narrow-view="list">
+          <div class="model-connection-list-pane">
+            <label>连接类型</label>
+            <div id="connectionTypeList" class="connection-type-list" role="listbox" aria-label="Chat 连接类型"></div>
+          </div>
+          <div class="model-connection-editor">
+            <button type="button" id="modelTypeBack" class="model-type-back" aria-label="返回连接类型列表">← 返回连接类型</button>
+            <div class="model-connection-heading">
+              <strong id="connectionTypeTitle">正在读取…</strong>
+              <code id="connectionStableId"></code>
+            </div>
+            <p class="hint" id="connectionTypeHelp"></p>
+            <div id="modelDescriptorFields" class="model-descriptor-fields"></div>
+            <div id="modelCredentialEditor"></div>
+          </div>
         </div>
-
-        <div id="baseWrap" style="display:none">
-          <label for="baseUrl">接口地址 Base URL</label>
-          <input id="baseUrl" type="text" placeholder="https://your-endpoint/v1">
-          <div class="hint" id="baseHint" style="display:none">用第三方中转/网关时填写(Anthropic 协议 /v1/messages);直连官方请留空。</div>
-        </div>
-
-        <div id="flavorWrap" style="display:none">
-          <label for="apiFlavor">接口协议</label>
-          <select id="apiFlavor">
-            <option value="">chat/completions（默认，绝大多数服务）</option>
-            <option value="responses">responses（部分第三方网关的 GPT 模型只开放这个）</option>
-          </select>
-        </div>
-
-        <div id="ollamaNote" class="hint" style="display:none; margin-top:14px">
-          本地 Ollama 已随安装包附带,无需填 key。聊天默认用 <code>qwen2.5</code> 等模型,
-          首次使用前请确保已 <code>ollama pull</code> 对应模型(embedding 的 bge-m3 已自动就绪)。
-        </div>
-
-        <label for="model">模型名</label>
-        <input id="model" type="text" placeholder="填写模型 ID，例如 deepseek-v4-flash">
-        <div class="hint" id="modelHint"></div>
 
         <div class="msg" id="msg0"></div>
         <div class="row-actions">
           <span></span>
-          <button class="primary" id="saveLlm">保存并继续 →</button>
+          <button class="primary" id="saveModel">测试、保存并继续 →</button>
         </div>
       </section>
 
@@ -224,24 +234,6 @@
 
   <script>
     const $ = (s) => document.querySelector(s);
-    const KEY_LINKS = {
-      deepseek: ["https://platform.deepseek.com/api_keys", "DeepSeek 开放平台"],
-      openai: ["https://platform.openai.com/api-keys", "OpenAI Platform"],
-      claude: ["https://console.anthropic.com/settings/keys", "Anthropic Console"],
-      gemini: ["https://aistudio.google.com/app/apikey", "Google AI Studio"],
-      openrouter: ["https://openrouter.ai/keys", "OpenRouter"],
-      openai_compatible: ["", ""],
-      ollama: ["", ""],
-    };
-    const DEFAULT_MODELS = {
-      deepseek: "deepseek-v4-flash",
-      openai: "gpt-5-nano",
-      claude: "claude-sonnet-4-6",
-      gemini: "gemini-2.5-flash",
-      openrouter: "openai/gpt-5-nano",
-      openai_compatible: "",
-      ollama: "qwen2.5:7b",
-    };
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
@@ -278,12 +270,16 @@
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
-    let lastAutoModel = "";
     let initPollInFlight = false, initPollPending = false;
-    // Providers whose api_key is already persisted server-side (GET /api/config
-    // returns it masked). Lets a relaunch save step 0 without re-pasting the
-    // key: PUT /api/config only touches fields present in the payload.
-    const savedKeyProviders = new Set();
+    let modelSnapshot = null;
+    let modelDescriptors = [];
+    let draftConnection = null;
+    let modelSaveInFlight = false;
+    let modelNarrowView = "list";
+    let modelTouchedFields = new Set();
+    const MODEL_VALUE_FIELDS = [
+      "model", "base_url", "api_mode", "reasoning_effort", "http_referer", "x_title", "num_ctx",
+    ];
 
     function setStep(n) {
       step = n;
@@ -297,80 +293,479 @@
       if (n === 2) renderInitIdle();
     }
 
-    function renderProvider() {
-      const p = $("#provider").value;
-      const isOllama = p === "ollama";
-      const isCompat = p === "openai_compatible";
-      const isClaude = p === "claude";
-      $("#apiKey").placeholder = savedKeyProviders.has(p) ? "已保存，留空则沿用当前 Key" : "粘贴你的 API Key";
-      $("#keyWrap").style.display = isOllama ? "none" : "block";
-      // Claude 也开放 Base URL（可选，第三方 Anthropic 协议网关，见 issue #72）
-      $("#baseWrap").style.display = (isCompat || isClaude) ? "block" : "none";
-      $("#baseHint").style.display = isClaude ? "block" : "none";
-      // openai_compatible 可切 /v1/responses 协议（issue #72）
-      $("#flavorWrap").style.display = isCompat ? "block" : "none";
-      $("#ollamaNote").style.display = isOllama ? "block" : "none";
-      const [url, name] = KEY_LINKS[p] || ["", ""];
-      $("#keyHint").innerHTML = url ? `还没有 key？去 <a href="${url}" target="_blank" rel="noopener">${name}</a> 免费申请,粘贴回来即可。` : "";
-      const modelInput = $("#model");
-      const defaultModel = DEFAULT_MODELS[p] || "";
-      if (!modelInput.value.trim() || (lastAutoModel && modelInput.value.trim() === lastAutoModel)) {
-        modelInput.value = defaultModel;
-        lastAutoModel = defaultModel;
-      }
-      $("#modelHint").textContent = defaultModel
-        ? "已填入推荐默认模型，可按你的服务商实际模型名修改。"
-        : "OpenAI 兼容接口通常需要填写你的部署名或第三方模型 ID。";
-    }
-
     function showMsg(id, text, kind) {
       const el = $(id);
       el.className = "msg show " + kind;
       el.innerHTML = text;
     }
 
-    async function saveLlm() {
-      const provider = $("#provider").value;
-      const apiKey = $("#apiKey").value.trim();
-      const baseUrl = $("#baseUrl").value.trim();
-      const model = $("#model").value.trim();
-      if (provider !== "ollama" && !apiKey && !savedKeyProviders.has(provider)) { showMsg("#msg0", "请先填入 API Key（本地 Ollama 才可免 key）。", "err"); return; }
-      if (provider === "openai_compatible" && !baseUrl) { showMsg("#msg0", "OpenAI 兼容接口需要填 Base URL。", "err"); return; }
-      if (!model) { showMsg("#msg0", "请填写模型名。", "err"); return; }
+    function showTextMsg(id, text, kind) {
+      const el = $(id);
+      el.className = "msg show " + kind;
+      el.textContent = text;
+    }
 
-      const pcfg = {};
-      if (apiKey) pcfg.api_key = apiKey;
-      // 只有展示了 Base URL 输入框的 provider 才提交它,避免切换 provider 时
-      // 把上一个 provider 残留的地址写进错误的配置段。
-      if (baseUrl && (provider === "openai_compatible" || provider === "claude")) pcfg.base_url = baseUrl;
-      if (provider === "openai_compatible") pcfg.api_flavor = $("#apiFlavor").value;
-      pcfg.model = model;
-      const payload = {
-        suppress_background_llm_work: true,
-        llm: { default_provider: provider, [provider]: pcfg },
+    function clone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function setModelNarrowView(view) {
+      modelNarrowView = view === "detail" ? "detail" : "list";
+      const layout = $("#modelSetupLayout");
+      if (layout) layout.dataset.narrowView = modelNarrowView;
+    }
+
+    function showModelTypeList() {
+      setModelNarrowView("list");
+      const selected = document.querySelector('#connectionTypeList [aria-selected="true"]');
+      if (selected) selected.focus();
+    }
+
+    function descriptorFor(type) {
+      return modelDescriptors.find((descriptor) => descriptor.id === type) || null;
+    }
+
+    function safeCredentialStatus(credential) {
+      return {
+        source: ["none", "inline", "env", "oauth"].includes(credential?.source) ? credential.source : "none",
+        configured: Boolean(credential?.configured),
+        env_name: String(credential?.env_name || ""),
+        credential_ref: String(credential?.credential_ref || ""),
+        oauth_logged_in: Boolean(credential?.oauth_logged_in),
       };
+    }
 
-      const btn = $("#saveLlm");
-      btn.disabled = true; btn.innerHTML = '<span class="spin"></span>保存中…';
+    function hydrateDraftConnection(connection) {
+      const credential = connection?.credential || {};
+      const descriptor = descriptorFor(String(connection?.type || ""));
+      const status = safeCredentialStatus(credential);
+      const hasCredentialField = Boolean(descriptor?.fields?.some((field) => field.name === "credential"));
+      return {
+        id: String(connection?.id || "chat-primary"),
+        name: String(connection?.name || descriptor?.label || "Primary Chat"),
+        type: String(connection?.type || modelDescriptors[0]?.id || ""),
+        model: String(connection?.model || ""),
+        preset: String(connection?.preset || ""),
+        base_url: String(connection?.base_url || ""),
+        credential: {
+          action: status.configured || descriptor?.category === "oauth"
+            ? "keep"
+            : hasCredentialField ? "set" : "clear",
+          value: "",
+          status,
+        },
+        api_mode: String(connection?.api_mode || ""),
+        reasoning_effort: String(connection?.reasoning_effort || ""),
+        http_referer: String(connection?.http_referer || ""),
+        x_title: String(connection?.x_title || ""),
+        num_ctx: Number(connection?.num_ctx || 0),
+      };
+    }
+
+    function createFirstChatDraft() {
+      const descriptor = modelDescriptors[0];
+      if (!descriptor) throw new Error("后端没有可用的 Chat 连接类型。");
+      const usedIds = new Set([
+        ...(modelSnapshot?.models?.chat?.connections || []),
+        ...(modelSnapshot?.models?.embedding?.providers || []),
+      ].map((record) => String(record?.id || "")).filter(Boolean));
+      let stableId = "chat-primary";
+      let suffix = 2;
+      while (usedIds.has(stableId)) {
+        stableId = `chat-primary-${suffix}`;
+        suffix += 1;
+      }
+      const firstPreset = (descriptor.preset_definitions || []).find(
+        (preset) => preset.capabilities?.includes("chat"),
+      );
+      const hasCredentialField = descriptor.fields.some((field) => field.name === "credential");
+      draftConnection = {
+        id: stableId,
+        name: descriptor.label,
+        type: descriptor.id,
+        model: "",
+        preset: firstPreset?.id || "",
+        base_url: "",
+        credential: {
+          action: descriptor.category === "oauth" ? "keep" : hasCredentialField ? "set" : "clear",
+          value: "",
+          status: safeCredentialStatus(null),
+        },
+        api_mode: "",
+        reasoning_effort: "",
+        http_referer: "",
+        x_title: "",
+        num_ctx: 0,
+      };
+      if (firstPreset) applyPresetDefaults(descriptor, firstPreset, true);
+      return draftConnection;
+    }
+
+    function currentPreset(descriptor) {
+      return (descriptor?.preset_definitions || []).find(
+        (preset) => preset.id === draftConnection?.preset && preset.capabilities?.includes("chat"),
+      ) || null;
+    }
+
+    function applicableModelFields(descriptor, presetId) {
+      return new Set(
+        (descriptor?.fields || [])
+          .filter((field) => (
+            (!field.capabilities?.length || field.capabilities.includes("chat"))
+            && (!field.presets?.length || field.presets.includes(presetId))
+          ))
+          .map((field) => field.name),
+      );
+    }
+
+    function clearInvalidModelFields(descriptor, presetId) {
+      const applicable = applicableModelFields(descriptor, presetId);
+      for (const field of MODEL_VALUE_FIELDS) {
+        if (applicable.has(field)) continue;
+        draftConnection[field] = field === "num_ctx" ? 0 : "";
+        modelTouchedFields.delete(field);
+      }
+      return applicable;
+    }
+
+    function applyPresetDefaults(descriptor, preset, force = false) {
+      if (!draftConnection || !preset) return;
+      draftConnection.preset = preset.id;
+      const applicable = applicableModelFields(descriptor, preset.id);
+      for (const [field, value] of Object.entries(preset.defaults || {})) {
+        const current = draftConnection[field];
+        const empty = current === "" || current === null || current === undefined
+          || (field === "num_ctx" && Number(current) === 0);
+        if (applicable.has(field) && (!modelTouchedFields.has(field) || empty)) {
+          draftConnection[field] = value;
+        }
+      }
+      clearInvalidModelFields(descriptor, preset.id);
+    }
+
+    function selectConnectionType(type) {
+      if (modelSaveInFlight) return;
+      const descriptor = descriptorFor(type);
+      if (!descriptor || !draftConnection) return;
+      if (draftConnection.type !== type) {
+        const previous = draftConnection;
+        const firstPreset = (descriptor.preset_definitions || []).find(
+          (preset) => preset.capabilities?.includes("chat"),
+        );
+        const hasCredentialField = descriptor.fields.some((field) => field.name === "credential");
+        draftConnection = {
+          ...previous,
+          id: previous.id,
+          name: previous.name || descriptor.label,
+          type,
+          preset: firstPreset?.id || "",
+          credential: {
+            action: descriptor.category === "oauth" ? "keep" : hasCredentialField ? "set" : "clear",
+            value: "",
+            status: safeCredentialStatus(null),
+          },
+        };
+        const applicable = clearInvalidModelFields(descriptor, draftConnection.preset);
+        for (const field of MODEL_VALUE_FIELDS) {
+          if (applicable.has(field) && !modelTouchedFields.has(field)) {
+            draftConnection[field] = field === "num_ctx" ? 0 : "";
+          }
+        }
+        if (firstPreset) applyPresetDefaults(descriptor, firstPreset, true);
+      }
+      setModelNarrowView("detail");
+      renderModelSetup();
+    }
+
+    function renderConnectionTypes() {
+      const disabled = modelSaveInFlight ? " disabled" : "";
+      $("#connectionTypeList").innerHTML = modelDescriptors.map((descriptor) => `
+        <button type="button" class="connection-type-option" role="option"
+          data-connection-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === draftConnection?.type}"${disabled}>
+          <span>${escapeHtml(descriptor.label)}</span><small>${escapeHtml(descriptor.category === "oauth" ? "OAuth 登录" : descriptor.help)}</small>
+        </button>`).join("");
+    }
+
+    function renderDescriptorField(descriptor, field) {
+      if (field.name === "credential") return "";
+      if (field.capabilities?.length && !field.capabilities.includes("chat")) return "";
+      if (field.presets?.length && !field.presets.includes(draftConnection.preset)) return "";
+      const required = field.required ? " required" : "";
+      const disabled = modelSaveInFlight ? " disabled" : "";
+      const help = field.help ? `<div class="hint">${escapeHtml(field.help)}</div>` : "";
+      if (field.name === "preset") {
+        const options = (descriptor.preset_definitions || [])
+          .filter((preset) => preset.capabilities?.includes("chat"));
+        return `<div class="model-field full"><label>Preset</label><select data-model-field="preset"${required}${disabled}>${options.map(
+          (preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === draftConnection.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`,
+        ).join("")}</select>${currentPreset(descriptor)?.help ? `<div class="hint">${escapeHtml(currentPreset(descriptor).help)}</div>` : help}</div>`;
+      }
+      if (field.input_type === "select") {
+        const current = String(draftConnection[field.name] || "");
+        const blank = !field.required && !current ? '<option value="" selected>默认</option>' : "";
+        return `<div class="model-field"><label>${escapeHtml(field.label)}</label><select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${blank}${(field.choices || []).map(
+          (choice) => `<option value="${escapeHtml(choice)}"${current === choice ? " selected" : ""}>${escapeHtml(choice)}</option>`,
+        ).join("")}</select>${help}</div>`;
+      }
+      const inputType = field.input_type === "number" ? "number" : "text";
+      const value = draftConnection[field.name] ?? "";
+      const full = field.name === "base_url" ? " full" : "";
+      return `<div class="model-field${full}"><label>${escapeHtml(field.label)}</label><input type="${inputType}" data-model-field="${escapeHtml(field.name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>${help}</div>`;
+    }
+
+    function renderCredential(descriptor) {
+      const host = $("#modelCredentialEditor");
+      const definition = descriptor.fields.find((field) => field.name === "credential");
+      if (!definition) {
+        host.innerHTML = '<p class="hint">此连接类型不需要凭据。</p>';
+        return;
+      }
+      const status = draftConnection.credential.status;
+      if (descriptor.category === "oauth") {
+        draftConnection.credential = { ...draftConnection.credential, action: "keep", value: "" };
+        host.innerHTML = `<label>${escapeHtml(definition.label)}</label><div class="hint">${escapeHtml(status.oauth_logged_in ? "已检测到登录" : "将导入本机登录")} · ${escapeHtml(status.credential_ref || definition.choices?.[0] || descriptor.label)}</div>`;
+        return;
+      }
+      const disabled = modelSaveInFlight ? " disabled" : "";
+      const sourceText = status.configured
+        ? `已配置（${status.source}${status.env_name ? ` · ${status.env_name}` : ""}）`
+        : "尚未配置";
+      const action = draftConnection.credential.action;
+      const needsValue = action === "set" || action === "env";
+      host.innerHTML = `
+        <label>${escapeHtml(definition.label)}</label>
+        <div class="hint">${escapeHtml(sourceText)}。读取时只返回状态，不会把已保存的密钥写入输入框。</div>
+        <div class="credential-actions">
+          ${status.configured ? `<button type="button" data-credential-action="keep" aria-pressed="${action === "keep"}"${disabled}>沿用已保存</button>` : ""}
+          <button type="button" data-credential-action="set" aria-pressed="${action === "set"}"${disabled}>输入 API Key</button>
+          <button type="button" data-credential-action="env" aria-pressed="${action === "env"}"${disabled}>环境变量</button>
+          <button type="button" data-credential-action="clear" aria-pressed="${action === "clear"}"${disabled}>清除</button>
+        </div>
+        ${needsValue ? `<input id="modelCredentialValue" type="${action === "set" ? "password" : "text"}" value="${escapeHtml(draftConnection.credential.value || "")}" placeholder="${action === "env" ? "例如 OPENAI_API_KEY" : "输入新 API Key"}" autocomplete="new-password"${disabled}>` : ""}`;
+    }
+
+    function renderModelSetup() {
+      setModelNarrowView(modelNarrowView);
+      renderConnectionTypes();
+      const descriptor = descriptorFor(draftConnection?.type);
+      if (!descriptor || !draftConnection) return;
+      $("#connectionTypeTitle").textContent = descriptor.label;
+      $("#connectionStableId").textContent = `ID: ${draftConnection.id}`;
+      $("#connectionTypeHelp").textContent = descriptor.help;
+      $("#modelDescriptorFields").innerHTML = descriptor.fields
+        .map((field) => renderDescriptorField(descriptor, field))
+        .join("");
+      renderCredential(descriptor);
+    }
+
+    function updateModelField(field, value) {
+      if (!draftConnection || modelSaveInFlight) return;
+      if (field === "preset") {
+        const descriptor = descriptorFor(draftConnection.type);
+        const preset = (descriptor?.preset_definitions || []).find((item) => item.id === value);
+        if (preset) applyPresetDefaults(descriptor, preset);
+        renderModelSetup();
+        return;
+      }
+      modelTouchedFields.add(field);
+      draftConnection[field] = field === "num_ctx" ? Number(value || 0) : value;
+    }
+
+    function credentialActionPayload(credential) {
+      const action = ["keep", "set", "clear", "env"].includes(credential?.action)
+        ? credential.action : "keep";
+      return action === "set" || action === "env"
+        ? { action, value: String(credential?.value || "") }
+        : { action };
+    }
+
+    function chatConnectionPayload(connection, credential = { action: "keep" }) {
+      return {
+        id: String(connection?.id || ""),
+        name: String(connection?.name || ""),
+        type: String(connection?.type || ""),
+        model: String(connection?.model || ""),
+        preset: String(connection?.preset || ""),
+        base_url: String(connection?.base_url || ""),
+        credential: credentialActionPayload(credential),
+        api_mode: String(connection?.api_mode || ""),
+        reasoning_effort: String(connection?.reasoning_effort || ""),
+        http_referer: String(connection?.http_referer || ""),
+        x_title: String(connection?.x_title || ""),
+        num_ctx: Math.max(0, Number(connection?.num_ctx || 0)),
+      };
+    }
+
+    function embeddingProviderPayload(provider) {
+      return {
+        id: String(provider?.id || ""),
+        name: String(provider?.name || ""),
+        type: String(provider?.type || ""),
+        preset: String(provider?.preset || ""),
+        base_url: String(provider?.base_url || ""),
+        credential: { action: "keep" },
+      };
+    }
+
+    function buildModelConfigPayload(primaryDraft) {
+      const models = modelSnapshot.models;
+      return {
+        revision: modelSnapshot.revision,
+        models: {
+          schema_version: 1,
+          chat: {
+            concurrency: Number(models.chat.concurrency),
+            timeout_seconds: Number(models.chat.timeout_seconds),
+            connections: [
+              primaryDraft,
+              ...models.chat.connections.slice(1).map((connection) => chatConnectionPayload(connection)),
+            ],
+          },
+          embedding: {
+            enabled: Boolean(models.embedding.enabled),
+            settings: {
+              model: String(models.embedding.settings.model || ""),
+              output_dimensionality: Number(models.embedding.settings.output_dimensionality || 0),
+              similarity_threshold: Number(models.embedding.settings.similarity_threshold),
+              multimodal_enabled: Boolean(models.embedding.settings.multimodal_enabled),
+            },
+            providers: models.embedding.providers.map(embeddingProviderPayload),
+          },
+        },
+        migration_resolutions: {},
+      };
+    }
+
+    function validateModelDraft(descriptor) {
+      for (const field of descriptor.fields || []) {
+        if (field.name === "credential") continue;
+        if (field.capabilities?.length && !field.capabilities.includes("chat")) continue;
+        if (field.presets?.length && !field.presets.includes(draftConnection.preset)) continue;
+        if (field.required && !String(draftConnection[field.name] ?? "").trim()) {
+          return `请填写${field.label}。`;
+        }
+      }
+      const credentialField = descriptor.fields.find((field) => field.name === "credential");
+      if (
+        credentialField?.required
+        && ["set", "env"].includes(draftConnection.credential.action)
+        && !String(draftConnection.credential.value || "").trim()
+      ) return draftConnection.credential.action === "env" ? "请填写环境变量名。" : "请填写 API Key。";
+      return "";
+    }
+
+    async function modelResponse(response) {
+      let details = {};
+      try { details = await response.json(); } catch {}
+      if (response.ok) return details;
+      const error = new Error(details.message || details.detail || details.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.details = details;
+      throw error;
+    }
+
+    function hydrateModelSetup(snapshot) {
+      if (!snapshot?.models?.chat || !snapshot?.models?.embedding) {
+        throw new Error("模型配置快照结构不完整。");
+      }
+      modelSnapshot = clone(snapshot);
+      modelTouchedFields = new Set();
+      setModelNarrowView("list");
+      const connections = Array.isArray(snapshot.models.chat.connections)
+        ? snapshot.models.chat.connections : [];
+      draftConnection = connections.length
+        ? hydrateDraftConnection(connections[0])
+        : createFirstChatDraft();
+      renderModelSetup();
+    }
+
+    function handleModelConflict(details) {
+      if (details?.latest) hydrateModelSetup(details.latest);
+      showMsg("#msg0", "模型配置已在另一个窗口更新。已载入最新版本，请重新确认后点击重试。", "warn");
+    }
+
+    async function loadModelSetup() {
+      const [typesResponse, snapshotResponse] = await Promise.all([
+        fetch("/api/model-connection-types?capability=chat"),
+        fetch("/api/model-config"),
+      ]);
+      if (typesResponse.status === 401 || snapshotResponse.status === 401) {
+        const error = new Error("需要先登录");
+        error.status = 401;
+        throw error;
+      }
+      const descriptors = await modelResponse(typesResponse);
+      modelDescriptors = Array.isArray(descriptors.connection_types) ? descriptors.connection_types : [];
+      if (!modelDescriptors.length) throw new Error("后端没有可用的 Chat 连接类型。");
+      hydrateModelSetup(await modelResponse(snapshotResponse));
+    }
+
+    async function saveModelRoute() {
+      if (!modelSnapshot || !draftConnection || modelSaveInFlight) return;
+      const descriptor = descriptorFor(draftConnection.type);
+      if (!descriptor) return;
+      const validationError = validateModelDraft(descriptor);
+      if (validationError) {
+        showTextMsg("#msg0", validationError, "err");
+        return;
+      }
+
+      const primaryDraft = chatConnectionPayload(draftConnection, draftConnection.credential);
+      const payload = buildModelConfigPayload(primaryDraft);
+      const btn = $("#saveModel");
+      modelSaveInFlight = true;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spin"></span>正在测试精确配置…';
+      renderModelSetup();
       try {
-        const r = await fetch("/api/config", {
-          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-        });
-        if (r.status === 401) {
-          // Remote browser + auth enabled: /api/config is session-gated (only
-          // the init endpoints are public). Point at the login path instead of
-          // dead-ending on a bare HTTP 401.
-          showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
+        const probe = await modelResponse(await fetch("/api/model-config/probe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            kind: "chat",
+            revision: modelSnapshot.revision,
+            connection: primaryDraft,
+          }),
+        }));
+        if (!probe.ok) {
+          showTextMsg("#msg0", `连接测试未通过：${probe.message || probe.error_code || "未知错误"}`, "err");
           return;
         }
-        if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0, 200));
-        const label = provider === "ollama" ? "本地 Ollama" : provider;
-        $("#doneLlm").textContent = "已连接 · " + label;
+        btn.innerHTML = '<span class="spin"></span>测试通过，正在保存…';
+        const result = await modelResponse(await fetch("/api/model-config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }));
+        hydrateModelSetup(result.snapshot);
+        const preset = currentPreset(descriptorFor(draftConnection.type));
+        $("#doneLlm").textContent = `已连接 · ${preset?.label || descriptor.label}`;
         setStep(1);
-      } catch (e) {
-        showMsg("#msg0", "保存失败：" + e.message, "err");
+      } catch (error) {
+        if (error.status === 401) {
+          showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
+        } else if (error.status === 409 && error.details?.error === "revision_conflict") {
+          handleModelConflict(error.details);
+        } else {
+          const fieldErrors = Array.isArray(error.details?.errors)
+            ? error.details.errors.map((item) => item.message).filter(Boolean).join("；")
+            : "";
+          showTextMsg("#msg0", `模型配置失败：${fieldErrors || error.message || "请稍后重试"}`, "err");
+        }
       } finally {
-        btn.disabled = false; btn.innerHTML = "保存并继续 →";
+        modelSaveInFlight = false;
+        btn.disabled = false;
+        btn.innerHTML = "测试、保存并继续 →";
+        renderModelSetup();
       }
     }
 
@@ -1036,32 +1431,20 @@
       location.href = "/web";
     }
 
-    // Resume where the user actually is: prefill saved config, then ask
+    // Resume where the user actually is: hydrate the native model route, then ask
     // /api/init-status — a reload mid-init must re-attach to the live progress
-    // instead of silently landing on step 0, and an initialized backend goes
+    // instead of silently landing on step 0. An initialized backend goes
     // straight to done / first-pool waiting.
     (async function guard() {
       try {
-        const r = await fetch("/api/config");
-        if (r.ok) {
-          const data = await r.json();
-          const llm = (data.config || data)?.llm || {};
-          for (const [name, cfg] of Object.entries(llm)) {
-            if (cfg && typeof cfg === "object" && String(cfg.api_key || "").trim()) savedKeyProviders.add(name);
-          }
-          const prov = llm.default_provider || "";
-          const providerCfg = (llm[prov] && typeof llm[prov] === "object") ? llm[prov] : {};
-          const hasKey = prov && (prov === "ollama" || providerCfg.api_key);
-          if (hasKey) {
-            $("#provider").value = prov;
-            if (providerCfg.model) {
-              $("#model").value = providerCfg.model;
-              lastAutoModel = "";
-            }
-          }
+        await loadModelSetup();
+      } catch (error) {
+        if (error.status === 401) {
+          showMsg("#msg0", '后端开启了访问密码。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试。', "err");
+        } else {
+          showTextMsg("#msg0", `无法读取模型配置：${error.message || "请稍后刷新"}`, "err");
         }
-      } catch {}
-      renderProvider();
+      }
       try {
         const status = await fetchInitStatus();
         if (status.running) {
@@ -1084,8 +1467,32 @@
       } catch {}
     })();
 
-    $("#provider").addEventListener("change", renderProvider);
-    $("#saveLlm").addEventListener("click", saveLlm);
+    $("#connectionTypeList").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-connection-type]");
+      if (button) selectConnectionType(button.dataset.connectionType);
+    });
+    $("#modelTypeBack").addEventListener("click", showModelTypeList);
+    $("#modelDescriptorFields").addEventListener("input", (event) => {
+      const field = event.target.dataset.modelField;
+      if (field && event.target.tagName !== "SELECT") updateModelField(field, event.target.value);
+    });
+    $("#modelDescriptorFields").addEventListener("change", (event) => {
+      const field = event.target.dataset.modelField;
+      if (field) updateModelField(field, event.target.value);
+    });
+    $("#modelCredentialEditor").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-credential-action]");
+      if (!button || !draftConnection || modelSaveInFlight) return;
+      draftConnection.credential.action = button.dataset.credentialAction;
+      draftConnection.credential.value = "";
+      renderCredential(descriptorFor(draftConnection.type));
+    });
+    $("#modelCredentialEditor").addEventListener("input", (event) => {
+      if (event.target.id === "modelCredentialValue" && draftConnection && !modelSaveInFlight) {
+        draftConnection.credential.value = event.target.value;
+      }
+    });
+    $("#saveModel").addEventListener("click", saveModelRoute);
     $("#back1").addEventListener("click", () => setStep(0));
     $("#next1").addEventListener("click", () => setStep(2));
     $("#backInit").addEventListener("click", () => setStep(1));

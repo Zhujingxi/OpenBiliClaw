@@ -86,28 +86,26 @@ def test_desktop_settings_selects_survive_browser_page_translation() -> None:
 
     valueless = re.findall(r"<option(?:\s+selected=\"\")?>[^<]*</option>", html)
     assert valueless == [], f"value-less <option> elements: {valueless}"
-    for select_id in (
-        "llmProvider",
-        "llmFallbackProvider",
-        "embeddingProvider",
-        "embeddingFallbackProvider",
-        "moduleSoulProvider",
-        "moduleDiscoveryProvider",
-        "moduleRecommendationProvider",
-        "moduleEvaluationProvider",
-        "logLevel",
-        "logFileLevel",
-    ):
+    for select_id in ("logLevel", "logFileLevel"):
         m = re.search(rf'<select id="{select_id}"[^>]*>', html)
         assert m, select_id
         assert 'translate="no"' in m.group(0), f"{select_id} missing translate=no"
 
+    model_js = Path("src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
+    assert "field.choices" in model_js
+    assert "preset_definitions" in model_js
+    assert '<option value="${escapeHtml(' in model_js
 
-def test_desktop_settings_warns_on_same_name_llm_fallback() -> None:
-    """A fallback provider equal to the default would never fire (the
-    registry drops it silently; the backend now rejects the save with a
-    blocking issue). The settings page must carry an inline warning element
-    and disable the same-name option via syncLlmFallbackSameState."""
-    assert 'id="llmFallbackSameWarning"' in _INDEX
-    assert "function syncLlmFallbackSameState()" in _APP_JS
-    assert "syncLlmFallbackSameState();" in _APP_JS
+
+def test_desktop_settings_allows_same_type_instances_with_distinct_ids() -> None:
+    """Fallback identity is now the stable record ID, not provider type."""
+    model_js = Path("src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="llmFallbackSameWarning"' not in _INDEX
+    assert "syncLlmFallbackSameState" not in _APP_JS
+    assert "data-model-record-id" in model_js
+    assert "record.id" in model_js

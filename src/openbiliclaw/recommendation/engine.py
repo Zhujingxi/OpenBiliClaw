@@ -40,7 +40,7 @@ _DEFAULT_EXPRESSION_BATCH_SIZE = 30
 _DEFAULT_EXPRESSION_BATCH_CONCURRENCY = 2
 
 # Cover visual alignment → delight bonus (opt-in, only when
-# [llm.embedding].multimodal_enabled + a multimodal embedding model are active).
+# [models.embedding.settings].multimodal_enabled + a multimodal model are active).
 #
 # CALIBRATION PROVENANCE: PROVISIONAL / UNMEASURED. Cross-modal image↔text
 # cosine in shared-space embedders (qwen3-vl-embedding / gemini-embedding-2)

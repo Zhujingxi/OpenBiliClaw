@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,19 +62,76 @@ def _bundled_with_seed(tmp_path: Path) -> Path:
 
 def _write_config(tmp_path: Path, *, provider: str = "") -> Path:
     cfg = tmp_path / "config.toml"
+    embedding_enabled = provider == "openai"
+    provider_block = (
+        """
+[[models.embedding.providers]]
+id = "remote-embedding"
+name = "Remote Embedding"
+type = "openai_compatible"
+preset = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+"""
+        if embedding_enabled
+        else ""
+    )
     cfg.write_text(
-        f'[llm.embedding]\nprovider = "{provider}"\nbase_url = ""\nmodel = "bge-m3"\n',
+        f"""[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "chat-main"
+name = "Primary Chat"
+type = "openai_compatible"
+preset = "deepseek"
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+[models.embedding]
+enabled = {str(embedding_enabled).lower()}
+[models.embedding.settings]
+model = "{"text-embedding-3-small" if embedding_enabled else "bge-m3"}"
+output_dimensionality = {1536 if embedding_enabled else 1024}
+similarity_threshold = 0.82
+multimodal_enabled = false
+{provider_block}
+[general]
+language = "zh"
+""",
         encoding="utf-8",
     )
     return cfg
 
 
-def test_set_embedding_field_edits_only_that_line(tmp_path: Path) -> None:
+def test_configure_ollama_embedding_updates_native_route_and_keeps_chat(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
-    entry._set_embedding_field(cfg, "base_url", "http://127.0.0.1:11435/v1")
-    text = cfg.read_text()
-    assert 'base_url = "http://127.0.0.1:11435/v1"' in text
-    assert 'provider = ""' in text  # other lines untouched
+
+    assert (
+        entry._configure_ollama_embedding(
+            cfg,
+            provider_id="ollama-packaged",
+            name="Bundled Ollama",
+            base_url="http://127.0.0.1:11435/v1",
+            model="bge-m3",
+        )
+        is True
+    )
+
+    raw = tomllib.loads(cfg.read_text(encoding="utf-8"))
+    assert raw["models"]["chat"]["connections"][0]["id"] == "chat-main"
+    assert raw["models"]["embedding"]["settings"]["model"] == "bge-m3"
+    assert raw["models"]["embedding"]["providers"] == [
+        {
+            "id": "ollama-packaged",
+            "name": "Bundled Ollama",
+            "type": "ollama",
+            "base_url": "http://127.0.0.1:11435/v1",
+        }
+    ]
+    assert raw["general"] == {"language": "zh"}
 
 
 def test_seed_bundled_lean_variant_is_noop(tmp_path: Path) -> None:

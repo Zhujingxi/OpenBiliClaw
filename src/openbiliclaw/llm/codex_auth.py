@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -28,6 +29,7 @@ _CODEX_AUTH_PATH_ENV = "OPENBILICLAW_CODEX_AUTH_PATH"
 _CODEX_CLI_AUTH_PATH_ENV = "OPENBILICLAW_CODEX_CLI_AUTH_PATH"
 _TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
 _CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+OFFICIAL_CODEX_API_BASE_URL = "https://api.openai.com/v1"
 _EXPIRY_SKEW_SECONDS = 300.0
 _refresh_lock = asyncio.Lock()
 
@@ -87,6 +89,45 @@ def default_codex_cli_auth_path() -> Path:
 def codex_credentials_exist(*, token_path: Path | None = None) -> bool:
     """Return whether OpenBiliClaw has a local Codex credential file."""
     return (token_path or default_token_path()).expanduser().exists()
+
+
+def validated_codex_api_base_url(base_url: str) -> str:
+    """Return the canonical endpoint or reject every non-official variant.
+
+    OAuth bearer tokens are high-value credentials.  They may only be sent to
+    the exact official HTTPS API base, with no userinfo, explicit port, extra
+    path, query, or fragment.
+    """
+    candidate = base_url.strip()
+    if not candidate:
+        return OFFICIAL_CODEX_API_BASE_URL
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError as exc:
+        raise CodexAuthError("Codex API endpoint is not allowed") from exc
+    allowed = (
+        candidate == OFFICIAL_CODEX_API_BASE_URL
+        and parsed.scheme == "https"
+        and parsed.hostname == "api.openai.com"
+        and parsed.username is None
+        and parsed.password is None
+        and port is None
+        and parsed.path == "/v1"
+        and not parsed.query
+        and not parsed.fragment
+    )
+    if not allowed:
+        raise CodexAuthError("Codex API endpoint is not allowed")
+    return OFFICIAL_CODEX_API_BASE_URL
+
+
+def load_codex_access_token() -> str:
+    """Load the current Codex access token for adapter construction."""
+    credentials = load_codex_credentials()
+    if credentials is None:
+        raise CodexAuthError("Codex OAuth credentials are unavailable")
+    return credentials.access_token
 
 
 def save_codex_credentials(

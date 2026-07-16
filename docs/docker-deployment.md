@@ -18,7 +18,11 @@
 - 源码构建路径(`docker-compose.yml`):`ollama` 服务用 `docker/ollama-bundled.Dockerfile` 本地构建(构建时联网拉一次 bge-m3 烤进镜像;之后运行离线)。
 - 万一烤好的种子缺失/损坏,healthcheck 会**明确报 unhealthy**(不静默降级);设 `OPENBILICLAW_OLLAMA_ALLOW_PULL=1` 可显式允许运行时联网补拉。
 
-后端容器首次启动时会自动把 `[llm.embedding] provider="ollama" model="bge-m3" base_url="http://ollama:11434/v1"` 写进生成的 `config.toml`,所以你**只需要给一个 chat 模型的 Key**,embedding 完全免费 + 离线可用。
+后端容器首次启动时会在原生 `[models.embedding]` 下加入一条稳定的
+`ollama` Provider 记录，并把共享 model 设为 `bge-m3`、endpoint 指向
+`http://ollama:11434/v1`。这是生成新 `config.toml` 时的 template seed：
+本地记录位于第 1 项，模板里已有的远端 Provider 保持相对顺序排在其后，
+Chat route 不改。磁盘上已存在的 `config.toml` 整体不覆盖。
 
 不需要这个 sidecar？删掉 `docker-compose.yml` 里 `ollama` 服务块和后端的 `OPENBILICLAW_SEED_OLLAMA_DEFAULTS` 环境变量即可。
 
@@ -57,7 +61,7 @@ OpenBiliClaw 不爬登录态——它复用**你**当前浏览器的登录会话
 
 ## 快速开始
 
-三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查**——它和桌面安装包是同一套向导：配置 LLM / embedding、选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit）、真实校验前置条件。
+三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查**——它和桌面安装包是同一套首启向导：先选 Chat 连接类型、按需选 preset，创建或编辑第一条稳定-ID Chat 记录，同时保留已有 fallback、Embedding route 与共享 settings；完整路由管理使用设置页或 `openbiliclaw models ...`。随后选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit）并校验前置条件。
 
 > ⚠️ **容器内「开始初始化」按钮不可用**：Docker 运行时后端会拒绝网页发起的图形化初始化（`unsupported_runtime`），向导页会直接给出替代命令。在 `/setup/` 完成配置和前置检查后，初始化本身在宿主机执行：
 >
@@ -114,12 +118,12 @@ $env:MODE="docker"; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliCl
 
 安装脚本会克隆 / 更新仓库，然后调用 `agent_bootstrap.py --mode docker --interactive-confirm --wait-for-extension-cookie`。bootstrap 的 Docker 顺序是：
 
-1. 在宿主机终端收集安装选择（LLM provider、embedding、B 站 Cookie 获取方式，以及小红书 / 抖音 / YouTube 初始化 opt-in；X / 知乎 / Reddit 请在 `/setup/` 引导页或后端设置页里开启）。Contract marker: human Docker one-line installer asks the same LLM provider first.
+1. 在宿主机终端先选 Chat connection type，再按 descriptor 选择 preset / credential / model，然后配置 ordered Embedding route、B 站 Cookie 获取方式，以及小红书 / 抖音 / YouTube 初始化 opt-in；X / 知乎 / Reddit 请在 `/setup/` 引导页或后端设置页里开启。Contract marker: human Docker one-line installer asks the Chat connection type first.
 2. 写入宿主机 `config.toml`。
 3. `docker compose up -d --build` 启动后端和 Ollama embedding sidecar。
 4. 把确认后的 `config.toml` / Cookie 文件同步到容器 `/app/runtime`。
 5. 等浏览器扩展把 B 站 Cookie 推到 `http://127.0.0.1:8420/api/bilibili/cookie`。
-6. 在容器运行时里检查默认 LLM provider 和 embedding 服务。
+6. 在容器运行时精确探测 stable primary Chat（不走 fallback），并逐条探测所有 ordered Embedding providers 与共享 settings。
 7. 检查通过后自动运行 `openbiliclaw init`。
 
 缺 LLM Key、缺 Cookie、缺来源确认时，bootstrap 会停在明确的 `needs_secrets` / `needs_decisions` 状态并打印继续命令；这不是最终成功状态。凭据和选择齐全后，bootstrap 会先做真实服务检查。如果返回 `service_check_failed`，说明 init 尚未运行，先修 API key / base_url / model / Ollama 后再重跑同一条安装或 bootstrap 命令。
@@ -134,7 +138,7 @@ AI agent 一句话部署时，`agent_bootstrap.py` 会在 auto-init 期间额外
 
 ### 启动后的通用说明
 
-- 默认 embedding 是 `ollama` + `bge-m3`，Docker 里写成 compose 网络地址 `http://ollama:11434/v1`，指向随 compose 启动的 sidecar。如果你手动填了其他 embedding endpoint，不会被覆盖。
+- 新生成配置的 Embedding 第 1 项是稳定的 `ollama-docker` Provider，共享 model 为 `bge-m3`，endpoint 为 `http://ollama:11434/v1`；模板中远端项保留相对顺序。已有 `config.toml` 不参与 seed，因此不会被覆盖。
 - **后端不再等 sidecar 拉完模型才启动**：`bge-m3` 首次下载（~568MB）期间后端已经可用，`/setup/` 的前置检查会显示 embedding 尚未就绪，拉取完成后自动通过。模型下载失败时 sidecar 守护进程仍在，重启 compose 会自动重试。
 - B 站登录态推荐用浏览器扩展：扩展装在**宿主机浏览器**里，不在容器里。你登录 bilibili.com 后，扩展会把 Cookie 自动 POST 到 `127.0.0.1:8420` 的后端接口。
 - 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 都默认关闭，只有你在 `/setup/` 或设置页明确开启才会进入初始化和日常发现；启用时需在宿主机浏览器里装扩展并登录对应站点。镜像通过 pip 安装项目，X 的 `twitter-cli` 和 Reddit 的 `rdt-cli` 已内置。
@@ -176,25 +180,53 @@ docker exec -it openbiliclaw-backend vi /app/runtime/config.toml
 | `OPENBILICLAW_PROXY_PORT` | `7897` | 代理端口 |
 | `OPENBILICLAW_PROXY_TIMEOUT` | `1.0` | 代理探测超时（秒） |
 
-### LLM 配置
+### 原生模型路由配置
 
-安装脚本 / bootstrap 会按你选的 provider 自动写好 `[llm.<provider>]` 段。如果你想手动改，下面是对照表（按推荐顺序排列）：
+安装脚本与 `/setup/` 都写原生 `[models]`。先选择 Chat connection type，
+再仅对支持 preset 的类型选择 preset：
 
-| Provider | 是否要 Key | 适合谁 | 备注 |
-|---|---|---|---|
-| `deepseek` ★默认 | ✅ | 默认推荐 / 几乎免费 / 国内可直连 | ¥0.001/千 token，月费通常 ¥0.5-2，OpenAI 兼容协议。无 embedding 接口；embedding 需在 `[llm.embedding]` 独立配置 |
-| `gemini` | ✅ | Google AI Studio 账户 | 免费档每天 1500 次够日常用；自带 embedding endpoint |
-| `openai` | ✅ | 已有 OpenAI 账户 | base_url 留空 = `https://api.openai.com/v1`；自带 embedding endpoint |
-| `claude` | ✅ | Anthropic 账户 | 高质量推理；无 embedding 接口，需独立配置 `[llm.embedding]` |
-| `openrouter` | ✅ | 想一个 Key 跑多家模型 | 按调用计费；embedding 不可靠，建议独立配置 Ollama / Gemini / OpenAI embedding |
-| `ollama` | ❌ | 完全离线 / 不要 Key / 16GB+ 内存 | CPU 推理首次响应慢（10-60s）。Docker 里 `[llm.ollama] base_url` 必须设成 `http://host.docker.internal:11434/v1` 才能从容器访问宿主机的 Ollama |
-| OpenAI 协议兼容自建网关（高级） | ✅ 通常需要 | 自己有 vLLM / LMStudio / Azure / OneAPI / 团队 LLM 网关 | 写到 `[llm.openai_compatible]` 段，关键是显式 `base_url` 字段。**普通用户不要选这个** |
+| Connection type | Preset / meaning |
+|---|---|
+| `openai_compatible` | `deepseek` / `openai` / `openrouter` / `custom` |
+| `anthropic_compatible` | `anthropic` / `custom` |
+| `gemini_api` | Google 原生 API，无 preset |
+| `ollama` | 本地 runtime，无 preset |
+| `codex_oauth` | 独立 OAuth 登录，无 preset |
 
-> 「OpenAI 官方」 ≠ 「OpenAI 协议兼容自建网关」：向导把这两个拆成独立菜单项，OpenAI 官方写 `[llm.openai]`，协议兼容网关写 `[llm.openai_compatible]`。
->
-> v0.3.20+：当 `--provider openai` 显式给出但 `--llm-base-url` 未给（或选了官方），bootstrap 会自动清空 `[llm.openai] base_url`，让 SDK 回到 `https://api.openai.com/v1`——之前从自建网关切回 OpenAI 官方时 base_url 残留导致继续打老网关的 bug 已修。
+DeepSeek、OpenAI 与 OpenRouter 都属于 OpenAI-compatible presets，不再
+占据三个顶层 Provider 入口；Anthropic 官方与自定义 Messages 网关同理。
+Chat 是 1–10 条同构记录的有序列表：第一条是 primary，其余按顺序是
+fallback。每条记录有全局唯一稳定 ID；重排列表就是改变优先级。
 
-**Per-module 覆盖（可选）**：在 `[llm.soul]` / `[llm.discovery]` / `[llm.recommendation]` / `[llm.evaluation]` 段单独指定 `provider` + `model`。典型用法：发现 / 评估走便宜模型，灵魂画像走高质量模型。详见 [docs/modules/config.md](modules/config.md)。
+Embedding 可关闭，或配置 1–10 个有序 Provider。所有 Provider 必须共享
+同一个 model、输出维度、相似度阈值与多模态开关；endpoint 和 credential
+属于各自记录。Docker 生成第一份配置时会 upsert 稳定 ID `ollama-docker`
+到位置 1，并让模板中保留的远端记录维持原相对顺序；Chat route 不变。
+如果 `config.toml` 已存在，bootstrap 不覆盖该文件，也不会再次 seed。
+
+该 seed 与 `/setup/`、CLI、桌面和插件使用同一 descriptor-backed 原生 schema；
+保存后的记录只经 ordered Chat / Embedding factories 构造
+`RuntimeModelBundle`。Docker 没有独立的 legacy Provider registry 或模型配置
+写入路径。
+
+在容器内查看和编辑：
+
+```bash
+docker exec -it openbiliclaw-backend openbiliclaw models list
+docker exec -it openbiliclaw-backend openbiliclaw models add --kind chat
+docker exec -it openbiliclaw-backend openbiliclaw models add --kind embedding
+docker exec -it openbiliclaw-backend openbiliclaw models move <STABLE_ID> --position <1-10>
+docker exec -it openbiliclaw-backend openbiliclaw models probe <STABLE_ID>
+```
+
+终端 bootstrap 的新自动化参数是 `--connection-type`、条件式 `--preset`，
+以及可重复的 `--embedding-endpoint TYPE[:PRESET]=BASE_URL`；全部
+Embedding endpoint 共用一个 `--embedding-model`。`--provider` 只保留为
+旧非交互脚本的 deprecated alias，新命令不要使用。
+
+init 前置检查会精确探测 stable primary Chat（禁用 fallback），并逐一精确
+探测全部 ordered Embedding providers 与共享 settings。任一失败都会返回
+`service_check_failed`，不会用另一条成功连接掩盖错误。
 
 ## 日常命令
 
@@ -299,38 +331,37 @@ export OPENBILICLAW_PROXY_HOST=192.168.1.100
 docker compose up -d --build
 ```
 
-### Ollama 本地模型
+### 宿主机 Ollama 作为 Chat connection
 
-如使用宿主机上的 Ollama，需确保 Ollama 监听 `0.0.0.0`，并在配置中设置：
-
-```toml
-[llm.ollama]
-model = "llama3"
-base_url = "http://host.docker.internal:11434"
-```
-
-### 本地 embedding provider（Ollama + bge-m3）
-
-不想再多一份 embedding API Key、或想让系统在断网时仍能跑相似度计算，可以让 Ollama 同时承担 embedding 服务：
+容器访问宿主机 Ollama 时使用 `host.docker.internal`。先保证宿主机
+Ollama 接受 Docker Desktop / Engine 的连接，再把它加入有序 Chat list：
 
 ```bash
-# 1. 在宿主机拉取 bge-m3（首次 ~568MB，CPU 即可跑）
+docker exec -it openbiliclaw-backend openbiliclaw models add \
+  --kind chat --id host-ollama-chat --name "Host Ollama" \
+  --connection-type ollama --model llama3 \
+  --base-url http://host.docker.internal:11434/v1
+```
+
+用 `models move host-ollama-chat --position N` 调整优先级；列表第一项
+自然成为 primary，不需要单独的 primary/fallback 开关。
+
+### 宿主机 Ollama 作为 Embedding provider
+
+Compose 已默认提供 sidecar。只有明确要改用宿主机 Ollama 时才先在
+宿主机准备相同共享模型，然后编辑原生 ordered route：
+
+```bash
 ollama pull bge-m3
-
-# 2. 在容器里写入 embedding 配置（推荐用 setup-embedding 命令）
 docker exec -it openbiliclaw-backend openbiliclaw setup-embedding
+docker exec -it openbiliclaw-backend openbiliclaw models list
 ```
 
-或直接编辑 `config.toml` 的 `[llm.embedding]` 段：
-
-```toml
-[llm.embedding]
-provider = "ollama"
-model = "bge-m3"
-base_url = "http://host.docker.internal:11434/v1"
-```
-
-注意：容器需要能访问宿主机的 Ollama；embedding 现在读取 `[llm.embedding].base_url`，不会自动复用 `[llm.ollama].base_url`。
+`setup-embedding` 只负责配置，不安装、启动或下载模型。向导中填写
+`http://host.docker.internal:11434/v1`，共享 model 保持 `bge-m3`。
+需要第二个 endpoint 时，用 `openbiliclaw models add --kind embedding`
+追加记录；新增 Provider 必须保持同一 model/维度/阈值/多模态设置。
+真实检查必须显式运行 `openbiliclaw models probe <STABLE_ID>`。
 
 ## 常见问题
 

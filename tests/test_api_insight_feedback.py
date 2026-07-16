@@ -18,6 +18,8 @@ from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.soul.engine import SoulEngine
 
+from .model_route_helpers import use_native_ollama
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -45,8 +47,7 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     project_root = tmp_path / "runtime"
     monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(project_root))
     cfg = Config()
-    cfg.llm.default_provider = "ollama"
-    cfg.llm.ollama.model = "llama3"
+    use_native_ollama(cfg)
     save_config(cfg, project_root / "config.toml")
 
 

@@ -21,6 +21,32 @@ if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
 
 
+def _runtime_config(tmp_path: Path):
+    """Return a complete credential-free config for API runtime fixtures."""
+    from openbiliclaw.config import Config
+    from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
+
+    config = Config(data_dir=str(tmp_path))
+    config.scheduler.enabled = False
+    config.sources.xiaohongshu.daily_search_budget = 20
+    config.sources.xiaohongshu.daily_creator_budget = 10
+    config.sources.xiaohongshu.task_interval_seconds = 45
+    config.models = ModelConfig(
+        chat=ChatRouteConfig(
+            connections=(
+                ChatConnection(
+                    id="ollama-main",
+                    name="Ollama",
+                    type="ollama",
+                    model="llama3",
+                    base_url="http://127.0.0.1:11434/v1",
+                ),
+            )
+        )
+    )
+    return config
+
+
 class RecordingMemoryManager:
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
@@ -120,30 +146,14 @@ class _XhsScoringLLM:
 @pytest.fixture
 def app_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Build a minimal TestClient with a real database but mocked adapter."""
-    from types import SimpleNamespace
-
     from openbiliclaw.storage.database import Database
 
     db = Database(tmp_path / "test.db")
     db.initialize()
 
-    fake_config = SimpleNamespace(
-        data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", proxy="", browser_executable="", browser_headed=False),
-        sources=SimpleNamespace(
-            browser_cdp_url="",
-            browser_headed=False,
-            xiaohongshu=SimpleNamespace(
-                daily_search_budget=20,
-                daily_creator_budget=10,
-                task_interval_seconds=45,
-            ),
-        ),
-        scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
-    )
+    fake_config = _runtime_config(tmp_path)
 
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
-    monkeypatch.setattr("openbiliclaw.llm.build_llm_registry", lambda config: "registry")
     monkeypatch.setattr("openbiliclaw.bilibili.auth.resolve_runtime_cookie", lambda **_: "")
 
     from openbiliclaw.api.app import create_app
@@ -165,20 +175,7 @@ def xhs_task_client(
     db.initialize()
     memory = RecordingMemoryManager()
 
-    fake_config = SimpleNamespace(
-        data_path=tmp_path,
-        bilibili=SimpleNamespace(cookie="", proxy="", browser_executable="", browser_headed=False),
-        sources=SimpleNamespace(
-            browser_cdp_url="",
-            browser_headed=False,
-            xiaohongshu=SimpleNamespace(
-                daily_search_budget=20,
-                daily_creator_budget=10,
-                task_interval_seconds=45,
-            ),
-        ),
-        scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
-    )
+    fake_config = _runtime_config(tmp_path)
 
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
 
@@ -799,22 +796,7 @@ class TestXhsObservedUrls:
             {"xhs_self_info": {"user_id": "u1", "nickname": "屎屎"}}
         )
 
-        fake_config = SimpleNamespace(
-            data_path=tmp_path,
-            bilibili=SimpleNamespace(
-                cookie="", proxy="", browser_executable="", browser_headed=False
-            ),
-            sources=SimpleNamespace(
-                browser_cdp_url="",
-                browser_headed=False,
-                xiaohongshu=SimpleNamespace(
-                    daily_search_budget=20,
-                    daily_creator_budget=10,
-                    task_interval_seconds=45,
-                ),
-            ),
-            scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
-        )
+        fake_config = _runtime_config(tmp_path)
         monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
 
         # create_app should fire the purge hook before returning.

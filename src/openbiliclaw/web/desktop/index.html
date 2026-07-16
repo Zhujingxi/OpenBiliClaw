@@ -274,83 +274,91 @@
           <button class="settings-tab" type="button" data-settings-tab="logging">日志</button>
         </div>
 
-        <div class="settings-panel" data-settings-panel="models">
-          <p class="settings-section-title">默认模型</p>
-          <div class="settings-subtabs" role="tablist" aria-label="LLM 模型设置类型">
-            <button class="settings-subtab is-active" type="button" data-model-settings-group="llm" data-model-settings-tab="default">默认</button>
-            <button class="settings-subtab" type="button" data-model-settings-group="llm" data-model-settings-tab="fallback">备选</button>
+        <div class="settings-panel model-settings-panel" data-settings-panel="models">
+          <fieldset class="model-editor-boundary" id="modelEditorBoundary" aria-label="模型路由编辑器" aria-busy="false">
+          <div class="model-route-tabs" id="modelRouteTabs" role="tablist" aria-label="模型类型">
+            <button class="model-route-tab is-active" type="button" role="tab" aria-selected="true" data-model-route="chat">Chat route</button>
+            <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="embedding">Embedding route</button>
+            <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="runtime">Runtime</button>
           </div>
 
-          <div class="settings-subpanel is-active" data-model-settings-group="llm" data-model-settings-panel="default">
-            <label class="settings-field"><span>默认 LLM Provider</span><select id="llmProvider" translate="no"><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
-            <label class="settings-field"><span>OpenAI 认证方式</span><select id="llmAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
-            <label class="settings-field"><span>默认模型</span><input id="llmModel" value="gpt-5-nano"></label>
-            <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" inputmode="numeric" placeholder="4"></label>
-            <label class="settings-field"><span>LLM 超时（秒）</span><input id="llmTimeout" inputmode="numeric" placeholder="60"></label>
-            <label class="settings-field"><span>当前 Provider API Key</span><input id="llmApiKey" autocomplete="off" placeholder="只保存当前选中的 Provider"></label>
-            <label class="settings-field"><span>当前 Provider Base URL</span><input id="llmBaseUrl" placeholder="OpenAI-compatible / Claude 第三方网关 / DeepSeek / Ollama 等"></label>
-            <label class="settings-field"><span>API 协议（OpenAI / 兼容）</span><select id="llmApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses（第三方网关）</option></select></label>
-            <label class="settings-field"><span>DeepSeek Reasoning Effort</span><select id="deepseekReasoning"><option value="">默认</option><option value="high">high</option><option value="max">max</option></select></label>
-            <label class="settings-field"><span>OpenRouter Referer</span><input id="openrouterReferer" placeholder="https://example.com"></label>
-            <label class="settings-field"><span>OpenRouter X-Title</span><input id="openrouterTitle" placeholder="OpenBiliClaw"></label>
-            <div class="settings-probe-row">
-              <button class="pill-btn" id="probeLlm" type="button">测试 LLM</button>
-              <span class="settings-probe-status" id="probeLlmStatus" aria-live="polite"></span>
+          <div class="model-remote-banner" id="modelRemoteBanner" role="status" hidden>
+            <span>模型配置已在别处更新。当前草稿仍保留，请先保存、放弃或重新加载。</span>
+            <button class="small-btn" id="modelReloadRemote" type="button">重新加载</button>
+          </div>
+          <section class="model-override-notice" id="modelOverrideNotice" role="status" aria-label="只读模型配置覆盖" hidden></section>
+          <div class="model-error-summary" id="modelErrorSummary" role="alert" hidden></div>
+          <section class="model-migration-panel" id="modelMigrationPanel" aria-label="旧模型配置迁移" hidden></section>
+
+          <section class="model-route-view" data-model-view="route">
+            <section class="model-embedding-shared" id="modelEmbeddingSharedSettings" aria-label="Embedding 共享设置" hidden>
+              <div class="model-section-heading">
+                <div><p class="eyebrow">Shared vector space</p><h3>Embedding 共享模型设置</h3></div>
+                <label class="settings-toggle-row"><input id="modelEmbeddingEnabled" type="checkbox"><span>启用 Embedding route</span></label>
+              </div>
+              <div class="model-shared-grid">
+                <label class="settings-field"><span>共享模型</span><input id="modelEmbeddingModel" autocomplete="off"></label>
+                <label class="settings-field"><span>输出维度</span><input id="modelEmbeddingDimension" type="number" min="0" step="1" inputmode="numeric"></label>
+                <label class="settings-field"><span>相似度阈值</span><input id="modelEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" inputmode="decimal"></label>
+                <label class="settings-toggle-row"><input id="modelEmbeddingMultimodal" type="checkbox"><span>启用多模态探测</span></label>
+              </div>
+              <p class="settings-note-inline">列表内所有 Provider 使用完全相同的模型、维度、阈值与多模态设置。</p>
+            </section>
+
+            <div class="model-route-layout" id="modelRouteLayout">
+              <section class="model-route-list-pane" id="modelRouteListPane" aria-label="模型路由列表">
+                <div class="model-section-heading">
+                  <div><p class="eyebrow" id="modelRouteEyebrow">Ordered route</p><h3 id="modelRouteTitle">Chat connections</h3></div>
+                  <button class="pill-btn" id="modelAddConnection" type="button">添加连接</button>
+                </div>
+                <p class="settings-note-inline" id="modelRouteHelp">第 1 项是 Primary，其余项按顺序作为 fallback。</p>
+                <div class="model-route-list" id="modelRouteList" role="list" aria-live="polite"></div>
+              </section>
+
+              <section class="model-inspector-pane" id="modelInspectorPane" aria-label="模型连接详情">
+                <button class="small-btn model-inspector-back" id="modelInspectorBack" type="button">← 返回列表</button>
+                <div class="model-inspector" id="modelInspector">
+                  <div class="model-section-heading">
+                    <div><p class="eyebrow" id="modelInspectorRole">Primary</p><h3 id="modelInspectorTitle">连接详情</h3></div>
+                    <div class="model-order-actions" aria-label="调整优先级">
+                      <button class="small-btn" id="modelMoveUp" type="button">Move Up</button>
+                      <button class="small-btn" id="modelMoveDown" type="button">Move Down</button>
+                    </div>
+                  </div>
+                  <div class="model-inspector-fields" id="modelInspectorFields"></div>
+                  <fieldset class="model-type-chooser">
+                    <legend>连接类型</legend>
+                    <label class="settings-field full"><span>搜索连接类型</span><input id="modelTypeSearch" type="search" autocomplete="off" placeholder="协议、本地运行时或 OAuth"></label>
+                    <div class="model-connection-type-groups" id="modelConnectionTypeGroups" role="listbox" aria-label="连接类型"></div>
+                  </fieldset>
+                  <div class="model-descriptor-fields" id="modelDescriptorFields"></div>
+                  <section class="model-credential-editor" id="modelCredentialEditor" aria-label="凭据来源"></section>
+                  <div class="settings-probe-row">
+                    <button class="pill-btn" id="modelProbeButton" type="button">测试当前连接</button>
+                    <span class="settings-probe-status" id="modelProbeStatus" aria-live="polite"></span>
+                  </div>
+                  <div class="model-inspector-danger">
+                    <button class="small-btn danger" id="modelRemoveConnection" type="button">移除连接</button>
+                  </div>
+                </div>
+              </section>
             </div>
-          </div>
+          </section>
 
-          <div class="settings-subpanel" data-model-settings-group="llm" data-model-settings-panel="fallback" hidden>
-            <p class="settings-note-inline">默认 LLM Provider 不可用时才会使用备选 Provider；留空表示不启用 LLM fallback。</p>
-            <label class="settings-field"><span>备选 LLM Provider</span><select id="llmFallbackProvider" translate="no"><option value="">不启用 fallback</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="openrouter">openrouter</option><option value="ollama">ollama</option><option value="openai_compatible">openai_compatible</option></select></label>
-            <p id="llmFallbackSameWarning" class="settings-note-inline" hidden>备选与默认 Provider 相同时永远不会生效，保存会被拒绝；请换一个不同类型的 Provider 或留空关闭 fallback。</p>
-            <label class="settings-field"><span>备选 OpenAI 认证方式</span><select id="llmFallbackAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
-            <label class="settings-field"><span>备选模型</span><input id="llmFallbackModel" placeholder="留空使用该 Provider 现有模型"></label>
-            <label class="settings-field"><span>备选 Provider API Key</span><input id="llmFallbackApiKey" autocomplete="off" placeholder="只保存备选 Provider"></label>
-            <label class="settings-field"><span>备选 Provider Base URL</span><input id="llmFallbackBaseUrl" placeholder="OpenAI-compatible / DeepSeek / Ollama 等"></label>
-            <label class="settings-field"><span>备选 API 协议（OpenAI / 兼容）</span><select id="llmFallbackApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses（第三方网关）</option></select></label>
-            <div class="settings-probe-row">
-              <button class="pill-btn" id="probeLlmFallback" type="button">测试备选 Provider</button>
-              <span class="settings-probe-status" id="probeLlmFallbackStatus" aria-live="polite"></span>
+          <section class="model-runtime-view" id="modelRuntimeView" data-model-view="runtime" hidden>
+            <div class="model-section-heading"><div><p class="eyebrow">Route policy</p><h3>Runtime</h3></div></div>
+            <div class="model-runtime-grid">
+              <label class="settings-field"><span>Chat 并发数</span><input id="modelChatConcurrency" type="number" min="1" max="16" inputmode="numeric"></label>
+              <label class="settings-field"><span>整条 route 超时（秒）</span><input id="modelChatTimeout" type="number" min="10" inputmode="numeric"></label>
             </div>
-          </div>
+            <div class="model-runtime-summary" id="modelRuntimeSummary" aria-live="polite"></div>
+          </section>
 
-          <p class="settings-section-title">Embedding</p>
-          <div class="settings-subtabs" role="tablist" aria-label="Embedding 设置类型">
-            <button class="settings-subtab is-active" type="button" data-model-settings-group="embedding" data-model-settings-tab="default">默认</button>
-            <button class="settings-subtab" type="button" data-model-settings-group="embedding" data-model-settings-tab="fallback">备选</button>
+          <div class="model-save-bar">
+            <span class="settings-probe-status" id="modelSaveStatus" aria-live="polite">正在读取模型配置…</span>
+            <button class="pill-btn primary" id="modelSaveButton" type="button">保存模型路由</button>
           </div>
-
-          <div class="settings-subpanel is-active" data-model-settings-group="embedding" data-model-settings-panel="default">
-            <label class="settings-field"><span>Embedding Provider</span><select id="embeddingProvider" translate="no"><option value="">跟随默认</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option><option value="dashscope">dashscope (qwen3-vl)</option></select></label>
-            <label class="settings-field"><span>Embedding 模型</span><input id="embeddingModel" value="bge-m3"></label>
-            <label class="settings-field"><span>Embedding API Key</span><input id="embeddingApiKey" autocomplete="off"></label>
-            <label class="settings-field"><span>Embedding Base URL</span><input id="embeddingBaseUrl"></label>
-            <label class="settings-field"><span>Embedding 维度</span><input id="embeddingOutputDimensionality" type="number" min="0" step="1" inputmode="numeric" placeholder="1024"></label>
-            <label class="settings-field"><span>相似度阈值</span><input id="embeddingSimilarity" inputmode="decimal" placeholder="0.82"></label>
-            <label class="settings-field"><span>封面视觉加成 (需多模态模型)</span><select id="embeddingMultimodalEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>
-            <div class="settings-probe-row">
-              <button class="pill-btn" id="probeEmbedding" type="button">测试 Embedding</button>
-              <span class="settings-probe-status" id="probeEmbeddingStatus" aria-live="polite"></span>
-            </div>
-          </div>
-
-          <div class="settings-subpanel" data-model-settings-group="embedding" data-model-settings-panel="fallback" hidden>
-            <p class="settings-note-inline">默认 Embedding Provider 不可用时才会使用备选 Provider；这里编辑的是所选 Provider 的现有配置。</p>
-            <label class="settings-field"><span>备选 Embedding Provider</span><select id="embeddingFallbackProvider" translate="no"><option value="">不启用 fallback</option><option value="ollama">ollama</option><option value="openai">openai</option><option value="gemini">gemini</option><option value="openai_compatible">openai_compatible</option></select></label>
-            <label class="settings-field"><span>备选 Provider 模型</span><input id="embeddingFallbackModel" placeholder="写入所选 Provider 的 model"></label>
-            <label class="settings-field"><span>备选 Provider API Key</span><input id="embeddingFallbackApiKey" autocomplete="off"></label>
-            <label class="settings-field"><span>备选 Provider Base URL</span><input id="embeddingFallbackBaseUrl"></label>
-          </div>
-
-          <p class="settings-section-title">模块覆盖</p>
-          <label class="settings-field"><span>画像 Provider</span><select id="moduleSoulProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
-          <label class="settings-field"><span>画像 Model</span><input id="moduleSoulModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>发现 Provider</span><select id="moduleDiscoveryProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
-          <label class="settings-field"><span>发现 Model</span><input id="moduleDiscoveryModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>推荐表达 Provider</span><select id="moduleRecommendationProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
-          <label class="settings-field"><span>推荐表达 Model</span><input id="moduleRecommendationModel" placeholder="留空继承"></label>
-          <label class="settings-field"><span>评估 Provider</span><select id="moduleEvaluationProvider" translate="no"><option value="">继承默认</option><option value="openai">openai</option><option value="claude">claude</option><option value="gemini">gemini</option><option value="deepseek">deepseek</option><option value="ollama">ollama</option><option value="openrouter">openrouter</option><option value="openai_compatible">openai_compatible</option></select></label>
-          <label class="settings-field"><span>评估 Model</span><input id="moduleEvaluationModel" placeholder="留空继承"></label>
+          </fieldset>
         </div>
 
         <div class="settings-panel" data-settings-panel="sources" hidden>
@@ -694,7 +702,7 @@
         </div>
 
         <label class="settings-field full"><span>配置状态</span><textarea id="configStatus" rows="3" readonly="" aria-live="polite">可连接 FastAPI：/api/health、/api/config、/api/runtime-status。保存后调用 PUT /api/config，并热重载运行时。</textarea></label>
-        <div class="drawer-actions" style="grid-column: 1 / -1"><button class="pill-btn primary" type="submit">保存配置</button></div>
+        <div class="drawer-actions" id="generalSettingsActions" style="grid-column: 1 / -1" hidden><button class="pill-btn primary" type="submit">保存通用配置</button></div>
       </form>
       </section>
     </main>
@@ -790,4 +798,5 @@
   <script src="/web/assets/js/pending-actions.js" defer></script>
   <script src="/web/assets/js/saved-sync-core.js" defer></script>
   <script src="/web/assets/js/app.js" defer></script>
+  <script type="module" src="/web/assets/js/model-settings.js"></script>
 </body></html>

@@ -14,7 +14,7 @@ def _read(path: str) -> str:
 def test_mobile_web_saved_sync_api_and_view_contract() -> None:
     api = _read("src/openbiliclaw/web/js/api.js")
     saved = _read("src/openbiliclaw/web/js/views/saved.js")
-    app = _read("src/openbiliclaw/web/js/app.js")
+    settings = _read("src/openbiliclaw/web/js/views/model-settings.js")
 
     for helper in (
         "saveItem",
@@ -30,10 +30,10 @@ def test_mobile_web_saved_sync_api_and_view_contract() -> None:
     assert "重试同步" in saved
     assert "extension_required" in saved
     assert "aria-live" in saved
-    assert "saved_sync" in app
-    assert "auto_sync_enabled" in app
-    assert "保存时自动同步到对应平台" in app
-    assert WARNING in app
+    assert "saved_sync" in settings
+    assert "auto_sync_enabled" in settings
+    assert "保存时自动同步到对应平台" in settings
+    assert WARNING in settings
     assert "switch (item.source_platform" not in saved
     assert "unsupported_content_type" in saved
     assert "unsupported_adapter_missing" in saved
@@ -102,7 +102,7 @@ def test_all_graphical_saved_surfaces_keep_manual_controls_and_default_auto_sync
     for source in (
         _read("extension/popup/popup.js"),
         _read("src/openbiliclaw/web/desktop/assets/js/app.js"),
-        _read("src/openbiliclaw/web/js/app.js"),
+        _read("src/openbiliclaw/web/js/views/model-settings.js"),
     ):
         assert "auto_sync_enabled === true" in source
 
@@ -123,7 +123,7 @@ def test_saved_sync_css_preserves_focus_motion_and_mobile_touch_safety() -> None
 def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
     popup = _read("extension/popup/popup.js")
     popup_runtime = _read("extension/popup/popup-saved-sync.js")
-    mobile_app = _read("src/openbiliclaw/web/js/app.js")
+    mobile_settings = _read("src/openbiliclaw/web/js/views/model-settings.js")
     mobile_css = _read("src/openbiliclaw/web/css/app.css")
     mobile_saved = _read("src/openbiliclaw/web/js/views/saved.js")
     mobile_recommend = _read("src/openbiliclaw/web/js/views/recommend.js")
@@ -140,12 +140,12 @@ def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
     assert "createDurableTaskTracker" in mobile_saved
     assert "createRetainedSavedListState" in mobile_saved
     assert "createSavedMutationRegistry" in mobile_recommend
-    assert 'setAttribute("role", "dialog")' in mobile_app
-    assert 'setAttribute("aria-modal", "true")' in mobile_app
-    assert "createDialogFocusController" in mobile_app
-    assert "mobile-settings-retry" in mobile_app
+    assert 'setAttribute("role", "dialog")' in mobile_settings
+    assert 'setAttribute("aria-modal", "true")' in mobile_settings
+    assert "createDialogFocusController" in mobile_settings
+    assert "mobile-settings-retry" in mobile_settings
     assert ".mobile-settings-retry[hidden] { display: none; }" in mobile_css
-    assert "configLoaded" in mobile_app
+    assert "configLoaded" in mobile_settings
 
     assert "saved-sync-core.js" in desktop_html
     assert "createStrictSavedApi(requestJsonStrict)" in desktop

@@ -1151,6 +1151,11 @@
     };
     function showToast(message) { toastManager.showToast(message); }
     window.showToast = showToast;// 用于终端测试ToastNotice
+    window.OpenBiliClawDesktopApi = Object.freeze({
+      getApiBase,
+      requestJsonStrict,
+      showToast,
+    });
 
     const pendingActions = window.OpenBiliClawPendingActions.createPendingActionCoordinator({
       windowMs: Number(window.__OBC_TEST_UNDO_WINDOW_MS || 10000),
@@ -5620,22 +5625,6 @@
       return { reload: load };
     }
 
-    // 主/备选 Provider 同名保护：同名 fallback 永远不会触发（registry 会静默丢弃），
-    // 后端保存也会以 blocking issue 拒绝。这里 (1) 禁用备选下拉里与主 Provider 同名
-    // 的选项（主 Provider 变化时恢复其它选项），(2) 对已经处于同名状态的旧配置只
-    // 显示警告、不自动清空选择，避免悄悄改动用户数据。
-    function syncLlmFallbackSameState() {
-      const providerSelect = $("#llmProvider");
-      const fallbackSelect = $("#llmFallbackProvider");
-      if (!providerSelect || !fallbackSelect) return;
-      const provider = providerSelect.value || "";
-      Array.from(fallbackSelect.options).forEach((option) => {
-        option.disabled = Boolean(option.value) && option.value === provider;
-      });
-      const warning = $("#llmFallbackSameWarning");
-      if (warning) warning.hidden = !(fallbackSelect.value && fallbackSelect.value === provider);
-    }
-
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
       state.config = config;
@@ -5691,66 +5680,6 @@
       const savedAutoSync = $("#savedAutoSync");
       if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
       if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
-
-      const llm = config.llm || {};
-      const provider = llm.default_provider || llm.provider;
-      setSelect("llmProvider", provider);
-      const fallbackProvider = llm.fallback_provider || "";
-      setSelect("llmFallbackProvider", fallbackProvider);
-      setInput("llmConcurrency", llm.concurrency ?? 4);
-      setInput("llmTimeout", llm.timeout);
-      setSelect("llmAuthMode", llm.openai?.auth_mode || "api_key");
-      if (provider) {
-        setInput("llmModel", llm[provider]?.model);
-        setInput("llmApiKey", llm[provider]?.api_key);
-        setInput("llmBaseUrl", llm[provider]?.base_url);
-        setSelect("llmApiFlavor", llm[provider]?.api_flavor || "");
-      } else {
-        setSelect("llmApiFlavor", "");
-      }
-      if (fallbackProvider) {
-        setSelect("llmFallbackAuthMode", llm[fallbackProvider]?.auth_mode || "api_key");
-        setInput("llmFallbackModel", llm[fallbackProvider]?.model);
-        setInput("llmFallbackApiKey", llm[fallbackProvider]?.api_key);
-        setInput("llmFallbackBaseUrl", llm[fallbackProvider]?.base_url);
-        setSelect("llmFallbackApiFlavor", llm[fallbackProvider]?.api_flavor || "");
-      } else {
-        setSelect("llmFallbackAuthMode", "api_key");
-        setInput("llmFallbackModel", "");
-        setInput("llmFallbackApiKey", "");
-        setInput("llmFallbackBaseUrl", "");
-        setSelect("llmFallbackApiFlavor", "");
-      }
-      syncLlmFallbackSameState();
-      setInput("openrouterReferer", llm.openrouter?.http_referer);
-      setInput("openrouterTitle", llm.openrouter?.x_title);
-      setSelect("deepseekReasoning", llm.deepseek?.reasoning_effort || "");
-      setSelect("embeddingProvider", llm.embedding?.provider || "");
-      const embeddingFallbackProvider = llm.embedding?.fallback_provider || "";
-      setSelect("embeddingFallbackProvider", embeddingFallbackProvider);
-      setInput("embeddingModel", llm.embedding?.model);
-      setInput("embeddingApiKey", llm.embedding?.api_key);
-      setInput("embeddingBaseUrl", llm.embedding?.base_url);
-      setInput("embeddingOutputDimensionality", llm.embedding?.output_dimensionality ?? 1024);
-      setInput("embeddingSimilarity", llm.embedding?.similarity_threshold);
-      setSelect("embeddingMultimodalEnabled", llm.embedding?.multimodal_enabled ? "on" : "off");
-      if (embeddingFallbackProvider) {
-        setInput("embeddingFallbackModel", llm[embeddingFallbackProvider]?.model);
-        setInput("embeddingFallbackApiKey", llm[embeddingFallbackProvider]?.api_key);
-        setInput("embeddingFallbackBaseUrl", llm[embeddingFallbackProvider]?.base_url);
-      } else {
-        setInput("embeddingFallbackModel", "");
-        setInput("embeddingFallbackApiKey", "");
-        setInput("embeddingFallbackBaseUrl", "");
-      }
-      setSelect("moduleSoulProvider", llm.soul?.provider || "");
-      setInput("moduleSoulModel", llm.soul?.model);
-      setSelect("moduleDiscoveryProvider", llm.discovery?.provider || "");
-      setInput("moduleDiscoveryModel", llm.discovery?.model);
-      setSelect("moduleRecommendationProvider", llm.recommendation?.provider || "");
-      setInput("moduleRecommendationModel", llm.recommendation?.model);
-      setSelect("moduleEvaluationProvider", llm.evaluation?.provider || "");
-      setInput("moduleEvaluationModel", llm.evaluation?.model);
 
       setSelect("biliAuth", config.bilibili?.auth_method || "cookie");
       setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
@@ -6293,6 +6222,9 @@
       // still update via applyRuntimeStatus above; user-initiated 换一批 / 加载更多 replace
       // the list explicitly. Matches recommend.js + popup.js (fix 79042ce).
       if (["config_reloaded"].includes(event.type)) {
+        window.dispatchEvent(new CustomEvent("openbiliclaw:config-reloaded", {
+          detail: event,
+        }));
         // config_reloaded 会触发全量再水合，applyConfig 覆盖设置表单里的每个字段。
         // 用户正在表单里编辑（焦点在 #settingsForm 内）时跳过，避免未保存的输入
         // 被后台事件悄悄打回。
@@ -6629,81 +6561,14 @@
     }
 
     function buildConfigUpdate() {
-      const provider = $("#llmProvider").value;
-      const fallbackProvider = getInput("llmFallbackProvider");
-      const llmProviderConfig = { model: getInput("llmModel") };
-      if (provider === "openai") llmProviderConfig.auth_mode = getInput("llmAuthMode") || "api_key";
-      // api_flavor 仅对 OpenAI 协议家族有意义;空值表示回到 chat/completions 默认
-      if (provider === "openai" || provider === "openai_compatible") llmProviderConfig.api_flavor = getInput("llmApiFlavor");
-      if (getInput("llmApiKey")) llmProviderConfig.api_key = getInput("llmApiKey");
-      if (getInput("llmBaseUrl")) llmProviderConfig.base_url = getInput("llmBaseUrl");
-      const llmFallbackConfig = { model: getInput("llmFallbackModel") };
-      if (fallbackProvider === "openai") llmFallbackConfig.auth_mode = getInput("llmFallbackAuthMode") || "api_key";
-      if (fallbackProvider === "openai" || fallbackProvider === "openai_compatible") llmFallbackConfig.api_flavor = getInput("llmFallbackApiFlavor");
-      if (getInput("llmFallbackApiKey")) llmFallbackConfig.api_key = getInput("llmFallbackApiKey");
-      if (getInput("llmFallbackBaseUrl")) llmFallbackConfig.base_url = getInput("llmFallbackBaseUrl");
       const logPath = splitLogPath(getInput("logPath"), state.config?.logging);
-      const embeddingFallbackProvider = getInput("embeddingFallbackProvider");
-      const embeddingFallbackConfig = { model: getInput("embeddingFallbackModel") };
-      if (getInput("embeddingFallbackApiKey")) embeddingFallbackConfig.api_key = getInput("embeddingFallbackApiKey");
-      if (getInput("embeddingFallbackBaseUrl")) embeddingFallbackConfig.base_url = getInput("embeddingFallbackBaseUrl");
-      const embedding = {
-        provider: $("#embeddingProvider").value,
-        fallback_enabled: Boolean(embeddingFallbackProvider),
-        fallback_provider: embeddingFallbackProvider,
-        model: getInput("embeddingModel"),
-        output_dimensionality: Math.max(0, getIntInput("embeddingOutputDimensionality", 1024)),
-        similarity_threshold: getFloatInput("embeddingSimilarity", 0.82),
-        multimodal_enabled: $("#embeddingMultimodalEnabled")?.value === "on"
-      };
-      if (getInput("embeddingApiKey")) embedding.api_key = getInput("embeddingApiKey");
-      if (getInput("embeddingBaseUrl")) embedding.base_url = getInput("embeddingBaseUrl");
       const cookie = getInput("biliCookie");
       const douyinCookie = getInput("douyinCookie");
       const twitterCookie = getInput("twitterCookie");
       const redditCookie = getInput("redditCookie");
-      const llm = {
-        ...(state.config?.llm || {}),
-        default_provider: provider,
-        // 非空 fallback_provider 即启用 fallback；旧的 fallback_enabled 布尔字段已移除。
-        fallback_provider: fallbackProvider,
-        concurrency: getIntInput("llmConcurrency", 4),
-        timeout: getIntInput("llmTimeout", 60),
-        [provider]: { ...(state.config?.llm?.[provider] || {}), ...llmProviderConfig },
-        embedding: { ...(state.config?.llm?.embedding || {}), ...embedding },
-        soul: { ...(state.config?.llm?.soul || {}), provider: getInput("moduleSoulProvider"), model: getInput("moduleSoulModel") },
-        discovery: { ...(state.config?.llm?.discovery || {}), provider: getInput("moduleDiscoveryProvider"), model: getInput("moduleDiscoveryModel") },
-        recommendation: { ...(state.config?.llm?.recommendation || {}), provider: getInput("moduleRecommendationProvider"), model: getInput("moduleRecommendationModel") },
-        evaluation: { ...(state.config?.llm?.evaluation || {}), provider: getInput("moduleEvaluationProvider"), model: getInput("moduleEvaluationModel") }
-      };
-      if (fallbackProvider && fallbackProvider !== provider) {
-        llm[fallbackProvider] = {
-          ...(state.config?.llm?.[fallbackProvider] || {}),
-          ...llmFallbackConfig
-        };
-      }
-      if (embeddingFallbackProvider) {
-        llm[embeddingFallbackProvider] = {
-          ...(llm[embeddingFallbackProvider] || state.config?.llm?.[embeddingFallbackProvider] || {}),
-          ...embeddingFallbackConfig
-        };
-      }
-      if (getInput("openrouterReferer") || getInput("openrouterTitle")) {
-        llm.openrouter = {
-          ...(llm.openrouter || {}),
-          http_referer: getInput("openrouterReferer"),
-          x_title: getInput("openrouterTitle")
-        };
-      }
-      const deepseekReasoning = getInput("deepseekReasoning");
-      llm.deepseek = {
-        ...(llm.deepseek || state.config?.llm?.deepseek || {}),
-        reasoning_effort: deepseekReasoning
-      };
       return {
         language: getInput("language") || "zh",
         data_dir: getInput("dataDir"),
-        llm,
         bilibili: {
           auth_method: $("#biliAuth").value,
           ...(cookie ? { cookie } : {}),
@@ -7123,60 +6988,6 @@
       statusEl.textContent = `${label} 探测中…`;
     }
 
-    async function runLlmConfigProbe() {
-      const button = $("#probeLlm");
-      const statusEl = $("#probeLlmStatus");
-      if (button) button.disabled = true;
-      renderProbePending(statusEl, "LLM");
-      try {
-        const result = await probeConfigService("llm", buildConfigUpdate());
-        renderProbeResult(statusEl, result);
-      } catch (error) {
-        renderProbeResult(statusEl, {
-          ok: false,
-          error: configErrorMessage(error?.details) || error?.message || "LLM 探测失败"
-        });
-      } finally {
-        if (button) button.disabled = false;
-      }
-    }
-
-    async function runLlmFallbackConfigProbe() {
-      const button = $("#probeLlmFallback");
-      const statusEl = $("#probeLlmFallbackStatus");
-      if (button) button.disabled = true;
-      renderProbePending(statusEl, "备选 Provider");
-      try {
-        const result = await probeConfigService("llm_fallback", buildConfigUpdate());
-        renderProbeResult(statusEl, result);
-      } catch (error) {
-        renderProbeResult(statusEl, {
-          ok: false,
-          error: configErrorMessage(error?.details) || error?.message || "备选 Provider 探测失败"
-        });
-      } finally {
-        if (button) button.disabled = false;
-      }
-    }
-
-    async function runEmbeddingConfigProbe() {
-      const button = $("#probeEmbedding");
-      const statusEl = $("#probeEmbeddingStatus");
-      if (button) button.disabled = true;
-      renderProbePending(statusEl, "Embedding");
-      try {
-        const result = await probeConfigService("embedding", buildConfigUpdate());
-        renderProbeResult(statusEl, result);
-      } catch (error) {
-        renderProbeResult(statusEl, {
-          ok: false,
-          error: configErrorMessage(error?.details) || error?.message || "Embedding 探测失败"
-        });
-      } finally {
-        if (button) button.disabled = false;
-      }
-    }
-
     async function runNetworkProxyConfigProbe() {
       const button = $("#probeNetworkProxy");
       const statusEl = $("#probeNetworkProxyStatus");
@@ -7201,6 +7012,13 @@
     });
 
     function setActiveSettingsPanel(panelName = "models") {
+      const currentPanel = document.querySelector("[data-settings-tab].is-active")?.dataset.settingsTab;
+      if (
+        currentPanel === "models"
+        && panelName !== "models"
+        && window.OpenBiliClawModelSettings?.confirmLeave
+        && !window.OpenBiliClawModelSettings.confirmLeave()
+      ) return false;
       document.querySelectorAll("[data-settings-tab]").forEach((tab) => {
         const isActive = tab.dataset.settingsTab === panelName;
         tab.classList.toggle("is-active", isActive);
@@ -7209,25 +7027,16 @@
       document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
         panel.hidden = panel.dataset.settingsPanel !== panelName;
       });
+      const generalSettingsActions = $("#generalSettingsActions");
+      if (generalSettingsActions) generalSettingsActions.hidden = panelName === "models";
+      window.dispatchEvent(new CustomEvent("openbiliclaw:settings-panel-change", {
+        detail: { panel: panelName },
+      }));
+      return true;
     }
 
     document.querySelectorAll("[data-settings-tab]").forEach((tab) => {
       tab.addEventListener("click", () => setActiveSettingsPanel(tab.dataset.settingsTab));
-    });
-
-    function setActiveModelSettingsPanel(groupName = "llm", panelName = "default") {
-      document.querySelectorAll(`[data-model-settings-tab][data-model-settings-group="${groupName}"]`).forEach((tab) => {
-        const isActive = tab.dataset.modelSettingsTab === panelName;
-        tab.classList.toggle("is-active", isActive);
-        tab.setAttribute("aria-selected", isActive ? "true" : "false");
-      });
-      document.querySelectorAll(`[data-model-settings-panel][data-model-settings-group="${groupName}"]`).forEach((panel) => {
-        panel.hidden = panel.dataset.modelSettingsPanel !== panelName;
-      });
-    }
-
-    document.querySelectorAll("[data-model-settings-tab]").forEach((tab) => {
-      tab.addEventListener("click", () => setActiveModelSettingsPanel(tab.dataset.modelSettingsGroup, tab.dataset.modelSettingsTab));
     });
 
     function startChatPlaceholderRotation() {
@@ -7417,12 +7226,6 @@
         subjectTitle: state.messageChatSubjectTitle
       });
     });
-    safeBind("#llmProvider", "change", () => { applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), default_provider: $("#llmProvider")?.value || "" } }); syncLlmFallbackSameState(); });
-    safeBind("#llmFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), fallback_provider: $("#llmFallbackProvider")?.value || "" } }));
-    safeBind("#embeddingFallbackProvider", "change", () => applyConfig({ ...(state.config || {}), llm: { ...(state.config?.llm || {}), embedding: { ...(state.config?.llm?.embedding || {}), fallback_provider: $("#embeddingFallbackProvider")?.value || "" } } }));
-    safeBind("#probeLlm", "click", () => { void runLlmConfigProbe(); });
-    safeBind("#probeLlmFallback", "click", () => { void runLlmFallbackConfigProbe(); });
-    safeBind("#probeEmbedding", "click", () => { void runEmbeddingConfigProbe(); });
     safeBind("#probeNetworkProxy", "click", () => { void runNetworkProxyConfigProbe(); });
     safeBind("#savedAutoSync", "change", (event) => {
       const toggle = event.currentTarget;
@@ -7460,6 +7263,10 @@
     });
     safeBind("#settingsForm", "submit", async (event) => {
       event.preventDefault();
+      if (document.querySelector("[data-settings-tab].is-active")?.dataset.settingsTab === "models") {
+        $("#modelSaveButton")?.focus();
+        return;
+      }
       const submitBtn = $("#settingsForm button[type='submit']");
       const previousText = submitBtn?.textContent || "保存配置";
       if (submitBtn) {

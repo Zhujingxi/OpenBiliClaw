@@ -776,11 +776,11 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             self.initialized += 1
 
     class FakeSoulEngine:
-        def __init__(self, *, llm: object, memory: object, module_overrides=None, **kwargs) -> None:
+        def __init__(self, *, llm: object, memory: object, **kwargs) -> None:
             self.llm = llm
             self.memory = memory
-            self.module_overrides = module_overrides
             self.kwargs = kwargs
+            self._embedding_service = kwargs.get("embedding_service")
 
     class FakeLLMService:
         def __init__(
@@ -789,14 +789,12 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             registry: object,
             memory: object,
             usage_recorder: object | None = None,
-            module_overrides=None,
             concurrency: int = 3,
             concurrency_gate: object | None = None,
         ) -> None:
             self.registry = registry
             self.memory = memory
             self.usage_recorder = usage_recorder
-            self.module_overrides = module_overrides
             self.concurrency = concurrency
             self.concurrency_gate = concurrency_gate
 
@@ -870,6 +868,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
 
     fake_config = SimpleNamespace(
         data_path=Path("/tmp/openclaw-data"),
+        models=SimpleNamespace(chat=SimpleNamespace(concurrency=3)),
         llm=SimpleNamespace(
             concurrency=3,
             soul=SimpleNamespace(provider="claude", model="claude-sonnet"),
@@ -912,13 +911,29 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ),
     )
 
+    route = object()
+    embedding_service = object()
+
+    def build_bundle(*_args: object, memory: object, concurrency_gate: object, **_kwargs: object):
+        service = FakeLLMService(
+            registry=route,
+            memory=memory,
+            concurrency=3,
+            concurrency_gate=concurrency_gate,
+        )
+        return SimpleNamespace(
+            chat_route=route,
+            llm_service=service,
+            embedding_service=embedding_service,
+        )
+
     monkeypatch.setattr(bootstrap_module, "load_config", lambda: fake_config)
-    monkeypatch.setattr(bootstrap_module, "build_llm_registry", lambda config: "registry")
+    monkeypatch.setattr(bootstrap_module, "compute_model_revision", lambda _models: "revision")
+    monkeypatch.setattr(bootstrap_module, "build_runtime_model_bundle", build_bundle)
     monkeypatch.setattr(bootstrap_module, "resolve_runtime_cookie", lambda **_: "cookie")
     monkeypatch.setattr(bootstrap_module, "Database", FakeDatabase)
     monkeypatch.setattr(bootstrap_module, "MemoryManager", FakeMemoryManager)
     monkeypatch.setattr(bootstrap_module, "SoulEngine", FakeSoulEngine)
-    monkeypatch.setattr(bootstrap_module, "LLMService", FakeLLMService)
     monkeypatch.setattr(bootstrap_module, "RecommendationEngine", FakeRecommendationEngine)
     monkeypatch.setattr(bootstrap_module, "BilibiliAPIClient", FakeBilibiliClient)
     monkeypatch.setattr(bootstrap_module, "ContentDiscoveryEngine", FakeDiscoveryEngine)
@@ -964,7 +979,9 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         created_databases[0],
         created_databases[0],
     ]
-    assert services.soul_engine.module_overrides["soul"].provider == "claude"
+    assert services.soul_engine.llm is route
+    assert services.soul_engine.kwargs["embedding_service"] is embedding_service
+    assert services.soul_engine._embedding_service is embedding_service
     assert services.soul_engine.kwargs["speculation_interval_minutes"] == 22
     assert services.soul_engine.kwargs["speculation_ttl_days"] == 8
     assert services.soul_engine.kwargs["speculation_cooldown_days"] == 9
@@ -974,8 +991,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.soul_engine.kwargs["speculation_max_secondary_interests"] == 66
     assert services.soul_engine.kwargs["speculator_idle_interval_minutes"] == 11
     assert services.soul_engine.kwargs["llm_concurrency"] == 3
-    assert services.llm_service.module_overrides["discovery"].provider == "deepseek"
-    assert services.llm_service.module_overrides["evaluation"].model == "gpt-4o-mini"
+    assert services.llm_service.registry is route
     assert services.llm_service.concurrency == 3
     assert services.discovery_engine.concurrency.llm_evaluation_concurrency == 2
     assert (
@@ -1338,7 +1354,6 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
     """A non-daemon OpenClaw refill must finish the durable copy stage inline."""
 
     import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
-    import openbiliclaw.llm.registry as registry_module
     import openbiliclaw.runtime.douyin_producer as douyin_producer_module
 
     profile = SoulProfile(
@@ -1525,6 +1540,7 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
     )
     config = SimpleNamespace(
         data_path=tmp_path,
+        models=SimpleNamespace(chat=SimpleNamespace(concurrency=3)),
         llm=SimpleNamespace(concurrency=3),
         bilibili=SimpleNamespace(cookie="", proxy=""),
         discovery=SimpleNamespace(admission_min_score=0.60),
@@ -1532,13 +1548,10 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
     )
 
     monkeypatch.setattr(bootstrap_module, "load_config", lambda: config)
-    monkeypatch.setattr(bootstrap_module, "build_llm_registry", lambda _config: object())
-    monkeypatch.setattr(bootstrap_module, "module_overrides_from_config", lambda _config: {})
-    monkeypatch.setattr(bootstrap_module, "_llm_concurrency_from_config", lambda _config: 3)
+    monkeypatch.setattr(bootstrap_module, "compute_model_revision", lambda _models: "revision")
     monkeypatch.setattr(bootstrap_module, "resolve_runtime_cookie", lambda **_kwargs: "")
     monkeypatch.setattr(bootstrap_module, "MemoryManager", BootstrapMemory)
     monkeypatch.setattr(bootstrap_module, "SoulEngine", BootstrapSoul)
-    monkeypatch.setattr(bootstrap_module, "LLMService", BootstrapLLM)
     monkeypatch.setattr(bootstrap_module, "BilibiliAPIClient", BootstrapBilibiliClient)
     monkeypatch.setattr(bootstrap_module, "ContentDiscoveryEngine", BootstrapDiscovery)
     monkeypatch.setattr(bootstrap_module, "SearchStrategy", BootstrapStrategy)
@@ -1552,21 +1565,25 @@ async def test_openclaw_bootstrap_one_shot_keeps_partial_copy_durable_without_sp
     monkeypatch.setattr(
         bootstrap_module, "build_youtube_discovery_producer", lambda **_kwargs: None
     )
-    embedding_builder_calls = 0
+    bundle_builder_calls = 0
 
-    def disabled_embedding_builder(*_args: object) -> None:
-        nonlocal embedding_builder_calls
-        embedding_builder_calls += 1
-        return None
+    def build_bundle(*_args: object, memory: object, concurrency_gate: object, **_kwargs: object):
+        nonlocal bundle_builder_calls
+        bundle_builder_calls += 1
+        service = BootstrapLLM()
+        service.usage_recorder = None
+        service.concurrency_gate = concurrency_gate
+        return SimpleNamespace(
+            chat_route=object(),
+            llm_service=service,
+            embedding_service=None,
+        )
 
-    # ``build_openclaw_adapter_services`` imports this symbol inside its
-    # factory, so patching the registry module verifies the same local-import
-    # seam that the real opt-in harness uses to prohibit embedding providers.
-    monkeypatch.setattr(registry_module, "build_embedding_service", disabled_embedding_builder)
+    monkeypatch.setattr(bootstrap_module, "build_runtime_model_bundle", build_bundle)
     monkeypatch.setattr(douyin_producer_module, "build_douyin_discovery_producer", build_douyin)
 
     services = bootstrap_module.build_openclaw_adapter_services()
-    assert embedding_builder_calls == 1
+    assert bundle_builder_calls == 1
     producer = services.runtime_controller.douyin_producer
 
     copy_drain_calls: list[tuple[int, int]] = []
@@ -1884,3 +1901,30 @@ async def test_respond_avoidance_probe_confirm_delegates_to_speculator() -> None
         domain="浅层热点复读",
     )
     assert soul_engine._avoidance_speculator.confirmed == ["浅层热点复读"]
+
+
+@pytest.mark.asyncio
+async def test_respond_avoidance_probe_uses_soul_embedding_for_semantic_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openbiliclaw.integrations.openclaw.operations as operations_module
+
+    adapter, soul_engine, memory_manager, *_ = _build_adapter()
+    embedding_service = object()
+    soul_engine._embedding_service = embedding_service
+    memory_manager.get_layer = lambda _name: SimpleNamespace(data={})  # type: ignore[attr-defined]
+    captured: dict[str, object] = {}
+
+    async def fake_apply_new_dislikes(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(operations_module, "apply_new_dislikes", fake_apply_new_dislikes)
+
+    result = await adapter.respond_avoidance_probe(
+        AvoidanceProbeFeedbackRequest(domain="浅层热点复读", response="confirm")
+    )
+
+    assert result.ok is True
+    assert captured["embedding_service"] is embedding_service
+    assert captured["topics"] == ["浅层热点复读"]

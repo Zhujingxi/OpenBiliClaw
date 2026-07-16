@@ -35,9 +35,9 @@ async def run_init_pipeline(
 ) -> Any:
     """Run init profile generation in an isolated temp environment."""
     from openbiliclaw.config import load_config
-    from openbiliclaw.llm.registry import build_llm_registry
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.engine import SoulEngine
+    from _model_runtime import build_script_model_bundle
 
     cfg = load_config()
 
@@ -46,8 +46,12 @@ async def run_init_pipeline(
         memory = MemoryManager(data_dir)
         memory.initialize()
 
-        registry = build_llm_registry(cfg)
-        engine = SoulEngine(llm=registry, memory=memory)
+        model_bundle = build_script_model_bundle(cfg, memory)
+        engine = SoulEngine(
+            llm=model_bundle.chat_route,
+            memory=memory,
+            embedding_service=model_bundle.embedding_service,
+        )
 
         # Convert to history format for init
         history = [

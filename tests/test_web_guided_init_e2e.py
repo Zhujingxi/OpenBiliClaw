@@ -24,6 +24,97 @@ DISCOVERY_TIMEOUT_DETAIL = (
 )
 
 
+def _model_snapshot(revision: str = "model-rev-1") -> dict[str, Any]:
+    return {
+        "revision": revision,
+        "source": "native",
+        "models": {
+            "schema_version": 1,
+            "chat": {
+                "concurrency": 4,
+                "timeout_seconds": 300,
+                "connections": [
+                    {
+                        "id": "ollama-main",
+                        "name": "Local Ollama",
+                        "type": "ollama",
+                        "preset": "",
+                        "model": "qwen2.5:7b",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "credential": {
+                            "source": "none",
+                            "configured": False,
+                            "env_name": "",
+                            "credential_ref": "",
+                            "oauth_logged_in": False,
+                        },
+                        "api_mode": "",
+                        "reasoning_effort": "",
+                        "http_referer": "",
+                        "x_title": "",
+                        "num_ctx": 0,
+                        "probe": None,
+                        "circuit": {"state": "closed"},
+                    }
+                ],
+            },
+            "embedding": {
+                "enabled": False,
+                "settings": {
+                    "model": "bge-m3",
+                    "output_dimensionality": 1024,
+                    "similarity_threshold": 0.82,
+                    "multimodal_enabled": False,
+                },
+                "providers": [],
+            },
+        },
+        "migration": {"state": "none", "confirmed": True, "issues": []},
+        "overrides": [],
+    }
+
+
+def _connection_types() -> dict[str, Any]:
+    ollama = {
+        "id": "ollama",
+        "label": "Ollama",
+        "category": "local_runtime",
+        "capabilities": ["chat", "embedding"],
+        "presets": [],
+        "preset_definitions": [],
+        "help": "Local native service",
+        "fields": [
+            {
+                "name": "model",
+                "label": "Model",
+                "input_type": "text",
+                "required": True,
+                "capabilities": ["chat"],
+                "presets": [],
+                "help": "",
+                "placeholder": "qwen2.5:7b",
+                "choices": [],
+            },
+            {
+                "name": "base_url",
+                "label": "Base URL",
+                "input_type": "text",
+                "required": True,
+                "capabilities": ["chat", "embedding"],
+                "presets": [],
+                "help": "",
+                "placeholder": "http://127.0.0.1:11434/v1",
+                "choices": [],
+            },
+        ],
+    }
+    return {
+        "capability": "chat",
+        "connection_types": [ollama],
+        "groups": [{"category": "local_runtime", "connection_types": [ollama]}],
+    }
+
+
 def _status(
     *,
     initialized: bool = False,
@@ -68,7 +159,10 @@ def _status(
 class GuidedInitStub:
     def __init__(self) -> None:
         self.init_posts: list[dict[str, Any]] = []
-        self.config_puts: list[dict[str, Any]] = []
+        self.model_puts: list[dict[str, Any]] = []
+        self.model_probes: list[dict[str, Any]] = []
+        self.model_operations: list[str] = []
+        self.model_snapshot = _model_snapshot()
         self.current_status = _status()
         self.post_init_error: tuple[int, dict[str, Any]] | None = None
         self.fail_next_status = False
@@ -200,19 +294,14 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
             if path.startswith("/web/assets/"):
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
+            if path == "/api/model-config":
+                return _json_response(self, state.model_snapshot)
+            if path == "/api/model-connection-types":
+                return _json_response(self, _connection_types())
             if path == "/api/config":
                 return _json_response(
                     self,
-                    {
-                        "config": {
-                            "llm": {"default_provider": "ollama", "ollama": {}},
-                            "bilibili": {"cookie": "SESSDATA=test"},
-                            "sources": {
-                                "bilibili": {"enabled": True},
-                                "youtube": {"enabled": True},
-                            },
-                        }
-                    },
+                    {"config": {"bilibili": {"cookie": "SESSDATA=test-session"}}},
                 )
             if path == "/api/init-status":
                 if state.fail_next_status:
@@ -257,6 +346,23 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                     return _json_response(self, body, status_code)
                 state.set_running()
                 return _json_response(self, state.start_response(), 202)
+            if path == "/api/model-config/probe":
+                state.model_probes.append(payload)
+                state.model_operations.append("probe")
+                connection = payload.get("connection") or {}
+                return _json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "connection_id": connection.get("id", ""),
+                        "capability": "chat",
+                        "observed_dimension": 0,
+                        "error_code": "",
+                        "message": "Connection ready.",
+                        "probed_at": "2026-07-16T00:00:00+00:00",
+                        "revision": payload.get("revision", ""),
+                    },
+                )
             return _json_response(self, {"ok": True})
 
         def do_PUT(self) -> None:  # noqa: N802
@@ -267,9 +373,21 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except json.JSONDecodeError:
                 payload = {}
-            if path == "/api/config":
-                state.config_puts.append(payload)
-                return _json_response(self, {"ok": True, "config": {}})
+            if path == "/api/model-config":
+                state.model_puts.append(payload)
+                state.model_operations.append("put")
+                snapshot = _model_snapshot("model-rev-2")
+                snapshot["models"] = payload["models"]
+                return _json_response(
+                    self,
+                    {
+                        "ok": True,
+                        "revision": "model-rev-2",
+                        "reloaded": True,
+                        "rollback_applied": False,
+                        "snapshot": snapshot,
+                    },
+                )
             return _json_response(self, {"ok": True})
 
         def _serve_file(self, path: Path, content_type: str | None = None) -> None:
@@ -376,6 +494,13 @@ def _install_fake_runtime_stream(page: Any, *, fast_watchdog: bool = False) -> N
     page.add_init_script(script.replace("__WATCHDOG_SETUP__", watchdog_setup))
 
 
+def _save_setup_model(page: Any) -> None:
+    page.wait_for_selector('#connectionTypeList [data-connection-type="ollama"]')
+    page.locator('#connectionTypeList [data-connection-type="ollama"]').click()
+    page.locator("#saveModel").click()
+    page.wait_for_selector('[data-panel="1"].active')
+
+
 def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
@@ -384,9 +509,7 @@ def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
     chromium_page.locator("#next1").click()
     chromium_page.wait_for_selector('[data-panel="2"].active')
     chromium_page.locator("label.init-source-row", has_text="YouTube").locator("input").check()
@@ -397,6 +520,10 @@ def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
         "() => document.querySelector('#initProgress')?.hidden === false"
     )
     assert stub.init_posts == [{"sources": ["bilibili", "youtube"]}]
+    assert stub.model_operations == ["probe", "put"]
+    assert stub.model_probes[0]["connection"]["id"] == "ollama-main"
+    assert stub.model_puts[0]["revision"] == "model-rev-1"
+    assert "llm" not in stub.model_puts[0]
     socket_url = chromium_page.evaluate("() => window.__obcSockets[0].url")
     assert socket_url.endswith("/api/runtime-stream")
 
@@ -419,9 +546,7 @@ def test_setup_wizard_e2e_waits_for_first_pool_before_finishing(
     _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
     chromium_page.locator("#next1").click()
     chromium_page.wait_for_selector('[data-panel="2"].active')
     chromium_page.locator("#startInit").click()
@@ -462,13 +587,31 @@ def test_setup_wizard_e2e_save_llm_does_not_start_guided_init(
     base_url, stub = guided_init_server
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
 
     assert stub.init_posts == []
-    assert len(stub.config_puts) == 1
-    assert stub.config_puts[0]["suppress_background_llm_work"] is True
+    assert len(stub.model_probes) == 1
+    assert len(stub.model_puts) == 1
+    assert stub.model_operations == ["probe", "put"]
+
+
+def test_setup_wizard_e2e_creates_first_stable_chat_connection(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    base_url, stub = guided_init_server
+    stub.model_snapshot["models"]["chat"]["connections"] = []
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.wait_for_selector('#connectionTypeList [data-connection-type="ollama"]')
+    chromium_page.locator('[data-model-field="model"]').fill("qwen2.5:7b")
+    chromium_page.locator('[data-model-field="base_url"]').fill("http://127.0.0.1:11434/v1")
+    chromium_page.locator("#saveModel").click()
+    chromium_page.wait_for_selector('[data-panel="1"].active')
+
+    assert stub.model_operations == ["probe", "put"]
+    assert stub.model_probes[0]["connection"]["id"] == "chat-primary"
+    assert stub.model_puts[0]["models"]["chat"]["connections"][0]["id"] == "chat-primary"
 
 
 def test_setup_wizard_e2e_selected_sources_do_not_require_prior_settings_enable(
@@ -480,9 +623,7 @@ def test_setup_wizard_e2e_selected_sources_do_not_require_prior_settings_enable(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
     chromium_page.locator("#next1").click()
     chromium_page.wait_for_selector('[data-panel="2"].active')
     chromium_page.locator("label.init-source-row", has_text="小红书").locator("input").check()
@@ -570,9 +711,7 @@ def test_web_e2e_surfaces_timeout_cause_and_recovery_actions(
 
     if surface == "setup":
         chromium_page.goto(f"{base_url}/setup/")
-        chromium_page.locator("#provider").select_option("ollama")
-        chromium_page.locator("#saveLlm").click()
-        chromium_page.wait_for_selector('[data-panel="1"].active')
+        _save_setup_model(chromium_page)
         chromium_page.locator("#next1").click()
         chromium_page.wait_for_selector('[data-panel="2"].active')
         chromium_page.locator("#startInit").click()
@@ -636,9 +775,7 @@ def test_setup_wizard_e2e_watchdog_polls_when_runtime_stream_is_silent(
     _install_fake_runtime_stream(chromium_page, fast_watchdog=True)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
     chromium_page.locator("#next1").click()
     chromium_page.wait_for_selector('[data-panel="2"].active')
     chromium_page.locator("#startInit").click()
@@ -658,9 +795,7 @@ def test_setup_wizard_e2e_default_watchdog_polls_when_runtime_stream_is_silent(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
     chromium_page.locator("#next1").click()
     chromium_page.wait_for_selector('[data-panel="2"].active')
     chromium_page.locator("#startInit").click()
@@ -681,9 +816,7 @@ def test_setup_wizard_e2e_blocks_missing_bilibili_without_post(
     _install_fake_runtime_stream(chromium_page)
 
     chromium_page.goto(f"{base_url}/setup/")
-    chromium_page.locator("#provider").select_option("ollama")
-    chromium_page.locator("#saveLlm").click()
-    chromium_page.wait_for_selector('[data-panel="1"].active')
+    _save_setup_model(chromium_page)
     chromium_page.locator("#next1").click()
     chromium_page.wait_for_selector('[data-panel="2"].active')
     chromium_page.locator("#startInit").click()

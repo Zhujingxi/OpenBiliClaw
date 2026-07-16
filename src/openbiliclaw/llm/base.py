@@ -1,16 +1,14 @@
-"""LLM base interfaces and provider registry.
-
-Defines the abstract LLM provider interface and a registry for
-dynamically selecting and switching between providers.
-"""
+"""Provider-neutral LLM interfaces and failure classification."""
 
 from __future__ import annotations
 
 import errno
 import logging
-import time
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -25,6 +23,20 @@ class LLMProviderError(Exception):
 class LLMRateLimitError(LLMProviderError):
     """Raised when a provider rate-limits a request."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        normalized = normalize_retry_after_seconds(retry_after_seconds)
+        self.retry_after_seconds = normalized
+        # Existing background coordinators inspect ``retry_after``. Keep the
+        # alias until their Task 8 cutover so one parsed provider header drives
+        # both the ordered route circuit and the legacy scheduler backoff.
+        self.retry_after = normalized
+
 
 class LLMTimeoutError(LLMProviderError):
     """Raised when a provider request times out."""
@@ -36,6 +48,70 @@ class LLMResponseError(LLMProviderError):
 
 class LLMFallbackError(LLMProviderError):
     """Raised when all candidate providers fail."""
+
+
+def normalize_retry_after_seconds(
+    value: object,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    """Parse a positive Retry-After delta or HTTP date without retaining input."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        seconds = float(value)
+        return seconds if math.isfinite(seconds) and seconds > 0 else None
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    try:
+        seconds = float(candidate)
+    except ValueError:
+        seconds = 0.0
+    if math.isfinite(seconds) and seconds > 0:
+        return seconds
+    try:
+        parsed = parsedate_to_datetime(candidate)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    delay = (parsed - current).total_seconds()
+    return delay if math.isfinite(delay) and delay > 0 else None
+
+
+def retry_after_seconds_from_exception(exc: BaseException) -> float | None:
+    """Extract a safe Retry-After value from a mapped or SDK exception."""
+    for attribute in ("retry_after_seconds", "retry_after"):
+        try:
+            value = getattr(exc, attribute, None)
+        except Exception:
+            continue
+        parsed = normalize_retry_after_seconds(value)
+        if parsed is not None:
+            return parsed
+
+    try:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+    except Exception:
+        return None
+    if headers is None:
+        return None
+    for key in ("retry-after", "Retry-After"):
+        try:
+            value = headers.get(key)
+        except Exception:
+            continue
+        parsed = normalize_retry_after_seconds(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def classify_llm_unavailability(exc: BaseException) -> str | None:
@@ -81,7 +157,16 @@ _LLM_MODERATION_MARKERS = (
     "10013",
 )
 
-_LLM_AUTH_MARKERS = ("authentication", "unauthorized", "invalid api key", "401")
+_LLM_AUTH_MARKERS = (
+    "authentication",
+    "unauthorized",
+    "invalid api key",
+    "permission denied",
+    "forbidden",
+    "401",
+    "http 403",
+    "status 403",
+)
 # The provider host was reachable and answered, but the configured *model* is
 # missing: a local Ollama model that was never pulled returns HTTP 404 with
 # ``{"type": "not_found_error", "message": "model 'x' not found, try pulling it
@@ -95,6 +180,8 @@ _LLM_MODEL_NOT_FOUND_MARKERS = (
     "no such model",
     "does not exist or you do not have access",
     "model does not exist",
+    "http 404",
+    "status 404",
 )
 _LLM_QUOTA_MARKERS = (
     "rate limit",
@@ -166,11 +253,38 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
 
     seen: set[int] = set()
     current: BaseException | None = exc
-    rate_limited = no_provider = auth_failed = model_not_found = False
+    moderation = rate_limited = no_provider = auth_failed = model_not_found = False
     timed_out = invalid_response = connection = server_error = False
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         message = str(current).lower()
+        if any(marker.lower() in message for marker in _LLM_MODERATION_MARKERS):
+            moderation = True
+        try:
+            attempts = getattr(current, "attempts", ())
+        except Exception:
+            attempts = ()
+        for attempt in attempts if isinstance(attempts, tuple | list) else ():
+            try:
+                attempt_kind = str(getattr(attempt, "failure_kind", ""))
+            except Exception:
+                continue
+            if attempt_kind == "moderation":
+                moderation = True
+            elif attempt_kind == "rate_limited":
+                rate_limited = True
+            elif attempt_kind == "auth_failed":
+                auth_failed = True
+            elif attempt_kind == "model_not_found":
+                model_not_found = True
+            elif attempt_kind == "timeout":
+                timed_out = True
+            elif attempt_kind == "connection":
+                connection = True
+            elif attempt_kind == "server_error":
+                server_error = True
+            elif attempt_kind == "invalid_response":
+                invalid_response = True
         if isinstance(current, LLMRateLimitError) or any(
             marker in message for marker in _LLM_QUOTA_MARKERS
         ):
@@ -213,6 +327,8 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
         ):
             invalid_response = True
         current = current.__cause__ or current.__context__
+    if moderation:
+        return "moderation"
     if rate_limited:
         return "rate_limited"
     if no_provider:
@@ -230,6 +346,37 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
     if invalid_response:
         return "invalid_response"
     return None
+
+
+def is_provider_scoped_failure(
+    exc: BaseException,
+    failure_kind: str | None = None,
+) -> bool:
+    """Return whether an embedding boundary may safely degrade or fallback.
+
+    Typed provider failures are deliberate adapter-boundary outcomes. Untyped
+    exceptions are accepted only when both their concrete transport type and
+    shared classifier identify a supported provider/transport category, so a
+    request ``ValueError`` or internal ``RuntimeError`` cannot be masked by
+    message text alone.
+    """
+    if isinstance(exc, LLMProviderError):
+        return True
+    kind = failure_kind if failure_kind is not None else classify_llm_failure_kind(exc)
+    return bool(
+        kind
+        in {
+            "rate_limited",
+            "auth_failed",
+            "model_not_found",
+            "timeout",
+            "connection",
+            "server_error",
+            "invalid_response",
+            "moderation",
+        }
+        and isinstance(exc, (TimeoutError, ConnectionError, OSError))
+    )
 
 
 def describe_llm_failure(exc: BaseException) -> str | None:
@@ -357,15 +504,10 @@ class LLMResponse:
     usage: dict[str, int] | None = None  # token counts
     raw: Any = None  # Raw provider response
     tool_calls: list[dict[str, Any]] | None = None  # Phase 4: function calling
-
-
-@dataclass
-class HealthCheckResult:
-    """Availability result for one provider."""
-
-    available: bool
-    is_default: bool = False
-    error: str | None = None
+    connection_id: str = ""
+    connection_type: str = ""
+    preset: str = ""
+    route_position: int = 0
 
 
 class LLMProvider(ABC):
@@ -375,13 +517,7 @@ class LLMProvider(ABC):
     can switch between them transparently.
     """
 
-    # Subclasses set True if they implement an ``async embed()`` method
-    # backed by a working embeddings endpoint. Used by
-    # ``build_embedding_service`` to pick a fallback when the user's
-    # primary provider has no embedding API (e.g. Anthropic Claude,
-    # DeepSeek). ``hasattr(provider, "embed")`` is unreliable because
-    # subclassing OpenAIProvider auto-inherits ``embed`` even for
-    # vendors whose backend doesn't actually expose it.
+    # Subclasses set True if they implement a working embeddings endpoint.
     supports_embedding: bool = False
 
     @property
@@ -443,271 +579,3 @@ class LLMProvider(ABC):
         except Exception:
             logger.exception("Health check failed for %s", self.name)
             return False
-
-
-class LLMRegistry:
-    """Registry for LLM providers.
-
-    Supports dynamic registration and selection of providers.
-    """
-
-    _RATE_LIMIT_COOLDOWN_SECONDS = 60.0
-
-    def __init__(self) -> None:
-        self._providers: dict[str, LLMProvider] = {}
-        self._default: str = ""
-        self._rate_limited_until: dict[str, float] = {}
-        # A non-empty fallback_provider IS the enable switch — there is no
-        # separate boolean (the legacy [llm].fallback_enabled flag was never
-        # consulted and has been removed; empty provider = fallback off).
-        self.fallback_provider: str = ""
-        # Names of providers that should NOT appear in the chat-completion
-        # fallback chain — typically an Ollama instance registered solely
-        # for embedding (see register(..., chat_capable=False)).
-        self._chat_disabled: set[str] = set()
-
-    def register(
-        self,
-        provider: LLMProvider,
-        *,
-        default: bool = False,
-        chat_capable: bool = True,
-    ) -> None:
-        """Register a provider.
-
-        Args:
-            provider: LLM provider instance.
-            default: Whether to set as default provider.
-            chat_capable: When False, the provider is registered for
-                non-chat use (typically Ollama for embedding-only) and
-                will NOT appear in the chat-completion fallback chain.
-                Default True for backward compat — every other call site
-                wants chat capability.
-
-                Why this matters: if the user only set
-                ``[llm.embedding] provider = "ollama"`` and never
-                configured ``[llm.ollama] model``, the embedding service
-                still needs Ollama to be in the registry — but the
-                model on disk is ``bge-m3``, which can't serve
-                ``/api/chat`` requests. Without this flag, when the
-                primary cloud provider hits a transient error, the
-                fallback chain happily picks Ollama, gets a 404 from
-                ``/api/chat``, and the user sees
-                ``All providers failed (openai, ollama)``.
-        """
-        self._providers[provider.name] = provider
-        if not chat_capable:
-            self._chat_disabled.add(provider.name)
-        else:
-            self._chat_disabled.discard(provider.name)
-        if default or not self._default:
-            self._default = provider.name
-        logger.info(
-            "Registered LLM provider: %s%s%s",
-            provider.name,
-            " (default)" if default else "",
-            "" if chat_capable else " [embedding-only]",
-        )
-
-    def get(self, name: str | None = None) -> LLMProvider:
-        """Get a provider by name, or the default.
-
-        Args:
-            name: Provider name. If None, returns the default.
-
-        Returns:
-            LLM provider instance.
-
-        Raises:
-            KeyError: If the provider is not registered.
-        """
-        target = name or self._default
-        if target not in self._providers:
-            available = ", ".join(self._providers.keys())
-            raise KeyError(f"LLM provider '{target}' not found. Available: {available}")
-        return self._providers[target]
-
-    @property
-    def available_providers(self) -> list[str]:
-        """List of registered provider names."""
-        return list(self._providers.keys())
-
-    @property
-    def default_provider(self) -> str:
-        """Name of the default provider."""
-        return self._default
-
-    def is_chat_capable(self, name: str) -> bool:
-        """Return whether *name* is registered for chat completions."""
-        target = name.strip().lower()
-        return bool(target and target in self._providers and target not in self._chat_disabled)
-
-    async def complete(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-        reasoning_effort: str | None = None,
-    ) -> LLMResponse:
-        """Execute a completion request with sequential provider fallback."""
-        last_error: Exception | None = None
-        attempted: list[str] = []
-        order = self._fallback_order()
-
-        for position, provider_name in enumerate(order):
-            has_next = position + 1 < len(order)
-            attempted.append(provider_name)
-            if self._provider_on_cooldown(provider_name):
-                last_error = LLMRateLimitError(
-                    f"Provider {provider_name} is cooling down after rate limit."
-                )
-                logger.warning("Provider %s is cooling down after rate limit.", provider_name)
-                continue
-            provider = self.get(provider_name)
-            try:
-                response = await provider.complete(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=json_mode,
-                    reasoning_effort=reasoning_effort,
-                )
-                self._rate_limited_until.pop(provider_name, None)
-                return response
-            except LLMRateLimitError as exc:
-                last_error = exc
-                self._mark_rate_limited(provider_name)
-                self._log_provider_failure(provider_name, has_next=has_next)
-            # LLMResponseError (empty/malformed content — flaky gateways
-            # commonly die by returning 200 with no content) falls through to
-            # the next provider like any other failure: the provider already
-            # did its own single in-place retry, and a different provider may
-            # well answer the same prompt.
-            except (LLMProviderError, LLMTimeoutError) as exc:
-                last_error = exc
-                self._log_provider_failure(provider_name, has_next=has_next)
-
-        attempted_list = ", ".join(attempted)
-        if last_error is None:
-            raise LLMFallbackError("No provider was available to process the request.")
-        raise LLMFallbackError(
-            f"All providers failed ({attempted_list}). Last error: {last_error}"
-        ) from last_error
-
-    @staticmethod
-    def _log_provider_failure(provider_name: str, *, has_next: bool) -> None:
-        if has_next:
-            logger.warning("Provider %s failed, trying next fallback.", provider_name)
-        else:
-            logger.warning("Provider %s failed; no fallback provider left to try.", provider_name)
-
-    async def complete_provider(
-        self,
-        provider_name: str,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-        reasoning_effort: str | None = None,
-        model: str | None = None,
-    ) -> LLMResponse:
-        """Execute a completion against one exact chat-capable provider.
-
-        Unlike ``complete()``, this method intentionally has no fallback
-        chain. It is used for explicit per-module overrides where
-        falling back to a different provider would violate user intent.
-        """
-        target = provider_name.strip().lower()
-        if not self.is_chat_capable(target):
-            available = ", ".join(self._fallback_order())
-            raise LLMFallbackError(
-                f"LLM provider '{target or provider_name}' is not registered "
-                f"or not chat-capable. Chat-capable providers: {available}"
-            )
-        if self._provider_on_cooldown(target):
-            logger.warning("Provider %s is cooling down after rate limit.", target)
-            raise LLMRateLimitError(f"Provider {target} is cooling down after rate limit.")
-
-        provider = self.get(target)
-        try:
-            response = await provider.complete(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                json_mode=json_mode,
-                reasoning_effort=reasoning_effort,
-                model=model,
-            )
-            self._rate_limited_until.pop(target, None)
-            return response
-        except LLMRateLimitError:
-            self._mark_rate_limited(target)
-            logger.warning("Provider %s rate-limited exact routed call.", target)
-            raise
-
-    async def health_check_all(self) -> dict[str, HealthCheckResult]:
-        """Run health checks for all registered providers."""
-        results: dict[str, HealthCheckResult] = {}
-        for provider_name in self.available_providers:
-            provider = self.get(provider_name)
-            try:
-                available = await provider.health_check()
-                results[provider_name] = HealthCheckResult(
-                    available=available,
-                    is_default=provider_name == self._default,
-                    error=None if available else "health check returned false",
-                )
-            except Exception as exc:
-                results[provider_name] = HealthCheckResult(
-                    available=False,
-                    is_default=provider_name == self._default,
-                    error=str(exc),
-                )
-        return results
-
-    def _fallback_order(self) -> list[str]:
-        """Return the sequential CHAT-fallback provider order.
-
-        Skips providers registered with ``chat_capable=False`` (the
-        embedding-only Ollama case). The default provider is honored
-        whenever it's chat-capable. A fallback provider is included only
-        when ``fallback_provider`` names a registered chat provider; no
-        automatic provider walk is performed.
-        """
-        chat_pool = [name for name in self.available_providers if name not in self._chat_disabled]
-        if not chat_pool:
-            # Edge case: every provider is embedding-only. Surface the
-            # problem rather than silently doing nothing — complete()
-            # will raise LLMFallbackError("No provider was available
-            # to process the request.").
-            return []
-        if self._default and self._default in chat_pool:
-            ordered = [
-                self._default,
-                *[name for name in chat_pool if name != self._default],
-            ]
-        else:
-            ordered = chat_pool
-        fallback_provider = self.fallback_provider.strip().lower()
-        if not fallback_provider:
-            return ordered[:1]
-        if fallback_provider == ordered[0] or fallback_provider not in chat_pool:
-            return ordered[:1]
-        return [ordered[0], fallback_provider]
-
-    def _provider_on_cooldown(self, provider_name: str) -> bool:
-        until = self._rate_limited_until.get(provider_name)
-        if until is None:
-            return False
-        if until > time.monotonic():
-            return True
-        self._rate_limited_until.pop(provider_name, None)
-        return False
-
-    def _mark_rate_limited(self, provider_name: str) -> None:
-        self._rate_limited_until[provider_name] = (
-            time.monotonic() + self._RATE_LIMIT_COOLDOWN_SECONDS
-        )
