@@ -10,6 +10,7 @@
 import {
   buildActionHintFromClickTarget,
   createBehaviorEvent,
+  isTapAuthoritativeAction,
   isTrackableCardElement,
   normalizeActionSignal,
 } from "../shared/behavior.js";
@@ -299,7 +300,7 @@ export function startCollector(adapter: PlatformAdapter): void {
       // Clicking an already-active like/favorite/follow control withdraws it.
       // A retraction is a neutralization, not a positive vote.
       if (actionHint.pressed === true && RETRACTABLE_ACTIONS.has(actionType)) {
-        if (adapter.strongSignalSource === "tap") {
+        if (isTapAuthoritativeAction(adapter, "retraction")) {
           // The MAIN-world tap emits the authoritative retraction; suppress
           // the DOM duplicate (no event).
           return;
@@ -317,6 +318,12 @@ export function startCollector(adapter: PlatformAdapter): void {
         );
         return;
       }
+
+      // Positive strong signal. When the platform's MAIN-world tap is the
+      // authoritative source for this action, suppress the DOM emission so we
+      // neither double-count the tap nor record "opened the menu = an event"
+      // false actions (e.g. clicking Reply/Repost only opens a composer).
+      if (isTapAuthoritativeAction(adapter, actionType)) return;
 
       const action = normalizeActionSignal(actionType, {
         ...targetMetadata,

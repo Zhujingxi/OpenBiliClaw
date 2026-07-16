@@ -56,6 +56,12 @@ function inferXiaohongshuActionType(hint: ActionHint): string | null {
 
 export const xiaohongshuAdapter: PlatformAdapter = {
   sourcePlatform: "xiaohongshu",
+  // The MAIN-world action tap (`main/xhs-action-tap.ts`) emits the
+  // authoritative like / favorite signal from the write endpoints and their
+  // withdrawals as retractions. The DOM click path must suppress all three so
+  // it never double-counts the tap nor records icon-button misfires. comment /
+  // share have no tap and keep flowing through the DOM.
+  tapAuthoritativeActions: new Set(["like", "favorite", "retraction"]),
   detectPageType: detectXiaohongshuPageType,
   extractContentId: extractNoteId,
   extractSearchQuery: (url) => queryParam(url, "keyword"),

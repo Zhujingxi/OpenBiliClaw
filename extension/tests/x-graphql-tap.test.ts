@@ -148,6 +148,44 @@ test("parseXMutation: reply CreateTweet → comment, carries in_reply_to id", ()
   assert.equal(out?.tweet_id, "1790000000000000004");
 });
 
+test("parseXMutation: reply CreateTweet carries the reply body text on success", () => {
+  const out = parseXMutation(loadFixture("reply_create_tweet.json"));
+  assert.equal(out?.type, "comment");
+  assert.equal(out?.text, "great thread, thanks for sharing");
+});
+
+test("parseXMutation: reply body is dropped when the response carries GraphQL errors", () => {
+  // Invariant 7b: HTTP 2xx but a GraphQL business error means the reply did
+  // not actually post — the comment event still fires (existing timing) but
+  // the body text is NOT attached.
+  const out = parseXMutation({
+    url: "https://x.com/i/api/graphql/q/CreateTweet",
+    requestBody: JSON.stringify({
+      variables: {
+        tweet_text: "this failed to post",
+        reply: { in_reply_to_tweet_id: "1790000000000000020" },
+      },
+    }),
+    responseBody: JSON.stringify({ errors: [{ message: "Rate limited" }] }),
+  });
+  assert.equal(out?.type, "comment");
+  assert.equal(out?.tweet_id, "1790000000000000020");
+  assert.equal(out?.text, undefined);
+});
+
+test("parseXMutation: reply with no tweet_text stays a bare comment (no regression)", () => {
+  const out = parseXMutation({
+    url: "https://x.com/i/api/graphql/q/CreateTweet",
+    requestBody: JSON.stringify({
+      variables: { reply: { in_reply_to_tweet_id: "1790000000000000021" } },
+    }),
+    responseBody: JSON.stringify({ data: { create_tweet: {} } }),
+  });
+  assert.equal(out?.type, "comment");
+  assert.equal(out?.tweet_id, "1790000000000000021");
+  assert.equal(out?.text, undefined);
+});
+
 test("parseXMutation: a top-level CreateTweet without reply is NOT captured", () => {
   // A brand-new tweet (no in_reply_to_tweet_id) is the user authoring
   // content, not engaging with someone else's — drop it.

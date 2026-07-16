@@ -37,6 +37,8 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 - 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务：点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
 - 记录行为发生时的**完整上下文**：对应的 DOM 页面快照、当前浏览路径、时间戳、平台内容 ID
 - 捕捉用户的**微行为**：鼠标悬停、视频进度条跳转、视频暂停 / 继续、页面导航等
+- 采集用户亲手写的**评论 / 弹幕正文**（最强的兴趣表达之一）：X 回复正文与 B 站评论 / 弹幕正文均经 MAIN-world 网络 tap 在**提交成功后**采集（业务码校验），双端截断 200 字符 + 剥离控制字符后进入 `metadata.comment_text`（弹幕 `comment_kind="danmaku"`）
+- **小红书赞 / 收藏强信号**由 MAIN-world `xhs-action-tap`（`obc-xhs-action`，与 token sniffer 隔离）在网络层认定：like/dislike/collect/uncollect 写端点业务成功才发，替代此前「按钮文案匹配、图标按钮漏采」的 DOM 路径；xhs adapter 声明 `tapAuthoritativeActions:{like,favorite,retraction}`，kernel 抑制对应 DOM 发射，事件 URL 与后端 note 键型互通以支持赞→撤销折价
 - 记录用户的**主动反馈**：`dislike` 类动作统一规范成 `feedback` 事件，避免各平台负反馈语义分叉
 - 插件 side panel 与桌面 / 移动 Web 使用同一 platform-neutral 保存契约：卡片先本地保存，保存页显式同步并轮询逐项任务；默认关闭自动同步，首次开启提示将修改对应平台账号；本地删除不删除平台记录
 - 本机调试可通过 `/api/extension/e2e/run` 驱动已安装插件在抖音 / 小红书 / X 真实页面执行白名单 DOM 操作，再由后端校验 `/api/events` 是否自然入库；runner 会把复用 tab 归位到平台入口并在回传结果前 flush 捕捉 buffer，该链路不伪造行为事件，用于验证捕捉层本身。`/api/events` 在画像明确未初始化时会拒收普通行为事件，首轮画像信号只由点击「开始初始化」后的 guided init 来源任务拉取；初始化后 accepted 普通事件会先写入 memory，再进入 `ProfileUpdatePipeline`，随后通过 `request_replenishment(reason="event_ingest")` 排队补货需求。旧版本已经停在 discovery 水位后的普通行为事件由独立 `last_profile_pipeline_event_id` 补喂画像 pipeline，而 `pending_signal_events` 仍只是 search / related_chain refresh 的触发水位，不是画像待处理数。
@@ -75,7 +77,7 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 ├─────────────────────────────────────────────────────────────┤
 │              📝 事件层 (Event Layer)                          │
 │  "他做了什么"                                                │
-│  原始行为日志 · DOM快照 · 点击/搜索/收藏记录 · 反馈记录          │
+│  原始行为日志 · DOM快照 · 点击/搜索/收藏记录 · 评论/弹幕正文 · 反馈记录 │
 └─────────────────────────────────────────────────────────────┘
 ```
 

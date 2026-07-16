@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { isTapAuthoritativeAction } from "../src/shared/behavior.ts";
+import { twitterAdapter } from "../src/shared/platforms/twitter.ts";
+import { bilibiliAdapter } from "../src/shared/platforms/bilibili.ts";
+import { redditAdapter } from "../src/shared/platforms/reddit.ts";
+import { xiaohongshuAdapter } from "../src/shared/platforms/xiaohongshu.ts";
+
 const kernelSource = readFileSync(
   new URL("../src/content/kernel.ts", import.meta.url),
   "utf8",
@@ -22,10 +28,54 @@ test("click path treats a pressed like/favorite/follow control as a retraction",
   assert.match(kernelSource, /retracted_action:/);
 });
 
-test("click path suppresses the retraction on tap-authoritative platforms (no double-emit)", () => {
-  // On X the GraphQL tap emits the authoritative retraction; the DOM path
-  // must only suppress, never emit a duplicate.
-  assert.match(kernelSource, /strongSignalSource === "tap"/);
+test("click path suppresses tap-authoritative actions on both the retraction and positive branches", () => {
+  // On X the GraphQL tap emits the authoritative like/favorite/share/comment
+  // AND retraction; the DOM path must only suppress, never double-emit — this
+  // kills both the positive double-count and the "opened the menu = an event"
+  // false actions (codex r2 findings 2/4).
+  assert.match(kernelSource, /isTapAuthoritativeAction\(adapter,\s*"retraction"\)/);
+  assert.match(kernelSource, /isTapAuthoritativeAction\(adapter,\s*actionType\)/);
+});
+
+test("tapAuthoritativeActions suppression matrix: declared actions suppress, others emit", () => {
+  // X declares all five engagement actions as tap-authoritative.
+  for (const action of ["like", "favorite", "share", "comment", "retraction"]) {
+    assert.equal(isTapAuthoritativeAction(twitterAdapter, action), true, action);
+  }
+  // Non-strong / undeclared actions are never suppressed (still DOM-emitted).
+  for (const action of ["view", "scroll", "coin", "hover"]) {
+    assert.equal(isTapAuthoritativeAction(twitterAdapter, action), false, action);
+  }
+});
+
+test("a non-tap platform never suppresses any DOM action", () => {
+  // reddit has no MAIN-world tap, so every action flows through the DOM path.
+  for (const action of ["like", "favorite", "share", "comment", "retraction", "view"]) {
+    assert.equal(isTapAuthoritativeAction(redditAdapter, action), false, action);
+  }
+});
+
+test("bilibili suppresses only DOM comment (its interact tap owns it), not other actions", () => {
+  // The bili-interact-tap emits the authoritative comment; clicking the DOM
+  // "评论" control must not double-count nor fire on merely opening the panel.
+  assert.equal(isTapAuthoritativeAction(bilibiliAdapter, "comment"), true);
+  // like / coin / favorite / share / follow still come from the DOM path.
+  for (const action of ["like", "coin", "favorite", "share", "follow", "retraction"]) {
+    assert.equal(isTapAuthoritativeAction(bilibiliAdapter, action), false, action);
+  }
+});
+
+test("xiaohongshu suppresses DOM like/favorite/retraction (its action tap owns them), not comment/share", () => {
+  // The xhs-action-tap emits the authoritative like/favorite from the write
+  // endpoints and their withdrawals as retractions; the icon-button DOM path
+  // must not double-count nor misfire. comment / share have no tap on xhs and
+  // still flow through the DOM.
+  for (const action of ["like", "favorite", "retraction"]) {
+    assert.equal(isTapAuthoritativeAction(xiaohongshuAdapter, action), true, action);
+  }
+  for (const action of ["comment", "share", "view", "scroll"]) {
+    assert.equal(isTapAuthoritativeAction(xiaohongshuAdapter, action), false, action);
+  }
 });
 
 test("video play begins a dwell segment; pause and ended end it", () => {

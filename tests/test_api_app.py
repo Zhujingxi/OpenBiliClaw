@@ -14640,3 +14640,64 @@ def test_reshuffle_endpoint_forwards_visible_card_exclusions() -> None:
         ({"profile": "ok"}, [], 10),
         ({"profile": "ok"}, ["BV1VISIBLE", "BV2VISIBLE"], 10),
     ]
+
+
+def test_apply_retraction_db_marks_marks_matching_positive(tmp_path: Path) -> None:
+    """The /api/events DB hook discounts stored positives undone by a retraction."""
+    from openbiliclaw.api.app import apply_retraction_db_marks
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "hook.db")
+    db.initialize()
+    t0 = datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC)
+    ms = int(t0.timestamp() * 1000)
+    db.insert_event(
+        "like",
+        url="https://x.com/i/status/123",
+        metadata={"signal_strength": 0.85, "timestamp": ms},
+    )
+
+    retraction_ms = int((t0 + timedelta(hours=1)).timestamp() * 1000)
+    marked = apply_retraction_db_marks(
+        db,
+        [
+            {
+                "event_type": "feedback",
+                "url": "https://x.com/u/status/123",
+                "metadata": {
+                    "feedback_type": "retraction",
+                    "retracted_action": "like",
+                    "timestamp": retraction_ms,
+                },
+            }
+        ],
+    )
+    assert marked == 1
+    row = db.query_events(event_types=["like"], limit=1)[0]
+    assert json.loads(row["metadata"])["retracted"] is True
+
+
+def test_apply_retraction_db_marks_skips_out_of_whitelist_action(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from openbiliclaw.api.app import apply_retraction_db_marks
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "hook2.db")
+    db.initialize()
+    with caplog.at_level("WARNING"):
+        marked = apply_retraction_db_marks(
+            db,
+            [
+                {
+                    "event_type": "feedback",
+                    "url": "https://x.com/i/status/123",
+                    "metadata": {
+                        "feedback_type": "retraction",
+                        "retracted_action": "view",
+                        "timestamp": 1,
+                    },
+                }
+            ],
+        )
+    assert marked == 0

@@ -310,6 +310,29 @@ def test_compact_event_for_prompt_preserves_signal_strength() -> None:
     }
 
 
+def test_compact_event_for_prompt_preserves_comment_text_and_kind() -> None:
+    analyzer = PreferenceAnalyzer(registry=ContextOverflowOnceStructuredService())
+
+    compact = analyzer._compact_event_for_prompt(
+        {
+            "event_type": "comment",
+            "title": "一个视频",
+            "metadata": {
+                "source_platform": "bilibili",
+                "comment_text": "写得真好",
+                "comment_kind": "danmaku",
+                "unused": "drop me",
+            },
+        }
+    )
+
+    assert compact["metadata"] == {
+        "source_platform": "bilibili",
+        "comment_text": "写得真好",
+        "comment_kind": "danmaku",
+    }
+
+
 class ServiceContextOverflowOnceStructuredService(ContextOverflowOnceStructuredService):
     async def complete_structured_task(
         self,

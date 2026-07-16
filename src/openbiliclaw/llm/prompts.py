@@ -251,6 +251,7 @@ _PREFERENCE_ANALYSIS_SYSTEM_PROMPT = """
 10. 如果事件的 inferred_satisfaction 是 negative，或 metadata.feedback_type 是 dislike / metadata.reaction 是 thumbs_down，表示负向证据。不要把负向事件提取为 interests / favorite_up_users；只能用于 disliked_topics、风格避让或降低相关偏好置信度。
 11. metadata.signal_strength 表示该事件作为偏好证据的强度，不是最终 interest.weight。如果存在该字段，优先用它判断证据强弱；最终 weight 仍要结合重复次数、内容一致性、最近性、负向反馈和跨来源一致性。没有 signal_strength 时按事件类型粗略理解：favorite / bookmark / save / collect 是强正向；coin / share 是强正向；like 是明确正向；comment 是主动参与但要看语义；follow / subscription 是长期兴趣信号但偏创作者/频道维度，不能直接等同于每个题材都喜欢；view / history 是弱到中等信号，单条不能推出高权重兴趣，重复出现或与强信号同向时才提高；click 只有足够停留、完播或 positive inferred_satisfaction 时才增强；search 是意图信号不是喜欢信号；hover / scroll / snapshot 只作被动上下文辅助；dialogue 是用户主动聊到，按表达强度判断。负向反馈、dislike、thumbs_down 或 inferred_satisfaction=negative 优先级最高，不能被 signal_strength 抵消。
 12. 如果 metadata.feedback_type 是 comment，它是用户对推荐内容的直接反馈和中性反馈容器，不预设正向或负向。必须根据备注、feedback_note、context 中的具体内容判断用户是喜欢、不喜欢，还是仅补充说明：正向才可强化 interests / style；负向只能用于 disliked_topics、风格避让或降低相关偏好置信度；不明确时不要强行改偏好。
+12b. 如果事件的 context 结尾带「(已撤销)」标记，或 metadata.retracted 为真，表示用户后来撤销了这次正向行为（取消赞 / 取消收藏 / 取消关注等）。这类证据已被降级（signal_strength 通常为 0.2），只能当作很弱的兴趣线索：不要据此提高任何兴趣权重，也不要把它计入 favorite_up_users；有明确反向证据时可用于降低相关偏好置信度。
 13. 初始化分片时，可顺手输出少量 awareness_candidates / insight_candidates：
     - awareness_candidates 是对本批事件的直接观察，不是人格结论，最多 3 条；
     - insight_candidates 是有证据支撑的轻量假设，最多 2 条，confidence 0~1；
@@ -315,6 +316,8 @@ def build_preference_analysis_prompt(
     existing_preference: dict[str, object],
 ) -> list[dict[str, str]]:
     """Build a structured prompt for extracting user preferences from events."""
+    from openbiliclaw.sources.event_format import render_retraction_marked_events
+
     system_prompt = _PREFERENCE_ANALYSIS_SYSTEM_PROMPT
     user_prompt = "\n\n".join(
         [
@@ -322,7 +325,11 @@ def build_preference_analysis_prompt(
             json.dumps(existing_preference, ensure_ascii=False, indent=2),
             "</existing_preference>",
             "<event_batch>",
-            json.dumps(events, ensure_ascii=False, indent=2),
+            json.dumps(
+                render_retraction_marked_events(events),
+                ensure_ascii=False,
+                indent=2,
+            ),
             "</event_batch>",
         ]
     )
@@ -714,6 +721,8 @@ def build_awareness_prompt(
     soul_profile: dict[str, object],
 ) -> list[dict[str, str]]:
     """Build a structured prompt for recent awareness-note generation."""
+    from openbiliclaw.sources.event_format import render_retraction_marked_events
+
     user_prompt = "\n\n".join(
         [
             "<soul_profile>",
@@ -723,7 +732,12 @@ def build_awareness_prompt(
             json.dumps(preference_summary, ensure_ascii=False, indent=2, sort_keys=True),
             "</preference_summary>",
             "<recent_events>",
-            json.dumps(events, ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(
+                render_retraction_marked_events(events),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
             "</recent_events>",
         ]
     )

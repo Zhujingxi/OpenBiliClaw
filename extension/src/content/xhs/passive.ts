@@ -11,6 +11,12 @@
  */
 
 import { pickMetricCount } from "../metric-count.ts";
+import {
+  NOTE_AUTHOR_SELECTOR,
+  NOTE_CARD_CONTAINER_SELECTOR,
+  NOTE_COVER_SELECTOR,
+  NOTE_TITLE_SELECTOR,
+} from "./selectors.ts";
 
 /** Note detail URL variants xhs exposes. We accept any non-empty segment
  *  after the prefix; backend validation can tighten the id shape. */
@@ -168,12 +174,9 @@ export function extractNoteMetadataFromAnchor(
   if (!url) return null;
 
   // Walk up to the card container — xhs uses .note-item or a nearby section/div
-  const card =
-    anchor.closest(".note-item, section, [class*='note'], [class*='card']") ?? anchor;
+  const card = anchor.closest(NOTE_CARD_CONTAINER_SELECTOR) ?? anchor;
 
-  const titleEl = card.querySelector(
-    ".title, .note-title, [class*='title'] span, [class*='title']",
-  );
+  const titleEl = card.querySelector(NOTE_TITLE_SELECTOR);
   const title = titleEl?.textContent?.trim() || anchor.title || "";
 
   // Skip notes with empty title — xhs frequently changes DOM structure,
@@ -181,14 +184,10 @@ export function extractNoteMetadataFromAnchor(
   // recommendation cards and wastes LLM classification budget.
   if (!title) return null;
 
-  const authorEl = card.querySelector(
-    ".author-wrapper .name, .author .name, .user-name, [class*='author'] .name, .nickname",
-  );
+  const authorEl = card.querySelector(NOTE_AUTHOR_SELECTOR);
   const author = authorEl?.textContent?.trim() || "";
 
-  const coverImg = card.querySelector(
-    "img.cover, .cover img, img[src*='xhscdn'], img[src*='sns-img'], img",
-  );
+  const coverImg = card.querySelector(NOTE_COVER_SELECTOR);
   const cover_url =
     coverImg?.getAttribute("src") || coverImg?.getAttribute("data-src") || "";
 

@@ -44,6 +44,16 @@
         },
         {
             "matches": [
+                "*://*.bilibili.com/*"
+            ],
+            "js": [
+                "dist/main/bili-interact-tap.js"
+            ],
+            "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
                 "*://*.xiaohongshu.com/*"
             ],
             "js": [
@@ -57,7 +67,8 @@
             ],
             "js": [
                 "dist/main/xhs-token-sniffer.js",
-                "dist/main/xhs-state-bridge.js"
+                "dist/main/xhs-state-bridge.js",
+                "dist/main/xhs-action-tap.js"
             ],
             "run_at": "document_start",
             "world": "MAIN"

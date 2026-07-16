@@ -18,6 +18,7 @@
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，避免 pool readiness / maintenance 的推荐历史排除和最近已看读取反复全表扫描。 |
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
+| Retraction 事件折价（离线重读面） | ✅ | `mark_positive_events_retracted(identity_urls, retracted_action, *, retraction_at)` 在独立短连接的一次事务中，对 `event_type == retracted_action` 且 URL 归一化 identity key（`sources/identity_keys.dedup_key`：tweet_id / bvid / mid / xhs note_id）命中、**且事件时间早于 `retraction_at`** 的行 patch `metadata.retracted=true` + `signal_strength=min(现值,0.2)`；事件时间不可得的行保守不标。无时间窗口（identity key 全局唯一），覆盖 `openbiliclaw init` 全量重建与 12h 认知整理等重读 events 表路径；不删行、不改 `event_type`/`url`。`latest_retraction_time_for(url, action)` 返回该 identity + action 最新的已存 retraction 事件时间，供落库路径对账迟到正向事件（account_sync 回填）。`retracted_action` 越界返回 0/None。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、近期已看、self-XHS 与 delight guards。 |
 | 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
 | 扩展原生保存 job ledger 与旧状态迁移 | ✅ | `extension_native_save_jobs` 保存脱敏后的六平台扩展任务；task URL 只允许平台 HTTPS host 与默认端口，输出移除 fragment/非导航 query（YouTube 仅保留身份参数 `v`；小红书仅保留打开公开笔记所需的单值非空 `xsec_token/xsec_source`，其它 key 仍剥离）。partial unique index 保证 `(platform, item_key, requested_action)` 只有一个 pending/in-progress row。命名迁移只把六个 canonical 平台的旧 `unsupported`/空 error code 改为 `unsupported_adapter_missing`，绝不改 Bilibili、未知平台或 `unsupported_content_type`。 |
@@ -53,7 +54,20 @@ urls = db.recent_event_urls(
 )
 ```
 
-`recent_event_urls()` 是 `query_events()` 的薄封装，返回窗口内指定类型事件的非空 `url` 集合；`exclude_source` 逐行解析 `metadata` JSON 过滤来源。`AccountSyncService` 用它做扩展 ↔ 账号拉取的跨源去重（键提取——bvid / mid / tweet ID——在调用方完成，helper 保持通用）。
+`recent_event_urls()` 是 `query_events()` 的薄封装，返回窗口内指定类型事件的非空 `url` 集合；`exclude_source` 逐行解析 `metadata` JSON 过滤来源。`AccountSyncService` 用它做扩展 ↔ 账号拉取的跨源去重（键提取现统一到共享 `sources/identity_keys.py`——bvid / mid / tweet ID / xhs note_id）。
+
+### Retraction 事件折价（离线重读面）
+
+```python
+marked = db.mark_positive_events_retracted(
+    ["https://x.com/u/status/123"],  # retraction 事件的 identity url(s)
+    "like",                          # retracted_action ∈ {like,favorite,share,follow}
+    retraction_at=retraction_time,   # 只标注事件时间早于它的行；时间不可得保守不标
+)
+retraction_time = db.latest_retraction_time_for("https://x.com/i/status/123", "like")
+```
+
+`mark_positive_events_retracted()` 是 retraction 双面折价机制的离线重读面（内存面在 `ProfileUpdatePipeline.ingest_batch()`）：把用户撤销的正向证据在 events 表原地标注为 `retracted` 并把 `signal_strength` 折到 0.2，供 `openbiliclaw init` 全量重建、12h 认知整理等重读路径消费。identity key 全局唯一，无时间窗口，撤销数月前的 like 也能命中；只 patch metadata，不删行、不改其它列。`latest_retraction_time_for()` 供 `MemoryManager.propagate_event/propagate_events` 在落库迟到正向事件时按 identity key 对账已存 retraction。
 
 ### Guided Init 状态与事件
 

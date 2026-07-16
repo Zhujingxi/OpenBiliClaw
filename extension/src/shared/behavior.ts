@@ -37,6 +37,24 @@ export function normalizeActionSignal(
   return { type: actionType, metadata };
 }
 
+/**
+ * Whether the generic DOM click path should suppress emitting a strong-signal
+ * action because the platform's MAIN-world network tap is the authoritative
+ * source for it. `action` is the `inferActionType` output for a positive
+ * signal, or the literal `"retraction"` for a pressed-control withdrawal.
+ *
+ * Per-action granularity (replaces the old coarse `strongSignalSource` flag):
+ * a platform can let its tap own like/favorite while still emitting other
+ * DOM actions, so we never double-count nor fire "opened the menu" false
+ * actions for tap-owned actions.
+ */
+export function isTapAuthoritativeAction(
+  adapter: Pick<PlatformAdapter, "tapAuthoritativeActions">,
+  action: string,
+): boolean {
+  return adapter.tapAuthoritativeActions?.has(action) ?? false;
+}
+
 function elementClassName(element: Element): string {
   const value = (element as HTMLElement).className;
   return typeof value === "string" ? value : (element.getAttribute("class") ?? "");

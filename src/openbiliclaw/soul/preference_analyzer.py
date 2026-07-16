@@ -72,6 +72,14 @@ _COMPACT_METADATA_KEYS = frozenset(
         "feedback_type",
         "reaction",
         "signal_strength",
+        # Retraction discount flag (Phase 0): kept so the budget-overflow /
+        # refusal-retry compact path still surfaces the undo + folded strength.
+        "retracted",
+        # Comment / danmaku text (Phase 2/3): the user's own first-person
+        # interest expression must survive the compact path, not just the
+        # whole-batch JSON dump.
+        "comment_text",
+        "comment_kind",
     }
 )
 

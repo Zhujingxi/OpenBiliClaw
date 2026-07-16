@@ -57,3 +57,22 @@ test("buildEventFromEngagement keeps positive engagements unchanged", () => {
   assert.equal(event.metadata.feedback_type, undefined);
   assert.equal(event.metadata.tweet_id, "1");
 });
+
+test("buildEventFromEngagement writes sanitized comment_text + comment_kind for a reply", () => {
+  const event = buildEventFromEngagement({
+    type: "comment",
+    tweet_id: "1790000000000000004",
+    text: "great\nthread \u200b thanks", // \n (Cc) + zero-width space (Cf) strip
+  });
+  assert.equal(event.type, "comment");
+  assert.equal(event.metadata.comment_kind, "comment");
+  assert.equal(event.metadata.comment_text, "greatthread  thanks");
+  assert.ok(!String(event.metadata.comment_text).includes("\n"));
+});
+
+test("buildEventFromEngagement omits comment_text when a reply carries no body", () => {
+  const event = buildEventFromEngagement({ type: "comment", tweet_id: "5" });
+  assert.equal(event.type, "comment");
+  assert.equal(event.metadata.comment_text, undefined);
+  assert.equal(event.metadata.comment_kind, undefined);
+});

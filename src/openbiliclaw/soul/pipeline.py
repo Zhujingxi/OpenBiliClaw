@@ -561,6 +561,82 @@ def save_pipeline_state(
 
 
 # ---------------------------------------------------------------------------
+# Retraction discounting (event-capture-completion Phase 0, face 1/1b)
+# ---------------------------------------------------------------------------
+
+# Out-of-order tombstone bounds. Calibration:
+# - TTL 24h covers the extension buffer's resend window plus the account_sync
+#   dual cycle, so a positive that arrives late but within a day is still
+#   discounted by an earlier retraction.
+# - Cap 500 far exceeds a single user's real retraction frequency; on overflow
+#   the oldest tombstones are evicted first.
+_RETRACTION_TOMBSTONE_TTL = timedelta(hours=24)
+_RETRACTION_TOMBSTONE_CAP = 500
+
+
+def _payload_event_type(payload: dict[str, object]) -> str:
+    return str(payload.get("event_type") or payload.get("type") or "").strip().lower()
+
+
+def _positive_signal_descriptor(
+    payload: dict[str, object],
+) -> tuple[str, str, datetime | None] | None:
+    """Return ``(identity_key, action, event_time)`` for a retractable positive.
+
+    ``None`` when the payload is not a whitelisted positive, has no identity
+    key, or lacks dict metadata.
+    """
+    from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS, parse_event_timestamp
+    from openbiliclaw.sources.identity_keys import dedup_key
+
+    action = _payload_event_type(payload)
+    if action not in RETRACTABLE_ACTIONS:
+        return None
+    key = dedup_key(str(payload.get("url") or ""))
+    if not key:
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    return key, action, parse_event_timestamp(metadata)
+
+
+def _retraction_signal_descriptor(
+    payload: dict[str, object],
+) -> tuple[str, str, datetime | None] | None:
+    """Return ``(identity_key, action, event_time)`` for a retraction feedback.
+
+    Logs + skips (returns ``None``) when ``retracted_action`` is out of the
+    whitelist (invariant 4) or no identity key applies.
+    """
+    from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS, parse_event_timestamp
+    from openbiliclaw.sources.identity_keys import dedup_key
+
+    metadata = payload.get("metadata")
+    if _payload_event_type(payload) != "feedback" or not isinstance(metadata, dict):
+        return None
+    if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
+        return None
+    action = str(metadata.get("retracted_action") or "").strip().lower()
+    if action not in RETRACTABLE_ACTIONS:
+        logger.warning("retraction discount: skipping out-of-whitelist retracted_action %r", action)
+        return None
+    key = dedup_key(str(payload.get("url") or ""))
+    if not key:
+        return None
+    return key, action, parse_event_timestamp(metadata)
+
+
+def _discount_payload(payload: dict[str, object]) -> None:
+    """Fold a positive payload's metadata to retracted + capped strength."""
+    from openbiliclaw.sources.event_format import apply_retraction_discount
+
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        payload["metadata"] = apply_retraction_discount(metadata)
+
+
+# ---------------------------------------------------------------------------
 # ProfileUpdatePipeline
 # ---------------------------------------------------------------------------
 
@@ -605,6 +681,10 @@ class ProfileUpdatePipeline:
             else {layer.value: LayerBuffer(layer=layer) for layer in _BUFFERED_LAYERS}
         )
         self._total_ingested = 0
+        # Out-of-order retraction tombstones: (identity_key, action) → retraction
+        # event time. In-memory only — the events table is the durable tombstone
+        # for cross-restart / late-backfill reconciliation (face 2b).
+        self._retraction_tombstones: dict[tuple[str, str], datetime] = {}
         # Track when we last ran the speculator tick so we can throttle
         # idle ticks while still letting layer-updates trigger fresh
         # speculator passes.  See `tick()` body for usage.
@@ -631,6 +711,12 @@ class ProfileUpdatePipeline:
 
     async def ingest_batch(self, signals: list[ProfileSignal]) -> IngestResult:
         """Ingest multiple signals, then check all buffers for readiness."""
+        # Atomic retraction-discount preprocessing runs BEFORE any threshold
+        # consumption (_update_layer) so a same-batch or out-of-order retraction
+        # discounts the matching positive before it can be folded into a layer
+        # (Phase 0 face 1/1b, invariant "atomic entry").
+        self._preprocess_retractions(signals)
+
         result = IngestResult()
         layers_touched: set[str] = set()
 
@@ -682,6 +768,91 @@ class ProfileUpdatePipeline:
 
         self._save_state()
         return result
+
+    def _preprocess_retractions(self, signals: list[ProfileSignal]) -> None:
+        """Discount positives undone by a retraction, atomically at batch entry.
+
+        Three effects (all before threshold consumption):
+          1. Incoming positives whose ``(key, action)`` matches an existing
+             tombstone AND whose event time precedes it are discounted (handles
+             a retraction that arrived in an earlier batch — out of order).
+          2. Each batch retraction discounts matching positives in this batch
+             and in the existing buffers, then registers/refreshes its tombstone.
+          3. Tombstones past their 24h TTL or over the 500 cap are evicted.
+
+        Missing event times are treated conservatively (never discount) so a
+        re-like after a retraction (``like → retract → like``) is preserved.
+        """
+        from datetime import UTC
+
+        now = datetime.now(UTC)
+        self._evict_retraction_tombstones(now)
+
+        incoming_payloads = [sig.payload for sig in signals if isinstance(sig.payload, dict)]
+        buffered_payloads = [
+            payload
+            for buf in self._buffers.values()
+            for sig in buf.signals
+            if isinstance(sig, dict) and isinstance((payload := sig.get("payload")), dict)
+        ]
+
+        # (1) Entry discount against tombstones from prior batches.
+        for payload in incoming_payloads:
+            self._maybe_discount_against_tombstones(payload)
+
+        # (2) Apply this batch's retractions.
+        for sig in signals:
+            if not isinstance(sig.payload, dict):
+                continue
+            descriptor = _retraction_signal_descriptor(sig.payload)
+            if descriptor is None:
+                continue
+            key, action, retraction_time = descriptor
+            if retraction_time is None:
+                # No causal reference → cannot order positives; skip (conservative).
+                continue
+            for payload in (*incoming_payloads, *buffered_payloads):
+                positive = _positive_signal_descriptor(payload)
+                if positive is None:
+                    continue
+                p_key, p_action, p_time = positive
+                if (
+                    p_key == key
+                    and p_action == action
+                    and p_time is not None
+                    and p_time < retraction_time
+                ):
+                    _discount_payload(payload)
+            existing = self._retraction_tombstones.get((key, action))
+            if existing is None or retraction_time > existing:
+                self._retraction_tombstones[(key, action)] = retraction_time
+
+        self._evict_retraction_tombstones(now)
+
+    def _maybe_discount_against_tombstones(self, payload: dict[str, object]) -> None:
+        positive = _positive_signal_descriptor(payload)
+        if positive is None:
+            return
+        key, action, event_time = positive
+        if event_time is None:
+            return
+        tombstone = self._retraction_tombstones.get((key, action))
+        if tombstone is not None and event_time < tombstone:
+            _discount_payload(payload)
+
+    def _evict_retraction_tombstones(self, now: datetime) -> None:
+        expired = [
+            marker
+            for marker, retraction_time in self._retraction_tombstones.items()
+            if now - retraction_time > _RETRACTION_TOMBSTONE_TTL
+        ]
+        for marker in expired:
+            del self._retraction_tombstones[marker]
+        overflow = len(self._retraction_tombstones) - _RETRACTION_TOMBSTONE_CAP
+        if overflow > 0:
+            oldest = sorted(self._retraction_tombstones.items(), key=lambda kv: kv[1])
+            for marker, _ in oldest[:overflow]:
+                del self._retraction_tombstones[marker]
 
     async def tick(self) -> FlushResult:
         """Periodic check: update any layers whose buffers are ready."""
