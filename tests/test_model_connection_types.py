@@ -37,6 +37,14 @@ def test_deepseek_preset_is_not_an_embedding_choice() -> None:
     assert registry.presets_for("openai_compatible", "embedding") == ("openai", "custom")
 
 
+def test_deepseek_reasoning_effort_is_an_explicit_bounded_choice() -> None:
+    definition = connection_type_registry().definition("openai_compatible")
+    field = next(item for item in definition.fields if item.name == "reasoning_effort")
+
+    assert field.input_type == "select"
+    assert field.choices == ("", "high", "max")
+
+
 def test_public_descriptors_are_json_safe_and_contain_rendering_metadata() -> None:
     descriptors = connection_type_registry().public_descriptors()
     encoded = json.dumps(descriptors, sort_keys=True)

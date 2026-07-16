@@ -1574,6 +1574,53 @@ def test_exact_chat_probe_uses_only_draft_and_does_not_persist_or_fallback(
     assert config_path.read_bytes() == before
 
 
+def test_exact_chat_probe_rejects_deepseek_off_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    async def probe(self: object, draft: object, settings: object = None) -> object:
+        nonlocal called
+        called = True
+        return ModelConfigProbeResult(ok=True, connection_id="primary-openai", capability="chat")
+
+    monkeypatch.setattr(
+        "openbiliclaw.api.runtime_context.RuntimeContext.probe_model_draft",
+        probe,
+    )
+    client, _config_path = _make_client(monkeypatch, tmp_path)
+    current = client.get("/api/model-config").json()
+    draft = replace(
+        _native_models().chat.connections[0],
+        preset="deepseek",
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com",
+        reasoning_effort="off",
+    )
+
+    response = client.post(
+        "/api/model-config/probe",
+        json={
+            "kind": "chat",
+            "revision": current["revision"],
+            "connection": _chat_payload(draft),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["errors"] == [
+        {
+            "path": "models.chat.connections[0].reasoning_effort",
+                "code": "invalid_connection_field_choice",
+                "message": "Field value is not one of the registered choices.",
+                "source": "",
+                "connection_id": "primary-openai",
+            }
+    ]
+    assert called is False
+
+
 def test_exact_new_codex_oauth_probe_keep_imports_reference_without_leaking_token(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

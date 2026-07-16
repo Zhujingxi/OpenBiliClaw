@@ -43,6 +43,18 @@ def test_desktop_web_model_probe_has_one_exact_selected_row_owner() -> None:
     assert "probeConfigService" not in js
 
 
+def test_desktop_web_model_probe_allows_the_backend_probe_deadline() -> None:
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
+    probe = js.split("async function probeSelected()", 1)[1].split(
+        "function retainSelection", 1
+    )[0]
+
+    assert "const MODEL_PROBE_TIMEOUT_MS = 60_000;" in js
+    assert "timeoutMs: MODEL_PROBE_TIMEOUT_MS" in probe
+
+
 def test_desktop_web_settings_exposes_and_wires_network_proxy() -> None:
     """The general tab must expose the [network].proxy field with a
     connectivity probe, and the copy must state CN requests stay direct

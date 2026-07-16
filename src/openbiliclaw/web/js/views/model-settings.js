@@ -818,7 +818,7 @@ export async function openMobileSettings(opener) {
           ${(field.choices || []).map((choice) => `<option
             value="${escapeHtml(choice)}"
             ${String(record[field.name] || "") === choice ? " selected" : ""}>
-            ${escapeHtml(choice)}</option>`).join("")}
+            ${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`).join("")}
         </select>${help}${errorMarkup(record.id, field.name)}</label>`;
     }
     const type = field.input_type === "number" ? "number" : "text";

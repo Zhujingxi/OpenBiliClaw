@@ -686,6 +686,7 @@ class RuntimeContext:
                     draft.id,
                     [{"role": "user", "content": "Reply with OK."}],
                     max_tokens=8,
+                    reasoning_effort=("" if draft.preset == "deepseek" else None),
                     ignore_circuit=True,
                 )
                 return ModelConfigProbeResult(

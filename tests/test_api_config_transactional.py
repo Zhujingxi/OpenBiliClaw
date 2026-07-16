@@ -21,7 +21,7 @@ from openbiliclaw.config import (
 )
 from openbiliclaw.config_write import coordinated_config_write
 from openbiliclaw.llm import connection_factory
-from openbiliclaw.llm.base import LLMProviderError
+from openbiliclaw.llm.base import LLMProviderError, LLMResponse
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 from openbiliclaw.logging_setup import configure_logging
 from openbiliclaw.model_config import (
@@ -472,6 +472,70 @@ async def test_runtime_exact_probe_returns_safe_result_for_expected_provider_fai
     assert result.error_code == "probe_failed"
     assert result.message == "The exact model draft probe failed."
     assert "test-secret-provider-detail" not in repr(result)
+
+
+@pytest.mark.parametrize("configured_effort", ["high", "max"])
+async def test_runtime_exact_deepseek_probe_disables_thinking(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_effort: str,
+) -> None:
+    context = RuntimeContext()
+    draft = ChatConnection(
+        id="deepseek-main",
+        name="DeepSeek",
+        type="openai_compatible",
+        preset="deepseek",
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com",
+        credential=CredentialConfig(source="inline", value="test-key"),
+        api_mode="chat_completions",
+        reasoning_effort=configured_effort,
+    )
+    calls: list[dict[str, object]] = []
+
+    class ProbeAdapter:
+        async def complete(
+            self,
+            messages: list[dict[str, str]],
+            *,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            json_mode: bool = False,
+            reasoning_effort: str | None = None,
+            model: str | None = None,
+        ) -> LLMResponse:
+            calls.append(
+                {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "json_mode": json_mode,
+                    "reasoning_effort": reasoning_effort,
+                    "model": model,
+                }
+            )
+            return LLMResponse(content="OK", provider="deepseek", model=draft.model)
+
+    monkeypatch.setattr(
+        connection_factory,
+        "build_chat_adapter",
+        lambda _draft, _options: ProbeAdapter(),
+    )
+
+    result = await context.probe_model_draft(draft)
+
+    assert result.ok is True
+    assert calls == [
+        {
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "temperature": 0.7,
+            "max_tokens": 8,
+            "json_mode": False,
+            "reasoning_effort": "",
+            "model": None,
+        }
+    ]
+    assert draft.reasoning_effort == configured_effort
 
 
 async def test_runtime_exact_probe_propagates_programming_errors(

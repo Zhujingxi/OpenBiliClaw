@@ -333,7 +333,7 @@ function renderDescriptorField(record, descriptor, field) {
   }
   if (field.input_type === "select") {
     return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-      <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(choice)}</option>`).join("")}</select>
+      <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`).join("")}</select>
       ${help}${errorMarkup(record.id, field.name)}</label>`;
   }
   const type = field.input_type === "number" ? "number" : "text";
