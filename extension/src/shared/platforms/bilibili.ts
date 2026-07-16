@@ -63,6 +63,12 @@ export function inferBilibiliActionType(hint: ActionHint): string | null {
 
 export const bilibiliAdapter: PlatformAdapter = {
   sourcePlatform: "bilibili",
+  // The MAIN-world interact tap (`main/bili-interact-tap.ts`) emits the
+  // authoritative comment on a successful `/x/v2/reply/add`; the DOM click
+  // path must not fire a comment when the user merely opens the comment panel
+  // nor double-count the submit. Like / coin / favorite / share / follow have
+  // no tap and stay DOM-sourced.
+  tapAuthoritativeActions: new Set(["comment"]),
   detectPageType: detectBilibiliPageType,
   extractContentId: extractBvid,
   extractSearchQuery: (url) => queryParam(url, "keyword"),

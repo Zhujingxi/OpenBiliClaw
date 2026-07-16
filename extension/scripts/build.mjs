@@ -20,6 +20,10 @@ const entrypoints = [
     outfile: resolve(root, `${outDir}/content/bilibili.js`),
   },
   {
+    entry: resolve(root, "src/main/bili-interact-tap.ts"),
+    outfile: resolve(root, `${outDir}/main/bili-interact-tap.js`),
+  },
+  {
     entry: resolve(root, "src/content/xiaohongshu.ts"),
     outfile: resolve(root, `${outDir}/content/xiaohongshu.js`),
   },

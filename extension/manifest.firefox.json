@@ -63,6 +63,16 @@
         },
         {
             "matches": [
+                "*://*.bilibili.com/*"
+            ],
+            "js": [
+                "main/bili-interact-tap.js"
+            ],
+            "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
                 "*://*.xiaohongshu.com/*"
             ],
             "js": [

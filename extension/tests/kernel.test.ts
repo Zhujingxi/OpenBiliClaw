@@ -5,6 +5,7 @@ import test from "node:test";
 import { isTapAuthoritativeAction } from "../src/shared/behavior.ts";
 import { twitterAdapter } from "../src/shared/platforms/twitter.ts";
 import { bilibiliAdapter } from "../src/shared/platforms/bilibili.ts";
+import { redditAdapter } from "../src/shared/platforms/reddit.ts";
 
 const kernelSource = readFileSync(
   new URL("../src/content/kernel.ts", import.meta.url),
@@ -47,9 +48,18 @@ test("tapAuthoritativeActions suppression matrix: declared actions suppress, oth
 });
 
 test("a non-tap platform never suppresses any DOM action", () => {
-  // bilibili declares no tapAuthoritativeActions until its interact tap ships,
-  // so every action flows through the DOM path unchanged.
+  // reddit has no MAIN-world tap, so every action flows through the DOM path.
   for (const action of ["like", "favorite", "share", "comment", "retraction", "view"]) {
+    assert.equal(isTapAuthoritativeAction(redditAdapter, action), false, action);
+  }
+});
+
+test("bilibili suppresses only DOM comment (its interact tap owns it), not other actions", () => {
+  // The bili-interact-tap emits the authoritative comment; clicking the DOM
+  // "评论" control must not double-count nor fire on merely opening the panel.
+  assert.equal(isTapAuthoritativeAction(bilibiliAdapter, "comment"), true);
+  // like / coin / favorite / share / follow still come from the DOM path.
+  for (const action of ["like", "coin", "favorite", "share", "follow", "retraction"]) {
     assert.equal(isTapAuthoritativeAction(bilibiliAdapter, action), false, action);
   }
 });
