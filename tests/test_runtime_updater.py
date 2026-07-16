@@ -799,6 +799,94 @@ async def test_run_command_uses_async_subprocess_exec(
     ]
 
 
+@pytest.mark.parametrize(
+    ("mode", "proxy", "expected"),
+    [
+        ("direct", None, ["git", "fetch", "origin"]),
+        ("system", None, ["git", "fetch", "origin"]),
+        (
+            "custom",
+            "http://127.0.0.1:7890",
+            ["git", "-c", "http.proxy=http://127.0.0.1:7890", "fetch", "origin"],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_proxy_mode_matrix_controls_git_command_only_for_custom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    mode: str,
+    proxy: str | None,
+    expected: list[str],
+) -> None:
+    from openbiliclaw import network
+
+    monkeypatch.setattr(network, "_outbound_mode", mode)
+    monkeypatch.setattr(network, "_outbound_proxy", proxy)
+    captured: list[list[str]] = []
+    service = updater.AutoUpdateService()
+
+    async def _run_command(command, _root, *, timeout):
+        captured.append(list(command))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._run_git(["fetch", "origin"], tmp_path)
+
+    assert captured == [expected]
+
+
+@pytest.mark.parametrize("command", [["uv", "sync"], ["/venv/bin/python", "-m", "pip", "install"]])
+@pytest.mark.parametrize(
+    ("mode", "proxy"),
+    [
+        ("direct", None),
+        ("system", None),
+        ("custom", "http://127.0.0.1:7890"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_proxy_mode_matrix_controls_dependency_environment_only_for_custom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    mode: str,
+    proxy: str | None,
+    command: list[str],
+) -> None:
+    from openbiliclaw import network
+
+    monkeypatch.setattr(network, "_outbound_mode", mode)
+    monkeypatch.setattr(network, "_outbound_proxy", proxy)
+    calls: list[dict[str, object]] = []
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+        def kill(self) -> None:
+            raise AssertionError("process should not be killed")
+
+    async def _create_subprocess_exec(*_args: str, **kwargs: object) -> _FakeProcess:
+        calls.append(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr(updater.asyncio, "create_subprocess_exec", _create_subprocess_exec)
+
+    await updater.AutoUpdateService()._run_command(command, tmp_path, timeout=5)
+
+    assert len(calls) == 1
+    if mode == "custom":
+        env = calls[0].get("env")
+        assert isinstance(env, dict)
+        assert env["HTTP_PROXY"] == proxy
+        assert env["HTTPS_PROXY"] == proxy
+    else:
+        assert "env" not in calls[0]
+
+
 @pytest.mark.asyncio
 async def test_apply_dependency_failure_publishes_backend_update_failed(
     monkeypatch: pytest.MonkeyPatch,

@@ -386,6 +386,23 @@ def _process_failure_detail(
     return f"{operation}: process exited with code {result.returncode}"
 
 
+def _custom_subprocess_proxy() -> str | None:
+    """Return the explicit custom proxy without changing direct/system behavior."""
+    from openbiliclaw.network import outbound_proxy_mode, outbound_proxy_url
+
+    if outbound_proxy_mode() != "custom":
+        return None
+    return outbound_proxy_url()
+
+
+def _is_dependency_command(command: Sequence[str]) -> bool:
+    if not command:
+        return False
+    if Path(command[0]).stem.lower() == "uv":
+        return True
+    return len(command) >= 3 and list(command[1:3]) == ["-m", "pip"]
+
+
 def _dirty_paths_besides_uv_lock(porcelain: str) -> list[str]:
     """Return dirty paths from ``git status --porcelain``, ignoring uv.lock.
 
@@ -934,9 +951,7 @@ class AutoUpdateService:
             # readable single-URL result, but never use it when either effective
             # probe returned a real value or failed: the allowlist must govern
             # what git will actually use.
-            configured_urls = (
-                configured.stdout.splitlines() if configured.returncode == 0 else []
-            )
+            configured_urls = configured.stdout.splitlines() if configured.returncode == 0 else []
             if effective.returncode == 0 and all_effective.returncode == 0:
                 remote_urls = [url.strip() for url in configured_urls if url.strip()]
         if not remote_urls or effective.returncode != 0 or all_effective.returncode != 0:
@@ -1219,7 +1234,11 @@ class AutoUpdateService:
         *,
         timeout: int = 30,
     ) -> subprocess.CompletedProcess[str]:
-        return await self._run_command(["git", *args], root, timeout=timeout)
+        proxy = _custom_subprocess_proxy()
+        command = ["git", *args]
+        if proxy:
+            command[1:1] = ["-c", f"http.proxy={proxy}"]
+        return await self._run_command(command, root, timeout=timeout)
 
     async def _run_command(
         self,
@@ -1229,12 +1248,24 @@ class AutoUpdateService:
         timeout: int,
     ) -> subprocess.CompletedProcess[str]:
         args = list(command)
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        proxy = _custom_subprocess_proxy()
+        if proxy and _is_dependency_command(args):
+            env = os.environ.copy()
+            env.update({"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy})
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
         try:
             stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError as exc:
