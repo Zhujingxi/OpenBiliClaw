@@ -97,6 +97,7 @@
     .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3);
       border-top-color: #fff; border-radius: 50%; animation: rot .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
     .model-setup-layout { display: grid; grid-template-columns: minmax(190px, 230px) minmax(0, 1fr); gap: 18px; align-items: start; }
+    .model-connection-list-pane { min-width: 0; }
     .connection-type-list { display: grid; gap: 8px; max-height: 440px; overflow: auto; padding-right: 3px; }
     .connection-type-option {
       width: 100%; padding: 12px 13px; background: var(--panel-2); color: var(--text);
@@ -116,10 +117,15 @@
     .credential-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .credential-actions button { padding: 7px 10px; font-size: 12px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
     .credential-actions button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+    .model-type-back { display: none; margin: 12px 0 2px; padding: 7px 10px; background: transparent; color: var(--muted); border: 1px solid var(--line); }
     @media (max-width: 680px) {
       .card { max-width: 560px; }
       .model-setup-layout { grid-template-columns: 1fr; }
       .connection-type-list { max-height: none; grid-template-columns: 1fr; }
+      .model-setup-layout[data-narrow-view="list"] .model-connection-editor { display: none; }
+      .model-setup-layout[data-narrow-view="detail"] .model-connection-list-pane { display: none; }
+      .model-setup-layout[data-narrow-view="list"] ~ .row-actions { display: none; }
+      .model-type-back { display: inline-flex; align-items: center; }
       .model-descriptor-fields { grid-template-columns: 1fr; }
       .model-field.full { grid-column: auto; }
     }
@@ -143,12 +149,13 @@
       <section class="panel active" data-panel="0">
         <h2>设置 Chat 模型路由</h2>
         <p class="sub">先选连接类型，再选对应 preset。OpenAI、DeepSeek 和 OpenRouter 统一归入 OpenAI-compatible；OAuth 登录单独列出。</p>
-        <div class="model-setup-layout">
-          <div>
+        <div id="modelSetupLayout" class="model-setup-layout" data-narrow-view="list">
+          <div class="model-connection-list-pane">
             <label>连接类型</label>
             <div id="connectionTypeList" class="connection-type-list" role="listbox" aria-label="Chat 连接类型"></div>
           </div>
           <div class="model-connection-editor">
+            <button type="button" id="modelTypeBack" class="model-type-back" aria-label="返回连接类型列表">← 返回连接类型</button>
             <div class="model-connection-heading">
               <strong id="connectionTypeTitle">正在读取…</strong>
               <code id="connectionStableId"></code>
@@ -268,6 +275,11 @@
     let modelDescriptors = [];
     let draftConnection = null;
     let modelSaveInFlight = false;
+    let modelNarrowView = "list";
+    let modelTouchedFields = new Set();
+    const MODEL_VALUE_FIELDS = [
+      "model", "base_url", "api_mode", "reasoning_effort", "http_referer", "x_title", "num_ctx",
+    ];
 
     function setStep(n) {
       step = n;
@@ -304,6 +316,18 @@
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#39;");
+    }
+
+    function setModelNarrowView(view) {
+      modelNarrowView = view === "detail" ? "detail" : "list";
+      const layout = $("#modelSetupLayout");
+      if (layout) layout.dataset.narrowView = modelNarrowView;
+    }
+
+    function showModelTypeList() {
+      setModelNarrowView("list");
+      const selected = document.querySelector('#connectionTypeList [aria-selected="true"]');
+      if (selected) selected.focus();
     }
 
     function descriptorFor(type) {
@@ -392,22 +416,40 @@
       ) || null;
     }
 
+    function applicableModelFields(descriptor, presetId) {
+      return new Set(
+        (descriptor?.fields || [])
+          .filter((field) => (
+            (!field.capabilities?.length || field.capabilities.includes("chat"))
+            && (!field.presets?.length || field.presets.includes(presetId))
+          ))
+          .map((field) => field.name),
+      );
+    }
+
+    function clearInvalidModelFields(descriptor, presetId) {
+      const applicable = applicableModelFields(descriptor, presetId);
+      for (const field of MODEL_VALUE_FIELDS) {
+        if (applicable.has(field)) continue;
+        draftConnection[field] = field === "num_ctx" ? 0 : "";
+        modelTouchedFields.delete(field);
+      }
+      return applicable;
+    }
+
     function applyPresetDefaults(descriptor, preset, force = false) {
       if (!draftConnection || !preset) return;
       draftConnection.preset = preset.id;
+      const applicable = applicableModelFields(descriptor, preset.id);
       for (const [field, value] of Object.entries(preset.defaults || {})) {
-        if (force || draftConnection[field] === "" || draftConnection[field] === null) {
+        const current = draftConnection[field];
+        const empty = current === "" || current === null || current === undefined
+          || (field === "num_ctx" && Number(current) === 0);
+        if (applicable.has(field) && (!modelTouchedFields.has(field) || empty)) {
           draftConnection[field] = value;
         }
       }
-      const visibleFields = new Set(
-        (descriptor.fields || [])
-          .filter((field) => !field.presets?.length || field.presets.includes(preset.id))
-          .map((field) => field.name),
-      );
-      for (const field of ["api_mode", "reasoning_effort", "http_referer", "x_title", "num_ctx"]) {
-        if (!visibleFields.has(field)) draftConnection[field] = field === "num_ctx" ? 0 : "";
-      }
+      clearInvalidModelFields(descriptor, preset.id);
     }
 
     function selectConnectionType(type) {
@@ -415,31 +457,32 @@
       const descriptor = descriptorFor(type);
       if (!descriptor || !draftConnection) return;
       if (draftConnection.type !== type) {
-        const stableId = draftConnection.id;
+        const previous = draftConnection;
         const firstPreset = (descriptor.preset_definitions || []).find(
           (preset) => preset.capabilities?.includes("chat"),
         );
         const hasCredentialField = descriptor.fields.some((field) => field.name === "credential");
         draftConnection = {
-          id: stableId,
-          name: descriptor.label,
+          ...previous,
+          id: previous.id,
+          name: previous.name || descriptor.label,
           type,
-          model: "",
           preset: firstPreset?.id || "",
-          base_url: "",
           credential: {
             action: descriptor.category === "oauth" ? "keep" : hasCredentialField ? "set" : "clear",
             value: "",
             status: safeCredentialStatus(null),
           },
-          api_mode: "",
-          reasoning_effort: "",
-          http_referer: "",
-          x_title: "",
-          num_ctx: 0,
         };
+        const applicable = clearInvalidModelFields(descriptor, draftConnection.preset);
+        for (const field of MODEL_VALUE_FIELDS) {
+          if (applicable.has(field) && !modelTouchedFields.has(field)) {
+            draftConnection[field] = field === "num_ctx" ? 0 : "";
+          }
+        }
         if (firstPreset) applyPresetDefaults(descriptor, firstPreset, true);
       }
+      setModelNarrowView("detail");
       renderModelSetup();
     }
 
@@ -511,6 +554,7 @@
     }
 
     function renderModelSetup() {
+      setModelNarrowView(modelNarrowView);
       renderConnectionTypes();
       const descriptor = descriptorFor(draftConnection?.type);
       if (!descriptor || !draftConnection) return;
@@ -528,10 +572,11 @@
       if (field === "preset") {
         const descriptor = descriptorFor(draftConnection.type);
         const preset = (descriptor?.preset_definitions || []).find((item) => item.id === value);
-        if (preset) applyPresetDefaults(descriptor, preset, true);
+        if (preset) applyPresetDefaults(descriptor, preset);
         renderModelSetup();
         return;
       }
+      modelTouchedFields.add(field);
       draftConnection[field] = field === "num_ctx" ? Number(value || 0) : value;
     }
 
@@ -633,6 +678,8 @@
         throw new Error("模型配置快照结构不完整。");
       }
       modelSnapshot = clone(snapshot);
+      modelTouchedFields = new Set();
+      setModelNarrowView("list");
       const connections = Array.isArray(snapshot.models.chat.connections)
         ? snapshot.models.chat.connections : [];
       draftConnection = connections.length
@@ -1424,6 +1471,7 @@
       const button = event.target.closest("[data-connection-type]");
       if (button) selectConnectionType(button.dataset.connectionType);
     });
+    $("#modelTypeBack").addEventListener("click", showModelTypeList);
     $("#modelDescriptorFields").addEventListener("input", (event) => {
       const field = event.target.dataset.modelField;
       if (field && event.target.tagName !== "SELECT") updateModelField(field, event.target.value);

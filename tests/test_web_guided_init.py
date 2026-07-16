@@ -118,6 +118,182 @@ def test_setup_model_route_is_descriptor_driven_and_provider_first() -> None:
     assert ".connection-type-list { max-height: none; grid-template-columns: 1fr; }" in narrow_css
 
 
+def test_setup_narrow_model_editor_has_sequential_detail_and_accessible_back_state() -> None:
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the narrow setup state regression")
+
+    assert 'id="modelSetupLayout"' in setup_html
+    assert 'data-narrow-view="list"' in setup_html
+    assert 'class="model-connection-list-pane"' in setup_html
+    assert 'id="modelTypeBack"' in setup_html
+    assert 'aria-label="返回连接类型列表"' in setup_html
+    narrow_css = setup_html.split("@media (max-width: 680px)", 1)[1].split("@keyframes", 1)[0]
+    assert '.model-setup-layout[data-narrow-view="list"] .model-connection-editor' in narrow_css
+    assert (
+        '.model-setup-layout[data-narrow-view="detail"] .model-connection-list-pane' in narrow_css
+    )
+    assert '.model-setup-layout[data-narrow-view="list"] ~ .row-actions' in narrow_css
+    assert '$("#modelTypeBack").addEventListener("click", showModelTypeList);' in setup_html
+    assert 'setModelNarrowView("detail")' in setup_html
+
+    state_helpers = setup_html.split("    function setModelNarrowView(view) {", 1)[1].split(
+        "\n    function descriptorFor", 1
+    )[0]
+    script = "\n".join(
+        [
+            'let modelNarrowView = "detail";',
+            "const layout = {dataset: {narrowView: 'detail'}};",
+            "let focused = false;",
+            "const $ = (selector) => selector === '#modelSetupLayout' ? layout : null;",
+            ("const document = {querySelector: () => ({focus: () => { focused = true; }})};"),
+            "function setModelNarrowView(view) {" + state_helpers,
+            "showModelTypeList();",
+            (
+                "process.stdout.write(JSON.stringify({view: modelNarrowView, "
+                "dataset: layout.dataset.narrowView, focused}));"
+            ),
+        ]
+    )
+    result = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "view": "list",
+        "dataset": "list",
+        "focused": True,
+    }
+
+
+def test_setup_preset_and_type_changes_preserve_touched_fields_and_stable_name() -> None:
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the setup draft-state regression")
+
+    model_functions = setup_html.split("    function descriptorFor(type) {", 1)[1].split(
+        "\n    function credentialActionPayload", 1
+    )[0]
+    descriptors = [
+        {
+            "id": "openai_compatible",
+            "label": "OpenAI-compatible",
+            "category": "api_protocol",
+            "help": "OpenAI-compatible API",
+            "fields": [
+                {
+                    "name": "preset",
+                    "capabilities": ["chat"],
+                    "presets": [],
+                    "input_type": "select",
+                },
+                {"name": "model", "capabilities": ["chat"], "presets": []},
+                {"name": "base_url", "capabilities": ["chat"], "presets": []},
+                {"name": "credential", "capabilities": ["chat"], "presets": []},
+                {
+                    "name": "reasoning_effort",
+                    "capabilities": ["chat"],
+                    "presets": ["deepseek"],
+                },
+            ],
+            "preset_definitions": [
+                {
+                    "id": "deepseek",
+                    "capabilities": ["chat"],
+                    "defaults": {
+                        "model": "deepseek-default",
+                        "base_url": "https://api.deepseek.com",
+                    },
+                },
+                {
+                    "id": "openai",
+                    "capabilities": ["chat"],
+                    "defaults": {
+                        "model": "openai-default",
+                        "base_url": "https://api.openai.com/v1",
+                    },
+                },
+            ],
+        },
+        {
+            "id": "ollama",
+            "label": "Ollama",
+            "category": "local_runtime",
+            "help": "Local Ollama",
+            "fields": [
+                {"name": "model", "capabilities": ["chat"], "presets": []},
+                {"name": "base_url", "capabilities": ["chat"], "presets": []},
+                {"name": "num_ctx", "capabilities": ["chat"], "presets": []},
+            ],
+            "preset_definitions": [],
+        },
+    ]
+    draft = {
+        "id": "stable-chat",
+        "name": "Keep this route name",
+        "type": "openai_compatible",
+        "model": "deepseek-default",
+        "preset": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "credential": {
+            "action": "keep",
+            "value": "",
+            "status": {"configured": True, "source": "env"},
+        },
+        "api_mode": "responses",
+        "reasoning_effort": "medium",
+        "http_referer": "",
+        "x_title": "",
+        "num_ctx": 0,
+    }
+    script = "\n".join(
+        [
+            f"let modelDescriptors = {json.dumps(descriptors)};",
+            f"let draftConnection = {json.dumps(draft)};",
+            "let modelSaveInFlight = false;",
+            "let modelTouchedFields = new Set();",
+            'let modelNarrowView = "list";',
+            (
+                'const MODEL_VALUE_FIELDS = ["model", "base_url", "api_mode", '
+                '"reasoning_effort", "http_referer", "x_title", "num_ctx"];'
+            ),
+            "function descriptorFor(type) {" + model_functions,
+            "renderModelSetup = () => {};",
+            "setModelNarrowView = () => {};",
+            'updateModelField("model", "user-edited-model");',
+            'updateModelField("base_url", "https://user-edited.example/v1");',
+            'updateModelField("reasoning_effort", "high");',
+            'updateModelField("preset", "openai");',
+            "const afterPreset = JSON.parse(JSON.stringify(draftConnection));",
+            'selectConnectionType("ollama");',
+            "const afterType = JSON.parse(JSON.stringify(draftConnection));",
+            "process.stdout.write(JSON.stringify({afterPreset, afterType}));",
+        ]
+    )
+    result = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    state = json.loads(result.stdout)
+
+    for key in ("afterPreset", "afterType"):
+        assert state[key]["name"] == "Keep this route name"
+        assert state[key]["model"] == "user-edited-model"
+        assert state[key]["base_url"] == "https://user-edited.example/v1"
+    assert state["afterPreset"]["preset"] == "openai"
+    assert state["afterPreset"]["reasoning_effort"] == ""
+    assert state["afterType"]["type"] == "ollama"
+    assert state["afterType"]["reasoning_effort"] == ""
+    assert state["afterType"]["api_mode"] == ""
+
+
 def test_setup_model_editor_escapes_config_values_and_can_create_first_chat_route() -> None:
     """Config-derived markup is escaped and an empty native route gets one stable draft."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")

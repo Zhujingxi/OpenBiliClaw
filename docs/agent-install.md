@@ -52,12 +52,12 @@ Either command:
 
 1. Clones the OpenBiliClaw repo (default `~/OpenBiliClaw` on Unix, `%USERPROFILE%\OpenBiliClaw` on Windows; override with the `INSTALL_DIR` env var)
    - Desktop installers use this same directory for `config.toml` / `data/` / `logs/`. If the desktop package created the directory first, the one-line installer clones source files into it without touching existing user data.
-2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and reuses only credentials whose connection type and preset match the new native route, plus the Bilibili cookie
+2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`). It first constructs the connection type/preset routes selected by flags or the wizard, then overlays only compatible credentials plus the Bilibili cookie; explicit credentials/cookie still win
 3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks Chat connection type first, then a preset only when supported, descriptor-specific fields, the ordered embedding route, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source
 4. Installs Python dependencies for local mode, or builds / starts Docker Compose when `MODE=docker`; X/Twitter discovery's `twitter-cli` and Reddit discovery's `rdt-cli` packages are part of the default dependency set, so AI one-line installs do not need an extra flag for either one
 5. Starts the backend and runs a health check against `/api/health`. One-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
    - **Optional LAN password gate**: exposing `0.0.0.0` makes the UI reachable by any device on the network. To require a login for LAN/remote devices (the local machine and the browser extension stay password-free), run `openbiliclaw set-password` (or answer "yes" to the init prompt), or set `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…` for unattended/Docker installs. See [`docs/modules/api-auth.md`](modules/api-auth.md). Behind a same-host reverse proxy, also set `[api.auth].trusted_proxies` or have the proxy enforce auth.
-6. Probes the exact stable primary Chat connection with fallback disabled and every ordered Embedding provider against the shared settings; any failure blocks init with `status=service_check_failed`
+6. Probes the exact stable primary Chat connection with fallback disabled and every ordered Embedding provider against the shared settings. One failed Embedding probe does not stop later exact probes; after all IDs are attempted, any failure blocks init with the fixed secret-safe `status=service_check_failed`
 7. Automatically runs init after credentials, confirmations, and AI service checks are complete, then prints a self-contained **status block** at the very end of stdout:
 
 ```
@@ -189,6 +189,13 @@ the status block prints a `Reused from: <path>` line **and**
 `reused`. You can also detect cookie reuse by inspecting whether
 `bilibili.cookie` is in the bootstrap summary's `reused` list, or
 whether `data/bilibili_cookie.json` already exists in the install dir.
+Route selection happens before the credential overlay, so a fresh DeepSeek
+template can reuse an OpenAI credential when OpenAI was selected for the new
+install. A credential borrowed from one legacy Provider table is consumed at
+most once across Chat and Embedding; separate native route records retain their
+own stable-ID identity even if their credential values happen to match. Explicit
+`--llm-api-key`, `--embedding-api-key`, and `--bilibili-cookie` values override
+the reused values.
 
 **You must surface the reuse to the user, not skip the corresponding
 question silently.** Specifically for `bilibili.cookie`:
@@ -411,9 +418,12 @@ python3 scripts/agent_bootstrap.py \
 ```
 
 Bootstrap preserves positional stable IDs when editing this list and never
-carries a credential across a connection-type or preset change. For
-provider-specific credentials or later add/remove/reorder work, use the
-native editor:
+carries a credential across a connection-type or preset change. The deprecated
+single `--embedding-provider` alias edits only the first provider and preserves
+the remaining ordered fallbacks and their credentials; when it creates a first
+provider, `embedding-main` or its first deterministic numeric suffix is allocated
+against both Chat and Embedding IDs. For provider-specific credentials or later
+add/remove/reorder work, use the native editor:
 
 ```bash
 openbiliclaw models add --kind embedding
@@ -424,7 +434,8 @@ openbiliclaw models probe <STABLE_ID>
 ```
 
 The pre-init gate probes every configured ordered Embedding provider exactly
-against the shared settings; it does not silently pass because a different
+against the shared settings, continuing through the complete list after a
+secret-safe fixed failure. It does not silently pass because a different
 provider works. Docker's default `ollama` + `bge-m3` record points to
 `http://ollama:11434/v1`. A user-supplied ordered route is preserved.
 

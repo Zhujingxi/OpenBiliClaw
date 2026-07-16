@@ -1591,9 +1591,16 @@ async def main() -> None:
                 settings=embedding_cfg.settings,
                 revision="bootstrap-preflight",
             )
+            probe_failed = False
             for provider in embedding_cfg.providers:
-                await route.probe_provider(provider.id)
-            result["services"]["embedding"]["available"] = True
+                try:
+                    await route.probe_provider(provider.id)
+                except Exception:
+                    probe_failed = True
+            if probe_failed:
+                result["services"]["embedding"]["error"] = "exact_embedding_probe_failed"
+            else:
+                result["services"]["embedding"]["available"] = True
     except Exception:
         result["services"]["embedding"]["error"] = "exact_embedding_probe_failed"
 
@@ -2046,20 +2053,27 @@ def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
         source_models = _load_typed_models(source_dir, allow_pending_migration=True)
         target_models = _load_typed_models(project_dir)
 
+        source_is_native = isinstance(source_data.get("models"), dict)
+        used_source_identities: set[tuple[str, str, str]] = set()
+
+        def source_identity(source: Any, route: str) -> tuple[str, str, str]:
+            if source_is_native:
+                return ("native", route, source.id)
+            return ("legacy", source.credential.source, source.credential.value)
+
         def overlay_credentials(
             target_records: tuple[Any, ...],
             source_records: tuple[Any, ...],
             *,
             route: str,
-        ) -> tuple[tuple[Any, ...], set[str]]:
-            used: set[str] = set()
+        ) -> tuple[Any, ...]:
             assignments: dict[str, Any] = {}
             for target in target_records:
                 exact = next(
                     (
                         source
                         for source in source_records
-                        if source.id not in used
+                        if source_identity(source, route) not in used_source_identities
                         and source.id == target.id
                         and source.type == target.type
                         and source.preset == target.preset
@@ -2070,14 +2084,14 @@ def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
                 )
                 if exact is not None:
                     assignments[target.id] = exact
-                    used.add(exact.id)
+                    used_source_identities.add(source_identity(exact, route))
             for target in target_records:
                 if target.id in assignments:
                     continue
                 compatible = [
                     source
                     for source in source_records
-                    if source.id not in used
+                    if source_identity(source, route) not in used_source_identities
                     and source.type == target.type
                     and source.preset == target.preset
                     and source.credential.source != "none"
@@ -2085,7 +2099,7 @@ def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
                 ]
                 if len(compatible) == 1:
                     assignments[target.id] = compatible[0]
-                    used.add(compatible[0].id)
+                    used_source_identities.add(source_identity(compatible[0], route))
 
             updated: list[Any] = []
             for target in target_records:
@@ -2095,27 +2109,27 @@ def reuse_config_secrets(project_dir: Path, source_dir: Path) -> dict[str, Any]:
                     continue
                 updated.append(replace(target, credential=source.credential))
                 summary["reused"].append(f"models.{route}.{target.id}.credential")
-            return tuple(updated), used
+            return tuple(updated)
 
-        chat, used_chat = overlay_credentials(
+        chat = overlay_credentials(
             target_models.chat.connections,
             source_models.chat.connections,
             route="chat.connections",
         )
-        embedding, used_embedding = overlay_credentials(
+        embedding = overlay_credentials(
             target_models.embedding.providers,
             source_models.embedding.providers,
             route="embedding.providers",
         )
-        for route, records, used in (
-            ("chat", source_models.chat.connections, used_chat),
-            ("embedding", source_models.embedding.providers, used_embedding),
+        for route, identity_route, records in (
+            ("chat", "chat.connections", source_models.chat.connections),
+            ("embedding", "embedding.providers", source_models.embedding.providers),
         ):
             for record in records:
                 if (
                     record.credential.source != "none"
                     and record.credential.value.strip()
-                    and record.id not in used
+                    and source_identity(record, identity_route) not in used_source_identities
                 ):
                     selection = f"{record.type}:{record.preset}".rstrip(":")
                     summary["skipped"].append(
@@ -2438,7 +2452,15 @@ def apply_embedding_config(
         if "embedding" not in connection_type_registry().definition(connection_type).capabilities:
             raise RuntimeError(f"provider alias {target_provider!r} does not support embedding")
         existing = current[0] if current else None
-        record_id = existing.id if existing is not None else "embedding-main"
+        if existing is not None:
+            record_id = existing.id
+        else:
+            reserved_ids = {item.id for item in (*models.chat.connections, *current)}
+            record_id = "embedding-main"
+            suffix = 2
+            while record_id in reserved_ids:
+                record_id = f"embedding-main-{suffix}"
+                suffix += 1
         endpoint = base_url
         same_selection = bool(
             existing and existing.type == connection_type and existing.preset == preset
@@ -2460,6 +2482,7 @@ def apply_embedding_config(
             credential = (
                 CredentialConfig(source="env", value=env_name) if env_name else CredentialConfig()
             )
+        fallbacks = current[1:] if existing is not None else ()
         providers = (
             EmbeddingProviderConfig(
                 id=record_id,
@@ -2473,6 +2496,7 @@ def apply_embedding_config(
                 base_url=endpoint or "",
                 credential=credential,
             ),
+            *fallbacks,
         )
         enabled = True
     else:
@@ -3349,13 +3373,6 @@ def run(args: argparse.Namespace) -> int:
         return 2
 
     reuse_summary: dict[str, Any] | None = None
-    if args.reuse_from:
-        try:
-            reuse_summary = reuse_config_secrets(project_dir, Path(args.reuse_from))
-        except RuntimeError as exc:
-            emit(BootstrapResult("error", str(exc), {"step": "reuse"}))
-            return 2
-        emit(BootstrapResult("ok", "secrets_reused", reuse_summary))
 
     if args.interactive_confirm:
         try:
@@ -3407,6 +3424,8 @@ def run(args: argparse.Namespace) -> int:
         if args.llm_model is None and legacy_preset.get("model"):
             args.llm_model = legacy_preset["model"]
 
+    chat_summary: dict[str, Any] | None = None
+    selected_chat: tuple[str, str] | None = None
     current_connections = _load_typed_models(project_dir).chat.connections
     current_primary = current_connections[0] if current_connections else None
     chat_touched = (
@@ -3436,26 +3455,21 @@ def run(args: argparse.Namespace) -> int:
                 connection_type, preset = resolve_connection_selection()
             else:
                 connection_type, preset = current_primary.type, current_primary.preset
+            selected_chat = (connection_type, preset)
             chat_summary = apply_chat_route_config(
                 project_dir,
                 connection_type=connection_type,
                 preset=preset,
                 model=args.llm_model,
                 base_url=args.llm_base_url,
-                api_key=args.llm_api_key,
+                api_key=None if args.reuse_from else args.llm_api_key,
                 credential_ref="codex" if connection_type == "codex_oauth" else None,
             )
         except (KeyError, RuntimeError, ValueError) as exc:
             emit(BootstrapResult("error", str(exc), {"step": "models.chat"}))
             return 2
-        emit(
-            BootstrapResult(
-                "ok",
-                "chat_route_set",
-                chat_summary,
-            )
-        )
 
+    embedding_summary: dict[str, Any] | None = None
     embedding_touched = (
         args.embedding_provider is not None
         or args.embedding_model is not None
@@ -3465,18 +3479,58 @@ def run(args: argparse.Namespace) -> int:
     )
     if embedding_touched:
         try:
-            summary = apply_embedding_config(
+            embedding_summary = apply_embedding_config(
                 project_dir,
                 provider=args.embedding_provider,
                 model=args.embedding_model,
                 base_url=args.embedding_base_url,
-                api_key=args.embedding_api_key,
+                api_key=None if args.reuse_from else args.embedding_api_key,
                 endpoints=args.embedding_endpoint,
             )
         except (KeyError, RuntimeError, ValueError) as exc:
             emit(BootstrapResult("error", str(exc), {"step": "models.embedding"}))
             return 2
-        emit(BootstrapResult("ok", "embedding_set", summary))
+    if args.reuse_from:
+        try:
+            reuse_summary = reuse_config_secrets(project_dir, Path(args.reuse_from))
+        except RuntimeError as exc:
+            emit(BootstrapResult("error", str(exc), {"step": "reuse"}))
+            return 2
+        emit(BootstrapResult("ok", "secrets_reused", reuse_summary))
+
+        if selected_chat is not None and args.llm_api_key is not None:
+            connection_type, preset = selected_chat
+            try:
+                chat_summary = apply_chat_route_config(
+                    project_dir,
+                    connection_type=connection_type,
+                    preset=preset,
+                    model=args.llm_model,
+                    base_url=args.llm_base_url,
+                    api_key=args.llm_api_key,
+                    credential_ref="codex" if connection_type == "codex_oauth" else None,
+                )
+            except (KeyError, RuntimeError, ValueError) as exc:
+                emit(BootstrapResult("error", str(exc), {"step": "models.chat"}))
+                return 2
+        if embedding_touched and args.embedding_api_key is not None:
+            try:
+                embedding_summary = apply_embedding_config(
+                    project_dir,
+                    provider=args.embedding_provider,
+                    model=args.embedding_model,
+                    base_url=args.embedding_base_url,
+                    api_key=args.embedding_api_key,
+                    endpoints=args.embedding_endpoint,
+                )
+            except (KeyError, RuntimeError, ValueError) as exc:
+                emit(BootstrapResult("error", str(exc), {"step": "models.embedding"}))
+                return 2
+
+    if chat_summary is not None:
+        emit(BootstrapResult("ok", "chat_route_set", chat_summary))
+    if embedding_summary is not None:
+        emit(BootstrapResult("ok", "embedding_set", embedding_summary))
 
     auto_embedding_to_ollama = False
 

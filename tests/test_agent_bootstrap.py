@@ -304,6 +304,82 @@ def test_embedding_endpoint_allocates_id_without_chat_collision(tmp_path: Path) 
     assert result["provider_ids"] == ["embedding-2"]
 
 
+def test_single_embedding_provider_allocates_id_without_chat_collision(tmp_path: Path) -> None:
+    _write_native_config(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'id = "existing-main"', 'id = "embedding-main"', 1
+        ),
+        encoding="utf-8",
+    )
+
+    result = bootstrap.apply_embedding_config(
+        tmp_path,
+        provider="ollama",
+        model="bge-m3",
+        base_url="http://embed-main:11434/v1",
+        api_key=None,
+        endpoints=None,
+    )
+
+    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert result["provider_ids"] == ["embedding-main-2"]
+    assert raw["models"]["embedding"]["providers"][0]["id"] == "embedding-main-2"
+    assert raw["models"]["chat"]["connections"][0]["id"] == "embedding-main"
+
+
+def test_single_embedding_provider_edits_primary_without_dropping_fallback(
+    tmp_path: Path,
+) -> None:
+    _write_native_config(tmp_path)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        .replace("[models.embedding]\nenabled = false", "[models.embedding]\nenabled = true")
+        .replace(
+            "\n[bilibili]",
+            """
+
+[[models.embedding.providers]]
+id = "embedding-primary"
+name = "Primary Ollama"
+type = "ollama"
+base_url = "http://old-primary:11434/v1"
+
+[[models.embedding.providers]]
+id = "embedding-fallback"
+name = "Kept remote fallback"
+type = "openai_compatible"
+preset = "openai"
+base_url = "https://fallback.example/v1"
+api_key_env = "KEPT_EMBEDDING_KEY"
+
+[bilibili]""",
+        ),
+        encoding="utf-8",
+    )
+    before = tomllib.loads(config_path.read_text(encoding="utf-8"))["models"]["embedding"][
+        "providers"
+    ][1]
+
+    result = bootstrap.apply_embedding_config(
+        tmp_path,
+        provider="ollama",
+        model="bge-m3",
+        base_url="http://new-primary:11434/v1",
+        api_key=None,
+        endpoints=None,
+    )
+
+    providers = tomllib.loads(config_path.read_text(encoding="utf-8"))["models"]["embedding"][
+        "providers"
+    ]
+    assert result["provider_ids"] == ["embedding-primary", "embedding-fallback"]
+    assert providers[0]["base_url"] == "http://new-primary:11434/v1"
+    assert providers[1] == before
+
+
 @pytest.mark.parametrize(
     ("alias", "preset", "model"),
     [
@@ -907,6 +983,264 @@ cookie = ""
     assert connections[0]["model"] == "target-first-model"
     assert connections[1]["model"] == "target-second-model"
     assert summary["reused"] == ["models.chat.connections.exact-second.credential"]
+
+
+def test_reuse_config_secrets_uses_one_legacy_source_credential_only_once(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    source = tmp_path / "source"
+    target.mkdir()
+    source.mkdir()
+    target.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "target-chat"
+name = "Target Chat"
+type = "openai_compatible"
+preset = "openai"
+model = "gpt-5-nano"
+base_url = "https://api.openai.com/v1"
+api_key_env = "TARGET_CHAT_KEY"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "text-embedding-3-small"
+output_dimensionality = 1536
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "target-embedding"
+name = "Target Embedding"
+type = "openai_compatible"
+preset = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "TARGET_EMBEDDING_KEY"
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+    source.joinpath("config.toml").write_text(
+        """[llm]
+default_provider = "openai"
+fallback_provider = ""
+
+[llm.openai]
+api_key = "test-one-legacy-source"
+model = "gpt-5-nano"
+base_url = "https://api.openai.com/v1"
+
+[llm.embedding]
+provider = "openai"
+model = "text-embedding-3-small"
+base_url = ""
+fallback_enabled = true
+
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+
+    summary = bootstrap.reuse_config_secrets(target, source)
+
+    models = tomllib.loads(target.joinpath("config.toml").read_text(encoding="utf-8"))["models"]
+    assert models["chat"]["connections"][0]["api_key"] == "test-one-legacy-source"
+    assert models["embedding"]["providers"][0]["api_key_env"] == "TARGET_EMBEDDING_KEY"
+    assert "api_key" not in models["embedding"]["providers"][0]
+    assert summary["reused"] == ["models.chat.connections.target-chat.credential"]
+
+
+def test_reuse_config_secrets_keeps_distinct_native_source_records_independent(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    source = tmp_path / "source"
+    target.mkdir()
+    source.mkdir()
+    target.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "target-chat"
+name = "Target Chat"
+type = "openai_compatible"
+preset = "openai"
+model = "gpt-5-nano"
+base_url = "https://api.openai.com/v1"
+api_key_env = "TARGET_CHAT_KEY"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "text-embedding-3-small"
+output_dimensionality = 1536
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "target-embedding"
+name = "Target Embedding"
+type = "openai_compatible"
+preset = "openai"
+base_url = "https://api.openai.com/v1"
+api_key_env = "TARGET_EMBEDDING_KEY"
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+    source.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "source-chat"
+name = "Source Chat"
+type = "openai_compatible"
+preset = "openai"
+model = "gpt-5-nano"
+base_url = "https://api.openai.com/v1"
+api_key = "test-same-value-distinct-records"
+[models.embedding]
+enabled = true
+[models.embedding.settings]
+model = "text-embedding-3-small"
+output_dimensionality = 1536
+similarity_threshold = 0.82
+multimodal_enabled = false
+[[models.embedding.providers]]
+id = "source-embedding"
+name = "Source Embedding"
+type = "openai_compatible"
+preset = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "test-same-value-distinct-records"
+[bilibili]
+cookie = ""
+""",
+        encoding="utf-8",
+    )
+
+    summary = bootstrap.reuse_config_secrets(target, source)
+
+    models = tomllib.loads(target.joinpath("config.toml").read_text(encoding="utf-8"))["models"]
+    assert models["chat"]["connections"][0]["api_key"] == ("test-same-value-distinct-records")
+    assert models["embedding"]["providers"][0]["api_key"] == ("test-same-value-distinct-records")
+    assert summary["reused"] == [
+        "models.chat.connections.target-chat.credential",
+        "models.embedding.providers.target-embedding.credential",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("explicit_key", "expected_key"),
+    [
+        (None, "test-reused-openai-key"),
+        ("test-explicit-openai-key", "test-explicit-openai-key"),
+    ],
+)
+def test_run_selects_native_route_before_reuse_and_keeps_explicit_secret_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    explicit_key: str | None,
+    expected_key: str,
+) -> None:
+    target = tmp_path / "target"
+    source = tmp_path / "source"
+    target.mkdir()
+    source.mkdir()
+    target.joinpath("config.toml").write_bytes(Path("config.example.toml").read_bytes())
+    source.joinpath("config.toml").write_text(
+        """[models]
+schema_version = 1
+[models.chat]
+concurrency = 4
+timeout_seconds = 300
+[[models.chat.connections]]
+id = "source-openai"
+name = "Source OpenAI"
+type = "openai_compatible"
+preset = "openai"
+model = "gpt-5-nano"
+base_url = "https://api.openai.com/v1"
+api_key = "test-reused-openai-key"
+[models.embedding]
+enabled = false
+[models.embedding.settings]
+model = "bge-m3"
+output_dimensionality = 1024
+similarity_threshold = 0.82
+multimodal_enabled = false
+[bilibili]
+cookie = "test-reused-cookie"
+""",
+        encoding="utf-8",
+    )
+    source.joinpath("data").mkdir()
+    source.joinpath("data", "bilibili_cookie.json").write_text(
+        json.dumps({"cookie": "test-reused-cookie-file"}),
+        encoding="utf-8",
+    )
+    argv = [
+        "--project-dir",
+        str(target),
+        "--mode",
+        "local",
+        "--reuse-from",
+        str(source),
+        "--connection-type",
+        "openai_compatible",
+        "--preset",
+        "openai",
+        "--embedding-provider",
+        "",
+        "--bilibili-cookie",
+        "test-explicit-cookie",
+        "--skip-install",
+        "--skip-start",
+        "--skip-init",
+    ]
+    if explicit_key is not None:
+        argv.extend(["--llm-api-key", explicit_key])
+    args = bootstrap.build_arg_parser().parse_args(argv)
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_repo_checkout",
+        lambda project_dir, _repo_url, _branch: project_dir,
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "ensure_config_toml",
+        lambda _project_dir: target / "config.toml",
+    )
+
+    assert bootstrap.run(args) == 0
+
+    raw = tomllib.loads(target.joinpath("config.toml").read_text(encoding="utf-8"))
+    primary = raw["models"]["chat"]["connections"][0]
+    cookie_file = json.loads(
+        target.joinpath("data", "bilibili_cookie.json").read_text(encoding="utf-8")
+    )
+    output = capsys.readouterr().out
+    assert primary["type"] == "openai_compatible"
+    assert primary["preset"] == "openai"
+    assert primary["api_key"] == expected_key
+    assert raw["bilibili"]["cookie"] == "test-explicit-cookie"
+    assert cookie_file == {"cookie": "test-explicit-cookie"}
+    assert "test-reused-openai-key" not in output
+    assert "test-explicit-openai-key" not in output
+    assert "test-reused-cookie" not in output
+    assert "test-explicit-cookie" not in output
 
 
 def test_reuse_config_secrets_skips_incompatible_source_route(
@@ -1785,6 +2119,82 @@ def test_pre_init_probe_never_emits_exception_secret(
     payload = json.loads(output)
     assert payload["services"]["llm"]["error"] == "exact_chat_probe_failed"
     assert payload["services"]["embedding"]["error"] == "exact_embedding_probe_failed"
+
+
+def test_pre_init_probe_attempts_every_embedding_provider_after_secret_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sentinel = "sentinel-provider-secret-must-not-appear"
+    probed: list[str] = []
+    primary = types.SimpleNamespace(id="chat-primary", type="ollama", preset="")
+    providers = (
+        types.SimpleNamespace(id="embedding-first", type="openai_compatible"),
+        types.SimpleNamespace(id="embedding-second", type="ollama"),
+    )
+    settings = types.SimpleNamespace(model="bge-m3")
+    config = types.SimpleNamespace(
+        models=types.SimpleNamespace(
+            chat=types.SimpleNamespace(connections=(primary,)),
+            embedding=types.SimpleNamespace(
+                enabled=True,
+                providers=providers,
+                settings=settings,
+            ),
+        )
+    )
+
+    class FakeChatRoute:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def complete_connection(self, *_args: object, **_kwargs: object) -> object:
+            return types.SimpleNamespace(content="OK")
+
+    class FakeEmbeddingRoute:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def probe_provider(self, provider_id: str) -> None:
+            probed.append(provider_id)
+            if provider_id == "embedding-first":
+                raise RuntimeError(sentinel)
+
+    config_module = types.ModuleType("openbiliclaw.config")
+    config_module.load_config = lambda: config  # type: ignore[attr-defined]
+    factory_module = types.ModuleType("openbiliclaw.llm.connection_factory")
+    factory_module.AdapterRuntimeOptions = (  # type: ignore[attr-defined]
+        lambda **_kwargs: object()
+    )
+    factory_module.build_chat_adapter = (  # type: ignore[attr-defined]
+        lambda *_args, **_kwargs: object()
+    )
+    factory_module.build_embedding_adapter = (  # type: ignore[attr-defined]
+        lambda provider, *_args, **_kwargs: provider.id
+    )
+    route_module = types.ModuleType("openbiliclaw.llm.route")
+    route_module.OrderedLLMRoute = FakeChatRoute  # type: ignore[attr-defined]
+    route_module.RouteConnection = (  # type: ignore[attr-defined]
+        lambda **_kwargs: object()
+    )
+    embedding_module = types.ModuleType("openbiliclaw.llm.embedding_route")
+    embedding_module.OrderedEmbeddingRoute = FakeEmbeddingRoute  # type: ignore[attr-defined]
+    for name, module in {
+        "openbiliclaw.config": config_module,
+        "openbiliclaw.llm.connection_factory": factory_module,
+        "openbiliclaw.llm.route": route_module,
+        "openbiliclaw.llm.embedding_route": embedding_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    exec(bootstrap.SERVICE_CHECK_PROBE, {})
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    assert probed == ["embedding-first", "embedding-second"]
+    assert payload["services"]["embedding"]["available"] is False
+    assert payload["services"]["embedding"]["error"] == "exact_embedding_probe_failed"
+    assert sentinel not in output
 
 
 def test_run_blocks_auto_init_when_pre_init_service_check_fails(
