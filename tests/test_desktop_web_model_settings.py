@@ -59,6 +59,20 @@ def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
     assert '<option value="openai">' not in INDEX
 
 
+def test_deepseek_disabled_thinking_uses_an_empty_wire_value_on_every_web_surface() -> None:
+    surfaces = (
+        MODEL_JS_PATH.read_text(encoding="utf-8"),
+        (ROOT / "extension/popup/popup-model-settings.js").read_text(encoding="utf-8"),
+        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(
+            encoding="utf-8"
+        ),
+        (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8"),
+    )
+
+    for source in surfaces:
+        assert 'field.name === "reasoning_effort" && choice === "" ? "disabled"' in source
+
+
 def test_route_rows_support_drag_buttons_keyboard_and_focus_restoration() -> None:
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
 

@@ -28,6 +28,7 @@ const {
 const MODEL_CONFIG_API = "/api/model-config";
 const CONNECTION_TYPES_API = "/api/model-connection-types";
 const MODEL_PROBE_API = "/api/model-config/probe";
+const MODEL_PROBE_TIMEOUT_MS = 60_000;
 const CONFIG_RELOADED_TYPE = "config_reloaded";
 const CATEGORY_LABELS = {
   api_protocol: "API protocols",
@@ -364,7 +365,7 @@ function renderDescriptorField(record, descriptor, field) {
   }
   if (field.input_type === "select") {
     return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-      <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(choice)}</option>`).join("")}</select>
+      <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`).join("")}</select>
       ${help}${errorMarkup(record.id, field.name)}</label>`;
   }
   const type = field.input_type === "number" ? "number" : "text";
@@ -723,6 +724,7 @@ async function probeSelected() {
   try {
     const result = await requestModelJson(MODEL_PROBE_API, {
       method: "POST",
+      timeoutMs: MODEL_PROBE_TIMEOUT_MS,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });

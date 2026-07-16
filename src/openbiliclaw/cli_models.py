@@ -1738,7 +1738,8 @@ def _guided_record_options(
             else defaults.get(field.name, "")
         )
         if field.choices:
-            typer.echo(f"{field.label} choices: {', '.join(field.choices)}")
+            choice_labels = tuple(choice or "disabled" for choice in field.choices)
+            typer.echo(f"{field.label} choices: {', '.join(choice_labels)}")
         if field.input_type == "number":
             value: object = typer.prompt(
                 field.label,
@@ -1753,6 +1754,8 @@ def _guided_record_options(
                     show_default=bool(raw_default),
                 )
             ).strip()
+            if field.name == "reasoning_effort" and value.lower() == "disabled":
+                value = ""
         options = replace(options, **cast("Any", {field.name: value}))
     return options
 

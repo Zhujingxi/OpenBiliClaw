@@ -130,9 +130,11 @@ openbiliclaw models remove deepseek-backup
 
 `list` 显示位置、`primary` / `fallback_n` 或 `embedding`、稳定 ID、type/preset、model/共享 model、脱敏 credential source，以及可注入 live runtime 时的 circuit 状态；普通离线 CLI 没有活跃 runtime circuit 时明确显示 `circuit=unknown`。写命令在非 TTY 下不发 prompt：缺少必填的 `--connection-type`、`--preset`、`--name`、`--model`、`--base-url` 或 credential flag 时安全失败；交互式终端才按 descriptor 依次询问。
 
+DeepSeek 的交互式 reasoning 选项显示为 `disabled / high / max`；选择 `disabled` 会保存空 `reasoning_effort`，运行时按官方 OpenAI-compatible 协议发送 `thinking.type=disabled`。`off` 不是合法的 DeepSeek `reasoning_effort`，descriptor-backed 校验会在保存或探测前拒绝。
+
 凭据输入互斥：`--api-key` 写 inline secret（会进入 shell history，自动化优先使用环境变量）、`--api-key-env NAME` 只保存环境变量名、`--credential-ref codex` 只适用于 `codex_oauth`，`models edit` 另有 `--clear-credential`。已有凭据默认使用 `keep`，公开草稿中的 inline 值不会被读回或写成遮罩/占位符。`models` 命令组会在 Click/Typer 解析前把自身作用域内的 inline key 替换为一次性 handle；命令选择会按 Click 语义消费子命令前至多一个 group-level `--`，随后按有效子命令的真实 option 参数识别 credential，leaf command 内独立 `--` 后的参数仍保持字面值。已被其它 option 消费的 `--api-key=...` 形值同样不会误清理。真实分离写法中紧随 `--api-key` 的 token 始终是值，即使它以 `--` 开头；未知子命令则保守扫描到独立 `--` 为止。子命令拼写错误、参数校验提前退出或 sanitizer 中断都会回写脱敏 argv 并清理 partial handle；原生 `args=None` 路径仍由 Click 执行平台参数展开，顶层其它命令的同名 option 不属于该作用域。
 
-每次保存携带读取到的 revision；若并发修改使 revision 过期，CLI 只在最新 ordered route 上按同一稳定 ID rebase 一次，第二次冲突即停止。legacy `[llm]` 有 blocking migration issue 时，`models list` 会显示 issue ID 与允许动作；非交互式写入用可重复的 `--resolve ISSUE=ACTION[@POSITION]` 完成封闭决定。`models probe ID` 只捕获并探测该 ID（Embedding 同时绑定完整共享 settings），网络期间不持配置锁，完成后再检查 revision；stale 结果被丢弃并最多重试一次，不走 route fallback。
+每次保存携带读取到的 revision；若并发修改使 revision 过期，CLI 只在最新 ordered route 上按同一稳定 ID rebase 一次，第二次冲突即停止。legacy `[llm]` 有 blocking migration issue 时，`models list` 会显示 issue ID 与允许动作；非交互式写入用可重复的 `--resolve ISSUE=ACTION[@POSITION]` 完成封闭决定。`models probe ID` 只捕获并探测该 ID（Embedding 同时绑定完整共享 settings）；DeepSeek 草稿的 `high / max` 不用于连通探测，探测固定关闭 thinking、正式配置不变。网络期间不持配置锁，完成后再检查 revision；stale 结果被丢弃并最多重试一次，不走 route fallback。
 
 ### `openbiliclaw health-check`
 

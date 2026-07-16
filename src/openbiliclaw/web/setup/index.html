@@ -511,9 +511,12 @@
       }
       if (field.input_type === "select") {
         const current = String(draftConnection[field.name] || "");
-        const blank = !field.required && !current ? '<option value="" selected>默认</option>' : "";
+        const hasBlankChoice = (field.choices || []).includes("");
+        const blank = !field.required && !current && !hasBlankChoice
+          ? '<option value="" selected>默认</option>'
+          : "";
         return `<div class="model-field"><label>${escapeHtml(field.label)}</label><select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${blank}${(field.choices || []).map(
-          (choice) => `<option value="${escapeHtml(choice)}"${current === choice ? " selected" : ""}>${escapeHtml(choice)}</option>`,
+          (choice) => `<option value="${escapeHtml(choice)}"${current === choice ? " selected" : ""}>${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`,
         ).join("")}</select>${help}</div>`;
       }
       const inputType = field.input_type === "number" ? "number" : "text";

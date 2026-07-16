@@ -186,6 +186,34 @@ def test_domain_validation_accepts_numeric_boundaries() -> None:
     assert validate_model_config(upper, connection_type_registry()) == []
 
 
+def test_domain_validation_bounds_deepseek_reasoning_effort() -> None:
+    deepseek = chat_connection(
+        "deepseek",
+        preset="deepseek",
+        base_url="https://api.deepseek.com",
+        reasoning_effort="",
+    )
+    config = replace(model_config(), chat=ChatRouteConfig(connections=(deepseek,)))
+
+    assert validate_model_config(config, connection_type_registry()) == []
+
+    invalid = replace(deepseek, reasoning_effort="off")
+    issues = validate_model_config(
+        replace(config, chat=ChatRouteConfig(connections=(invalid,))),
+        connection_type_registry(),
+    )
+    assert [
+        (issue.path, issue.code, issue.connection_id)
+        for issue in issues
+    ] == [
+        (
+            "models.chat.connections[0].reasoning_effort",
+            "invalid_connection_field_choice",
+            "deepseek",
+        )
+    ]
+
+
 def test_domain_validation_rejects_negative_ollama_num_ctx_with_connection_id() -> None:
     connection = chat_connection(
         "local-ollama",

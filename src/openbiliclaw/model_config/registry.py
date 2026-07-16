@@ -243,8 +243,11 @@ def _openai_compatible() -> ConnectionTypeDefinition:
             _field(
                 "reasoning_effort",
                 "Reasoning effort",
+                input_type="select",
                 capabilities=("chat",),
                 presets=("deepseek",),
+                help="disabled sends thinking.type=disabled; high and max enable thinking.",
+                choices=("", "high", "max"),
             ),
             _field(
                 "http_referer",

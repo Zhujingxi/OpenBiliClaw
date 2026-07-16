@@ -513,6 +513,25 @@ def _validate_candidate(models: ModelConfig) -> None:
         raise ModelConfigValidationError(tuple(_field_error(issue) for issue in issues))
 
 
+def _probe_candidate_models(
+    current: ModelConfig,
+    draft: RouteRecord,
+    settings: EmbeddingModelSettings | None,
+) -> ModelConfig:
+    """Project one exact draft into an otherwise valid route for validation."""
+    if isinstance(draft, ChatConnection):
+        return replace(current, chat=replace(current.chat, connections=(draft,)))
+    return replace(
+        current,
+        embedding=replace(
+            current.embedding,
+            enabled=True,
+            settings=settings or current.embedding.settings,
+            providers=(draft,),
+        ),
+    )
+
+
 def _validate_public_endpoints(*candidates: ModelConfig) -> None:
     """Validate endpoint-only policy across persistence and effective views."""
     errors: list[ModelConfigFieldError] = []
@@ -899,33 +918,26 @@ class ModelConfigService:
         :meth:`revalidate_probe_capture` so a ``keep`` credential and any live
         effects stay bound to one persisted revision.
         """
-        candidate = draft
+        current = self._read_state().models
+        shell = _probe_candidate_models(current, draft, settings)
+        applied = shell
         if credential_action is not None:
             _validate_action(draft.id, credential_action)
-            current = self._read_state().models
-            shell = ModelConfig(
-                chat=replace(
-                    current.chat,
-                    connections=(draft,) if isinstance(draft, ChatConnection) else (),
-                ),
-                embedding=replace(
-                    current.embedding,
-                    enabled=isinstance(draft, EmbeddingProviderConfig),
-                    settings=settings or current.embedding.settings,
-                    providers=(draft,) if isinstance(draft, EmbeddingProviderConfig) else (),
-                ),
-            )
             applied = _apply_credential_actions(
                 shell,
                 current,
                 {draft.id: credential_action},
             )
-            candidate = (
-                applied.chat.connections[0]
-                if isinstance(draft, ChatConnection)
-                else applied.embedding.providers[0]
-            )
-        return await self.coordinator.probe_model_draft(candidate, settings)
+        _validate_candidate(applied)
+        candidate = (
+            applied.chat.connections[0]
+            if isinstance(draft, ChatConnection)
+            else applied.embedding.providers[0]
+        )
+        effective_settings = applied.embedding.settings if isinstance(
+            draft, EmbeddingProviderConfig
+        ) else None
+        return await self.coordinator.probe_model_draft(candidate, effective_settings)
 
     async def capture_probe(
         self,
@@ -942,35 +954,29 @@ class ModelConfigService:
             state = self._read_state()
             if state.revision != revision:
                 raise ModelConfigRevisionConflictError(self._snapshot(state))
-            candidate = draft
+            shell = _probe_candidate_models(state.models, draft, settings)
+            applied = shell
             if credential_action is not None:
                 _validate_action(draft.id, credential_action)
-                shell = ModelConfig(
-                    chat=replace(
-                        state.models.chat,
-                        connections=(draft,) if isinstance(draft, ChatConnection) else (),
-                    ),
-                    embedding=replace(
-                        state.models.embedding,
-                        enabled=isinstance(draft, EmbeddingProviderConfig),
-                        settings=settings or state.models.embedding.settings,
-                        providers=((draft,) if isinstance(draft, EmbeddingProviderConfig) else ()),
-                    ),
-                )
                 applied = _apply_credential_actions(
                     shell,
                     state.models,
                     {draft.id: credential_action},
                 )
-                candidate = (
-                    applied.chat.connections[0]
-                    if isinstance(draft, ChatConnection)
-                    else applied.embedding.providers[0]
-                )
+            _validate_candidate(applied)
+            candidate = (
+                applied.chat.connections[0]
+                if isinstance(draft, ChatConnection)
+                else applied.embedding.providers[0]
+            )
             return ModelConfigProbeCapture(
                 revision=state.revision,
                 draft=candidate,
-                settings=settings,
+                settings=(
+                    applied.embedding.settings
+                    if isinstance(draft, EmbeddingProviderConfig)
+                    else None
+                ),
             )
 
     async def probe_captured(

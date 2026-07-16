@@ -243,7 +243,7 @@ api_key_env = "OPENAI_API_KEY"
 | `model` / `base_url` | Chat 模型与 HTTP(S) endpoint。官方 preset 可使用其默认 endpoint；自定义 endpoint 必须通过安全校验。 |
 | `api_key` / `api_key_env` / `credential_ref` | 三选一的 inline、环境变量名或 OAuth 引用；也可以全部省略表示无凭据。 |
 | `api_mode` | OpenAI 协议的 `chat_completions` 或 `responses`。 |
-| `reasoning_effort` | 支持该能力的 preset 的默认推理强度；空字符串表示关闭。 |
+| `reasoning_effort` | DeepSeek 推理强度只允许空字符串、`high`、`max`；界面把空字符串显示为 `disabled`，adapter 随后发送官方的 `thinking.type=disabled`。`off` 不是 DeepSeek 的 `reasoning_effort` 值，保存时会被拒绝。 |
 | `http_referer` / `x_title` | OpenRouter 可选请求头。 |
 | `num_ctx` | Ollama 原生 Chat 上下文；`0` 使用服务端默认值。 |
 
@@ -303,7 +303,7 @@ DashScope 多模态向量走原生 multimodal-embedding 接口，不走 OpenAI c
 | `GET /api/model-config` | 返回当前公开 snapshot：revision、原序 Chat/Embedding 列表、共享 Embedding 设置、迁移 issue、local override、最近一次精确探测和 live circuit 摘要。 |
 | `PUT /api/model-config` | 接收完整 route、上一版 revision、逐 ID credential action 和迁移 resolution；`add_to_chat_route` 省略 `position` 时，由后端在应用全部确认删除后按 issue 顺序确定性追加，显式 one-based `position` 仍受支持并按删除后的最终 route 校验范围与冲突。canonical precommit 再检查 guided init。写盘前等待 lifecycle-locked settled runtime/task 快照；所有 public stop/restart 整段串行，成功顺序为写盘、无事件发布完整 graph、清退 registry 中除 `guided_init` 外的旧 graph 工作、重启新 graph app loops、清除 degraded、单次 final-slot reload event。等待快照时取消不改磁盘/runtime；写盘后的失败/取消由 shielded rollback 重取 lifecycle ownership 并恢复旧字节/runtime 与旧等价 app loops，已取消 detached one-shot 不复活。revision/init 冲突返回 `409`。 |
 | `GET /api/model-connection-types?capability=chat|embedding` | 从代码 registry 返回按 `api_protocol / local_runtime / oauth` 分组、可按 capability 过滤的字段与 preset descriptor。 |
-| `POST /api/model-config/probe` | 对请求中的一个精确 draft 发起真实探测；gate admission 后重查 init，取得 model path lock 后再次重查 init，凭据捕获和完成回写都受同一 revision 校验；不走 fallback、不读写产品 cache、不保存配置，init/stale 结果返回 `409` 且无 credential/network 或 history/circuit 副作用。 |
+| `POST /api/model-config/probe` | 对请求中的一个精确 draft 发起真实探测；DeepSeek 的 `high / max` 仅保留在草稿身份中，网络探测固定关闭 thinking 并请求 8 token，防止长推理造成测试假失败。gate admission 后重查 init，取得 model path lock 后再次重查 init，凭据捕获和完成回写都受同一 revision 校验；不走 fallback、不读写产品 cache、不保存配置，init/stale 结果返回 `409` 且无 credential/network 或 history/circuit 副作用。 |
 
 #### 原生模型 CLI
 

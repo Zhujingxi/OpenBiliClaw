@@ -258,6 +258,25 @@ def _validate_record(
                     connection_id,
                 )
             )
+        if (
+            field_definition.name not in allowed_fields
+            or field_definition.name == "credential"
+            or not field_definition.choices
+        ):
+            continue
+        raw_choice = _text(record, field_definition.name).strip().lower()
+        allowed_choices = frozenset(
+            str(choice).strip().lower() for choice in field_definition.choices
+        )
+        if raw_choice and raw_choice not in allowed_choices:
+            issues.append(
+                _issue(
+                    f"{path}.{field_definition.name}",
+                    "invalid_connection_field_choice",
+                    "Field value is not one of the registered choices.",
+                    connection_id,
+                )
+            )
 
     issues.extend(
         _validate_credential(
