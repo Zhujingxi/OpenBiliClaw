@@ -56,10 +56,67 @@ from __future__ import annotations
 
 import json
 import logging
+import unicodedata
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+# --- Comment / danmaku text capture (event-capture-completion Phase 2/3) -----
+#
+# Users' own comment / danmaku text is the strongest first-person interest
+# expression we capture. Both surfaces sanitize independently (invariant 5,
+# two-layer defense): the extension truncates + strips control chars before
+# send, and the server repeats it here as the authoritative final defense.
+#
+# Calibration: 200 chars keeps a full danmaku / short comment intact while
+# capping a pasted-essay reply so a single event can't blow the prompt budget.
+# Reopen on any provider/model swap (pitfall #3).
+COMMENT_TEXT_MAX_CHARS = 200
+
+# ``comment_kind`` whitelist (invariant 4). Out-of-range values are treated as
+# missing ("") + logged at WARNING, matching the retracted_action guard.
+VALID_COMMENT_KINDS = frozenset({"", "comment", "danmaku"})
+
+# Evidence strength for a danmaku. Calibration: below a written comment (0.75)
+# because bullet chatter is more casual / reactive, ties with follow (0.6).
+# Reopen on any provider/model swap (pitfall #3).
+DANMAKU_SIGNAL_STRENGTH = 0.6
+
+
+def _strip_unicode_category_c(text: str) -> str:
+    """Drop every Unicode category-C code point (control / format / surrogate /
+    private-use / unassigned) — zero-width joiners, bidi marks, NUL, newlines.
+    Ordinary whitespace (category Z) is preserved so interior spaces survive."""
+    return "".join(ch for ch in text if not unicodedata.category(ch).startswith("C"))
+
+
+def sanitize_comment_text(text: Any) -> str:
+    """Truncate to ``COMMENT_TEXT_MAX_CHARS`` and strip Unicode category-C.
+
+    The authoritative server-side half of the two-layer defense (invariant 5):
+    never trusts the extension's pre-sanitization. Non-string input → "".
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    cleaned = _strip_unicode_category_c(text).strip()
+    return cleaned[:COMMENT_TEXT_MAX_CHARS]
+
+
+def normalize_comment_kind(kind: Any) -> str:
+    """Return a whitelisted ``comment_kind`` ("" | "comment" | "danmaku").
+
+    Out-of-range / non-string values are treated as missing ("") and logged at
+    WARNING (invariant 4 — enum whitelist with coercion logging, pitfall #4).
+    """
+    if not isinstance(kind, str):
+        return ""
+    normalized = kind.strip().lower()
+    if normalized in VALID_COMMENT_KINDS:
+        return normalized
+    logger.warning("normalize_comment_kind: out-of-range comment_kind %r → ''", kind)
+    return ""
+
 
 # --- Retraction discounting (event-capture-completion Phase 0) --------------
 #
@@ -435,6 +492,14 @@ def default_signal_strength_for_event(
             return 0.5
         return 0.5
 
+    # A danmaku is a lighter comment sub-kind (0.6 vs a written comment's 0.75);
+    # defended here for metadata-stripped / server-built events (mirrors the
+    # retraction branch above).
+    if normalized_event_type == "comment":
+        comment_kind = str(metadata.get("comment_kind") or "").strip().lower()
+        if comment_kind == "danmaku":
+            return DANMAKU_SIGNAL_STRENGTH
+
     return _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE.get(normalized_event_type)
 
 
@@ -549,6 +614,14 @@ def build_event(
     final_metadata.setdefault("source_platform", source_platform)
     if author and "author" not in final_metadata:
         final_metadata["author"] = author
+    # Comment / danmaku text is the final sanitization defense (invariant 5) and
+    # comment_kind the enum whitelist (invariant 4). Normalize BEFORE the
+    # signal_strength fallback so a danmaku's 0.6 is derived from the cleaned
+    # kind.
+    if "comment_kind" in final_metadata:
+        final_metadata["comment_kind"] = normalize_comment_kind(final_metadata["comment_kind"])
+    if "comment_text" in final_metadata:
+        final_metadata["comment_text"] = sanitize_comment_text(final_metadata["comment_text"])
     if "signal_strength" not in final_metadata:
         signal_strength = default_signal_strength_for_event(event_type, final_metadata)
         if signal_strength is not None:
@@ -564,6 +637,15 @@ def build_event(
             source_platform=source_platform,
             title=title,
             author=effective_author,
+        )
+
+    # Surface the user's own comment / danmaku text in the human-readable
+    # context so the preference LLM reads it directly (it's the strongest
+    # first-person interest signal). The excerpt is already sanitized above.
+    comment_excerpt = str(final_metadata.get("comment_text") or "")
+    if event_type == "comment" and comment_excerpt and "评论:『" not in context:
+        context = (
+            f"{context},评论:『{comment_excerpt}』" if context else f"评论:『{comment_excerpt}』"
         )
 
     event: dict[str, Any] = {

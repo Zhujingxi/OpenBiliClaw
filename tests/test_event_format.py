@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from openbiliclaw.cli import _history_item_to_event
 from openbiliclaw.sources.event_format import (
+    COMMENT_TEXT_MAX_CHARS,
     SOURCE_BILIBILI,
     SOURCE_XIAOHONGSHU,
     build_event,
     default_signal_strength_for_event,
     format_event_context,
+    normalize_comment_kind,
+    sanitize_comment_text,
 )
 from openbiliclaw.sources.xhs_tasks import xhs_bootstrap_notes_to_events
 
@@ -441,3 +444,77 @@ def test_twitter_label_and_context_render() -> None:
     )
     assert rendered.startswith("在X")  # _PLATFORM_LABELS["twitter"] == "X"
     assert "《A thread on systems》" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Comment-text capture (event-capture-completion Phase 2/3)
+
+
+def test_sanitize_comment_text_truncates_to_200_chars() -> None:
+    assert COMMENT_TEXT_MAX_CHARS == 200
+    long = "字" * 250
+    cleaned = sanitize_comment_text(long)
+    assert len(cleaned) == 200
+    assert cleaned == "字" * 200
+
+
+def test_sanitize_comment_text_strips_unicode_category_c() -> None:
+    # Control chars (Cc: \n \t \x00), format chars (Cf: zero-width space,
+    # left-to-right mark) are category-C and must be stripped; ordinary
+    # whitespace (Zs) at the ends is trimmed but interior spaces survive.
+    dirty = "hello\n\tworld\u200b \u200e ok\x00"
+    cleaned = sanitize_comment_text(dirty)
+    assert cleaned == "helloworld  ok"
+    assert "\n" not in cleaned
+    assert "\u200b" not in cleaned
+
+
+def test_sanitize_comment_text_non_string_returns_empty() -> None:
+    assert sanitize_comment_text(None) == ""
+    assert sanitize_comment_text(123) == ""
+    assert sanitize_comment_text("") == ""
+
+
+def test_normalize_comment_kind_whitelist() -> None:
+    assert normalize_comment_kind("comment") == "comment"
+    assert normalize_comment_kind("danmaku") == "danmaku"
+    assert normalize_comment_kind("") == ""
+    # Out-of-range values are treated as missing ("").
+    assert normalize_comment_kind("bullet") == ""
+    assert normalize_comment_kind("DANMAKU") == "danmaku"
+    assert normalize_comment_kind(None) == ""
+
+
+def test_default_signal_strength_danmaku_is_0_6() -> None:
+    # Danmaku is a comment sub-kind weighted below a written comment (0.75)
+    # because bullet chatter is more casual; ties with follow (0.6).
+    assert default_signal_strength_for_event("comment", {"comment_kind": "danmaku"}) == 0.6
+    # A plain comment stays 0.75.
+    assert default_signal_strength_for_event("comment", {"comment_kind": "comment"}) == 0.75
+    assert default_signal_strength_for_event("comment", {}) == 0.75
+
+
+def test_build_event_comment_renders_excerpt_and_sanitizes() -> None:
+    event = build_event(
+        event_type="comment",
+        source_platform="bilibili",
+        title="一个视频",
+        metadata={"comment_kind": "danmaku", "comment_text": "太强了\n666" + "x" * 300},
+    )
+    # Server is the final sanitization defense: category-C stripped + truncated.
+    assert "\n" not in event["metadata"]["comment_text"]
+    assert len(event["metadata"]["comment_text"]) == 200
+    # Danmaku strength applied via the normalized comment_kind.
+    assert event["metadata"]["signal_strength"] == 0.6
+    # The excerpt is rendered into the human-readable context.
+    assert "评论:『" in event["context"]
+
+
+def test_build_event_comment_kind_out_of_range_cleared() -> None:
+    event = build_event(
+        event_type="comment",
+        source_platform="bilibili",
+        title="一个视频",
+        metadata={"comment_kind": "bullet", "comment_text": "hi"},
+    )
+    assert event["metadata"]["comment_kind"] == ""
