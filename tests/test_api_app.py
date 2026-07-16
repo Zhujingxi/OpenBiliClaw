@@ -11223,6 +11223,29 @@ class TestGuidedInitEndpoints:
         # Rejected before reserving — no run row created at all.
         assert db.get_latest_init_run() is None
 
+    def test_docker_init_status_preserves_cli_failure_behind_capability_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("OPENBILICLAW_IN_CONTAINER", "1")
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        db.record_external_init_failure(
+            "cli-timeout",
+            reason="analyze_failed",
+            detail="偏好分析等待 AI 服务超过 6 分钟仍未返回结果。",
+            stage=2,
+        )
+
+        with TestClient(app) as client:
+            body = client.get("/api/init-status").json()
+
+        assert body["reason"] == "unsupported_runtime"
+        assert body["start_mode"] == "cli_only"
+        assert body["last_failure_reason"] == "analyze_failed"
+        assert "超过 6 分钟" in body["last_failure_detail"]
+
     def test_init_rejects_already_initialized_without_force(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
@@ -11930,6 +11953,8 @@ class TestGuidedInitEndpoints:
         assert body["reason"] == expected_reason
         assert body["can_start"] is expected_can_start
         assert body["detail"] == detail
+        assert body["last_failure_reason"] == "analyze_failed"
+        assert body["last_failure_detail"] == detail
 
     def test_init_status_configured_embedding_hard_gates_can_start(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

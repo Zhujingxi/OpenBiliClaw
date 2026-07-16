@@ -626,6 +626,7 @@ background ─ background admission (default 3) ──────┘
 │ 有限/维度校验 · config circuit · 固定 PNG 探测 · 共享 namespace │
 │ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
 │ guided-init/CLI 共用 service/writer；无跨进程锁；离线 circuit=unknown │
+│ CLI init 失败终态 → init_runs → /api/init-status 能力+根因 → 四端恢复 │
 ├────────────────────────────────────────────────┤
 │ LLMService 全路径 → 同一 route；caller 仅并发/usage；成本按 connection 归因 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

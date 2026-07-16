@@ -107,8 +107,9 @@
       { key: "reddit", label: "Reddit" }
     ];
     const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+    const INIT_CLI_COMMAND = "docker exec -it openbiliclaw-backend openbiliclaw init";
     const INIT_REASON_TEXT = {
-      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
+      unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化，请复制下方命令到宿主机运行。",
       already_running: "初始化正在进行中。",
       bilibili_not_logged_in: "还没检测到 B 站登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
@@ -1188,6 +1189,33 @@
       return describeInitReason(reason) || detail;
     }
 
+    function initLastFailureText(status) {
+      const detail = String(status?.last_failure_detail || "").trim();
+      if (detail) return detail;
+      return describeInitReason(String(status?.last_failure_reason || ""));
+    }
+
+    function initRecoveryReasonText(status) {
+      const failure = initLastFailureText(status);
+      const capability = initStatusReasonText(status);
+      if (failure && capability && failure !== capability) return `${failure}；${capability}`;
+      return failure || capability;
+    }
+
+    function initStartMode(status) {
+      if (status?.start_mode) return String(status.start_mode);
+      if (status?.reason === "unsupported_runtime") return "cli_only";
+      if (status?.reason === "local_only") return "local_only";
+      return "web";
+    }
+
+    function preferredInitSettingsPanel(status) {
+      const reason = String(status?.last_failure_reason || status?.reason || "");
+      if (["llm_not_ready", "analyze_failed", "profile_failed"].includes(reason)) return "models";
+      if (reason === "embedding_not_ready") return "models";
+      return "sources";
+    }
+
     function initEnabledPlatforms(status) {
       const platforms = status?.prerequisites?.enabled_platforms;
       return Array.isArray(platforms) ? platforms.map(String) : [];
@@ -1375,6 +1403,7 @@
       const runId = status?.run_id ? String(status.run_id) : "";
       const st = runId ? _viewState(runId) : null;
       const failedStage = stages.find((stage) => stage.status === "failed" || stage.status === "cancelled");
+      const previousFailure = initLastFailureText(status);
       const current = status?.current_stage || 0;
       const currentStage = stages.find((stage) => stage.n === current);
       let stageLabel = currentStage ? `${currentStage.n}/${total} ${currentStage.label}` : "";
@@ -1394,11 +1423,11 @@
       }
       return {
         active: running,
-        failed: Boolean(failedStage),
+        failed: Boolean(failedStage || previousFailure),
         pct,
         stageLabel,
         etaText: running ? stageEtaText(currentStage) : "",
-        failedReason: failedStage?.reason || ""
+        failedReason: failedStage?.reason || String(status?.last_failure_reason || "")
       };
     }
 
@@ -1407,6 +1436,8 @@
     // message, v0.3.156+) — append it so internal_error is diagnosable from
     // the UI instead of only the generic "请稍后重试".
     function initFailureText(status, progress) {
+      const lastFailure = initLastFailureText(status);
+      if (lastFailure) return lastFailure;
       const base = describeInitReason(status?.reason) || "";
       const detail = String(status?.detail || "").trim();
       const reason = String(status?.reason || "");
@@ -1565,6 +1596,9 @@
       const status = state.initStatus;
       const progress = initProgressView(status);
       const isRunning = Boolean(status?.running);
+      const startMode = initStartMode(status);
+      const cliOnly = startMode === "cli_only";
+      const remoteOnly = startMode === "local_only";
       const waitingForFirstPool = initWaitingForFirstPool(status);
       const embeddingPull = embeddingPullProgressView(status);
       const displayProgress = waitingForFirstPool
@@ -1578,7 +1612,7 @@
         ? (status?.partial_success ? initStatusReasonText(status) : state.initReason || INIT_FIRST_POOL_WAIT_TEXT)
         : displayProgress.failed
           ? (state.initReason || initFailureText(status, displayProgress))
-          : (state.initReason || initStatusReasonText(status) || "");
+          : (state.initReason || initRecoveryReasonText(status) || "");
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
@@ -1588,10 +1622,14 @@
             ? "整理首轮内容…"
           : alreadyInitialized
             ? "已初始化"
+            : cliOnly
+              ? "复制初始化命令"
+              : remoteOnly
+                ? "请在后端主机操作"
             : displayProgress.failed
               ? "重试初始化"
               : "开始初始化";
-      const buttonDisabled = state.initBusy || isRunning || waitingForFirstPool || alreadyInitialized;
+      const buttonDisabled = state.initBusy || isRunning || waitingForFirstPool || alreadyInitialized || remoteOnly;
       const staleness = stalenessView(status);
       const stallText = isRunning
         ? staleness.fresh
@@ -1624,6 +1662,7 @@
           <p class="init-stall-hint${stallText && !staleness.fresh ? " stale" : ""}"${stallText ? "" : " hidden"}>${escapeHtml(stallText)}</p>
           <p class="init-expectation"${expectationText ? "" : " hidden"}>${escapeHtml(expectationText)}</p>
           <p class="init-reason" role="status" aria-live="polite" aria-atomic="true"${reason ? "" : " hidden"}>${escapeHtml(reason)}</p>
+          ${cliOnly ? `<div class="init-cli-command"><span>在 Docker 宿主机运行</span><code>${escapeHtml(INIT_CLI_COMMAND)}</code></div>` : ""}
           <div class="init-actions">
             <button class="small-btn primary" type="button" data-init-action="start"${buttonDisabled ? " disabled" : ""}>${escapeHtml(buttonLabel)}</button>
             <button class="small-btn" type="button" data-init-action="settings">打开设置</button>
@@ -1635,7 +1674,7 @@
         void handleDesktopStartInitClick();
       });
       grid.querySelector('[data-init-action="settings"]')?.addEventListener("click", () => {
-        openSettingsPage("sources");
+        openSettingsPage(preferredInitSettingsPanel(state.initStatus));
       });
       // Delegated: the checklist's innerHTML is replaced on every status
       // poll, so listeners on the buttons themselves would be lost.
@@ -1757,6 +1796,18 @@
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
         return;
       }
+      if (initStartMode(status) === "cli_only") {
+        try {
+          await navigator.clipboard.writeText(INIT_CLI_COMMAND);
+          state.initReason = "初始化命令已复制，请到 Docker 宿主机终端运行。";
+          showToast("初始化命令已复制");
+        } catch {
+          state.initReason = `请在 Docker 宿主机运行：${INIT_CLI_COMMAND}`;
+        }
+        state.initBusy = false;
+        renderAll();
+        return;
+      }
       if (!selected.length) {
         state.initReason = INIT_REASON_TEXT.no_sources_selected;
         state.initBusy = false;
@@ -1789,6 +1840,16 @@
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
       } catch (error) {
         const code = error?.details?.error || error?.details?.reason;
+        if (code === "unsupported_runtime") {
+          state.initStatus = {
+            ...(state.initStatus || {}),
+            initialized: false,
+            running: false,
+            can_start: false,
+            start_mode: "cli_only",
+            reason: code
+          };
+        }
         state.initReason = describeInitReason(code) || error?.message || "初始化没能启动，请稍后重试。";
         state.initBusy = false;
         renderAll();
@@ -3598,8 +3659,27 @@
 
     function renderProfileDetails() {
       const profile = state.profile;
-      if (!profile) {
-        $("#profileDetails").innerHTML = profileItem("画像还没攒起来", paragraphsHtml("后端未连接或画像尚未初始化。连接 FastAPI 后会展示完整画像。"));
+      const uninitialized = profile?.initialized === false || state.runtimeStatus?.initialized === false;
+      if (!profile || uninitialized) {
+        if (uninitialized) {
+          const failure = initLastFailureText(state.initStatus);
+          const detail = failure || "后端已经连接，但画像还没有生成；推荐与候选评估会保持暂停。";
+          const cliHint = initStartMode(state.initStatus) === "cli_only"
+            ? `<p class="video-meta">Docker 初始化命令：<code>${escapeHtml(INIT_CLI_COMMAND)}</code></p>`
+            : "";
+          $("#profileDetails").innerHTML = profileItem(
+            "画像尚未初始化",
+            `<p class="video-meta">${escapeHtml(detail)}</p>${cliHint}<div class="profile-edit-bar"><button class="pill-btn" type="button" data-profile-recovery="setup">查看初始化恢复</button><button class="pill-btn" type="button" data-profile-recovery="models">检查模型设置</button></div>`,
+          );
+          $("#profileDetails").querySelector('[data-profile-recovery="setup"]')?.addEventListener("click", () => {
+            window.location.href = "/setup/";
+          });
+          $("#profileDetails").querySelector('[data-profile-recovery="models"]')?.addEventListener("click", () => {
+            openSettingsPage("models");
+          });
+        } else {
+          $("#profileDetails").innerHTML = profileItem("暂时无法读取画像", paragraphsHtml("后端画像接口没有响应，请确认服务在线后重试。"));
+        }
         state.profileCognitionHasMore = false;
         updateProfileMemoryButton();
         return;
@@ -5107,6 +5187,7 @@
         last_notification_at: String(merged.last_notification_at ?? ""),
         unread_count: Number(merged.unread_count ?? state.messages.length ?? 0),
         pool_available_count: Number(merged.pool_available_count ?? merged.pool_available ?? merged.available_count ?? 0),
+        pool_raw_count: Number(merged.pool_raw_count ?? 0),
         pool_pending_count: Number(merged.pool_pending_count ?? 0),
         pool_target_count: Number(merged.pool_target_count ?? state.config?.scheduler?.pool_target_count ?? 0),
         last_discovered_count: Number(merged.last_discovered_count ?? 0),
@@ -5114,34 +5195,21 @@
         recent_pool_topics: Array.isArray(merged.recent_pool_topics) ? merged.recent_pool_topics.map(String).filter(Boolean) : [],
         manual_refresh_state: manualRefreshState || "idle",
         manual_refresh_message: String(merged.manual_refresh_message || ""),
+        last_account_sync_error: String(merged.last_account_sync_error || ""),
         runtime_event_type: incomingType || String(merged.runtime_event_type || ""),
         live_summary: String(merged.live_summary || merged.message || merged.state || "")
       };
-    }
-
-    function hasPostInitRuntimeSignals(runtime) {
-      return Boolean(runtime) && (
-        runtime.recommendation_count > 0 ||
-        runtime.pool_available_count > 0 ||
-        runtime.pool_pending_count > 0 ||
-        runtime.last_replenished_count > 0 ||
-        runtime.last_discovered_count > 0
-      );
     }
 
     function shouldShowInitOnboarding(status) {
       const runtime = normalizeRuntimeStatus(status);
       if (initWaitingForFirstPool(state.initStatus)) return true;
       if (Boolean(state.initStatus?.running)) return true;
-      // /api/init-status is the authoritative pre-init source. runtime-status
-      // can be transiently unreachable (state.runtimeStatus stays null) or get
-      // rebuilt from field-less runtime events / message merges, where the
-      // missing `initialized` defaults to true — neither may hide the guided
-      // init card while the backend explicitly reports it never initialized.
-      if (state.initStatus?.initialized === false && !state.videos.length && !hasPostInitRuntimeSignals(runtime)) {
-        return true;
-      }
-      return Boolean(status) && runtime.initialized === false && !hasPostInitRuntimeSignals(runtime);
+      // Profile readiness is authoritative. Raw/pending pool material can be
+      // produced before stage 2 finishes and cannot be served without a soul
+      // profile, so inventory counters must never hide the recovery panel.
+      if (state.initStatus?.initialized === false) return true;
+      return Boolean(status) && runtime.initialized === false;
     }
 
     function getPoolStatusSummary(status) {
@@ -6211,13 +6279,27 @@
       applyDelights(payload);
     }
 
+    function runtimeEventSummary(event) {
+      const explicit = String(event?.message || event?.live_summary || "").trim();
+      if (explicit) return explicit;
+      const labels = {
+        bilibili_cookie_synced: "B 站登录信息已同步",
+        config_reloaded: "后端配置已更新",
+        "refresh.started": "正在补充推荐池",
+        "refresh.pool_updated": "推荐池已同步",
+        init_completed: "初始化已完成",
+        init_failed: "初始化未完成"
+      };
+      return labels[event?.type] || state.runtimeStatus?.live_summary || "";
+    }
+
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
       if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
         desktopRuntimeGeneration += 1;
         clearDesktopRuntimeRecovery();
       }
-      applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      applyRuntimeStatus({ ...event, live_summary: runtimeEventSummary(event) });
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
       // (/api/recommendations only returns the latest top window). Header/pool counts
@@ -6362,10 +6444,12 @@
     async function refreshProfile() {
       const payload = await requestJson(ENDPOINTS.profile);
       const profile = payload?.profile || payload;
-      if (profile && profile.initialized !== false) {
+      if (profile) {
         state.profile = profile;
-        hydrateInboxFromSpeculations(profile.speculative_interests);
-        hydrateInboxFromSpeculations(profile.speculative_avoidances, "avoidance.probe");
+        if (profile.initialized !== false) {
+          hydrateInboxFromSpeculations(profile.speculative_interests);
+          hydrateInboxFromSpeculations(profile.speculative_avoidances, "avoidance.probe");
+        }
         renderRail();
         renderProfileDetails();
         renderMessages();

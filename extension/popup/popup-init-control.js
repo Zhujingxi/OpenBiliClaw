@@ -56,11 +56,28 @@ export function describeInitStatusReason(status) {
   return describeInitReason(reason) || detail;
 }
 
+export function describeInitLastFailure(status) {
+  const reason = String((status && status.last_failure_reason) || "");
+  const detail = String((status && status.last_failure_detail) || "").trim();
+  return detail || describeInitReason(reason);
+}
+
+export function initStartMode(status) {
+  if (status && status.start_mode) return String(status.start_mode);
+  if (status && status.reason === "unsupported_runtime") return "cli_only";
+  if (status && status.reason === "local_only") return "local_only";
+  return "web";
+}
+
 // Human text for a failed/cancelled run. ``status.detail`` carries the
 // backend's stored failure specifics (exception summary / GuidedInitError
 // message, v0.3.156+) — append it so an internal_error is diagnosable from
 // the UI instead of only the generic "请稍后重试" (field report 2026-07-05).
 export function describeInitFailure(status, progress = null) {
+  const previousFailure = describeInitLastFailure(status);
+  if (previousFailure) {
+    return previousFailure;
+  }
   const base = describeInitReason(status && status.reason) || "";
   const detail = String((status && status.detail) || "").trim();
   const reason = String((status && status.reason) || "");
@@ -289,6 +306,13 @@ export function initStartButtonState(status, selected = null) {
         : "如需重建画像，请到设置页。",
     };
   }
+  if (initStartMode(status) === "cli_only") {
+    return {
+      enabled: true,
+      label: "复制初始化命令",
+      reason: describeInitLastFailure(status) || REASON_TEXT.unsupported_runtime,
+    };
+  }
   if (Array.isArray(selected) && selected.length === 0) {
     return { enabled: false, label: "开始初始化", reason: REASON_TEXT.no_sources_selected };
   }
@@ -488,7 +512,13 @@ export function isInitTerminal(status) {
 // the page was reopened / refreshed mid-init, so no click or SSE frame kicked
 // the poll on this instance). Tolerant of missing / legacy status objects.
 export function shouldAttachRunningInitProgress(status) {
-  return Boolean(status && status.running);
+  return Boolean(
+    status &&
+      (status.running ||
+        initStartMode(status) === "cli_only" ||
+        describeInitLastFailure(status) ||
+        initProgressView(status).failed),
+  );
 }
 
 // Map an error thrown by startInit() (requestJson attaches .status/.details)

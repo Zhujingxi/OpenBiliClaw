@@ -651,6 +651,7 @@ export function normalizePoolStatus(status) {
 export function normalizeRuntimeStatus(status) {
   return {
     initialized: Boolean(status?.initialized),
+    initialized_known: typeof status?.initialized === "boolean",
     recommendation_count: Number(status?.recommendation_count ?? 0),
     pending_signal_events: Number(status?.pending_signal_events ?? 0),
     last_refresh_at: normalizeText(status?.last_refresh_at),
@@ -667,17 +668,18 @@ export function normalizeRuntimeStatus(status) {
       : [],
     manual_refresh_state: normalizeText(status?.manual_refresh_state) || "idle",
     manual_refresh_message: normalizeText(status?.manual_refresh_message),
+    last_account_sync_error: normalizeText(status?.last_account_sync_error),
   };
 }
 
 export function mergeRuntimeStatusEvent(status, event) {
   const runtime = normalizeRuntimeStatus(status);
   const next = { ...runtime };
+  if (typeof event?.initialized === "boolean") {
+    next.initialized = event.initialized;
+    next.initialized_known = true;
+  }
   if (typeof event?.pool_available_count === "number") {
-    // A pool snapshot can only be emitted by a running, initialized backend.
-    // Promote the partial stream payload so first-load HTTP timeouts do not
-    // hide otherwise authoritative inventory from the mobile header.
-    next.initialized = true;
     next.pool_available_count = Number(event.pool_available_count);
   }
   if (typeof event?.pool_raw_count === "number") {
@@ -758,6 +760,14 @@ export function getPoolStatusSummary(status) {
 
 export function getReadyRecommendationHint(status) {
   const runtime = normalizeRuntimeStatus(status);
+  if (runtime.initialized_known && !runtime.initialized) {
+    return {
+      message: runtime.last_account_sync_error
+        ? `画像初始化未完成：${runtime.last_account_sync_error}`
+        : "画像尚未初始化，先完成初始化再来看推荐。",
+      tone: "info",
+    };
+  }
   if (runtime.pool_available_count > 0) {
     return {
       message: `这池里还有 ${runtime.pool_available_count} 条可换，想看就点，不想看就直说。`,
@@ -785,11 +795,13 @@ export function getMobileRecommendationHeaderState({
     runtimeEvent,
     expanded: activityExpanded,
   });
+  const initializationRequired = runtime.initialized_known && !runtime.initialized;
   return {
     kicker: "For You",
-    title: "这几条，你大概会点开",
-    primaryActionLabel: "换一批",
+    title: initializationRequired ? "还没完成初始化" : "这几条，你大概会点开",
+    primaryActionLabel: initializationRequired ? "查看初始化引导" : "换一批",
     secondaryActionLabel: "加载更多",
+    initializationRequired,
     activityLine: activity.line1,
     activityHeadline: activity.line2,
     activityExpanded: activity.expanded,

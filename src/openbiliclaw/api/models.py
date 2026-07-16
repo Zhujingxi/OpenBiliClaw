@@ -189,9 +189,18 @@ class InitStatusOut(BaseModel):
     partial_success: bool = False
     can_start: bool = False
     can_manage: bool = False
+    # How this caller can start initialization. ``cli_only`` is used by
+    # container runtimes; ``local_only`` means the page is being viewed from a
+    # remote/LAN client and initialization must be started on the host.
+    start_mode: Literal["web", "cli_only", "local_only"] = "web"
     prerequisites: InitPrerequisitesOut = Field(default_factory=InitPrerequisitesOut)
     reason: str = "none"
     detail: str = ""
+    # Capability (reason/detail) and the most recent terminal failure are
+    # independent. Keeping both prevents Docker's ``unsupported_runtime`` from
+    # hiding a real CLI/background analysis failure that the user must fix.
+    last_failure_reason: str = ""
+    last_failure_detail: str = ""
     # Wall-clock (server tz) of the most recent status write for the current
     # run — advanced by every stage/progress/heartbeat write. "" when idle.
     # The GUI derives a "still working / stalled" indicator from now minus this.

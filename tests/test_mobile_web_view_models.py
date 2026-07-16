@@ -504,6 +504,7 @@ class TestMobileWebViewModels:
               normalizeRuntimeStatus({ initialized: true }),
               {
                 initialized: true,
+                initialized_known: true,
                 recommendation_count: 0,
                 pending_signal_events: 0,
                 last_refresh_at: "",
@@ -518,6 +519,7 @@ class TestMobileWebViewModels:
                 recent_pool_topics: [],
                 manual_refresh_state: "idle",
                 manual_refresh_message: "",
+                last_account_sync_error: "",
               },
             );
 
@@ -1017,10 +1019,22 @@ class TestMobileWebViewModels:
                 ["现在在忙", "整理好就能换，不会把素材数当可换数"],
               ],
             );
+
+            const uninitialized = getMobileRecommendationHeaderState({
+              runtimeStatus: {
+                initialized: false,
+                pool_available_count: 23,
+                pool_pending_count: 142,
+              },
+            });
+            assert.equal(uninitialized.initializationRequired, true);
+            assert.equal(uninitialized.title, "还没完成初始化");
+            assert.equal(uninitialized.primaryActionLabel, "查看初始化引导");
+            assert.deepEqual(uninitialized.poolChips, []);
         """)
         )
 
-    def test_pool_stream_snapshot_can_initialize_mobile_inventory_summary(self) -> None:
+    def test_pool_stream_snapshot_cannot_override_profile_readiness(self) -> None:
         _assert_js(
             dedent("""
             import assert from "node:assert/strict";
@@ -1035,8 +1049,16 @@ class TestMobileWebViewModels:
               recent_pool_topics: ["城市影像"],
             });
 
-            assert.equal(runtime.initialized, true);
-            assert.equal(getPoolStatusSummary(runtime).available, "还有 23 条可换");
+            assert.equal(runtime.initialized, false);
+            assert.equal(runtime.initialized_known, false);
+            assert.equal(getPoolStatusSummary(runtime), null);
+
+            const explicit = mergeRuntimeStatusEvent(
+              { initialized: false, pool_available_count: 0 },
+              { pool_available_count: 23 },
+            );
+            assert.equal(explicit.initialized, false);
+            assert.equal(explicit.initialized_known, true);
         """),
         )
 
