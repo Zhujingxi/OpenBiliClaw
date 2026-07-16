@@ -13,9 +13,49 @@ from sqlalchemy import select, update
 
 from openbiliclaw.features.sources.domain import SourceOperation, SourceTaskStatus
 from openbiliclaw.infrastructure.database.models import SourceTaskModel
+from openbiliclaw.infrastructure.sources import browser_tasks as browser_tasks_module
 from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
 
 from .test_browser_tasks import task_context  # noqa: F401
+
+
+class LateEnqueueFatalError(BaseException):
+    """Test-only fatal enqueue outcome that must never escape a done callback."""
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        KeyboardInterrupt("keyboard-secret"),
+        SystemExit("system-exit-secret"),
+        BaseExceptionGroup(
+            "group-secret",
+            [LateEnqueueFatalError("nested-group-secret")],
+        ),
+    ],
+    ids=("keyboard-interrupt", "system-exit", "base-exception-group"),
+)
+def test_late_enqueue_outcome_callback_contains_fatal_base_exceptions(
+    failure: BaseException,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailedTask:
+        @staticmethod
+        def result() -> None:
+            raise failure
+
+    source_logger = logging.getLogger(
+        "openbiliclaw.infrastructure.sources.browser_tasks"
+    )
+    monkeypatch.setattr(source_logger, "disabled", False)
+    with caplog.at_level(logging.WARNING):
+        browser_tasks_module._consume_late_enqueue_outcome(  # noqa: SLF001
+            FailedTask()  # type: ignore[arg-type]
+        )
+
+    assert type(failure).__name__ in caplog.text
+    assert str(failure) not in caplog.text
 
 
 async def test_queue_transport_awaits_a_completed_typed_result(
@@ -369,6 +409,69 @@ async def test_late_enqueue_exception_is_drained_without_secret_or_loop_error(
     assert loop_errors == []
     assert secret not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+async def test_late_enqueue_base_exception_is_drained_without_secret_or_loop_error(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, service = task_context
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    secret = "late-base-exception-secret-must-not-escape"
+    loop_errors: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    source_logger = logging.getLogger(
+        "openbiliclaw.infrastructure.sources.browser_tasks"
+    )
+    monkeypatch.setattr(source_logger, "disabled", False)
+
+    class LateFatalService:
+        persistence_timeout_seconds = 0.02
+
+        def enqueue(
+            self, request: Any, *, task_id: Any, request_deadline_at: Any
+        ) -> Any:
+            started.set()
+            release.wait(timeout=1)
+            finished.set()
+            raise LateEnqueueFatalError(secret)
+
+        def cancel(self, task_id: Any) -> Any:
+            return service.cancel(task_id)
+
+        def snapshot(self, task_id: Any) -> Any:
+            return service.snapshot(task_id)
+
+    transport = QueuedBrowserTransport(
+        LateFatalService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=0.01,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.02,
+    )
+    try:
+        with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
+            await transport.fetch(
+                operation=SourceOperation.SEARCH.value, query="python", limit=3
+            )
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 1)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        loop.set_exception_handler(previous_handler)
+
+    assert loop_errors == []
+    assert secret not in caplog.text
+    assert "LateEnqueueFatalError" in caplog.text
 
 
 async def test_delayed_insert_and_blocked_worker_claim_use_database_deadline(

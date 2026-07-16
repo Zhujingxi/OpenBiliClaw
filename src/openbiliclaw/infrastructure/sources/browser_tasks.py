@@ -380,5 +380,5 @@ def _consume_late_enqueue_outcome(task: asyncio.Task[UUID]) -> None:
         task.result()
     except asyncio.CancelledError:
         return
-    except Exception as error:
+    except BaseException as error:
         logger.warning("late source task enqueue failed (%s)", type(error).__name__)

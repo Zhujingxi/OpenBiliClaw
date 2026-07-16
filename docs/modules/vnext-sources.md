@@ -44,7 +44,7 @@ complete 对相同 lease token + 相同结果是幂等的；并行相同 complet
 
 `QueuedBrowserTransport` 在进入 enqueue 前预分配 task UUID，并把由 execution timeout 推导出的绝对 `request_deadline_at` 与任务一起持久化；enqueue + poll 的浏览器执行等待使用该 timeout。timeout 或调用方取消后，另一个 cleanup task 会在显式有限的 persistence bound 内等待在途 insert 并尝试写 `cancelled`；该 bound 默认是与 SQLite `busy_timeout_seconds` 对齐的 service persistence timeout 加短 scheduling grace。父 task 再次被 cancel 不会越过 cleanup task；cleanup 完成或达到自身上限后才重新抛出最初的 `TimeoutError` / `CancelledError`，cleanup 异常只按类型安全记录，不替换原异常。
 
-这里没有“调用必在 execution timeout 的同一时刻返回”或“返回前一定已经写成 cancelled”的承诺：总等待最多还包含有限 cleanup window。若 insert/cancel 因数据库阻塞超过 cleanup bound，调用可在 row 尚未收敛前返回；row 随后落库时已携带过期 deadline，因此永远不能新 claim，下一次 snapshot/claim 会把它持久化为 `abandoned`。超界后仍在运行的 enqueue task 会保留 done callback，必定取走 result/exception；异常日志只记录 exception class，不包含 message/value，也不会触发事件循环的 “Task exception was never retrieved”。成功 compensation 的 row 是 `cancelled`；两种状态都不可 claim/complete，且不会留下 actionable orphan。扩展仍在自己的登录 tab 执行任务，task payload 不承载浏览器 Cookie。
+这里没有“调用必在 execution timeout 的同一时刻返回”或“返回前一定已经写成 cancelled”的承诺：总等待最多还包含有限 cleanup window。若 insert/cancel 因数据库阻塞超过 cleanup bound，调用可在 row 尚未收敛前返回；row 随后落库时已携带过期 deadline，因此永远不能新 claim，下一次 snapshot/claim 会把它持久化为 `abandoned`。超界后仍在运行的 enqueue task 会保留 done callback，必定取走 result/exception；回调显式吞掉 `CancelledError`，其余所有 `BaseException`（包括 group、`SystemExit`、`KeyboardInterrupt`）都只按 exception class 记录，不包含 message/value，也不会逃逸到事件循环或触发 “Task exception was never retrieved”。成功 compensation 的 row 是 `cancelled`；两种状态都不可 claim/complete，且不会留下 actionable orphan。扩展仍在自己的登录 tab 执行任务，task payload 不承载浏览器 Cookie。
 
 ## 尚未完成
 
