@@ -189,9 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.172 (2026-07-16)**
+📌 Latest: **v0.3.173 (2026-07-16)**
 
 - **No more CPU burn when content sources are temporarily unavailable** — replenishment requests now back off on an escalating cooldown, fixing the fan-spinning / overheating regression; normal cadence resumes within ten minutes of a source recovering.
+- **Source-install auto-update hardened across the board** — multi-URL origins and SSH port-443 clones are no longer falsely blocked, failed checks fall back automatically, and the `[network]` custom proxy now covers update downloads too.
+- **Every update failure carries its real cause** — no more blank or misleading errors on the status card, and repair commands with spaces in paths are copy-paste safe.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
