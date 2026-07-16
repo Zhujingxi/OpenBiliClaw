@@ -594,7 +594,7 @@ guided init: signals → preferences → full profile commit → discover → ev
 ┌────────────────────────────────────────────────┐
 │       Browser Extension (Chrome / Firefox)     │
 │  Behavior capture · MAIN-world taps (comment/  │
-│  danmaku text) · Cookie sync · Platform tasks  │
+│  danmaku, xhs strong signal) · Cookie · Tasks  │
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
