@@ -2,8 +2,8 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-16-event-capture-completion-spec.md`](./2026-07-16-event-capture-completion-spec.md)
-> **Status:** r4 — codex 第三轮 6 findings 已修订,待第四轮 review
-> **Execution order(r4 重排,codex r3 finding 3):** Wave A(Task 0→1→2)→ **Task 6(kernel 动作粒度抑制契约——Wave B 与 Wave C 的共享前置,必须先于两者合入)** → Wave B(Task 3→4→5)→ Wave C(Task 7→8→9)→ Task 10。文档按 Wave 拆分:每个 Wave 的最后一步完成其文档子集,Wave 才算可交付。Wave A 可独立交付;Wave B/C 各自依赖 Task 6,彼此独立。
+> **Status:** r5 — codex 第四轮 3 findings 已修订(DB 因果对齐 + 迟到对账、缺时间用例、Task 6 物理前置),待第五轮 review
+> **Execution order:** Wave A(Task 0→1→2)→ **共享前置 Task 6(kernel 动作粒度抑制契约,必须先于 Wave B/C 合入,正文已物理前置)** → Wave B(Task 3→4→5)→ Wave C(Task 7→8→9)→ Task 10。文档按 Wave 拆分:每个 Wave 的最后一步完成其文档子集,Wave 才算可交付。Wave A 可独立交付;Wave B/C 各自依赖 Task 6,彼此独立。
 > **Tech:** Python 3.11+/仓库 `.venv/bin/python`(勿用裸 `python`);测试 `PYTHONPATH=$PWD/src <venv>/python -m pytest <file> -q`;lint `ruff format/check src/ tests/`;类型 `mypy src/`(strict)。扩展:`cd extension && npm test && npm run typecheck && npm run build`(node --test)。
 
 **Invariants that MUST hold — re-read before each task:**
@@ -55,9 +55,10 @@
 
 - [ ] Failing test(原子性,codex r3 blocker 1):批内正向信号数恰好触发阈值消费(threshold-ready)且含同批 retraction → 断言 `_update_layer` 收到的信号已折价。
 - [ ] Confirm FAIL → 在 `ingest_batch` 开头实现原子折价阶段(批内 + 既有缓冲,复用 Task 0 identity 模块)→ PASS。
-- [ ] Failing test(乱序 + 因果):retraction 先到 → tombstone 登记;随后同 `(key, action)` 且事件时间更早的 like → 入场折价;`like→retract→like` 第二个 like(事件时间晚于 retraction)不折;同 key 跨动作(like tombstone 不折 favorite);TTL 过期/cap 逐出后不折。
+- [ ] Failing test(乱序 + 因果):retraction 先到 → tombstone 登记;随后同 `(key, action)` 且事件时间更早的 like → 入场折价;`like→retract→like` 第二个 like(事件时间晚于 retraction)不折;同 key 跨动作(like tombstone 不折 favorite);**正向或 retraction 任一方缺事件时间 → 保守不折(r5,codex r4 finding 2)**;TTL 过期/cap 逐出后不折。
 - [ ] Confirm FAIL → 实现 tombstone → PASS。
-- [ ] Failing test(DB 面):POST X retraction 后,先前入库同 tweet_id like 行带 `retracted=true`;实现 API 层钩子(白名单 → `mark_positive_events_retracted`;异常 WARNING 不阻断响应)。
+- [ ] Failing test(DB 面因果):POST X retraction 后,先前入库、事件时间更早的同 tweet_id like 行带 `retracted=true`;事件时间晚于 retraction 或时间不可得的行不被标记;实现 API 层钩子(白名单 → `mark_positive_events_retracted(..., retraction_at=)`;异常 WARNING 不阻断响应)。
+- [ ] Failing test(迟到对账,r5):retraction 已入库后,批量落库一条事件时间更早的同 key like(模拟 account_sync 回填)→ 该行入库即带 `retracted` 标注;事件时间更晚的重新点赞正常入库不标注。实现落库路径对账(`/api/events` + account_sync 写入口,按 key 查已存 retraction 行)。
 - [ ] 补用例:bili bvid 键型;`retracted_action` 缺失/越界(如 `"view"`)跳过 + WARNING 断言(pipeline 侧与 API 侧各一)。
 - [ ] Run `pytest tests/test_api_app.py tests/test_pipeline_advanced.py -q` 回归 + ruff + mypy。
 
@@ -88,6 +89,28 @@
 - Reproduce with `PYTHONPATH=$PWD/src <venv>/python -m pytest tests/test_event_retraction_discount.py tests/test_llm_prompts.py tests/test_preference_analyzer.py -q`。
 
 ---
+
+## 共享前置 — Task 6(Wave B/C 都依赖,先行合入)
+
+### Task 6: kernel 动作粒度抑制契约(`tapAuthoritativeActions`)
+
+**Files:** 修改 `extension/src/shared/types.ts`(`PlatformAdapter` 接口所在文件,r4 修正路径;新字段 `tapAuthoritativeActions`,动作类型沿用 `inferActionType` 返回的字符串动作域,实现时确认是否已有具名类型)、`extension/src/content/kernel.ts`(正向路径 321-327 与撤销路径 301-306 统一为集合检查)、`extension/src/shared/platforms/twitter.ts`(声明 `{like, favorite, share, comment, retraction}`——其 tap 已发全部五类,消除 DOM share/comment 双计与"打开菜单即记事件",codex r2 findings 2/4);测试 `extension/tests/kernel.test.ts`、`extension/tests/twitter-adapter.test.ts`。
+
+**Interfaces:** Consumes: adapter `tapAuthoritativeActions`。Produces: 声明动作 DOM 零发射;未声明动作与非 tap 平台完全不变;既有 `strongSignalSource` 语义收敛(保留或替换由实现决定,带迁移测试)。
+
+**Steps:**
+
+- [ ] 先核对 X 现状:确认 twitter adapter/kernel 当前正向 like / share / comment 是否会 DOM 发射(写进 PR 描述;若另有去重机制,统一收敛到本契约并保留回归测试)。
+- [ ] Failing test(抑制矩阵):声明平台 × {like, favorite, share, comment, retraction} DOM 点击 → 零事件;未声明动作(view/scroll 等)照常;非 tap 平台全动作照发。
+- [ ] Confirm FAIL → 实现 → PASS。
+- [ ] X 全量回归:`x-graphql-tap.test.ts`、`x-content-script.test.ts`、`twitter-adapter.test.ts`、`kernel.test.ts` 0 失败。
+- [ ] `npm test && npm run typecheck`。
+
+**Acceptance:**
+
+- Numeric gate:抑制矩阵(声明/未声明/非 tap × 五动作 + 非强信号)≥8 用例全过;X 系测试 0 回归。
+- Reproduce with `cd extension && npm test 2>&1 | tail -5`。
+
 
 ## Wave B — 评论正文 + 弹幕(Phase 2、3)
 
@@ -154,25 +177,6 @@
 ---
 
 ## Wave C — xhs 域(Phase 1、4)
-
-### Task 6: kernel 动作粒度抑制契约(`tapAuthoritativeActions`)
-
-**Files:** 修改 `extension/src/shared/types.ts`(`PlatformAdapter` 接口所在文件,r4 修正路径;新字段 `tapAuthoritativeActions`,动作类型沿用 `inferActionType` 返回的字符串动作域,实现时确认是否已有具名类型)、`extension/src/content/kernel.ts`(正向路径 321-327 与撤销路径 301-306 统一为集合检查)、`extension/src/shared/platforms/twitter.ts`(声明 `{like, favorite, share, comment, retraction}`——其 tap 已发全部五类,消除 DOM share/comment 双计与"打开菜单即记事件",codex r2 findings 2/4);测试 `extension/tests/kernel.test.ts`、`extension/tests/twitter-adapter.test.ts`。
-
-**Interfaces:** Consumes: adapter `tapAuthoritativeActions`。Produces: 声明动作 DOM 零发射;未声明动作与非 tap 平台完全不变;既有 `strongSignalSource` 语义收敛(保留或替换由实现决定,带迁移测试)。
-
-**Steps:**
-
-- [ ] 先核对 X 现状:确认 twitter adapter/kernel 当前正向 like / share / comment 是否会 DOM 发射(写进 PR 描述;若另有去重机制,统一收敛到本契约并保留回归测试)。
-- [ ] Failing test(抑制矩阵):声明平台 × {like, favorite, share, comment, retraction} DOM 点击 → 零事件;未声明动作(view/scroll 等)照常;非 tap 平台全动作照发。
-- [ ] Confirm FAIL → 实现 → PASS。
-- [ ] X 全量回归:`x-graphql-tap.test.ts`、`x-content-script.test.ts`、`twitter-adapter.test.ts`、`kernel.test.ts` 0 失败。
-- [ ] `npm test && npm run typecheck`。
-
-**Acceptance:**
-
-- Numeric gate:抑制矩阵(声明/未声明/非 tap × 五动作 + 非强信号)≥8 用例全过;X 系测试 0 回归。
-- Reproduce with `cd extension && npm test 2>&1 | tail -5`。
 
 ### Task 7: xhs 强信号 action tap + adapter 切换
 
