@@ -262,10 +262,12 @@ function renderRouteList() {
   const kind = state.activeRoute;
   const items = activeItems();
   const locked = routeLocked(kind);
-  byId("modelRouteTitle").textContent = kind === "chat" ? "Chat connections" : "Embedding providers";
+  byId("modelRouteEyebrow").textContent = "调用顺序";
+  byId("modelRouteTitle").textContent = kind === "chat" ? "Chat 路由" : "Embedding 路由";
+  byId("modelAddConnection").textContent = kind === "chat" ? "添加连接" : "添加 Provider";
   byId("modelRouteHelp").textContent = kind === "chat"
-    ? "第 1 项是 Primary，其余项按顺序作为 fallback；最多 10 项。"
-    : "所有 Provider 按此顺序 fallback，并共享上方唯一模型设置；最多 10 项。";
+    ? "从上到下依次调用；第 1 项为主连接，最多 10 项。"
+    : "从上到下依次回退；共用上方模型设置，最多 10 项。";
   byId("modelAddConnection").disabled = Boolean(locked) || items.length >= 10 || (
     kind === "embedding" && !state.models.embedding.enabled
   );
@@ -284,7 +286,7 @@ function renderRouteList() {
         </button>
         <span class="model-route-health" data-tone="${health.tone}">${escapeHtml(health.label)}</span>
       </div>`;
-  }).join("") || '<p class="settings-note-inline">当前 route 为空。</p>';
+  }).join("") || `<p class="model-route-empty">${kind === "chat" ? "尚未添加 Chat 连接。" : "尚未添加 Embedding Provider。"}</p>`;
 }
 
 function renderConnectionTypes() {
@@ -527,7 +529,10 @@ function focusMovedRow(id) {
 }
 
 function focusNarrowDetail() {
-  if (!window.matchMedia("(max-width: 820px)").matches) return;
+  const layout = document.querySelector(".layout");
+  const narrowViewport = window.matchMedia("(max-width: 820px)").matches;
+  const narrowContent = layout && layout.getBoundingClientRect().width <= 940;
+  if (!narrowViewport && !narrowContent) return;
   window.requestAnimationFrame(() => byId("modelInspectorBack")?.focus());
 }
 
