@@ -104,7 +104,8 @@
 
 **Files:**
 - Create: `src/openbiliclaw/features/{activity,profile,feed,library,chat}/service.py`
-- Create: `src/openbiliclaw/infrastructure/jobs/{queue,tasks}.py`
+- Create: `src/openbiliclaw/infrastructure/jobs/{queue,tasks,worker}.py`
+- Modify: `docker-compose.yml`, `docker-compose.prebuilt.yml`, `pyproject.toml`, `uv.lock`
 - Create: `tests/vnext/test_use_cases.py`, `tests/vnext/test_jobs.py`
 
 **Interfaces:**
@@ -114,6 +115,7 @@
 - [ ] Write failing tests for ActivityEvent to ProfileSignal projection, atomic ProfileDelta application, deterministic deficit/allocation/dedup/diversity admission, feedback affecting later rank, local-only collections, persisted chat turns, and SSE-compatible chat chunks.
 - [ ] Write failing worker tests for priority, idempotency, retry, cancellation, duplicate scheduling, restart recovery, locks, and application DB job status as source of truth.
 - [ ] Implement use cases behind repository/AI/source ports and Huey backed by its own SQLite file; do not use naked `asyncio.create_task()`.
+- [ ] Add a runnable Compose `worker` service only after the real Huey worker module exists; keep the legacy backend service unchanged until Task 21 replaces it with `api`.
 - [ ] Run focused tests, Ruff, MyPy, and architecture contracts.
 - [ ] Commit with `feat: implement vnext use cases and jobs`.
 

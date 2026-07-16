@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import HttpUrl
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from openbiliclaw.features.feed.domain import ContentItem
@@ -29,6 +29,7 @@ from openbiliclaw.infrastructure.database.models import (
     SettingModel,
     SourceAccountModel,
 )
+from openbiliclaw.infrastructure.jobs.tasks import JobRunSnapshot, JobRunStatus
 from openbiliclaw.infrastructure.security.credentials import EncryptedCredential
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from openbiliclaw.features.activity.domain import ActivityEvent
     from openbiliclaw.features.chat.domain import ChatTurn
     from openbiliclaw.features.feed.domain import CandidateAssessment, FeedEntry, Interaction
-    from openbiliclaw.features.library.domain import CollectionItem
+    from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
     from openbiliclaw.features.system.service import SettingValue
 
 _SOURCE_ACCOUNT_NAMESPACE = UUID("644b8dba-8301-4e9f-a2d0-b1a54cb854be")
@@ -101,6 +102,10 @@ class ActivityRepository(Protocol):
 
     def add(self, event: ActivityEvent) -> None: ...
 
+    def add_if_absent(self, event: ActivityEvent) -> bool: ...
+
+    def list_all(self) -> tuple[ActivityEvent, ...]: ...
+
 
 class ProfileRepository(Protocol):
     """Persistence port for immutable profile revisions."""
@@ -129,11 +134,17 @@ class FeedRepository(Protocol):
 
     def add(self, entry: FeedEntry) -> None: ...
 
+    def unseen_count(self) -> int: ...
+
+    def next_position(self) -> int: ...
+
 
 class InteractionRepository(Protocol):
     """Persistence port for immutable user interactions."""
 
     def add(self, interaction: Interaction) -> None: ...
+
+    def adjustment(self, content_id: UUID) -> float: ...
 
 
 class CollectionRepository(Protocol):
@@ -142,6 +153,8 @@ class CollectionRepository(Protocol):
     def list_predefined(self) -> tuple[CollectionRecord, ...]: ...
 
     def add(self, item: CollectionItem) -> None: ...
+
+    def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
 
 
 class ChatRepository(Protocol):
@@ -260,6 +273,40 @@ class SQLAlchemyActivityRepository:
                 event_metadata=_json_metadata(event),
             )
         )
+
+    def add_if_absent(self, event: ActivityEvent) -> bool:
+        if self._session.get(ActivityEventModel, str(event.id)) is not None:
+            return False
+        self.add(event)
+        return True
+
+    def list_all(self) -> tuple[ActivityEvent, ...]:
+        rows = self._session.scalars(
+            select(ActivityEventModel).order_by(
+                ActivityEventModel.occurred_at, ActivityEventModel.id
+            )
+        ).all()
+        return tuple(_activity_from_row(row) for row in rows)
+
+
+def _activity_from_row(row: ActivityEventModel) -> ActivityEvent:
+    from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
+
+    occurred_at = _aware(row.occurred_at)
+    assert occurred_at is not None
+    return ActivityEvent(
+        id=UUID(row.id),
+        source_id=row.source_id,
+        account_id=UUID(row.account_id) if row.account_id else None,
+        kind=ActivityKind(row.kind),
+        occurred_at=occurred_at,
+        content_external_id=row.content_external_id,
+        url=HttpUrl(row.url) if row.url else None,
+        title=row.title,
+        text=row.text,
+        duration_seconds=row.duration_seconds,
+        metadata=row.event_metadata,
+    )
 
 
 class SQLAlchemyProfileRepository:
@@ -426,6 +473,21 @@ class SQLAlchemyFeedRepository:
             )
         )
 
+    def unseen_count(self) -> int:
+        seen = select(InteractionModel.content_id).where(
+            InteractionModel.kind.in_(("impression", "open", "dismiss"))
+        )
+        return int(
+            self._session.scalar(
+                select(func.count(FeedEntryModel.id)).where(FeedEntryModel.content_id.not_in(seen))
+            )
+            or 0
+        )
+
+    def next_position(self) -> int:
+        latest = self._session.scalar(select(func.max(FeedEntryModel.position)))
+        return 0 if latest is None else int(latest) + 1
+
 
 class SQLAlchemyInteractionRepository:
     """SQLAlchemy interaction adapter."""
@@ -443,6 +505,18 @@ class SQLAlchemyInteractionRepository:
                 interaction_metadata=_json_metadata(interaction),
             )
         )
+
+    def adjustment(self, content_id: UUID) -> float:
+        kinds = self._session.scalars(
+            select(InteractionModel.kind).where(InteractionModel.content_id == str(content_id))
+        ).all()
+        adjustment = 0.0
+        for kind in kinds:
+            if kind == "positive":
+                adjustment += 0.2
+            elif kind in {"negative", "dismiss"}:
+                adjustment -= 0.5
+        return max(-1.0, min(1.0, adjustment))
 
 
 class SQLAlchemyCollectionRepository:
@@ -475,6 +549,20 @@ class SQLAlchemyCollectionRepository:
                 note=item.note,
             )
         )
+
+    def remove(self, collection: CollectionKind, content_id: UUID) -> bool:
+        collection_id = self._session.scalar(
+            select(CollectionModel.id).where(CollectionModel.slug == collection.value)
+        )
+        if collection_id is None:
+            raise LookupError(f"predefined collection {collection.value!r} is missing")
+        result = self._session.execute(
+            delete(CollectionItemModel).where(
+                CollectionItemModel.collection_id == collection_id,
+                CollectionItemModel.content_id == str(content_id),
+            )
+        )
+        return bool(getattr(result, "rowcount", 0))
 
 
 class SQLAlchemyChatRepository:
@@ -513,12 +601,151 @@ class SQLAlchemyJobRunRepository:
                 status="pending",
                 priority=priority,
                 progress=0.0,
+                attempts=0,
                 error=None,
                 created_at=now,
                 updated_at=now,
+                started_at=None,
+                finished_at=None,
             )
         )
         return run_id
+
+    def create_or_get(
+        self, *, job_name: str, idempotency_key: str, priority: int
+    ) -> tuple[UUID, bool]:
+        existing = self._session.scalar(
+            select(JobRunModel).where(JobRunModel.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            return UUID(existing.id), False
+        run_id = self.add_pending(
+            job_name=job_name,
+            idempotency_key=idempotency_key,
+            priority=priority,
+        )
+        try:
+            self._session.flush()
+        except IntegrityError:
+            self._session.rollback()
+            existing = self._session.scalar(
+                select(JobRunModel).where(JobRunModel.idempotency_key == idempotency_key)
+            )
+            if existing is None:
+                raise
+            return UUID(existing.id), False
+        return run_id, True
+
+    def get(self, run_id: UUID) -> JobRunSnapshot:
+        row = self._session.get(JobRunModel, str(run_id))
+        if row is None:
+            raise LookupError(f"job run does not exist: {run_id}")
+        return _job_snapshot(row)
+
+    def claim(self, run_id: UUID) -> bool:
+        now = _utc_now()
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status == JobRunStatus.PENDING.value,
+            )
+            .values(
+                status=JobRunStatus.RUNNING.value,
+                attempts=JobRunModel.attempts + 1,
+                error=None,
+                started_at=now,
+                updated_at=now,
+            )
+        )
+        return bool(getattr(result, "rowcount", 0))
+
+    def update(
+        self,
+        run_id: UUID,
+        *,
+        status: JobRunStatus,
+        progress: float,
+        error: str | None = None,
+    ) -> None:
+        row = self._session.get(JobRunModel, str(run_id))
+        if row is None:
+            raise LookupError(f"job run does not exist: {run_id}")
+        if row.status == JobRunStatus.CANCELLED.value:
+            return
+        now = _utc_now()
+        row.status = status.value
+        row.progress = max(0.0, min(1.0, progress))
+        row.error = error
+        row.updated_at = now
+        row.finished_at = (
+            now
+            if status in {JobRunStatus.SUCCEEDED, JobRunStatus.FAILED, JobRunStatus.CANCELLED}
+            else None
+        )
+
+    def cancel(self, run_id: UUID) -> bool:
+        row = self._session.get(JobRunModel, str(run_id))
+        if row is None:
+            raise LookupError(f"job run does not exist: {run_id}")
+        if row.status in {JobRunStatus.SUCCEEDED.value, JobRunStatus.FAILED.value}:
+            return False
+        if row.status == JobRunStatus.CANCELLED.value:
+            return True
+        now = _utc_now()
+        row.status = JobRunStatus.CANCELLED.value
+        row.updated_at = now
+        row.finished_at = now
+        return True
+
+    def recover_running(self) -> tuple[UUID, ...]:
+        rows = self._session.scalars(
+            select(JobRunModel)
+            .where(JobRunModel.status == JobRunStatus.RUNNING.value)
+            .order_by(JobRunModel.created_at, JobRunModel.id)
+        ).all()
+        now = _utc_now()
+        for row in rows:
+            row.status = JobRunStatus.PENDING.value
+            row.error = "WorkerInterrupted"
+            row.updated_at = now
+            row.started_at = None
+        return tuple(UUID(row.id) for row in rows)
+
+    def cleanup_finished(self, *, older_than: datetime) -> int:
+        result = self._session.execute(
+            delete(JobRunModel).where(
+                JobRunModel.status.in_(
+                    (
+                        JobRunStatus.SUCCEEDED.value,
+                        JobRunStatus.FAILED.value,
+                        JobRunStatus.CANCELLED.value,
+                    )
+                ),
+                JobRunModel.finished_at < older_than,
+            )
+        )
+        return int(getattr(result, "rowcount", 0) or 0)
+
+
+def _job_snapshot(row: JobRunModel) -> JobRunSnapshot:
+    created_at = _aware(row.created_at)
+    updated_at = _aware(row.updated_at)
+    assert created_at is not None and updated_at is not None
+    return JobRunSnapshot(
+        id=UUID(row.id),
+        job_name=row.job_name,
+        idempotency_key=row.idempotency_key,
+        status=JobRunStatus(row.status),
+        priority=row.priority,
+        progress=row.progress,
+        attempts=row.attempts,
+        error=row.error,
+        created_at=created_at,
+        updated_at=updated_at,
+        started_at=_aware(row.started_at),
+        finished_at=_aware(row.finished_at),
+    )
 
 
 class SQLAlchemyAIRunRepository:

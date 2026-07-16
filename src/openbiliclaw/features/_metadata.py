@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, TypeAlias, cast
 
-from pydantic import JsonValue, PlainSerializer, PlainValidator
+from pydantic import JsonValue, PlainSerializer, PlainValidator, TypeAdapter, WithJsonSchema
 
 JsonScalar: TypeAlias = str | int | float | bool | None
 FrozenJsonValue: TypeAlias = (
@@ -68,4 +68,5 @@ FrozenMetadata: TypeAlias = Annotated[
     Mapping[str, JsonValue],
     PlainValidator(freeze_metadata),
     PlainSerializer(serialize_metadata, return_type=dict[str, object]),
+    WithJsonSchema(TypeAdapter(dict[str, JsonValue]).json_schema()),
 ]

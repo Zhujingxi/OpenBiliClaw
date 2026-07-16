@@ -54,6 +54,7 @@ dependencies = [
     "uvicorn>=0.32",
     "pydantic-evals>=2.11.0",
     "pydantic-ai-slim[openai]>=2.11.0",
+    "huey>=2.5,<3",
 ]
 
 [project.optional-dependencies]
@@ -136,6 +137,8 @@ module = [
     "aiohttp",
     "claude_agent_sdk",
     "claude_agent_sdk.*",
+    "huey",
+    "huey.*",
     "playwright.*",
     "twitter_cli",
     "twitter_cli.*",

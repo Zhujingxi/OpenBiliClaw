@@ -27,6 +27,12 @@ class SourceRegistry:
         return tuple(self._connectors)
 
     @property
+    def connectors(self) -> tuple[SourceConnector, ...]:
+        """Return the explicitly injected connectors in composition order."""
+
+        return tuple(self._connectors.values())
+
+    @property
     def manifests(self) -> Mapping[str, SourceManifest]:
         """Return immutable capability declarations keyed by canonical ID."""
 

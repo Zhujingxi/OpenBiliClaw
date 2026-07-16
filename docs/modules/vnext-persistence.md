@@ -4,7 +4,7 @@
 
 本模块是 backend-first vNext 的独立持久化基础，已经实现 SQLAlchemy 2.x 映射、repository、同步 Unit of Work、Alembic 基线迁移、类型化系统设置和 Fernet 凭据密文适配。它使用新的 `data/vnext/openbiliclaw.db`，不读取、迁移或替换当前 `storage/database.py` 管理的 legacy 数据库。
 
-**当前生产 API、runtime、CLI、安装流程和前端都尚未构造或调用这套基础。** 因此它不是运行时权威来源；现有 legacy storage/runtime 继续承载真实用户数据与业务请求。后续任务必须显式完成 use case、启动接线、数据迁移和切换验证，才能改变这一状态。
+**独立 vNext worker 已构造并调用这套基础，但当前生产 API、legacy runtime、CLI 和前端尚未切换。** 因此它已经是 vNext 后台任务的业务状态来源，却仍不是现有用户请求与 legacy 数据的权威来源。后续任务必须显式完成 HTTP 接线、安装器 secret 生命周期、数据迁移和切换验证，才能改变这一状态。
 
 ## 已实现功能
 
@@ -17,7 +17,8 @@
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
-| 生产接线 | 🚧 | legacy storage/runtime 仍是权威路径；vNext API、任务服务、安装器 secret 交付和数据切换尚未实现 |
+| worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
+| 完整生产切换 | 🚧 | legacy storage/runtime 仍是公开请求权威；vNext API、安装器 secret 交付和数据迁移尚未实现 |
 
 ## Schema
 
@@ -41,7 +42,7 @@
 | `infrastructure.security` | `CredentialCipher`, `EncryptedCredential` |
 | `infrastructure.security.credentials` | `MissingCredentialKeyError`, `SECRET_KEY_ENV` |
 
-`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`source_tasks`、`job_runs`、`ai_runs` 当前只提供供后续任务继续构建的低层新增入口，不代表对应 worker 或 AI runner 已经上线。`ai_runs` 只记录 task、model alias、状态、时间、usage 与错误分类；ORM、未发布 Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。
+`UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`activities` 支持幂等导入，feed/interaction/collection adapter 提供用例所需查询与删除，`job_runs` 提供幂等 schedule、claim、取消、重启恢复和 terminal cleanup。worker 中的 `TaskRunner` 会写 `ai_runs`，但该表只记录 task、model alias、状态、时间、usage 与错误分类；ORM、Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。`source_tasks` 已由 queued browser transport 使用，但现有浏览器扩展 dispatcher 尚未切到 generic claim/complete。
 
 `UserSettings` 的当前完整契约如下：
 
@@ -51,6 +52,8 @@
 | `feed_low_watermark` | `20` | `0..1000`，且不得高于 high watermark |
 | `feed_high_watermark` | `50` | `1..2000` |
 | `source_sync_interval_minutes` | `30` | `1..10080` |
+| `source_weights` | 七个平台均为 `1.0` | key 必须是 canonical SourceId；值必须有限且非负，零权重不参与 feed 配额 |
+| `source_enabled` | 七个平台均为 `false` | key 必须是 canonical SourceId；只有显式启用的来源会被 worker 调用 |
 
 ## 迁移与安全约束
 

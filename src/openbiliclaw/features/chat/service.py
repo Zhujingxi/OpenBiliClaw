@@ -1,0 +1,129 @@
+"""Interactive chat use case with persisted turns and SSE-shaped output."""
+
+from __future__ import annotations
+
+import json
+from enum import StrEnum
+from typing import TYPE_CHECKING, Protocol
+from uuid import UUID  # noqa: TC003 - Pydantic resolves the field at runtime
+
+from pydantic import BaseModel, ConfigDict
+
+from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
+from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from types import TracebackType
+
+
+class ChatChunkKind(StrEnum):
+    DELTA = "delta"
+    DONE = "done"
+
+
+class ChatChunk(BaseModel):
+    """Transport-neutral chunk that can be rendered as an SSE event."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: ChatChunkKind
+    content: str
+    turn_id: UUID
+
+    def to_sse(self) -> str:
+        data = json.dumps(self.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+        return f"event: {self.kind.value}\ndata: {data}\n\n"
+
+
+class ChatResponder(Protocol):
+    """Interactive-lane adapter backed by the shared TaskRunner, never Huey."""
+
+    async def respond(self, *, conversation_id: UUID, message: str) -> str: ...
+
+
+class ChatRepository(Protocol):
+    def add(self, turn: ChatTurn) -> None: ...
+
+
+class ActivityRepository(Protocol):
+    def add(self, event: ActivityEvent) -> None: ...
+
+
+class ChatUnitOfWork(Protocol):
+    chat: ChatRepository
+    activities: ActivityRepository
+
+    def __enter__(self) -> ChatUnitOfWork: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
+
+    def commit(self) -> None: ...
+
+
+class ChatService:
+    """Persist both turns around one direct interactive TaskRunner adapter call."""
+
+    def __init__(
+        self,
+        uow_factory: Callable[[], ChatUnitOfWork],
+        *,
+        responder: ChatResponder,
+    ) -> None:
+        self._uow_factory = uow_factory
+        self._responder = responder
+
+    async def stream(
+        self,
+        *,
+        conversation_id: UUID,
+        message: str,
+        learn: bool = False,
+    ) -> AsyncIterator[ChatChunk]:
+        user_turn = ChatTurn(
+            conversation_id=conversation_id,
+            role=ChatRole.USER,
+            content=message,
+        )
+        with self._uow_factory() as uow:
+            uow.chat.add(user_turn)
+            uow.commit()
+
+        reply = (
+            await self._responder.respond(
+                conversation_id=conversation_id,
+                message=message,
+            )
+        ).strip()
+        assistant_turn = ChatTurn(
+            conversation_id=conversation_id,
+            role=ChatRole.ASSISTANT,
+            content=reply,
+        )
+        with self._uow_factory() as uow:
+            uow.chat.add(assistant_turn)
+            if learn:
+                uow.activities.add(
+                    ActivityEvent(
+                        source_id="openbiliclaw",
+                        kind=ActivityKind.CHAT_LEARNING,
+                        text=message,
+                        metadata={"conversation_id": str(conversation_id), "value": message},
+                    )
+                )
+            uow.commit()
+
+        yield ChatChunk(
+            kind=ChatChunkKind.DELTA,
+            content=assistant_turn.content,
+            turn_id=assistant_turn.id,
+        )
+        yield ChatChunk(kind=ChatChunkKind.DONE, content="", turn_id=assistant_turn.id)
+
+
+__all__ = ["ChatChunk", "ChatChunkKind", "ChatResponder", "ChatService"]

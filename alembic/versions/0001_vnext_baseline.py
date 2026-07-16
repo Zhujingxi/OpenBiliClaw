@@ -87,9 +87,12 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=30), nullable=False),
         sa.Column("priority", sa.Integer(), nullable=False),
         sa.Column("progress", sa.Float(), nullable=False),
+        sa.Column("attempts", sa.Integer(), nullable=False),
         sa.Column("error", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_job_runs")),
         sa.UniqueConstraint("idempotency_key", name=op.f("uq_job_runs_idempotency_key")),
     )

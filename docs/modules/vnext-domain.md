@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-本模块是 backend-first vNext 的第一层基础，只定义无框架依赖的不可变领域契约与纯策略；相邻的 [vNext 持久化模块](vnext-persistence.md) 已提供 SQLAlchemy/Alembic adapter，但当前 legacy runtime、存储、CLI 和公开 API 尚未切换到这些类型。领域模块本身仍不得导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。
+本模块是 backend-first vNext 的第一层基础，只定义无框架依赖的不可变领域契约与纯策略；相邻的 [vNext 持久化模块](vnext-persistence.md) 已提供 SQLAlchemy/Alembic adapter，[vNext 用例与后台任务](vnext-use-cases-jobs.md) 已在独立 worker 中组合这些类型，但当前 legacy runtime、存储、CLI 和公开 API尚未切换。领域模块本身仍不得导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。
 
 ## 已实现功能
 
@@ -15,7 +15,7 @@
 | 持久化聊天 | ✅ | `ChatTurn` 表达 user / assistant 对话轮次 |
 | 来源能力 | ✅ | `SourceId` / `SourceManifest` 分开声明稳定 capability 与带 auth/result/transport metadata 的 concrete operation；`SourceConnector` 只返回规范化活动或内容对象 |
 | 来源任务合同 | ✅ | `SourceTaskRequest`、`ClaimedSourceTask`、`SourceTaskSnapshot`、`SourceTaskCompletion` 冻结通用任务边界；claim/snapshot 暴露 durable request deadline 与 `cancelled/abandoned` 终态，lease 策略见相邻 vNext 来源模块 |
-| 相邻持久化 adapter | ✅ | 独立 vNext SQLAlchemy/Alembic 基础已实现，但不属于本领域模块且未接入生产路径 |
+| 相邻持久化与 worker adapter | ✅ | 独立 vNext SQLAlchemy/Alembic 基础和四任务 worker 已实现，但不属于本领域模块；公开请求路径仍未切换 |
 | 运行时接线 | 🚧 | AI 与来源 adapter 基础已实现；use case、API、数据迁移与现有前端切换由后续任务实现 |
 
 ## 公开 API

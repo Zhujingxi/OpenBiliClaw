@@ -32,6 +32,12 @@ printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
 
 Admin 端口在两份 Compose 中都固定绑定宿主机 `127.0.0.1`，不会向局域网暴露。确需远程管理时，必须显式把 `127.0.0.1:${LITELLM_PORT:-4000}:4000` 改成受控监听地址，并先配置防火墙、TLS 和访问控制；不要直接裸露到公网。
 
+## vNext 后台 worker
+
+源码与预构建 Compose 现在都启动独立 `openbiliclaw-worker`。它先执行 Alembic migration，再以最多 4 个 thread worker 运行四个有锁、可恢复的任务：`source_sync`、`profile_projection`、`feed_replenishment`、`cleanup`。应用数据位于共享 volume 的 `data/vnext/openbiliclaw.db`，Huey transport/result 位于独立的 `data/vnext/huey.db`；即使 Huey result 中有值，任务状态仍只以应用库 `job_runs` 为准。
+
+worker 固定构造 Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，不加载动态插件。`source_enabled` 默认全部关闭，因此启动不会调用平台。Bilibili、抖音、X 等 direct/CLI client 只在首次真实调用时读取 `source_accounts` 并解密；需要此路径时，把与写入密文相同的 `OPENBILICLAW_SECRET_KEY` 放进本地 `.env`。当前 installer 尚未自动生成或轮换该值；缺失/错误 secret 或账户 Cookie 会让对应 job 以不含凭据内容的明确配置错误失败。小红书、知乎、YouTube bootstrap 与 production-default Reddit 使用 generic browser queue，但扩展 dispatcher 要到后续切换任务才会消费它们。
+
 ### 自带 Ollama embedding sidecar（bge-m3 已烤进镜像,离线开箱即用）
 
 `docker-compose.yml` 有一个 `ollama` 服务,对外暴露 `http://ollama:11434`,用 Docker 网络和后端互通。**bge-m3(~1.1GB)已在构建时烤进镜像 `openbiliclaw-ollama`**:容器启动时其 entrypoint 把烤好的模型播种进存储再 serve,**零网络拉取、离线可用**,对国内网络尤其友好。named volume `openbiliclaw_ollama` 持久化,重建容器不丢。
@@ -180,6 +186,8 @@ docker compose ps          # 源码目录里；预构建方式加 -f docker-comp
 curl http://127.0.0.1:8420/api/health
 curl http://127.0.0.1:4000/health/readiness
 ```
+
+`docker compose ps` 应同时显示 backend、worker、LiteLLM、PostgreSQL 与 Ollama；worker 没有 HTTP health endpoint，可用 `docker compose logs worker` 检查 migration/consumer 启动。不要把 Huey 的 result storage 当成产品任务状态接口。
 
 `/health/readiness` 只说明 proxy 可服务；三个 alias 的 deployment health 由 vNext `AIHealthService` 逐一检查 `/health?model=<alias>`，并只投影脱敏状态。注意 LiteLLM 的 model health 检查**可能真实调用 provider**，不要把它当成高频 liveness probe；当前 public API 尚未暴露该投影。任一 deployment 健康即 alias 可用，混合健康/失败会标为 `degraded`；transport、auth、未配置 alias、proxy server 和 provider unhealthy 分开分类。
 

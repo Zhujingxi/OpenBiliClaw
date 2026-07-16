@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 from openbiliclaw.features.system.domain import UserSettings
 
-SettingValue = bool | int | float | str | None
+SettingValue = bool | int | float | str | dict[str, bool] | dict[str, float] | None
 
 
 class SettingsRepository(Protocol):

@@ -584,9 +584,9 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
-### vNext Domain, Seven Sources, Persistence, and Typed AI Foundation (not cut over)
+### vNext Domain, Use Cases, and Independent Worker (public API not cut over)
 
-v0.4.0 now includes framework-independent domain contracts, seven capability/concrete-operation source connectors, lease-safe generic source tasks with durable request deadlines and bounded cancellation compensation, isolated SQLAlchemy/Alembic persistence, typed settings, Fernet credential encryption, and a PydanticAI typed-task boundary routed only through LiteLLM. The Bilibili search contract explicitly records its direct primary and browser fallback. Expired work cannot be newly claimed even when local cleanup is delayed; claim/complete use database time to prevent stale authorization after lock waits, and late enqueue failures are safely retrieved. Cleanup has its own finite window, so total return time may exceed the browser execution timeout. **The current API, business runtime, CLI, and frontend do not use them yet, and the extension has not switched to the generic task route.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live business path.
+v0.4.0 now includes framework-independent domain contracts, seven source connectors, lease-safe generic source tasks, isolated persistence, typed settings, Fernet credentials, six typed AI tasks, activity/profile/feed/library/chat application services, and an independent Huey worker. The worker constructs all seven built-ins explicitly and decrypts credentials only on the first direct call; all sources are disabled by default, so startup makes no live source calls. Four background jobs use application `job_runs` as the authority for status, idempotency, cancellation, and restart recovery; Huey results are transport-only. **The current API, legacy business runtime, CLI, frontend, and extension dispatcher have not switched yet**, and the isolated database neither replaces nor migrates existing data.
 
 ```text
 7 explicit SourceManifest + Connectors ──normalized──► Activity / Profile / Content / Feed
@@ -600,18 +600,19 @@ v0.4.0 now includes framework-independent domain contracts, seven capability/con
                                    ├─ typed DatabaseSettings / UserSettings
                                    └─ Fernet credential ciphertext
 
-future use cases ─► typed TaskSpec / PydanticAI ─► TaskRunner ─► LiteLLM ─► providers
+vNext use cases ─► typed TaskSpec / PydanticAI ─► TaskRunner ─► LiteLLM ─► providers
                        │ semantic retries only          │
                        ├─ obc-interactive / obc-analysis│ routing/fallback/retry/cache
                        └─ obc-embedding ◄─ embeddings ──┘
 
-Implemented: domain/seven-source/task/persistence foundations, typed AI/embedding/health,
-             offline eval datasets, and LiteLLM Compose
-Not wired: production source composition, HTTP/extension task routes, use cases/runtime/API,
-           legacy data migration, or frontend cutover
+Huey scheduler/transport ─► source sync / profile / feed / cleanup ─► authoritative job_runs
+
+Implemented: domain/source/task/persistence, application services, typed AI,
+             four-job worker, offline evals, and LiteLLM/Huey Compose
+Not wired: HTTP/extension routes, legacy data migration, /api/v1, or frontend cutover
 ```
 
-Application code only knows the stable aliases `obc-interactive`, `obc-analysis`, and `obc-embedding`; LiteLLM alone owns provider routing/fallback, network retries, limits, and caching. See [vNext Sources and Generic Browser Tasks](docs/modules/vnext-sources.md) for the capability matrix and [vNext Typed AI](docs/modules/vnext-ai.md) for the model boundary.
+Application code only knows the stable aliases `obc-interactive`, `obc-analysis`, and `obc-embedding`; LiteLLM alone owns provider routing/fallback, network retries, limits, and caching. See [vNext Sources and Generic Browser Tasks](docs/modules/vnext-sources.md) for the capability matrix, [vNext Use Cases and Jobs](docs/modules/vnext-use-cases-jobs.md) for worker behavior, and [vNext Typed AI](docs/modules/vnext-ai.md) for the model boundary.
 
 ### Current v0.3 Runtime Architecture
 

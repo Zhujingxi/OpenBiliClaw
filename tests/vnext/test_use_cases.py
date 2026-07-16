@@ -1,0 +1,357 @@
+"""Use-case tests for the vNext evidence, feed, library, and chat slice."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+from uuid import UUID
+
+import pytest
+
+from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
+from openbiliclaw.features.activity.service import ActivityService, project_activity_event
+from openbiliclaw.features.chat.service import ChatChunkKind, ChatService
+from openbiliclaw.features.feed.domain import (
+    CandidateAssessment,
+    ContentItem,
+    Interaction,
+    InteractionKind,
+)
+from openbiliclaw.features.feed.service import (
+    FeedbackService,
+    FeedPolicy,
+    FeedService,
+    allocate_source_limits,
+)
+from openbiliclaw.features.library.domain import CollectionKind
+from openbiliclaw.features.library.service import LibraryService
+from openbiliclaw.features.profile.domain import ProfileDelta, ProfileFacet, ProfileSnapshot
+from openbiliclaw.features.profile.service import InvalidProfileDeltaError, ProfileService
+from openbiliclaw.features.sources.domain import (
+    SourceCapability,
+    SourceId,
+    SourceManifest,
+    SourceOperation,
+    SourceOperationSpec,
+    SourceResultKind,
+    SourceTransportKind,
+)
+
+PROFILE_ID = UUID("00000000-0000-0000-0000-000000000020")
+EVENT_ID = UUID("00000000-0000-0000-0000-000000000021")
+CONTENT_A = UUID("00000000-0000-0000-0000-000000000022")
+CONTENT_B = UUID("00000000-0000-0000-0000-000000000023")
+CONVERSATION_ID = UUID("00000000-0000-0000-0000-000000000024")
+
+
+@dataclass
+class MemoryState:
+    events: list[ActivityEvent] = field(default_factory=list)
+    profiles: list[ProfileSnapshot] = field(default_factory=list)
+    content: list[ContentItem] = field(default_factory=list)
+    assessments: list[CandidateAssessment] = field(default_factory=list)
+    feed: list[Any] = field(default_factory=list)
+    interactions: list[Interaction] = field(default_factory=list)
+    collections: list[Any] = field(default_factory=list)
+    turns: list[Any] = field(default_factory=list)
+
+
+class MemoryRepository:
+    def __init__(self, state: MemoryState) -> None:
+        self.state = state
+
+    def add(self, value: Any) -> None:
+        name = type(value).__name__
+        target = {
+            "ActivityEvent": self.state.events,
+            "ProfileSnapshot": self.state.profiles,
+            "ContentItem": self.state.content,
+            "CandidateAssessment": self.state.assessments,
+            "FeedEntry": self.state.feed,
+            "Interaction": self.state.interactions,
+            "CollectionItem": self.state.collections,
+            "ChatTurn": self.state.turns,
+        }[name]
+        target.append(value)
+
+    def add_if_absent(self, value: ActivityEvent) -> bool:
+        if any(event.id == value.id for event in self.state.events):
+            return False
+        self.state.events.append(value)
+        return True
+
+    def latest(self) -> ProfileSnapshot | None:
+        return self.state.profiles[-1] if self.state.profiles else None
+
+    def append(self, snapshot: ProfileSnapshot, expected_revision: int | None) -> None:
+        actual = None if not self.state.profiles else self.state.profiles[-1].revision
+        if actual != expected_revision:
+            raise RuntimeError("revision conflict")
+        self.state.profiles.append(snapshot)
+
+    def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None:
+        return next(
+            (
+                item
+                for item in self.state.content
+                if item.source_id == source_id and item.external_id == external_id
+            ),
+            None,
+        )
+
+    def unseen_count(self) -> int:
+        seen = {item.content_id for item in self.state.interactions}
+        return sum(entry.content_id not in seen for entry in self.state.feed)
+
+    def next_position(self) -> int:
+        return len(self.state.feed)
+
+    def adjustment(self, content_id: UUID) -> float:
+        adjustment = 0.0
+        for interaction in self.state.interactions:
+            if interaction.content_id == content_id:
+                adjustment += 0.2 if interaction.kind is InteractionKind.POSITIVE else 0.0
+                adjustment -= 0.5 if interaction.kind is InteractionKind.NEGATIVE else 0.0
+        return adjustment
+
+    def remove(self, collection: CollectionKind, content_id: UUID) -> bool:
+        before = len(self.state.collections)
+        self.state.collections[:] = [
+            item
+            for item in self.state.collections
+            if not (item.collection is collection and item.content_id == content_id)
+        ]
+        return len(self.state.collections) != before
+
+
+class MemoryUow:
+    def __init__(self, state: MemoryState) -> None:
+        repo = MemoryRepository(state)
+        self.activities = repo
+        self.profiles = repo
+        self.content = repo
+        self.assessments = repo
+        self.feed = repo
+        self.interactions = repo
+        self.collections = repo
+        self.chat = repo
+        self.commits = 0
+
+    def __enter__(self) -> MemoryUow:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+class BatchAssessor:
+    def __init__(self) -> None:
+        self.calls: list[tuple[ContentItem, ...]] = []
+
+    async def assess_batch(
+        self, profile: ProfileSnapshot, content: tuple[ContentItem, ...]
+    ) -> tuple[CandidateAssessment, ...]:
+        self.calls.append(content)
+        return tuple(
+            CandidateAssessment(
+                content_id=item.id,
+                profile_revision=profile.revision,
+                relevance=0.9,
+                quality=0.9,
+                novelty=0.9,
+                risk=0,
+                topics=("python" if index < 2 else "architecture",),
+            )
+            for index, item in enumerate(content)
+        )
+
+
+class Connector:
+    def __init__(self, source: SourceId, items: tuple[ContentItem, ...]) -> None:
+        self._items = items
+        self.calls: list[tuple[SourceOperation, str | None, int]] = []
+        self.manifest = SourceManifest(
+            source_id=source,
+            display_name=source.value,
+            capabilities=frozenset({SourceCapability.TRENDING_FEED}),
+            operations=(
+                SourceOperationSpec(
+                    operation=SourceOperation.TRENDING,
+                    capability=SourceCapability.TRENDING_FEED,
+                    result_kind=SourceResultKind.CONTENT,
+                    requires_auth=False,
+                    transport_kind=SourceTransportKind.DIRECT,
+                ),
+            ),
+        )
+
+    async def execute(
+        self, operation: SourceOperation, query: str | None = None, limit: int = 20
+    ) -> tuple[ContentItem, ...]:
+        self.calls.append((operation, query, limit))
+        return self._items[:limit]
+
+
+def test_ingestion_persists_event_and_projects_deterministic_evidence() -> None:
+    state = MemoryState()
+    event = ActivityEvent(
+        id=EVENT_ID,
+        source_id="bilibili",
+        kind=ActivityKind.FAVORITE,
+        title="Typed Python architecture",
+    )
+
+    signals = ActivityService(lambda: MemoryUow(state)).ingest(event)
+
+    assert state.events == [event]
+    assert signals == project_activity_event(event)
+    assert signals[0].evidence_ids == (EVENT_ID,)
+
+
+@pytest.mark.asyncio
+async def test_profile_delta_is_validated_and_appended_atomically() -> None:
+    state = MemoryState(events=[ActivityEvent(id=EVENT_ID, source_id="local", kind="feedback")])
+    service = ProfileService(lambda: MemoryUow(state))
+    delta = ProfileDelta(
+        upserts=(
+            ProfileFacet(
+                name="interests",
+                value="Python",
+                weight=0.8,
+                confidence=0.9,
+                evidence_ids=(EVENT_ID,),
+            ),
+        )
+    )
+
+    snapshot = service.apply_delta(delta, evidence_ids=frozenset({EVENT_ID}))
+
+    assert snapshot.revision == 0
+    assert state.profiles == [snapshot]
+    bad = delta.model_copy(update={"upserts": (delta.upserts[0], delta.upserts[0].model_copy())})
+    with pytest.raises(InvalidProfileDeltaError, match="duplicate"):
+        service.apply_delta(bad, evidence_ids=frozenset({EVENT_ID}))
+
+
+def test_source_allocation_is_deterministic_and_exact() -> None:
+    assert allocate_source_limits(5, ("youtube", "bilibili", "reddit")) == {
+        "bilibili": 2,
+        "reddit": 2,
+        "youtube": 1,
+    }
+    assert allocate_source_limits(
+        7,
+        ("youtube", "bilibili", "reddit"),
+        weights={"bilibili": 3.0, "reddit": 1.0, "youtube": 0.0},
+    ) == {"bilibili": 5, "reddit": 2}
+    assert (
+        sum(
+            allocate_source_limits(
+                11,
+                ("youtube", "bilibili", "reddit"),
+                weights={"bilibili": 0.5, "reddit": 1.5, "youtube": 2.0},
+            ).values()
+        )
+        == 11
+    )
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        allocate_source_limits(3, ("bilibili",), weights={"bilibili": -1.0})
+
+
+@pytest.mark.asyncio
+async def test_feed_replenishment_dedupes_batches_and_enforces_diversity() -> None:
+    state = MemoryState(profiles=[ProfileSnapshot(id=PROFILE_ID, revision=0, narrative="Python")])
+    duplicate = ContentItem(
+        id=CONTENT_A,
+        source_id="bilibili",
+        external_id="same",
+        url="https://example.com/a",
+        title="A",
+    )
+    second = ContentItem(
+        id=CONTENT_B,
+        source_id="bilibili",
+        external_id="second",
+        url="https://example.com/b",
+        title="B",
+    )
+    third = ContentItem(
+        source_id="youtube",
+        external_id="third",
+        url="https://example.com/c",
+        title="C",
+    )
+    assessor = BatchAssessor()
+    service = FeedService(
+        lambda: MemoryUow(state),
+        connectors=(
+            Connector(SourceId.BILIBILI, (duplicate, second)),
+            Connector(SourceId.YOUTUBE, (duplicate.model_copy(), third)),
+        ),
+        assessor=assessor,
+        policy=FeedPolicy(low_watermark=1, high_watermark=2, max_per_topic=1),
+    )
+
+    entries = await service.replenish()
+
+    assert len(entries) == 2
+    assert len(assessor.calls) == 1  # typed batch, never candidate-by-candidate N+1
+    assert len({(item.source_id, item.external_id) for item in state.content}) == len(state.content)
+    assert [entry.position for entry in entries] == [0, 1]
+
+
+def test_feedback_persists_interaction_and_activity_that_changes_later_rank() -> None:
+    state = MemoryState()
+    interaction = Interaction(content_id=CONTENT_A, kind=InteractionKind.NEGATIVE)
+
+    signal = FeedbackService(lambda: MemoryUow(state)).record(interaction)
+
+    assert state.interactions == [interaction]
+    assert len(state.events) == 1
+    assert signal.evidence_ids == (state.events[0].id,)
+    assert MemoryRepository(state).adjustment(CONTENT_A) < 0
+
+
+def test_library_mutation_is_local_and_limited_to_two_collections() -> None:
+    state = MemoryState()
+    service = LibraryService(lambda: MemoryUow(state))
+
+    item = service.save(CollectionKind.FAVORITES, CONTENT_A, note="keep")
+
+    assert item.collection is CollectionKind.FAVORITES
+    assert service.remove(CollectionKind.FAVORITES, CONTENT_A) is True
+    assert state.collections == []
+
+
+class ChatResponder:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def respond(self, *, conversation_id: UUID, message: str) -> str:
+        self.calls += 1
+        return f"Echo: {message}"
+
+
+@pytest.mark.asyncio
+async def test_chat_persists_both_turns_and_emits_sse_compatible_chunks() -> None:
+    state = MemoryState()
+    responder = ChatResponder()
+    service = ChatService(lambda: MemoryUow(state), responder=responder)
+
+    chunks = [
+        chunk
+        async for chunk in service.stream(
+            conversation_id=CONVERSATION_ID,
+            message="I enjoy maintainable systems",
+            learn=True,
+        )
+    ]
+
+    assert [turn.role.value for turn in state.turns] == ["user", "assistant"]
+    assert responder.calls == 1
+    assert [chunk.kind for chunk in chunks] == [ChatChunkKind.DELTA, ChatChunkKind.DONE]
+    assert all(chunk.to_sse().endswith("\n\n") for chunk in chunks)
+    assert state.events[-1].kind is ActivityKind.CHAT_LEARNING

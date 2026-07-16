@@ -30,6 +30,8 @@ RUN python -c "import tomllib, pathlib; deps = tomllib.load(open('pyproject.toml
     && rm /tmp/requirements.txt
 
 COPY README.md config.example.toml ./
+COPY alembic.ini ./
+COPY alembic ./alembic
 COPY src ./src
 # Task 21's operational eval command will consume these versioned Pydantic
 # Evals datasets. Shipping them now keeps source and image installs aligned.

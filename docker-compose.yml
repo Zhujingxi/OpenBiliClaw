@@ -153,6 +153,27 @@ services:
       retries: 3
     restart: unless-stopped
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openbiliclaw-worker
+    depends_on:
+      litellm:
+        condition: service_healthy
+    environment:
+      OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
+      OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
+      OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
+      OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
+      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:-}
+      OPENBILICLAW_WORKERS: "4"
+      OPENBILICLAW_WORKER_RUNTIME_FACTORY: openbiliclaw.infrastructure.jobs.worker:database_runtime_factory
+    command: ["python", "-m", "openbiliclaw.infrastructure.jobs.worker"]
+    volumes:
+      - openbiliclaw_data:/app/runtime/data
+    restart: unless-stopped
+
 volumes:
   openbiliclaw_config:
   openbiliclaw_data:
