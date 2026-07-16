@@ -18,6 +18,7 @@ from openbiliclaw.features.sources.domain import (
     SourceTaskSnapshot,
     UnsupportedSourceOperationError,
 )
+from openbiliclaw.features.system.domain import DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -82,10 +83,21 @@ class CancelledSourceTaskError(RuntimeError):
     """Raised when a cancelled durable task receives a completion callback."""
 
 
+class AbandonedSourceTaskError(RuntimeError):
+    """Raised when a request-deadline-expired task receives a completion callback."""
+
+
 class SourceTaskRepository(Protocol):
     """Persistence operations required by the generic source-task service."""
 
-    def add_pending(self, request: SourceTaskRequest, *, task_id: UUID, now: datetime) -> UUID: ...
+    def add_pending(
+        self,
+        request: SourceTaskRequest,
+        *,
+        task_id: UUID,
+        request_deadline_at: datetime,
+        now: datetime,
+    ) -> UUID: ...
 
     def claim(
         self,
@@ -106,7 +118,7 @@ class SourceTaskRepository(Protocol):
         now: datetime,
     ) -> SourceTaskCompletion: ...
 
-    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
+    def get_snapshot(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot: ...
 
     def cancel(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot: ...
 
@@ -137,14 +149,30 @@ class SourceTaskService:
         registry: SourceRegistry | Callable[[], SourceRegistry],
         *,
         lease_seconds: int = 360,
+        persistence_timeout_seconds: float = DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS,
     ) -> None:
         if lease_seconds < 1:
             raise ValueError("source task lease must be positive")
+        if persistence_timeout_seconds <= 0:
+            raise ValueError("source task persistence timeout must be positive")
         self._uow_factory = uow_factory
         self._registry_provider = registry if callable(registry) else lambda: registry
         self._lease_seconds = lease_seconds
+        self._persistence_timeout_seconds = persistence_timeout_seconds
 
-    def enqueue(self, request: SourceTaskRequest, *, task_id: UUID | None = None) -> UUID:
+    @property
+    def persistence_timeout_seconds(self) -> float:
+        """Finite local persistence bound, configured to match SQLite busy timeout."""
+
+        return self._persistence_timeout_seconds
+
+    def enqueue(
+        self,
+        request: SourceTaskRequest,
+        *,
+        task_id: UUID | None = None,
+        request_deadline_at: datetime | None = None,
+    ) -> UUID:
         """Persist validated work only when the source advertises the operation."""
 
         connector = self._registry_provider().get(request.source_id)
@@ -155,9 +183,17 @@ class SourceTaskService:
             )
         _safe_json_object(request.payload)
         now = datetime.now(UTC)
+        deadline = request_deadline_at or now + timedelta(seconds=self._lease_seconds)
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError("source task request deadline must be timezone-aware")
         resolved_task_id = task_id or uuid4()
         with self._uow_factory() as uow:
-            persisted_id = uow.source_tasks.add_pending(request, task_id=resolved_task_id, now=now)
+            persisted_id = uow.source_tasks.add_pending(
+                request,
+                task_id=resolved_task_id,
+                request_deadline_at=deadline,
+                now=now,
+            )
             uow.commit()
         return persisted_id
 
@@ -205,7 +241,9 @@ class SourceTaskService:
         """Read task state without exposing lease or persistence details."""
 
         with self._uow_factory() as uow:
-            return uow.source_tasks.get_snapshot(task_id)
+            snapshot = uow.source_tasks.get_snapshot(task_id, now=datetime.now(UTC))
+            uow.commit()
+        return snapshot
 
     def cancel(self, task_id: UUID) -> SourceTaskSnapshot:
         """Make pending or leased browser work durably non-actionable."""
@@ -250,6 +288,7 @@ def _reject_credential_fields(value: object, *, path: tuple[str, ...] = ()) -> N
 
 # Re-export the request from the service module as the application-facing task API.
 __all__ = [
+    "AbandonedSourceTaskError",
     "CancelledSourceTaskError",
     "CredentialShapedPayloadError",
     "SourceTaskCompletionConflictError",

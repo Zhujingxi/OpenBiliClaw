@@ -45,12 +45,13 @@ def ensure_database_parent(url: str) -> None:
     Path(database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
-def _enable_sqlite_foreign_keys(engine: Engine) -> None:
+def _configure_sqlite(engine: Engine, *, busy_timeout_seconds: float) -> None:
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection: object, _connection_record: object) -> None:
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         try:
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute(f"PRAGMA busy_timeout={round(busy_timeout_seconds * 1000)}")
         finally:
             cursor.close()
 
@@ -67,12 +68,15 @@ def create_engine_and_session(
     parsed = make_url(resolved.url)
     kwargs: dict[str, object] = {"echo": resolved.echo}
     if parsed.get_backend_name() == "sqlite":
-        kwargs["connect_args"] = {"check_same_thread": False}
+        kwargs["connect_args"] = {
+            "check_same_thread": False,
+            "timeout": resolved.busy_timeout_seconds,
+        }
         if parsed.database in {None, "", ":memory:"}:
             kwargs["poolclass"] = StaticPool
 
     engine = create_engine(resolved.url, **kwargs)
     if parsed.get_backend_name() == "sqlite":
-        _enable_sqlite_foreign_keys(engine)
+        _configure_sqlite(engine, busy_timeout_seconds=resolved.busy_timeout_seconds)
     factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
     return engine, factory

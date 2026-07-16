@@ -12,8 +12,9 @@ from alembic.config import Config
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from openbiliclaw.features.sources.domain import SourceOperation
+from openbiliclaw.features.sources.domain import SourceOperation, SourceTaskStatus
 from openbiliclaw.features.sources.service import (
+    AbandonedSourceTaskError,
     CancelledSourceTaskError,
     CredentialShapedPayloadError,
     SourceTaskCompletionConflictError,
@@ -38,7 +39,8 @@ def task_context(tmp_path: Path) -> tuple[Any, Any, SourceTaskService]:
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
-    engine, session_factory = create_engine_and_session(DatabaseSettings(url=url))
+    database_settings = DatabaseSettings(url=url, busy_timeout_seconds=0.2)
+    engine, session_factory = create_engine_and_session(database_settings)
     transports = {
         source_id: RecordingTransport(source_id)
         for source_id in (
@@ -52,7 +54,12 @@ def task_context(tmp_path: Path) -> tuple[Any, Any, SourceTaskService]:
         )
     }
     registry = make_registry(transports)
-    service = SourceTaskService(lambda: UnitOfWork(session_factory), registry, lease_seconds=60)
+    service = SourceTaskService(
+        lambda: UnitOfWork(session_factory),
+        registry,
+        lease_seconds=60,
+        persistence_timeout_seconds=database_settings.busy_timeout_seconds,
+    )
     yield session_factory, engine, service
     engine.dispose()
 
@@ -309,6 +316,69 @@ def test_cancelled_task_is_terminal_unclaimable_and_uncompletable(
     assert service.claim("zhihu") is None
     with pytest.raises(CancelledSourceTaskError):
         service.complete(task_id, claim.lease_token, {"items": []})
+
+
+def test_expired_request_deadline_is_abandoned_without_ever_becoming_claimable(
+    task_context: tuple[Any, Any, SourceTaskService],
+) -> None:
+    session_factory, _, service = task_context
+    deadline = datetime.now(UTC) - timedelta(milliseconds=1)
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.SEARCH, payload={"query": "python"}
+        ),
+        request_deadline_at=deadline,
+    )
+
+    assert service.claim("zhihu") is None
+    snapshot = service.snapshot(task_id)
+    assert snapshot.status.value == "abandoned"
+    assert snapshot.request_deadline_at == deadline
+    with session_factory() as session:
+        row = session.get(SourceTaskModel, str(task_id))
+        assert row is not None
+        assert row.status == "abandoned"
+
+
+def test_snapshot_persists_abandoned_status_for_expired_pending_work(
+    task_context: tuple[Any, Any, SourceTaskService],
+) -> None:
+    session_factory, _, service = task_context
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.FEED, payload={"limit": 1}
+        ),
+        request_deadline_at=datetime.now(UTC) - timedelta(milliseconds=1),
+    )
+
+    assert service.snapshot(task_id).status.value == "abandoned"
+    with session_factory() as session:
+        row = session.get(SourceTaskModel, str(task_id))
+        assert row is not None
+        assert row.status == "abandoned"
+    assert service.claim("zhihu") is None
+
+
+def test_completion_after_request_deadline_is_rejected_as_abandoned(
+    task_context: tuple[Any, Any, SourceTaskService],
+) -> None:
+    session_factory, _, service = task_context
+    task_id = service.enqueue(
+        SourceTaskRequest(
+            source_id="zhihu", operation=SourceOperation.SEARCH, payload={"query": "python"}
+        ),
+        request_deadline_at=datetime.now(UTC) + timedelta(seconds=1),
+    )
+    claim = service.claim("zhihu")
+    assert claim is not None
+    with session_factory() as session, session.begin():
+        row = session.get(SourceTaskModel, str(task_id))
+        assert row is not None
+        row.request_deadline_at = datetime.now(UTC) - timedelta(milliseconds=1)
+
+    with pytest.raises(AbandonedSourceTaskError):
+        service.complete(task_id, claim.lease_token, {"items": []})
+    assert service.snapshot(task_id).status is SourceTaskStatus.ABANDONED
 
 
 def test_two_separate_uows_claim_one_task_for_exactly_one_owner(

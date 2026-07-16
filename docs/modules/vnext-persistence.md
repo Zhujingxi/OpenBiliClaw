@@ -10,7 +10,7 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
-| 独立数据库配置 | ✅ | `DatabaseSettings` 默认指向 `sqlite:///data/vnext/openbiliclaw.db`，可通过 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` 覆盖 |
+| 独立数据库配置 | ✅ | `DatabaseSettings` 默认指向 `sqlite:///data/vnext/openbiliclaw.db`；URL、echo 与有限 SQLite busy timeout 可通过 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS` 覆盖 |
 | SQLAlchemy schema | ✅ | 15 张 vNext 业务表覆盖设置、来源账户、活动、画像、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
 | Alembic 基线 | ✅ | `0001_vnext_baseline` 支持从空库 upgrade、downgrade 后重建，并预置 `favorites` / `watch_later` 两个本地集合 |
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
@@ -29,7 +29,7 @@
 | 本地集合与聊天 | `collections`, `collection_items`, `chat_turns` |
 | 后续执行基础 | `source_tasks`, `job_runs`, `ai_runs` |
 
-内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 evidence 以外键关联活动证据；来源账户凭据列只保存 `encrypted_credentials`。SQLite engine 会打开 foreign keys，并在文件型 URL 下自动创建父目录。
+内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 evidence 以外键关联活动证据；来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
 
 ## 公开 API
 

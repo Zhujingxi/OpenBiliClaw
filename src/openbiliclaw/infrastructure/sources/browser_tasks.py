@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -20,6 +21,7 @@ from openbiliclaw.features.sources.domain import (
     SourceTaskStatus,
 )
 from openbiliclaw.features.sources.service import (
+    AbandonedSourceTaskError,
     CancelledSourceTaskError,
     SourceTaskCompletionConflictError,
     StaleSourceTaskLeaseError,
@@ -33,13 +35,25 @@ if TYPE_CHECKING:
     from openbiliclaw.features.sources.service import SourceTaskService
 
 
+logger = logging.getLogger(__name__)
+_CLEANUP_SCHEDULING_GRACE_SECONDS = 0.25
+_ACTIONABLE_STATUSES = (SourceTaskStatus.PENDING.value, SourceTaskStatus.IN_PROGRESS.value)
+
+
 class SQLAlchemyBrowserTaskRepository:
     """Atomically claim expired/pending tasks and preserve idempotent completions."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def add_pending(self, request: SourceTaskRequest, *, task_id: UUID, now: datetime) -> UUID:
+    def add_pending(
+        self,
+        request: SourceTaskRequest,
+        *,
+        task_id: UUID,
+        request_deadline_at: datetime,
+        now: datetime,
+    ) -> UUID:
         dumped = request.model_dump(mode="json")
         payload = dumped["payload"]
         if not isinstance(payload, dict):
@@ -54,6 +68,7 @@ class SQLAlchemyBrowserTaskRepository:
                 result_payload=None,
                 lease_token=None,
                 lease_expires_at=None,
+                request_deadline_at=request_deadline_at,
                 created_at=now,
                 updated_at=now,
             )
@@ -71,11 +86,15 @@ class SQLAlchemyBrowserTaskRepository:
     ) -> ClaimedSourceTask | None:
         if not allowed_operations:
             return None
-        claimable = or_(
-            SourceTaskModel.status == "pending",
-            and_(
-                SourceTaskModel.status == "in_progress",
-                SourceTaskModel.lease_expires_at <= now,
+        self._abandon_expired(now=now, source_id=source_id)
+        claimable = and_(
+            SourceTaskModel.request_deadline_at > now,
+            or_(
+                SourceTaskModel.status == "pending",
+                and_(
+                    SourceTaskModel.status == "in_progress",
+                    SourceTaskModel.lease_expires_at <= now,
+                ),
             ),
         )
         for _attempt in range(3):
@@ -110,6 +129,7 @@ class SQLAlchemyBrowserTaskRepository:
                     payload=row.request_payload,
                     lease_token=lease_token,
                     lease_expires_at=lease_expires_at,
+                    request_deadline_at=_aware(row.request_deadline_at),
                 )
             self._session.expire_all()
         return None
@@ -129,6 +149,7 @@ class SQLAlchemyBrowserTaskRepository:
                 SourceTaskModel.status == "in_progress",
                 SourceTaskModel.lease_token == lease_token,
                 SourceTaskModel.lease_expires_at > now,
+                SourceTaskModel.request_deadline_at > now,
             )
             .values(
                 status="completed",
@@ -140,12 +161,15 @@ class SQLAlchemyBrowserTaskRepository:
         )
         if row is not None:
             return SourceTaskCompletion(id=task_id, completed_at=now, idempotent=False)
+        self._abandon_expired(now=now, task_id=task_id)
         self._session.expire_all()
         row = self._session.get(SourceTaskModel, str(task_id))
         if row is None:
             raise LookupError(f"source task does not exist: {task_id}")
         if row.status == SourceTaskStatus.CANCELLED:
             raise CancelledSourceTaskError("source task was cancelled")
+        if row.status == SourceTaskStatus.ABANDONED:
+            raise AbandonedSourceTaskError("source task request deadline expired")
         if row.status == "completed":
             if row.lease_token != lease_token:
                 raise StaleSourceTaskLeaseError("source task completion lease is stale")
@@ -181,22 +205,50 @@ class SQLAlchemyBrowserTaskRepository:
         return SourceTaskSnapshot(
             id=task_id,
             status=SourceTaskStatus(row.status),
+            request_deadline_at=_aware(row.request_deadline_at),
             result=row.result_payload,
         )
 
-    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot:
+    def get_snapshot(self, task_id: UUID, *, now: datetime) -> SourceTaskSnapshot:
+        self._abandon_expired(now=now, task_id=task_id)
+        self._session.expire_all()
         row = self._session.get(SourceTaskModel, str(task_id))
         if row is None:
             raise LookupError(f"source task does not exist: {task_id}")
         return SourceTaskSnapshot(
             id=task_id,
             status=SourceTaskStatus(row.status),
+            request_deadline_at=_aware(row.request_deadline_at),
             result=row.result_payload,
+        )
+
+    def _abandon_expired(
+        self,
+        *,
+        now: datetime,
+        source_id: str | None = None,
+        task_id: UUID | None = None,
+    ) -> None:
+        expired = update(SourceTaskModel).where(
+            SourceTaskModel.status.in_(_ACTIONABLE_STATUSES),
+            SourceTaskModel.request_deadline_at <= now,
+        )
+        if source_id is not None:
+            expired = expired.where(SourceTaskModel.source_id == source_id)
+        if task_id is not None:
+            expired = expired.where(SourceTaskModel.id == str(task_id))
+        self._session.execute(
+            expired.values(
+                status=SourceTaskStatus.ABANDONED.value,
+                lease_token=None,
+                lease_expires_at=None,
+                updated_at=now,
+            )
         )
 
 
 class QueuedBrowserTransport:
-    """Enqueue a typed operation and await its extension result with a hard bound."""
+    """Await browser execution to a durable deadline, then compensate within a local bound."""
 
     def __init__(
         self,
@@ -205,6 +257,7 @@ class QueuedBrowserTransport:
         *,
         timeout_seconds: float = 60.0,
         poll_interval_seconds: float = 0.1,
+        cleanup_timeout_seconds: float | None = None,
     ) -> None:
         if timeout_seconds <= 0 or poll_interval_seconds <= 0:
             raise ValueError("browser transport timing values must be positive")
@@ -212,6 +265,14 @@ class QueuedBrowserTransport:
         self._source_id = source_id
         self._timeout = timeout_seconds
         self._poll_interval = poll_interval_seconds
+        persistence_timeout = service.persistence_timeout_seconds
+        self._cleanup_timeout = (
+            persistence_timeout + _CLEANUP_SCHEDULING_GRACE_SECONDS
+            if cleanup_timeout_seconds is None
+            else cleanup_timeout_seconds
+        )
+        if self._cleanup_timeout <= 0:
+            raise ValueError("browser transport cleanup timeout must be positive")
 
     async def fetch(
         self, *, operation: str, query: str | None, limit: int
@@ -226,8 +287,14 @@ class QueuedBrowserTransport:
             operation=typed_operation,
             payload=payload,
         )
+        request_deadline_at = datetime.now(UTC) + timedelta(seconds=self._timeout)
         enqueue_task = asyncio.create_task(
-            asyncio.to_thread(self._service.enqueue, request, task_id=task_id)
+            asyncio.to_thread(
+                self._service.enqueue,
+                request,
+                task_id=task_id,
+                request_deadline_at=request_deadline_at,
+            )
         )
         try:
             async with asyncio.timeout(self._timeout):
@@ -244,19 +311,40 @@ class QueuedBrowserTransport:
                         return [dict(item) for item in items]
                     if snapshot.status is SourceTaskStatus.CANCELLED:
                         raise CancelledSourceTaskError("browser source task was cancelled")
+                    if snapshot.status is SourceTaskStatus.ABANDONED:
+                        raise TimeoutError("browser source task request deadline expired")
                     await asyncio.sleep(self._poll_interval)
-        except BaseException:
-            await asyncio.shield(self._compensate(enqueue_task, task_id))
-            raise
+        except BaseException as original_error:
+            cleanup_task = asyncio.create_task(self._compensate(enqueue_task, task_id))
+            await self._await_cleanup_resistant(cleanup_task)
+            raise original_error
 
     async def _compensate(self, enqueue_task: asyncio.Task[UUID], task_id: UUID) -> None:
-        """Wait out an in-flight insert, then make its row terminal before returning."""
+        """Try to cancel a persisted row within the finite local persistence bound."""
 
         try:
-            await asyncio.shield(enqueue_task)
-        except Exception:
-            return
-        await asyncio.to_thread(self._service.cancel, task_id)
+            async with asyncio.timeout(self._cleanup_timeout):
+                try:
+                    await asyncio.shield(enqueue_task)
+                except Exception:
+                    return
+                await asyncio.to_thread(self._service.cancel, task_id)
+        except TimeoutError:
+            logger.warning("source task cleanup reached its persistence deadline")
+        except Exception as error:
+            logger.warning("source task cleanup failed (%s)", type(error).__name__)
+
+    async def _await_cleanup_resistant(self, cleanup_task: asyncio.Task[None]) -> None:
+        """Ignore repeated parent cancellation until cleanup finishes or reaches its own bound."""
+
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException as error:
+                logger.warning("source task cleanup failed (%s)", type(error).__name__)
+                break
 
 
 def _aware(value: datetime) -> datetime:

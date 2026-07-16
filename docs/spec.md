@@ -209,7 +209,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ### 3.1 vNext 领域、来源、持久化与类型化 AI 基础（尚非运行时权威）
 
-v0.4.0 先冻结 feature-oriented 领域契约和确定性策略，再加入七平台 capability / concrete-operation connector、可取消的 generic source task、隔离的 SQLAlchemy/Alembic persistence、类型化系统设置、凭据加密和只经 LiteLLM 的 typed AI 基础。operation 可显式声明 primary + fallback transport；browser task timeout / 调用取消会落 durable terminal `cancelled`，而不是遗留 actionable row。连线标出已实现的依赖方向与后续 use case 的预期关系，不表示生产请求已切换；v0.3 API、runtime、legacy storage 和四端客户端仍是当前实际路径。
+v0.4.0 先冻结 feature-oriented 领域契约和确定性策略，再加入七平台 capability / concrete-operation connector、可取消的 generic source task、隔离的 SQLAlchemy/Alembic persistence、类型化系统设置、凭据加密和只经 LiteLLM 的 typed AI 基础。operation 可显式声明 primary + fallback transport；browser task enqueue 会落 durable request deadline，claim/complete 原子排除到期 row。timeout / 调用取消后的 compensation 具有独立、与 SQLite busy timeout 对齐的有限窗口：成功写 `cancelled`，超界/失败时由过期 deadline 保证 row 不再 actionable，并在 snapshot/claim 时收敛为 `abandoned`；不承诺调用严格在 execution timeout 时返回，也不承诺返回前一律已经写入终态。连线标出已实现的依赖方向与后续 use case 的预期关系，不表示生产请求已切换；v0.3 API、runtime、legacy storage 和四端客户端仍是当前实际路径。
 
 ```text
 HTTP / CLI / logged-in browser transports
@@ -220,7 +220,7 @@ HTTP / CLI / logged-in browser transports
         └────────► ContentItem ──► CandidateAssessment ──► FeedEntry ──► Interaction
                          ├────────► CollectionItem
                          └────────► ChatTurn
-        └────────► SourceTaskService ─ lease claim/complete ─► source_tasks
+        └────────► SourceTaskService ─ deadline + lease/cancel/abandon ─► source_tasks
         │
         │ typed repository contracts
         ▼

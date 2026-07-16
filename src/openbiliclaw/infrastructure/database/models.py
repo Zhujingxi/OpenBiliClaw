@@ -227,7 +227,15 @@ class SourceTaskModel(Base):
     """Durable generic work claimed by a source transport."""
 
     __tablename__ = "source_tasks"
-    __table_args__ = (Index("source_task_claim", "source_id", "status", "created_at"),)
+    __table_args__ = (
+        Index(
+            "source_task_claim",
+            "source_id",
+            "status",
+            "request_deadline_at",
+            "created_at",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     source_id: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -238,6 +246,9 @@ class SourceTaskModel(Base):
     lease_token: Mapped[str | None] = mapped_column(String(100), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    request_deadline_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

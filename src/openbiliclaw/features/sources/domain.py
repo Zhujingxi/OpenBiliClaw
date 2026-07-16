@@ -170,6 +170,7 @@ class ClaimedSourceTask(BaseModel):
     payload: FrozenMetadata = Field(default_factory=empty_metadata)
     lease_token: str = Field(min_length=20, max_length=100)
     lease_expires_at: AwareDatetime
+    request_deadline_at: AwareDatetime
 
 
 class SourceTaskStatus(StrEnum):
@@ -177,6 +178,7 @@ class SourceTaskStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+    ABANDONED = "abandoned"
 
 
 class SourceTaskSnapshot(BaseModel):
@@ -186,6 +188,7 @@ class SourceTaskSnapshot(BaseModel):
 
     id: UUID
     status: SourceTaskStatus
+    request_deadline_at: AwareDatetime
     result: FrozenMetadata | None = None
 
 

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_DATABASE_URL = "sqlite:///data/vnext/openbiliclaw.db"
+DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class DatabaseSettings(BaseSettings):
@@ -19,6 +20,9 @@ class DatabaseSettings(BaseSettings):
 
     url: str = Field(default=DEFAULT_DATABASE_URL, min_length=1)
     echo: bool = False
+    busy_timeout_seconds: float = Field(
+        default=DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS, ge=0.001, le=60
+    )
 
 
 class UserSettings(BaseModel):

@@ -20,7 +20,7 @@ from openbiliclaw.infrastructure.database.base import (
     DatabaseSettings,
     create_engine_and_session,
 )
-from openbiliclaw.infrastructure.database.models import AIRunModel
+from openbiliclaw.infrastructure.database.models import AIRunModel, SourceTaskModel
 from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 
@@ -77,6 +77,21 @@ def test_fresh_migration_creates_only_vnext_schema_and_predefined_collections(
     ai_run_columns = {column["name"] for column in inspect(engine).get_columns("ai_runs")}
     assert "input_payload" not in ai_run_columns
     assert "output_payload" not in ai_run_columns
+    source_task_columns = {
+        column["name"] for column in inspect(engine).get_columns("source_tasks")
+    }
+    assert "request_deadline_at" in source_task_columns
+    assert source_task_columns == set(SourceTaskModel.__table__.columns.keys())
+    source_task_indexes = {
+        index["name"]: index["column_names"]
+        for index in inspect(engine).get_indexes("source_tasks")
+    }
+    assert source_task_indexes["source_task_claim"] == [
+        "source_id",
+        "status",
+        "request_deadline_at",
+        "created_at",
+    ]
     with UnitOfWork(session_factory) as uow:
         collections = uow.collections.list_predefined()
     assert [(collection.slug, collection.display_name) for collection in collections] == [

@@ -261,11 +261,13 @@ def production_context(tmp_path: Path):  # type: ignore[no-untyped-def]
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", url)
     command.upgrade(config, "head")
-    engine, session_factory = create_engine_and_session(DatabaseSettings(url=url))
+    database_settings = DatabaseSettings(url=url, busy_timeout_seconds=0.2)
+    engine, session_factory = create_engine_and_session(database_settings)
     registry_holder: dict[str, Any] = {}
     service = SourceTaskService(
         lambda: UnitOfWork(session_factory),
         lambda: registry_holder["registry"],
+        persistence_timeout_seconds=database_settings.busy_timeout_seconds,
     )
     registry = build_source_registry(
         bilibili=build_bilibili_connector(BilibiliClient(), service),

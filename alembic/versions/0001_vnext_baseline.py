@@ -141,13 +141,16 @@ def upgrade() -> None:
         sa.Column("result_payload", sa.JSON(), nullable=True),
         sa.Column("lease_token", sa.String(length=100), nullable=True),
         sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("request_deadline_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_source_tasks")),
     )
     with op.batch_alter_table("source_tasks", schema=None) as batch_op:
         batch_op.create_index(
-            "source_task_claim", ["source_id", "status", "created_at"], unique=False
+            "source_task_claim",
+            ["source_id", "status", "request_deadline_at", "created_at"],
+            unique=False,
         )
 
     op.create_table(

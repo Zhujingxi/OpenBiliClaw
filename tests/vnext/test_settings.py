@@ -9,7 +9,7 @@ from alembic import command
 from alembic.config import Config
 from cryptography.fernet import InvalidToken
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from openbiliclaw.features.system.domain import UserSettings
 from openbiliclaw.features.system.service import SettingsService
@@ -49,6 +49,16 @@ def test_database_settings_read_environment(
     monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", url)
 
     assert DatabaseSettings().url == url
+
+
+def test_sqlite_busy_timeout_is_explicit_and_configurable(tmp_path: Path) -> None:
+    url = f"sqlite:///{tmp_path / 'busy-timeout.db'}"
+    engine, _ = create_engine_and_session(
+        DatabaseSettings(url=url, busy_timeout_seconds=0.123)
+    )
+    with engine.connect() as connection:
+        assert connection.scalar(text("PRAGMA busy_timeout")) == 123
+    engine.dispose()
 
 
 def test_settings_service_persists_and_validates_typed_values(tmp_path: Path) -> None:
