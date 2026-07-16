@@ -88,10 +88,11 @@ export function inferTwitterActionType(hint: ActionHint): string | null {
 
 export const twitterAdapter: PlatformAdapter = {
   sourcePlatform: "twitter",
-  // The MAIN-world GraphQL tap emits the authoritative like/unlike signals;
-  // the DOM click path must only suppress pressed-control clicks, never
-  // double-emit a retraction.
-  strongSignalSource: "tap",
+  // The MAIN-world GraphQL tap emits the authoritative signal for every
+  // engagement action (like/favorite/share/comment) and their retractions.
+  // The DOM click path must suppress all of them so it never double-counts
+  // the tap nor records "opened the composer/menu = an event" false actions.
+  tapAuthoritativeActions: new Set(["like", "favorite", "share", "comment", "retraction"]),
   detectPageType: detectTwitterPageType,
   extractContentId: extractTweetId,
   extractSearchQuery: (url) => queryParam(url, "q"),

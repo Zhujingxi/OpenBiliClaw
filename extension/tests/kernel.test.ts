@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { isTapAuthoritativeAction } from "../src/shared/behavior.ts";
+import { twitterAdapter } from "../src/shared/platforms/twitter.ts";
+import { bilibiliAdapter } from "../src/shared/platforms/bilibili.ts";
+
 const kernelSource = readFileSync(
   new URL("../src/content/kernel.ts", import.meta.url),
   "utf8",
@@ -22,10 +26,32 @@ test("click path treats a pressed like/favorite/follow control as a retraction",
   assert.match(kernelSource, /retracted_action:/);
 });
 
-test("click path suppresses the retraction on tap-authoritative platforms (no double-emit)", () => {
-  // On X the GraphQL tap emits the authoritative retraction; the DOM path
-  // must only suppress, never emit a duplicate.
-  assert.match(kernelSource, /strongSignalSource === "tap"/);
+test("click path suppresses tap-authoritative actions on both the retraction and positive branches", () => {
+  // On X the GraphQL tap emits the authoritative like/favorite/share/comment
+  // AND retraction; the DOM path must only suppress, never double-emit — this
+  // kills both the positive double-count and the "opened the menu = an event"
+  // false actions (codex r2 findings 2/4).
+  assert.match(kernelSource, /isTapAuthoritativeAction\(adapter,\s*"retraction"\)/);
+  assert.match(kernelSource, /isTapAuthoritativeAction\(adapter,\s*actionType\)/);
+});
+
+test("tapAuthoritativeActions suppression matrix: declared actions suppress, others emit", () => {
+  // X declares all five engagement actions as tap-authoritative.
+  for (const action of ["like", "favorite", "share", "comment", "retraction"]) {
+    assert.equal(isTapAuthoritativeAction(twitterAdapter, action), true, action);
+  }
+  // Non-strong / undeclared actions are never suppressed (still DOM-emitted).
+  for (const action of ["view", "scroll", "coin", "hover"]) {
+    assert.equal(isTapAuthoritativeAction(twitterAdapter, action), false, action);
+  }
+});
+
+test("a non-tap platform never suppresses any DOM action", () => {
+  // bilibili declares no tapAuthoritativeActions until its interact tap ships,
+  // so every action flows through the DOM path unchanged.
+  for (const action of ["like", "favorite", "share", "comment", "retraction", "view"]) {
+    assert.equal(isTapAuthoritativeAction(bilibiliAdapter, action), false, action);
+  }
 });
 
 test("video play begins a dwell segment; pause and ended end it", () => {

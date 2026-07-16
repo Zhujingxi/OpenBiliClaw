@@ -44,13 +44,21 @@ export interface PlatformAdapter {
   readonly sourcePlatform: string;
 
   /**
-   * Where this platform's authoritative strong signals come from.
-   * `"dom"` (default) — the DOM click path is the source of truth, so a
-   * pressed-control click emits a retraction. `"tap"` — a MAIN-world
-   * network tap (X's GraphQL tap) emits the authoritative retraction, so
-   * the DOM path only suppresses the positive event to avoid a duplicate.
+   * Actions for which a MAIN-world network tap is the authoritative source,
+   * so the generic DOM click path must NOT emit them (it would double-count
+   * with the tap and would fire "opened the menu = an event" false actions).
+   *
+   * Keys are `inferActionType` outputs (`"like"`, `"favorite"`, `"share"`,
+   * `"comment"`, …) plus the literal `"retraction"` for a pressed-control
+   * withdrawal. Undeclared actions and platforms with no tap keep the DOM
+   * path as their source of truth.
+   *
+   * X declares `{like, favorite, share, comment, retraction}` (its GraphQL
+   * tap emits all five); bilibili declares `{comment}` once its reply/add
+   * interact tap ships; xiaohongshu declares `{like, favorite, retraction}`
+   * once its action tap ships.
    */
-  readonly strongSignalSource?: "dom" | "tap";
+  readonly tapAuthoritativeActions?: ReadonlySet<string>;
 
   /** Classify the current URL into a coarse page type for context. */
   detectPageType(url: string): PageType;
