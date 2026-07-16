@@ -649,6 +649,13 @@ class SQLAlchemyJobRunRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def _fresh_row(self, run_id: UUID) -> JobRunModel | None:
+        return self._session.scalar(
+            select(JobRunModel)
+            .where(JobRunModel.id == str(run_id))
+            .execution_options(populate_existing=True)
+        )
+
     def add_pending(self, *, job_name: str, idempotency_key: str, priority: int) -> UUID:
         run_id = uuid4()
         now = _utc_now()
@@ -697,7 +704,7 @@ class SQLAlchemyJobRunRepository:
         return run_id, True
 
     def get(self, run_id: UUID) -> JobRunSnapshot:
-        row = self._session.get(JobRunModel, str(run_id))
+        row = self._fresh_row(run_id)
         if row is None:
             raise LookupError(f"job run does not exist: {run_id}")
         return _job_snapshot(row)
@@ -762,14 +769,23 @@ class SQLAlchemyJobRunRepository:
         return bool(getattr(result, "rowcount", 0))
 
     def checkpoint(self, run_id: UUID, progress: float) -> bool:
-        row = self._session.get(JobRunModel, str(run_id))
-        if row is None:
+        resolved_progress = max(0.0, min(1.0, progress))
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status == JobRunStatus.RUNNING.value,
+            )
+            .values(
+                progress=func.max(JobRunModel.progress, resolved_progress),
+                updated_at=_utc_now(),
+            )
+        )
+        if getattr(result, "rowcount", 0):
+            return True
+        if self._fresh_row(run_id) is None:
             raise LookupError(f"job run does not exist: {run_id}")
-        if row.status != JobRunStatus.RUNNING.value:
-            return False
-        row.progress = max(row.progress, max(0.0, min(1.0, progress)))
-        row.updated_at = _utc_now()
-        return True
+        return False
 
     def update(
         self,
@@ -779,52 +795,70 @@ class SQLAlchemyJobRunRepository:
         progress: float,
         error: str | None = None,
     ) -> None:
-        row = self._session.get(JobRunModel, str(run_id))
-        if row is None:
-            raise LookupError(f"job run does not exist: {run_id}")
-        if row.status == JobRunStatus.CANCELLED.value:
-            return
         now = _utc_now()
-        row.status = status.value
-        row.progress = max(0.0, min(1.0, progress))
-        row.error = error
-        row.updated_at = now
-        row.finished_at = (
-            now
-            if status in {JobRunStatus.SUCCEEDED, JobRunStatus.FAILED, JobRunStatus.CANCELLED}
-            else None
-        )
+        values: dict[str, object] = {
+            "status": status.value,
+            "progress": max(0.0, min(1.0, progress)),
+            "error": error,
+            "updated_at": now,
+            "finished_at": (
+                now
+                if status in {JobRunStatus.SUCCEEDED, JobRunStatus.FAILED, JobRunStatus.CANCELLED}
+                else None
+            ),
+        }
         if status is JobRunStatus.PENDING:
-            row.dispatched_at = None
+            values["dispatched_at"] = None
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status != JobRunStatus.CANCELLED.value,
+            )
+            .values(**values)
+        )
+        if getattr(result, "rowcount", 0):
+            return
+        if self._fresh_row(run_id) is None:
+            raise LookupError(f"job run does not exist: {run_id}")
 
     def cancel(self, run_id: UUID) -> bool:
-        row = self._session.get(JobRunModel, str(run_id))
+        now = _utc_now()
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status.in_((JobRunStatus.PENDING.value, JobRunStatus.RUNNING.value)),
+            )
+            .values(
+                status=JobRunStatus.CANCELLED.value,
+                progress=JobRunModel.progress,
+                updated_at=now,
+                finished_at=now,
+            )
+        )
+        if getattr(result, "rowcount", 0):
+            return True
+        row = self._fresh_row(run_id)
         if row is None:
             raise LookupError(f"job run does not exist: {run_id}")
-        if row.status in {JobRunStatus.SUCCEEDED.value, JobRunStatus.FAILED.value}:
-            return False
-        if row.status == JobRunStatus.CANCELLED.value:
-            return True
-        now = _utc_now()
-        row.status = JobRunStatus.CANCELLED.value
-        row.updated_at = now
-        row.finished_at = now
-        return True
+        return row.status == JobRunStatus.CANCELLED.value
 
     def recover_running(self) -> tuple[UUID, ...]:
-        rows = self._session.scalars(
-            select(JobRunModel)
-            .where(JobRunModel.status == JobRunStatus.RUNNING.value)
-            .order_by(JobRunModel.created_at, JobRunModel.id)
-        ).all()
         now = _utc_now()
-        for row in rows:
-            row.status = JobRunStatus.PENDING.value
-            row.error = "WorkerInterrupted"
-            row.updated_at = now
-            row.started_at = None
-            row.dispatched_at = None
-        return tuple(UUID(row.id) for row in rows)
+        rows = self._session.scalars(
+            update(JobRunModel)
+            .where(JobRunModel.status == JobRunStatus.RUNNING.value)
+            .values(
+                status=JobRunStatus.PENDING.value,
+                error="WorkerInterrupted",
+                updated_at=now,
+                started_at=None,
+                dispatched_at=None,
+            )
+            .returning(JobRunModel.id)
+        ).all()
+        return tuple(UUID(row_id) for row_id in sorted(rows))
 
     def cleanup_finished(self, *, older_than: datetime) -> int:
         result = self._session.execute(

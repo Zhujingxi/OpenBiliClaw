@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from threading import Event, Thread, current_thread
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import event
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.feed.domain import ContentItem, Interaction, InteractionKind
@@ -83,6 +85,17 @@ class CancelBeforePersistenceContext(JobExecutionContext):
         super().guard(uow)
 
 
+def _start_running_job(service: JobService, key: str) -> tuple[UUID, JobExecutionContext]:
+    run = service.schedule("source_sync", idempotency_key=key)
+    assert service.claim(run.id)
+    return run.id, JobExecutionContext(service, run.id)
+
+
+def _join(thread: Thread) -> None:
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+
 @pytest.fixture
 def database(tmp_path: Path) -> Iterator[tuple[Engine, sessionmaker[Session]]]:
     path = tmp_path / "task20-regressions.db"
@@ -129,6 +142,188 @@ def test_startup_republishes_dequeued_pending_huey_message_exactly_once(
 
     assert effects == [run.id]
     assert service.inspect(run.id).status is JobRunStatus.SUCCEEDED
+
+
+def test_sqlite_cancellation_write_order_first_rejects_guard_without_effect(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    """Cancellation holding the write order must make a later guard reject cleanly."""
+
+    engine, session_factory = database
+    cancel_repository_ready = Event()
+    release_cancel_commit = Event()
+
+    class PausingCancellationUnitOfWork(UnitOfWork):
+        def commit(self) -> None:
+            if current_thread().name == "task20-cancel-first":
+                cancel_repository_ready.set()
+                if not release_cancel_commit.wait(timeout=5):
+                    raise AssertionError("timed out releasing cancellation commit")
+            super().commit()
+
+    service = JobService(lambda: PausingCancellationUnitOfWork(session_factory), queue=Queue())
+    run_id, context = _start_running_job(service, "cancel-write-first")
+    activity = ActivityEvent(
+        source_id="local",
+        kind=ActivityKind.CHAT_LEARNING,
+        text="must not commit after cancellation wins",
+    )
+    guard_update_started = Event()
+    guard_update_completed = Event()
+    cancel_outcome: dict[str, object] = {}
+    guard_outcome: dict[str, object] = {}
+
+    def before_cursor_execute(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if current_thread().name == "task20-guard-second" and statement.lstrip().upper().startswith(
+            "UPDATE JOB_RUNS"
+        ):
+            guard_update_started.set()
+
+    def after_cursor_execute(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if current_thread().name == "task20-guard-second" and statement.lstrip().upper().startswith(
+            "UPDATE JOB_RUNS"
+        ):
+            guard_update_completed.set()
+
+    def cancel() -> None:
+        try:
+            cancel_outcome["snapshot"] = service.cancel(run_id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            cancel_outcome["error"] = exc
+
+    def guarded_effect() -> None:
+        try:
+            with UnitOfWork(session_factory) as uow:
+                context.guard(uow)
+                uow.activities.add(activity)
+                uow.commit()
+        except BaseException as exc:
+            guard_outcome["error"] = exc
+
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    event.listen(engine, "after_cursor_execute", after_cursor_execute)
+    cancel_thread = Thread(target=cancel, name="task20-cancel-first")
+    guard_thread = Thread(target=guarded_effect, name="task20-guard-second")
+    try:
+        cancel_thread.start()
+        assert cancel_repository_ready.wait(timeout=5)
+        guard_thread.start()
+        assert guard_update_started.wait(timeout=5)
+        guard_completed_before_cancel_commit = guard_update_completed.wait(timeout=0.2)
+        release_cancel_commit.set()
+        _join(cancel_thread)
+        _join(guard_thread)
+    finally:
+        release_cancel_commit.set()
+        event.remove(engine, "before_cursor_execute", before_cursor_execute)
+        event.remove(engine, "after_cursor_execute", after_cursor_execute)
+
+    assert not guard_completed_before_cancel_commit
+    assert "error" not in cancel_outcome
+    assert isinstance(guard_outcome.get("error"), JobCancelledError)
+    with UnitOfWork(session_factory) as uow:
+        assert uow.activities.list_all() == ()
+    assert service.inspect(run_id).status is JobRunStatus.CANCELLED
+
+
+def test_sqlite_guard_write_order_first_allows_effect_then_cancellation_without_lock_error(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    """A guard-held write order makes cancellation wait, then complete normally."""
+
+    engine, session_factory = database
+    service = JobService(lambda: UnitOfWork(session_factory), queue=Queue())
+    run_id, context = _start_running_job(service, "guard-write-first")
+    activity = ActivityEvent(
+        source_id="local",
+        kind=ActivityKind.CHAT_LEARNING,
+        text="commits before cancellation",
+    )
+    cancel_update_started = Event()
+    cancel_done = Event()
+    cancel_outcome: dict[str, object] = {}
+
+    def before_cursor_execute(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if (
+            current_thread().name == "task20-cancel-second"
+            and statement.lstrip().upper().startswith("UPDATE JOB_RUNS")
+        ):
+            cancel_update_started.set()
+
+    def cancel() -> None:
+        try:
+            cancel_outcome["snapshot"] = service.cancel(run_id)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            cancel_outcome["error"] = exc
+        finally:
+            cancel_done.set()
+
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    cancel_thread = Thread(target=cancel, name="task20-cancel-second")
+    try:
+        with UnitOfWork(session_factory) as uow:
+            context.guard(uow)
+            uow.activities.add(activity)
+            cancel_thread.start()
+            assert cancel_update_started.wait(timeout=5)
+            assert not cancel_done.wait(timeout=0.2)
+            uow.commit()
+        _join(cancel_thread)
+    finally:
+        event.remove(engine, "before_cursor_execute", before_cursor_execute)
+
+    assert "error" not in cancel_outcome
+    snapshot = cancel_outcome.get("snapshot")
+    assert snapshot is not None
+    assert snapshot.status is JobRunStatus.CANCELLED  # type: ignore[attr-defined]
+    with UnitOfWork(session_factory) as uow:
+        assert uow.activities.list_all() == (activity,)
+    assert service.inspect(run_id).status is JobRunStatus.CANCELLED
+
+
+def test_atomic_cancel_preserves_idempotent_terminal_and_missing_row_semantics(
+    database: tuple[Engine, sessionmaker[Session]],
+) -> None:
+    _engine, session_factory = database
+    service = JobService(lambda: UnitOfWork(session_factory), queue=Queue())
+
+    pending = service.schedule("cleanup", idempotency_key="cancel-idempotent")
+    assert service.cancel(pending.id).status is JobRunStatus.CANCELLED
+    assert service.cancel(pending.id).status is JobRunStatus.CANCELLED
+
+    succeeded = service.schedule("cleanup", idempotency_key="cancel-succeeded")
+    assert service.claim(succeeded.id)
+    service.succeed(succeeded.id)
+    assert service.cancel(succeeded.id).status is JobRunStatus.SUCCEEDED
+
+    failed = service.schedule("cleanup", idempotency_key="cancel-failed")
+    assert service.claim(failed.id)
+    service.fail(failed.id, ValueError("classified without message persistence"))
+    assert service.cancel(failed.id).status is JobRunStatus.FAILED
+
+    with pytest.raises(LookupError, match="job run does not exist"):
+        service.cancel(uuid4())
 
 
 class BatchRunner:
