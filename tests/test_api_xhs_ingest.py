@@ -247,6 +247,26 @@ class TestXhsObservedUrls:
         assert body["accepted"] == 1  # only the valid xhs URL
         assert body["enqueued"] == 0
 
+    def test_urls_branch_accepts_discovery_item_variant(self, app_client: TestClient) -> None:
+        """The bare-``urls`` branch previously only accepted ``/explore/`` and
+        silently dropped the equally valid ``/discovery/item/`` note URL shape
+        (the ``notes`` branch already accepted it). Align them so a
+        discovery/item bare link is ingested, not discarded."""
+        note = "0123456789abcdef01234567"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": [
+                    f"https://www.xiaohongshu.com/discovery/item/{note}?xsec_token=Z",
+                    "https://example.com/bad",
+                ],
+                "page_type": "explore",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["accepted"] == 1  # the discovery/item URL, not the junk one
+
     def test_stores_observations_in_db(self, app_client: TestClient, tmp_path: Path) -> None:
         from openbiliclaw.storage.database import Database
 

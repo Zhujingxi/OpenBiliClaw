@@ -8224,11 +8224,17 @@ def create_app(
             _persist_xhs_self_info(self_info_now)
         self_info_for_filter = self_info_now or _load_xhs_self_info()
 
-        # Filter to valid xhs note URLs
+        # Filter to valid xhs note URLs. Accept both note-detail shapes xhs
+        # exposes — ``/explore/<id>`` and the legacy ``/discovery/item/<id>``
+        # — so the bare-``urls`` branch stops silently dropping discovery/item
+        # links the ``notes`` branch already ingests (both key on the same
+        # note id via sources.identity_keys).
         valid_urls = [
             u
             for u in urls_raw
-            if isinstance(u, str) and u.startswith(xhs_url_prefix) and "/explore/" in u
+            if isinstance(u, str)
+            and u.startswith(xhs_url_prefix)
+            and ("/explore/" in u or "/discovery/item/" in u)
         ]
 
         # Store bare URLs for tracking
