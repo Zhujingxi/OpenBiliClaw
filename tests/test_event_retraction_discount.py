@@ -520,3 +520,51 @@ def test_event_rendering_invariance_without_retractions() -> None:
         events=_INVARIANCE_EVENTS, preference_summary={"interests": []}, soul_profile={}
     )
     assert _sha256(awareness[1]["content"]) == _AWARENESS_RENDER_SHA256
+
+
+def _retracted_like_event() -> dict[str, Any]:
+    return {
+        "event_type": "like",
+        "title": "手冲咖啡入门",
+        "url": "https://x.com/i/status/123",
+        "context": "在X点赞了《手冲咖啡入门》",
+        "metadata": {
+            "source_platform": "twitter",
+            "signal_strength": 0.2,
+            "retracted": True,
+        },
+    }
+
+
+def test_preference_render_marks_retracted_event() -> None:
+    from openbiliclaw.llm.prompts import build_preference_analysis_prompt
+
+    messages = build_preference_analysis_prompt(
+        events=[_retracted_like_event()], existing_preference={}
+    )
+    assert "(已撤销)" in messages[1]["content"]
+
+
+def test_awareness_render_marks_retracted_event_with_string_metadata() -> None:
+    """The awareness face reads raw DB rows whose metadata is a JSON string."""
+    from openbiliclaw.llm.prompts import build_awareness_prompt
+
+    row = {
+        "event_type": "like",
+        "title": "手冲咖啡入门",
+        "url": "https://x.com/i/status/123",
+        "context": "在X点赞了《手冲咖啡入门》",
+        "metadata": json.dumps({"signal_strength": 0.2, "retracted": True}, ensure_ascii=False),
+    }
+    messages = build_awareness_prompt(events=[row], preference_summary={}, soul_profile={})
+    assert "(已撤销)" in messages[1]["content"]
+
+
+def test_preference_system_prompt_mentions_retraction_semantics() -> None:
+    """The static system prompt carries a retraction rule (call-invariant)."""
+    from openbiliclaw.llm.prompts import build_preference_analysis_prompt
+
+    a = build_preference_analysis_prompt(events=[_retracted_like_event()], existing_preference={})
+    b = build_preference_analysis_prompt(events=[], existing_preference={"interests": [1]})
+    assert "撤销" in a[0]["content"]
+    assert a[0]["content"] == b[0]["content"]  # system prompt is call-invariant
