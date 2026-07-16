@@ -360,8 +360,12 @@ Good if you already have Docker installed; ships with an Ollama embedding sideca
 ```bash
 mkdir -p ~/openbiliclaw && cd ~/openbiliclaw
 curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+umask 077
+printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 docker compose -f docker-compose.prebuilt.yml up -d
-# then open http://127.0.0.1:8420/setup/ to finish initialization
+# configure the three stable model aliases at http://127.0.0.1:4000/ui;
+# then open http://127.0.0.1:8420/setup/ for the legacy initialization flow
 ```
 
 Or paste this into an AI coding agent for the terminal wizard + auto-init path:
@@ -576,9 +580,9 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
-### vNext Domain and Persistence Foundation (not cut over)
+### vNext Domain, Persistence, and Typed AI Foundation (not cut over)
 
-v0.4.0 now includes the framework-independent domain contracts plus isolated SQLAlchemy/Alembic persistence, typed settings, and Fernet credential encryption foundations. **The current API, runtime, CLI, installer, and frontend do not use them yet.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live path.
+v0.4.0 now includes framework-independent domain contracts, isolated SQLAlchemy/Alembic persistence, typed settings, Fernet credential encryption, and a PydanticAI typed-task boundary routed only through LiteLLM. **The current API, business runtime, CLI, and frontend do not use them yet.** The new database defaults to `data/vnext/openbiliclaw.db` and neither replaces nor migrates existing data; until production wiring and data cutover are completed, the v0.3 legacy storage/runtime below remains the only live business path.
 
 ```text
 SourceManifest + SourceConnector ──normalized──► Activity / Profile / Content / Feed
@@ -590,11 +594,17 @@ SourceManifest + SourceConnector ──normalized──► Activity / Profile / 
                                    ├─ typed DatabaseSettings / UserSettings
                                    └─ Fernet credential ciphertext
 
-Implemented: domain contracts, schema/migration, repositories/UoW,
-             typed settings and credential encryption foundations
-Not wired: production runtime/API, installer key lifecycle, legacy data migration,
-           or frontend cutover
+future use cases ─► typed TaskSpec / PydanticAI ─► TaskRunner ─► LiteLLM ─► providers
+                       │ semantic retries only          │
+                       ├─ obc-interactive / obc-analysis│ routing/fallback/retry/cache
+                       └─ obc-embedding ◄─ embeddings ──┘
+
+Implemented: domain/persistence foundations, typed AI/embedding/health,
+             offline eval datasets, and LiteLLM Compose
+Not wired: production use cases/runtime/API, legacy data migration, or frontend cutover
 ```
+
+Application code only knows the stable aliases `obc-interactive`, `obc-analysis`, and `obc-embedding`; LiteLLM alone owns provider routing/fallback, network retries, limits, and caching. See [vNext Typed AI](docs/modules/vnext-ai.md).
 
 ### Current v0.3 Runtime Architecture
 

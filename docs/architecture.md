@@ -1,8 +1,8 @@
 # 架构设计
 
-## vNext 领域与持久化基础（未接入生产）
+## vNext 领域、持久化与类型化 AI 基础（未接入生产）
 
-backend-first vNext 已交付两层隔离基础：`src/openbiliclaw/features/` 的冻结 Pydantic 领域契约与纯策略，以及 `src/openbiliclaw/infrastructure/` 的 SQLAlchemy repository / Unit of Work、Alembic schema、类型化系统设置和 Fernet 凭据密文适配。领域层仍不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage；依赖方向由 infrastructure 指向 feature contracts。
+backend-first vNext 已交付三层隔离基础：`src/openbiliclaw/features/` 的冻结 Pydantic 领域契约与纯策略，`src/openbiliclaw/infrastructure/` 的 SQLAlchemy repository / Unit of Work、Alembic schema、类型化系统设置和 Fernet 凭据密文适配，以及仅经 LiteLLM 的 PydanticAI typed-task 边界。领域层仍不导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage；依赖方向由 infrastructure 指向 feature contracts。
 
 ```text
 Future source adapters
@@ -22,15 +22,30 @@ infrastructure.database
         └─ infrastructure.security.CredentialCipher
               OPENBILICLAW_SECRET_KEY ──► derived Fernet key ──► opaque ciphertext only
 
-Implemented: domain contracts and policies; isolated schema and migration;
-             repository/UoW; DatabaseSettings/UserSettings; credential cipher
-Deferred: runtime composition, installer key lifecycle, data migration, AI/source/job
-          services, use cases, /api/v1, frontend cutover
+future application use cases ──► reusable TaskSpec + PydanticAI Agent
+        │                          │ typed input/output + semantic retries only
+        │                          ▼
+        │                    infrastructure.ai.TaskRunner ──► safe ai_runs outcome
+        │                          │ SDK network retries = 0
+        │                          ▼
+        ├─ interactive ─────► obc-interactive ─┐
+        ├─ analysis ────────► obc-analysis ────┼─► LiteLLM proxy ─► providers
+        └─ embedding client ► obc-embedding ───┘     │ routing/fallback/retry/
+                                                     │ limits/cache
+                                                     └─► LiteLLM PostgreSQL
+
+Implemented: domain contracts/policies; isolated schema/migration; repository/UoW;
+             typed settings; credential cipher; typed AI tasks/runner/embedding/health;
+             LiteLLM + PostgreSQL Compose and offline eval datasets
+Deferred: production composition, data migration, source/job services, application
+          use cases, /api/v1, frontend cutover, least-privilege LiteLLM virtual key
 ```
 
 vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO`；`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
 
-本节不是运行时切换声明。当前生产 API、runtime、CLI、安装器和前端没有构造这套 vNext persistence；下面的 v0.3 系统概览与 `storage/database.py` 仍描述唯一真实执行和用户数据路径。只有后续完成 composition root、数据迁移与切换验证后，vNext 才能成为运行时权威。
+AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；provider deployment、fallback、网络重试、限流和缓存全部由 LiteLLM 拥有。Compose 已可独立启动 LiteLLM/PostgreSQL 并通过 `/ui` 配置 provider，但未启动验证，也尚无生产 use case 构造 typed runner。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
+
+本节不是运行时切换声明。当前生产 API、runtime、CLI 和前端没有构造这套 vNext persistence/AI；Docker installer 只负责生成 Compose 基础设施密钥。下面的 v0.3 系统概览与 `storage/database.py` 仍描述唯一真实业务执行和用户数据路径。只有后续完成 composition root、数据迁移与切换验证后，vNext 才能成为运行时权威。
 
 ## 当前 v0.3 系统概览
 

@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -3317,10 +3318,36 @@ def start_local_backend(project_dir: Path, host: str, port: int) -> subprocess.P
 # Docker deployment
 
 
+def ensure_docker_infrastructure_secrets(project_dir: Path) -> None:
+    """Create stable local LiteLLM infrastructure secrets without replacing values."""
+
+    env_file = project_dir / ".env"
+    lines = env_file.read_text(encoding="utf-8").splitlines() if env_file.exists() else []
+    generated = {
+        "LITELLM_POSTGRES_PASSWORD": secrets.token_hex(32),
+        "LITELLM_MASTER_KEY": f"sk-{secrets.token_hex(32)}",
+    }
+    found: set[str] = set()
+    for index, line in enumerate(lines):
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if separator and key in generated:
+            found.add(key)
+            if not value.strip():
+                lines[index] = f"{key}={generated[key]}"
+    for key, value in generated.items():
+        if key not in found:
+            lines.append(f"{key}={value}")
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if os.name != "nt":
+        env_file.chmod(0o600)
+
+
 def docker_compose_up(project_dir: Path) -> None:
     docker = which("docker")
     if docker is None:
         raise RuntimeError("docker is not available on PATH")
+    ensure_docker_infrastructure_secrets(project_dir)
     run_streaming([docker, "compose", "up", "-d", "--build"], cwd=project_dir)
 
 

@@ -78,8 +78,8 @@
 - [ ] Write failing tests using PydanticAI test models for input/output validation, semantic retry bounds, timeout, usage-limit failure, AI-run recording, and stable alias selection; mock OpenAI-compatible embedding/health HTTP responses.
 - [ ] Run focused tests and capture RED output.
 - [ ] Implement the boundary so no feature imports provider SDKs and the runner does not implement provider routing, HTTP retry, JSON repair, or fallback.
-- [ ] Add Compose services `api`, `worker`, `litellm`, and `litellm-postgres`; configure `/ui`, health checks, persistent volumes, and the three exact aliases.
-- [ ] Replace direct provider dependencies with PydanticAI/Pydantic Evals; update the lock; run focused tests and configuration validation.
+- [ ] Add runnable Compose services `litellm` and `litellm-postgres`, configure `/ui`, health checks, and persistent volumes. Preserve the existing backend service until the vNext API/worker entrypoints exist; Tasks 20-21 rename it to `api` and add the runnable `worker` so Compose is never knowingly left with dead commands.
+- [ ] Add PydanticAI/Pydantic Evals and update the lock. Keep legacy provider dependencies only while the legacy runtime still imports them; Task 23 removes those dependencies together with their now-orphaned stack. Run focused tests and configuration validation.
 - [ ] Commit with `feat: route typed ai tasks through litellm`.
 
 ### Task 19: Seven Capability-Based Source Connectors and Generic Source Tasks

@@ -1,4 +1,45 @@
 services:
+  litellm-postgres:
+    image: postgres:16-alpine
+    container_name: openbiliclaw-litellm-postgres
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}
+    volumes:
+      - openbiliclaw_litellm_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  litellm:
+    # Pinned signed upstream release; never pass provider credentials through
+    # Compose. Add them to the persistent LiteLLM database through /ui.
+    image: ghcr.io/berriai/litellm:v1.92.0
+    container_name: openbiliclaw-litellm
+    depends_on:
+      litellm-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://litellm:${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}@litellm-postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
+      STORE_MODEL_IN_DB: "True"
+    command: ["--config=/app/config.yaml"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 40s
+    restart: unless-stopped
+
   # Ollama sidecar — embedding service so users don't need Ollama on their
   # host. This image BAKES bge-m3 (~1.1GB) at build time and its entrypoint
   # seeds it into the store before serving, so the container reaches
@@ -54,6 +95,8 @@ services:
       # "embedding not ready yet" until the pull completes.
       ollama:
         condition: service_started
+      litellm:
+        condition: service_healthy
     environment:
       OPENBILICLAW_PROJECT_ROOT: /app/runtime
       OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
@@ -68,6 +111,10 @@ services:
       OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
       OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
       OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
+      # vNext typed AI calls only these internal proxy settings. Provider
+      # credentials stay in LiteLLM and are never injected into this service.
+      OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
+      OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
     command:
       - python
@@ -113,3 +160,4 @@ volumes:
   # Persists ollama models across container recreations so users don't
   # have to re-pull bge-m3 on every rebuild.
   openbiliclaw_ollama:
+  openbiliclaw_litellm_postgres:

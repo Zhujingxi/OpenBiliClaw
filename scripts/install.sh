@@ -511,6 +511,12 @@ PY
         esac
     fi
     echo "Health URL:  $health_url"
+    if [ "$MODE" = "docker" ]; then
+        echo "LiteLLM UI:  http://127.0.0.1:4000/ui"
+        echo "              Infrastructure secrets are stored locally in $INSTALL_DIR/.env."
+        echo "              Configure exact aliases: obc-interactive, obc-analysis, obc-embedding."
+        echo "              Provider credentials belong in LiteLLM UI, not Compose/config.toml."
+    fi
     if [ -n "$missing" ]; then
         echo "Missing:     $missing"
     else

@@ -52,6 +52,8 @@ dependencies = [
     "cryptography>=43",
     "apscheduler>=3.10",
     "uvicorn>=0.32",
+    "pydantic-evals>=2.11.0",
+    "pydantic-ai-slim[openai]>=2.11.0",
 ]
 
 [project.optional-dependencies]

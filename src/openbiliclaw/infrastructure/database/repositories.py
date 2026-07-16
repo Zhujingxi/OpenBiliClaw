@@ -166,9 +166,21 @@ class JobRunRepository(Protocol):
 
 
 class AIRunRepository(Protocol):
-    """Persistence port on which Task 18 builds auditable typed AI runs."""
+    """Secret-safe persistence port for typed AI run lifecycle metadata."""
 
     def add_started(self, *, task_name: str, model_alias: str) -> UUID: ...
+
+    def start(self, *, task_name: str, model_alias: str) -> UUID: ...
+
+    def succeed(
+        self,
+        run_id: UUID,
+        *,
+        output_payload: dict[str, object],
+        usage: dict[str, int],
+    ) -> None: ...
+
+    def fail(self, run_id: UUID, *, error_kind: str) -> None: ...
 
 
 class SQLAlchemySettingsRepository:
@@ -546,12 +558,19 @@ class SQLAlchemyJobRunRepository:
 
 
 class SQLAlchemyAIRunRepository:
-    """Low-level adapter reserved for the Task 18 typed AI runner."""
+    """Persist AI outcomes without prompts, inputs, or provider credentials."""
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def add_started(self, *, task_name: str, model_alias: str) -> UUID:
+        """Backward-compatible name for creating a running record."""
+
+        return self.start(task_name=task_name, model_alias=model_alias)
+
+    def start(self, *, task_name: str, model_alias: str) -> UUID:
+        """Create the metadata-only start of an AI run."""
+
         run_id = uuid4()
         self._session.add(
             AIRunModel(
@@ -567,3 +586,39 @@ class SQLAlchemyAIRunRepository:
             )
         )
         return run_id
+
+    def succeed(
+        self,
+        run_id: UUID,
+        *,
+        output_payload: dict[str, object],
+        usage: dict[str, int],
+    ) -> None:
+        """Finish a run with typed output and provider-neutral usage counters."""
+
+        row = self._require_running(run_id)
+        row.status = "succeeded"
+        row.output_payload = output_payload
+        row.usage = usage
+        row.error = None
+        row.finished_at = _utc_now()
+
+    def fail(self, run_id: UUID, *, error_kind: str) -> None:
+        """Finish a run with a classification, never a raw exception message."""
+
+        row = self._require_running(run_id)
+        row.status = "failed"
+        row.output_payload = None
+        row.usage = None
+        row.error = (
+            error_kind if error_kind.isidentifier() and len(error_kind) <= 100 else "AIError"
+        )
+        row.finished_at = _utc_now()
+
+    def _require_running(self, run_id: UUID) -> AIRunModel:
+        row = self._session.get(AIRunModel, str(run_id))
+        if row is None:
+            raise LookupError(f"AI run does not exist: {run_id}")
+        if row.status != "running":
+            raise RuntimeError(f"AI run is already finished: {run_id}")
+        return row

@@ -26,6 +26,28 @@ def _load_bootstrap_module():
 bootstrap = _load_bootstrap_module()
 
 
+def test_ensure_docker_infrastructure_secrets_creates_and_preserves_env(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("EXISTING_SETTING=keep-me\n", encoding="utf-8")
+
+    bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+    first = env_file.read_text(encoding="utf-8")
+    bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+
+    assert env_file.read_text(encoding="utf-8") == first
+    assert "EXISTING_SETTING=keep-me" in first
+    values = dict(
+        line.split("=", 1) for line in first.splitlines() if line and not line.startswith("#")
+    )
+    assert len(values["LITELLM_POSTGRES_PASSWORD"]) == 64
+    assert values["LITELLM_MASTER_KEY"].startswith("sk-")
+    assert len(values["LITELLM_MASTER_KEY"]) == 67
+    if os.name != "nt":
+        assert env_file.stat().st_mode & 0o777 == 0o600
+
+
 def _write_native_config(tmp_path: Path) -> None:
     (tmp_path / "config.toml").write_text(
         """[models]

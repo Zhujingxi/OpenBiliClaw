@@ -31,6 +31,9 @@ RUN python -c "import tomllib, pathlib; deps = tomllib.load(open('pyproject.toml
 
 COPY README.md config.example.toml ./
 COPY src ./src
+# Task 21's operational eval command will consume these versioned Pydantic
+# Evals datasets. Shipping them now keeps source and image installs aligned.
+COPY evals ./evals
 
 # Dependencies are already satisfied by the layer above; this only
 # installs the openbiliclaw package itself, so rebuilds after source

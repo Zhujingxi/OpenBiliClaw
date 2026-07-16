@@ -3,7 +3,12 @@
 # This file is self-contained — no git clone or local build needed:
 #
 #   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
+#   umask 077
+#   printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
+#     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 #   docker compose -f docker-compose.prebuilt.yml up -d
+#   # configure obc-interactive, obc-analysis, and obc-embedding at
+#   # http://127.0.0.1:4000/ui
 #   # then open http://127.0.0.1:8420/setup/ for AI config + prereq checks,
 #   # and run the (container-required) init step from the host:
 #   #   docker exec -it openbiliclaw-backend openbiliclaw init
@@ -17,6 +22,44 @@
 # docker-compose.yml at the repository root — see docs/docker-deployment.md.
 
 services:
+  litellm-postgres:
+    image: postgres:16-alpine
+    container_name: openbiliclaw-litellm-postgres
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}
+    volumes:
+      - openbiliclaw_litellm_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  litellm:
+    # The official image can boot from DATABASE_URL/LITELLM_MASTER_KEY alone;
+    # STORE_MODEL_IN_DB makes provider setup persistent through /ui.
+    image: ghcr.io/berriai/litellm:v1.92.0
+    container_name: openbiliclaw-litellm
+    depends_on:
+      litellm-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://litellm:${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}@litellm-postgres:5432/litellm
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
+      STORE_MODEL_IN_DB: "True"
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 40s
+    restart: unless-stopped
+
   # Ollama sidecar — bundled embedding service so users don't need to
   # install Ollama on their host. Pulls bge-m3 on first start (~1.1GB,
   # CPU-only) and keeps the daemon running on the internal Docker
@@ -59,6 +102,8 @@ services:
       # surfaces "embedding not ready yet" until the pull completes.
       ollama:
         condition: service_started
+      litellm:
+        condition: service_healthy
     environment:
       OPENBILICLAW_PROJECT_ROOT: /app/runtime
       OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
@@ -71,6 +116,8 @@ services:
       OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
       OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
       OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
+      OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
+      OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
     # ``host.docker.internal`` resolves the host machine from inside the
     # container (proxy auto-detect, host-side Ollama). Required on Linux
     # Docker; auto-provided by Docker Desktop on Mac / Windows.
@@ -97,3 +144,4 @@ volumes:
   # Persists ollama models across container recreations so users don't
   # have to re-pull bge-m3 on every rebuild.
   openbiliclaw_ollama:
+  openbiliclaw_litellm_postgres:

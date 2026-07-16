@@ -8,6 +8,7 @@
 
 - **冻结 vNext 领域契约**：新增 activity、profile、feed、library、chat 与 sources 六个 feature domain，统一不可变 Pydantic 契约、递归不可变且仅 JSON 的 metadata、证据必填画像信号、双向保留 evidence 的用户覆盖保护、大小写不敏感画像合并、候选评分钳制及 feed 低水位补货策略；该领域任务只建立无框架依赖的边界，尚未切换现有运行时或公开 API。复杂度 12 的全仓门禁保留在最终重构目标中，等 legacy 删除后再启用，避免把 170 个继承违规混入该任务。
 - **建立隔离的 vNext 持久化基础**：新增 SQLAlchemy 2.x schema、repository / Unit of Work、可升降级的 Alembic `0001` 基线、类型化 `DatabaseSettings`、严格 `UserSettings` 与原子设置服务；来源账户凭据通过 `OPENBILICLAW_SECRET_KEY` 派生的 Fernet key 加密，并以 cipher 签发的 opaque ciphertext 类型入库；`ai_runs` 仅记录任务、模型别名、时延、usage 与 outcome，不保存原始输入、prompt 或请求 payload。新库默认位于 `data/vnext/openbiliclaw.db`，尚未由生产 API、runtime、CLI、安装器或前端构造，当前 legacy storage/runtime 继续作为唯一运行时权威与真实数据路径。
+- **类型化 AI 统一经 LiteLLM**：新增 PydanticAI `TaskSpec` / `TaskRunner`、画像增量/关键词/候选评估/推荐解释四个可复用 typed task、Pydantic Evals YAML、专用 embedding 与脱敏 alias health；应用只认识 `obc-interactive`、`obc-analysis`、`obc-embedding`，LiteLLM 独占 provider routing/fallback、网络重试、限流和缓存，OpenAI transport retry 明确为 0。`ai_runs` 生命周期只保存脱敏输出、usage 和错误类型；输入、prompt、异常文本及凭据形字段不入库。Docker Compose 固定 LiteLLM `v1.92.0` + PostgreSQL、要求本地生成的基础设施密钥并支持 `/ui` 持久化 provider 配置；legacy backend 服务与命令保留，typed AI 尚未接入生产 composition/use case。
 
 ## v0.3.168 / extension v0.3.168 / desktop v0.3.168：初始化有界化、多模态封面与升级可靠性（2026-07-14）
 
