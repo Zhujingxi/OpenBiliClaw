@@ -53,6 +53,10 @@ _POOL_MAINTENANCE_MAX_BATCHES_PER_TICK = 8
 # 10-minute safety pass bounds that drift while avoiding full ranked scans on
 # every 60-second scheduler tick.
 _POOL_MAINTENANCE_SAFETY_SCAN_SECONDS = 10 * 60
+# Five minutes is the same order of magnitude as the supply cooldown ceiling,
+# bounding repeated diagnostic DB work while still guaranteeing at least one
+# full diagnostic for each source-exhaustion episode.
+_EMPTY_PLAN_DIAG_INTERVAL_SECONDS = 300.0
 
 
 class InitialPoolUnavailableError(RuntimeError):
@@ -425,6 +429,9 @@ class ContinuousRefreshController:
         init=False,
     )
     _last_pool_maintenance_scan_at: datetime | None = field(default=None, init=False)
+    _last_empty_plan_diag_at: datetime | None = field(default=None, init=False)
+    _last_empty_plan_fingerprint: tuple[int] | None = field(default=None, init=False)
+    _suppressed_empty_plan_count: int = field(default=0, init=False)
     _warned_pool_count_fallbacks: set[str] = field(default_factory=set, init=False)
     # Last pool_available count emitted via the runtime event stream so
     # popup-side ``mergeRuntimeStatusEvent`` only re-renders when the
@@ -2081,6 +2088,26 @@ class ContinuousRefreshController:
         return int(pool_available) < low_watermark
 
     def _log_empty_refresh_plan_diagnostics(self, *, pool_available: int) -> None:
+        now = self._now()
+        fingerprint = (max(0, int(pool_available)),)
+        last_at = self._last_empty_plan_diag_at
+        full_diagnostics_due = (
+            last_at is None
+            or fingerprint != self._last_empty_plan_fingerprint
+            or (now - last_at).total_seconds() >= _EMPTY_PLAN_DIAG_INTERVAL_SECONDS
+        )
+        if not full_diagnostics_due:
+            self._suppressed_empty_plan_count += 1
+            logger.debug(
+                "refresh plan empty (suppressed diagnostics, %d since last full)",
+                self._suppressed_empty_plan_count,
+            )
+            return
+
+        suppressed_count = self._suppressed_empty_plan_count
+        self._last_empty_plan_diag_at = now
+        self._last_empty_plan_fingerprint = fingerprint
+        self._suppressed_empty_plan_count = 0
         try:
             readiness = self._pool_readiness_counts()
         except Exception:
@@ -2124,12 +2151,13 @@ class ContinuousRefreshController:
                 requested_by_source[source] = -1
 
         logger.info(
-            "refresh plan empty: pool_available=%s raw=%s pending=%s "
+            "refresh plan empty: pool_available=%s raw=%s pending=%s suppressed=%s "
             "source_available=%s source_raw=%s source_targets=%s raw_targets=%s "
             "requested_by_source=%s",
             pool_available,
             readiness.get("raw", "?"),
             readiness.get("pending", "?"),
+            suppressed_count,
             source_available,
             source_raw,
             source_targets,

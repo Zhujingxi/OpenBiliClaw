@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 
@@ -212,3 +215,58 @@ def test_llm_work_gate_blocks_while_init_active() -> None:
 
     ctrl.init_active_check = _boom  # defensive: a raising check never crashes
     assert ctrl._llm_work_allowed() == baseline
+
+
+def test_empty_plan_diagnostics_throttled_by_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [datetime(2026, 7, 16, 12, 0, 0)]
+    ctrl = _ctrl(_FakeDB([0]), _FakeDisc())
+    readiness = Mock(return_value={"raw": 20, "pending": 5})
+    source_available = Mock(return_value={"bilibili": 10})
+    source_raw = Mock(return_value={"bilibili": 20})
+    monkeypatch.setattr(ctrl, "_now", lambda: now[0])
+    monkeypatch.setattr(ctrl, "_pool_readiness_counts", readiness)
+    monkeypatch.setattr(ctrl, "_count_pool_available_candidates_by_source", source_available)
+    monkeypatch.setattr(ctrl, "_count_pool_raw_material_by_source", source_raw)
+    monkeypatch.setattr(ctrl, "_source_target_counts", Mock(return_value={"bilibili": 30}))
+    monkeypatch.setattr(ctrl, "_raw_source_target_counts", Mock(return_value={"bilibili": 60}))
+    monkeypatch.setattr(ctrl, "_source_requested_count", Mock(return_value=20))
+    caplog.set_level(logging.DEBUG, logger="openbiliclaw.runtime.refresh")
+
+    for _ in range(100):
+        ctrl._log_empty_refresh_plan_diagnostics(pool_available=10)
+
+    full_records = [
+        record for record in caplog.records if record.message.startswith("refresh plan empty:")
+    ]
+    suppressed_records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("refresh plan empty (suppressed diagnostics")
+    ]
+    assert len(full_records) == 1
+    assert len(suppressed_records) == 99
+    assert "99 since last full" in suppressed_records[-1].message
+    assert readiness.call_count == 1
+    assert source_available.call_count == 1
+    assert source_raw.call_count == 1
+
+    ctrl._log_empty_refresh_plan_diagnostics(pool_available=11)
+    full_records = [
+        record for record in caplog.records if record.message.startswith("refresh plan empty:")
+    ]
+    assert len(full_records) == 2
+    assert "suppressed=99" in full_records[-1].message
+
+    now[0] += timedelta(seconds=301)
+    ctrl._log_empty_refresh_plan_diagnostics(pool_available=11)
+    full_records = [
+        record for record in caplog.records if record.message.startswith("refresh plan empty:")
+    ]
+    assert len(full_records) == 3
+    assert "suppressed=0" in full_records[-1].message
+    assert readiness.call_count == 3
+    assert source_available.call_count == 3
+    assert source_raw.call_count == 3
