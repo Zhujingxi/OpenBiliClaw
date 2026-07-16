@@ -23,9 +23,9 @@ async def main() -> None:
     from openbiliclaw.bilibili.auth import resolve_runtime_cookie
     from openbiliclaw.config import load_config
     from openbiliclaw.eval.run_logger import RunLogger
-    from openbiliclaw.llm.registry import build_llm_registry
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.engine import SoulEngine
+    from _model_runtime import build_script_model_bundle
 
     cfg = load_config()
     data_dir = cfg.data_path
@@ -133,8 +133,12 @@ async def main() -> None:
     print("\n[4/4] 分析偏好 + 生成画像...")
     print(f"  总信号量: {len(events)} 条事件")
 
-    registry = build_llm_registry(cfg)
-    engine = SoulEngine(llm=registry, memory=memory)
+    model_bundle = build_script_model_bundle(cfg, memory)
+    engine = SoulEngine(
+        llm=model_bundle.chat_route,
+        memory=memory,
+        embedding_service=model_bundle.embedding_service,
+    )
 
     await engine.analyze_events(events)
 

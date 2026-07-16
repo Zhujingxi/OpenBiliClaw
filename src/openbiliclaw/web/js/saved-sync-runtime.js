@@ -168,7 +168,9 @@ export function createDialogFocusController(options = {}) {
   let active = false;
   const focusables = () => Array.from(dialog?.querySelectorAll?.(
     'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-  ) || []).filter((node) => node.hidden !== true);
+  ) || []).filter(
+    (node) => node.hidden !== true && !node.closest?.("[hidden], [inert]"),
+  );
   const onKeydown = (event) => {
     if (event.key === "Escape") {
       event.preventDefault?.();
@@ -202,7 +204,8 @@ export function createDialogFocusController(options = {}) {
       if (!active) return;
       active = false;
       doc?.removeEventListener?.("keydown", onKeydown);
-      opener?.focus?.();
+      const focusTarget = options.resolveOpener ? options.resolveOpener() : opener;
+      focusTarget?.focus?.();
     },
   };
 }

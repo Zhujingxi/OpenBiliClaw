@@ -308,7 +308,7 @@ Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or anothe
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that both the configured LLM provider and embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in.
+The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Model setup chooses a Chat connection type first and a preset only when that type supports one; Embedding is an ordered provider list with one shared model/settings object. Before auto-init, bootstrap probes the stable primary Chat connection exactly with fallback disabled and every ordered Embedding provider exactly; any failure blocks init until you fix that record. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in.
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
@@ -325,7 +325,7 @@ openbiliclaw start
 ```
 
 - **Desktop**: open `http://127.0.0.1:8420/web` (or `http://127.0.0.1:8420/`, auto-redirects). Two-column editorial layout with recommendations, profile, chat, messages, and settings all on one page.
-- **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone.
+- **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone; top settings manage Saved Sync separately and edit ordered Chat / Embedding routes plus Runtime policy through a sequential list→detail flow.
 
 > During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable, `127.0.0.1` = local only).
 
@@ -348,7 +348,7 @@ Native Windows (PowerShell, no Docker or WSL2 required):
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-The script needs `git` and Python 3.11+. It clones the repo, then asks for LLM provider, embedding, Bilibili cookie, Xiaohongshu opt-in, Douyin opt-in, YouTube opt-in, X opt-in, and Zhihu opt-in choices in the terminal wizard before installing dependencies or starting the backend. Once the confirmations are complete, it starts the backend, runs the health check, verifies that the LLM provider and embedding service can really respond, then automatically runs init to build the first profile and discovery pool. If unsure, press Enter or choose the default.
+The script needs `git` and Python 3.11+. It clones the repo, then asks for the Chat connection type, a conditional preset, the ordered Embedding providers, Bilibili cookie, Xiaohongshu opt-in, Douyin opt-in, YouTube opt-in, X opt-in, and Zhihu opt-in choices in the terminal wizard before installing dependencies or starting the backend. Once the confirmations are complete, it starts the backend, runs the health check, probes the stable primary Chat connection with fallback disabled and every ordered Embedding provider against the shared settings, then automatically runs init to build the first profile and discovery pool. If unsure, press Enter or choose the default.
 
 </details>
 
@@ -410,10 +410,11 @@ curl -fsSL https://ollama.com/install.sh | sh && ollama serve &
 macOS / Windows users can install the official app from [ollama.com/download](https://ollama.com/download). Start Ollama, then run:
 
 ```bash
+ollama pull bge-m3
 uv run openbiliclaw setup-embedding
 ```
 
-The wizard pulls `bge-m3` (~1.1GB, CPU-only is fine) and writes the config.
+`setup-embedding` is configuration-only and writes native `[models.embedding]`. It does not install, start, download, or access the network; prepare Ollama and `bge-m3` first as shown above, then run `openbiliclaw models probe <id>` separately for a real connectivity check.
 
 </details>
 
@@ -571,13 +572,13 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
 - 🔒 **Fully Private** — all data in local SQLite, LLM calls use your own key, each instance is built for exactly one person
 - 🔌 **Local Embedding** — optional Ollama + bge-m3, CPU-only, no extra API key
-- 🔧 **Fully Controllable** — swap LLMs per module, edit your profile directly, write custom Skills to extend discovery
+- 🔧 **Fully Controllable** — Desktop, Mobile Web, and extension settings can add, remove, and reorder Chat / Embedding connections; Mobile uses a touch-friendly list→detail flow with move controls, the global Chat route fails over in order, and profiles and custom Skills remain directly editable
 
 ## 🏛️ Architecture Overview
 
 ```text
 interactive ─────────────────────────────────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ global Chat route
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  └─ while queued: guarantee 2, may borrow all 3
@@ -601,6 +602,29 @@ background ─ background admission (default 3) ──────┘
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Model API + transactional Chat/Embedding routes + all configuration entry points (stages 9–14) │
+│ Chat/Embedding/Runtime tabs · one stable-ID ordered route │
+│ Desktop inspector · extension/mobile sequential list→detail · descriptor-driven fields │
+│ strict GET/PUT snapshot/save · descriptors · exact draft probe │
+│ descriptor registry → ModelConfigService → native ordered factories │
+│ CLI models list/add/edit/remove/move/probe → ModelConfigService │
+│ setup/bootstrap/install/Docker/package → native [models] writer │
+│ legacy /api/config is a credential-free projection with write guard │
+│ native/legacy + base/local → ModelConfigService path lock  │
+│ safe endpoint → redacted snapshot; credential + local fence │
+│ full graph build → writer init guard + reread/rebase/conflict │
+│ lifecycle-locked settled runtime/loop snapshot; cancelled wait writes/publishes nothing │
+│ backup → temp/fsync/replace → publish graph → serialized drain/restart → one event │
+│ every public stop/restart is exclusive; drain excludes guided_init; event sees final slots │
+│ degraded clears; mid-cutover cancellation shield-restores after reacquiring lifecycle ownership │
+│ Chat record → ID adapter → OrderedLLMRoute (global order)  │
+│ total deadline · revision circuits · capture/recheck probe · safe attempts │
+│ shared Embedding settings → ID adapter → OrderedEmbeddingRoute │
+│ finite/dimension checks · config circuit · fixed PNG probe · shared namespace │
+│ RuntimeModelBundle → Soul/Dialogue/Discovery/Recommendation/CLI/OpenClaw │
+│ guided-init/CLI share service/writer; no cross-process lock; offline circuit=unknown │
+├────────────────────────────────────────────────┤
+│ LLMService paths → one route; caller is concurrency/usage only; cost by connection │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · viewed identity    │

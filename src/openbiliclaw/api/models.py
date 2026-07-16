@@ -1573,6 +1573,11 @@ class ModuleLLMConfigOut(BaseModel):
 
 
 class LLMConfigOut(BaseModel):
+    # One-release compatibility projection. The dedicated /api/model-config
+    # endpoint is authoritative and is the only model writer.
+    authoritative: bool = False
+    read_only: bool = True
+    projection: str = "primary_and_first_fallback"
     default_provider: str = "deepseek"
     concurrency: int = 4
     timeout: int = 300
@@ -1900,21 +1905,17 @@ class ConfigUpdateIn(BaseModel):
 
 
 class ConfigServiceProbeIn(BaseModel):
-    """No-write request to probe the submitted LLM or embedding config.
+    """Legacy no-write request retained only for outbound-network policy."""
 
-    ``llm_fallback`` probes ``[llm].fallback_provider`` (that exact
-    provider, no fallback chain) instead of the default provider.
-    """
-
-    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
+    kind: Literal["network_proxy"]
     config: dict[str, object] = Field(default_factory=dict)
 
 
 class ConfigServiceProbeResponse(BaseModel):
-    """Result of a user-triggered provider connectivity probe."""
+    """Result of a legacy outbound-network connectivity probe."""
 
     ok: bool
-    kind: Literal["llm", "embedding", "llm_fallback", "network_proxy"]
+    kind: Literal["network_proxy"]
     provider: str = ""
     model: str = ""
     message: str = ""
@@ -1938,6 +1939,7 @@ class ConfigUpdateResponse(BaseModel):
     reloaded: bool = False
     rollback_applied: bool = False
     restart_required: bool = False
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SourceShareSuggestionResponse(BaseModel):

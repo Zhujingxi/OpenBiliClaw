@@ -827,6 +827,10 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     provider TEXT NOT NULL,
     model TEXT NOT NULL DEFAULT '',
+    connection_id TEXT NOT NULL DEFAULT '',
+    connection_type TEXT NOT NULL DEFAULT '',
+    preset TEXT NOT NULL DEFAULT '',
+    route_position INTEGER NOT NULL DEFAULT 0,
     caller TEXT NOT NULL DEFAULT '',
     prompt_tokens INTEGER NOT NULL DEFAULT 0,
     completion_tokens INTEGER NOT NULL DEFAULT 0,
@@ -1086,7 +1090,7 @@ class Database:
         self._ensure_xhs_observed_urls_table()
         self._ensure_discovery_candidate_columns()
         self._normalize_legacy_style_keys()
-        self._ensure_llm_usage_cache_columns()
+        self._ensure_llm_usage_columns()
         self._ensure_chat_turns_table()
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
@@ -1422,6 +1426,10 @@ class Database:
         *,
         provider: str,
         model: str,
+        connection_id: str = "",
+        connection_type: str = "",
+        preset: str = "",
+        route_position: int = 0,
         prompt_tokens: int,
         completion_tokens: int,
         estimated_cost_cny: float,
@@ -1440,13 +1448,18 @@ class Database:
         total = max(0, prompt_tokens) + max(0, completion_tokens)
         cursor = self._execute_write(
             """INSERT INTO llm_usage
-               (provider, model, caller, prompt_tokens, completion_tokens,
+               (provider, model, connection_id, connection_type, preset,
+                route_position, caller, prompt_tokens, completion_tokens,
                 total_tokens, cached_input_tokens, estimated_cost_cny,
                 success)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 provider or "",
                 model or "",
+                connection_id or "",
+                connection_type or "",
+                preset or "",
+                max(0, int(route_position)),
                 caller or "",
                 int(max(0, prompt_tokens)),
                 int(max(0, completion_tokens)),
@@ -1504,6 +1517,33 @@ class Database:
             WHERE timestamp >= datetime('now', '-' || ? || ' day', 'localtime')
             GROUP BY provider, model
             ORDER BY cost_cny DESC
+            """,
+            (max(1, int(days)),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def query_llm_usage_by_connection(
+        self,
+        *,
+        days: int = 7,
+    ) -> list[dict[str, Any]]:
+        """Return per-route-connection totals without replacing provider totals."""
+        cursor = self.conn.execute(
+            """
+            SELECT COALESCE(connection_id, '') AS connection_id,
+                   COALESCE(connection_type, '') AS connection_type,
+                   COALESCE(preset, '') AS preset,
+                   provider,
+                   model,
+                   MIN(COALESCE(route_position, 0)) AS route_position,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+                   COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+                   COALESCE(SUM(estimated_cost_cny), 0) AS cost_cny
+            FROM llm_usage
+            WHERE timestamp >= datetime('now', '-' || ? || ' day', 'localtime')
+            GROUP BY connection_id, connection_type, preset, provider, model
+            ORDER BY cost_cny DESC, route_position ASC, connection_id ASC
             """,
             (max(1, int(days)),),
         )
@@ -5936,18 +5976,28 @@ class Database:
             self._conn.close()
             self._conn = None
 
-    def _ensure_llm_usage_cache_columns(self) -> None:
-        """Backfill v0.3.28+ prompt-cache columns on existing llm_usage tables."""
+    def _ensure_llm_usage_columns(self) -> None:
+        """Idempotently backfill usage observability columns and indexes."""
         existing_columns = {
             str(row["name"]) for row in self.conn.execute("PRAGMA table_info(llm_usage)").fetchall()
         }
         required_columns = {
             "cached_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "connection_id": "TEXT NOT NULL DEFAULT ''",
+            "connection_type": "TEXT NOT NULL DEFAULT ''",
+            "preset": "TEXT NOT NULL DEFAULT ''",
+            "route_position": "INTEGER NOT NULL DEFAULT 0",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {column_name} {column_type}")
+        self.conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_llm_usage_connection_timestamp
+            ON llm_usage(connection_id, timestamp)
+            """
+        )
 
     def _ensure_event_satisfaction_columns(self) -> None:
         """Backfill v0.3.x event-satisfaction columns for pre-migration DBs.

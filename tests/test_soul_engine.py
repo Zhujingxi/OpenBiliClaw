@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 import pytest
 
 from openbiliclaw.llm.base import LLMResponse
-from openbiliclaw.llm.service import ModuleOverride
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.soul.engine import SoulEngine
 from openbiliclaw.soul.overrides import ProfileOverrides, apply_edit
@@ -45,19 +44,18 @@ class FakeRegistry:
         return LLMResponse(content=self.content, provider="openai")
 
 
-def test_soul_engine_wires_module_overrides_to_internal_service(tmp_path: Path) -> None:
+def test_soul_engine_wires_global_route_to_internal_service(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()
-    overrides = {"soul": ModuleOverride(provider="claude", model="claude-sonnet")}
+    route = FakeRegistry("{}")
 
     engine = SoulEngine(
-        llm=FakeRegistry("{}"),
+        llm=route,
         memory=memory,
-        module_overrides=overrides,
     )
 
-    assert engine._module_overrides == overrides
-    assert engine._llm_service.module_overrides == overrides
+    assert engine._llm is route
+    assert engine._llm_service.registry is route
 
 
 def test_soul_engine_wires_scheduler_speculation_config(tmp_path: Path) -> None:

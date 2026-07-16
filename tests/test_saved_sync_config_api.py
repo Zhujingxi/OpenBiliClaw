@@ -8,7 +8,8 @@ from pydantic import ValidationError
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.models import ConfigUpdateIn
-from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, load_config, save_config
+from openbiliclaw.config import Config, load_config, save_config
+from openbiliclaw.model_config import ChatConnection, ChatRouteConfig, ModelConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,9 +17,18 @@ if TYPE_CHECKING:
 
 def _make_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     config = Config(
-        llm=LLMConfig(
-            default_provider="openai",
-            openai=LLMProviderConfig(api_key="sk-test", model="gpt-4o-mini"),
+        models=ModelConfig(
+            chat=ChatRouteConfig(
+                connections=(
+                    ChatConnection(
+                        id="ollama-main",
+                        name="Ollama",
+                        type="ollama",
+                        model="llama3",
+                        base_url="http://127.0.0.1:11434/v1",
+                    ),
+                )
+            )
         )
     )
     config_path = tmp_path / "config.toml"
@@ -41,7 +51,7 @@ def test_config_api_exposes_and_updates_saved_sync(
         json={"saved_sync": {"auto_sync_enabled": True}},
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert client.get("/api/config").json()["saved_sync"] == {"auto_sync_enabled": True}
     assert load_config(tmp_path / "config.toml").saved_sync.auto_sync_enabled is True
 
@@ -112,7 +122,7 @@ def test_config_api_allows_omitted_saved_sync(
 
     response = client.put("/api/config", json={"language": "en"})
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert response.json()["config"]["saved_sync"] == {"auto_sync_enabled": False}
     loaded = load_config(tmp_path / "config.toml")
     assert loaded.language == "en"

@@ -13,6 +13,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
+from openbiliclaw.llm import openai_provider as openai_provider_module
 from openbiliclaw.llm.base import (
     LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
     LLMProviderError,
@@ -23,8 +24,11 @@ from openbiliclaw.llm.base import (
 from openbiliclaw.llm.claude_provider import ClaudeProvider
 from openbiliclaw.llm.gemini_provider import GeminiProvider, gemini_sdk_available
 from openbiliclaw.llm.ollama_provider import OllamaProvider
-from openbiliclaw.llm.openai_provider import DeepSeekProvider, OpenAIProvider
-from openbiliclaw.llm.openrouter_provider import OpenRouterProvider
+from openbiliclaw.llm.openai_provider import (
+    OpenAIProtocolOptions,
+    OpenAIProtocolProvider,
+    OpenAIProvider,
+)
 
 
 def _openai_response(content: str = "ok") -> SimpleNamespace:
@@ -35,6 +39,51 @@ def _openai_response(content: str = "ok") -> SimpleNamespace:
             prompt_tokens=10,
             completion_tokens=5,
             total_tokens=15,
+        ),
+    )
+
+
+def _deepseek_provider(
+    *,
+    model: str = "deepseek-chat",
+    reasoning_effort: str = "",
+) -> OpenAIProtocolProvider:
+    return OpenAIProtocolProvider(
+        api_key="test-key",
+        model=model,
+        base_url="https://api.deepseek.com",
+        options=OpenAIProtocolOptions(
+            connection_id="deepseek",
+            preset="deepseek",
+            api_mode="chat_completions",
+            default_reasoning_effort=reasoning_effort,
+        ),
+    )
+
+
+def _openrouter_provider(
+    *,
+    model: str,
+    http_referer: str = "",
+    x_title: str = "",
+) -> OpenAIProtocolProvider:
+    headers = {
+        key: value
+        for key, value in {
+            "HTTP-Referer": http_referer,
+            "X-Title": x_title,
+        }.items()
+        if value
+    }
+    return OpenAIProtocolProvider(
+        api_key="test-key",
+        model=model,
+        base_url="https://openrouter.ai/api/v1",
+        options=OpenAIProtocolOptions(
+            connection_id="openrouter",
+            preset="openrouter",
+            api_mode="chat_completions",
+            extra_headers=headers,
         ),
     )
 
@@ -62,6 +111,64 @@ async def test_openai_provider_normalizes_response(monkeypatch: pytest.MonkeyPat
         "completion_tokens": 5,
         "total_tokens": 15,
     }
+
+
+@pytest.mark.asyncio
+async def test_openai_embedding_retries_and_raises_typed_secret_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+    calls = 0
+    sentinel = "openai-embedding-secret-never-retain"
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.embeddings, "create", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", no_sleep)
+
+    with pytest.raises(LLMTimeoutError) as raised:
+        await provider.embed("private text")
+
+    assert calls == 3
+    assert sentinel not in str(raised.value)
+    assert "private text" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_openai_embedding_does_not_retain_generic_sdk_failure_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenAIProvider(api_key="test-key")
+    calls = 0
+    sentinel = "openai-generic-sdk-secret-never-retain"
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.embeddings, "create", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.openai_provider.asyncio.sleep", no_sleep)
+
+    with pytest.raises(LLMProviderError) as raised:
+        await provider.embed("private text")
+
+    assert calls == 3
+    assert sentinel not in str(raised.value)
+    assert sentinel not in repr(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
 
 @pytest.mark.asyncio
@@ -245,7 +352,7 @@ async def test_openai_provider_does_not_retry_rate_limit(
 async def test_openai_provider_treats_insufficient_balance_as_provider_backoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key")
+    provider = _deepseek_provider()
     calls = {"count": 0}
 
     class PaymentRequiredError(Exception):
@@ -495,7 +602,7 @@ async def test_claude_provider_does_not_retry_rate_limit(
 
 
 def test_deepseek_provider_defaults() -> None:
-    provider = DeepSeekProvider(api_key="test-key")
+    provider = _deepseek_provider()
     assert provider.name == "deepseek"
 
 
@@ -503,7 +610,7 @@ def test_deepseek_provider_defaults() -> None:
 async def test_deepseek_provider_accepts_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key", model="deepseek-default")
+    provider = _deepseek_provider(model="deepseek-default")
     captured: dict[str, object] = {}
 
     async def fake_request(**kwargs: object) -> SimpleNamespace:
@@ -527,7 +634,7 @@ async def test_deepseek_provider_accepts_per_call_model_override(
 async def test_deepseek_provider_sends_disabled_thinking_for_empty_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key", reasoning_effort="max")
+    provider = _deepseek_provider(reasoning_effort="max")
     captured: dict[str, object] = {}
 
     async def fake_request(**kwargs: object) -> SimpleNamespace:
@@ -543,14 +650,58 @@ async def test_deepseek_provider_sends_disabled_thinking_for_empty_reasoning_eff
 
     assert response.content == "deepseek-ok"
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
-    assert provider._reasoning_effort == "max"
+    assert provider.options.default_reasoning_effort == "max"
+
+
+@pytest.mark.asyncio
+async def test_protocol_provider_parallel_reasoning_overrides_do_not_mutate_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert hasattr(openai_provider_module, "OpenAIProtocolProvider"), (
+        "OpenAI protocol provider is not implemented"
+    )
+    assert hasattr(openai_provider_module, "OpenAIProtocolOptions"), (
+        "OpenAI protocol options are not implemented"
+    )
+    protocol_provider = openai_provider_module.OpenAIProtocolProvider
+    protocol_options = openai_provider_module.OpenAIProtocolOptions
+    provider = protocol_provider(
+        api_key="test-key",
+        model="deepseek-test",
+        base_url="https://api.deepseek.com",
+        options=protocol_options(
+            connection_id="deepseek-a",
+            preset="deepseek",
+            api_mode="chat_completions",
+            default_reasoning_effort="max",
+        ),
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_request(**kwargs: object) -> SimpleNamespace:
+        calls.append(dict(kwargs))
+        await __import__("asyncio").sleep(0)
+        return _openai_response("ok")
+
+    monkeypatch.setattr(provider, "_request_with_retry", fake_request)
+
+    await __import__("asyncio").gather(
+        provider.complete([{"role": "user", "content": "one"}], reasoning_effort=""),
+        provider.complete([{"role": "user", "content": "two"}], reasoning_effort="high"),
+    )
+
+    assert {str(call["extra_body"]) for call in calls} == {
+        "{'thinking': {'type': 'disabled'}}",
+        "{'thinking': {'type': 'enabled'}, 'reasoning_effort': 'high'}",
+    }
+    assert provider.options.default_reasoning_effort == "max"
 
 
 @pytest.mark.asyncio
 async def test_deepseek_provider_retries_empty_response_once_without_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = DeepSeekProvider(api_key="test-key")
+    provider = _deepseek_provider()
     calls = {"count": 0}
 
     async def fake_create(**_: object) -> SimpleNamespace:
@@ -674,11 +825,13 @@ async def test_ollama_provider_embed_calls_native_endpoint(
 
 
 @pytest.mark.asyncio
-async def test_ollama_provider_embed_returns_empty_on_failure(
+async def test_ollama_provider_embed_retries_then_raises_typed_secret_safe_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When Ollama isn't reachable, embed() should return [] not raise."""
     import httpx
+
+    calls = 0
+    sentinel = "ollama-embedding-secret-never-retain"
 
     class _FailingClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -691,13 +844,19 @@ async def test_ollama_provider_embed_returns_empty_on_failure(
             return None
 
         async def post(self, *args: object, **kwargs: object) -> object:
-            raise httpx.ConnectError("connection refused")
+            nonlocal calls
+            calls += 1
+            raise httpx.ConnectError(f"connection refused: {sentinel}")
 
     monkeypatch.setattr(httpx, "AsyncClient", _FailingClient)
 
     provider = OllamaProvider(base_url="http://localhost:11434/v1")
-    result = await provider.embed("hello", model="bge-m3")
-    assert result == []
+    with pytest.raises(LLMProviderError) as raised:
+        await provider.embed("hello", model="bge-m3")
+
+    assert calls == 2
+    assert sentinel not in str(raised.value)
+    assert "hello" not in str(raised.value)
 
 
 class _FakeChatResponse:
@@ -892,8 +1051,7 @@ async def test_ollama_provider_native_reports_thinking_only_response(
 
 
 def test_openrouter_provider_defaults_and_headers() -> None:
-    provider = OpenRouterProvider(
-        api_key="test-key",
+    provider = _openrouter_provider(
         model="openai/gpt-4o-mini",
         http_referer="https://example.com",
         x_title="OpenBiliClaw",
@@ -911,7 +1069,7 @@ def test_openrouter_provider_defaults_and_headers() -> None:
 async def test_openrouter_provider_inherits_per_call_model_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = OpenRouterProvider(api_key="test-key", model="openai/default")
+    provider = _openrouter_provider(model="openai/default")
     captured: dict[str, object] = {}
 
     async def fake_request(**kwargs: object) -> SimpleNamespace:
@@ -1040,6 +1198,36 @@ async def test_gemini_provider_normalizes_response(
     assert config.thinking_config.thinking_budget == 0  # type: ignore[attr-defined]
     assert config.automatic_function_calling is not None  # type: ignore[attr-defined]
     assert config.automatic_function_calling.disable is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not gemini_sdk_available(), reason="google-genai is not installed")
+async def test_gemini_embedding_methods_retry_and_raise_typed_secret_safe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = GeminiProvider(api_key="test-key")
+    calls = 0
+    sentinel = "gemini-embedding-secret-never-retain"
+
+    async def fail_embedding(**_: object) -> object:
+        nonlocal calls
+        calls += 1
+        raise TimeoutError(sentinel)
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(provider._client.aio.models, "embed_content", fail_embedding)
+    monkeypatch.setattr("openbiliclaw.llm.gemini_provider.asyncio.sleep", no_sleep)
+
+    with pytest.raises(LLMTimeoutError) as text_error:
+        await provider.embed("private text")
+    with pytest.raises(LLMTimeoutError) as image_error:
+        await provider.embed_image(b"private image", model="gemini-embedding-2")
+
+    assert calls == 6
+    assert sentinel not in str(text_error.value)
+    assert sentinel not in str(image_error.value)
 
 
 @pytest.mark.asyncio

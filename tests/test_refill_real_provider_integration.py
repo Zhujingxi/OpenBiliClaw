@@ -20,9 +20,11 @@ from openbiliclaw.integrations.openclaw.bootstrap import build_openclaw_adapter_
 from openbiliclaw.integrations.openclaw.operations import OpenClawAdapter
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.concurrency import LLMConcurrencyGate
-from openbiliclaw.llm.registry import build_llm_registry
-from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
+from openbiliclaw.llm.registry import build_ordered_chat_route
+from openbiliclaw.llm.service import LLMService
 from openbiliclaw.memory.manager import MemoryManager
+from openbiliclaw.model_config import compute_model_revision
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.soul.profile import InterestTag, OnionProfile, PreferenceLayer, SoulProfile
 from openbiliclaw.storage.database import Database
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from openbiliclaw.config import Config
-    from openbiliclaw.llm.base import LLMRegistry
+    from openbiliclaw.llm.route import OrderedLLMRoute
 
 _LIVE = os.getenv("OPENBILICLAW_REFILL_E2E", "") == "1"
 _LIVE_CONFIG_ENV = "OPENBILICLAW_REFILL_CONFIG"
@@ -50,7 +52,7 @@ pytestmark = [
 def _load_live_config_and_registry(
     *,
     disable_embedding: bool = False,
-) -> tuple[Config, LLMRegistry]:
+) -> tuple[Config, OrderedLLMRoute]:
     """Load an opt-in live-test config without changing persisted settings.
 
     The optional environment controls exist only for this explicitly enabled
@@ -61,53 +63,47 @@ def _load_live_config_and_registry(
 
     config_path = os.getenv(_LIVE_CONFIG_ENV, "").strip()
     config = load_config(config_path) if config_path else load_config()
-    requested_provider = os.getenv(_LIVE_PROVIDER_ENV, "").strip().lower()
-    if requested_provider:
-        # A selected live provider must win over every LLMService routing
-        # bucket. Retaining an old module model (for example an Ollama model)
-        # would still route the selected provider to the wrong model, so each
-        # override deliberately falls back to the selected provider's model.
+    requested_connection = os.getenv(_LIVE_PROVIDER_ENV, "").strip()
+    if requested_connection:
+        selected = next(
+            (
+                connection
+                for connection in config.models.chat.connections
+                if connection.id == requested_connection
+            ),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError("Requested live refill connection is unavailable.")
         config = replace(
             config,
-            llm=replace(
-                config.llm,
-                default_provider=requested_provider,
-                soul=replace(config.llm.soul, provider=requested_provider, model=""),
-                discovery=replace(config.llm.discovery, provider=requested_provider, model=""),
-                recommendation=replace(
-                    config.llm.recommendation,
-                    provider=requested_provider,
-                    model="",
-                ),
-                evaluation=replace(config.llm.evaluation, provider=requested_provider, model=""),
+            models=replace(
+                config.models,
+                chat=replace(config.models.chat, connections=(selected,)),
             ),
         )
     if disable_embedding:
-        # The OpenClaw one-shot latency proof is intentionally chat-provider
-        # only.  Do this before building the registry so a locally configured
-        # Ollama chat/embedding endpoint cannot even be registered or reached
-        # by this opt-in SenseTime test.
+        # The OpenClaw one-shot latency proof is intentionally chat-only.
         config = replace(
             config,
-            llm=replace(
-                config.llm,
-                fallback_provider="",
-                ollama=replace(config.llm.ollama, api_key="", base_url="", model=""),
+            models=replace(
+                config.models,
                 embedding=replace(
-                    config.llm.embedding,
-                    provider="",
-                    model="",
-                    api_key="",
-                    base_url="",
-                    fallback_enabled=False,
-                    fallback_provider="",
+                    config.models.embedding,
+                    enabled=False,
+                    providers=(),
                 ),
             ),
         )
-    registry = build_llm_registry(config)
-    if requested_provider and registry.default_provider != requested_provider:
-        raise RuntimeError("Requested live refill provider is unavailable.")
-    return config, registry
+    route = build_ordered_chat_route(
+        config.models.chat,
+        revision=compute_model_revision(config.models),
+        runtime_options=AdapterRuntimeOptions(
+            timeout_seconds=float(config.models.chat.timeout_seconds),
+            environment=os.environ,
+        ),
+    )
+    return config, route
 
 
 def _profile() -> SoulProfile:
@@ -219,7 +215,8 @@ class _MonitoredRegistry:
     def __init__(self, registry: Any, metrics: _LiveMetrics) -> None:
         self.registry = registry
         self.metrics = metrics
-        self.default_provider = registry.default_provider
+        connections = tuple(getattr(registry, "connections", ()))
+        self.connection_id = connections[0].id if connections else "test"
 
     def is_chat_capable(self, name: str) -> bool:
         return bool(self.registry.is_chat_capable(name))
@@ -227,13 +224,13 @@ class _MonitoredRegistry:
     async def complete(self, messages: list[dict[str, str]], **kwargs: object) -> object:
         return await self._call("complete", None, messages, kwargs)
 
-    async def complete_provider(
+    async def complete_connection(
         self,
         provider_name: str,
         messages: list[dict[str, str]],
         **kwargs: object,
     ) -> object:
-        return await self._call("complete_provider", provider_name, messages, kwargs)
+        return await self._call("complete_connection", provider_name, messages, kwargs)
 
     async def _call(
         self,
@@ -252,9 +249,7 @@ class _MonitoredRegistry:
             kwargs=kwargs,
         )
         self.metrics.provider_round_count += 1
-        self.metrics.provider_names.append(
-            str(provider_name or self.default_provider).strip().lower()
-        )
+        self.metrics.provider_names.append(str(provider_name or self.connection_id).strip().lower())
         if request_fingerprint in self.metrics.retry_pending:
             self.metrics.retry_pending.remove(request_fingerprint)
             self.metrics.transient_retry_count += 1
@@ -272,9 +267,9 @@ class _MonitoredRegistry:
             if batch_size:
                 self.metrics.expression_batch_sizes.append(batch_size)
         try:
-            if method == "complete_provider":
+            if method == "complete_connection":
                 assert provider_name is not None
-                return await self.registry.complete_provider(provider_name, messages, **kwargs)
+                return await self.registry.complete_connection(provider_name, messages, **kwargs)
             return await self.registry.complete(messages, **kwargs)
         except Exception as exc:
             if classify_llm_failure_kind(exc) in {
@@ -345,7 +340,6 @@ class _BarrierRegistry:
     ) -> None:
         self.registry = registry
         self.metrics = metrics
-        self.default_provider = registry.default_provider
         self.expected = expected
         self.entered = 0
         self.ready = asyncio.Event()
@@ -362,7 +356,7 @@ class _BarrierRegistry:
         await self.release.wait()
         return await self.registry.complete(messages, **kwargs)
 
-    async def complete_provider(
+    async def complete_connection(
         self,
         provider_name: str,
         messages: list[dict[str, str]],
@@ -373,7 +367,7 @@ class _BarrierRegistry:
         if self.entered >= self.expected:
             self.ready.set()
         await self.release.wait()
-        return await self.registry.complete_provider(provider_name, messages, **kwargs)
+        return await self.registry.complete_connection(provider_name, messages, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -387,13 +381,11 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
     gate.update_inventory(available=0, target=8)
     metrics = _LiveMetrics(gate)
     monitored_registry = _MonitoredRegistry(registry, metrics)
-    overrides = module_overrides_from_config(config)
     service = LLMService(
         registry=monitored_registry,
         memory=memory,
         concurrency=4,
         concurrency_gate=gate,
-        module_overrides=overrides,
     )
     profile = _profile()
 
@@ -534,14 +526,12 @@ async def test_real_provider_refill_and_interactive_fourth_slot(tmp_path: Path) 
         memory=memory,
         concurrency=4,
         concurrency_gate=gate,
-        module_overrides=overrides,
     )
     interactive = LLMService(
         registry=monitored_registry,
         memory=memory,
         concurrency=4,
         concurrency_gate=gate,
-        module_overrides=overrides,
     )
     background_tasks = [
         asyncio.create_task(
@@ -609,7 +599,8 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
     """
 
     import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
-    import openbiliclaw.llm.registry as registry_module
+    from openbiliclaw.api.runtime_context import RuntimeModelBundle
+    from openbiliclaw.llm.usage_recorder import UsageRecorder
 
     print("live_openclaw_one_shot_phase=config", flush=True)
     loaded_config, registry = _load_live_config_and_registry(disable_embedding=True)
@@ -626,40 +617,52 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
             discovery_limit=_LIVE_OPENCLAW_DISCOVERY_LIMIT,
         ),
     )
-    assert config.llm.default_provider == "openai_compatible"
-    assert config.llm.embedding.provider == ""
-    assert config.llm.embedding.fallback_provider == ""
-    assert config.llm.ollama.model == ""
-    assert config.llm.ollama.base_url == ""
-    assert "ollama" not in registry.available_providers
+    assert [connection.id for connection in config.models.chat.connections] == ["openai_compatible"]
+    assert config.models.embedding.enabled is False
+    assert config.models.embedding.providers == ()
+    assert all(connection.type != "ollama" for connection in registry.connections)
     gate = LLMConcurrencyGate(total_concurrency=4)
     metrics = _LiveMetrics(gate)
     monitored_registry = _MonitoredRegistry(registry, metrics)
-    embedding_builder_calls = 0
+    model_bundle_calls = 0
 
-    def disabled_embedding_builder(
-        callback_config: Config,
-        _registry: LLMRegistry,
-    ) -> None:
-        nonlocal embedding_builder_calls
-        embedding_builder_calls += 1
-        assert callback_config.llm.embedding.provider == ""
-        assert callback_config.llm.embedding.fallback_provider == ""
-        assert callback_config.llm.ollama.model == ""
-        assert callback_config.llm.ollama.base_url == ""
-        return None
+    def monitored_model_bundle(
+        models: object,
+        revision: str,
+        *,
+        memory: object,
+        usage_sink: object,
+        concurrency_gate: LLMConcurrencyGate,
+        **_kwargs: object,
+    ) -> RuntimeModelBundle:
+        nonlocal model_bundle_calls
+        model_bundle_calls += 1
+        assert models is config.models
+        usage_recorder = UsageRecorder(sink=usage_sink)
+        service = LLMService(
+            registry=monitored_registry,
+            memory=memory,  # type: ignore[arg-type]
+            usage_recorder=usage_recorder,
+            concurrency=config.models.chat.concurrency,
+            concurrency_gate=concurrency_gate,
+        )
+        return RuntimeModelBundle(
+            revision=revision,
+            models=config.models,
+            chat_route=monitored_registry,
+            llm_service=service,
+            embedding_service=None,
+        )
 
     monkeypatch.setattr(bootstrap_module, "load_config", lambda: config)
     monkeypatch.setattr(
         bootstrap_module,
-        "build_llm_registry",
-        lambda _config: monitored_registry,
+        "build_runtime_model_bundle",
+        monitored_model_bundle,
     )
-    monkeypatch.setattr(registry_module, "build_embedding_service", disabled_embedding_builder)
 
     services = build_openclaw_adapter_services()
     try:
-        assert embedding_builder_calls == 1
         assert services.recommendation_engine._embedding_service is None  # noqa: SLF001
         assert services.discovery_engine._embedding_service is None  # noqa: SLF001
         assert all(
@@ -906,7 +909,7 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
             f"expression_provider_calls={len(metrics.expression_batch_sizes)} "
             f"provider_round_count={metrics.provider_round_count} "
             f"provider_names={sorted(set(metrics.provider_names))} "
-            f"embedding_builder_calls={embedding_builder_calls} "
+            f"model_bundle_calls={model_bundle_calls} "
             "embedding_service_configured=False "
             f"detached_controller_tasks={detached_controller_task_names} "
             f"detached_recommendation_tasks={detached_recommendation_task_names} "
@@ -947,7 +950,7 @@ async def test_real_provider_openclaw_one_shot_refill_uses_single_copy_owner(
         assert len(metrics.expression_requests) <= 1
         assert metrics.provider_names
         assert set(metrics.provider_names) == {"openai_compatible"}
-        assert embedding_builder_calls == 1
+        assert model_bundle_calls == 1
         assert not detached_controller_task_names
         assert not detached_recommendation_task_names
         assert all(

@@ -209,7 +209,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ```text
 interactive ─────────────────────────────────────────┐
-                                                    ├─ runtime total gate (default 4) ─ provider
+                                                    ├─ runtime total gate (default 4) ─ global Chat route
 background ─ background admission (default 3) ──────┘
              ├─ refill: expression > evaluation > supply
              │  └─ while queued: guarantee 2, may borrow all 3
@@ -219,6 +219,23 @@ background ─ background admission (default 3) ──────┘
 ```
 
 下图的对话/反馈入口共享同一失败原子链路：`Web / CLI / OpenClaw → SocraticDialogue`。成功才写入 user+agent 历史并后台学习；失败/超时回滚临时用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、runtime 与次级 hydration 是独立分支。
+
+模型配置只有一条生产数据流：`connection-type descriptor registry → ModelConfigService → 原生 ordered Chat/Embedding factories → RuntimeModelBundle → Soul / Dialogue / Discovery / Recommendation / CLI / OpenClaw`。桌面、移动、插件与 `/setup/` 消费同一脱敏 snapshot 和 descriptor；CLI 直接调用同一 service。旧 `[llm]` 只在加载时生成明确待确认的迁移候选，legacy `/api/config` 只提供无凭据只读投影，二者都不参与生产 route 构造或权威写入。
+
+```text
+descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
+             └─ CLI models ────────────────────────────────────────┤
+                                                                  ▼
+                                                         ModelConfigService
+                                                                  │ native [models]
+                                                                  ▼
+                                              ordered Chat / Embedding factories
+                                                                  │
+                                                                  ▼
+                                                        RuntimeModelBundle
+                                                                  │
+                                                                  └─ all model callers
+```
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -376,14 +393,47 @@ background ─ background admission (default 3) ──────┘
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
+│ 模型配置 API + 事务型有序 Chat/Embedding route + 全配置入口（阶段 9–14）│
+│ Desktop：ordered list + inspector；Extension/Mobile：sequential list→detail │
+│ CLI：models list/add/edit/remove/move/probe → ModelConfigService │
+│ setup/bootstrap/install/Docker/package → native [models] writer │
+│ Chat/Embedding/Runtime tabs；descriptor fields；Embedding 共享设置 │
+│ GET/PUT model-config → strict secret-safe schema ────────┐    │
+│ descriptors + exact probe → safe probe/circuit summary ─┤    │
+│ legacy /api/config → read-only projection/write guard ──┤    │
+│ native [models] → strict parser/revision/safe endpoint ──┤    │
+│ legacy [llm] → effective base+local inspection/map ──────┤    │
+│                 → secret-safe report → closed resolution │    │
+│                 → authoritative final validation ────────┤    │
+│                                                         └→ ModelConfigService path lock │
+│ redacted snapshot/revision → credential action → local fence │
+│ build complete RuntimeContext candidate → canonical writer   │
+│ init guard + immediate reread → rebase / authority conflict  │
+│ lifecycle-locked settled runtime/task snapshot before replace │
+│ legacy backup → temp/fsync/replace → app lifecycle activation │
+│ publish graph → serialized drain/restart → clear degraded → one final-slot event │
+│ failure/cancel → shielded restore reacquires lifecycle ownership │
+│ Chat records → connection_factory → ID adapter → OrderedLLMRoute │
+│                                   ├→ total deadline + safe attempts │
+│                                   └→ revision-aware CircuitTable   │
+│ Embedding providers → shared settings adapter → OrderedEmbeddingRoute │
+│                                   ├→ finite/dimension validation + circuit │
+│                                   └→ fixed PNG exact probe + shared cache namespace │
+│ probe: gate/init → path-lock init/revision/credential capture → network unlocked → revision recheck │
+│ RuntimeModelBundle → 全 consumer 原子发布并激活对应后台任务        │
+│ 普通保存保留 raw；四端共用原生 schema；CLI 显式 DTO→domain、revision rebase │
+├──────────────────────────────────────────────────────────────┤
 │         LLM 适配层 + Embedding 服务（双层缓存）                 │
 │  ┌──────────────────────────┐  ┌────────────────────────┐   │
 │  │ OpenAI / Claude / Gemini │  │ EmbeddingService       │   │
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │
-│  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
+│  │ OpenRouter + Codex OAuth │  │ 共享 namespace + 安全降级 │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
-│  LLMService caller bucket → per-module provider/model override │
+│  LLMService normal/structured/multimodal/tools → one global route │
+│  caller only controls admission/usage; llm_usage records connection identity │
+│  caller tags → concurrency + usage only; no module model selection │
+│  response → provider/model + connection ID/type/preset/position    │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
 │  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │
 │  结构化 JSON helper: wrapper / fenced / JSONL / schema echo / MiMo 容错 │

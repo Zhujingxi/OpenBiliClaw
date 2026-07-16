@@ -9,18 +9,28 @@ Chat completion is intentionally unsupported; this class is embedding-only.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any
 
 import httpx
 
-from .base import LLMProvider, LLMProviderError, LLMResponse
+from .base import (
+    LLMProvider,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponse,
+    LLMResponseError,
+    LLMTimeoutError,
+    normalize_retry_after_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com"
 _EMBED_PATH = "/api/v1/services/embeddings/multimodal-embedding/multimodal-embedding"
+_BASE_URL_SUFFIXES = ("/compatible-mode/v1", "/api/v1", "/compatible-mode")
 
 # qwen3-vl-embedding documented MRL dimensions (default 2560).
 _QWEN3_VL_DIMENSIONS: frozenset[int] = frozenset({2560, 2048, 1536, 1024, 768, 512, 256})
@@ -38,6 +48,8 @@ class DashScopeEmbeddingProvider(LLMProvider):
 
     supports_embedding = True
     supports_image_embedding = True
+    _MAX_RETRIES = 3
+    _BASE_RETRY_DELAY = 0.25
 
     def __init__(
         self,
@@ -54,11 +66,15 @@ class DashScopeEmbeddingProvider(LLMProvider):
         self._api_key = key
         self._model = (model or "qwen3-vl-embedding").strip() or "qwen3-vl-embedding"
         root = (base_url or _DEFAULT_BASE_URL).strip().rstrip("/")
-        if root.endswith("/v1"):
-            # Users may paste the OpenAI-compat chat base_url; strip to API root.
-            root = root[: -len("/v1")].rstrip("/")
-        if root.endswith("/compatible-mode"):
-            root = root[: -len("/compatible-mode")].rstrip("/")
+        # Alibaba documents workspace-scoped native DashScope base URLs as
+        # ``...maas.aliyuncs.com/api/v1``. Strip that prefix as one unit before
+        # appending _EMBED_PATH; removing only ``/v1`` would produce the broken
+        # ``/api/api/v1/services/...`` URL. Keep accepting compatible-mode URLs
+        # as a convenience, but always call the native multimodal endpoint.
+        for suffix in _BASE_URL_SUFFIXES:
+            if root.endswith(suffix):
+                root = root[: -len(suffix)].rstrip("/")
+                break
         self._base_url = root or _DEFAULT_BASE_URL
         self._timeout = max(5.0, float(timeout))
         self._embedding_output_dimensionality = max(0, int(embedding_output_dimensionality or 0))
@@ -180,51 +196,106 @@ class DashScopeEmbeddingProvider(LLMProvider):
         # overseas ladder never tunnels the domestic embedding call (the exact
         # regression v0.3.167 fixed for chat gateways). A genuinely non-domestic
         # base_url still follows the global mode. Imported per-call, like codex_auth.
-        from openbiliclaw.network import httpx_kwargs_for_endpoint
-
+        response = await self._post_with_retry(url, body)
+        invalid_json = False
         try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout, **httpx_kwargs_for_endpoint(self._base_url)
-            ) as client:
-                response = await client.post(
-                    url,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                )
-                if response.status_code >= 400:
-                    snippet = (response.text or "")[:300]
-                    logger.warning(
-                        "DashScope embedding HTTP %s (model=%s): %s",
-                        response.status_code,
-                        model,
-                        snippet,
-                    )
-                    return []
-                data = response.json()
-        except Exception:
-            logger.warning(
-                "DashScope embedding request failed (model=%s)",
-                model,
-                exc_info=True,
-            )
-            return []
+            data = response.json()
+        except (TypeError, ValueError):
+            data = None
+            invalid_json = True
+        if invalid_json:
+            raise LLMResponseError("dashscope embedding returned an invalid response") from None
+
+        payload_error = self._payload_error(data)
+        if payload_error is not None:
+            raise payload_error from None
 
         return self._parse_embedding_vector(data)
 
     @staticmethod
+    def _payload_error(data: object) -> LLMProviderError | None:
+        """Map a successful-HTTP error envelope without retaining its message."""
+        if not isinstance(data, dict) or not data.get("code") or data.get("output"):
+            return None
+        code = str(data.get("code") or "").lower().replace("_", "")
+        if any(marker in code for marker in ("invalidapikey", "authentication", "unauthorized")):
+            return LLMProviderError("dashscope embedding authentication failed")
+        if any(marker in code for marker in ("throttl", "ratelimit", "quota", "limitexceeded")):
+            return LLMRateLimitError("dashscope embedding rate limit exceeded")
+        if "model" in code and any(marker in code for marker in ("notfound", "notexist")):
+            return LLMProviderError("dashscope embedding model not found")
+        return LLMProviderError("dashscope embedding provider error")
+
+    async def _post_with_retry(self, url: str, body: dict[str, Any]) -> httpx.Response:
+        """Send one embedding request under a bounded, secret-safe contract."""
+        from openbiliclaw.network import httpx_kwargs_for_endpoint
+
+        last_error: LLMProviderError | None = None
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            status_code: int | None = None
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self._timeout, **httpx_kwargs_for_endpoint(self._base_url)
+                ) as client:
+                    response = await client.post(
+                        url,
+                        headers={
+                            "Authorization": f"Bearer {self._api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=body,
+                    )
+                status_code = response.status_code
+                if status_code < 400:
+                    return response
+                mapped = self._http_error(response)
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, httpx.TimeoutException):
+                mapped = LLMTimeoutError("dashscope embedding request timed out")
+            except httpx.TransportError:
+                mapped = LLMProviderError("dashscope embedding connection error")
+            except LLMProviderError as exc:
+                mapped = exc
+            except Exception:
+                mapped = LLMProviderError("dashscope embedding request failed")
+
+            last_error = mapped
+            retryable = status_code is None or status_code >= 500
+            if (
+                isinstance(mapped, LLMRateLimitError)
+                or not retryable
+                or attempt == self._MAX_RETRIES
+            ):
+                break
+            await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
+
+        if last_error is None:
+            last_error = LLMProviderError("dashscope embedding request failed")
+        raise last_error
+
+    @staticmethod
+    def _http_error(response: httpx.Response) -> LLMProviderError:
+        status = response.status_code
+        if status == 429:
+            retry_after = None
+            try:
+                retry_after = normalize_retry_after_seconds(response.headers.get("retry-after"))
+            except Exception:
+                retry_after = None
+            return LLMRateLimitError(
+                "dashscope embedding rate limit exceeded",
+                retry_after_seconds=retry_after,
+            )
+        if status in {401, 403}:
+            return LLMProviderError("dashscope embedding authentication failed")
+        if status >= 500:
+            return LLMProviderError(f"dashscope embedding server error: HTTP {status}")
+        return LLMProviderError(f"dashscope embedding request failed: HTTP {status}")
+
+    @staticmethod
     def _parse_embedding_vector(data: object) -> list[float]:
         if not isinstance(data, dict):
-            return []
-        # Error payloads: {"code": "...", "message": "..."}
-        if data.get("code") and not data.get("output"):
-            logger.warning(
-                "DashScope embedding error: code=%s message=%s",
-                data.get("code"),
-                data.get("message"),
-            )
             return []
         output = data.get("output")
         if not isinstance(output, dict):

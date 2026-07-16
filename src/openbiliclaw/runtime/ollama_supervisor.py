@@ -14,7 +14,6 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 from rich.console import Console
 
-from openbiliclaw.llm.registry import _ollama_is_chat_capable
 from openbiliclaw.runtime import embedding_progress
 
 if TYPE_CHECKING:
@@ -57,17 +56,27 @@ class _ManagedDaemon:
 _managed_daemon: _ManagedDaemon | None = None
 
 
-def _embedding_wants_ollama(config: Config) -> bool:
-    embedding = config.llm.embedding
-    return (
-        str(embedding.provider).strip().lower() == "ollama"
-        or str(embedding.fallback_provider).strip().lower() == "ollama"
+def _ollama_chat_connections(config: Config) -> tuple[object, ...]:
+    return tuple(
+        connection
+        for connection in config.models.chat.connections
+        if connection.type.strip().lower() == "ollama"
+    )
+
+
+def _ollama_embedding_providers(config: Config) -> tuple[object, ...]:
+    if not config.models.embedding.enabled:
+        return ()
+    return tuple(
+        provider
+        for provider in config.models.embedding.providers
+        if provider.type.strip().lower() == "ollama"
     )
 
 
 def ollama_required(config: Config) -> bool:
     """Return whether chat or embedding routing may call Ollama."""
-    return _ollama_is_chat_capable(config) or _embedding_wants_ollama(config)
+    return bool(_ollama_chat_connections(config) or _ollama_embedding_providers(config))
 
 
 def _strip_openai_v1_suffix(url: str) -> str:
@@ -83,23 +92,46 @@ def _strip_openai_v1_suffix(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, path.rstrip("/"), "", "", "")).rstrip("/")
 
 
-def effective_ollama_endpoint(config: Config) -> str:
-    """Return the daemon root endpoint used for Ollama health probes.
+def ollama_daemon_endpoint(base_url: str) -> str:
+    """Return the daemon root for one exact Ollama provider base URL."""
+    text = base_url.strip()
+    if not text:
+        text = f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
+    return _strip_openai_v1_suffix(text)
 
-    Chat and embedding providers use OpenAI-compatible ``/v1`` URLs in config, but
-    Ollama's health API lives at daemon root ``/api/version``.
+
+def configured_ollama_endpoints(config: Config) -> tuple[str, ...]:
+    """Return distinct Ollama roots in the general-startup priority order.
+
+    The process owns at most one managed daemon. General startup therefore has
+    an explicit single-target policy: the first configured Chat endpoint wins,
+    then the first Embedding endpoint when Chat has no Ollama connection.
+    Additional distinct endpoints remain visible here for diagnostics but must
+    already be running or be managed by their endpoint-specific owner.
     """
-    if _ollama_is_chat_capable(config):
-        base_url = config.llm.ollama.base_url.strip() or f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
-    elif _embedding_wants_ollama(config):
-        base_url = (
-            config.llm.embedding.base_url.strip()
-            or config.llm.ollama.base_url.strip()
-            or f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
-        )
-    else:
-        base_url = config.llm.ollama.base_url.strip() or f"{_DEFAULT_OLLAMA_ENDPOINT}/v1"
-    return _strip_openai_v1_suffix(base_url)
+    records = (*_ollama_chat_connections(config), *_ollama_embedding_providers(config))
+    endpoints: list[str] = []
+    identities: set[tuple[str, int | None]] = set()
+    for record in records:
+        endpoint = ollama_daemon_endpoint(str(getattr(record, "base_url", "") or ""))
+        identity = _normalized_hostport(endpoint)
+        if identity in identities:
+            continue
+        identities.add(identity)
+        endpoints.append(endpoint)
+    return tuple(endpoints)
+
+
+def effective_ollama_endpoint(config: Config) -> str:
+    """Return the one general-startup daemon root selected by policy.
+
+    General startup owns at most one daemon and chooses the first configured
+    Chat endpoint, falling back to the first Embedding endpoint. Provider-specific
+    flows such as embedding repair must instead call :func:`ollama_daemon_endpoint`
+    with their exact provider URL.
+    """
+    endpoints = configured_ollama_endpoints(config)
+    return endpoints[0] if endpoints else _DEFAULT_OLLAMA_ENDPOINT
 
 
 def is_loopback(url: str) -> bool:
@@ -146,11 +178,14 @@ def is_managed_endpoint(endpoint: str) -> bool:
 def may_manage_ollama_endpoint(endpoint: str) -> bool:
     """Return whether the supervisor may start/restart Ollama at ``endpoint``.
 
-    True for the default loopback daemon (as before) OR a recorded managed daemon
-    (e.g. the private ``with-embedding`` daemon on 11435). Shared by both repair
-    gates so the private daemon is no longer excluded from self-heal.
+    The supervisor records only one daemon. Once a record exists, only that exact
+    normalized host:port may be managed; this prevents a default 11434 repair from
+    overwriting a private 11435 record (or vice versa). With no record, only the
+    default loopback daemon is eligible for managed startup.
     """
-    return _is_default_ollama_endpoint(endpoint) or is_managed_endpoint(endpoint)
+    if _managed_daemon is not None:
+        return is_managed_endpoint(endpoint)
+    return _is_default_ollama_endpoint(endpoint)
 
 
 def _ollama_is_running(host: str = _DEFAULT_OLLAMA_ENDPOINT) -> bool:

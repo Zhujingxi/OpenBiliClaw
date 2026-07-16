@@ -8,10 +8,13 @@ Covers:
 
 from __future__ import annotations
 
+import sqlite3
 from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.llm import usage_recorder as usage_recorder_module
+from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.llm.pricing import PRICING, estimate_cost
 from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.storage.database import Database
@@ -378,3 +381,131 @@ def test_query_llm_usage_by_caller_returns_cache_field(tmp_path: Path) -> None:
     assert hit_rate == pytest.approx(0.75, rel=1e-9)
     # 0% on recommendation
     assert by_caller["recommendation.write_expression"]["cached_input_tokens"] == 0
+
+
+def test_existing_usage_rows_gain_safe_connection_metadata_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-usage.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE llm_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT '',
+            caller TEXT NOT NULL DEFAULT '',
+            prompt_tokens INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+            estimated_cost_cny REAL NOT NULL DEFAULT 0.0,
+            success INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO llm_usage (provider, model, caller) VALUES (?, ?, ?)",
+        ("deepseek", "deepseek-chat", "legacy.call"),
+    )
+    connection.commit()
+    connection.close()
+
+    db = Database(path)
+    db.initialize()
+
+    columns = {row["name"] for row in db.conn.execute("PRAGMA table_info(llm_usage)")}
+    assert {"connection_id", "connection_type", "preset", "route_position"} <= columns
+    row = dict(db.conn.execute("SELECT * FROM llm_usage WHERE caller = 'legacy.call'").fetchone())
+    assert row["connection_id"] == ""
+    assert row["connection_type"] == ""
+    assert row["preset"] == ""
+    assert row["route_position"] == 0
+    indexes = {row["name"] for row in db.conn.execute("PRAGMA index_list(llm_usage)")}
+    assert "idx_llm_usage_connection_timestamp" in indexes
+
+
+@pytest.mark.parametrize(
+    ("preset", "connection_type", "expected_pricing_provider"),
+    [
+        ("deepseek", "openai_compatible", "deepseek"),
+        ("custom", "openai_compatible", "openai_compatible"),
+        ("", "gemini_api", "gemini"),
+        ("anthropic", "anthropic_compatible", "claude"),
+    ],
+)
+def test_usage_recorder_persists_route_metadata_and_uses_route_pricing_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: str,
+    connection_type: str,
+    expected_pricing_provider: str,
+) -> None:
+    db = Database(tmp_path / f"usage-{preset or connection_type}.db")
+    db.initialize()
+    seen_pricing_providers: list[str] = []
+
+    def fake_estimate_cost(
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cached_tokens: int = 0,
+    ) -> float:
+        del model, prompt_tokens, completion_tokens, cached_tokens
+        seen_pricing_providers.append(provider)
+        return 0.25
+
+    monkeypatch.setattr(usage_recorder_module, "estimate_cost", fake_estimate_cost)
+    response = LLMResponse(
+        content='{"ok": true}',
+        provider="adapter-provider",
+        model="configured-model",
+        usage={"prompt_tokens": 10, "completion_tokens": 5},
+        connection_id="chat-main",
+        connection_type=connection_type,
+        preset=preset,
+        route_position=3,
+    )
+
+    UsageRecorder(sink=db).record(response, caller="soul.preference")
+
+    row = dict(db.conn.execute("SELECT * FROM llm_usage").fetchone())
+    assert seen_pricing_providers == [expected_pricing_provider]
+    assert row["provider"] == "adapter-provider"
+    assert row["model"] == "configured-model"
+    assert row["connection_id"] == "chat-main"
+    assert row["connection_type"] == connection_type
+    assert row["preset"] == preset
+    assert row["route_position"] == 3
+
+
+def test_connection_breakdown_keeps_existing_provider_totals(tmp_path: Path) -> None:
+    db = Database(tmp_path / "usage.db")
+    db.initialize()
+    for connection_id, cost in (("primary", 0.3), ("fallback", 0.2)):
+        db.insert_llm_usage(
+            provider="deepseek",
+            model="deepseek-chat",
+            connection_id=connection_id,
+            connection_type="openai_compatible",
+            preset="deepseek",
+            route_position=0 if connection_id == "primary" else 1,
+            prompt_tokens=100,
+            completion_tokens=50,
+            estimated_cost_cny=cost,
+        )
+
+    provider_rows = db.query_llm_usage_by_provider(days=7)
+    connection_rows = db.query_llm_usage_by_connection(days=7)
+
+    assert provider_rows == [
+        {
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "calls": 2,
+            "prompt_tokens": 200,
+            "completion_tokens": 100,
+            "cost_cny": pytest.approx(0.5),
+        }
+    ]
+    assert {row["connection_id"] for row in connection_rows} == {"primary", "fallback"}

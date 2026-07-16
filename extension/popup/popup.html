@@ -4381,10 +4381,490 @@
       display: flex;
     }
 
+    /* Model routes use a list -> detail flow so the popup remains legible as
+       connection types and ordered fallbacks grow. */
+    .popup-model-shell {
+      padding: 14px;
+      gap: 14px;
+      overflow: hidden;
+    }
+
+    .popup-model-heading,
+    .popup-model-section-heading,
+    .popup-model-detail-heading,
+    .popup-model-save-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .popup-model-heading > div,
+    .popup-model-section-heading > div,
+    .popup-model-detail-heading > div {
+      min-width: 0;
+    }
+
+    .popup-model-heading .eyebrow {
+      margin-bottom: 3px;
+    }
+
+    .popup-model-authority,
+    .popup-model-role {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      color: #397fcb;
+      background: var(--sky-soft);
+      font-size: 10px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .popup-model-tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 5px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: rgba(246, 249, 255, 0.9);
+    }
+
+    .popup-model-tabs button {
+      min-height: 34px;
+      border: 0;
+      border-radius: 9px;
+      color: var(--text-secondary);
+      background: transparent;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .popup-model-tabs button.is-active {
+      color: #fff;
+      background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+      box-shadow: 0 7px 14px rgba(251, 114, 153, 0.18);
+    }
+
+    .popup-model-notice,
+    .popup-model-errors {
+      padding: 10px 11px;
+      border-radius: 11px;
+      border: 1px solid var(--line);
+      background: rgba(244, 248, 255, 0.92);
+      color: var(--text-secondary);
+      font: inherit;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .popup-model-notice {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .popup-model-notice > div,
+    .popup-model-notice > div > span {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .popup-model-notice[data-tone="warning"],
+    .popup-model-errors {
+      border-color: rgba(239, 122, 134, 0.28);
+      background: rgba(255, 242, 244, 0.92);
+      color: #9d4d59;
+    }
+
+    .popup-model-notice ul {
+      margin: 6px 0 0 18px;
+    }
+
+    .popup-model-notice li span {
+      margin-left: 5px;
+    }
+
+    .popup-model-editor {
+      min-width: 0;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .popup-model-shared,
+    .popup-model-runtime,
+    .popup-model-migration,
+    .popup-model-detail-page,
+    .popup-model-route-page {
+      min-width: 0;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.74);
+    }
+
+    .popup-model-shared,
+    .popup-model-runtime,
+    .popup-model-migration,
+    .popup-model-detail-page,
+    .popup-model-route-page {
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    .popup-model-shared:not([hidden]),
+    .popup-model-runtime:not([hidden]),
+    .popup-model-migration:not([hidden]),
+    .popup-model-route-page {
+      display: flex;
+    }
+
+    .popup-model-section-heading strong,
+    .popup-model-detail-heading h3 {
+      display: block;
+      font-size: 13px;
+      color: var(--text-main);
+    }
+
+    .popup-model-section-heading span {
+      display: block;
+      margin-top: 3px;
+      font-size: 10.5px;
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+
+    .popup-model-field-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+    }
+
+    .popup-model-field-grid .full {
+      grid-column: 1 / -1;
+    }
+
+    .settings-field > span {
+      font-size: 10.5px;
+      font-weight: 800;
+      color: var(--text-secondary);
+      letter-spacing: 0.03em;
+    }
+
+    .settings-field > small,
+    .settings-note-inline {
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .popup-model-route-layout {
+      min-width: 0;
+    }
+
+    .popup-model-detail-page {
+      display: none;
+    }
+
+    .popup-model-route-layout.is-detail .popup-model-route-page {
+      display: none;
+    }
+
+    .popup-model-route-layout.is-detail .popup-model-detail-page:not([hidden]) {
+      display: flex;
+    }
+
+    .model-route-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .model-route-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      padding: 9px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: rgba(248, 250, 255, 0.88);
+    }
+
+    .model-route-row.is-selected {
+      border-color: rgba(90, 169, 255, 0.58);
+      box-shadow: 0 0 0 2px rgba(90, 169, 255, 0.1);
+    }
+
+    .model-route-row:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
+    .model-route-drag-handle {
+      color: var(--text-muted);
+      font-size: 12px;
+      letter-spacing: -3px;
+    }
+
+    .model-route-row-copy {
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      text-align: left;
+      color: inherit;
+      background: transparent;
+    }
+
+    .model-route-row-copy strong,
+    .model-route-row-copy span {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .model-route-row-copy strong {
+      font-size: 11.5px;
+    }
+
+    .model-route-row-copy span,
+    .model-route-health {
+      margin-top: 3px;
+      color: var(--text-muted);
+      font-size: 10px;
+    }
+
+    .model-route-health {
+      grid-column: 2;
+      margin-top: -3px;
+    }
+
+    .model-route-health[data-tone="success"],
+    #popupModelProbeStatus[data-tone="success"],
+    #popupModelSaveStatus[data-tone="success"] {
+      color: var(--success);
+    }
+
+    .model-route-health[data-tone="error"],
+    #popupModelProbeStatus[data-tone="error"],
+    #popupModelSaveStatus[data-tone="error"] {
+      color: var(--danger);
+    }
+
+    .popup-model-detail-back {
+      align-self: flex-start;
+      padding: 6px 9px;
+      border: 0;
+      border-radius: 8px;
+      color: #397fcb;
+      background: var(--sky-soft);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .popup-model-order-actions,
+    .model-credential-actions,
+    .model-migration-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .popup-model-order-actions .settings-secondary-btn {
+      padding: 6px 8px;
+      font-size: 10.5px;
+    }
+
+    .popup-model-danger {
+      color: #b64e5d;
+    }
+
+    .popup-model-type-picker,
+    .popup-model-credential {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding-top: 2px;
+    }
+
+    .model-type-groups {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 310px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .model-type-group {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .model-type-group-title {
+      color: var(--text-muted);
+      font-size: 9.5px;
+      font-weight: 800;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .model-type-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      padding: 8px 9px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      text-align: left;
+      color: var(--text-main);
+      background: rgba(248, 250, 255, 0.82);
+    }
+
+    .model-type-option[aria-selected="true"] {
+      border-color: rgba(251, 114, 153, 0.55);
+      background: var(--brand-soft);
+    }
+
+    .model-type-option span,
+    .model-type-option strong,
+    .model-type-option small {
+      display: block;
+      min-width: 0;
+    }
+
+    .model-type-option strong {
+      font-size: 11px;
+    }
+
+    .model-type-option small,
+    .model-empty-types {
+      color: var(--text-muted);
+      font-size: 9.5px;
+      line-height: 1.4;
+    }
+
+    .model-credential-action,
+    .small-btn {
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--text-secondary);
+      background: rgba(255, 255, 255, 0.86);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .model-credential-action[aria-pressed="true"],
+    .small-btn.is-active {
+      color: var(--brand-strong);
+      border-color: rgba(251, 114, 153, 0.42);
+      background: var(--brand-soft);
+    }
+
+    .model-field-error {
+      color: var(--danger);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .popup-model-runtime-summary {
+      display: grid;
+      gap: 7px;
+    }
+
+    .model-runtime-card,
+    .model-migration-issue {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(248, 250, 255, 0.82);
+    }
+
+    .model-runtime-card span,
+    .model-runtime-card strong,
+    .model-migration-issue > strong,
+    .model-migration-issue > span {
+      display: block;
+    }
+
+    .model-runtime-card span {
+      color: var(--text-muted);
+      font-size: 9.5px;
+    }
+
+    .model-runtime-card strong {
+      margin-top: 3px;
+      font-size: 11px;
+    }
+
+    .model-migration-issue {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .popup-model-save-bar {
+      align-items: stretch;
+    }
+
+    .popup-model-save-bar .settings-save {
+      flex: 0 0 auto;
+      padding: 10px 14px;
+      font-size: 12px;
+    }
+
+    .popup-model-save-bar .settings-probe-status {
+      align-self: center;
+      flex: 1 1 auto;
+    }
+
+    @media (max-width: 460px) {
+      .popup-model-field-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .popup-model-field-grid .full {
+        grid-column: auto;
+      }
+
+      .popup-model-detail-heading,
+      .popup-model-save-bar,
+      .popup-model-notice {
+        align-items: stretch;
+        flex-direction: column;
+      }
+
+      .popup-model-save-bar .settings-save {
+        width: 100%;
+      }
+    }
+
     .settings-actions {
       display: flex;
       gap: 10px;
       align-items: center;
+    }
+
+    #settingsGeneralActions:not([hidden]) {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
     }
 
     .settings-save {
@@ -5009,303 +5489,144 @@
       </div>
 
       <div id="settingsPanelModels" class="settings-panel" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTabModels">
-      <!-- LLM Provider -->
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x1F916;</span> LLM 模型</h3>
-        <div class="settings-field">
-          <label for="cfgLlmProvider">默认 Provider</label>
-          <select id="cfgLlmProvider">
-            <option value="openai">OpenAI</option>
-            <option value="claude">Claude</option>
-            <option value="gemini">Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="ollama">Ollama (本地)</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai_compatible">OpenAI 协议兼容 (Groq/Together/Azure/vLLM)</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgLlmConcurrency">LLM 并发数</label>
-          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="4">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLlmTimeout">LLM 超时 (秒)</label>
-          <input id="cfgLlmTimeout" type="number" min="10" max="600" step="10" placeholder="300">
-        </div>
-        <div class="settings-field">
-          <label for="cfgLlmFallbackProvider">备选 Provider</label>
-          <select id="cfgLlmFallbackProvider">
-            <option value="">(不启用 fallback)</option>
-            <option value="openai">OpenAI</option>
-            <option value="claude">Claude</option>
-            <option value="gemini">Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="ollama">Ollama (本地)</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai_compatible">OpenAI 协议兼容 (Groq/Together/Azure/vLLM)</option>
-          </select>
-        </div>
-        <p class="settings-hint">默认空；只有显式选择备选 Provider 时才会 fallback，不再自动尝试其它 Provider。</p>
-        <p id="cfgLlmFallbackSameWarning" class="settings-hint settings-hint-warning" hidden>备选与默认 Provider 相同时永远不会生效，保存会被拒绝；请换一个不同类型的 Provider 或留空关闭 fallback。</p>
-        <div class="settings-probe-row">
-          <button id="cfgProbeLlm" class="settings-secondary-btn" type="button">测试 LLM</button>
-          <span id="cfgProbeLlmStatus" class="settings-probe-status" aria-live="polite"></span>
-        </div>
-        <div class="settings-probe-row">
-          <button id="cfgProbeLlmFallback" class="settings-secondary-btn" type="button">测试备选 Provider</button>
-          <span id="cfgProbeLlmFallbackStatus" class="settings-probe-status" aria-live="polite"></span>
-        </div>
-        <!-- OpenAI -->
-        <div class="settings-provider-fields" data-provider="openai">
-          <div class="settings-field">
-            <label for="cfgOpenaiAuthMode">认证方式</label>
-            <select id="cfgOpenaiAuthMode">
-              <option value="api_key">API Key</option>
-              <option value="codex_oauth">Codex OAuth</option>
-            </select>
+        <section class="settings-section popup-model-shell" aria-labelledby="popupModelHeading">
+          <div class="popup-model-heading">
+            <div>
+              <p class="eyebrow">Ordered routes</p>
+              <h3 id="popupModelHeading"><span class="section-icon">&#x1F916;</span> 模型路由</h3>
+            </div>
+            <span class="popup-model-authority">独立保存</span>
           </div>
-          <div class="settings-field">
-            <label for="cfgOpenaiKey">OpenAI API Key</label>
-            <input id="cfgOpenaiKey" type="password" autocomplete="off" placeholder="sk-...">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenaiModel">Model</label>
-            <input id="cfgOpenaiModel" type="text" placeholder="gpt-5-nano">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenaiBaseUrl">Base URL (可选)</label>
-            <input id="cfgOpenaiBaseUrl" type="text" placeholder="留空使用默认">
-          </div>
-        </div>
-        <!-- Claude -->
-        <div class="settings-provider-fields" data-provider="claude">
-          <div class="settings-field">
-            <label for="cfgClaudeKey">Claude API Key</label>
-            <input id="cfgClaudeKey" type="password" autocomplete="off" placeholder="sk-ant-...">
-          </div>
-          <div class="settings-field">
-            <label for="cfgClaudeModel">Model</label>
-            <input id="cfgClaudeModel" type="text" placeholder="claude-sonnet-4-6">
-          </div>
-        </div>
-        <!-- Gemini -->
-        <div class="settings-provider-fields" data-provider="gemini">
-          <div class="settings-field">
-            <label for="cfgGeminiKey">Gemini API Key</label>
-            <input id="cfgGeminiKey" type="password" autocomplete="off" placeholder="AI...">
-          </div>
-          <div class="settings-field">
-            <label for="cfgGeminiModel">Model</label>
-            <input id="cfgGeminiModel" type="text" placeholder="gemini-2.5-flash">
-          </div>
-        </div>
-        <!-- DeepSeek -->
-        <div class="settings-provider-fields" data-provider="deepseek">
-          <div class="settings-field">
-            <label for="cfgDeepseekKey">DeepSeek API Key</label>
-            <input id="cfgDeepseekKey" type="password" autocomplete="off">
-          </div>
-          <div class="settings-field">
-            <label for="cfgDeepseekModel">Model</label>
-            <input id="cfgDeepseekModel" type="text" placeholder="deepseek-v4-flash">
-          </div>
-          <div class="settings-field">
-            <label for="cfgDeepseekBaseUrl">Base URL</label>
-            <input id="cfgDeepseekBaseUrl" type="text" placeholder="https://api.deepseek.com">
-          </div>
-          <div class="settings-field">
-            <label for="cfgDeepseekReasoning">Reasoning Effort</label>
-            <select id="cfgDeepseekReasoning">
-              <option value="">关闭</option>
-              <option value="high">high</option>
-              <option value="max">max</option>
-            </select>
-          </div>
-        </div>
-        <!-- Ollama -->
-        <div class="settings-provider-fields" data-provider="ollama">
-          <div class="settings-field">
-            <label for="cfgOllamaModel">Model</label>
-            <input id="cfgOllamaModel" type="text" placeholder="qwen2.5:7b">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOllamaBaseUrl">Base URL</label>
-            <input id="cfgOllamaBaseUrl" type="text" placeholder="http://localhost:11434/v1">
-          </div>
-        </div>
-        <!-- OpenRouter -->
-        <div class="settings-provider-fields" data-provider="openrouter">
-          <div class="settings-field">
-            <label for="cfgOpenrouterKey">OpenRouter API Key</label>
-            <input id="cfgOpenrouterKey" type="password" autocomplete="off">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenrouterModel">Model</label>
-            <input id="cfgOpenrouterModel" type="text" placeholder="openai/gpt-5-nano">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenrouterBaseUrl">Base URL</label>
-            <input id="cfgOpenrouterBaseUrl" type="text" placeholder="https://openrouter.ai/api/v1">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenrouterReferer">HTTP Referer</label>
-            <input id="cfgOpenrouterReferer" type="text" placeholder="https://example.com">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenrouterTitle">X-Title</label>
-            <input id="cfgOpenrouterTitle" type="text" placeholder="OpenBiliClaw">
-          </div>
-        </div>
-        <!-- OpenAI Compatible -->
-        <div class="settings-provider-fields" data-provider="openai_compatible">
-          <p class="settings-hint">
-            适配 Groq / Together / Azure OpenAI / vLLM / 自建等任何走 OpenAI 协议的服务。<strong>Base URL 必填</strong>，否则等同于普通 OpenAI provider。
-          </p>
-          <div class="settings-field">
-            <label for="cfgOpenaiCompatibleKey">API Key</label>
-            <input id="cfgOpenaiCompatibleKey" type="password" autocomplete="off" placeholder="gsk-... / sk-...">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenaiCompatibleModel">Model</label>
-            <input id="cfgOpenaiCompatibleModel" type="text" placeholder="llama-3.1-70b-versatile">
-          </div>
-          <div class="settings-field">
-            <label for="cfgOpenaiCompatibleBaseUrl">Base URL (必填)</label>
-            <input id="cfgOpenaiCompatibleBaseUrl" type="text" placeholder="https://api.groq.com/openai/v1">
-          </div>
-        </div>
-      </div>
+          <p class="settings-hint">Primary 与 fallback 使用同一条有序列表。点开一项后进入详情页，返回即可继续调整优先级。</p>
 
-      <!-- Embedding -->
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x1F50D;</span> Embedding 模型</h3>
-        <p class="settings-hint">
-          Embedding 与 LLM 各自独立配置，Provider 留空时不会跟随默认 LLM。Claude / DeepSeek / OpenRouter 没有 embedding 接口，未在此列出。
-        </p>
-        <div class="settings-field">
-          <label for="cfgEmbeddingProvider">Provider</label>
-          <select id="cfgEmbeddingProvider">
-            <option value="">(不启用 embedding)</option>
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Gemini</option>
-            <option value="ollama">Ollama (本地)</option>
-            <option value="openai_compatible">OpenAI 协议兼容 (Together/vLLM/Azure 等)</option>
-            <option value="dashscope">DashScope 阿里百炼 (qwen3-vl 多模态)</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgEmbeddingFallbackProvider">备选 Provider</label>
-          <select id="cfgEmbeddingFallbackProvider">
-            <option value="">(不启用 fallback)</option>
-            <option value="openai">OpenAI</option>
-            <option value="gemini">Gemini</option>
-            <option value="ollama">Ollama (本地)</option>
-            <option value="openai_compatible">OpenAI 协议兼容 (Together/vLLM/Azure 等)</option>
-          </select>
-        </div>
-        <p class="settings-hint">默认空；只有显式选择备选 Provider 时才会 fallback，并借用对应 chat provider 凭据。</p>
-        <div class="settings-probe-row">
-          <button id="cfgProbeEmbedding" class="settings-secondary-btn" type="button">测试 Embedding</button>
-          <span id="cfgProbeEmbeddingStatus" class="settings-probe-status" aria-live="polite"></span>
-        </div>
-        <div class="settings-field" data-embedding-field="api_key">
-          <label for="cfgEmbeddingApiKey">Embedding API Key</label>
-          <input id="cfgEmbeddingApiKey" type="password" autocomplete="off" placeholder="sk-...">
-        </div>
-        <div class="settings-field" data-embedding-field="base_url">
-          <label for="cfgEmbeddingBaseUrl">Base URL (可选)</label>
-          <input id="cfgEmbeddingBaseUrl" type="text" placeholder="留空使用默认">
-        </div>
-        <div class="settings-field">
-          <label for="cfgEmbeddingModel">Embedding Model</label>
-          <input id="cfgEmbeddingModel" type="text" placeholder="留空 = 自动选择">
-        </div>
-        <div class="settings-field">
-          <label for="cfgEmbeddingSimilarity">相似度阈值 (0~1)</label>
-          <input id="cfgEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
-        </div>
-        <div class="settings-field-row">
-          <input id="cfgEmbeddingMultimodalEnabled" type="checkbox">
-          <label for="cfgEmbeddingMultimodalEnabled">启用封面视觉加成 (image-only)</label>
-        </div>
-        <p class="settings-hint">需多模态 embedding 模型（Gemini <code>gemini-embedding-2</code> 或 DashScope <code>qwen3-vl-embedding</code>）。开启后封面图会单独编码为向量，为惊喜推荐的“封面对味度”加一点分；纯文本模型（如 bge-m3）自动跳过、零成本。默认关闭。</p>
-      </div>
+          <div id="popupModelRouteTabs" class="popup-model-tabs" role="tablist" aria-label="模型类型">
+            <button class="is-active" type="button" role="tab" aria-selected="true" data-popup-model-route="chat">Chat</button>
+            <button type="button" role="tab" aria-selected="false" data-popup-model-route="embedding">Embedding</button>
+            <button type="button" role="tab" aria-selected="false" data-popup-model-route="runtime">Runtime</button>
+          </div>
 
-      <!-- Module LLM Overrides -->
-      <div class="settings-section">
-        <h3><span class="section-icon">&#x1F9E0;</span> 模块模型覆盖</h3>
-        <p class="settings-hint">
-          留空时继承默认 Provider；只在需要给画像、发现、推荐表达或评估单独指定模型时填写。
-        </p>
-        <div class="settings-field">
-          <label for="cfgModuleSoulProvider">画像 Provider</label>
-          <select id="cfgModuleSoulProvider">
-            <option value="">继承默认</option>
-            <option value="openai">OpenAI</option>
-            <option value="claude">Claude</option>
-            <option value="gemini">Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="ollama">Ollama</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai_compatible">OpenAI 协议兼容</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleSoulModel">画像 Model</label>
-          <input id="cfgModuleSoulModel" type="text" placeholder="留空继承 provider 默认模型">
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleDiscoveryProvider">发现 Provider</label>
-          <select id="cfgModuleDiscoveryProvider">
-            <option value="">继承默认</option>
-            <option value="openai">OpenAI</option>
-            <option value="claude">Claude</option>
-            <option value="gemini">Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="ollama">Ollama</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai_compatible">OpenAI 协议兼容</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleDiscoveryModel">发现 Model</label>
-          <input id="cfgModuleDiscoveryModel" type="text" placeholder="留空继承 provider 默认模型">
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleRecommendationProvider">推荐表达 Provider</label>
-          <select id="cfgModuleRecommendationProvider">
-            <option value="">继承默认</option>
-            <option value="openai">OpenAI</option>
-            <option value="claude">Claude</option>
-            <option value="gemini">Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="ollama">Ollama</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai_compatible">OpenAI 协议兼容</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleRecommendationModel">推荐表达 Model</label>
-          <input id="cfgModuleRecommendationModel" type="text" placeholder="留空继承 provider 默认模型">
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleEvaluationProvider">评估 Provider</label>
-          <select id="cfgModuleEvaluationProvider">
-            <option value="">继承默认</option>
-            <option value="openai">OpenAI</option>
-            <option value="claude">Claude</option>
-            <option value="gemini">Gemini</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="ollama">Ollama</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="openai_compatible">OpenAI 协议兼容</option>
-          </select>
-        </div>
-        <div class="settings-field">
-          <label for="cfgModuleEvaluationModel">评估 Model</label>
-          <input id="cfgModuleEvaluationModel" type="text" placeholder="留空继承 provider 默认模型">
-        </div>
-      </div>
+          <div id="popupModelRemoteBanner" class="popup-model-notice" data-tone="warning" hidden>
+            <div>
+              <strong>模型配置已有远端更新</strong>
+              <span>当前草稿仍保留；加载远端版本会放弃本地未保存内容。</span>
+            </div>
+            <button id="popupModelReloadRemote" class="settings-secondary-btn" type="button">加载远端</button>
+          </div>
+          <div id="popupModelOverrideNotice" class="popup-model-notice" data-tone="info" hidden></div>
+          <pre id="popupModelErrorSummary" class="popup-model-errors" role="alert" hidden></pre>
+
+          <fieldset id="popupModelEditorBoundary" class="popup-model-editor">
+            <section id="popupModelEmbeddingSharedSettings" class="popup-model-shared" hidden>
+              <div class="popup-model-section-heading">
+                <div>
+                  <strong>共享 Embedding 空间</strong>
+                  <span>所有 Provider 必须使用同一个模型、维度与相似度设置。</span>
+                </div>
+              </div>
+              <label class="settings-field-row">
+                <input id="popupModelEmbeddingEnabled" type="checkbox">
+                <span>启用 Embedding route</span>
+              </label>
+              <label class="settings-field">
+                <span>共享模型</span>
+                <input id="popupModelEmbeddingModel" type="text" autocomplete="off" placeholder="bge-m3">
+              </label>
+              <div class="popup-model-field-grid">
+                <label class="settings-field">
+                  <span>输出维度</span>
+                  <input id="popupModelEmbeddingDimension" type="number" min="1" step="1" placeholder="1024">
+                </label>
+                <label class="settings-field">
+                  <span>相似度阈值</span>
+                  <input id="popupModelEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
+                </label>
+              </div>
+              <label class="settings-field-row">
+                <input id="popupModelEmbeddingMultimodal" type="checkbox">
+                <span>启用多模态 Embedding</span>
+              </label>
+            </section>
+
+            <div id="popupModelRouteLayout" class="popup-model-route-layout" data-popup-model-view="route">
+              <section class="popup-model-route-page" aria-labelledby="popupModelRouteTitle">
+                <div class="popup-model-section-heading">
+                  <div>
+                    <strong id="popupModelRouteTitle">Chat connections</strong>
+                    <span id="popupModelRouteHelp">第 1 项是 Primary，其余项依序 fallback。</span>
+                  </div>
+                  <button id="popupModelAddConnection" class="settings-secondary-btn" type="button">添加</button>
+                </div>
+                <div id="popupModelRouteList" class="model-route-list" role="list"></div>
+              </section>
+
+              <section id="popupModelDetail" class="popup-model-detail-page" aria-labelledby="popupModelInspectorTitle" hidden>
+                <button id="popupModelDetailBack" class="popup-model-detail-back" type="button">&larr; 返回 route 列表</button>
+                <div class="popup-model-detail-heading">
+                  <div>
+                    <span id="popupModelInspectorRole" class="popup-model-role">Primary</span>
+                    <h3 id="popupModelInspectorTitle">连接详情</h3>
+                  </div>
+                  <div class="popup-model-order-actions" aria-label="调整连接优先级">
+                    <button id="popupModelMoveUp" class="settings-secondary-btn" type="button">上移</button>
+                    <button id="popupModelMoveDown" class="settings-secondary-btn" type="button">下移</button>
+                    <button id="popupModelRemoveConnection" class="settings-secondary-btn popup-model-danger" type="button">移除</button>
+                  </div>
+                </div>
+
+                <div id="popupModelInspectorFields" class="popup-model-field-grid"></div>
+
+                <div class="popup-model-type-picker">
+                  <div class="popup-model-section-heading">
+                    <div>
+                      <strong>连接类型</strong>
+                      <span>先选协议、原生 SDK、本地 runtime 或独立 OAuth。</span>
+                    </div>
+                  </div>
+                  <label class="settings-field">
+                    <span>搜索连接类型</span>
+                    <input id="popupModelTypeSearch" type="search" autocomplete="off" placeholder="搜索 OpenAI、Anthropic、OAuth…">
+                  </label>
+                  <div id="popupModelConnectionTypeGroups" class="model-type-groups" role="listbox" aria-label="连接类型"></div>
+                </div>
+
+                <div id="popupModelDescriptorFields" class="popup-model-field-grid"></div>
+                <div id="popupModelCredentialEditor" class="popup-model-credential" hidden></div>
+
+                <div class="settings-probe-row popup-model-probe">
+                  <button id="popupModelProbeButton" class="settings-secondary-btn" type="button">探测当前草稿</button>
+                  <span id="popupModelProbeStatus" class="settings-probe-status" aria-live="polite">尚未探测此精确草稿。</span>
+                </div>
+              </section>
+            </div>
+
+            <section id="popupModelRuntimeView" class="popup-model-runtime" hidden>
+              <div class="popup-model-section-heading">
+                <div>
+                  <strong>Chat runtime</strong>
+                  <span>这些值属于模型 route，并随模型配置独立保存。</span>
+                </div>
+              </div>
+              <div class="popup-model-field-grid">
+                <label class="settings-field">
+                  <span>并发数</span>
+                  <input id="popupModelChatConcurrency" type="number" min="1" max="16" step="1">
+                </label>
+                <label class="settings-field">
+                  <span>超时（秒）</span>
+                  <input id="popupModelChatTimeout" type="number" min="10" max="600" step="10">
+                </label>
+              </div>
+              <div id="popupModelRuntimeSummary" class="popup-model-runtime-summary"></div>
+            </section>
+
+            <section id="popupModelMigrationPanel" class="popup-model-migration" hidden></section>
+          </fieldset>
+
+          <div class="popup-model-save-bar">
+            <span id="popupModelSaveStatus" class="settings-probe-status" aria-live="polite"></span>
+            <button id="popupModelSaveButton" class="settings-save" type="button">保存模型 route</button>
+          </div>
+        </section>
       </div>
 
       <div id="settingsPanelSources" class="settings-panel" data-settings-panel="sources" role="tabpanel" aria-labelledby="settingsTabSources" hidden>
@@ -5952,10 +6273,11 @@
       </div>
       </div>
 
-      <p class="settings-note">保存后会尝试热重载；少数路径类设置仍建议重启后端确认。</p>
-
-      <div class="settings-actions">
-        <button id="settingsSave" class="settings-save" type="button">保存配置</button>
+      <div id="settingsGeneralActions">
+        <p class="settings-note">通用配置保存后会尝试热重载；少数路径类设置仍建议重启后端确认。</p>
+        <div class="settings-actions">
+          <button id="settingsSave" class="settings-save" type="button">保存通用配置</button>
+        </div>
       </div>
     </div>
 

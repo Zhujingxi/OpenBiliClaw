@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, NoReturn
 
+import httpx
+
 from .base import (
     LLMProvider,
     LLMProviderError,
@@ -12,6 +14,7 @@ from .base import (
     LLMResponse,
     LLMResponseError,
     LLMTimeoutError,
+    retry_after_seconds_from_exception,
 )
 
 genai: Any | None
@@ -73,10 +76,12 @@ class GeminiProvider(LLMProvider):
         embedding_output_dimensionality: int | None = None,
         proxy: str = "",
         trust_env: bool = True,
+        provider_name: str = "gemini",
     ) -> None:
         if not gemini_sdk_available():
             _raise_missing_sdk()
         assert genai is not None
+        self._provider_name = provider_name
         self._model = model
         self._embedding_output_dimensionality = (
             embedding_output_dimensionality
@@ -128,7 +133,7 @@ class GeminiProvider(LLMProvider):
 
     @property
     def name(self) -> str:
-        return "gemini"
+        return self._provider_name
 
     async def complete(
         self,
@@ -168,7 +173,7 @@ class GeminiProvider(LLMProvider):
 
         content = response.text or ""
         if not content.strip():
-            raise LLMResponseError("gemini returned empty content")
+            raise LLMResponseError(f"{self._provider_name} returned empty content")
 
         usage = None
         if response.usage_metadata is not None:
@@ -187,43 +192,89 @@ class GeminiProvider(LLMProvider):
         return LLMResponse(
             content=content,
             model=response.model_version or effective_model,
-            provider="gemini",
+            provider=self._provider_name,
             usage=usage,
             raw=response,
         )
 
     async def _request_with_retry(self, **kwargs: Any) -> Any:
-        last_error: Exception | None = None
+        return await self._send_with_retry(self._client.aio.models.generate_content, **kwargs)
+
+    async def _embedding_request_with_retry(self, **kwargs: Any) -> Any:
+        return await self._send_with_retry(self._client.aio.models.embed_content, **kwargs)
+
+    async def _send_with_retry(self, send: Any, **kwargs: Any) -> Any:
+        """Apply one retry/error contract to chat and embedding SDK calls."""
+        last_error: LLMProviderError | None = None
 
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                return await self._client.aio.models.generate_content(**kwargs)
+                return await send(**kwargs)
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 mapped = self._map_error(exc)
                 last_error = mapped
-                if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
-                    raise mapped from exc
-                await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
+            if not self._is_retryable(mapped) or attempt == self._MAX_RETRIES:
+                break
+            await asyncio.sleep(self._BASE_RETRY_DELAY * attempt)
 
         if last_error is None:
-            raise LLMProviderError("gemini request failed")
-        raise last_error
+            raise LLMProviderError(f"{self._provider_name} request failed")
+        raise last_error from None
 
     def _map_error(self, exc: Exception) -> LLMProviderError:
+        if isinstance(exc, LLMRateLimitError):
+            return LLMRateLimitError(
+                f"{self._provider_name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
+        if isinstance(exc, (LLMTimeoutError, TimeoutError, httpx.TimeoutException)):
+            return LLMTimeoutError(f"{self._provider_name} request timed out")
+        if isinstance(exc, LLMResponseError):
+            return LLMResponseError(f"{self._provider_name} returned an invalid response")
         if isinstance(exc, LLMProviderError):
-            return exc
-        if isinstance(exc, TimeoutError):
-            return LLMTimeoutError("gemini request timed out")
+            return LLMProviderError(f"{self._provider_name} request failed")
 
-        status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
-        message = (getattr(exc, "message", None) or str(exc)).lower()
-        if status_code == 429 or "rate limit" in message or "resource_exhausted" in message:
-            return LLMRateLimitError("gemini rate limit exceeded")
-        if (errors is not None and isinstance(exc, errors.ServerError)) or (
-            status_code and int(status_code) >= 500
+        status_code = self._safe_status_code(exc)
+        error_type = type(exc).__name__.lower().replace("_", "")
+        if status_code == 429 or "ratelimit" in error_type or "resourceexhausted" in error_type:
+            return LLMRateLimitError(
+                f"{self._provider_name} rate limit exceeded",
+                retry_after_seconds=retry_after_seconds_from_exception(exc),
+            )
+        if status_code in {401, 403}:
+            return LLMProviderError(f"{self._provider_name} authentication failed")
+        if (
+            isinstance(exc, (ConnectionError, OSError, httpx.TransportError))
+            or "connection" in error_type
         ):
-            return LLMProviderError(f"gemini server error: {status_code}")
-        return LLMProviderError(f"gemini request failed: {exc}")
+            return LLMProviderError(f"{self._provider_name} connection error")
+        if (errors is not None and isinstance(exc, errors.ServerError)) or (
+            status_code is not None and status_code >= 500
+        ):
+            return LLMProviderError(f"{self._provider_name} server error: {status_code}")
+        if status_code is not None:
+            return LLMProviderError(f"{self._provider_name} request failed: HTTP {status_code}")
+        return LLMProviderError(f"{self._provider_name} request failed")
+
+    @staticmethod
+    def _safe_status_code(exc: Exception) -> int | None:
+        for attribute in ("code", "status_code"):
+            try:
+                value = getattr(exc, attribute, None)
+            except Exception:
+                continue
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                try:
+                    return int(value.strip())
+                except ValueError:
+                    continue
+        return None
 
     def _is_retryable(self, exc: LLMProviderError) -> bool:
         if isinstance(exc, LLMRateLimitError):
@@ -268,7 +319,7 @@ class GeminiProvider(LLMProvider):
         """
         if types is None:
             _raise_missing_sdk()
-        response = await self._client.aio.models.embed_content(
+        response = await self._embedding_request_with_retry(
             model=model,
             contents=text,
             config=self._embed_content_config(),
@@ -297,7 +348,7 @@ class GeminiProvider(LLMProvider):
             data=image_bytes,
             mime_type=(mime_type or "image/jpeg").strip() or "image/jpeg",
         )
-        response = await self._client.aio.models.embed_content(
+        response = await self._embedding_request_with_retry(
             model=model,
             contents=part,
             config=self._embed_content_config(),

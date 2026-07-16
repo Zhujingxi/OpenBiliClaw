@@ -18,7 +18,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
-from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlparse
 from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -86,7 +86,6 @@ from openbiliclaw.api.models import (
     LLMConfigOut,
     LLMProviderConfigOut,
     LoggingConfigOut,
-    ModuleLLMConfigOut,
     NetworkConfigOut,
     NotificationAckIn,
     NotificationAckResponse,
@@ -149,6 +148,8 @@ from openbiliclaw.api.models import (
     ZhihuSourceConfigOut,
     validate_saved_item_key,
 )
+from openbiliclaw.config import mask_proxy_userinfo
+from openbiliclaw.config_write import coordinated_config_write
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
@@ -196,7 +197,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
-_CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
 # Guided-init liveness heartbeat period (init-progress spec Phase 0). A stage-2
@@ -590,17 +590,6 @@ def _detect_lan_ip() -> str | None:
     return fallback
 
 
-_RESETTABLE_CONFIG_FIELDS = {
-    "llm.openai.api_key": ("llm", "openai", "api_key"),
-    "llm.claude.api_key": ("llm", "claude", "api_key"),
-    "llm.gemini.api_key": ("llm", "gemini", "api_key"),
-    "llm.deepseek.api_key": ("llm", "deepseek", "api_key"),
-    "llm.openrouter.api_key": ("llm", "openrouter", "api_key"),
-    "llm.openai_compatible.api_key": ("llm", "openai_compatible", "api_key"),
-    "llm.embedding.api_key": ("llm", "embedding", "api_key"),
-}
-
-
 def _config_backup_path(config_path: Path) -> Path:
     return config_path.with_name(f"{config_path.name}.bak")
 
@@ -620,16 +609,34 @@ def _restore_config_snapshot(backup_path: Path, config_path: Path) -> None:
 
 def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
     from openbiliclaw.config import ConfigIssue
-    from openbiliclaw.llm.registry import RegistryBuildError, build_llm_registry
+    from openbiliclaw.llm.connection_factory import AdapterRuntimeOptions
+    from openbiliclaw.llm.registry import (
+        build_ordered_chat_route,
+        build_ordered_embedding_service,
+    )
+    from openbiliclaw.model_config import compute_model_revision
 
     issues = list(base_issues)
     try:
-        build_llm_registry(cfg)
-    except RegistryBuildError as exc:
+        options = AdapterRuntimeOptions(
+            timeout_seconds=float(cfg.models.chat.timeout_seconds),
+            environment=os.environ,
+        )
+        build_ordered_chat_route(
+            cfg.models.chat,
+            revision=compute_model_revision(cfg.models),
+            runtime_options=options,
+        )
+        build_ordered_embedding_service(
+            cfg.models.embedding,
+            revision=compute_model_revision(cfg.models),
+            runtime_options=options,
+        )
+    except Exception as exc:
         issues.append(
             ConfigIssue(
-                field="llm",
-                message=f"LLM registry would fail to build: {exc}",
+                field="models",
+                message=f"Model routes would fail to build: {exc}",
                 severity="blocking",
             )
         )
@@ -1204,21 +1211,6 @@ def _mode_to_flags(mode: str) -> tuple[bool, bool]:
     return (mode != "legacy", mode == "inspiration")
 
 
-def _mask_proxy_userinfo(url: str) -> str:
-    """Mask any ``user:pass@`` credential in a proxy URL for GET responses.
-
-    ``socks5://u:p@host:1`` → ``socks5://***@host:1``. A bare
-    ``socks5://host:1`` has no secret and is returned verbatim.
-    """
-    if not url:
-        return url
-    parts = urlsplit(url)
-    if "@" not in parts.netloc:
-        return url
-    host = parts.netloc.rsplit("@", 1)[1]
-    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
-
-
 def _is_masked_proxy_echo(value: str) -> bool:
     """Whether a submitted proxy value is a masked GET echo (contains ``***``)."""
     return "***" in value
@@ -1438,6 +1430,25 @@ def create_app(
             auto_update_service=auto_update_service,
             llm_concurrency_gate=injected_gate,
         )
+        # Even dependency-injected tests/integrations expose one immutable
+        # bundle, so health and every new consumer resolve the same route and
+        # embedding identity as production composition.
+        from openbiliclaw.api.runtime_context import RuntimeModelBundle
+        from openbiliclaw.model_config import compute_model_revision, default_model_config
+
+        injected_service = getattr(soul_engine, "_llm_service", None)
+        injected_route = getattr(injected_service, "registry", None)
+        injected_embedding = getattr(soul_engine, "_embedding_service", None)
+        injected_models = getattr(config, "models", None) or default_model_config()
+        ctx.model_bundle = RuntimeModelBundle(
+            revision=compute_model_revision(injected_models),
+            chat_route=injected_route,
+            llm_service=injected_service,
+            embedding_service=injected_embedding,
+            models=injected_models,
+        )
+        ctx.llm_registry = injected_route
+        ctx.llm_service = injected_service
         if ctx.dialogue is None:
             from openbiliclaw.soul.dialogue import SocraticDialogue
 
@@ -1472,10 +1483,9 @@ def create_app(
                 "; ".join(str(getattr(issue, "message", issue)) for issue in ctx.degraded_issues),
             )
     if ctx.llm_concurrency_gate is None:
-        from openbiliclaw.config import llm_concurrency_from_config
         from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
-        ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+        ctx.llm_concurrency_gate = LLMConcurrencyGate(config.models.chat.concurrency)
 
     def _inventory_target() -> int:
         controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
@@ -1549,7 +1559,7 @@ def create_app(
         """Local-only enable/disable + set/change of the password gate.
 
         Lives here (not in register_auth_routes) so it shares ``PUT /api/config``'s
-        ``_CONFIG_SAVE_LOCK`` + snapshot/rollback — its full-file ``save_config``
+        canonical path boundary + snapshot/rollback — its full-file ``save_config``
         must not race with a concurrent settings save (review r1#3). Callable only
         by a trusted-local client (extension / local UI / CLI), never a remote
         session ("change the lock only from inside the house"); applied live (no
@@ -1584,7 +1594,8 @@ def create_app(
         password = str(password) if password is not None else None
         ttl = body.get("session_ttl_hours")
 
-        async with _CONFIG_SAVE_LOCK:
+        config_path = _cfg_path()
+        async with coordinated_config_write(config_path):
             cfg = _load()  # re-read inside the lock to avoid clobbering a concurrent save
             auth = cfg.api.auth
             was_enabled = auth.enabled
@@ -1611,7 +1622,6 @@ def create_app(
             # while running — is caught by revoke_and_set_fingerprint comparing the
             # new fingerprint to the stored one inside its transaction (r4#2).
             force_bump = (auth.enabled != was_enabled) or bool(password and password.strip())
-            config_path = _cfg_path()
             config_existed = config_path.exists()
             backup_path = _snapshot_config_file(config_path)
 
@@ -1725,6 +1735,11 @@ def create_app(
         method = request.method.upper()
         allowed = (
             method == "OPTIONS"
+            # Degraded mode is an API capability boundary, not a frontend
+            # availability boundary.  Keep every HTML shell and static asset
+            # reachable so users can open the desktop/mobile/setup UI and
+            # repair the model route through the allow-listed APIs below.
+            or not path.startswith("/api/")
             or path == "/api/ping"
             or path == "/api/qr-info"
             or path == "/api/health"
@@ -1734,12 +1749,14 @@ def create_app(
             or path == "/api/autostart/apply"
             or path in ("/api/init-status", "/api/init", "/api/init/cancel")
             # Update status + manual check/apply: a backend that can't build its
-            # LLM registry is exactly when pulling a fix-carrying release matters,
+            # model routes is exactly when pulling a fix-carrying release matters,
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
+            or path == "/api/model-config"
+            or path == "/api/model-connection-types"
+            or path == "/api/model-config/probe"
             or path.startswith("/api/auth")
-            or path.startswith("/m")
         )
         if allowed:
             return await call_next(request)
@@ -1835,6 +1852,20 @@ def create_app(
                     status_code=409,
                 )
         return await call_next(request)
+
+    # Model configuration is a separate, revision-guarded API surface. Keep
+    # its strict schemas, secret handling, descriptor projection, and service
+    # transaction mapping out of this already-large application module.
+    from openbiliclaw.api.model_config_routes import install_model_config_routes
+    from openbiliclaw.config import _default_config_path as _model_config_path
+
+    install_model_config_routes(
+        app,
+        context=ctx,
+        config_path=_model_config_path(),
+        init_active=_init_active_now,
+        event_publisher=getattr(ctx.event_hub, "publish", None),
+    )
 
     # Register AFTER the degraded guard so the auth gate is the outermost http
     # middleware (runs first): unauthenticated requests are rejected before any
@@ -2250,15 +2281,44 @@ def create_app(
         _embedding_ready_checked_at = float("-inf")
         _embedding_diag_checked_at = float("-inf")
 
+    def _embedding_route_config() -> Any | None:
+        config = getattr(ctx, "config", None)
+        models = getattr(config, "models", None)
+        return getattr(models, "embedding", None)
+
+    def _embedding_primary_provider() -> Any | None:
+        route = _embedding_route_config()
+        if route is None or not bool(getattr(route, "enabled", False)):
+            return None
+        providers = tuple(getattr(route, "providers", ()) or ())
+        return providers[0] if providers else None
+
+    def _embedding_ollama_provider() -> Any | None:
+        route = _embedding_route_config()
+        if route is None or not bool(getattr(route, "enabled", False)):
+            return None
+        return next(
+            (
+                provider
+                for provider in tuple(getattr(route, "providers", ()) or ())
+                if str(getattr(provider, "type", "") or "").strip().lower() == "ollama"
+            ),
+            None,
+        )
+
     def _embedding_ollama_target() -> tuple[str, str]:
         """(base_url, model) the embedding path would use for Ollama.
 
         Mirrors registry defaults: empty base_url → local daemon, empty
         model → bge-m3.
         """
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        base_url = str(getattr(emb, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
-        model = str(getattr(emb, "model", "") or "").strip() or "bge-m3"
+        route = _embedding_route_config()
+        provider = _embedding_ollama_provider()
+        base_url = (
+            str(getattr(provider, "base_url", "") or "").strip() or "http://127.0.0.1:11434/v1"
+        )
+        settings = getattr(route, "settings", None)
+        model = str(getattr(settings, "model", "") or "").strip() or "bge-m3"
         return base_url, model
 
     def _embedding_probe_ttl(outcome: _EmbeddingProbeOutcome) -> float:
@@ -2269,8 +2329,8 @@ def create_app(
             return True
         if outcome != "timed_out" or strict:
             return False
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip().lower()
+        primary = _embedding_primary_provider()
+        provider = str(getattr(primary, "type", "") or "").strip().lower()
         if provider != "ollama":
             return False
         from openbiliclaw.runtime.ollama_supervisor import is_loopback
@@ -2297,20 +2357,23 @@ def create_app(
         pull_progress = _embedding_pull_progress_view()
         if pull_progress["running"]:
             return ("repairing", str(pull_progress["status_text"] or _repair_progress_detail()))
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip()
-        if not provider:
+        route = _embedding_route_config()
+        primary = _embedding_primary_provider()
+        provider = str(getattr(primary, "type", "") or "").strip()
+        if route is None or not bool(getattr(route, "enabled", False)):
             return ("disabled", "")
-        soul_engine = getattr(ctx, "soul_engine", None)
-        service = getattr(soul_engine, "_embedding_service", None)
+        if not provider:
+            return ("misconfigured", "embedding route has no configured provider.")
+        bundle = getattr(ctx, "model_bundle", None)
+        service = getattr(bundle, "embedding_service", None)
         if service is None:
             # Configured but the registry couldn't build it. Distinguish an
             # unknown provider NAME (e.g. a browser-translated value like
             # '奥拉玛' — re-pick in settings) from a known provider whose
             # build failed (usually missing key / base_url — fix credentials).
-            from openbiliclaw.llm.registry import _EMBEDDING_CAPABLE_PROVIDERS
+            from openbiliclaw.model_config import connection_type_registry
 
-            if provider.lower() in _EMBEDDING_CAPABLE_PROVIDERS:
+            if connection_type_registry().get(provider.lower()) is not None:
                 return (
                     "misconfigured",
                     f"embedding 服务未能构建（provider={provider}）——"
@@ -2376,8 +2439,8 @@ def create_app(
         """
         nonlocal _embedding_probe_outcome, _embedding_ready_checked_at
 
-        soul_engine = getattr(ctx, "soul_engine", None)
-        service = getattr(soul_engine, "_embedding_service", None)
+        bundle = getattr(ctx, "model_bundle", None)
+        service = getattr(bundle, "embedding_service", None)
         if service is None:
             return False
         probe = getattr(service, "probe", None)
@@ -2414,10 +2477,8 @@ def create_app(
 
     def _embedding_required_for_init() -> bool:
         """Whether guided init must wait for a configured embedding provider."""
-        cfg = getattr(ctx, "config", None)
-        emb = getattr(getattr(cfg, "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip()
-        return bool(provider)
+        route = _embedding_route_config()
+        return bool(route is not None and getattr(route, "enabled", False))
 
     @app.get("/api/ping")
     async def ping() -> JSONResponse:
@@ -2659,11 +2720,11 @@ def create_app(
             return
 
         try:
-            from openbiliclaw.config import Config, save_config
+            from openbiliclaw.config import Config, _default_config_path, save_config
 
             cfg = cast("Config", cfg)
 
-            async with _CONFIG_SAVE_LOCK:
+            async with coordinated_config_write(_default_config_path()):
                 save_config(cfg)
         except Exception:
             logger.warning("guided init source opt-in save_config failed", exc_info=True)
@@ -2674,10 +2735,14 @@ def create_app(
         try:
             await ctx.rebuild_from_config(cfg)
             await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+            reloaded_bundle = ctx.model_bundle
+            if reloaded_bundle is None:
+                raise RuntimeError("hot reload completed without a model bundle")
             with suppress(Exception):
                 await ctx.event_hub.publish(
                     {
                         "type": "config_reloaded",
+                        "revision": reloaded_bundle.revision,
                         "message": "初始化来源选择已写入配置。",
                     }
                 )
@@ -2823,8 +2888,12 @@ def create_app(
             await _persist_guided_init_source_opt_in(effective_sources)
 
         run_id = uuid.uuid4().hex
-        if not coord.try_start(run_id):
-            return JSONResponse({"error": "already_running"}, status_code=409)
+        # Reserve guided init inside the same path-scoped writer boundary used
+        # by every config transaction. Once this CAS wins, later writers see
+        # init_active; if a writer wins first, reservation waits for its commit.
+        async with coordinated_config_write(_model_config_path()):
+            if not coord.try_start(run_id):
+                return JSONResponse({"error": "already_running"}, status_code=409)
 
         # Critical-section revalidation: prereqs may have lapsed between the
         # status poll and now. On a miss, roll the reservation back to idle so
@@ -2962,8 +3031,7 @@ def create_app(
 
     async def _maybe_autostart_embedding_pull() -> bool:
         """Best-effort auto-pull for a locally hosted missing/broken model."""
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        if str(getattr(emb, "provider", "") or "").strip().lower() != "ollama":
+        if _embedding_ollama_provider() is None:
             return False
         try:
             base_url, model = _embedding_ollama_target()
@@ -3033,9 +3101,7 @@ def create_app(
         """
         if not _get_auth_gate().is_trusted_local(request):
             return JSONResponse({"error": "local_only"}, status_code=403)
-        emb = getattr(getattr(getattr(ctx, "config", None), "llm", None), "embedding", None)
-        provider = str(getattr(emb, "provider", "") or "").strip().lower()
-        if provider != "ollama":
+        if _embedding_ollama_provider() is None:
             return JSONResponse(
                 {
                     "error": "unsupported_provider",
@@ -3045,6 +3111,9 @@ def create_app(
                 status_code=409,
             )
         base_url, model = _embedding_ollama_target()
+        from openbiliclaw.runtime.ollama_supervisor import ollama_daemon_endpoint
+
+        embedding_endpoint = ollama_daemon_endpoint(base_url)
 
         from openbiliclaw.llm.ollama_diagnostics import (
             DIAG_DISK_FULL,
@@ -3072,7 +3141,6 @@ def create_app(
                     return JSONResponse({"ok": True, "already_ok": True, "model": model})
                 if code == DIAG_NOT_RUNNING:
                     from openbiliclaw.runtime.ollama_supervisor import (
-                        effective_ollama_endpoint,
                         ensure_managed_ollama,
                         is_loopback,
                         may_manage_ollama_endpoint,
@@ -3080,12 +3148,11 @@ def create_app(
                     )
 
                     cfg = ctx.config
-                    endpoint = effective_ollama_endpoint(cfg)
                     may_manage = (
                         bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                         and ollama_required(cfg)
-                        and is_loopback(endpoint)
-                        and may_manage_ollama_endpoint(endpoint)
+                        and is_loopback(embedding_endpoint)
+                        and may_manage_ollama_endpoint(embedding_endpoint)
                     )
                     if not may_manage:
                         return JSONResponse(
@@ -3100,7 +3167,7 @@ def create_app(
                             },
                             status_code=409,
                         )
-                    if not ensure_managed_ollama(endpoint):
+                    if not ensure_managed_ollama(embedding_endpoint):
                         return JSONResponse(
                             {"error": "not_running", "detail": detail},
                             status_code=409,
@@ -3109,6 +3176,8 @@ def create_app(
                     continue
                 if code == DIAG_MODEL_PATH_ENCODING:
                     from openbiliclaw.runtime.ollama_supervisor import (
+                        is_loopback,
+                        may_manage_ollama_endpoint,
                         ollama_models_relocation_candidate,
                         restart_managed_ollama_with_models_dir,
                     )
@@ -3119,6 +3188,14 @@ def create_app(
                         "请手动设置系统环境变量 OLLAMA_MODELS 为纯英文路径"
                         f"（如 D:\\ollama\\models），然后重启 Ollama 并重新拉取 {model}。"
                     )
+                    if not (
+                        is_loopback(embedding_endpoint)
+                        and may_manage_ollama_endpoint(embedding_endpoint)
+                    ):
+                        return JSONResponse(
+                            {"error": "manual_fix_required", "detail": manual_detail},
+                            status_code=409,
+                        )
                     models_dir = ollama_models_relocation_candidate()
                     if models_dir is None:
                         return JSONResponse(
@@ -3160,7 +3237,6 @@ def create_app(
                 if code == DIAG_ERROR:
                     if not provider_error_restarted:
                         from openbiliclaw.runtime.ollama_supervisor import (
-                            effective_ollama_endpoint,
                             is_loopback,
                             may_manage_ollama_endpoint,
                             ollama_required,
@@ -3168,12 +3244,11 @@ def create_app(
                         )
 
                         cfg = ctx.config
-                        endpoint = effective_ollama_endpoint(cfg)
                         may_manage = (
                             bool(getattr(getattr(cfg, "autostart", None), "manage_ollama", False))
                             and ollama_required(cfg)
-                            and is_loopback(endpoint)
-                            and may_manage_ollama_endpoint(endpoint)
+                            and is_loopback(embedding_endpoint)
+                            and may_manage_ollama_endpoint(embedding_endpoint)
                         )
                         provider_error_restarted = True
                         if may_manage and actions < _max_embedding_repair_actions:
@@ -8503,7 +8578,9 @@ def create_app(
         "ok": "X 来源正常，cookie 有效。",
         "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
         "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
-        "rate_limited": "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。",
+        "rate_limited": (
+            "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。"
+        ),
         "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
     }
 
@@ -9688,9 +9765,7 @@ def create_app(
         publish = getattr(getattr(ctx, "event_hub", None), "publish", None)
         if callable(publish):
             with suppress(Exception):
-                delivered = bool(
-                    await publish({"type": "extension_reload", "source": "dev"})
-                )
+                delivered = bool(await publish({"type": "extension_reload", "source": "dev"}))
         return {"ok": True, "delivered": delivered}
 
     def _autostart_status_out(
@@ -9812,8 +9887,8 @@ def create_app(
             )
             return JSONResponse(status_code=409, content=body.model_dump(mode="json"))
 
-        async with _CONFIG_SAVE_LOCK:
-            config_path = _cfg_path()
+        config_path = _cfg_path()
+        async with coordinated_config_write(config_path):
             config_existed = config_path.exists()
             backup_path = _snapshot_config_file(config_path)
 
@@ -9960,17 +10035,106 @@ def create_app(
                 cookie_env=cfg.sources.twitter.cookie_env,
             )
 
-        def _provider_out(p: Any) -> LLMProviderConfigOut:
-            return LLMProviderConfigOut(
-                api_key=_mask(p.api_key),
-                model=p.model,
-                base_url=p.base_url,
-                auth_mode=getattr(p, "auth_mode", ""),
-                api_flavor=getattr(p, "api_flavor", ""),
-                http_referer=getattr(p, "http_referer", ""),
-                x_title=getattr(p, "x_title", ""),
-                reasoning_effort=getattr(p, "reasoning_effort", ""),
+        def _legacy_provider_name(record: Any) -> str:
+            connection_type = str(getattr(record, "type", "") or "")
+            preset = str(getattr(record, "preset", "") or "")
+            if connection_type == "openai_compatible":
+                return {
+                    "openai": "openai",
+                    "deepseek": "deepseek",
+                    "openrouter": "openrouter",
+                    "custom": "openai_compatible",
+                }.get(preset, "openai_compatible")
+            return {
+                "anthropic_compatible": "claude",
+                "gemini_api": "gemini",
+                "ollama": "ollama",
+                "codex_oauth": "openai",
+            }.get(connection_type, "")
+
+        def _native_llm_projection() -> LLMConfigOut:
+            models = cfg.models
+            provider_fields = {
+                "openai": LLMProviderConfigOut(),
+                "claude": LLMProviderConfigOut(),
+                "gemini": LLMProviderConfigOut(),
+                "deepseek": LLMProviderConfigOut(),
+                "ollama": LLMProviderConfigOut(),
+                "openrouter": LLMProviderConfigOut(),
+                "openai_compatible": LLMProviderConfigOut(),
+            }
+
+            def _chat_provider(record: Any) -> LLMProviderConfigOut:
+                return LLMProviderConfigOut(
+                    api_key="",
+                    model=str(getattr(record, "model", "") or ""),
+                    base_url=str(getattr(record, "base_url", "") or ""),
+                    auth_mode=(
+                        "codex_oauth" if getattr(record, "type", "") == "codex_oauth" else ""
+                    ),
+                    api_flavor=str(getattr(record, "api_mode", "") or ""),
+                    http_referer=str(getattr(record, "http_referer", "") or ""),
+                    x_title=str(getattr(record, "x_title", "") or ""),
+                    reasoning_effort=str(getattr(record, "reasoning_effort", "") or ""),
+                )
+
+            chat_records = tuple(models.chat.connections)
+            primary_name = _legacy_provider_name(chat_records[0]) if chat_records else ""
+            if primary_name:
+                provider_fields[primary_name] = _chat_provider(chat_records[0])
+            fallback_name = ""
+            if len(chat_records) > 1:
+                candidate_name = _legacy_provider_name(chat_records[1])
+                # Two records cannot occupy one legacy provider bucket. Never
+                # collapse the first fallback over primary or substitute a
+                # representable later fallback.
+                if candidate_name and candidate_name != primary_name:
+                    fallback_name = candidate_name
+                    provider_fields[candidate_name] = _chat_provider(chat_records[1])
+
+            embedding_records = tuple(models.embedding.providers)
+            embedding_primary = (
+                _legacy_provider_name(embedding_records[0]) if embedding_records else ""
             )
+            embedding_fallback = ""
+            if len(embedding_records) > 1:
+                candidate_name = _legacy_provider_name(embedding_records[1])
+                if candidate_name and candidate_name != embedding_primary:
+                    embedding_fallback = candidate_name
+
+            return LLMConfigOut(
+                authoritative=False,
+                read_only=True,
+                projection="primary_and_first_fallback",
+                default_provider=primary_name,
+                concurrency=models.chat.concurrency,
+                timeout=models.chat.timeout_seconds,
+                fallback_provider=fallback_name,
+                openai=provider_fields["openai"],
+                claude=provider_fields["claude"],
+                gemini=provider_fields["gemini"],
+                deepseek=provider_fields["deepseek"],
+                ollama=provider_fields["ollama"],
+                openrouter=provider_fields["openrouter"],
+                openai_compatible=provider_fields["openai_compatible"],
+                embedding=EmbeddingConfigOut(
+                    provider=embedding_primary if models.embedding.enabled else "",
+                    model=models.embedding.settings.model,
+                    api_key="",
+                    base_url=(
+                        str(getattr(embedding_records[0], "base_url", "") or "")
+                        if embedding_records
+                        else ""
+                    ),
+                    output_dimensionality=models.embedding.settings.output_dimensionality,
+                    similarity_threshold=models.embedding.settings.similarity_threshold,
+                    fallback_enabled=bool(embedding_fallback),
+                    fallback_provider=embedding_fallback,
+                    multimodal_enabled=models.embedding.settings.multimodal_enabled,
+                ),
+            )
+
+        llm_projection = _native_llm_projection()
 
         issue_list = [
             ConfigIssueOut(
@@ -9986,46 +10150,7 @@ def create_app(
             data_dir=cfg.data_dir,
             degraded=degraded,
             degraded_reason=degraded_reason,
-            llm=LLMConfigOut(
-                default_provider=cfg.llm.default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
-                timeout=int(getattr(cfg.llm, "timeout", 300)),
-                fallback_provider=cfg.llm.fallback_provider,
-                openai=_provider_out(cfg.llm.openai),
-                claude=_provider_out(cfg.llm.claude),
-                gemini=_provider_out(cfg.llm.gemini),
-                deepseek=_provider_out(cfg.llm.deepseek),
-                ollama=_provider_out(cfg.llm.ollama),
-                openrouter=_provider_out(cfg.llm.openrouter),
-                openai_compatible=_provider_out(cfg.llm.openai_compatible),
-                embedding=EmbeddingConfigOut(
-                    provider=cfg.llm.embedding.provider,
-                    model=cfg.llm.embedding.model,
-                    api_key=_mask(cfg.llm.embedding.api_key),
-                    base_url=cfg.llm.embedding.base_url,
-                    output_dimensionality=cfg.llm.embedding.output_dimensionality,
-                    similarity_threshold=cfg.llm.embedding.similarity_threshold,
-                    fallback_enabled=cfg.llm.embedding.fallback_enabled,
-                    fallback_provider=cfg.llm.embedding.fallback_provider,
-                    multimodal_enabled=cfg.llm.embedding.multimodal_enabled,
-                ),
-                soul=ModuleLLMConfigOut(
-                    provider=cfg.llm.soul.provider,
-                    model=cfg.llm.soul.model,
-                ),
-                discovery=ModuleLLMConfigOut(
-                    provider=cfg.llm.discovery.provider,
-                    model=cfg.llm.discovery.model,
-                ),
-                recommendation=ModuleLLMConfigOut(
-                    provider=cfg.llm.recommendation.provider,
-                    model=cfg.llm.recommendation.model,
-                ),
-                evaluation=ModuleLLMConfigOut(
-                    provider=cfg.llm.evaluation.provider,
-                    model=cfg.llm.evaluation.model,
-                ),
-            ),
+            llm=llm_projection,
             bilibili=BilibiliConfigOut(
                 auth_method=cfg.bilibili.auth_method,
                 cookie=_mask(cfg.bilibili.cookie),
@@ -10034,7 +10159,7 @@ def create_app(
             ),
             network=NetworkConfigOut(
                 mode=cfg.network.mode,
-                proxy=_mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
+                proxy=mask_proxy_userinfo(cfg.network.proxy) if mask_keys else cfg.network.proxy,
             ),
             sources=SourcesConfigOut(
                 browser=SourcesBrowserConfigOut(
@@ -10226,266 +10351,6 @@ def create_app(
             return []
         return [str(item).strip() for item in value if str(item).strip()]
 
-    def _apply_llm_update(cfg: Any, llm_data: object) -> None:
-        """Apply the LLM subset of a config update to an in-memory config."""
-        if not isinstance(llm_data, dict):
-            return
-        from openbiliclaw.config import _normalize_llm_concurrency, _normalize_llm_timeout
-
-        if "default_provider" in llm_data:
-            cfg.llm.default_provider = str(llm_data["default_provider"])
-        if "concurrency" in llm_data:
-            cfg.llm.concurrency = _normalize_llm_concurrency(llm_data["concurrency"])
-        if "timeout" in llm_data:
-            cfg.llm.timeout = _normalize_llm_timeout(llm_data["timeout"])
-        # Legacy clients (older extension popups) still send
-        # "fallback_enabled" — deliberately ignored: a non-empty
-        # fallback_provider is the only enable switch.
-        if "fallback_provider" in llm_data:
-            cfg.llm.fallback_provider = str(llm_data["fallback_provider"]).strip()
-        for provider_name in (
-            "openai",
-            "claude",
-            "gemini",
-            "deepseek",
-            "ollama",
-            "openrouter",
-            "openai_compatible",
-        ):
-            if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
-                provider_cfg = getattr(cfg.llm, provider_name)
-                pdata = llm_data[provider_name]
-                skipped_fields: list[str] = []
-                for field_name in (
-                    "api_key",
-                    "model",
-                    "base_url",
-                    "auth_mode",
-                    "api_flavor",
-                    "http_referer",
-                    "x_title",
-                    "reasoning_effort",
-                ):
-                    if field_name in pdata:
-                        new_value = str(pdata[field_name])
-                        if field_name == "api_key" and "*" in new_value:
-                            skipped_fields.append(f"{field_name}=masked")
-                            continue
-                        existing = getattr(provider_cfg, field_name, "")
-                        if (
-                            # These accept an explicit empty value ("" = back
-                            # to default); the others treat empty as "keep".
-                            field_name not in {"auth_mode", "reasoning_effort", "api_flavor"}
-                            and not new_value.strip()
-                            and isinstance(existing, str)
-                            and existing.strip()
-                        ):
-                            skipped_fields.append(f"{field_name}=empty_skip")
-                            continue
-                        setattr(provider_cfg, field_name, new_value)
-                if skipped_fields:
-                    logger.debug(
-                        "Config LLM update: provider %s skipped fields: %s",
-                        provider_name,
-                        ", ".join(skipped_fields),
-                    )
-        if "embedding" in llm_data and isinstance(llm_data["embedding"], dict):
-            emb = llm_data["embedding"]
-            if "provider" in emb:
-                cfg.llm.embedding.provider = str(emb["provider"])
-            if "model" in emb:
-                new_model = str(emb["model"])
-                if new_model.strip() or not cfg.llm.embedding.model.strip():
-                    cfg.llm.embedding.model = new_model
-            if "api_key" in emb:
-                new_key = str(emb["api_key"])
-                if "*" not in new_key and (
-                    new_key.strip() or not cfg.llm.embedding.api_key.strip()
-                ):
-                    cfg.llm.embedding.api_key = new_key
-            if "base_url" in emb:
-                new_base_url = str(emb["base_url"])
-                if new_base_url.strip() or not cfg.llm.embedding.base_url.strip():
-                    cfg.llm.embedding.base_url = new_base_url
-            if "output_dimensionality" in emb:
-                try:
-                    cfg.llm.embedding.output_dimensionality = max(
-                        0,
-                        int(emb["output_dimensionality"] or 0),
-                    )
-                except (TypeError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="llm.embedding.output_dimensionality must be an integer",
-                    ) from exc
-            if "similarity_threshold" in emb:
-                cfg.llm.embedding.similarity_threshold = float(emb["similarity_threshold"])
-            if "fallback_enabled" in emb:
-                cfg.llm.embedding.fallback_enabled = _as_bool(emb["fallback_enabled"])
-            if "fallback_provider" in emb:
-                cfg.llm.embedding.fallback_provider = str(emb["fallback_provider"]).strip()
-            if "multimodal_enabled" in emb:
-                cfg.llm.embedding.multimodal_enabled = _as_bool(emb["multimodal_enabled"])
-        for module_name in ("soul", "discovery", "recommendation", "evaluation"):
-            if module_name in llm_data and isinstance(llm_data[module_name], dict):
-                mod_cfg = getattr(cfg.llm, module_name)
-                mdata = llm_data[module_name]
-                if "provider" in mdata:
-                    mod_cfg.provider = str(mdata["provider"])
-                if "model" in mdata:
-                    mod_cfg.model = str(mdata["model"])
-
-    async def _probe_llm_config(
-        cfg: Any,
-        *,
-        kind: Literal["llm", "llm_fallback"] = "llm",
-    ) -> ConfigServiceProbeResponse:
-        from openbiliclaw.llm.base import LLM_CONNECTIVITY_PROBE_MAX_TOKENS
-        from openbiliclaw.llm.registry import build_llm_registry
-
-        started = time.perf_counter()
-        is_fallback = kind == "llm_fallback"
-        default_provider = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
-        provider = (
-            str(getattr(cfg.llm, "fallback_provider", "") or "").strip().lower()
-            if is_fallback
-            else default_provider
-        )
-        model = ""
-        if is_fallback:
-            # Refuse cleanly (ok=false, not a 500) for the two dead states
-            # the registry would otherwise silently drop.
-            if not provider:
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind=kind,
-                    provider="",
-                    model="",
-                    error="Fallback LLM provider is not configured.",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            if provider == default_provider:
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind=kind,
-                    provider=provider,
-                    model="",
-                    error=(
-                        f"Fallback provider {provider!r} is the same as the default "
-                        "provider — it would never be used."
-                    ),
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-        try:
-            registry = build_llm_registry(cfg)
-            if not is_fallback:
-                provider = provider or str(getattr(registry, "default_provider", "") or "")
-            provider_cfg = getattr(cfg.llm, provider, None)
-            model = str(getattr(provider_cfg, "model", "") or "").strip()
-            if not registry.is_chat_capable(provider):
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind=kind,
-                    provider=provider,
-                    model=model,
-                    error=f"LLM provider {provider!r} is not registered or not chat-capable.",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
-
-            async def _complete_probe() -> Any:
-                async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
-                    return await registry.complete_provider(
-                        provider,
-                        [
-                            {"role": "system", "content": "Reply with only OK."},
-                            {"role": "user", "content": "OpenBiliClaw connectivity probe."},
-                        ],
-                        temperature=0,
-                        max_tokens=LLM_CONNECTIVITY_PROBE_MAX_TOKENS,
-                        reasoning_effort="",
-                        model=model or None,
-                    )
-
-            response = await asyncio.wait_for(
-                _complete_probe(),
-                timeout=timeout_s,
-            )
-            ok = bool(str(getattr(response, "content", "") or "").strip())
-            response_model = str(getattr(response, "model", "") or model)
-            label = "Fallback LLM provider" if is_fallback else "LLM provider"
-            return ConfigServiceProbeResponse(
-                ok=ok,
-                kind=kind,
-                provider=provider,
-                model=response_model,
-                message=f"{label} is available." if ok else "",
-                error="" if ok else f"{label} returned an empty response.",
-                latency_ms=int((time.perf_counter() - started) * 1000),
-            )
-        except Exception as exc:
-            return ConfigServiceProbeResponse(
-                ok=False,
-                kind=kind,
-                provider=provider,
-                model=model,
-                error=str(exc),
-                latency_ms=int((time.perf_counter() - started) * 1000),
-            )
-
-    async def _probe_embedding_config(cfg: Any) -> ConfigServiceProbeResponse:
-        from openbiliclaw.llm.base import LLMRegistry
-        from openbiliclaw.llm.registry import build_embedding_service
-
-        started = time.perf_counter()
-        emb_cfg = getattr(getattr(cfg, "llm", None), "embedding", None)
-        provider = str(getattr(emb_cfg, "provider", "") or "").strip().lower()
-        model = str(getattr(emb_cfg, "model", "") or "").strip()
-        if not provider:
-            return ConfigServiceProbeResponse(
-                ok=False,
-                kind="embedding",
-                provider="",
-                model=model,
-                error="Embedding provider is not configured.",
-            )
-        try:
-            service = build_embedding_service(cfg, LLMRegistry())
-            if service is None:
-                return ConfigServiceProbeResponse(
-                    ok=False,
-                    kind="embedding",
-                    provider=provider,
-                    model=model,
-                    error="Embedding service could not be built from the submitted config.",
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                )
-            probe = getattr(service, "probe", None)
-            if not callable(probe):
-                # Legacy/stub embedding service without a live probe —
-                # building it successfully is the best signal we have.
-                ok = True
-            else:
-                ok = bool(await asyncio.wait_for(probe(), timeout=15.0))
-            return ConfigServiceProbeResponse(
-                ok=ok,
-                kind="embedding",
-                provider=provider,
-                model=model,
-                message="Embedding provider is available." if ok else "",
-                error="" if ok else "Embedding provider returned no vector.",
-                latency_ms=int((time.perf_counter() - started) * 1000),
-            )
-        except Exception as exc:
-            return ConfigServiceProbeResponse(
-                ok=False,
-                kind="embedding",
-                provider=provider,
-                model=model,
-                error=str(exc),
-                latency_ms=int((time.perf_counter() - started) * 1000),
-            )
-
     async def _probe_network_proxy(mode: str, proxy: str) -> ConfigServiceProbeResponse:
         """Probe the submitted overseas routing policy without saving config.
 
@@ -10546,43 +10411,31 @@ def create_app(
 
     @app.post("/api/config/probe-service", response_model=ConfigServiceProbeResponse)
     async def probe_config_service(payload: ConfigServiceProbeIn) -> ConfigServiceProbeResponse:
-        """Probe submitted LLM / embedding / proxy settings without saving config.toml."""
-        from copy import deepcopy
-
+        """Probe only submitted outbound-network settings without saving."""
         from openbiliclaw.config import (
-            load_config,
             normalize_outbound_proxy,
             normalize_outbound_proxy_mode,
         )
 
         update = payload.config if isinstance(payload.config, dict) else {}
-        if payload.kind == "network_proxy":
-            network_data = update.get("network")
-            proxy_raw = ""
-            mode_raw = ""
-            if isinstance(network_data, dict):
-                proxy_raw = str(network_data.get("proxy", ""))
-                mode_raw = str(network_data.get("mode", ""))
-            try:
-                proxy = normalize_outbound_proxy(proxy_raw)
-                mode = (
-                    normalize_outbound_proxy_mode(mode_raw)
-                    if mode_raw.strip()
-                    else ("custom" if proxy else "direct")
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if mode == "custom" and not proxy:
-                raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
-            return await _probe_network_proxy(mode, proxy)
-
-        cfg = deepcopy(load_config())
-        llm_data = update.get("llm")
-        if isinstance(llm_data, dict):
-            _apply_llm_update(cfg, llm_data)
-        if payload.kind == "embedding":
-            return await _probe_embedding_config(cfg)
-        return await _probe_llm_config(cfg, kind=payload.kind)
+        network_data = update.get("network")
+        proxy_raw = ""
+        mode_raw = ""
+        if isinstance(network_data, dict):
+            proxy_raw = str(network_data.get("proxy", ""))
+            mode_raw = str(network_data.get("mode", ""))
+        try:
+            proxy = normalize_outbound_proxy(proxy_raw)
+            mode = (
+                normalize_outbound_proxy_mode(mode_raw)
+                if mode_raw.strip()
+                else ("custom" if proxy else "direct")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if mode == "custom" and not proxy:
+            raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
+        return await _probe_network_proxy(mode, proxy)
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
     async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:
@@ -10624,9 +10477,15 @@ def create_app(
         update = payload.model_dump(exclude_none=True)
         reset_fields = [str(field) for field in update.pop("reset_fields", [])]
         suppress_background_llm_work = bool(update.pop("suppress_background_llm_work", False))
-        unknown_reset_fields = [
-            field for field in reset_fields if field not in _RESETTABLE_CONFIG_FIELDS
-        ]
+        warnings: list[str] = []
+        ignored_model_update = "llm" in update
+        update.pop("llm", None)
+        retained_resets = [field for field in reset_fields if not field.startswith("llm.")]
+        ignored_model_update = ignored_model_update or len(retained_resets) != len(reset_fields)
+        reset_fields = retained_resets
+        if ignored_model_update:
+            warnings.append("model_config_not_updated")
+        unknown_reset_fields = list(reset_fields)
         if unknown_reset_fields:
             raise HTTPException(
                 status_code=400,
@@ -10641,10 +10500,6 @@ def create_app(
             cfg.language = str(update["language"])
         if "data_dir" in update:
             cfg.data_dir = str(update["data_dir"])
-
-        # Apply LLM updates
-        if "llm" in update:
-            _apply_llm_update(cfg, update["llm"])
 
         # A masked GET echo looks like ``SESS****abcd`` — a long asterisk run
         # never appears in a genuine Cookie header, so use it (not a single
@@ -11137,12 +10992,6 @@ def create_app(
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
-        for field in reset_fields:
-            target = _RESETTABLE_CONFIG_FIELDS[field]
-            section = getattr(cfg, target[0])
-            subsection = getattr(section, target[1])
-            setattr(subsection, target[2], "")
-
         issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
         if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
             response = ConfigUpdateResponse(
@@ -11158,13 +11007,15 @@ def create_app(
                 reloaded=False,
                 rollback_applied=False,
                 restart_required=False,
+                warnings=warnings,
             )
             return JSONResponse(
                 status_code=400,
                 content=response.model_dump(mode="json"),
             )
 
-        async with _CONFIG_SAVE_LOCK:
+        config_path = _default_config_path()
+        async with coordinated_config_write(config_path):
             # gui-init D1 / spec §5b: re-check inside the lock. The middleware
             # gated this path on init_active before the handler ran, but a run
             # could have been reserved in between; saving + rebuilding config
@@ -11174,7 +11025,37 @@ def create_app(
                     {"error": "init_running", "detail": "初始化进行中，请稍后再保存配置"},
                     status_code=409,
                 )
-            config_path = _default_config_path()
+
+            # The ordinary form is prepared before it reaches the canonical
+            # write lock. A revision-guarded model save may therefore commit
+            # while this request is waiting. Native model routes are a
+            # separate authority: rebase them from the latest disk snapshot
+            # inside the lock so save, response, and runtime publication all
+            # use the same current bundle.
+            latest = load_config()
+            cfg.models = latest.models
+            cfg.model_meta = latest.model_meta
+            issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
+            if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
+                response = ConfigUpdateResponse(
+                    ok=False,
+                    config=_config_to_response(
+                        cfg,
+                        issues,
+                        mask_keys=True,
+                        degraded=bool(getattr(ctx, "degraded", False)),
+                        degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+                    ),
+                    message="配置校验失败，未写入 config.toml。",
+                    reloaded=False,
+                    rollback_applied=False,
+                    restart_required=False,
+                    warnings=warnings,
+                )
+                return JSONResponse(
+                    status_code=400,
+                    content=response.model_dump(mode="json"),
+                )
             try:
                 backup_path = _snapshot_config_file(config_path)
             except Exception as exc:
@@ -11191,8 +11072,8 @@ def create_app(
             logger.info("Configuration saved to %s", saved_path)
 
             # Refresh the process-level outbound-proxy mirror BEFORE any runtime
-            # rebuild so the rebuilt LLM registry constructs its clients with the
-            # new proxy. CN-direct clients never read this value.
+            # rebuild so the rebuilt model routes construct clients with the new
+            # proxy. CN-direct clients never read this value.
             from openbiliclaw.network import set_outbound_proxy
 
             set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)
@@ -11214,6 +11095,7 @@ def create_app(
                     reloaded=False,
                     rollback_applied=False,
                     restart_required=True,
+                    warnings=warnings,
                 )
 
             # ── Hot-reload: rebuild runtime components ──────────────
@@ -11226,11 +11108,15 @@ def create_app(
                 )
                 reload_message += " 运行时组件已热重载，新配置立即生效。"
                 logger.info("Config hot-reload succeeded")
+                reloaded_bundle = ctx.model_bundle
+                if reloaded_bundle is None:
+                    raise RuntimeError("hot reload completed without a model bundle")
                 # Notify WebSocket subscribers so the extension re-fetches data
                 with suppress(Exception):
                     await ctx.event_hub.publish(
                         {
                             "type": "config_reloaded",
+                            "revision": reloaded_bundle.revision,
                             "message": "配置已热重载，运行时组件已重建。",
                         }
                     )
@@ -11241,6 +11127,7 @@ def create_app(
                     reloaded=True,
                     rollback_applied=False,
                     restart_required=False,
+                    warnings=warnings,
                 )
             except Exception as exc:
                 logger.exception("Config hot-reload failed — attempting config rollback")
@@ -11285,6 +11172,7 @@ def create_app(
                     reloaded=False,
                     rollback_applied=rollback_applied,
                     restart_required=False,
+                    warnings=warnings,
                 )
 
     def _normalize_enabled_sources_override(
@@ -11383,13 +11271,27 @@ def create_app(
     _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
     if _desktop_dir.is_dir():
         _desktop_index_path = _desktop_dir / "index.html"
+        _shared_web_dir = _desktop_dir.parent / "shared"
+
+        if _shared_web_dir.is_dir():
+            app.mount(
+                "/web/shared",
+                _StaticFiles(directory=_shared_web_dir),
+                name="desktop-web-shared",
+            )
 
         def _desktop_asset_version() -> str:
             import hashlib
 
             digest = hashlib.sha256()
-            for relative in ("assets/css/app.css", "assets/js/app.js"):
-                path = _desktop_dir / relative
+            assets = (
+                (_desktop_dir, "assets/css/app.css"),
+                (_desktop_dir, "assets/js/app.js"),
+                (_desktop_dir, "assets/js/model-settings.js"),
+                (_desktop_dir.parent, "shared/model-config-state.js"),
+            )
+            for root, relative in assets:
+                path = root / relative
                 if not path.is_file():
                     continue
                 stat = path.stat()
@@ -11410,6 +11312,10 @@ def create_app(
             html = html.replace(
                 'src="/web/assets/js/app.js"',
                 f'src="/web/assets/js/app.js?v={version}"',
+            )
+            html = html.replace(
+                'src="/web/assets/js/model-settings.js"',
+                f'src="/web/assets/js/model-settings.js?v={version}"',
             )
             return Response(
                 html,

@@ -1,269 +1,182 @@
-# Task 9 end-to-end verification report
+# Task 9 Delivery Report
 
-Status: **PASS — deterministic and real SenseTime verification complete**
+## Status
 
-## Deterministic evidence
+Complete after review remediation. The branch exposes the dedicated,
+secret-safe model configuration API, protects native `[models]` from legacy
+`/api/config` writers, retains only the outbound-network probe on the legacy
+probe endpoint, and now closes the probe/lifecycle/init races found during
+review.
 
-- All scenarios use temporary SQLite and temporary memory only.
-- User A starts with 16 ready rows and 602 raw rows under a ceiling of 600,
-  consumes the pool to zero and observes real-service recovery in under one
-  second for each of 50 sustained rounds, then runs post-refill maintenance.
-- User A directly verifies no non-null discovery claim tokens and no active or
-  waiting total/background permits remain after shutdown.
-- A separate sixty-row copy scenario observes two simultaneous 30-item provider
-  requests and measured expression fan-out exactly equal to two.
-- An isolated User B database starts with ten ready rows plus twelve
-  `zhihu-*` overflow rows and verifies canonical `zhihu` accounting and
-  maintenance non-erasure.
+## Delivered scope
 
-## Live evidence
+- Added strict request/response models for ordered Chat connections, shared
+  Embedding settings and providers, explicit `keep/set/clear/env` credential
+  actions, migration resolutions, public credential state, exact probe state,
+  live circuit state, and descriptor registry output. Unknown fields and type
+  coercion are rejected; response schemas contain no raw credential field.
+- Added `GET/PUT /api/model-config`, `GET /api/model-connection-types`, and
+  `POST /api/model-config/probe` through a route installer around
+  `ModelConfigService`. Saves preserve the service's revision/authority guard,
+  fieldized validation, transactional persistence/runtime swap, rollback, and
+  single `config_reloaded` publisher.
+- Exact probes accept one Chat draft or one Embedding provider plus the full
+  shared settings object. They do not persist or fallback and continue to use
+  the runtime maintenance concurrency gate. A `keep` action resolves only the
+  same stable ID at the current revision.
+- Added in-memory, secret-free exact-probe summaries with UTC timestamps and
+  source revision. GET history follows stable IDs through pure reorder but is
+  invalidated by record edits, credential transitions, unexplained revision
+  changes, or any shared Embedding setting change. An edited/unsaved same-ID
+  draft receives its POST result without evicting the persisted record's last
+  exact summary.
+- Added `RuntimeContext.record_model_probe_success()`. Only a successful probe
+  whose full draft fingerprint matches the current persisted record can close
+  the matching live circuit for the same ID, capability, and current revision;
+  peers, old revisions, brand-new IDs, edited drafts, and Embedding drafts with
+  different shared settings remain untouched.
+- Made legacy `GET /api/config` a credential-free, non-authoritative,
+  read-only `primary_and_first_fallback` projection. It never reveals model
+  keys, including with `reveal_keys=true`, never substitutes later fallbacks,
+  and never collapses duplicate connection types over one provider bucket.
+- When native `[models]` is active, legacy `PUT /api/config` ignores `llm` and
+  `llm.*` reset attempts, preserves the native route, returns
+  `model_config_not_updated`, and continues saving unrelated general settings.
+  The old `/api/config/probe-service` now accepts only `network_proxy`; its
+  unreachable model probe implementations were removed.
+- Kept all four model endpoints reachable in degraded mode and guarded model
+  saves/probes while guided initialization is active.
+- Bound every HTTP exact probe to one captured revision. A `keep` credential is
+  resolved while holding the short model path lock, the network call runs after
+  releasing that lock, and completion revalidates the same revision before any
+  history or live-circuit effect. A stale probe returns the latest snapshot with
+  no side effect. `ModelConfigService.probe()` remains only as non-HTTP legacy
+  compatibility for callers that do not attach history/circuit effects.
+- Added an app-owned model lifecycle coordinator. A successful save now
+  publishes the complete graph without an event, drains every registry-owned
+  old-graph task except `guided_init`, restarts app loops from the new graph,
+  clears runtime/app degraded state, then publishes exactly one
+  `config_reloaded`. A completed exceptional child is cleanup data rather than
+  a cutover failure, while cancellation of the save caller still propagates and
+  enters rollback. Failure or cancellation restores the old bytes and exact
+  normal/degraded runtime graph, then recreates old-equivalent app loops
+  according to the previous ownership; it does not claim to preserve the same
+  `asyncio.Task` objects or recreate cancelled detached old-graph one-shots.
+- Serialized every public background stop/restart with one stable
+  `RuntimeContext` lifecycle lock. One ownership now spans slot clearing,
+  registry drain, loop creation, and post-reload one-shot scheduling, while
+  `guided_init` remains excluded from drain. The model service uses an optional
+  async coordinator capability to wait for a settled runtime/task snapshot
+  before backup, replacement, or publication; legacy/fake coordinators retain
+  the synchronous property fallback. Cancellation while waiting changes
+  neither disk nor runtime, while cancellation after replacement enters the
+  existing shielded restore, which reacquires lifecycle ownership before
+  rebuilding old-equivalent loops.
+- Moved guided-init reservation into the canonical config writer and added a
+  model-save precommit guard inside that same writer. A model commit and init
+  reservation therefore cannot cross after their handler-level checks. Probes
+  recheck init after maintenance-gate admission and again immediately after
+  acquiring the model path lock, before disk/credential capture. A probe queued
+  behind a slow save therefore cannot cross a later init reservation; network
+  work remains outside the lock.
+- Made a successful dedicated model save a complete degraded-mode recovery:
+  full consumer graph, background loops, both degraded flags, and the reload
+  event all transition in the lifecycle order above without requiring restart.
+- Updated configuration/runtime module docs, changelog, index, architecture,
+  spec, and bilingual README architecture diagrams. The graphical list/detail
+  editors and CLI editor remain explicitly assigned to later tasks.
 
-- Command: `OPENBILICLAW_REFILL_E2E=1 .venv/bin/pytest tests/test_refill_real_provider_integration.py -q -s`
-- Result: exit 124 after 600.027 seconds (command timeout).
-- No pytest summary or sanitized counters were produced before timeout, so the
-  pending phase cannot be narrowed further without adding phase-only progress
-  instrumentation or changing provider timeout policy.
-- This is a failed verification, not a skip or pass.
-- No API keys, Cookies, prompts, profile fields, titles, descriptions, content
-  bodies, or model responses were printed or retained in this report.
+## TDD evidence
 
-Second run after adding phase-only markers and explicit timeouts:
+- Initial Task 9 RED command:
+  `pytest tests/test_api_model_config.py tests/test_api_config_guards.py tests/test_api_config_probe.py tests/test_api_config_transactional.py -q`
+  produced `15 failed, 56 passed`: the model API module/routes were absent,
+  legacy native writes were unguarded, and the legacy endpoint still accepted
+  model probes.
+- Shared Embedding probe identity RED produced two failures: an unsaved settings
+  change incorrectly closed the live circuit, and a settings-only PUT retained
+  stale probe history. Adding all four shared settings to the fingerprint made
+  both regressions GREEN.
+- Persisted-history RED showed a same-ID edited draft evicting the current exact
+  summary. GET-visible history is now updated only for an exact persisted
+  fingerprint, while POST still reports the edited draft result.
+- The legacy migration API fixture now generates a real unrouted credential
+  issue and verifies its tuple-backed `allowed_actions` survives strict JSON
+  output as a non-empty list without exposing either legacy secret.
+- Probe-race RED used two deterministic barriers: a gate-waiting revision-A
+  request and an in-flight revision-A network call both returned `200` before
+  remediation after revision B changed only the secret. They now return `409`,
+  never borrow B's secret, and never update B history/circuit state.
+- Lifecycle RED showed only `config_reloaded` with no background-task restart;
+  an injected restart failure also returned `200`. The production-app
+  regression now proves `restart -> event`, while failure restores disk and the
+  exact old consumer graph, restarts old-equivalent app-loop ownership, and emits no
+  success event.
+- The final lifecycle review REDs covered three cleanup edges: an already-done
+  exceptional app slot aborted cutover, a registry-owned detached old-graph
+  task was still alive when the reload event fired, and cancellation of the
+  save caller was swallowed while a child handled cancellation. The fixed
+  lifecycle clears all slots before awaiting, treats child outcomes as cleanup
+  results, drains the registry except `guided_init`, and preserves caller
+  cancellation through rollback. Rollback recreates only old-equivalent app
+  loops; detached old one-shots remain cancelled.
+- Init-race RED showed a save completing with `200` after init became active
+  during candidate construction, and `try_start()` occurring outside the
+  canonical writer. Both deterministic regressions now return/observe the
+  guarded behavior. A separate gate barrier verifies a probe performs no
+  credential or network work when init starts while it waits.
+- A second deterministic probe barrier held a slow save inside the model path
+  lock, admitted the probe through its maintenance gate, then activated init
+  while the probe waited for that lock. RED returned `200` and reached
+  credential/network work; GREEN returns the same safe `409 init_running` as
+  the outer guard and performs neither operation.
+- Broad verification found one compatibility edge after the cleanup rewrite:
+  short-lived `TestClient` requests can leave a completed app slot attached to
+  an already-closed event loop, and `asyncio.gather()` rejects even a completed
+  foreign-loop future. The final implementation consumes completed outcomes
+  directly and gathers only unfinished tasks; both existing repeated-save
+  regressions pass without weakening same-loop cancellation semantics.
+- A degraded-runtime integration regression forces initial registry failure,
+  repairs through `PUT /api/model-config`, and verifies task restart precedes
+  the single event, both degraded flags clear, the full graph exists, and a
+  formerly guarded API returns `200`.
+- Final lifecycle-serialization RED paused a guided-init-style restart after
+  its real registry drain, then overlapped a real app model cutover. Before the
+  lock, both restarts drained the same old set, created separate loop sets, and
+  the reload event captured slots later overwritten by the other restart. A
+  second RED showed the model transaction replacing disk and publishing its
+  candidate before it could obtain settled lifecycle state. GREEN proves one
+  final registry-owned set, event/final-slot identity, lifecycle-aware capture
+  before replacement/publication, unchanged disk/runtime on cancellation while
+  waiting, and shielded rollback compatibility for cancellation during drain.
 
-- Public Bilibili ranking succeeded with `fetched=8`.
-- The configured normal registry entered candidate evaluation.
-- The configured provider did not return response headers within the explicit
-  180-second evaluation timeout; pytest failed in the provider HTTP receive
-  path (`1 failed in 183.77s`).
-- Evaluation/admission/copy/maintenance/interactive counters were therefore not
-  fabricated and the live acceptance gate remains failed.
+## Verification
 
-### SenseTime-compatible provider rerun
+- Final lifecycle-serialization RED/GREEN nodes: `2 passed` in 1.37s.
+- Lifecycle cancellation/restart/detached-work plus registry compatibility set:
+  `13 passed` in 1.43s.
+- Final reviewer-blocker regression set: `4 passed` in 1.25s.
+- Closed-loop repeated-save compatibility reproductions: `2 passed` in focused
+  isolated runs.
+- Required Task 9 matrix: `92 passed` in 7.48s.
+- Model API, production app, and degraded compatibility set: `448 passed` in
+  20.31s.
+- Model domain, service, connection factory, ordered Chat/Embedding route, and
+  runtime bundle set: `460 passed` in 1.37s.
+- Background task registry set: `7 passed` in 0.79s.
+- Full repository suite: `5,432 passed, 41 skipped` in 146.21s.
+- MyPy strict check: success across 223 source files.
+- Repository-wide Ruff lint: passed.
+- All four touched Python files pass Ruff format check.
+- `git diff --check`: passed.
+- Fresh temporary-root `openbiliclaw config-show`: passed and displayed only
+  default/redacted model state without starting the server.
 
-- Exact command used the explicit opt-in controls:
-  `OPENBILICLAW_REFILL_E2E=1`,
-  `OPENBILICLAW_REFILL_CONFIG=/Users/white/workspace/OpenBiliClaw/config.toml`,
-  and `OPENBILICLAW_REFILL_PROVIDER=openai_compatible`. The test loads that
-  path only when explicitly supplied and clones the selected default plus every
-  LLMService module route in memory; it never writes config or logs credentials.
-- A 30-second normal-registry completion probe succeeded in **5.6 seconds**.
-- The full temporary-DB/read-only-ranking run reached `fetched=8`, then failed
-  its intentional admission assertion in **33.57 seconds**: `evaluated=8`,
-  `passing_scores=0`, `admitted=0`, `rejected=8`. It correctly did not proceed
-  to copy, maintenance, or interactive-reservation phases.
-- A follow-up aggregate-only diagnostic confirmed one JSON-mode `system/user`
-  evaluator request via `openai_compatible` / `deepseek-v4-flash`: the response
-  parsed as a valid object containing eight scored entries, all eight identifiers
-  matched, all eight candidates resolved (zero parser-unresolved), every score
-  fell below `0.60`, and all eight durable statuses were
-  `rejected_low_score`.
-- This is an admission/data failure under the unchanged strict acceptance rule,
-  not a provider routing, response-shape, parser, authentication, or timeout
-  failure. No threshold, profile, source data, or provider configuration was
-  changed to manufacture a pass; no raw response, prompt, content body, Cookie,
-  or key was printed.
-- Follow-up harness correction: an explicit live provider now also overrides
-  `soul`, `discovery`, `recommendation`, and `evaluation` module providers and
-  clears their old per-module model overrides, so an `evaluation=ollama`
-  setting cannot silently win over the requested compatible provider. A guard
-  test proves `discovery.evaluate_batch` resolves the explicit provider.
+## Explicit boundaries
 
-### Post-routing-review rerun
-
-- After the focused routing review passed, the exact full command was rerun at
-  harness head `467320d8` with the same explicit config/provider controls.
-- Result: `1 failed in 49.17s`. Phases reached `ranking fetched=8` and then
-  `evaluation_done evaluated=8 passing_scores=0 parser_unresolved=0
-  admitted=0 rejected=8`.
-- The strict admission assertion stopped the run before copy, maintenance, and
-  interactive-reservation phases. This independently confirms that the routing
-  correction did not mask a parser failure: all eight real candidates were
-  evaluated but rated below the unchanged admission threshold. No threshold,
-  profile, source data, or provider setting was changed after this result.
-
-### Technology-ranking rerun
-
-- The live fixture was narrowed to the public Bilibili technology ranking
-  (`ranking_rid=188`, still anonymous and capped at eight) while keeping the
-  synthetic software/technology profile, provider route, and `0.60` threshold
+- Probe history is process-local UI status, not persisted configuration.
+- Model API writer coordination remains in-process; the model service's
+  documented narrow external-writer race and lack of a cross-process lock are
   unchanged.
-- At harness head `9af1c0f1`, the full exact run reached
-  `ranking_rid=188 fetched=8` and `evaluation_start`, then failed in
-  **59.56 seconds** before any score/admission result was returned.
-- The selected compatible provider rejected the JSON-object request with an
-  HTTP 400 message-format policy error, then the exact route entered its
-  rate-limit state. This is a provider request-compatibility failure, not a
-  low-score admission result; copy, maintenance, and interactive phases did
-  not run. No profile, threshold, source breadth, or provider configuration was
-  changed after the failure.
-- Aggregate contract reconstruction used the actual `LLMService` routing path
-  with no provider request: all-ranking and technology-ranking calls both used
-  `openai_compatible` / `deepseek-v4-flash`, chat-completions
-  `response_format=json_object`, `complete_provider`, `system/user`, eight
-  items, `discovery.evaluate_batch`, `max_tokens=16384`, `temperature=0.7`,
-  disabled reasoning, and no module model override. Both pairs lacked a literal
-  lowercase `json` token (the system prompt has uppercase `JSON`); only the
-  technology user-message size was larger. The evidence supports a nonstandard
-  case-sensitive provider JSON-object policy whose enforcement changed or was
-  inconsistent after the prior all-ranking success; the later rate-limit is a
-  downstream result, not the initial cause. No raw prompt, title, response, or
-  credential was retained.
-
-### Technology-ranking post-compatibility rerun
-
-- After the reviewed structured JSON compatibility fix, the same exact
-  `ranking_rid=188` / explicit-provider command passed at harness head
-  `e3c7e325` in **83.83 seconds**.
-- Sanitized live phases: `fetched=8`, `evaluated=8`, `passing_scores=4`,
-  `parser_unresolved=0`, `admitted=4`, `rejected=4`, `copied=4`, and
-  maintenance `available_before=4 available_after=4`.
-- The live interactive reservation completed: total/background peaks were
-  `4/3`, the fourth interactive slot entered, maximum copy batch was `4`, copy
-  fan-out was `1`, provider rounds were `8`, and transient retry/failure counts
-  were both `0`. The real provider, public anonymous Bilibili source, temporary
-  SQLite/memory state, synthetic profile, and unchanged `0.60` threshold all
-  remained in effect.
-
-## Guard and focused checks
-
-- Live integration remains opt-in and is skipped when its explicit flag is
-  absent.
-- Repository-wide Ruff and MyPy checks pass; current exact affected counts are
-  recorded in the review-remediation section below.
-
-## Final gates
-
-All Task 9 verification gates now pass:
-
-- Full Python suite: `4274 passed, 36 skipped` in 252.05 seconds. The 2288
-  warnings are existing FastAPI/websocket deprecation warnings.
-- Ruff: `ruff check src/ tests/` passed; the two touched LLM files are already
-  formatted. A full `ruff format --check src/ tests/` still reports ten
-  pre-existing, unrelated files that would be reformatted, so they were not
-  modified by this branch.
-- MyPy: 189 source files checked with no issues.
-- Extension: 711 tests passed; TypeScript typecheck and production build passed.
-- Concurrency/cancellation soak: 50/50 rounds passed; each round ran 96 gate,
-  candidate-evaluator, and expression-coordinator tests.
-
-Contract/document/boundary audit:
-
-- No separately committed destructive trim composition remains in runtime.
-- No plan placeholders were found.
-- Legacy `llm.concurrency=3` text matches are explicit compatibility/design
-  examples; `candidate_eval_concurrency=3` is intentionally unchanged.
-- Runtime `precompute_pool_copy()` references are compatibility branches used
-  only when `ExpressionCopyCoordinator` is absent, plus one `limit=0` delight
-  fallback. Normal long-running production wiring notifies the coordinator.
-- All eight module documents, four architecture surfaces, configuration sample,
-  and changelog are changed on the branch and describe the new flow.
-- `git diff main...HEAD --check` passed and the worktree was clean before this
-  report update.
-- Soul changes only inject/reuse the runtime gate and update the default total
-  concurrency. No Soul prompt, token-budget, pricing, or cost behavior changed.
-
-## Review remediation
-
-- Replaced the deterministic direct-gate fake with a real `LLMService` backed
-  by a keyed controlled registry. Every deterministic provider request now
-  traverses production caller classification, the shared gate, registry
-  dispatch, parsing, admission and copy persistence.
-- Split User A and User B into independent temporary SQLite and memory
-  scenarios. User A performs maintenance before and after refill, consumes the
-  pool to zero and observes recovery in under one second for each of 50 rounds,
-  and verifies claim plus active/waiting permit cleanup. User B independently
-  verifies ten ready Zhihu rows plus twelve overflow rows.
-- Kept the production expression coordinator's three-second tail unchanged;
-  sustained rounds create threshold-sized work rather than shortening it.
-- Provider-boundary monitors now measure total/background gate peaks,
-  expression batch sizes and expression fan-out. Live monitoring additionally
-  counts registry calls and classified transient registry failures.
-- Removed literal live summary metrics. The live summary prints only measured
-  values and omits metrics unavailable at the registry boundary.
-- All three live `LLMService` instances receive the exact same
-  `module_overrides_from_config()` mapping.
-- Added structural regressions for literal metrics, override propagation, real
-  service routing, and isolated scenario definitions.
-
-Second review remediation verification:
-
-- Added a deterministic production-component companion with sixty durable
-  pending-copy rows. A provider-ingress barrier observed two expression calls
-  simultaneously active, each containing exactly thirty rows; measured copy
-  fan-out was exactly two and the shared gate remained within total/background
-  bounds.
-- User A cleanup now directly executes SQL against `discovery_candidates` and
-  asserts zero rows with a non-null `claim_token`, in addition to lifecycle
-  status and active/waiting permit checks.
-- Live metrics record `provider_round_count` for every actual registry
-  invocation. A classified transient stores only an in-memory SHA-256
-  fingerprint over caller/module, exact canonical messages and structured
-  request parameters. Only a later invocation with the same fingerprint
-  increments `transient_retry_count`; unrelated requests from the same caller
-  do not count. Raw content and hashes are never printed.
-- A controlled observer regression proves one transient plus one subsequent
-  invocation yields two provider rounds, one transient failure, and one retry;
-  the first failure alone yields no retry. A second regression proves a
-  candidate-A transient followed by independent candidate-B success remains at
-  zero retries.
-- Fresh deterministic/contract/live-guard suite: `10 passed, 1 skipped in
-  16.64s`; the skipped test is the explicit live provider test and was not
-  rerun against the stalled local provider.
-- Expanded affected suite (LLM service/gate, evaluator coordinator, expression
-  coordinator and recommendation engine): `239 passed in 11.36s`.
-- Repository-wide Ruff and MyPy (189 source files), plus `git diff --check`,
-  passed after the final fingerprint change.
-
-## OpenClaw one-shot bounded-copy follow-up
-
-- OpenClaw direct bootstrap now bounds one interactive replenishment wave at
-  four source/evaluation/copy rows. Its copy callback calls
-  `drain_pending_expression_copy(limit=4, max_extra_requests=0)`; the generic
-  API/daemon default remains `limit<=60, max_extra_requests=6`.
-- The deterministic bootstrap regression first failed against the old behavior:
-  a four-item provider response with a valid two-item subset was split and
-  retried. It now proves exactly one copy provider call, a two-row canonical
-  subset, two durable pending-copy rows, and exactly one receipt/callback
-  owner.
-- Focused final guard command (with the real test intentionally opt-in and
-  therefore skipped here) completed as `9 passed, 1 skipped in 3.47s`:
-  OpenClaw bootstrap/controller, one-shot refresh caps, generic expression
-  split-retry defaults, and the live-test skip guard.
-- Formatting/lint command over touched production and test files passed;
-  `mypy src/` reported no issues in 189 files; `git diff --check` passed.
-- Real opt-in SenseTime/OpenAI-compatible run used a temporary database,
-  anonymous public Bilibili technology ranking (`rid=188`), synthetic generic
-  profile, default OpenClaw `pool_target=300` and `discovery_limit=30`. It
-  passed in 45.82s wall time: evaluation `[4]` took 15.92s; two rows were
-  admitted; one `recommendation.write_expression` request for batch two took
-  10.89s; refresh was 28.42s and adapter end-to-end time 43.03s, below the
-  unchanged 45s boundary. There was one admission callback, one controller
-  copy callback, no cancellation, one canonical available row, and a usable
-  response. The test prints only sanitized counts/timings, never API keys,
-  prompts, or provider content.
-
-## OpenClaw live-harness embedding isolation
-
-- The opt-in OpenClaw SenseTime harness now creates an in-memory clone with
-  `llm.embedding` and `llm.ollama` disabled before registry construction. It
-  clears the chat fallback too, so Ollama is neither registered nor reachable
-  by the test; no persisted config is modified.
-- A non-live contract test verifies that clone behavior, including original
-  config immutability. The deterministic OpenClaw bootstrap test also counts
-  the registry-module `build_embedding_service` patch, proving the factory's
-  local import seam is intercepted once.
-- The live harness injects a `None` embedding builder, asserts no embedding
-  service on the engine/strategies, records all chat provider routes, and
-  records any prewarm/detached provider task starts. It additionally measures
-  the whole public `adapter.recommend()` call (setup excluded) against the
-  unchanged 45-second boundary.
-- Fresh live SenseTime/OpenAI-compatible result: provider route
-  `openai_compatible` only; embedding builder `1`, no configured embedding
-  service, no detached controller/recommendation task; evaluation `[4]` took
-  20.20s, one batch-three copy request took 15.78s, refresh took 36.13s, and
-  complete adapter call took 41.02s. It returned a usable recommendation with
-  two canonical rows and no cancellation.
-- Fresh focused/static verification: `21 passed, 1 skipped in 2.85s`, Ruff,
-  MyPy over 189 source files, and `git diff --check` all passed. The full
-  suite was not rerun for this harness-only follow-up; do not treat historical
-  full-suite runs as green evidence because a known 150ms test-order flake
-  exists.
+- Task 9 supplies the backend contract only. Desktop, extension, and mobile
+  list/detail editors and the unified CLI model editor are later plan tasks.

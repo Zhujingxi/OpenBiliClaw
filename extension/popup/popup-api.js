@@ -8,6 +8,9 @@ import {
 export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
 export const CONFIG_GET_TIMEOUT_MS = 12_000;
 export const CONFIG_PUT_TIMEOUT_MS = 60_000;
+export const MODEL_CONFIG_GET_TIMEOUT_MS = 12_000;
+export const MODEL_CONFIG_PUT_TIMEOUT_MS = 60_000;
+export const MODEL_CONFIG_PROBE_TIMEOUT_MS = 60_000;
 const HEALTH_SUCCESS_CACHE_TTL_MS = 3_000;
 const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
 
@@ -606,6 +609,36 @@ export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
   const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
+}
+
+/** Read the secret-safe, revisioned model route snapshot. */
+export async function fetchModelConfig(timeoutMs = MODEL_CONFIG_GET_TIMEOUT_MS) {
+  return requestJson("/model-config", { method: "GET", timeoutMs });
+}
+
+/** Read JSON-safe model connection descriptors; provider rules stay server-owned. */
+export async function fetchModelConnectionTypes(timeoutMs = MODEL_CONFIG_GET_TIMEOUT_MS) {
+  return requestJson("/model-connection-types", { method: "GET", timeoutMs });
+}
+
+/** Commit a complete model route against the revision returned by fetchModelConfig. */
+export async function updateModelConfig(data, timeoutMs = MODEL_CONFIG_PUT_TIMEOUT_MS) {
+  return requestJson("/model-config", {
+    method: "PUT",
+    timeoutMs,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/** Probe exactly one revision-bound Chat connection or Embedding provider draft. */
+export async function probeModelConnection(data, timeoutMs = MODEL_CONFIG_PROBE_TIMEOUT_MS) {
+  return requestJson("/model-config/probe", {
+    method: "POST",
+    timeoutMs,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
 }
 
 export async function fetchSourceShareSuggestion(overrides = null) {

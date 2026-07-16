@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -24,10 +24,8 @@ from openbiliclaw.llm.service import (
     LLMProviderExecutionError,
     LLMResponseContentError,
     LLMService,
-    ModuleOverride,
     PrioritySemaphore,
     is_llm_rate_limit_error,
-    module_overrides_from_config,
 )
 from openbiliclaw.memory.manager import MemoryManager
 
@@ -208,6 +206,8 @@ def test_classify_llm_unavailability_rate_limit_wins_over_no_provider() -> None:
             LLMProviderError("The model `gpt-x` does not exist or you do not have access to it."),
             "model_not_found",
         ),
+        (LLMProviderError("connection-a request failed: HTTP 404"), "model_not_found"),
+        (LLMProviderError("connection-a request failed: HTTP 403"), "auth_failed"),
         (ConnectionError("connection reset by peer"), "connection"),
         (OSError("network is unreachable"), "connection"),
         (
@@ -638,164 +638,93 @@ def test_resolve_priority_longest_prefix_wins() -> None:
     assert LLMService._resolve_priority("") == LLMService._DEFAULT_PRIORITY
 
 
-def test_route_bucket_for_caller_covers_actual_callers() -> None:
-    assert LLMService._route_bucket_for_caller("soul.profile_builder") == "soul"
-    assert LLMService._route_bucket_for_caller("discovery.search.query") == "discovery"
-    assert LLMService._route_bucket_for_caller("discovery.keyword_planner") == "discovery"
-    assert LLMService._route_bucket_for_caller("discovery.keyword_inspiration") == "discovery"
-    assert LLMService._route_bucket_for_caller("discovery.evaluate_batch") == "evaluation"
-    assert LLMService._route_bucket_for_caller("recommendation.write_batch") == "recommendation"
-    assert (
-        LLMService._route_bucket_for_caller("recommendation.write_expression") == "recommendation"
-    )
-    assert LLMService._route_bucket_for_caller("sources.xhs.classify") == "discovery"
-    assert LLMService._route_bucket_for_caller("eval.batch") == "evaluation"
-    assert LLMService._route_bucket_for_caller("unrelated.tag") is None
-
-
-def test_module_overrides_from_config_normalizes_non_empty_blocks() -> None:
-    from openbiliclaw.config import Config
-
-    config = Config()
-    config.llm.soul.provider = " Claude "
-    config.llm.soul.model = " claude-sonnet "
-    config.llm.discovery.model = " gpt-4o-mini "
-
-    overrides = module_overrides_from_config(config)
-
-    assert overrides == {
-        "soul": ModuleOverride(provider="claude", model="claude-sonnet"),
-        "discovery": ModuleOverride(provider="", model="gpt-4o-mini"),
-    }
-
-
 @pytest.mark.asyncio
-async def test_complete_with_core_memory_routes_module_override() -> None:
+async def test_all_former_module_callers_use_the_same_global_route() -> None:
     registry = FakeRegistry(
-        LLMResponse(content="ok", provider="claude"),
-        chat_capable={"openai", "claude"},
+        LLMResponse(content="ok", provider="openai"),
+        chat_capable={"openai", "claude", "deepseek"},
     )
     memory = FakeMemoryManager(core_prompt="## 用户画像\nportrait")
     service = LLMService(
         registry=registry,
         memory=memory,  # type: ignore[arg-type]
-        module_overrides={"soul": ModuleOverride(provider="claude", model="claude-sonnet")},
     )
 
-    await service.complete_with_core_memory(
-        system_instruction="A",
-        user_input="B",
-        caller="soul.profile_builder",
+    callers = (
+        "soul.profile_builder",
+        "discovery.search.query",
+        "recommendation.write_expression",
+        "recommendation.evaluate_batch",
+        "sources.xhs.classify",
+        "eval.batch",
     )
-
-    assert registry.calls == []
-    assert registry.provider_calls[0]["provider_name"] == "claude"
-    assert registry.provider_calls[0]["model"] == "claude-sonnet"
-
-
-@pytest.mark.asyncio
-async def test_route_bucket_specific_prefix_beats_broad_recommendation() -> None:
-    registry = FakeRegistry(
-        LLMResponse(content="ok", provider="deepseek"),
-        chat_capable={"openai", "deepseek"},
-    )
-    service = LLMService(
-        registry=registry,
-        memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
-        module_overrides={
-            "recommendation": ModuleOverride(provider="openai", model="gpt-4o-mini"),
-            "evaluation": ModuleOverride(provider="deepseek", model="deepseek-v4-flash"),
-        },
-    )
-
-    await service.complete_with_core_memory(
-        system_instruction="A",
-        user_input="B",
-        caller="recommendation.evaluate_batch",
-    )
-
-    assert registry.provider_calls[0]["provider_name"] == "deepseek"
-    assert registry.provider_calls[0]["model"] == "deepseek-v4-flash"
-
-
-@pytest.mark.asyncio
-async def test_model_only_module_override_uses_default_provider() -> None:
-    registry = FakeRegistry(
-        LLMResponse(content="ok", provider="openai"),
-        chat_capable={"openai"},
-        default_provider="openai",
-    )
-    service = LLMService(
-        registry=registry,
-        memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
-        module_overrides={"soul": ModuleOverride(model="gpt-4.1-mini")},
-    )
-
-    await service.complete_with_core_memory(
-        system_instruction="A",
-        user_input="B",
-        caller="soul.preference",
-    )
-
-    assert registry.calls == []
-    assert registry.provider_calls[0]["provider_name"] == "openai"
-    assert registry.provider_calls[0]["model"] == "gpt-4.1-mini"
-
-
-@pytest.mark.asyncio
-async def test_unknown_module_override_provider_falls_back_and_logs_once(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    registry = FakeRegistry(
-        LLMResponse(content="ok", provider="openai"),
-        chat_capable={"openai"},
-    )
-    service = LLMService(
-        registry=registry,
-        memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
-        module_overrides={"soul": ModuleOverride(provider="claud", model="expensive")},
-    )
-
-    with caplog.at_level(logging.INFO, logger="openbiliclaw.llm.service"):
+    for caller in callers:
         await service.complete_with_core_memory(
             system_instruction="A",
-            user_input="B",
-            caller="soul.preference",
-        )
-        await service.complete_with_core_memory(
-            system_instruction="A",
-            user_input="C",
-            caller="soul.profile_builder",
+            user_input=caller,
+            caller=caller,
         )
 
     assert registry.provider_calls == []
-    assert len(registry.calls) == 2
-    ignored = [r for r in caplog.records if "LLM module override ignored" in r.getMessage()]
-    assert len(ignored) == 1
+    assert len(registry.calls) == len(callers)
+    assert [call[-1]["content"] for call in registry.calls] == list(callers)
 
 
 @pytest.mark.asyncio
-async def test_override_provider_error_does_not_spill_to_default() -> None:
+async def test_normal_structured_multimodal_and_tool_paths_share_global_complete() -> None:
     registry = FakeRegistry(
-        LLMResponse(content="ok", provider="openai"),
+        LLMResponse(content='{"reply": "ok"}', provider="openai"),
         chat_capable={"openai", "claude"},
-        provider_error=LLMProviderError("override down"),
     )
     service = LLMService(
         registry=registry,
         memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
-        module_overrides={"soul": ModuleOverride(provider="claude")},
     )
 
-    with pytest.raises(LLMProviderExecutionError):
-        await service.complete_with_core_memory(
-            system_instruction="A",
-            user_input="B",
-            caller="soul.preference",
-        )
+    await service.complete_with_core_memory(
+        system_instruction="A",
+        user_input="normal",
+        caller="soul.preference",
+    )
+    await service.complete_structured_task(
+        system_instruction="Return JSON.",
+        user_input="structured",
+        caller="discovery.evaluate_batch",
+    )
+    await service.complete_multimodal_structured_task(
+        system_instruction="Return JSON.",
+        user_input="multimodal",
+        image_inputs=[],
+        caller="recommendation.evaluate_batch",
+    )
+    await service.complete_with_tools(
+        system_instruction="A",
+        user_input="tools",
+        tools=[],
+        caller="recommendation.write_expression",
+    )
 
-    assert len(registry.provider_calls) == 1
-    assert registry.calls == []
+    assert len(registry.calls) == 4
+    assert registry.provider_calls == []
+
+
+def test_supports_image_input_uses_global_primary_connection_not_caller_override() -> None:
+    registry = FakeRegistry(default_provider="custom-id")
+    registry.connections = (
+        SimpleNamespace(
+            id="custom-id",
+            type="openai_compatible",
+            preset="custom",
+            model="gpt-4o-mini",
+        ),
+    )
+    service = LLMService(
+        registry=registry,
+        memory=FakeMemoryManager(core_prompt=""),  # type: ignore[arg-type]
+    )
+
+    assert service.supports_image_input("soul.profile_builder")
+    assert service.supports_image_input("discovery.evaluate_batch")
 
 
 @pytest.mark.asyncio

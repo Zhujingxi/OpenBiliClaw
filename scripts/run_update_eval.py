@@ -54,11 +54,11 @@ async def main() -> None:
 
     from openbiliclaw.config import load_config
     from openbiliclaw.eval.run_logger import RunLogger
-    from openbiliclaw.llm.registry import build_llm_registry
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.engine import SoulEngine
     from openbiliclaw.soul.pipeline import signals_from_events
     from openbiliclaw.soul.profile import OnionProfile
+    from _model_runtime import build_script_model_bundle
 
     cfg = load_config()
     data_dir = cfg.data_path
@@ -111,8 +111,12 @@ async def main() -> None:
 
     # 3. Run pipeline update
     print("\n[3/4] 运行 Pipeline 增量更新...")
-    registry = build_llm_registry(cfg)
-    engine = SoulEngine(llm=registry, memory=memory)
+    model_bundle = build_script_model_bundle(cfg, memory)
+    engine = SoulEngine(
+        llm=model_bundle.chat_route,
+        memory=memory,
+        embedding_service=model_bundle.embedding_service,
+    )
     pipeline = engine.pipeline
 
     # Normalize events for pipeline

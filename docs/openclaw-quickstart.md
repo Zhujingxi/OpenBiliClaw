@@ -124,7 +124,7 @@ python3 scripts/agent_bootstrap.py --mode docker --interactive-confirm --wait-fo
 
 跑完后可以用 `openbiliclaw cost` 查看本次 init 在 LLM 上花了多少钱（v0.3.26+ 计费台账）。
 
-如果当前终端**不是**交互式（CI / 服务器脚本），`init` 不会等待输入，而是直接报错——这是为了避免把脚本挂死。这时改用 `python3 scripts/agent_bootstrap.py --provider ... --llm-api-key ... --bilibili-cookie ... --yes-xhs/--no-xhs --yes-douyin/--no-douyin --yes-youtube/--no-youtube`（详见 [docs/agent-install.md](agent-install.md)）。
+如果当前终端**不是**交互式（CI / 服务器脚本），`init` 不会等待输入，而是直接报错——这是为了避免把脚本挂死。人类恢复应在 TTY 中运行 `python3 scripts/agent_bootstrap.py --interactive-confirm`，让 API Key / 手动 Cookie 进入关闭回显的安全提示；无人值守环境应预先通过受控 secret store 写好原生模型 credential，再用 `--connection-type`、可选 `--preset` 和显式来源选择运行（详见 [docs/agent-install.md](agent-install.md)）。
 
 ### 3. 给 OpenClaw 保留一个本地 workspace
 

@@ -2,7 +2,7 @@
 
 **日期：** 2026-07-15
 **范围：** 配置模型、LLM / Embedding 运行时、配置 API、桌面 Web、移动 Web、浏览器扩展、CLI、安装与初始化流程
-**状态：** 已确认设计，待实施
+**状态：** 已实施（2026-07-16）
 
 ## 问题
 
@@ -118,6 +118,8 @@ credential_ref = "codex"
 
 [models.embedding]
 enabled = true
+
+[models.embedding.settings]
 model = "bge-m3"
 output_dimensionality = 1024
 similarity_threshold = 0.82
@@ -158,7 +160,7 @@ api_key_env = "BGE_REMOTE_API_KEY"
 
 ### Embedding invariant
 
-Embedding 的 `model`、`output_dimensionality`、`similarity_threshold` 和 `multimodal_enabled` 只存在于 `[models.embedding]`。Provider 项没有 `model` 字段，因此无法在同一 fallback route 内声明不同模型。
+Embedding 的 `model`、`output_dimensionality`、`similarity_threshold` 和 `multimodal_enabled` 只存在于 `[models.embedding.settings]`。Provider 项没有 `model` 字段，因此无法在同一 fallback route 内声明不同模型。
 
 `enabled=false` 时 Provider 数组可为空；`enabled=true` 时必须有 1–10 个 Provider。每次调用把同一个共享 model 传给当前 Provider。缓存 namespace 由共享 model 设置生成，不包含当前 Provider ID，使兼容 endpoint 可共享缓存；任何共享 model 设置变化都会生成新 namespace。
 

@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +36,7 @@ import tomllib
 import urllib.request
 import webbrowser
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -365,71 +365,89 @@ def _inject_bundled_ollama_on_path(bundled_resources: Path) -> bool:
     return True
 
 
-def _enable_ollama_embedding_default(config_path: Path) -> None:
-    """Flip ``[llm.embedding].provider`` to ``ollama`` in a freshly seeded config.
+def _configure_ollama_embedding(
+    config_path: Path,
+    *,
+    provider_id: str,
+    name: str,
+    base_url: str,
+    model: str,
+) -> bool:
+    """Own an empty/packaged native route without replacing remote choices."""
+    from openbiliclaw.config import render_model_config_document
+    from openbiliclaw.model_config import EmbeddingProviderConfig, parse_model_config
 
-    Only touches the single ``provider = ""`` line inside the ``[llm.embedding]``
-    block so the heavily-commented template stays intact (a ``save_config``
-    round-trip would strip every comment). No-op if the user already picked a
-    provider. This is what makes the bundled Ollama actually drive embedding
-    out of the box; without it the shipped binary would sit idle.
-    """
     try:
-        lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except OSError:
-        return
-    in_block = False
-    changed = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_block = stripped == "[llm.embedding]"
-            continue
-        if in_block and not changed and re.match(r'\s*provider\s*=\s*""', line):
-            indent = line[: len(line) - len(line.lstrip())]
-            lines[i] = f'{indent}provider = "ollama"\n'
-            changed = True
-            break
-    if changed:
-        config_path.write_text("".join(lines), encoding="utf-8")
-        print("[OpenBiliClaw] 已默认启用本地 Ollama embedding (bge-m3)")
+        original = config_path.read_bytes()
+        raw = tomllib.loads(original.decode("utf-8"))
+        models_raw = raw.get("models")
+        if not isinstance(models_raw, dict):
+            return False
+        models = parse_model_config(models_raw)
+        if any(item.id == provider_id for item in models.chat.connections):
+            return False
+        existing = next(
+            (
+                item
+                for item in models.embedding.providers
+                if item.id == provider_id and item.type == "ollama"
+            ),
+            None,
+        )
+        if existing is None and (models.embedding.enabled or models.embedding.providers):
+            return False
+        provider = EmbeddingProviderConfig(
+            id=provider_id,
+            name=name,
+            type="ollama",
+            base_url=base_url,
+        )
+        providers = (
+            tuple(
+                provider if item.id == provider_id else item for item in models.embedding.providers
+            )
+            if existing is not None
+            else (provider,)
+        )
+        updated = replace(
+            models,
+            embedding=replace(
+                models.embedding,
+                enabled=True,
+                settings=replace(models.embedding.settings, model=model),
+                providers=providers,
+            ),
+        )
+        rendered = render_model_config_document(original, updated)
+        if rendered != original:
+            config_path.write_bytes(rendered)
+        return True
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, TypeError):
+        return False
 
 
-def _default_ollama_to_embedding_only(config_path: Path) -> None:
-    """Blank a preset ``[llm.ollama] model`` so local Ollama is embedding-only.
+def _packaged_embedding_route_seedable(
+    config_path: Path,
+    *,
+    provider_id: str,
+) -> bool:
+    """Return whether bundled seeding owns this route without mutating it."""
+    from openbiliclaw.model_config import parse_model_config
 
-    config.example.toml ships ``[llm.ollama] model = "qwen2.5:7b"``. Per
-    ``registry._ollama_is_chat_capable``, a non-empty model marks Ollama
-    chat-capable, so the chat chain probes qwen2.5:7b — which the packaged user
-    hasn't pulled — flooding the console with ``ollama request failed: 404``.
-    The packaged app defaults chat to a cloud provider and only wants Ollama for
-    bge-m3 embedding, so clear the chat model. Skipped when the user actually
-    defaulted chat to ollama; the wizard sets the model back if they pick it.
-    """
     try:
-        text = config_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-    provider = re.search(r'(?m)^\s*default_provider\s*=\s*"([^"]*)"', text)
-    if provider and provider.group(1).strip().lower() == "ollama":
-        return
-    lines = text.splitlines(keepends=True)
-    in_block = False
-    changed = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_block = stripped == "[llm.ollama]"
-            continue
-        if in_block:
-            match = re.match(r'(\s*model\s*=\s*)"[^"]*"(.*)$', line)
-            if match:
-                lines[i] = f'{match.group(1)}""{match.group(2)}\n'
-                changed = True
-                break
-    if changed:
-        config_path.write_text("".join(lines), encoding="utf-8")
-        print("[OpenBiliClaw] 本地 Ollama 默认仅用于 embedding(已清空预设 chat 模型)")
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        models_raw = raw.get("models")
+        if not isinstance(models_raw, dict):
+            return False
+        models = parse_model_config(models_raw)
+        if any(item.id == provider_id for item in models.chat.connections):
+            return False
+        embedding = models.embedding
+        if any(item.id == provider_id and item.type == "ollama" for item in embedding.providers):
+            return True
+        return not embedding.enabled and not embedding.providers
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, TypeError):
+        return False
 
 
 def _packaged_ollama_preflight() -> None:
@@ -480,15 +498,15 @@ def _ensure_embedding_model_async() -> None:
             from openbiliclaw.config import load_config
 
             cfg = load_config()
-            emb = cfg.llm.embedding
-            if str(emb.provider).strip().lower() != "ollama":
-                return
-            model = str(emb.model).strip() or "bge-m3"
-            base_url = (
-                str(emb.base_url).strip()
-                or str(cfg.llm.ollama.base_url).strip()
-                or "http://localhost:11434/v1"
+            emb = cfg.models.embedding
+            provider = next(
+                (item for item in emb.providers if item.type.strip().lower() == "ollama"),
+                None,
             )
+            if not emb.enabled or provider is None:
+                return
+            model = emb.settings.model.strip() or "bge-m3"
+            base_url = provider.base_url.strip() or "http://localhost:11434/v1"
             from openbiliclaw.cli import _ollama_has_model
             from openbiliclaw.llm.ollama_diagnostics import native_root, pull_ollama_model
             from openbiliclaw.runtime import embedding_progress
@@ -527,26 +545,6 @@ def _ensure_embedding_model_async() -> None:
 _PRIVATE_OLLAMA_PORT = 11435
 
 
-def _set_embedding_field(config_path: Path, field: str, value: str) -> None:
-    """Set a single ``[llm.embedding].<field>`` line, editing only that line so
-    the comment-heavy template survives (mirrors ``_enable_ollama_embedding_default``)."""
-    try:
-        lines = config_path.read_text(encoding="utf-8").splitlines(keepends=True)
-    except OSError:
-        return
-    in_block = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            in_block = stripped == "[llm.embedding]"
-            continue
-        if in_block and re.match(rf"\s*{re.escape(field)}\s*=", line):
-            indent = line[: len(line) - len(line.lstrip())]
-            lines[i] = f'{indent}{field} = "{value}"\n'
-            config_path.write_text("".join(lines), encoding="utf-8")
-            return
-
-
 def _seed_bundled_embedding_model(bundled_resources: Path, config_path: Path) -> bool:
     """``with-embedding`` variant: seed the baked bge-m3 into an ASCII,
     user-writable dir and serve it from a PRIVATE Ollama on a dedicated port,
@@ -554,25 +552,26 @@ def _seed_bundled_embedding_model(bundled_resources: Path, config_path: Path) ->
 
     Returns True when the private embedding daemon is up (the caller then skips
     the default preflight + network pull). Returns False — a no-op — for the
-    lean variant (no seed dir), when the user picked a remote embedding
-    provider, or when anything can't complete (=> fall back to the normal
-    preflight + online pull). Never crashes startup.
+    lean variant (no seed dir) or when anything can't complete (=> fall back
+    to the normal preflight + online pull). An enabled remote route is
+    authoritative and skips model seeding, config mutation, and private daemon
+    startup. Only an empty/disabled route or the stable packaged record is owned.
+    Never crashes startup.
     """
     seed_dir = bundled_resources / "bge-m3-seed"
     if not seed_dir.is_dir():
         return False  # lean variant — nothing bundled
+    if not _packaged_embedding_route_seedable(
+        config_path,
+        provider_id="ollama-packaged",
+    ):
+        return False
     try:
-        from openbiliclaw.config import load_config
         from openbiliclaw.runtime.embedding_seed import (
             effective_embedding_models_dir,
             seed_embedding_model,
         )
         from openbiliclaw.runtime.ollama_supervisor import start_managed_ollama_at
-
-        cfg = load_config()
-        provider = str(cfg.llm.embedding.provider).strip().lower()
-        if provider not in ("", "ollama"):
-            return False  # user chose a remote embedding provider — respect it
 
         target = effective_embedding_models_dir(
             user_ollama_models=os.environ.get("OLLAMA_MODELS"),
@@ -590,12 +589,16 @@ def _seed_bundled_embedding_model(bundled_resources: Path, config_path: Path) ->
 
         host = f"127.0.0.1:{_PRIVATE_OLLAMA_PORT}"
         base_url = f"http://{host}/v1"
-        # Provider + base_url + model all point at the private daemon, which
-        # only serves the bundled bge-m3. Forcing the model guards against a
-        # stale/other embedding model name 404-ing against the private daemon.
-        _enable_ollama_embedding_default(config_path)
-        _set_embedding_field(config_path, "base_url", base_url)
-        _set_embedding_field(config_path, "model", "bge-m3")
+        # The stable packaged provider points at the private daemon while the
+        # route-wide model remains shared by every retained fallback provider.
+        if not _configure_ollama_embedding(
+            config_path,
+            provider_id="ollama-packaged",
+            name="Bundled Ollama",
+            base_url=base_url,
+            model="bge-m3",
+        ):
+            return False
 
         if not start_managed_ollama_at(str(target), host):
             print("[OpenBiliClaw] 私有 Ollama 未能启动,内置向量模型交回默认流程。")
@@ -973,13 +976,27 @@ def main() -> None:
     # packaged install with a bundled ollama, default embedding to it so local
     # semantic features work out of the box.
     seeded = _seed_default_config(project_root, bundled_resources)
-    if seeded and has_bundled_ollama:
-        _enable_ollama_embedding_default(project_root / "config.toml")
-        _default_ollama_to_embedding_only(project_root / "config.toml")
+    if (
+        seeded
+        and has_bundled_ollama
+        and _configure_ollama_embedding(
+            project_root / "config.toml",
+            provider_id="ollama-packaged",
+            name="Bundled Ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            model="bge-m3",
+        )
+    ):
+        print("[OpenBiliClaw] 已默认启用本地 Ollama embedding (bge-m3)")
     repair_result = _repair_unloadable_config(project_root, bundled_resources)
     if repair_result.regenerated_default and has_bundled_ollama:
-        _enable_ollama_embedding_default(project_root / "config.toml")
-        _default_ollama_to_embedding_only(project_root / "config.toml")
+        _configure_ollama_embedding(
+            project_root / "config.toml",
+            provider_id="ollama-packaged",
+            name="Bundled Ollama",
+            base_url="http://127.0.0.1:11434/v1",
+            model="bge-m3",
+        )
 
     # The packaged app bypasses `openbiliclaw start`, so set up the same
     # structured, rotated, UTF-8 `openbiliclaw.log` the CLI gets — otherwise the

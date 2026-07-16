@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
 from openbiliclaw.soul.profile import SoulProfile, preference_layer_from_dict
@@ -19,11 +18,10 @@ from .concurrency import (
 )
 from .prompts import build_socratic_dialogue_prompt
 
-logger = logging.getLogger(__name__)
 DEFAULT_LLM_CONCURRENCY = DEFAULT_TOTAL_LLM_CONCURRENCY
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator
 
     from openbiliclaw.memory.manager import MemoryManager
 
@@ -31,10 +29,7 @@ if TYPE_CHECKING:
 
 
 class SupportsComplete(Protocol):
-    """Protocol for providers or registries with a complete method."""
-
-    @property
-    def default_provider(self) -> str: ...
+    """Protocol for the one global ordered route."""
 
     async def complete(
         self,
@@ -45,20 +40,6 @@ class SupportsComplete(Protocol):
         json_mode: bool = False,
         reasoning_effort: str | None = None,
     ) -> LLMResponse: ...
-
-    async def complete_provider(
-        self,
-        provider_name: str,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.7,
-        max_tokens: int = 4096,
-        json_mode: bool = False,
-        reasoning_effort: str | None = None,
-        model: str | None = None,
-    ) -> LLMResponse: ...
-
-    def is_chat_capable(self, name: str) -> bool: ...
 
 
 class LLMServiceError(Exception):
@@ -111,35 +92,6 @@ def is_llm_rate_limit_error(exc: BaseException) -> bool:
     return False
 
 
-@dataclass(frozen=True)
-class ModuleOverride:
-    """Per-module LLM route override."""
-
-    provider: str = ""
-    model: str = ""
-
-
-_MODULE_OVERRIDE_BUCKETS = ("soul", "discovery", "recommendation", "evaluation")
-
-
-def module_overrides_from_config(config: object) -> dict[str, ModuleOverride]:
-    """Build normalized module LLM overrides from ``Config.llm`` blocks."""
-    llm_config = getattr(config, "llm", None)
-    if llm_config is None:
-        return {}
-
-    overrides: dict[str, ModuleOverride] = {}
-    for bucket in _MODULE_OVERRIDE_BUCKETS:
-        raw = getattr(llm_config, bucket, None)
-        if raw is None:
-            continue
-        provider = str(getattr(raw, "provider", "") or "").strip().lower()
-        model = str(getattr(raw, "model", "") or "").strip()
-        if provider or model:
-            overrides[bucket] = ModuleOverride(provider=provider, model=model)
-    return overrides
-
-
 def _coerce_concurrency(value: object) -> int:
     """Return a positive LLM concurrency value, falling back to the default."""
     return coerce_total_concurrency(value)
@@ -167,22 +119,6 @@ class LLMService:
         "xhs": 2,
     }
     _DEFAULT_PRIORITY: ClassVar[int] = 3
-    _ROUTE_BUCKET_PREFIXES: ClassVar[tuple[tuple[str, str], ...]] = (
-        ("recommendation.evaluate_batch", "evaluation"),
-        ("discovery.evaluate", "evaluation"),
-        ("discovery.eval", "evaluation"),
-        ("eval", "evaluation"),
-        ("discovery.keyword", "discovery"),
-        ("discovery.search", "discovery"),
-        ("discovery.explore", "discovery"),
-        ("discovery.trending", "discovery"),
-        ("discovery.related", "discovery"),
-        ("yt_search", "discovery"),
-        ("sources.xhs", "discovery"),
-        ("recommendation", "recommendation"),
-        ("soul", "soul"),
-    )
-
     registry: SupportsComplete
     memory: MemoryManager
     # v0.3.26+: optional usage ledger sink. When supplied, every
@@ -191,12 +127,8 @@ class LLMService:
     # preserves prior behaviour for tests / standalone callers that
     # don't care about cost tracking.
     usage_recorder: object | None = None
-    module_overrides: Mapping[str, ModuleOverride] = field(default_factory=dict)
     concurrency: int = DEFAULT_LLM_CONCURRENCY
     concurrency_gate: LLMConcurrencyGate | None = None
-    _logged_unknown_override_keys: set[tuple[str, str]] = field(
-        default_factory=set, init=False, repr=False
-    )
 
     def __post_init__(self) -> None:
         self.concurrency = _coerce_concurrency(self.concurrency)
@@ -228,53 +160,6 @@ class LLMService:
                 if best is None or length > best[0]:
                     best = (length, priority)
         return best[1] if best is not None else cls._DEFAULT_PRIORITY
-
-    @classmethod
-    def _route_bucket_for_caller(cls, caller: str) -> str | None:
-        """Map a concrete caller tag to a module override bucket."""
-        tag = caller.strip()
-        if not tag:
-            return None
-        for prefix, bucket in cls._ROUTE_BUCKET_PREFIXES:
-            if cls._caller_matches_route_prefix(tag, prefix):
-                return bucket
-        return None
-
-    @staticmethod
-    def _caller_matches_route_prefix(caller: str, prefix: str) -> bool:
-        return (
-            caller == prefix or caller.startswith(prefix + ".") or caller.startswith(prefix + "_")
-        )
-
-    def _resolve_module_override(self, caller: str) -> tuple[str, str | None] | None:
-        bucket = self._route_bucket_for_caller(caller)
-        if bucket is None:
-            return None
-        override = self.module_overrides.get(bucket)
-        if override is None:
-            return None
-
-        provider = override.provider.strip().lower()
-        model = override.model.strip()
-        if not provider and not model:
-            return None
-        if not provider:
-            provider = self.registry.default_provider.strip().lower()
-        if not provider:
-            return None
-
-        if not self.registry.is_chat_capable(provider):
-            log_key = (bucket, provider)
-            if log_key not in self._logged_unknown_override_keys:
-                self._logged_unknown_override_keys.add(log_key)
-                logger.info(
-                    "LLM module override ignored: bucket=%s provider=%s "
-                    "is not registered or chat-capable; using default provider.",
-                    bucket,
-                    provider,
-                )
-            return None
-        return provider, model or None
 
     @staticmethod
     def _structured_json_contract(system_instruction: str) -> str:
@@ -343,24 +228,12 @@ class LLMService:
         messages.append({"role": "user", "content": user_input})
 
         async def _do_llm_call() -> LLMResponse:
-            routed = self._resolve_module_override(caller)
-            if routed is None:
-                return await self.registry.complete(
-                    messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=json_mode,
-                    reasoning_effort=reasoning_effort,
-                )
-            provider, model = routed
-            return await self.registry.complete_provider(
-                provider,
+            return await self.registry.complete(
                 messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=json_mode,
                 reasoning_effort=reasoning_effort,
-                model=model,
             )
 
         try:
@@ -415,24 +288,15 @@ class LLMService:
 
     def supports_image_input(self, caller: str = "discovery.evaluate_batch") -> bool:
         """Best-effort check for OpenAI-compatible vision-capable routes."""
-        routed = self._resolve_module_override(caller)
-        provider_name = (
-            routed[0] if routed is not None else self.registry.default_provider
-        ).strip()
-        provider_key = provider_name.lower()
-        if provider_key not in {"openai", "openai_compatible", "openrouter"}:
+        del caller
+        route_connections = getattr(self.registry, "connections", ())
+        if not route_connections:
             return False
-
-        provider_obj: object | None = None
-        get_provider = getattr(self.registry, "get", None)
-        if callable(get_provider):
-            with suppress(Exception):
-                provider_obj = get_provider(provider_key)
-        model = ""
-        if routed is not None and routed[1]:
-            model = routed[1]
-        elif provider_obj is not None:
-            model = str(getattr(provider_obj, "_model", "") or "")
+        primary = route_connections[0]
+        provider_key = str(getattr(primary, "type", "") or "").lower()
+        model = str(getattr(primary, "model", "") or "")
+        if provider_key not in {"openai_compatible", "codex_oauth"}:
+            return False
         model_lower = model.lower()
         vision_markers = (
             "gpt-4o",
@@ -499,24 +363,12 @@ class LLMService:
         messages.append({"role": "user", "content": user_parts})
 
         async def _do_llm_call() -> LLMResponse:
-            routed = self._resolve_module_override(caller)
-            if routed is None:
-                return await self.registry.complete(
-                    cast("Any", messages),
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=True,
-                    reasoning_effort=reasoning_effort,
-                )
-            provider, model = routed
-            return await self.registry.complete_provider(
-                provider,
+            return await self.registry.complete(
                 cast("Any", messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 json_mode=True,
                 reasoning_effort=reasoning_effort,
-                model=model,
             )
 
         try:

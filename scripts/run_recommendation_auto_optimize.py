@@ -124,10 +124,9 @@ async def main() -> None:
     from openbiliclaw.eval.optimizer import MODIFIABLE_FILES, PromptOptimizer
     from openbiliclaw.eval.persona_pool import PersonaPool
     from openbiliclaw.eval.run_logger import RunLogger
-    from openbiliclaw.llm.registry import build_llm_registry
-    from openbiliclaw.llm.service import LLMService
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.profile import OnionProfile
+    from _model_runtime import build_script_model_bundle
 
     logging.basicConfig(
         level=logging.INFO,
@@ -135,10 +134,9 @@ async def main() -> None:
     )
 
     cfg = load_config()
-    registry = build_llm_registry(cfg)
     memory = MemoryManager(PROJECT_ROOT / "data")
     memory.initialize()
-    llm_service = LLMService(registry=registry, memory=memory)
+    llm_service = build_script_model_bundle(cfg, memory).llm_service
 
     optimizer = PromptOptimizer(project_root=PROJECT_ROOT)
     persona_pool = PersonaPool()
