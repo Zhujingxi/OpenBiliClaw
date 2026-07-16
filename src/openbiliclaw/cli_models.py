@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn, TypeAlias, cast
 
 import typer
 from typer import _click as click
-from typer.core import TyperGroup
+from typer.core import TyperGroup, TyperOption
 
 from openbiliclaw.model_config import (
     ChatConnection,
@@ -177,18 +177,44 @@ class _InlineApiKeyHandleType(click.types.ParamType):
         return handle
 
 
-def _model_write_command_offset(args: Sequence[str]) -> int | None:
-    for index, value in enumerate(args[:-1]):
-        if value == "models" and args[index + 1] in {"add", "edit"}:
-            return index + 2
-    if args and args[0] in {"add", "edit"}:
-        return 1
+def _root_models_argument_offset(
+    args: Sequence[str],
+    parameters: Sequence[click.Parameter],
+) -> int | None:
+    """Locate the root's top-level models command without consuming option values."""
+    options = {
+        option_name: parameter
+        for parameter in parameters
+        if isinstance(parameter, TyperOption)
+        for option_name in (*parameter.opts, *parameter.secondary_opts)
+    }
+    index = 0
+    while index < len(args):
+        value = args[index]
+        if value == "--":
+            index += 1
+            break
+        option_name, separator, _ = value.partition("=")
+        option = options.get(option_name)
+        if option is not None:
+            index += 1
+            if not separator and not option.is_flag and not option.count:
+                index += max(option.nargs, 1)
+            continue
+        if value.startswith("-"):
+            return None
+        break
+    if index < len(args) and args[index] == "models":
+        return index + 1
     return None
 
 
-def _protect_inline_api_key_args(args: list[str]) -> tuple[_InlineApiKeyHandle, ...]:
+def _protect_inline_api_key_args(
+    args: list[str],
+    *,
+    offset: int | None,
+) -> tuple[_InlineApiKeyHandle, ...]:
     """Replace model --api-key values in-place before Click copies them."""
-    offset = _model_write_command_offset(args)
     if offset is None:
         return ()
     handles: list[_InlineApiKeyHandle] = []
@@ -215,6 +241,13 @@ def _protect_inline_api_key_args(args: list[str]) -> tuple[_InlineApiKeyHandle, 
 class SecretSafeTyperGroup(TyperGroup):
     """Scrub inline model keys before Click/Typer retain argument state."""
 
+    _direct_model_scope = False
+
+    def _model_argument_offset(self, args: Sequence[str]) -> int | None:
+        if self._direct_model_scope:
+            return 0
+        return _root_models_argument_offset(args, self.params)
+
     def main(
         self,
         args: Sequence[str] | None = None,
@@ -225,16 +258,21 @@ class SecretSafeTyperGroup(TyperGroup):
         **extra: object,
     ) -> object:
         if args is None:
-            protected_args = sys.argv
-            parent_args: Sequence[str] | None = None
+            from_sys_argv = True
+            protected_args = list(sys.argv[1:])
         else:
+            from_sys_argv = False
             protected_args = args if isinstance(args, list) else list(args)
-            args = protected_args
-            parent_args = protected_args
-        handles = _protect_inline_api_key_args(protected_args)
+        args = protected_args
+        handles = _protect_inline_api_key_args(
+            protected_args,
+            offset=self._model_argument_offset(protected_args),
+        )
+        if from_sys_argv:
+            sys.argv[1:] = protected_args
         try:
             return super().main(
-                args=parent_args,
+                args=protected_args,
                 prog_name=prog_name,
                 complete_var=complete_var,
                 standalone_mode=standalone_mode,
@@ -246,8 +284,14 @@ class SecretSafeTyperGroup(TyperGroup):
                 _INLINE_API_KEY_VAULT.discard(handle)
 
 
+class _DirectModelSecretSafeTyperGroup(SecretSafeTyperGroup):
+    """Apply model credential protection to the entire direct subgroup view."""
+
+    _direct_model_scope = True
+
+
 models_app = typer.Typer(
-    cls=SecretSafeTyperGroup,
+    cls=_DirectModelSecretSafeTyperGroup,
     help="Inspect and edit ordered Chat and Embedding model routes.",
     no_args_is_help=True,
 )

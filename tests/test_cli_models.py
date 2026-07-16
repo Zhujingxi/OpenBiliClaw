@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import sys
 import tomllib
 from dataclasses import replace
 from types import FunctionType
@@ -729,6 +730,108 @@ def test_model_api_key_vault_cleans_up_after_pre_callback_validation_exit(
         vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
         assert vault is not None
         assert vault.pending_count() == 0
+
+
+@pytest.mark.parametrize("target_kind", ["root", "subgroup"])
+@pytest.mark.parametrize("argument_source", ["explicit", "sys_argv"])
+@pytest.mark.parametrize("subcommand", ["add", "addd"])
+@pytest.mark.parametrize("option_form", ["split", "equals"])
+def test_model_group_scrubs_api_key_before_all_parser_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    target_kind: str,
+    argument_source: str,
+    subcommand: str,
+    option_form: str,
+) -> None:
+    module = _models_module(runner)
+    target = app if target_kind == "root" else module.models_app
+    command_args = (["models"] if target_kind == "root" else []) + [subcommand]
+    if option_form == "split":
+        command_args.extend(["--api-key", _EXCEPTION_SECRET])
+    else:
+        command_args.append(f"--api-key={_EXCEPTION_SECRET}")
+    command_args.extend(["--kind", "chat", "--position", "0"])
+
+    if argument_source == "explicit":
+        result = runner.invoke(target, command_args)
+        exception = result.exception
+        output = result.output
+        exit_code = result.exit_code
+        retained_args = command_args
+    else:
+        monkeypatch.setattr(sys, "argv", ["model-cli-test", *command_args])
+        command_args.clear()
+        command = typer.main.get_command(target)
+        with runner.isolation() as outstreams:
+            with pytest.raises(SystemExit) as caught:
+                command.main(args=None, prog_name="model-cli-test")
+            output = outstreams[2].getvalue().decode("utf-8", errors="replace")
+        exception = caught.value
+        exit_code = cast("int", exception.code)
+        retained_args = sys.argv[1:]
+
+    assert exit_code == 2
+    assert exception is not None
+    assert _EXCEPTION_SECRET not in output
+    assert _EXCEPTION_SECRET not in _exception_artifacts(exception)
+    assert all(_EXCEPTION_SECRET not in value for value in retained_args)
+    assert all(_EXCEPTION_SECRET not in value for value in sys.argv)
+    vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
+    assert vault is not None
+    assert vault.pending_count() == 0
+
+
+def test_root_group_preserves_unrelated_api_key_option(
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    unrelated_app = typer.Typer(cls=module.SecretSafeTyperGroup)
+    observed: list[str] = []
+
+    @unrelated_app.callback()
+    def unrelated_root(api_key: str = typer.Option(..., "--api-key")) -> None:
+        observed.append(api_key)
+
+    @unrelated_app.command("other")
+    def unrelated_command() -> None:
+        return None
+
+    result = runner.invoke(
+        unrelated_app,
+        ["--api-key", _EXCEPTION_SECRET, "other"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert observed == [_EXCEPTION_SECRET]
+    vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
+    assert vault is not None
+    assert vault.pending_count() == 0
+
+
+def test_root_group_scrubbing_skips_top_level_option_values(
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    command_args = [
+        "--log-level",
+        "INFO",
+        "models",
+        "addd",
+        "--api-key",
+        _EXCEPTION_SECRET,
+    ]
+
+    result = runner.invoke(app, command_args)
+
+    assert result.exit_code == 2
+    assert result.exception is not None
+    assert _EXCEPTION_SECRET not in result.output
+    assert _EXCEPTION_SECRET not in _exception_artifacts(result.exception)
+    assert all(_EXCEPTION_SECRET not in value for value in command_args)
+    vault = getattr(module, "_INLINE_API_KEY_VAULT", None)
+    assert vault is not None
+    assert vault.pending_count() == 0
 
 
 def test_model_safe_boundary_drops_recursive_secret_exception_state(
