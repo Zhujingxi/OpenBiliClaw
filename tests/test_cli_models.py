@@ -47,6 +47,8 @@ _EXCEPTION_SECRET = "test-secret-exception-chain-never-retain"
 _DASH_PREFIXED_EXCEPTION_SECRET = "--secret-token-never-retain"
 _PARTIAL_FIRST_EXCEPTION_SECRET = "partial-first-secret-never-retain"
 _PARTIAL_SECOND_EXCEPTION_SECRET = "partial-second-secret-never-retain"
+_STORE_BOUNDARY_EXCEPTION_SECRET = "store-boundary-secret-never-retain"
+_TERMINATED_API_KEY_LITERAL = "--api-key=literal-after-terminator"
 _MODEL_CLI_SECRET_SENTINELS = (
     _EXCEPTION_SECRET,
     _DASH_PREFIXED_EXCEPTION_SECRET,
@@ -512,6 +514,75 @@ def test_models_edit_move_remove_use_stable_id_and_guard_the_final_chat_route(
     assert "final Chat connection" in final_guard.output
 
 
+def test_models_remove_preserves_api_key_shaped_id_after_terminator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    models = _models()
+    literal_id = "--api-key=route-id"
+    literal_route = replace(
+        models.chat.connections[1],
+        id=literal_id,
+        name="Literal API Key Shaped ID",
+    )
+    models = replace(
+        models,
+        chat=replace(
+            models.chat,
+            connections=(*models.chat.connections, literal_route),
+        ),
+    )
+    path = _project_root(monkeypatch, tmp_path, models)
+    module = _models_module(runner)
+    _install_service(module, monkeypatch, ModelConfigService(path, FakeCoordinator()))
+    token_calls: list[int] = []
+
+    def record_token_call(size: int) -> str:
+        token_calls.append(size)
+        return "unexpected-remove-handle"
+
+    monkeypatch.setattr(module.secrets, "token_urlsafe", record_token_call)
+
+    result = runner.invoke(app, ["models", "remove", "--", literal_id])
+
+    assert result.exit_code == 0, result.output
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    remaining_ids = [item["id"] for item in parsed["models"]["chat"]["connections"]]
+    assert literal_id not in remaining_ids
+    assert token_calls == []
+    assert module._INLINE_API_KEY_VAULT.pending_count() == 0
+
+
+def test_models_edit_preserves_api_key_shaped_value_consumed_by_name_option(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner: CliRunner,
+) -> None:
+    path = _project_root(monkeypatch, tmp_path, _models())
+    module = _models_module(runner)
+    _install_service(module, monkeypatch, ModelConfigService(path, FakeCoordinator()))
+    token_calls: list[int] = []
+
+    def record_token_call(size: int) -> str:
+        token_calls.append(size)
+        return "unexpected-name-handle"
+
+    monkeypatch.setattr(module.secrets, "token_urlsafe", record_token_call)
+    literal_name = "--api-key=display-name"
+
+    result = runner.invoke(
+        app,
+        ["models", "edit", "route-a", "--name", literal_name],
+    )
+
+    assert result.exit_code == 0, result.output
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert parsed["models"]["chat"]["connections"][0]["name"] == literal_name
+    assert token_calls == []
+    assert module._INLINE_API_KEY_VAULT.pending_count() == 0
+
+
 def test_models_probe_captures_and_revalidates_the_exact_selected_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -872,6 +943,87 @@ def test_model_group_cleans_partial_vault_when_sanitizer_aborts(
         assert vault.pending_count() == 0
     finally:
         vault.discard(module._InlineApiKeyHandle("partial-first-handle"))
+
+
+def test_inline_api_key_vault_store_clears_raw_local_after_assignment_abort(
+    runner: CliRunner,
+) -> None:
+    module = _models_module(runner)
+    vault = module._InlineApiKeyVault()
+    handle = module._InlineApiKeyHandle("store-boundary-handle")
+    secret_holder: list[str | None] = [_STORE_BOUNDARY_EXCEPTION_SECRET]
+    assert vault.reserve(handle)
+    store_code = module._InlineApiKeyVault.store.__code__
+    injection_observed = False
+
+    def abort_after_assignment(frame: object, event: str, _arg: object) -> object:
+        nonlocal injection_observed
+        if getattr(frame, "f_code", None) is store_code:
+            frame.f_trace_opcodes = True
+            if (
+                event == "opcode"
+                and frame.f_locals.get("secret_value") == _STORE_BOUNDARY_EXCEPTION_SECRET
+            ):
+                injection_observed = True
+                raise _SanitizerAbort("forced post-assignment store abort")
+        return abort_after_assignment
+
+    sys.settrace(abort_after_assignment)
+    try:
+        with pytest.raises(_SanitizerAbort) as caught:
+            vault.store(handle, secret_holder)
+    finally:
+        sys.settrace(None)
+
+    assert injection_observed
+    assert secret_holder == [None]
+    assert vault.pending_count() == 0
+    assert _STORE_BOUNDARY_EXCEPTION_SECRET not in _exception_artifacts(caught.value)
+
+
+@pytest.mark.parametrize("target_kind", ["root", "subgroup"])
+@pytest.mark.parametrize("argument_source", ["explicit", "sys_argv"])
+def test_malformed_model_scanner_stops_at_terminator(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    target_kind: str,
+    argument_source: str,
+) -> None:
+    module = _models_module(runner)
+    target = app if target_kind == "root" else module.models_app
+    command_args = (["models"] if target_kind == "root" else []) + [
+        "addd",
+        "--api-key",
+        _EXCEPTION_SECRET,
+        "--",
+        _TERMINATED_API_KEY_LITERAL,
+    ]
+
+    if argument_source == "explicit":
+        result = runner.invoke(target, command_args)
+        exception = result.exception
+        output = result.output
+        exit_code = result.exit_code
+        retained_args = command_args
+    else:
+        monkeypatch.setattr(sys, "argv", ["model-cli-test", *command_args])
+        command_args.clear()
+        command = typer.main.get_command(target)
+        with runner.isolation() as outstreams:
+            with pytest.raises(SystemExit) as caught:
+                command.main(args=None, prog_name="model-cli-test")
+            output = outstreams[2].getvalue().decode("utf-8", errors="replace")
+        exception = caught.value
+        exit_code = cast("int", exception.code)
+        retained_args = sys.argv[1:]
+
+    assert exit_code == 2
+    assert exception is not None
+    assert _EXCEPTION_SECRET not in output
+    assert _EXCEPTION_SECRET not in _exception_artifacts(exception)
+    assert all(_EXCEPTION_SECRET not in value for value in retained_args)
+    assert _TERMINATED_API_KEY_LITERAL in retained_args
+    assert module._INLINE_API_KEY_VAULT.pending_count() == 0
 
 
 @pytest.mark.parametrize("failure_site", ["redaction", "sys_argv_writeback"])

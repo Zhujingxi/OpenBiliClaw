@@ -137,8 +137,9 @@ class _InlineApiKeyVault:
         secret_holder: list[str | None],
     ) -> None:
         """Transfer a mutable secret holder into a reserved capability."""
-        secret_value = secret_holder[0]
+        secret_value: str | None = None
         try:
+            secret_value = secret_holder[0]
             if secret_value is None:
                 raise RuntimeError("Inline API key holder was cleared before storage.")
             with self._lock:
@@ -169,6 +170,14 @@ class _InlineApiKeyVault:
 _INLINE_API_KEY_VAULT = _InlineApiKeyVault()
 _INLINE_API_KEY_HANDLE_PREFIX = "__openbiliclaw_inline_api_key_handle__:"
 _INLINE_API_KEY_REDACTION = "__openbiliclaw_inline_api_key_redacted__"
+
+
+@dataclass(frozen=True)
+class _InlineApiKeyOccurrence:
+    """One secret-bearing argument slot identified without retaining its value."""
+
+    secret_index: int
+    equals_form: bool
 
 
 def _encode_inline_api_key_handle(handle: _InlineApiKeyHandle) -> str:
@@ -236,33 +245,103 @@ def _root_models_argument_offset(
     return None
 
 
+def _conservative_api_key_occurrences(
+    args: Sequence[str],
+    *,
+    start: int,
+) -> tuple[_InlineApiKeyOccurrence, ...]:
+    """Find real-looking credential options when no command grammar is available."""
+    occurrences: list[_InlineApiKeyOccurrence] = []
+    index = start
+    while index < len(args):
+        value = args[index]
+        if value == "--":
+            break
+        if value == "--api-key" and index + 1 < len(args):
+            occurrences.append(_InlineApiKeyOccurrence(index + 1, False))
+            index += 2
+            continue
+        if value.startswith("--api-key="):
+            occurrences.append(_InlineApiKeyOccurrence(index, True))
+        index += 1
+    return tuple(occurrences)
+
+
+def _command_api_key_occurrences(
+    args: Sequence[str],
+    *,
+    start: int,
+    command: click.Command,
+) -> tuple[_InlineApiKeyOccurrence, ...]:
+    """Find credentials using the selected Click command's actual option grammar."""
+    options = {
+        option_name: parameter
+        for parameter in command.params
+        if isinstance(parameter, TyperOption)
+        for option_name in (*parameter.opts, *parameter.secondary_opts)
+    }
+    api_key_option = options.get("--api-key")
+    occurrences: list[_InlineApiKeyOccurrence] = []
+    index = start
+    while index < len(args):
+        value = args[index]
+        if value == "--":
+            break
+        option_name, separator, _ = value.partition("=")
+        option = options.get(option_name)
+        if option is None:
+            index += 1
+            continue
+        if option is api_key_option:
+            if separator:
+                occurrences.append(_InlineApiKeyOccurrence(index, True))
+                index += 1
+                continue
+            if index + 1 < len(args):
+                occurrences.append(_InlineApiKeyOccurrence(index + 1, False))
+            index += 1 + max(option.nargs, 1)
+            continue
+        index += 1
+        if separator or option.is_flag or option.count:
+            continue
+        index += max(option.nargs, 1)
+    return tuple(occurrences)
+
+
+def _model_api_key_occurrences(
+    args: Sequence[str],
+    *,
+    offset: int | None,
+    group: TyperGroup | None,
+) -> tuple[_InlineApiKeyOccurrence, ...]:
+    """Select grammar-aware or conservative scanning for one model invocation."""
+    if offset is None or offset >= len(args):
+        return ()
+    command = group.commands.get(args[offset]) if group is not None else None
+    if command is None:
+        return _conservative_api_key_occurrences(args, start=offset)
+    return _command_api_key_occurrences(args, start=offset + 1, command=command)
+
+
 def _protect_inline_api_key_args(
     args: list[str],
     *,
-    offset: int | None,
+    occurrences: Sequence[_InlineApiKeyOccurrence],
     handles: list[_InlineApiKeyHandle],
 ) -> None:
     """Replace model --api-key values in-place before Click copies them."""
-    if offset is None:
-        return
     secret_holder: list[str | None] = [None]
-    index = offset
     try:
-        while index < len(args):
-            secret_index: int | None = None
-            equals_form = False
-            if args[index] == "--api-key" and index + 1 < len(args):
-                secret_index = index + 1
+        for occurrence in occurrences:
+            secret_index = occurrence.secret_index
+            if secret_index >= len(args):
+                continue
+            if occurrence.equals_form:
+                secret_holder[0] = args[secret_index].partition("=")[2]
+                args[secret_index] = f"--api-key={_INLINE_API_KEY_REDACTION}"
+            else:
                 secret_holder[0] = args[secret_index]
                 args[secret_index] = _INLINE_API_KEY_REDACTION
-            elif args[index].startswith("--api-key="):
-                secret_index = index
-                equals_form = True
-                secret_holder[0] = args[index].partition("=")[2]
-                args[index] = f"--api-key={_INLINE_API_KEY_REDACTION}"
-            if secret_index is None:
-                index += 1
-                continue
 
             while True:
                 handle = _INLINE_API_KEY_VAULT.new_handle()
@@ -272,25 +351,26 @@ def _protect_inline_api_key_args(
                 handles.pop()
             _INLINE_API_KEY_VAULT.store(handle, secret_holder)
             encoded = _encode_inline_api_key_handle(handle)
-            args[secret_index] = f"--api-key={encoded}" if equals_form else encoded
-            index = secret_index + 1
+            args[secret_index] = f"--api-key={encoded}" if occurrence.equals_form else encoded
     finally:
         secret_holder[0] = None
 
 
-def _redact_inline_api_key_args(args: list[str], *, offset: int | None) -> None:
+def _redact_inline_api_key_args(
+    args: list[str],
+    *,
+    occurrences: Sequence[_InlineApiKeyOccurrence],
+) -> None:
     """Erase recognized model credential values from a retained argument view."""
-    if offset is None:
-        return
-    index = offset
-    while index < len(args):
-        if args[index] == "--api-key" and index + 1 < len(args):
-            args[index + 1] = _INLINE_API_KEY_REDACTION
-            index += 2
+    for occurrence in occurrences:
+        secret_index = occurrence.secret_index
+        if secret_index >= len(args):
             continue
-        if args[index].startswith("--api-key="):
-            args[index] = f"--api-key={_INLINE_API_KEY_REDACTION}"
-        index += 1
+        args[secret_index] = (
+            f"--api-key={_INLINE_API_KEY_REDACTION}"
+            if occurrence.equals_form
+            else _INLINE_API_KEY_REDACTION
+        )
 
 
 class SecretSafeTyperGroup(TyperGroup):
@@ -302,6 +382,12 @@ class SecretSafeTyperGroup(TyperGroup):
         if self._direct_model_scope:
             return 0
         return _root_models_argument_offset(args, self.params)
+
+    def _model_group(self) -> TyperGroup | None:
+        candidate: click.Command | None = self
+        if not self._direct_model_scope:
+            candidate = self.commands.get("models")
+        return candidate if isinstance(candidate, TyperGroup) else None
 
     def main(
         self,
@@ -321,12 +407,18 @@ class SecretSafeTyperGroup(TyperGroup):
         args = protected_args
         handles: list[_InlineApiKeyHandle] = []
         model_offset: int | None = None
+        occurrences: tuple[_InlineApiKeyOccurrence, ...] = ()
         parent_args: Sequence[str] | None = None if from_sys_argv else protected_args
         try:
             model_offset = self._model_argument_offset(protected_args)
-            _protect_inline_api_key_args(
+            occurrences = _model_api_key_occurrences(
                 protected_args,
                 offset=model_offset,
+                group=self._model_group(),
+            )
+            _protect_inline_api_key_args(
+                protected_args,
+                occurrences=occurrences,
                 handles=handles,
             )
             if from_sys_argv:
@@ -342,7 +434,10 @@ class SecretSafeTyperGroup(TyperGroup):
         finally:
             try:
                 try:
-                    _redact_inline_api_key_args(protected_args, offset=model_offset)
+                    _redact_inline_api_key_args(
+                        protected_args,
+                        occurrences=occurrences,
+                    )
                 finally:
                     if from_sys_argv:
                         sys.argv[1:] = protected_args
