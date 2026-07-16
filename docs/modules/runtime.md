@@ -242,8 +242,9 @@ embedding_progress.reset()
 - `PUT /api/config`：允许保存修复配置，但跳过热重载并返回 `restart_required=true`。
 - `GET /api/model-config`、`PUT /api/model-config`、`GET /api/model-connection-types` 与 `POST /api/model-config/probe`：保持模型修复、迁移决定、descriptor 与精确探测入口可达；请求仍受 revision/init guard 与 secret-safe validation 保护。
 - `GET /api/runtime-status` 与 `/api/runtime-stream`：用于 popup 展示降级状态；stream 会先发送 `{type:"degraded", ...}` 并保持连接。
+- 所有非 `/api/` 的前端页面与静态资源继续可达，包括桌面 Web `/`、`/web...`、首次设置 `/setup...`、移动 Web `/m...` 与 favicon；用户可以先打开完整页面，再通过上述模型配置 API 修复路由。远程访问仍照常经过 API auth 门禁。
 
-其他 API 在降级模式下返回 503，避免在缺少可用模型 route、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。对外 `degraded_reason="llm_registry_unavailable"` 作为一版兼容值保留，不代表旧 `LLMRegistry` 仍存在。
+其他 `/api/` 业务接口在降级模式下返回 503，避免在缺少可用模型 route、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。对外 `degraded_reason="llm_registry_unavailable"` 作为一版兼容值保留，不代表旧 `LLMRegistry` 仍存在。
 
 降级状态下成功 `PUT /api/model-config` 会构造并发布完整 runtime graph，启动新 graph 的后台任务，清除 `RuntimeContext` 与 app 两层 degraded 标记，再发一次 `config_reloaded`；调用方无需重启 daemon。构造、publication 或任务启动失败时，文件和完整 degraded runtime state 都恢复，且不发送成功事件。
 
