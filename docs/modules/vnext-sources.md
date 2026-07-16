@@ -2,33 +2,35 @@
 
 ## 状态与边界
 
-本模块为 backend-first vNext 提供七个平台的能力声明、只读连接器边界和通用浏览器任务服务。它已经实现并通过 mock transport / SQLite 合同测试，但**尚未接入当前生产 API、legacy runtime 或浏览器插件 dispatcher**；HTTP 路由、composition root 和扩展切换由后续任务完成。当前 v0.3 来源模块与各平台旧任务 endpoint 仍是实际运行路径。
+本模块为 backend-first vNext 提供七个平台的能力声明、只读连接器边界、现有客户端适配器和通用浏览器任务服务。它已经通过逐操作 connector、真实客户端形状、SQLite 并发与排队等待合同测试，但**尚未接入当前生产 API、legacy runtime 或浏览器插件 dispatcher**；HTTP 路由、composition root 和扩展切换由后续任务完成。当前 v0.3 来源模块与各平台旧任务 endpoint 仍是实际运行路径。
 
 连接器只公开不可变 `ActivityEvent` 或 `ContentItem`。HTTP、CLI、SDK、DOM 原始 row 只能存在于 `infrastructure.sources.<platform>` 内部；不支持的能力不会用空结果或其它操作模拟，而是抛出 `UnsupportedSourceOperationError`。连接器不提供 like、follow、favorite、save、upvote、subscribe 等账号写操作。
 
 ## 七平台能力矩阵
 
-| canonical source ID | 保留能力 | transport 边界 |
-|---|---|---|
-| `bilibili` | activity import、search、trending、related、explore | 现有 API / extension transport 的只读适配 seam |
-| `xiaohongshu` | activity import、search、creator | 已登录扩展 tab |
-| `douyin` | activity import、search、trending、recommended feed | direct HTTP 或已登录扩展 tab |
-| `youtube` | activity import、search、trending、creator/channel | scraper、Takeout 或扩展 transport |
-| `twitter` | search、recommended For-You、creator | `twitter-cli` 只读 transport；没有虚构 bootstrap |
-| `zhihu` | activity import、search、trending、recommended feed、creator、related | 已登录扩展 tab |
-| `reddit` | activity import、search、trending、community/subreddit、related | `rdt-cli` 或扩展 transport |
+manifest 把稳定产品能力与可执行操作分开。每个 operation 另带 `requires_auth`、`result_kind` 和 `transport_kind=direct|cli|browser`，因此同一个 `trending/feed` 能力可以有多个真实操作，但不会把高层探索策略伪装成平台原生操作。
 
-`CREATOR`、`COMMUNITY`、`EXPLORE` 是独立能力，避免把频道、subreddit 或跨域探索伪装为其它操作。每个平台使用独立的冻结 Pydantic settings；settings 只含开关、模式、预算与节流值，不含 Cookie、token 或其它凭据字段。
+| canonical source ID | 可执行只读操作 | transport 边界 |
+|---|---|---|
+| `bilibili` | bootstrap import、search、trending、related | retained `BilibiliAPI` direct adapter；没有平台原生 `explore` |
+| `xiaohongshu` | bootstrap import、search、creator | durable queued browser transport |
+| `douyin` | bootstrap import；search、trending、feed | bootstrap 固定 browser；discovery 由闭合 `direct|extension` mode 选择 retained direct client 或 browser |
+| `youtube` | bootstrap import、search、trending、creator/channel | bootstrap browser；retained scraper direct adapter |
+| `twitter` | bootstrap import、search、feed、creator | retained `XClient` / `twitter-cli` adapter；bootstrap 合并 likes + bookmarks |
+| `zhihu` | bootstrap import、search、trending、feed、creator、related | durable queued browser transport |
+| `reddit` | bootstrap import、search、trending、community/subreddit、related | bootstrap browser；closed `rdt|extension` backend 选择 retained CLI 或 browser |
+
+creator 与 community 是独立能力；B 站跨域 explore 属于后续高层发现用例，不在 connector manifest。每个平台使用独立的冻结 Pydantic settings；所有 mode/backend/source-mode 都是 `Literal` 或枚举闭集，settings 只含开关、模式、预算与节流值，不含 Cookie、token 或其它凭据字段。
 
 ## 公开 API
 
 | 模块 | API |
 |---|---|
-| `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceManifest`, `SourceConnector`, `SourceTaskRequest`, `ClaimedSourceTask`, `SourceTaskCompletion` |
+| `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceOperation`, `SourceOperationSpec`, `SourceManifest`, `SourceConnector`, browser task models |
 | `features.sources.registry` | `SourceRegistry`, `build_source_registry()`；函数签名显式要求七个已构造 connector，不扫描 entry point 或动态插件 |
-| `features.sources.service` | `SourceTaskService.enqueue()`, `claim()`, `complete()`；`CredentialShapedPayloadError`, `StaleSourceTaskLeaseError`, `SourceTaskCompletionConflictError` |
-| `infrastructure.sources.<platform>` | `<Platform>Settings`, `<Platform>Transport`, `<Platform>Connector` |
-| `infrastructure.sources.browser_tasks` | `SQLAlchemyBrowserTaskRepository` |
+| `features.sources.service` | `SourceTaskService.enqueue()`, `claim()`, `complete()`, `snapshot()`；只允许 browser operation 进入 durable queue |
+| `infrastructure.sources.<platform>` | 严格 settings、production retained-client/CLI/browser adapter、connector 和显式 builder |
+| `infrastructure.sources.browser_tasks` | `SQLAlchemyBrowserTaskRepository`, `QueuedBrowserTransport`；typed enqueue + bounded async wait，调用取消会直接传播 |
 
 ## 规范化与身份
 
@@ -36,13 +38,15 @@
 
 ## 通用浏览器任务安全
 
-`SourceTaskRequest` 只接受七个 canonical source ID 与 `SourceCapability` operation；service 在入队前再次核对 manifest，来源未声明的操作直接拒绝。claim 只领取同一来源下最早的 pending 或 lease 已过期任务，使用随机 lease token 与条件更新避免同一任务被两个 worker 同时拥有。过期任务可以重新领取，旧 token 不得 complete。
+`SourceTaskRequest` 只接受七个 canonical source ID 与闭合 `SourceOperation`；service 在入队前核对 manifest 且只允许 `transport_kind=browser` 的 operation 持久化。claim 也只领取该来源的 browser operation。最早 pending / lease-expired task 通过条件更新获得随机 lease token；独立 session 并发 claim 测试证明同一任务只产生一个 owner。过期任务可以重新领取，旧 token 不得 complete。
 
-complete 对相同 lease token + 相同结果是幂等的；不同结果得到 conflict，错误 token 或过期 token 得到 stale lease。payload/result 先做严格 JSON 验证，再递归拒绝 authorization、Cookie、password、secret、session、credential、API key 和任意 token 形状字段；异常不回显字段值。扩展在自己的登录 tab 执行任务，task payload 不承载浏览器 Cookie。
+complete 对相同 lease token + 相同结果是幂等的；并行相同 completion 得到一次写入和一次 idempotent retry，并行不同结果只保留一个结果且另一方 conflict。payload/result 先做严格 JSON 验证，再递归拒绝 singular、plural、qualified 或嵌套的 authorization、proxy authorization、Cookie、password、secret、session、credential、API key 和 token 容器；异常只报告字段路径，不回显字段值。`token_count`、`session_duration`、`cookie_policy` 等非凭据统计字段不会误伤。
+
+`QueuedBrowserTransport` 入队后通过只读 snapshot 等待 `completed` result，以 `asyncio.timeout` 限制总等待时间；没有线程内无限等待或吞掉 cancellation。扩展仍在自己的登录 tab 执行任务，task payload 不承载浏览器 Cookie。
 
 ## 尚未完成
 
 - 尚未新增 `/api/v1/source-tasks` HTTP claim/complete 路由。
 - 尚未把 legacy 各平台 task endpoint 或扩展 dispatcher 改接通用合同。
-- 尚未在生产 composition root 注入真实 transport；本任务只冻结服务/transport 合同并以 mock 验证。
+- 各平台 retained-client/CLI/browser adapter 与 builder 已实现，但尚未在生产 composition root 构造并切换 runtime。
 - 尚未切换 legacy 数据或停止 v0.3 来源 producer。

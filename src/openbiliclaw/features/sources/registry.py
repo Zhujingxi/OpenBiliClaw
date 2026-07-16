@@ -15,7 +15,7 @@ class SourceRegistry:
     """Immutable registry; sources cannot be discovered or injected dynamically."""
 
     def __init__(self, connectors: tuple[SourceConnector, ...]) -> None:
-        by_id = {connector.manifest.source_id: connector for connector in connectors}
+        by_id = {connector.manifest.source_id.value: connector for connector in connectors}
         if len(by_id) != len(connectors):
             raise ValueError("source registry contains duplicate source IDs")
         self._connectors: Mapping[str, SourceConnector] = MappingProxyType(by_id)

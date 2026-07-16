@@ -1,12 +1,21 @@
 """Read-only Xiaohongshu connector around logged-in extension transports."""
 
+from __future__ import annotations
+
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openbiliclaw.features.activity.domain import ActivityEvent
-from openbiliclaw.features.feed.domain import ContentItem
-from openbiliclaw.features.sources.domain import SourceCapability, SourceManifest
+from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
+from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
+from openbiliclaw.features.sources.domain import (
+    SourceCapability,
+    SourceId,
+    SourceManifest,
+    SourceOperation,
+    SourceResultKind,
+    SourceTransportKind,
+)
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
     activity_event,
@@ -14,8 +23,10 @@ from openbiliclaw.infrastructure.sources._base import (
     content_item,
     first_text,
     nested,
+    operation_spec,
     timestamp,
 )
+from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
 
 
 class XiaohongshuTransport(Protocol):
@@ -34,16 +45,39 @@ class XiaohongshuSettings(BaseModel):
 
 
 _MANIFEST = SourceManifest(
-    source_id="xiaohongshu",
+    source_id=SourceId.XIAOHONGSHU,
     display_name="Xiaohongshu",
     capabilities=frozenset(
         {
-            SourceCapability.ACTIVITY_IMPORT,
+            SourceCapability.AUTHENTICATION,
+            SourceCapability.BOOTSTRAP_IMPORT,
+            SourceCapability.ACTIVITY_COLLECTION,
             SourceCapability.SEARCH,
-            SourceCapability.CREATOR,
+            SourceCapability.CREATOR_DISCOVERY,
+            SourceCapability.BROWSER_ASSISTED,
         }
     ),
-    requires_account=True,
+    operations=(
+        operation_spec(
+            SourceOperation.BOOTSTRAP_IMPORT,
+            SourceCapability.BOOTSTRAP_IMPORT,
+            result_kind=SourceResultKind.ACTIVITY,
+            requires_auth=True,
+            transport_kind=SourceTransportKind.BROWSER,
+        ),
+        operation_spec(
+            SourceOperation.SEARCH,
+            SourceCapability.SEARCH,
+            requires_auth=True,
+            transport_kind=SourceTransportKind.BROWSER,
+        ),
+        operation_spec(
+            SourceOperation.CREATOR,
+            SourceCapability.CREATOR_DISCOVERY,
+            requires_auth=True,
+            transport_kind=SourceTransportKind.BROWSER,
+        ),
+    ),
 )
 
 
@@ -58,6 +92,15 @@ class XiaohongshuConnector(NormalizingConnector):
             normalize_content=_content,
             normalize_activity=_activity,
         )
+
+
+def build_xiaohongshu_connector(
+    task_service: object, settings: XiaohongshuSettings | None = None
+) -> XiaohongshuConnector:
+    return XiaohongshuConnector(
+        QueuedBrowserTransport(task_service, SourceId.XIAOHONGSHU),  # type: ignore[arg-type]
+        settings,
+    )
 
 
 def _external_id(row: dict[str, Any]) -> str:

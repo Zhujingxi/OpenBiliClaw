@@ -1,26 +1,60 @@
 """Read-only YouTube connector around scraper, Takeout, or browser transports."""
 
+from __future__ import annotations
+
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openbiliclaw.features.activity.domain import ActivityEvent
-from openbiliclaw.features.feed.domain import ContentItem
-from openbiliclaw.features.sources.domain import SourceCapability, SourceManifest
+from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
+from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
+from openbiliclaw.features.sources.domain import (
+    SourceCapability,
+    SourceId,
+    SourceManifest,
+    SourceOperation,
+    SourceResultKind,
+    SourceTransportKind,
+)
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
+    RoutedTransport,
     activity_event,
     activity_kind,
     content_item,
     first_text,
+    operation_spec,
     timestamp,
 )
+from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
 
 
 class YouTubeTransport(Protocol):
     async def fetch(
         self, *, operation: str, query: str | None, limit: int
     ) -> list[dict[str, Any]]: ...
+
+
+class YouTubeReadClient(Protocol):
+    async def search_videos(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]: ...
+    async def get_trending(self, *, limit: int = 50) -> list[dict[str, Any]]: ...
+    async def get_channel_videos(
+        self, channel_id: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]: ...
+
+
+class YouTubeDirectTransport:
+    def __init__(self, client: YouTubeReadClient) -> None:
+        self._client = client
+
+    async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
+        if operation == SourceOperation.SEARCH:
+            return await self._client.search_videos(query or "", limit=limit)
+        if operation == SourceOperation.TRENDING:
+            return await self._client.get_trending(limit=limit)
+        if operation == SourceOperation.CREATOR:
+            return await self._client.get_channel_videos(query or "", limit=limit)
+        raise ValueError(f"unsupported YouTube operation: {operation}")
 
 
 class YouTubeSettings(BaseModel):
@@ -35,17 +69,46 @@ class YouTubeSettings(BaseModel):
 
 
 _MANIFEST = SourceManifest(
-    source_id="youtube",
+    source_id=SourceId.YOUTUBE,
     display_name="YouTube",
     capabilities=frozenset(
         {
-            SourceCapability.ACTIVITY_IMPORT,
+            SourceCapability.AUTHENTICATION,
+            SourceCapability.BOOTSTRAP_IMPORT,
+            SourceCapability.ACTIVITY_COLLECTION,
             SourceCapability.SEARCH,
-            SourceCapability.TRENDING,
-            SourceCapability.CREATOR,
+            SourceCapability.TRENDING_FEED,
+            SourceCapability.CREATOR_DISCOVERY,
+            SourceCapability.BROWSER_ASSISTED,
         }
     ),
-    requires_account=False,
+    operations=(
+        operation_spec(
+            SourceOperation.BOOTSTRAP_IMPORT,
+            SourceCapability.BOOTSTRAP_IMPORT,
+            result_kind=SourceResultKind.ACTIVITY,
+            requires_auth=True,
+            transport_kind=SourceTransportKind.BROWSER,
+        ),
+        operation_spec(
+            SourceOperation.SEARCH,
+            SourceCapability.SEARCH,
+            requires_auth=False,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+        operation_spec(
+            SourceOperation.TRENDING,
+            SourceCapability.TRENDING_FEED,
+            requires_auth=False,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+        operation_spec(
+            SourceOperation.CREATOR,
+            SourceCapability.CREATOR_DISCOVERY,
+            requires_auth=False,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+    ),
 )
 
 
@@ -60,6 +123,26 @@ class YouTubeConnector(NormalizingConnector):
             normalize_content=_content,
             normalize_activity=_activity,
         )
+
+
+def build_youtube_connector(
+    client: YouTubeReadClient,
+    task_service: object,
+    settings: YouTubeSettings | None = None,
+) -> YouTubeConnector:
+    direct = YouTubeDirectTransport(client)
+    browser = QueuedBrowserTransport(task_service, SourceId.YOUTUBE)  # type: ignore[arg-type]
+    return YouTubeConnector(
+        RoutedTransport(
+            {
+                SourceOperation.BOOTSTRAP_IMPORT.value: browser,
+                SourceOperation.SEARCH.value: direct,
+                SourceOperation.TRENDING.value: direct,
+                SourceOperation.CREATOR.value: direct,
+            }
+        ),
+        settings,
+    )
 
 
 def _external_id(row: dict[str, Any]) -> str:

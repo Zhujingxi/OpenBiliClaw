@@ -1,27 +1,59 @@
 """Read-only Douyin connector around direct HTTP or logged-in browser transports."""
 
+from __future__ import annotations
+
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from openbiliclaw.features.activity.domain import ActivityEvent
-from openbiliclaw.features.feed.domain import ContentItem
-from openbiliclaw.features.sources.domain import SourceCapability, SourceManifest
+from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
+from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
+from openbiliclaw.features.sources.domain import (
+    SourceCapability,
+    SourceId,
+    SourceManifest,
+    SourceOperation,
+    SourceResultKind,
+    SourceTransportKind,
+)
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
+    RoutedTransport,
     activity_event,
     activity_kind,
     content_item,
     first_text,
     nested,
+    operation_spec,
     timestamp,
 )
+from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
 
 
 class DouyinTransport(Protocol):
     async def fetch(
         self, *, operation: str, query: str | None, limit: int
     ) -> list[dict[str, Any]]: ...
+
+
+class DouyinReadClient(Protocol):
+    async def search_aweme(self, keyword: str, *, limit: int = 30) -> list[dict[str, Any]]: ...
+    async def get_hot_board(self, *, limit: int = 30) -> list[dict[str, Any]]: ...
+    async def get_recommend_feed(self, *, limit: int = 30) -> list[dict[str, Any]]: ...
+
+
+class DouyinDirectTransport:
+    def __init__(self, client: DouyinReadClient) -> None:
+        self._client = client
+
+    async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
+        if operation == SourceOperation.SEARCH:
+            return await self._client.search_aweme(query or "", limit=limit)
+        if operation == SourceOperation.TRENDING:
+            return await self._client.get_hot_board(limit=limit)
+        if operation == SourceOperation.FEED:
+            return await self._client.get_recommend_feed(limit=limit)
+        raise ValueError(f"unsupported Douyin operation: {operation}")
 
 
 class DouyinSettings(BaseModel):
@@ -35,30 +67,87 @@ class DouyinSettings(BaseModel):
     request_interval_seconds: int = Field(default=2, ge=1)
 
 
-_MANIFEST = SourceManifest(
-    source_id="douyin",
-    display_name="Douyin",
-    capabilities=frozenset(
-        {
-            SourceCapability.ACTIVITY_IMPORT,
-            SourceCapability.SEARCH,
-            SourceCapability.TRENDING,
-            SourceCapability.RECOMMENDED,
-        }
-    ),
-    requires_account=True,
-)
-
-
 class DouyinConnector(NormalizingConnector):
     def __init__(self, transport: DouyinTransport, settings: DouyinSettings | None = None) -> None:
+        resolved = settings or DouyinSettings()
+        discovery_kind = (
+            SourceTransportKind.DIRECT if resolved.mode == "direct" else SourceTransportKind.BROWSER
+        )
         super().__init__(
-            manifest=_MANIFEST,
+            manifest=SourceManifest(
+                source_id=SourceId.DOUYIN,
+                display_name="Douyin",
+                capabilities=frozenset(
+                    {
+                        SourceCapability.AUTHENTICATION,
+                        SourceCapability.BOOTSTRAP_IMPORT,
+                        SourceCapability.ACTIVITY_COLLECTION,
+                        SourceCapability.SEARCH,
+                        SourceCapability.TRENDING_FEED,
+                        SourceCapability.BROWSER_ASSISTED,
+                    }
+                ),
+                operations=(
+                    operation_spec(
+                        SourceOperation.BOOTSTRAP_IMPORT,
+                        SourceCapability.BOOTSTRAP_IMPORT,
+                        result_kind=SourceResultKind.ACTIVITY,
+                        requires_auth=True,
+                        transport_kind=SourceTransportKind.BROWSER,
+                    ),
+                    operation_spec(
+                        SourceOperation.SEARCH,
+                        SourceCapability.SEARCH,
+                        requires_auth=True,
+                        transport_kind=discovery_kind,
+                    ),
+                    operation_spec(
+                        SourceOperation.TRENDING,
+                        SourceCapability.TRENDING_FEED,
+                        requires_auth=True,
+                        transport_kind=discovery_kind,
+                    ),
+                    operation_spec(
+                        SourceOperation.FEED,
+                        SourceCapability.TRENDING_FEED,
+                        requires_auth=True,
+                        transport_kind=discovery_kind,
+                    ),
+                ),
+            ),
             transport=transport,
-            settings=settings or DouyinSettings(),
+            settings=resolved,
             normalize_content=_content,
             normalize_activity=_activity,
         )
+
+
+def build_douyin_connector(
+    *,
+    task_service: object,
+    direct_client: DouyinReadClient | None = None,
+    settings: DouyinSettings | None = None,
+) -> DouyinConnector:
+    resolved = settings or DouyinSettings()
+    browser = QueuedBrowserTransport(task_service, SourceId.DOUYIN)  # type: ignore[arg-type]
+    discovery: DouyinTransport
+    if resolved.mode == "direct":
+        if direct_client is None:
+            raise ValueError("direct_client is required in direct mode")
+        discovery = DouyinDirectTransport(direct_client)
+    else:
+        discovery = browser
+    return DouyinConnector(
+        RoutedTransport(
+            {
+                SourceOperation.BOOTSTRAP_IMPORT.value: browser,
+                SourceOperation.SEARCH.value: discovery,
+                SourceOperation.TRENDING.value: discovery,
+                SourceOperation.FEED.value: discovery,
+            }
+        ),
+        resolved,
+    )
 
 
 def _content(row: dict[str, Any]) -> ContentItem | None:

@@ -1,7 +1,9 @@
-"""SQLAlchemy persistence adapter for generic logged-in browser source tasks."""
+"""Durable browser source-task persistence and awaiting transport."""
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -10,10 +12,12 @@ from sqlalchemy import and_, or_, select, update
 
 from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
-    SourceCapability,
     SourceId,
+    SourceOperation,
     SourceTaskCompletion,
     SourceTaskRequest,
+    SourceTaskSnapshot,
+    SourceTaskStatus,
 )
 from openbiliclaw.features.sources.service import (
     SourceTaskCompletionConflictError,
@@ -24,6 +28,8 @@ from openbiliclaw.infrastructure.database.models import SourceTaskModel
 if TYPE_CHECKING:
     from pydantic import JsonValue
     from sqlalchemy.orm import Session
+
+    from openbiliclaw.features.sources.service import SourceTaskService
 
 
 class SQLAlchemyBrowserTaskRepository:
@@ -100,7 +106,7 @@ class SQLAlchemyBrowserTaskRepository:
                 return ClaimedSourceTask(
                     id=UUID(row.id),
                     source_id=SourceId(row.source_id),
-                    operation=SourceCapability(row.operation),
+                    operation=SourceOperation(row.operation),
                     payload=row.request_payload,
                     lease_token=lease_token,
                     lease_expires_at=lease_expires_at,
@@ -149,6 +155,63 @@ class SQLAlchemyBrowserTaskRepository:
                 id=task_id, completed_at=_aware(row.updated_at), idempotent=True
             )
         raise StaleSourceTaskLeaseError("source task completion lease is stale")
+
+    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot:
+        row = self._session.get(SourceTaskModel, str(task_id))
+        if row is None:
+            raise LookupError(f"source task does not exist: {task_id}")
+        return SourceTaskSnapshot(
+            id=task_id,
+            status=SourceTaskStatus(row.status),
+            result=row.result_payload,
+        )
+
+
+class QueuedBrowserTransport:
+    """Enqueue a typed operation and await its extension result with a hard bound."""
+
+    def __init__(
+        self,
+        service: SourceTaskService,
+        source_id: SourceId,
+        *,
+        timeout_seconds: float = 60.0,
+        poll_interval_seconds: float = 0.1,
+    ) -> None:
+        if timeout_seconds <= 0 or poll_interval_seconds <= 0:
+            raise ValueError("browser transport timing values must be positive")
+        self._service = service
+        self._source_id = source_id
+        self._timeout = timeout_seconds
+        self._poll_interval = poll_interval_seconds
+
+    async def fetch(
+        self, *, operation: str, query: str | None, limit: int
+    ) -> list[dict[str, object]]:
+        typed_operation = SourceOperation(operation)
+        payload: dict[str, JsonValue] = {"limit": limit}
+        if query is not None:
+            payload["query"] = query
+        task_id = await asyncio.to_thread(
+            self._service.enqueue,
+            SourceTaskRequest(
+                source_id=self._source_id,
+                operation=typed_operation,
+                payload=payload,
+            ),
+        )
+        async with asyncio.timeout(self._timeout):
+            while True:
+                snapshot = await asyncio.to_thread(self._service.snapshot, task_id)
+                if snapshot.status is SourceTaskStatus.COMPLETED:
+                    result = snapshot.result or {}
+                    items = result.get("items")
+                    if not isinstance(items, tuple):
+                        raise TypeError("browser source result must contain an items array")
+                    if not all(isinstance(item, Mapping) for item in items):
+                        raise TypeError("browser source result items must be objects")
+                    return [dict(item) for item in items]
+                await asyncio.sleep(self._poll_interval)
 
 
 def _aware(value: datetime) -> datetime:

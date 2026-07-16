@@ -28,6 +28,10 @@ from openbiliclaw.features.sources.domain import (
     SourceCapability,
     SourceConnector,
     SourceManifest,
+    SourceOperation,
+    SourceOperationSpec,
+    SourceResultKind,
+    SourceTransportKind,
 )
 
 NOW = datetime(2026, 7, 17, 8, 30, tzinfo=UTC)
@@ -136,8 +140,18 @@ def _contracts() -> tuple[BaseModel, ...]:
         SourceManifest(
             source_id="bilibili",
             display_name="Bilibili",
-            capabilities=frozenset({SourceCapability.ACTIVITY_IMPORT, SourceCapability.SEARCH}),
-            requires_account=True,
+            capabilities=frozenset(
+                {SourceCapability.AUTHENTICATION, SourceCapability.BOOTSTRAP_IMPORT}
+            ),
+            operations=(
+                SourceOperationSpec(
+                    operation=SourceOperation.BOOTSTRAP_IMPORT,
+                    capability=SourceCapability.BOOTSTRAP_IMPORT,
+                    result_kind=SourceResultKind.ACTIVITY,
+                    requires_auth=True,
+                    transport_kind=SourceTransportKind.DIRECT,
+                ),
+            ),
         ),
     )
 
@@ -450,18 +464,24 @@ def test_feed_deficit_rejects_invalid_watermarks(
 def test_source_connector_is_a_runtime_checkable_capability_contract() -> None:
     class FakeConnector:
         manifest = SourceManifest(
-            source_id="test",
+            source_id="bilibili",
             display_name="Test",
             capabilities=frozenset({SourceCapability.SEARCH}),
+            operations=(
+                SourceOperationSpec(
+                    operation=SourceOperation.SEARCH,
+                    capability=SourceCapability.SEARCH,
+                    result_kind=SourceResultKind.CONTENT,
+                    requires_auth=False,
+                    transport_kind=SourceTransportKind.DIRECT,
+                ),
+            ),
         )
 
-        async def import_activity(self) -> tuple[ActivityEvent, ...]:
-            return ()
-
-        async def discover(
-            self, capability: SourceCapability, query: str | None, limit: int
+        async def execute(
+            self, operation: SourceOperation, query: str | None = None, limit: int = 20
         ) -> tuple[ContentItem, ...]:
-            del capability, query, limit
+            del operation, query, limit
             return ()
 
     connector: Any = FakeConnector()
@@ -470,8 +490,6 @@ def test_source_connector_is_a_runtime_checkable_capability_contract() -> None:
 
 
 def test_source_connector_annotations_resolve_at_runtime() -> None:
-    activity_hints = get_type_hints(SourceConnector.import_activity)
-    discovery_hints = get_type_hints(SourceConnector.discover)
+    execute_hints = get_type_hints(SourceConnector.execute)
 
-    assert activity_hints["return"] == tuple[ActivityEvent, ...]
-    assert discovery_hints["return"] == tuple[ContentItem, ...]
+    assert execute_hints["return"] == tuple[ActivityEvent, ...] | tuple[ContentItem, ...]

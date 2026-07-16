@@ -13,7 +13,7 @@
 | 候选与 Feed | ✅ | `ContentItem`、`CandidateAssessment`、`FeedEntry`、`Interaction` 统一内容和反馈边界 |
 | 本地收藏 | ✅ | `CollectionItem` 只表达 favorites / watch-later 本地集合成员关系 |
 | 持久化聊天 | ✅ | `ChatTurn` 表达 user / assistant 对话轮次 |
-| 来源能力 | ✅ | `SourceId` / `SourceManifest` 声明七平台真实能力；`SourceConnector` 只返回规范化活动或内容对象 |
+| 来源能力 | ✅ | `SourceId` / `SourceManifest` 分开声明稳定 capability 与带 auth/result/transport metadata 的 concrete operation；`SourceConnector` 只返回规范化活动或内容对象 |
 | 来源任务合同 | ✅ | `SourceTaskRequest`、`ClaimedSourceTask`、`SourceTaskCompletion` 冻结通用任务边界；lease 策略见相邻 vNext 来源模块 |
 | 相邻持久化 adapter | ✅ | 独立 vNext SQLAlchemy/Alembic 基础已实现，但不属于本领域模块且未接入生产路径 |
 | 运行时接线 | 🚧 | AI 与来源 adapter 基础已实现；use case、API、数据迁移与现有前端切换由后续任务实现 |
@@ -27,7 +27,7 @@
 | `features.feed.domain` | `ContentItem`, `CandidateAssessment`, `FeedEntry`, `InteractionKind`, `Interaction`, `feed_deficit()` |
 | `features.library.domain` | `CollectionKind`, `CollectionItem` |
 | `features.chat.domain` | `ChatRole`, `ChatTurn` |
-| `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceManifest`, `SourceConnector`, `SourceTaskRequest`, `ClaimedSourceTask`, `SourceTaskCompletion` |
+| `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceOperation`, `SourceOperationSpec`, `SourceManifest`, `SourceConnector`, browser task request/claim/snapshot/completion models |
 
 所有 Pydantic 契约均使用 `frozen=True` 与 `extra="forbid"`，支持 JSON 序列化后由同类型无损还原。`ActivityEvent`、`ContentItem` 与 `Interaction` 的 metadata 只接受 JSON 值，并把对象递归冻结为只读 mapping、数组递归冻结为 tuple；序列化时还原为普通 JSON object/array。`SourceConnector` 是 runtime-checkable Protocol，不是 transport payload 容器，其 normalized result annotations 可在运行时解析。七平台实现、能力矩阵和通用任务安全合同见 [vNext 多来源连接器与通用浏览器任务](vnext-sources.md)。
 

@@ -14,6 +14,8 @@ from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
     SourceTaskCompletion,
     SourceTaskRequest,
+    SourceTaskSnapshot,
+    SourceTransportKind,
     UnsupportedSourceOperationError,
 )
 
@@ -26,12 +28,20 @@ if TYPE_CHECKING:
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 _CREDENTIAL_FIELD_SUFFIXES = (
     "apikey",
+    "apikeys",
     "cookie",
+    "cookies",
     "credential",
+    "credentials",
     "password",
+    "passwords",
+    "proxyauthorization",
     "secret",
+    "secrets",
     "session",
+    "sessions",
     "token",
+    "tokens",
 )
 
 
@@ -71,6 +81,8 @@ class SourceTaskRepository(Protocol):
         now: datetime,
     ) -> SourceTaskCompletion: ...
 
+    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
+
 
 class SourceTaskUnitOfWork(Protocol):
     """Small transaction boundary needed by the source feature."""
@@ -95,23 +107,24 @@ class SourceTaskService:
     def __init__(
         self,
         uow_factory: Callable[[], SourceTaskUnitOfWork],
-        registry: SourceRegistry,
+        registry: SourceRegistry | Callable[[], SourceRegistry],
         *,
         lease_seconds: int = 360,
     ) -> None:
         if lease_seconds < 1:
             raise ValueError("source task lease must be positive")
         self._uow_factory = uow_factory
-        self._registry = registry
+        self._registry_provider = registry if callable(registry) else lambda: registry
         self._lease_seconds = lease_seconds
 
     def enqueue(self, request: SourceTaskRequest) -> UUID:
         """Persist validated work only when the source advertises the operation."""
 
-        connector = self._registry.get(request.source_id)
-        if request.operation not in connector.manifest.capabilities:
+        connector = self._registry_provider().get(request.source_id)
+        spec = connector.manifest.operation_spec(request.operation)
+        if spec.transport_kind is not SourceTransportKind.BROWSER:
             raise UnsupportedSourceOperationError(
-                f"{request.source_id} does not support {request.operation.value}"
+                f"{request.source_id.value} {request.operation.value} is not browser-assisted"
             )
         _safe_json_object(request.payload)
         now = datetime.now(UTC)
@@ -123,14 +136,16 @@ class SourceTaskService:
     def claim(self, source_id: str) -> ClaimedSourceTask | None:
         """Lease the oldest pending or expired task for one canonical source."""
 
-        connector = self._registry.get(source_id)
+        connector = self._registry_provider().get(source_id)
         now = datetime.now(UTC)
         token = uuid4().hex
         with self._uow_factory() as uow:
             task = uow.source_tasks.claim(
                 source_id=source_id,
                 allowed_operations=frozenset(
-                    capability.value for capability in connector.manifest.capabilities
+                    spec.operation.value
+                    for spec in connector.manifest.operations
+                    if spec.transport_kind is SourceTransportKind.BROWSER
                 ),
                 lease_token=token,
                 now=now,
@@ -158,6 +173,12 @@ class SourceTaskService:
             uow.commit()
         return completion
 
+    def snapshot(self, task_id: UUID) -> SourceTaskSnapshot:
+        """Read task state without exposing lease or persistence details."""
+
+        with self._uow_factory() as uow:
+            return uow.source_tasks.get_snapshot(task_id)
+
 
 def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     """Validate JSON recursively and reject credential-shaped keys without echoing values."""
@@ -170,8 +191,15 @@ def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
 def _reject_credential_fields(value: object, *, path: tuple[str, ...] = ()) -> None:
     if isinstance(value, MappingABC):
         for key, child in value.items():
-            normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
-            if normalized == "authorization" or normalized.endswith(_CREDENTIAL_FIELD_SUFFIXES):
+            raw_key = str(key).casefold()
+            normalized = re.sub(r"[^a-z0-9]", "", raw_key)
+            segments = tuple(part for part in re.split(r"[^a-z0-9]+", raw_key) if part)
+            sensitive = normalized.endswith(("authorization", "authorizations")) or (
+                normalized.endswith(_CREDENTIAL_FIELD_SUFFIXES)
+            )
+            if segments and segments[-1] in _CREDENTIAL_FIELD_SUFFIXES:
+                sensitive = True
+            if sensitive:
                 safe_path = ".".join((*path, str(key)))
                 raise CredentialShapedPayloadError(
                     f"credential-shaped field is forbidden in source tasks: {safe_path}"

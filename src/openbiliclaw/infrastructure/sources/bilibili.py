@@ -1,12 +1,21 @@
 """Read-only Bilibili connector around retained API/extension transports."""
 
+from __future__ import annotations
+
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from openbiliclaw.features.activity.domain import ActivityEvent
-from openbiliclaw.features.feed.domain import ContentItem
-from openbiliclaw.features.sources.domain import SourceCapability, SourceManifest
+from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
+from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
+from openbiliclaw.features.sources.domain import (
+    SourceCapability,
+    SourceId,
+    SourceManifest,
+    SourceOperation,
+    SourceResultKind,
+    SourceTransportKind,
+)
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
     activity_event,
@@ -14,6 +23,7 @@ from openbiliclaw.infrastructure.sources._base import (
     content_item,
     first_text,
     nested,
+    operation_spec,
     text,
     timestamp,
 )
@@ -25,6 +35,66 @@ class BilibiliTransport(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+class BilibiliReadClient(Protocol):
+    async def search(
+        self, keyword: str, *, page: int = 1, page_size: int = 20, order: str = "totalrank"
+    ) -> list[dict[str, Any]]: ...
+    async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]: ...
+    async def get_all_favorites(
+        self,
+        *,
+        max_folders: int = 10,
+        max_items_per_folder: int = 50,
+        max_total_items: int | None = None,
+    ) -> list[Any]: ...
+    async def get_following(self, *, page: int = 1, page_size: int = 50) -> list[Any]: ...
+    async def get_related_videos(self, bvid: str) -> list[dict[str, Any]]: ...
+    async def get_ranking(self, rid: int = 0) -> list[dict[str, Any]]: ...
+
+
+class BilibiliDirectTransport:
+    def __init__(self, client: BilibiliReadClient) -> None:
+        self._client = client
+
+    async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
+        if operation == SourceOperation.BOOTSTRAP_IMPORT:
+            history = [
+                dict(row, event_type=row.get("event_type") or "view")
+                for row in await self._client.get_user_history(max_items=limit)
+            ]
+            folders = await self._client.get_all_favorites(max_total_items=limit)
+            favorites = [
+                dict(row, event_type="favorite")
+                for folder in folders
+                for row in getattr(folder, "items", ())
+                if isinstance(row, dict)
+            ]
+            following = [
+                {
+                    "id": f"user:{getattr(user, 'mid', '')}",
+                    "title": str(getattr(user, "uname", "")),
+                    "url": f"https://space.bilibili.com/{getattr(user, 'mid', '')}",
+                    "event_type": "follow",
+                }
+                for user in await self._client.get_following(page_size=limit)
+                if getattr(user, "mid", None)
+            ]
+            return (history + favorites + following)[:limit]
+        if operation == SourceOperation.SEARCH:
+            return await self._client.search(query or "", page_size=limit)
+        if operation == SourceOperation.TRENDING:
+            return (await self._client.get_ranking())[:limit]
+        if operation == SourceOperation.RELATED:
+            return (await self._client.get_related_videos(query or ""))[:limit]
+        raise ValueError(f"unsupported Bilibili operation: {operation}")
+
+
+def build_bilibili_connector(
+    client: BilibiliReadClient, settings: BilibiliSettings | None = None
+) -> BilibiliConnector:
+    return BilibiliConnector(BilibiliDirectTransport(client), settings)
+
+
 class BilibiliSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -32,18 +102,45 @@ class BilibiliSettings(BaseModel):
 
 
 _MANIFEST = SourceManifest(
-    source_id="bilibili",
+    source_id=SourceId.BILIBILI,
     display_name="Bilibili",
     capabilities=frozenset(
         {
-            SourceCapability.ACTIVITY_IMPORT,
+            SourceCapability.AUTHENTICATION,
+            SourceCapability.BOOTSTRAP_IMPORT,
+            SourceCapability.ACTIVITY_COLLECTION,
             SourceCapability.SEARCH,
-            SourceCapability.TRENDING,
-            SourceCapability.RELATED,
-            SourceCapability.EXPLORE,
+            SourceCapability.TRENDING_FEED,
+            SourceCapability.RELATED_DISCOVERY,
         }
     ),
-    requires_account=True,
+    operations=(
+        operation_spec(
+            SourceOperation.BOOTSTRAP_IMPORT,
+            SourceCapability.BOOTSTRAP_IMPORT,
+            result_kind=SourceResultKind.ACTIVITY,
+            requires_auth=True,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+        operation_spec(
+            SourceOperation.SEARCH,
+            SourceCapability.SEARCH,
+            requires_auth=False,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+        operation_spec(
+            SourceOperation.TRENDING,
+            SourceCapability.TRENDING_FEED,
+            requires_auth=False,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+        operation_spec(
+            SourceOperation.RELATED,
+            SourceCapability.RELATED_DISCOVERY,
+            requires_auth=False,
+            transport_kind=SourceTransportKind.DIRECT,
+        ),
+    ),
 )
 
 

@@ -13,6 +13,11 @@ from openbiliclaw.features.feed.domain import ContentItem
 from openbiliclaw.features.sources.domain import (
     SourceCapability,
     SourceManifest,
+    SourceOperation,
+    SourceOperationSpec,
+    SourceResult,
+    SourceResultKind,
+    SourceTransportKind,
     UnsupportedSourceOperationError,
 )
 
@@ -30,6 +35,39 @@ class RetainedSourceTransport(Protocol):
     async def fetch(
         self, *, operation: str, query: str | None, limit: int
     ) -> list[dict[str, Any]]: ...
+
+
+class RoutedTransport:
+    """Route operations to explicitly supplied production transports."""
+
+    def __init__(self, routes: Mapping[str, RetainedSourceTransport]) -> None:
+        self._routes = dict(routes)
+
+    async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
+        try:
+            transport = self._routes[operation]
+        except KeyError as exc:
+            raise UnsupportedSourceOperationError(f"no transport for {operation}") from exc
+        return await transport.fetch(operation=operation, query=query, limit=limit)
+
+
+def operation_spec(
+    operation: SourceOperation,
+    capability: SourceCapability,
+    *,
+    result_kind: SourceResultKind = SourceResultKind.CONTENT,
+    requires_auth: bool,
+    transport_kind: SourceTransportKind,
+) -> SourceOperationSpec:
+    """Keep source manifests concise while retaining explicit per-operation metadata."""
+
+    return SourceOperationSpec(
+        operation=operation,
+        capability=capability,
+        result_kind=result_kind,
+        requires_auth=requires_auth,
+        transport_kind=transport_kind,
+    )
 
 
 class NormalizingConnector:
@@ -55,40 +93,45 @@ class NormalizingConnector:
         return self._manifest
 
     async def import_activity(self) -> tuple[ActivityEvent, ...]:
-        capability = SourceCapability.ACTIVITY_IMPORT
-        self._require(capability)
+        operation = SourceOperation.BOOTSTRAP_IMPORT
+        self._require(operation)
         if self._normalize_activity is None:
             raise UnsupportedSourceOperationError(
-                f"{self.manifest.source_id} does not support {capability.value}"
+                f"{self.manifest.source_id} does not support {operation.value}"
             )
-        rows = await self._transport.fetch(operation=capability.value, query=None, limit=100)
+        rows = await self._transport.fetch(operation=operation.value, query=None, limit=100)
         normalized = (self._normalize_activity(row) for row in rows)
         return _dedupe_events(event for event in normalized if event is not None)
 
     async def discover(
-        self, capability: SourceCapability, query: str | None, limit: int
+        self, operation: SourceOperation, query: str | None, limit: int
     ) -> tuple[ContentItem, ...]:
-        self._require(capability)
-        if capability is SourceCapability.ACTIVITY_IMPORT:
-            raise UnsupportedSourceOperationError("activity_import must use import_activity()")
+        spec = self._require(operation)
+        if spec.result_kind is SourceResultKind.ACTIVITY:
+            raise UnsupportedSourceOperationError("bootstrap_import must use import_activity()")
         if not 1 <= limit <= 100:
             raise ValueError("source discovery limit must be between 1 and 100")
         resolved_query = query.strip() if query else None
-        if capability.requires_input and not resolved_query:
-            raise ValueError(f"{capability.value} requires a non-empty input")
+        if operation.requires_input and not resolved_query:
+            raise ValueError(f"{operation.value} requires a non-empty input")
         rows = await self._transport.fetch(
-            operation=capability.value,
+            operation=operation.value,
             query=resolved_query,
             limit=limit,
         )
         normalized = (self._normalize_content(row) for row in rows)
         return _dedupe_content(item for item in normalized if item is not None)[:limit]
 
-    def _require(self, capability: SourceCapability) -> None:
-        if capability not in self.manifest.capabilities:
-            raise UnsupportedSourceOperationError(
-                f"{self.manifest.source_id} does not support {capability.value}"
-            )
+    async def execute(
+        self, operation: SourceOperation, query: str | None = None, limit: int = 20
+    ) -> SourceResult:
+        spec = self._require(operation)
+        if spec.result_kind is SourceResultKind.ACTIVITY:
+            return await self.import_activity()
+        return await self.discover(operation, query, limit)
+
+    def _require(self, operation: SourceOperation):  # type: ignore[no-untyped-def]
+        return self.manifest.operation_spec(operation)
 
 
 def content_item(
