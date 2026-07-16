@@ -578,9 +578,9 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | `avoidance_speculation_confirmation_threshold` | int | `3` | 自动确认不喜欢领域所需显式负向信号数；用户直接确认不受此阈值限制 |
 | `avoidance_speculation_max_active` | int | `5` | 最多同时活跃的不喜欢领域探针数，不占 `speculation_max_active` |
 | `auto_update_enabled` | bool | `false` | 是否启用后端自动检查并应用新版本；默认关闭，只影响后端源码，不更新浏览器插件 |
-| `auto_update_check_interval_hours` | int | `6` | 后端自动更新检查间隔（小时）；手动检查不受该间隔限制 |
+| `auto_update_check_interval_hours` | int | `6` | 后端自动更新检查间隔（小时），最小 `1`；TOML 中的 `0` / 负数 / 非整数字符串加载时回退安全默认值 `6`，`PUT /api/config` 与 `save_config()` 对非整数或 `<1` 的值直接拒绝且不落盘；手动检查不受该间隔限制 |
 | `auto_update_allow_prerelease` | bool | `false` | 是否允许 `backend-vX.Y.Z-rc/beta/dev` 预发布 tag 被后端自动更新选择；默认忽略 |
-| `auto_update_allowed_remotes` | list[str] | OpenBiliClaw GitHub HTTPS / SSH | 允许自动更新快进的 `origin` allowlist；按规范化形式比较（`.git` 后缀可选、HTTPS/SSH 拼法等价、大小写不敏感），带 userinfo/credential 的 URL 或未匹配的 remote 以 `untrusted_remote` 拒绝并写日志（含实际 remote 地址）；走 GitHub 镜像克隆的安装把镜像 URL 加入此列表即可 |
+| `auto_update_allowed_remotes` | list[str] | OpenBiliClaw GitHub HTTPS / SSH | 允许自动更新快进的 `origin` allowlist；守卫校验 `ls-remote --get-url` 改写后的地址和 `remote get-url --all` 的全部值，任一不可信即拒绝且绝不自动改写 git 配置。规范化支持可选 `.git`、大小写不敏感与 GitHub 官方 `ssh.github.com[:443]` 等价；镜像包装、带凭据或未匹配地址继续以 `untrusted_remote` 拒绝 |
 
 > 运行时护栏：
 > 即使 `pool_target_count` 设得较高，单次 refresh 里的 discover wave 也由 `discovery_limit` 控制（默认 `30`，最大 `60`），避免一次性把全部缺口都打满。

@@ -6579,6 +6579,15 @@ function bindSettings() {
     const isGitInstall = installMode === "git";
     const isFrozenInstall = installMode === "frozen";
     const isDockerInstall = installMode === "docker";
+    const autoApplyUnsupported = ["frozen", "docker", "unsupported"].includes(installMode);
+    const autoUpdateToggle = document.getElementById("cfgAutoUpdate");
+    if (autoUpdateToggle instanceof HTMLInputElement) {
+      autoUpdateToggle.disabled = autoApplyUnsupported;
+    }
+    const autoUpdateInterval = document.getElementById("cfgAutoUpdateInterval");
+    if (autoUpdateInterval instanceof HTMLInputElement) {
+      autoUpdateInterval.disabled = autoApplyUnsupported;
+    }
     const isDesktopInstallerUpdate = String(backend.latest_tag || "").startsWith("desktop-v");
     const applyBtn = document.getElementById("backendUpdateApply");
     if (applyBtn instanceof HTMLButtonElement) {

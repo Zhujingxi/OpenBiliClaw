@@ -98,6 +98,14 @@ def test_desktop_web_update_actions_require_explicit_install_branch() -> None:
     assert '!unsupportedInstall && backend.state === "update_available"' not in js
 
 
+def test_desktop_web_update_error_prefers_backend_last_error_detail() -> None:
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert "const errorText = backend.last_error" in js
+    assert "UPDATE_REASON_TEXT[backend.last_error] || backend.last_error" in js
+    assert '更新检查出错：${errorText || reasonText || "未知错误"}' in js
+
+
 def test_desktop_web_settings_persists_delight_queue_limit_to_backend_config() -> None:
     """The shared delight queue size must be saved through /api/config."""
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")

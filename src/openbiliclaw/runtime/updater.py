@@ -400,6 +400,12 @@ def _custom_subprocess_proxy() -> str | None:
     return outbound_proxy_url()
 
 
+def _quote_command_path(path: Path) -> str:
+    """Quote a repository path for copy-pasteable POSIX and Windows git commands."""
+    escaped = str(path).replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _is_dependency_command(command: Sequence[str]) -> bool:
     if not command:
         return False
@@ -1106,6 +1112,7 @@ class AutoUpdateService:
         allowlist / credential check.
         """
         fix_url = DEFAULT_ALLOWED_REMOTES[0]
+        root_arg = _quote_command_path(root)
         probe = await self._run_git(["remote", "get-url", "origin"], root)
         config_err = config_result.stderr.strip()
         probe_err = probe.stderr.strip()
@@ -1120,12 +1127,12 @@ class AutoUpdateService:
             self._guard_detail = (
                 f"git 拒绝读取仓库({root}):检测到 dubious ownership"
                 f"(仓库属主与运行后端的账户不一致,Windows 副盘/服务账户常见);"
-                f"以运行后端的账户执行:git config --global --add safe.directory {root}"
+                f"以运行后端的账户执行:git config --global --add safe.directory {root_arg}"
             )
         elif probe.returncode != 0 and "no such remote" in probe_err.lower():
             # Genuinely no origin remote — the only case where "remote add" fits.
             self._guard_detail = (
-                f"未配置 origin 远端({root});运行:git -C {root} remote add origin {fix_url}"
+                f"未配置 origin 远端({root});运行:git -C {root_arg} remote add origin {fix_url}"
             )
         elif probe.returncode != 0 and (config_err or probe_err):
             # Any other git failure reading the repo (lock, corrupt config, git
@@ -1141,7 +1148,7 @@ class AutoUpdateService:
             # refused. This is what reproduces the reported card contradiction.
             self._guard_detail = (
                 f"origin 远端已存在但地址无法解析({root});"
-                f"运行:git -C {root} remote set-url origin {fix_url}"
+                f"运行:git -C {root_arg} remote set-url origin {fix_url}"
             )
 
         logger.warning(

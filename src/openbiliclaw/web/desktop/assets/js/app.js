@@ -7095,8 +7095,12 @@
         }
         case "unsupported":
           return { text: reasonText || "当前安装方式不支持自动更新。", tone: "error" };
-        case "error":
-          return { text: `更新检查出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        case "error": {
+          const errorText = backend.last_error
+            ? UPDATE_REASON_TEXT[backend.last_error] || backend.last_error
+            : "";
+          return { text: `更新检查出错：${errorText || reasonText || "未知错误"}${suffix}`, tone: "error" };
+        }
         default:
           return { text: `尚未检查更新${current ? `，当前版本 ${current}` : ""}。`, tone: "" };
       }
@@ -7119,8 +7123,12 @@
           return { text: `当前镜像已是最新${current ? ` ${current}` : ""}${suffix}`, tone: "success" };
         case "update_available":
           return { text: `发现新版镜像 ${latest}（当前 ${current}），在部署目录执行 docker compose pull && docker compose up -d 完成升级${suffix}`, tone: "" };
-        case "error":
-          return { text: `检查新版镜像出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        case "error": {
+          const errorText = backend.last_error
+            ? UPDATE_REASON_TEXT[backend.last_error] || backend.last_error
+            : "";
+          return { text: `检查新版镜像出错：${errorText || reasonText || "未知错误"}${suffix}`, tone: "error" };
+        }
         default:
           return { text: `Docker 安装通过拉取新镜像升级；后台会定期检查新版并在这里提醒${current ? `（当前 ${current}）` : ""}。`, tone: "" };
       }
@@ -7143,8 +7151,12 @@
           return { text: `当前安装包已是最新${current ? ` ${current}` : ""}${suffix}`, tone: "success" };
         case "update_available":
           return { text: `发现新版安装包 ${latest}（当前 ${current}），桌面安装包不支持自动更新，请下载新版安装包完成升级${suffix}`, tone: "" };
-        case "error":
-          return { text: `检查新版安装包出错：${reasonText || backend.last_error || "未知错误"}${suffix}`, tone: "error" };
+        case "error": {
+          const errorText = backend.last_error
+            ? UPDATE_REASON_TEXT[backend.last_error] || backend.last_error
+            : "";
+          return { text: `检查新版安装包出错：${errorText || reasonText || "未知错误"}${suffix}`, tone: "error" };
+        }
         default:
           return { text: `桌面安装包不支持自动应用更新；后台会定期检查新版安装包并在这里提醒下载${current ? `（当前 ${current}）` : ""}。`, tone: "" };
       }

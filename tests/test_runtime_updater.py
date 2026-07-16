@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
@@ -1847,6 +1848,64 @@ async def test_request_apply_dubious_ownership_points_at_safe_directory(
     last_error = service.get_update_status()["last_error"]
     assert "safe.directory" in last_error
     assert "remote add origin" not in last_error
+
+
+@pytest.mark.parametrize(
+    ("root_text", "config_error", "probe_code", "probe_error", "command_prefix"),
+    [
+        (
+            "/Users/Jane Doe/OpenBiliClaw",
+            "dubious ownership",
+            128,
+            "dubious ownership",
+            "git config --global --add safe.directory",
+        ),
+        (
+            r"C:\Users\Jane Doe\OpenBiliClaw",
+            "dubious ownership",
+            128,
+            "dubious ownership",
+            "git config --global --add safe.directory",
+        ),
+        ("/Users/Jane Doe/OpenBiliClaw", "", 2, "No such remote 'origin'", "remote add"),
+        (
+            r"C:\Users\Jane Doe\OpenBiliClaw",
+            "",
+            2,
+            "No such remote 'origin'",
+            "remote add",
+        ),
+        ("/Users/Jane Doe/OpenBiliClaw", "", 0, "", "remote set-url"),
+        (r"C:\Users\Jane Doe\OpenBiliClaw", "", 0, "", "remote set-url"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_apply_guidance_quotes_repository_paths_with_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+    root_text: str,
+    config_error: str,
+    probe_code: int,
+    probe_error: str,
+    command_prefix: str,
+) -> None:
+    root = Path(root_text)
+    service = updater.AutoUpdateService()
+    config_result = subprocess.CompletedProcess(
+        ["git", "config", "--get", "remote.origin.url"],
+        128 if config_error else 1,
+        "",
+        config_error,
+    )
+
+    async def _run_command(command, _root, *, timeout):
+        return subprocess.CompletedProcess(command, probe_code, "", probe_error)
+
+    monkeypatch.setattr(service, "_run_command", _run_command)
+
+    await service._refuse_unreadable_origin(root, config_result)
+
+    assert command_prefix in service._guard_detail
+    assert f'"{root}"' in service._guard_detail
 
 
 def test_detect_install_mode_docker(

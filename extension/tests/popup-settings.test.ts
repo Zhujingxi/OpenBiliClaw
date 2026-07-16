@@ -257,6 +257,17 @@ test("settings backend update actions require explicit install branch", () => {
   assert.doesNotMatch(popupJs, /!unsupportedInstall && backend\.state === "update_available"/);
 });
 
+test("settings disables backend auto-apply controls for every non-git install", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(
+    popupJs,
+    /const autoApplyUnsupported = \["frozen", "docker", "unsupported"\]\.includes\(installMode\)/,
+  );
+  assert.match(popupJs, /autoUpdateToggle\.disabled = autoApplyUnsupported/);
+  assert.match(popupJs, /autoUpdateInterval\.disabled = autoApplyUnsupported/);
+});
+
 test("settings page round-trips YouTube source budgets", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
