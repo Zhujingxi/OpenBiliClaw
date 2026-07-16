@@ -112,6 +112,12 @@ class ProfileService:
         self._uow_factory = uow_factory
         self._ai = ai
 
+    def current(self) -> ProfileSnapshot | None:
+        """Return the latest immutable evidence profile, if projected."""
+
+        with self._uow_factory() as uow:
+            return uow.profiles.latest()
+
     def apply_delta(
         self,
         delta: ProfileDelta,

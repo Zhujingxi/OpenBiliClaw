@@ -102,6 +102,8 @@ class JobRunRepository(Protocol):
 
     def cleanup_finished(self, *, older_than: datetime) -> int: ...
 
+    def list(self, *, limit: int) -> tuple[JobRunSnapshot, ...]: ...
+
 
 class JobUnitOfWork(Protocol):
     job_runs: JobRunRepository
@@ -228,6 +230,12 @@ class JobService:
         with self._uow_factory() as uow:
             value = uow.job_runs.get(run_id)
         return _snapshot(run_id, value)
+
+    def list(self, *, limit: int = 100) -> tuple[JobRunSnapshot, ...]:
+        if not 1 <= limit <= 500:
+            raise ValueError("invalid job page size")
+        with self._uow_factory() as uow:
+            return uow.job_runs.list(limit=limit)
 
     def cancel(self, run_id: UUID) -> JobRunSnapshot:
         with self._uow_factory() as uow:

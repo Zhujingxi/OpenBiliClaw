@@ -73,7 +73,7 @@ services:
       start_period: 300s
     restart: unless-stopped
 
-  openbiliclaw-backend:
+  api:
     build:
       context: .
       dockerfile: Dockerfile
@@ -84,7 +84,7 @@ services:
       # build a release image, use buildx:
       #   docker buildx build --platform linux/amd64,linux/arm64 \
       #     -t openbiliclaw-backend:vX.Y.Z .
-    container_name: openbiliclaw-backend
+    container_name: openbiliclaw-api
     depends_on:
       # service_started (not service_healthy) on purpose: the sidecar is
       # only "healthy" once bge-m3 finished downloading (~1.1GB). If that
@@ -116,17 +116,10 @@ services:
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
+      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
+      OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
       # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
-    command:
-      - python
-      - -m
-      - openbiliclaw.docker_runtime
-      - openbiliclaw
-      - serve-api
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8420"
+    command: ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "8420"]
     # ``host.docker.internal`` resolves the host machine from inside
     # the container. Used by:
     #   - HTTP proxy auto-detect (OPENBILICLAW_PROXY_HOST)
@@ -144,10 +137,10 @@ services:
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
     # Compose-level healthcheck mirrors the Dockerfile HEALTHCHECK so
-    # ``docker compose ps`` shows ``healthy`` only when /api/health
+    # ``docker compose ps`` shows ``healthy`` only when vNext readiness
     # returns 200, not just when the container process is alive.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health', timeout=4).status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/v1/system/readiness', timeout=4).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -167,10 +160,10 @@ services:
       OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
-      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:-}
+      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_WORKERS: "4"
       OPENBILICLAW_WORKER_RUNTIME_FACTORY: openbiliclaw.infrastructure.jobs.worker:database_runtime_factory
-    command: ["python", "-m", "openbiliclaw.infrastructure.jobs.worker"]
+    command: ["python", "-m", "openbiliclaw.worker"]
     volumes:
       - openbiliclaw_data:/app/runtime/data
     restart: unless-stopped

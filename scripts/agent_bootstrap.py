@@ -67,11 +67,11 @@ if TYPE_CHECKING:
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8420
 DEFAULT_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw.git"
-DEFAULT_HEALTH_PATH = "/api/health"
+DEFAULT_HEALTH_PATH = "/api/v1/system/readiness"
 HEALTH_TIMEOUT_SECONDS = 90
 HEALTH_POLL_INTERVAL = 2.0
 LOCAL_NO_PROXY_HOSTS = ("localhost", "127.0.0.1", "::1")
-DOCKER_CONTAINER_NAME = "openbiliclaw-backend"
+DOCKER_CONTAINER_NAME = "openbiliclaw-api"
 DOCKER_RUNTIME_ROOT = "/app/runtime"
 DOCKER_OLLAMA_BASE_URL = "http://ollama:11434/v1"
 LOCAL_OLLAMA_BASE_URLS = (
@@ -1370,7 +1370,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--skip-health-check",
         action="store_true",
-        help="Do not poll /api/health after starting the backend.",
+        help="Do not poll /api/v1/system/readiness after starting the backend.",
     )
     parser.add_argument(
         "--host",
@@ -3030,7 +3030,7 @@ def build_init_command(
             "docker",
             "exec",
             "-i",
-            "openbiliclaw-backend",
+            "openbiliclaw-api",
             "openbiliclaw",
             "init",
         ]
@@ -3096,15 +3096,15 @@ def local_serve_command(project_dir: Path, host: str, port: int) -> list[str]:
     """Return the command used to start the API server in local mode."""
 
     if detect_uv():
-        return ["uv", "run", "openbiliclaw", "serve-api", "--host", host, "--port", str(port)]
+        return ["uv", "run", "openbiliclaw", "serve", "--host", host, "--port", str(port)]
 
     venv_bin = project_dir / (".venv/Scripts" if os.name == "nt" else ".venv/bin")
     openbiliclaw = venv_bin / "openbiliclaw"
     if openbiliclaw.exists():
-        return [str(openbiliclaw), "serve-api", "--host", host, "--port", str(port)]
+        return [str(openbiliclaw), "serve", "--host", host, "--port", str(port)]
 
     python = venv_bin / ("python.exe" if os.name == "nt" else "python")
-    return [str(python), "-m", "openbiliclaw.cli", "serve-api", "--host", host, "--port", str(port)]
+    return [str(python), "-m", "openbiliclaw.cli", "serve", "--host", host, "--port", str(port)]
 
 
 def _connect_host_for_bind_host(host: str) -> str:
@@ -3132,7 +3132,7 @@ def _probe_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
 
 
 def _probe_is_openbiliclaw(host: str, port: int) -> bool:
-    """Confirm the listener on host:port responds to /api/health as OpenBiliClaw."""
+    """Confirm the listener on host:port responds to /api/v1/system/readiness as OpenBiliClaw."""
     url = _health_url(host, port)
     try:
         with urllib.request.urlopen(url, timeout=2.0) as response:  # noqa: S310
@@ -3330,6 +3330,8 @@ def ensure_docker_infrastructure_secrets(project_dir: Path) -> None:
         generated = {
             "LITELLM_POSTGRES_PASSWORD": secrets.token_hex(32),
             "LITELLM_MASTER_KEY": f"sk-{secrets.token_hex(32)}",
+            "OPENBILICLAW_SECRET_KEY": secrets.token_hex(32),
+            "OPENBILICLAW_ACCESS_TOKEN": secrets.token_urlsafe(48),
         }
         found: set[str] = set()
         for index, line in enumerate(lines):
@@ -3569,7 +3571,7 @@ STALE_COOKIE_MISSING_ENTRY = "bilibili.cookie (stale — reused cookie failed li
 
 
 def _init_status_url(host: str, port: int) -> str:
-    return _health_url(host, port).replace("/api/health", "/api/init-status")
+    return _health_url(host, port).replace("/api/v1/system/readiness", "/api/init-status")
 
 
 def fetch_init_status(host: str, port: int, timeout: float = 30.0) -> dict[str, Any] | None:
@@ -3645,7 +3647,7 @@ def backend_healthy_label(final_status: dict[str, Any]) -> str:
 
 
 def wait_for_health(host: str, port: int, timeout: float = HEALTH_TIMEOUT_SECONDS) -> bool:
-    """Poll /api/health until it returns 200 or timeout expires."""
+    """Poll /api/v1/system/readiness until it returns 200 or timeout expires."""
 
     url = _health_url(host, port)
     deadline = time.monotonic() + timeout
@@ -4184,7 +4186,7 @@ def run(args: argparse.Namespace) -> int:
                     info(
                         "Init exited with a non-zero status, but the backend is running. "
                         "You can run 'openbiliclaw init' manually later "
-                        "(or 'docker exec -it openbiliclaw-backend openbiliclaw init' for Docker)."
+                        "Use the /api/v1/onboarding flow after configuring sources."
                     )
                     return 0
                 emit(
@@ -4199,7 +4201,7 @@ def run(args: argparse.Namespace) -> int:
                 info(
                     f"Init failed ({exc}), but the backend is running. "
                     "You can run 'openbiliclaw init' manually later "
-                    "(or 'docker exec -it openbiliclaw-backend openbiliclaw init' for Docker)."
+                    "Use the /api/v1/onboarding flow after configuring sources."
                 )
 
         return 0

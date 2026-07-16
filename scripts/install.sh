@@ -443,9 +443,9 @@ PY
 
     if [ -z "$health_url" ]; then
         if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ] || [ "$HOST" = "[::]" ]; then
-            health_url="http://127.0.0.1:${PORT}/api/health"
+            health_url="http://127.0.0.1:${PORT}/api/v1/system/readiness"
         else
-            health_url="http://${HOST}:${PORT}/api/health"
+            health_url="http://${HOST}:${PORT}/api/v1/system/readiness"
         fi
     fi
 

@@ -13,6 +13,7 @@ from openbiliclaw.features.feed.domain import (
     CandidateAssessment,
     ContentItem,
     FeedEntry,
+    FeedItem,
     Interaction,
     InteractionKind,
     feed_deficit,
@@ -80,6 +81,8 @@ class FeedRepository(Protocol):
     def unseen_count(self) -> int: ...
 
     def next_position(self) -> int: ...
+
+    def list_entries(self, *, limit: int, offset: int) -> tuple[FeedItem, ...]: ...
 
 
 class InteractionRepository(Protocol):
@@ -229,6 +232,14 @@ class FeedService:
         self._assessor = assessor
         self._policy = policy or FeedPolicy()
         self._settings = settings
+
+    def list_entries(self, *, limit: int = 50, offset: int = 0) -> tuple[FeedItem, ...]:
+        """Return a bounded ordered feed projection."""
+
+        if not 1 <= limit <= 200 or offset < 0:
+            raise ValueError("invalid feed page")
+        with self._uow_factory() as uow:
+            return uow.feed.list_entries(limit=limit, offset=offset)
 
     async def replenish(
         self,

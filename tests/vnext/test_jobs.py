@@ -350,7 +350,7 @@ def test_source_sync_periodic_buckets_follow_typed_setting(interval: int) -> Non
 def test_backend_and_worker_share_vnext_database_but_not_huey(compose_name: str) -> None:
     compose = yaml.safe_load((Path(__file__).parents[2] / compose_name).read_text())
     services: dict[str, Any] = compose["services"]
-    backend_db = services["openbiliclaw-backend"]["environment"]["OPENBILICLAW_DATABASE_URL"]
+    backend_db = services["api"]["environment"]["OPENBILICLAW_DATABASE_URL"]
     worker = services["worker"]["environment"]
 
     assert backend_db == worker["OPENBILICLAW_DATABASE_URL"]

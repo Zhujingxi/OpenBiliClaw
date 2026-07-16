@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping as MappingABC
 from datetime import UTC, datetime, timedelta
@@ -13,6 +14,8 @@ from pydantic import JsonValue, TypeAdapter
 from openbiliclaw.features._metadata import freeze_metadata, serialize_metadata
 from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
+    SourceAccountStatus,
+    SourceId,
     SourceTaskCompletion,
     SourceTaskRequest,
     SourceTaskSnapshot,
@@ -138,6 +141,79 @@ class SourceTaskUnitOfWork(Protocol):
     def commit(self) -> None: ...
 
 
+class SourceAccountRepository(Protocol):
+    def upsert_credentials(
+        self, *, source_id: str, account_key: str, encrypted_credentials: object
+    ) -> UUID: ...
+
+    def list_statuses(self) -> tuple[SourceAccountStatus, ...]: ...
+
+
+class SourceAccountUnitOfWork(Protocol):
+    source_accounts: SourceAccountRepository
+
+    def __enter__(self) -> SourceAccountUnitOfWork: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
+
+    def commit(self) -> None: ...
+
+
+class CredentialCipherPort(Protocol):
+    def encrypt(self, plaintext: str) -> object: ...
+
+
+class SourceAccountService:
+    """Configure source accounts while returning only secret-free state."""
+
+    def __init__(
+        self,
+        uow_factory: Callable[[], SourceAccountUnitOfWork],
+        *,
+        cipher: CredentialCipherPort,
+        registry: SourceRegistry | Callable[[], SourceRegistry],
+    ) -> None:
+        self._uow_factory = uow_factory
+        self._cipher = cipher
+        self._registry_provider = registry if callable(registry) else lambda: registry
+
+    def manifests(self) -> tuple[object, ...]:
+        return tuple(self._registry_provider().manifests.values())
+
+    def statuses(self) -> tuple[SourceAccountStatus, ...]:
+        with self._uow_factory() as uow:
+            return uow.source_accounts.list_statuses()
+
+    def configure(
+        self,
+        source_id: SourceId,
+        account_key: str,
+        credentials: Mapping[str, object],
+    ) -> SourceAccountStatus:
+        self._registry_provider().get(source_id.value)
+        key = account_key.strip()
+        if not key:
+            raise ValueError("source account key cannot be empty")
+        validated = _JSON_OBJECT.validate_python(dict(credentials), strict=True)
+        if not validated:
+            raise ValueError("source credentials cannot be empty")
+        plaintext = json.dumps(validated, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ciphertext = self._cipher.encrypt(plaintext)
+        with self._uow_factory() as uow:
+            uow.source_accounts.upsert_credentials(
+                source_id=source_id.value,
+                account_key=key,
+                encrypted_credentials=ciphertext,
+            )
+            uow.commit()
+        return SourceAccountStatus(source_id=source_id, account_key=key, enabled=True)
+
+
 class SourceTaskService:
     """Validate capabilities and own durable claim/complete lease semantics."""
 
@@ -258,6 +334,12 @@ def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     return result
 
 
+def validate_source_task_payload(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Public transport-boundary validation for source-task request/result payloads."""
+
+    return _safe_json_object(value)
+
+
 def _reject_credential_fields(value: object, *, path: tuple[str, ...] = ()) -> None:
     if isinstance(value, MappingABC):
         for key, child in value.items():
@@ -289,5 +371,7 @@ __all__ = [
     "SourceTaskCompletionConflictError",
     "SourceTaskRequest",
     "SourceTaskService",
+    "SourceAccountService",
     "StaleSourceTaskLeaseError",
+    "validate_source_task_payload",
 ]

@@ -475,9 +475,9 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
     if (-not $youtubeFlag) { $youtubeFlag = '--no-youtube' }
     if (-not $healthUrl) {
         if ($ApiHost -in @('0.0.0.0', '::', '[::]')) {
-            $healthUrl = "http://127.0.0.1:$Port/api/health"
+            $healthUrl = "http://127.0.0.1:$Port/api/v1/system/readiness"
         } else {
-            $healthUrl = "http://${ApiHost}:$Port/api/health"
+            $healthUrl = "http://${ApiHost}:$Port/api/v1/system/readiness"
         }
     }
 

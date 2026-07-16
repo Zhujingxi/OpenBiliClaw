@@ -45,6 +45,8 @@ def test_ensure_docker_infrastructure_secrets_creates_and_preserves_env(
     assert len(values["LITELLM_POSTGRES_PASSWORD"]) == 64
     assert values["LITELLM_MASTER_KEY"].startswith("sk-")
     assert len(values["LITELLM_MASTER_KEY"]) == 67
+    assert len(values["OPENBILICLAW_SECRET_KEY"]) == 64
+    assert len(values["OPENBILICLAW_ACCESS_TOKEN"]) >= 48
     if os.name != "nt":
         assert env_file.stat().st_mode & 0o777 == 0o600
 
@@ -126,6 +128,8 @@ def test_ensure_docker_infrastructure_secrets_serializes_concurrent_updates(
     assert lines.count("UNRELATED=preserved") == 1
     assert sum(line.startswith("LITELLM_POSTGRES_PASSWORD=") for line in lines) == 1
     assert sum(line.startswith("LITELLM_MASTER_KEY=") for line in lines) == 1
+    assert sum(line.startswith("OPENBILICLAW_SECRET_KEY=") for line in lines) == 1
+    assert sum(line.startswith("OPENBILICLAW_ACCESS_TOKEN=") for line in lines) == 1
     assert not list(tmp_path.glob(".env.tmp-*"))
 
 
@@ -2743,13 +2747,13 @@ def test_docker_runtime_config_copy_commands(tmp_path: Path) -> None:
         "docker",
         "cp",
         str(tmp_path / "config.toml"),
-        "openbiliclaw-backend:/app/runtime/config.toml",
+        "openbiliclaw-api:/app/runtime/config.toml",
     ] in commands
     assert [
         "docker",
         "cp",
         str(data_dir / "bilibili_cookie.json"),
-        "openbiliclaw-backend:/app/runtime/data/bilibili_cookie.json",
+        "openbiliclaw-api:/app/runtime/data/bilibili_cookie.json",
     ] in commands
 
 
@@ -2757,7 +2761,7 @@ def test_docker_secret_detector_command_reads_runtime_config() -> None:
     command = bootstrap.build_docker_missing_secrets_command()
     script = command[-1]
 
-    assert command[:3] == ["docker", "exec", "openbiliclaw-backend"]
+    assert command[:3] == ["docker", "exec", "openbiliclaw-api"]
     assert "/app/runtime/config.toml" in " ".join(command)
     assert "/app/runtime/data/bilibili_cookie.json" in " ".join(command)
     assert 'data.get("models", {})' in script
@@ -2781,7 +2785,7 @@ def test_build_init_command_appends_explicit_source_flags_for_docker(tmp_path: P
         "docker",
         "exec",
         "-i",
-        "openbiliclaw-backend",
+        "openbiliclaw-api",
         "openbiliclaw",
         "init",
         "--yes-xhs",

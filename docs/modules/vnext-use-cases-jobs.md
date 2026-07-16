@@ -1,5 +1,9 @@
 # vNext 用例与后台任务
 
+> Runtime update: these services are injected into the authoritative
+> `/api/v1` routers. Job progress reads application `job_runs`; Huey results are
+> never exposed as product state.
+
 ## 状态与边界
 
 本模块已实现 vNext 的 activity、profile、feed、library、chat 应用服务，以及独立 SQLite Huey worker。它是可运行的后台 composition，但尚未提供公开 HTTP API；Task 21 才会把这些用例接到 `/api/v1`。legacy backend 服务和现有前端路径在切换前保持不变。

@@ -6,7 +6,8 @@
 #   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
 #   curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/litellm/config.yaml -o litellm/config.yaml
 #   umask 077
-#   printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
+#   printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\nOPENBILICLAW_SECRET_KEY=%s\nOPENBILICLAW_ACCESS_TOKEN=%s\n' \
+#     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
 #     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 #   docker compose -f docker-compose.prebuilt.yml up -d
 #   # configure obc-interactive, obc-analysis, and obc-embedding at
@@ -93,12 +94,12 @@ services:
       start_period: 300s
     restart: unless-stopped
 
-  openbiliclaw-backend:
+  api:
     # Multi-arch image (linux/amd64 + linux/arm64) published by
     # .github/workflows/release-docker.yml on every backend release.
     # Pin a specific version by replacing `latest` with e.g. `0.3.152`.
     image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
-    container_name: openbiliclaw-backend
+    container_name: openbiliclaw-api
     depends_on:
       # service_started (not service_healthy) on purpose: the sidecar is
       # only "healthy" once bge-m3 finished downloading. A health gate
@@ -124,6 +125,9 @@ services:
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
+      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
+      OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
+    command: ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "8420"]
     # ``host.docker.internal`` resolves the host machine from inside the
     # container (proxy auto-detect, host-side Ollama). Required on Linux
     # Docker; auto-provided by Docker Desktop on Mac / Windows.
@@ -136,7 +140,7 @@ services:
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health', timeout=4).status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/v1/system/readiness', timeout=4).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -154,10 +158,10 @@ services:
       OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
-      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:-}
+      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_WORKERS: "4"
       OPENBILICLAW_WORKER_RUNTIME_FACTORY: openbiliclaw.infrastructure.jobs.worker:database_runtime_factory
-    command: ["python", "-m", "openbiliclaw.infrastructure.jobs.worker"]
+    command: ["python", "-m", "openbiliclaw.worker"]
     volumes:
       - openbiliclaw_data:/app/runtime/data
     restart: unless-stopped

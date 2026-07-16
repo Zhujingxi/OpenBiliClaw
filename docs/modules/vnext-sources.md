@@ -1,5 +1,9 @@
 # vNext 多来源连接器与通用浏览器任务
 
+> Runtime update: manifests/status/account configuration are exposed under
+> `/api/v1/sources`; browser execution uses only generic
+> `/api/v1/source-tasks` claim/complete. Extension wiring lands in Task 22.
+
 ## 状态与边界
 
 本模块为 backend-first vNext 提供七个平台的能力声明、只读连接器边界、现有客户端适配器和通用浏览器任务服务。独立 worker 的 production composition 已显式注册全部七个平台，并通过无 live call 的 SQLite composition smoke test；它**尚未接入当前生产 API、legacy runtime 或浏览器插件 dispatcher**，因此 HTTP 路由与扩展切换仍由后续任务完成。当前 v0.3 来源模块与各平台旧任务 endpoint 仍是现有用户请求的实际运行路径。

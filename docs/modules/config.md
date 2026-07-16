@@ -1,5 +1,25 @@
 # 配置参考
 
+## vNext runtime authority
+
+Mutable product settings live in the vNext `settings` table and are exposed by
+strict `GET/PATCH /api/v1/settings`: onboarding completion, feed watermarks,
+source sync interval, seven-source enable flags, and weights. Source account
+credential envelopes are encrypted with `OPENBILICLAW_SECRET_KEY`; API reads
+return status only. Provider credentials/routing live only in LiteLLM Admin.
+
+| Environment variable | Meaning |
+|---|---|
+| `OPENBILICLAW_DATABASE_URL` | Fresh app DB; default `sqlite:///data/vnext/openbiliclaw.db`. |
+| `OPENBILICLAW_HUEY_PATH` | Separate Huey transport SQLite file. |
+| `OPENBILICLAW_SECRET_KEY` | Required credential-encryption root secret. |
+| `OPENBILICLAW_ACCESS_TOKEN` | Required bearer token for protected `/api/v1`. |
+| `OPENBILICLAW_LITELLM_BASE_URL` | LiteLLM proxy URL. |
+| `OPENBILICLAW_LITELLM_API_KEY` | Proxy key, never a provider key. |
+
+Legacy TOML sections below remain only until Task 23 deletes unreachable code;
+the vNext API/CLI do not read or write the custom provider/model route stack.
+
 > 生产运行时并发只读取 `[models.chat].concurrency`；缺省值为 4，原生模型配置的权威校验只接受 `1..16` 的整数。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。legacy `[llm].concurrency` 只参与只读迁移候选，不再覆盖原生值。
 
 > `config.toml` 所有配置段落详解。

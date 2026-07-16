@@ -11,8 +11,10 @@ from pydantic import HttpUrl
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from openbiliclaw.features.feed.domain import ContentItem
+from openbiliclaw.features.feed.domain import ContentItem, FeedEntry, FeedItem
+from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
 from openbiliclaw.features.profile.domain import ProfileFacet, ProfileSnapshot
+from openbiliclaw.features.sources.domain import SourceAccountStatus, SourceId
 from openbiliclaw.infrastructure.database.models import (
     ActivityEventModel,
     AIRunModel,
@@ -40,8 +42,7 @@ if TYPE_CHECKING:
 
     from openbiliclaw.features.activity.domain import ActivityEvent
     from openbiliclaw.features.chat.domain import ChatTurn
-    from openbiliclaw.features.feed.domain import CandidateAssessment, FeedEntry, Interaction
-    from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
+    from openbiliclaw.features.feed.domain import CandidateAssessment, Interaction
     from openbiliclaw.features.system.service import SettingValue
 
 _SOURCE_ACCOUNT_NAMESPACE = UUID("644b8dba-8301-4e9f-a2d0-b1a54cb854be")
@@ -97,6 +98,8 @@ class SourceAccountRepository(Protocol):
         encrypted_credentials: EncryptedCredential,
     ) -> UUID: ...
 
+    def list_statuses(self) -> tuple[SourceAccountStatus, ...]: ...
+
 
 class ActivityRepository(Protocol):
     """Persistence port for normalized activity evidence."""
@@ -151,6 +154,8 @@ class FeedRepository(Protocol):
 
     def next_position(self) -> int: ...
 
+    def list_entries(self, *, limit: int, offset: int) -> tuple[FeedItem, ...]: ...
+
 
 class InteractionRepository(Protocol):
     """Persistence port for immutable user interactions."""
@@ -168,6 +173,8 @@ class CollectionRepository(Protocol):
     def add(self, item: CollectionItem) -> None: ...
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
+
+    def list_items(self, collection: CollectionKind) -> tuple[CollectionItem, ...]: ...
 
 
 class ChatRepository(Protocol):
@@ -262,6 +269,21 @@ class SQLAlchemySourceAccountRepository:
             row.encrypted_credentials = str(encrypted_credentials)
             row.updated_at = now
         return account_id
+
+    def list_statuses(self) -> tuple[SourceAccountStatus, ...]:
+        rows = self._session.scalars(
+            select(SourceAccountModel).order_by(
+                SourceAccountModel.source_id, SourceAccountModel.account_key
+            )
+        ).all()
+        return tuple(
+            SourceAccountStatus(
+                source_id=SourceId(row.source_id),
+                account_key=row.account_key,
+                enabled=row.enabled,
+            )
+            for row in rows
+        )
 
 
 class SQLAlchemyActivityRepository:
@@ -547,6 +569,33 @@ class SQLAlchemyFeedRepository:
         latest = self._session.scalar(select(func.max(FeedEntryModel.position)))
         return 0 if latest is None else int(latest) + 1
 
+    def list_entries(self, *, limit: int, offset: int) -> tuple[FeedItem, ...]:
+        rows = self._session.execute(
+            select(FeedEntryModel, ContentItemModel)
+            .join(ContentItemModel, ContentItemModel.id == FeedEntryModel.content_id)
+            .order_by(FeedEntryModel.position, FeedEntryModel.id)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        result: list[FeedItem] = []
+        for entry, content in rows:
+            admitted_at = _aware(entry.admitted_at)
+            assert admitted_at is not None
+            result.append(
+                FeedItem(
+                    entry=FeedEntry(
+                        id=UUID(entry.id),
+                        content_id=UUID(entry.content_id),
+                        assessment_id=(UUID(entry.assessment_id) if entry.assessment_id else None),
+                        position=entry.position,
+                        admitted_at=admitted_at,
+                        explanation=entry.explanation,
+                    ),
+                    content=_content_from_row(content),
+                )
+            )
+        return tuple(result)
+
 
 class SQLAlchemyInteractionRepository:
     """SQLAlchemy interaction adapter."""
@@ -622,6 +671,28 @@ class SQLAlchemyCollectionRepository:
             )
         )
         return bool(getattr(result, "rowcount", 0))
+
+    def list_items(self, collection: CollectionKind) -> tuple[CollectionItem, ...]:
+        rows = self._session.scalars(
+            select(CollectionItemModel)
+            .join(CollectionModel, CollectionModel.id == CollectionItemModel.collection_id)
+            .where(CollectionModel.slug == collection.value)
+            .order_by(CollectionItemModel.added_at, CollectionItemModel.id)
+        ).all()
+        result: list[CollectionItem] = []
+        for row in rows:
+            added_at = _aware(row.added_at)
+            assert added_at is not None
+            result.append(
+                CollectionItem(
+                    id=UUID(row.id),
+                    collection=collection,
+                    content_id=UUID(row.content_id),
+                    added_at=added_at,
+                    note=row.note,
+                )
+            )
+        return tuple(result)
 
 
 class SQLAlchemyChatRepository:
@@ -708,6 +779,14 @@ class SQLAlchemyJobRunRepository:
         if row is None:
             raise LookupError(f"job run does not exist: {run_id}")
         return _job_snapshot(row)
+
+    def list(self, *, limit: int) -> tuple[JobRunSnapshot, ...]:
+        rows = self._session.scalars(
+            select(JobRunModel)
+            .order_by(JobRunModel.created_at.desc(), JobRunModel.id.desc())
+            .limit(limit)
+        ).all()
+        return tuple(_job_snapshot(row) for row in rows)
 
     def claim(self, run_id: UUID) -> bool:
         now = _utc_now()

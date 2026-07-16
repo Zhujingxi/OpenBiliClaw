@@ -60,3 +60,36 @@ class SettingsService:
             uow.settings.replace(candidate.model_dump())
             uow.commit()
         return candidate
+
+
+class JobScheduler(Protocol):
+    def schedule(
+        self,
+        job_name: str,
+        *,
+        idempotency_key: str,
+        priority: int | None = None,
+    ) -> object: ...
+
+
+class OnboardingService:
+    """Apply first-run source selection before scheduling durable bootstrap."""
+
+    def __init__(self, settings: SettingsService, jobs: JobScheduler) -> None:
+        self._settings = settings
+        self._jobs = jobs
+
+    def status(self) -> UserSettings:
+        return self._settings.get()
+
+    def start(self, source_ids: tuple[str, ...]) -> object:
+        selected = frozenset(source_ids)
+        if selected:
+            current = self._settings.get()
+            enabled = {source_id: source_id in selected for source_id in current.source_enabled}
+            self._settings.update({"source_enabled": enabled})
+        source_key = ",".join(sorted(selected)) or "all-enabled"
+        return self._jobs.schedule(
+            "source_sync",
+            idempotency_key=f"onboarding:{source_key}",
+        )

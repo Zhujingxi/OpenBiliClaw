@@ -46,7 +46,7 @@ $env:MODE="docker"; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePo
 ```
 
 > The leading `[Net.ServicePointManager]...Tls12` line is **required on PowerShell 5.1** (the default that ships with Windows 10/11). PS 5.1 defaults to TLS 1.0/1.1, but GitHub.com only accepts TLS 1.2+. Without the prefix, `iwr` fails with "underlying connection was closed" and the user blames the installer. Users on PowerShell 7+ can omit the prefix. Compatible from v0.3.9 forward — the script itself also re-applies the same setting once it starts running, so any subsequent HTTPS calls (git, pip, uv) inside the script are also covered.
-> v0.3.71+ also sets `NO_PROXY/no_proxy=localhost,127.0.0.1,::1` in `install.sh`, `install.ps1`, and `agent_bootstrap.py` before local health checks. This keeps corporate/VPN proxies from intercepting `http://127.0.0.1:<port>/api/health` on native Windows.
+> v0.3.71+ also sets `NO_PROXY/no_proxy=localhost,127.0.0.1,::1` in `install.sh`, `install.ps1`, and `agent_bootstrap.py` before local health checks. This keeps corporate/VPN proxies from intercepting `http://127.0.0.1:<port>/api/v1/system/readiness` on native Windows.
 
 Either command:
 
@@ -55,7 +55,7 @@ Either command:
 2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`). It first constructs the connection type/preset routes selected by flags or the wizard, then overlays only compatible credentials plus the Bilibili cookie; explicit credentials/cookie still win
 3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks Chat connection type first, then a preset only when supported, descriptor-specific fields, the ordered embedding route, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source
 4. Installs Python dependencies for local mode, or generates missing LiteLLM/PostgreSQL infrastructure secrets under a cross-process lock using a same-directory mode-`0600` temporary file, file/directory `fsync`, and atomic replacement before Docker Compose starts when `MODE=docker`; existing non-empty values and unrelated `.env` entries are preserved, while `.env`/lock symlinks are rejected. X/Twitter discovery's `twitter-cli` and Reddit discovery's `rdt-cli` packages are part of the default dependency set, so AI one-line installs do not need an extra flag for either one
-5. Starts the backend and runs a health check against `/api/health`. One-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN; the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
+5. Starts the vNext API with `openbiliclaw serve` and checks `/api/v1/system/readiness`. Docker mode creates PostgreSQL, LiteLLM, source-encryption, and bearer-access secrets. Static Web/extension API wiring lands in Task 22.
    - **Optional LAN password gate**: exposing `0.0.0.0` makes the UI reachable by any device on the network. To require a login for LAN/remote devices (the local machine and the browser extension stay password-free), run `openbiliclaw set-password` (or answer "yes" to the init prompt), or set `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…` for unattended/Docker installs. See [`docs/modules/api-auth.md`](modules/api-auth.md). Behind a same-host reverse proxy, also set `[api.auth].trusted_proxies` or have the proxy enforce auth.
 6. Probes the exact stable primary Chat connection with fallback disabled and every ordered Embedding provider against the shared settings. One failed Embedding probe does not stop later exact probes; after all IDs are attempted, any failure blocks init with the fixed secret-safe `status=service_check_failed`
 7. Automatically runs init after credentials, confirmations, and AI service checks are complete, then prints a self-contained **status block** at the very end of stdout:
@@ -67,7 +67,7 @@ Either command:
 Status:      complete | running_with_missing_secrets | needs_secrets | needs_decisions | service_check_failed | error
 Checkout:    <absolute path to the repo>
 Reused from: <path>                 (only present when reuse happened)
-Health URL:  http://127.0.0.1:8420/api/health
+Health URL:  http://127.0.0.1:8420/api/v1/system/readiness
 Missing:     (none)  |  models.chat.connections.<id>.credential, bilibili.cookie, ...
 
 Next action (required — credentials are missing):
@@ -826,7 +826,7 @@ same shared Embedding model and settings.
 ## Hard rules
 
 1. **Never edit `config.toml` by hand.** Every credential write goes through `scripts/agent_bootstrap.py`.
-2. **Never hard-code `http://127.0.0.1:8420/api/health`.** Always use the `Health URL` line from the status block — the port may be different if the user already has another instance running.
+2. **Never hard-code `http://127.0.0.1:8420/api/v1/system/readiness`.** Always use the `Health URL` line from the status block — the port may be different if the user already has another instance running.
 3. **Run init by default — DO NOT pass `--skip-init`.** Once all credentials are present, the user's expectation is "the app is ready to use." That means: history pulled, soul profile generated, first discovery pass done. `agent_bootstrap.py` does this automatically after the backend is healthy. Only pass `--skip-init` when the user explicitly says "don't pull my history yet" or you're doing a credentials-only patch on an already-initialized install.
 4. **Never use WebFetch on this document.** WebFetch summarises markdown and can drop exact flags. Use Bash `curl -o` + Read instead.
 

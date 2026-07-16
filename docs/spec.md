@@ -207,7 +207,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ## 3. 系统架构
 
-### 3.1 vNext 领域、用例与独立 worker（公开 API 尚未切换）
+### 3.1 vNext 领域、薄 `/api/v1` 与独立 worker（前端待重接）
 
 v0.4.0 已实现 feature-oriented 领域契约、七平台 connector、generic source task、隔离 persistence、类型化设置、凭据加密、只经 LiteLLM 的 typed AI，以及 activity/profile/feed/library/chat application service 和四任务 Huey worker。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure 可按 undispatched row reconcile，worker startup 则重发全部 pending row，覆盖 dequeue 后、应用 claim 前崩溃，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。每个 handler 的条件 running guard 与其 feature writes 共用一个 UoW；cancellation 及其它 running state transition 也以条件 UPDATE 开始而不先读，两个 SQLite writer 按写序和有限 busy timeout 原子排序 cancellation 与 activity、profile+ledger、feed graph、cleanup effect，等待耗尽显式失败。profile 另使用独立 consumed-evidence ledger 与 expected base revision；Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。该 worker 已可运行，但 v0.3 API、legacy runtime、扩展 dispatcher 和四端客户端尚未切换。
 
@@ -257,7 +257,9 @@ Authoritative now: vNext job state for the worker; v0.3 legacy storage/runtime f
 
 三个模型别名必须精确为 `obc-interactive`、`obc-analysis`、`obc-embedding`。应用层不得选择 provider deployment；provider routing/fallback、网络重试、限流和缓存由 LiteLLM 独占，`TaskRunner` 只允许 task 声明的 semantic output retry，并把 BYPASS 映射为 proxy 的 `cache.no-cache`。六个内置 task 覆盖 profile、keyword、单候选、batch candidate、chat 与 recommendation；candidate assessment row ID 由 application 层生成。AI run schema/API 只接收 metadata/usage/error class，不存在输入或输出 payload 字段。Docker Compose 要求本地生成的 LiteLLM master key 与 PostgreSQL password，源码/预构建路径挂同一 policy，Admin 默认只绑定 loopback；本阶段没有 live provider/Compose E2E。`/health?model` 可能调用 provider，仅用于显式诊断，并区分 degraded、transport、auth、missing alias、server 与 provider unhealthy。
 
-### 3.2 当前 v0.3 生产架构
+FastAPI 只公开 `/api/v1/system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat 与 progress 走 SSE，扩展来源工作走 generic claim/complete。Bearer token 只从 installer/runtime 环境读取。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展待下一任务重接。
+
+### 3.2 已停止作为入口的 v0.3 架构
 
 ```text
 interactive ─────────────────────────────────────────┐

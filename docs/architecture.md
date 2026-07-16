@@ -1,6 +1,6 @@
 # 架构设计
 
-## vNext 领域、用例与独立 worker（公开 API 尚未切换）
+## vNext 领域、薄 `/api/v1` 与独立 worker（前端待重接）
 
 backend-first vNext 已交付冻结 Pydantic 领域契约与纯策略、七平台 connector 与 generic browser task、SQLAlchemy/Alembic persistence、类型化设置和 Fernet 凭据、只经 LiteLLM 的 PydanticAI typed-task 边界，以及 activity/profile/feed/library/chat application service 和独立 Huey worker。领域与 feature service 不导入 FastAPI、SQLAlchemy 或 Huey；来源原始 HTTP/CLI/SDK/DOM row 只存在于各自 infrastructure source package。
 
@@ -43,12 +43,19 @@ Huey scheduler/transport (data/vnext/huey.db, result enabled)
         └─► source_sync / profile_projection / feed_replenishment / cleanup
               └─► JobService ─► job_runs (all-pending recovery/claim/cancel/txn guard)
 
+Existing Web + Extension (Task 22 rewiring pending)
+        └─► bearer HTTP / EventSource
+              └─► FastAPI feature routers (/api/v1 only)
+                    ├─► injected application services
+                    ├─► SSE chat + onboarding/job progress
+                    └─► generic source-task long poll claim/complete
+
 Implemented: domain contracts/policies; seven source manifests/connectors/settings;
              lease-safe generic source tasks; isolated schema/migration; repository/UoW;
              credential cipher; six typed AI tasks/runner/embedding/health; application services;
-             explicit seven-source worker composition; four durable jobs; LiteLLM/Huey Compose
-Deferred: HTTP/extension rewiring, data migration, /api/v1, frontend cutover,
-          installer-managed source secret and least-privilege LiteLLM virtual key
+             explicit seven-source worker composition; four durable jobs; LiteLLM/Huey Compose;
+             thin FastAPI v1 routers, SSE, bearer access, operational CLI, deterministic OpenAPI
+Deferred: web/extension client rewiring and final legacy deletion; stored legacy data is not migrated
 ```
 
 vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS`；SQLite driver timeout 与 `PRAGMA busy_timeout` 使用同一个有限值。`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
@@ -57,9 +64,9 @@ vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legac
 
 AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。六个 task 覆盖 profile、keyword、单候选、batch candidate、chat 和 recommendation；profile/feed worker 已构造共享 runner adapter，chat adapter 等待 HTTP 接线。四份 versioned Pydantic Evals dataset 继续覆盖既有核心任务。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
 
-worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，哪怕 result storage 存在值，产品状态、运行中取消和单调 progress 仍只读取应用库 `job_runs`。四 handler 在外部边界后 checkpoint，并在 feature 写事务内先执行条件 running guard；cancel/checkpoint/terminal/retry/recovery 同样 write-first，避免 SQLite SELECT 后升级写锁。guard 与 cancellation 竞争时由条件 UPDATE 的写序和有限 busy timeout 串行：cancel 先则 feature 无 effect，guard 先则 feature commit 先于 cancelled state，等待耗尽显式失败。profile 的 expected base revision 与独立 consumed ledger 防陈旧/重复投影，Feed 的 durable assessment/admission history 防重复准入。Compose backend/worker 明确共享 vNext app DB，Huey 文件隔离。本节不是公开运行时切换声明：当前生产 API、legacy runtime、CLI 和前端尚未构造这些 use case，扩展也尚未改用 generic claim/complete。下面的 v0.3 系统概览仍描述现有用户请求和 legacy 数据路径。
+worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展 dispatcher 到 Task 22 才消费这些 route。下方 v0.3 图只用于最终删除前追踪不可达实现。
 
-## 当前 v0.3 系统概览
+## 已停止作为入口的 v0.3 实现
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：
 

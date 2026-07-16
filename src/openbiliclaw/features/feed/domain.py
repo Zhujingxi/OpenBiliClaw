@@ -84,6 +84,15 @@ class FeedEntry(BaseModel):
     explanation: str = ""
 
 
+class FeedItem(BaseModel):
+    """One feed entry joined to its normalized display content."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entry: FeedEntry
+    content: ContentItem
+
+
 class InteractionKind(StrEnum):
     """User actions that can affect ranking or local collections."""
 

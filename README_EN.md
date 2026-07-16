@@ -363,7 +363,8 @@ mkdir -p litellm
 curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
 curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/litellm/config.yaml -o litellm/config.yaml
 umask 077
-printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\n' \
+printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\nOPENBILICLAW_SECRET_KEY=%s\nOPENBILICLAW_ACCESS_TOKEN=%s\n' \
+  "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
   "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
 docker compose -f docker-compose.prebuilt.yml up -d
 # configure the three stable model aliases at http://127.0.0.1:4000/ui;
@@ -584,9 +585,9 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 
 ## 🏛️ Architecture Overview
 
-### vNext Domain, Use Cases, and Independent Worker (public API not cut over)
+### vNext Backend, `/api/v1`, and Independent Worker (frontend wiring pending)
 
-v0.4.0 now includes framework-independent domain contracts, seven source connectors, lease-safe generic source tasks, isolated persistence, typed settings, Fernet credentials, six typed AI tasks, activity/profile/feed/library/chat application services, and an independent Huey worker. The worker constructs all seven built-ins explicitly and decrypts credentials only on the first direct call; all sources are disabled by default, so startup makes no live source calls. Four background jobs use application `job_runs` as the authority for reliable dispatch, status, idempotency, in-flight cancellation, monotonic progress, and restart recovery; Huey results are transport-only. Startup republishes every pending row, atomic claim absorbs duplicate messages, and write-first cancellation plus a running guard inside each feature persistence transaction order cancellation and business effects by SQLite write order. Profile revisions atomically record an independent consumed-evidence ledger, and Feed excludes durable assessment/admission history. **The current API, legacy business runtime, CLI, frontend, and extension dispatcher have not switched yet**, and the isolated database neither replaces nor migrates existing data.
+The authoritative v0.4.0 backend now uses feature-oriented `/api/v1`, an operational CLI, and the independent Huey worker. An injected `ApplicationContainer` supplies use cases while the app factory only handles composition, lifecycle, routers, and static mounts; imports contact no provider or platform. Bearer access, chat/job/onboarding SSE, generic source-task claim/complete, stable OpenAPI, and centralized safe errors are wired. `job_runs` remains the product status authority. **Existing web/extension assets are mounted unchanged and will be rewired next; legacy files await final deletion but no longer own API/CLI runtime.**
 
 ```text
 7 explicit SourceManifest + Connectors ──normalized──► Activity / Profile / Content / Feed
@@ -609,12 +610,12 @@ Huey scheduler/transport ─► source sync / profile / feed / cleanup ─► jo
 
 Implemented: domain/source/task/persistence, application services, typed AI,
              four-job worker, offline evals, and LiteLLM/Huey Compose
-Not wired: HTTP/extension routes, legacy data migration, /api/v1, or frontend cutover
+Pending: existing web/extension client wiring; legacy data is not migrated and old modules are deleted in the final cleanup task
 ```
 
 Application code only knows the stable aliases `obc-interactive`, `obc-analysis`, and `obc-embedding`; LiteLLM alone owns provider routing/fallback, network retries, limits, and caching. See [vNext Sources and Generic Browser Tasks](docs/modules/vnext-sources.md) for the capability matrix, [vNext Use Cases and Jobs](docs/modules/vnext-use-cases-jobs.md) for worker behavior, and [vNext Typed AI](docs/modules/vnext-ai.md) for the model boundary.
 
-### Current v0.3 Runtime Architecture
+### Superseded v0.3 implementation (retained only until final deletion)
 
 ```text
 interactive ─────────────────────────────────────────┐

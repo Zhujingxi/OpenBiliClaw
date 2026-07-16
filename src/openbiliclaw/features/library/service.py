@@ -17,6 +17,8 @@ class CollectionRepository(Protocol):
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
 
+    def list_items(self, collection: CollectionKind) -> tuple[CollectionItem, ...]: ...
+
 
 class LibraryUnitOfWork(Protocol):
     collections: CollectionRepository
@@ -38,6 +40,12 @@ class LibraryService:
 
     def __init__(self, uow_factory: Callable[[], LibraryUnitOfWork]) -> None:
         self._uow_factory = uow_factory
+
+    def list(self, collection: CollectionKind) -> tuple[CollectionItem, ...]:
+        """List one predefined local-only collection."""
+
+        with self._uow_factory() as uow:
+            return uow.collections.list_items(collection)
 
     def save(
         self, collection: CollectionKind, content_id: UUID, *, note: str = ""

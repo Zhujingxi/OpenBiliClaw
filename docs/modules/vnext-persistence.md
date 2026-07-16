@@ -1,5 +1,9 @@
 # vNext 持久化与系统设置
 
+> Runtime update: the vNext API and operational CLI now use this database as
+> authority. `openbiliclaw db migrate/backup` are supported; legacy data remains
+> untouched and is not imported.
+
 ## 状态与边界
 
 本模块是 backend-first vNext 的独立持久化基础，已经实现 SQLAlchemy 2.x 映射、repository、同步 Unit of Work、Alembic 基线迁移、类型化系统设置和 Fernet 凭据密文适配。它使用新的 `data/vnext/openbiliclaw.db`，不读取、迁移或替换当前 `storage/database.py` 管理的 legacy 数据库。

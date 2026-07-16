@@ -198,3 +198,14 @@ class SourceTaskCompletion(BaseModel):
     id: UUID
     completed_at: AwareDatetime
     idempotent: bool
+
+
+class SourceAccountStatus(BaseModel):
+    """Secret-free source-account status exposed to product clients."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_id: SourceId
+    account_key: str = Field(min_length=1, max_length=200)
+    configured: bool = True
+    enabled: bool
