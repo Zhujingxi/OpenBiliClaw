@@ -467,3 +467,56 @@ async def test_late_relike_after_retraction_not_reconciled(tmp_path: Path) -> No
     rows = memory._database.query_events(event_types=["like"], limit=10)
     meta = json.loads(rows[0]["metadata"])
     assert "retracted" not in meta
+
+
+# --- Task 2: render marker + replay invariance -------------------------------
+
+# Fixed no-retraction event set + its rendered-prompt byte snapshot (sha256),
+# captured on the pre-marker rendering. The marker wiring must leave this
+# byte-identical (invariant 2: replay invariance, scope = event rendering).
+_INVARIANCE_EVENTS = [
+    {
+        "event_type": "like",
+        "title": "手冲咖啡入门",
+        "url": "https://x.com/i/status/123",
+        "context": "在X点赞了《手冲咖啡入门》,作者:豆子老师",
+        "metadata": {
+            "source_platform": "twitter",
+            "author": "豆子老师",
+            "signal_strength": 0.85,
+        },
+    },
+    {
+        "event_type": "view",
+        "title": "讲透历史叙事",
+        "url": "https://www.bilibili.com/video/BV1a",
+        "context": "在 B 站看了《讲透历史叙事》",
+        "metadata": {"source_platform": "bilibili", "bvid": "BV1a", "signal_strength": 0.35},
+    },
+]
+_PREFERENCE_RENDER_SHA256 = "a0b24ab081562fc1a5280d7b539791b52a1ae0ace12104420c7912d71bca8c43"
+_AWARENESS_RENDER_SHA256 = "86cce383eff2d40d8d8d3510c43fc7cbbefa0fe95121445af70c3c0e3b6259d7"
+
+
+def _sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_event_rendering_invariance_without_retractions() -> None:
+    """No-retraction event sets render byte-identically after marker wiring."""
+    from openbiliclaw.llm.prompts import (
+        build_awareness_prompt,
+        build_preference_analysis_prompt,
+    )
+
+    pref = build_preference_analysis_prompt(
+        events=_INVARIANCE_EVENTS, existing_preference={"interests": []}
+    )
+    assert _sha256(pref[1]["content"]) == _PREFERENCE_RENDER_SHA256
+
+    awareness = build_awareness_prompt(
+        events=_INVARIANCE_EVENTS, preference_summary={"interests": []}, soul_profile={}
+    )
+    assert _sha256(awareness[1]["content"]) == _AWARENESS_RENDER_SHA256
