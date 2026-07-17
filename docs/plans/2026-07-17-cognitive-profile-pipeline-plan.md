@@ -9,12 +9,12 @@
 **Invariants that MUST hold — re-read before each task:**
 
 - Prompt-cache:被触碰 builder 全部常量化 system + sort_keys + 入 invariance 清单(含现存不合规的 dialogue-insight builder)。
-- 回放不变性:无新语义输入的渲染/行为逐字节一致;基线快照先行单独提交;`posture_gate_mode=off` 与现状逐字节一致。
-- 门控只拦深层(dialogue 深层 candidates / pipeline VALUES+CORE / soul rebuild 三面),shadow 异步旁路零延迟,enforce 需 shadow ≥14 天(save-time blocking + force 逃生门),异常→downgrade。
+- 回放不变性(作用域收窄,R4-3):偏好渲染、对话 prompt(≤窗口)、`analyze()` 路径 awareness 逐字节一致;`cognition_cycle` 切新 builder 属有意变更走 A/B 对照;基线快照先行;`posture_gate_mode=off` 与现状逐字节一致。
+- 门控只拦深层(dialogue 深层 candidates / pipeline VALUES+CORE / soul rebuild 三面),shadow 异步旁路零延迟+快照隔离;enforce save-time 三条件(最早有效判定 ≥14 天 且 近 14 天 ≥10 条 且 近 7 天 ≥1 条,force 逃生门);异常→downgrade。
 - 台账只追加、best-effort 观察者(WARNING 不阻断);覆盖=枚举写点清单内 100% 挂钩。
 - 收编不迁移;结算身份=自然键(speculation:domain / insight:内容 hash8 / confusion:id),白名单=当轮注入清单。
 - 结算单一所有权:probe/avoidance_probe/confusion scope 归 durable 侧效应;settles 只处理 scope="chat"。
-- 对话学习单 worker 队列 + 注册表 + 热重载 drain。
+- 对话学习单 worker 队列;worker 自持生命周期不入 cancel_all 注册表;热重载 pause-drain、失败回滚 resume。
 - 疑惑不写画像;clarifying 并发=1 由 partial unique index 保证;冷却 72h 持久化。
 - 阈值带校准注释;LLM 输出白名单/clamp+WARNING;解析失败保守化。
 - 单用户全量注入;新 caller 注册 usage recorder。

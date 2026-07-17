@@ -16,7 +16,7 @@
 - 态势门控 shadow 先行:shadow 判定**异步旁路**(不阻塞、不延迟原写入);enforce 切换受 save-time 校验(shadow 数据不足 14 天拒绝)。验证:`pytest tests/test_posture_gate.py -q`。
 - 对话窗口上限 + popup durable 通道回灌;≤窗口会话 prompt 字节不变。验证:`pytest tests/test_dialogue_context.py tests/test_llm_prompts.py -q`。
 - 疑惑端到端:认知失调 → 疑惑 → topic 冻结(防后续强化 + trial 回滚补偿)→ 询问(DB 级并发约束)→ resolved 三出口。验证:`pytest tests/test_confusion_lifecycle.py -q`。
-- 对话学习串行化:后台学习任务经单 worker 队列 + 注册表管理,热重载 drain。验证:`pytest tests/test_dialogue_learn_queue.py -q`。
+- 对话学习串行化:后台学习任务经单 worker 队列(worker 自持生命周期,不入 cancel_all 注册表),热重载 pause-drain/失败 resume。验证:`pytest tests/test_dialogue_learn_queue.py -q`。
 
 ## Design invariants (MUST hold in every phase)
 
@@ -126,7 +126,7 @@
 ### Phase 3 — 态势门控(r2:异步 shadow、三接入点、enforce 校验)
 
 **模式语义(不变量 3,r1 findings 14/15)**:
-- `shadow`(默认):原写入**立即执行**(零延迟零阻塞);**在 commit boundary 捕获不可变快照**(before/after 摘要、source_refs、gate_id;r3/R2-4)——异步旁路任务(进后台注册表)只消费该快照,不回读活状态(后续写入不得污染判定语境,带断言测试);结果进台账(`shadow_*` verdict);LLM 异常记 `shadow_error` 行。
+- `shadow`(默认):原写入**立即执行**(零延迟零阻塞);**在 commit boundary 捕获不可变快照**(before/after 摘要、source_refs、gate_id;r3/R2-4)——异步旁路任务(shadow 判定任务可进通用注册表,与对话学习队列 worker 的自持生命周期区分)只消费该快照,不回读活状态(后续写入不得污染判定语境,带断言测试);结果进台账(`shadow_*` verdict);LLM 异常记 `shadow_error` 行。
 - `enforce`:写入前同步判定;异常/解析失败 → downgrade + WARNING(保守 fail-closed-to-hypothesis);save-time 校验(r4/R3-3 统一语义):保存 enforce 需**同时满足三条**——(a) 最早有效 shadow 判定行距今 ≥14 天(观察时长门);(b) 近 14 天有效判定(shadow_accept/downgrade/reject,不含 shadow_error)≥10 条(样本量门,校准:单用户日均 ~1-3 次 × 14 天下界);(c) 最近 7 天 ≥1 条(近期覆盖门)。任一不满足 blocking 拒绝(pitfall #7),`posture_gate_force_enforce=true` 逃生门(文档注明风险)。
 - `off`:完全旁路,行为与现状逐字节一致(回放门)。
 **三接入点(r1 finding 10/11)**:
