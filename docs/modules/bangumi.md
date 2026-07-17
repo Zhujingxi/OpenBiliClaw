@@ -37,7 +37,7 @@ rank/date cursor + branch budgets ─┘       │
 explicit public username → public collections → unified events → guided init/profile
 ```
 
-`BangumiDiscoveryProducer` 是 fetch-only producer。它维护 search/ranked/latest 各自的 UTC 日预算、cursor、最小调度间隔和持久化 cooldown；遇到 `429` 时遵循合法 `Retry-After`，停止本轮剩余请求，并让后续 runtime tick 继续恢复。429 属于上游暂时限流，当前及尚未执行的关键词会 rollback，不会被误记 zero-yield；若前面的关键词已经产出候选，这些候选仍以 `partial` 结果入队并计入实际预算。官方 browse API 会在持久化 offset 超出缩小后的 total 时返回 400；producer 对非零 cursor 的首次 `invalid_request` 会先持久化归零、再仅重试一次，避免 ranked/latest 永久卡死。ranked/latest 还会为每个 mode 持久化 subject-type 起始位：即使单轮 `limit` 小于类型数，后续轮次也会依次覆盖 book/game/music/real，不会长期只抓配置列表第一项。预算只按跨分支去重并应用最终 `limit` 后仍保留的候选扣减，分支召回的重复或被截断条目只进入 `discovered` 诊断、不消耗额度。空搜索结果和领取后规范化为空的关键词会标为 zero-yield/failed，而不是伪装成已使用或反复 rollback。
+`BangumiDiscoveryProducer` 是 fetch-only producer。它维护 search/ranked/latest 各自的 UTC 日预算、cursor、最小调度间隔和持久化 cooldown；遇到 `429` 时遵循合法 `Retry-After`，停止本轮剩余请求，并让后续 runtime tick 继续恢复。429 属于上游暂时限流，当前及尚未执行的关键词会 rollback，不会被误记 zero-yield；若前面的关键词已经产出候选，这些候选仍以 `partial` 结果入队并计入实际预算。官方 browse API 会在持久化 offset 超出缩小后的 total 时返回 400；producer 对非零 cursor 的首次 `invalid_request` 会先持久化归零、再仅重试一次，避免 ranked/latest 永久卡死。ranked/latest 还会为每个 mode 持久化 subject-type 起始位：即使单轮 `limit` 小于类型数，后续轮次也会依次覆盖 book/game/music/real，不会长期只抓配置列表第一项。预算只按跨分支去重并应用最终 `limit` 后仍保留的候选扣减，分支召回的重复或被截断条目只进入 `discovered` 诊断、不消耗额度。空搜索结果和领取后规范化为空的关键词会标为 zero-yield/failed，而不是伪装成已使用或反复 rollback。当所有启用分支都因当日预算耗尽（`branch_limit <= 0`）而完全没有发起请求时，producer 返回顶层 `reason=budget_exhausted`（而非 `empty`），`mode_results` 逐分支如实记为 `budget_exhausted`，CLI 据此提示"今日预算已用完，可在配置页调整分支预算"而非误报"官方 API 可达但无可转换条目"；只要有任一分支真正跑通（即便为空），仍按 `empty`/`partial`/`ok` 判定。
 
 ## 公开 API
 
@@ -120,7 +120,7 @@ openbiliclaw discover-bangumi-latest --limit 10
 openbiliclaw discover --source bangumi --limit 30
 ```
 
-`fetch-bangumi --write-memory` 才会写本地事件；`--rebuild-profile` 还会真实调用配置中的 LLM，并隐含要求写 memory。guided init 若只选择 Bangumi，则必须提供公开用户名；若与其它画像来源混用而用户名为空，Bangumi 仅参与后续 discovery，并返回明确 warning。`source_options.bangumi.username` 显式出现时以本轮值为准，包括空字符串；只有字段缺失的旧客户端才回退已保存用户名。显式 `discover --source bangumi` 仍要求来源自身启用，但不受后台 `[scheduler].enabled` 总开关限制；该总开关只控制 daemon-owned 调度。
+`fetch-bangumi --write-memory` 才会写本地事件；`--rebuild-profile` 还会真实调用配置中的 LLM，并隐含要求写 memory。guided init 若只选择 Bangumi，则必须提供公开用户名；若与其它画像来源混用而用户名为空，Bangumi 仅参与后续 discovery，并返回明确 warning。`source_options.bangumi.username` 显式出现时以本轮值为准，包括空字符串；只有字段缺失的旧客户端才回退已保存用户名。扩展 popup、桌面 Web 与打包 setup 三端据此约定：仅当用户手动编辑、或在成功 prefill 后显式清空该字段时才发送 `username`（清空即发送 `""` 覆盖配置）；prefill 失败/未完成或字段从未被触碰时省略该字段，避免用空值误删已配置用户名。三端还会读取 `/api/init` 202 响应里的 `warnings` 并按现有状态/提示样式安全渲染（如未填公开用户名的 discovery-only 提示），不再静默丢弃。`fetch_bangumi_public_collection_events` 对正常 bootstrap 按 50 行请求，较小的全局 `limit` 则不超过目标量，并把富余行按 lane 缓存复用；仍以 `per_pair` 公平份额、去重、限速、终止与不过量导入为界，用较大的缓冲分页替代大量小页。显式 `discover --source bangumi` 仍要求来源自身启用，但不受后台 `[scheduler].enabled` 总开关限制；该总开关只控制 daemon-owned 调度。
 
 ## 安全边界
 

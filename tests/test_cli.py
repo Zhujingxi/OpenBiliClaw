@@ -5961,6 +5961,85 @@ def test_explicit_bangumi_discovery_ignores_scheduler_master_switch(
     ]
 
 
+def test_bangumi_discovery_reports_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = config_module.Config()
+    cfg.sources.bangumi.enabled = True
+    panels: list[tuple[str, str, str]] = []
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"preferences": {"interests": [{"name": "科幻"}]}}
+
+    class FakeBangumiClient:
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+        async def __aenter__(self) -> "FakeBangumiClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeProducer:
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+        async def produce_if_due(self, *, limit: int, force: bool) -> dict[str, object]:
+            return {
+                "reason": "budget_exhausted",
+                "discovered": 0,
+                "enqueued": 0,
+                "mode_results": {
+                    "search": "budget_exhausted",
+                    "ranked": "budget_exhausted",
+                    "latest": "budget_exhausted",
+                },
+            }
+
+    class FakeKeywordFetch:
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", object)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", FakeSoulEngine)
+    monkeypatch.setattr(cli_module, "_build_discovery_engine", object)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_candidate_pipeline",
+        lambda **kwargs: SimpleNamespace(last_admitted_items=[]),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_fetch.KeywordFetchCoordinator",
+        FakeKeywordFetch,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.bangumi_client.BangumiClient",
+        FakeBangumiClient,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.bangumi_producer.BangumiDiscoveryProducer",
+        FakeProducer,
+    )
+    monkeypatch.setattr(cli_module, "_print_page_title", lambda *args: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_print_status_panel",
+        lambda kind, title, body: panels.append((kind, title, body)),
+    )
+
+    cli_module._run_bangumi_discovery(limit=5, force=True)
+
+    assert panels == [
+        (
+            "info",
+            "Bangumi discovery 今日预算已用完",
+            "所有启用分支的每日预算均已耗尽，可在配置页调整对应分支预算或明日重试。",
+        )
+    ]
+
+
 def test_discover_reddit_default_uses_rdt_command_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

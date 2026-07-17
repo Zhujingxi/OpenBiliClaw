@@ -252,6 +252,19 @@ export function getHintBannerState(tone) {
   return { tone: "info" };
 }
 
+// Decide what Bangumi username guided init should send, or null to omit it so
+// the backend keeps the configured value (an omitted username means "keep
+// existing"). Only a deliberately typed value, or an explicit clear of a value
+// a successful /api/config prefill put in the field, is sent — an empty field
+// we never prefilled (config fetch pending/failed, or never touched) must NOT
+// erase a configured username with "".
+export function resolveInitBangumiUsername({ touched, prefilled, value } = {}) {
+  const trimmed = String(value ?? "").trim();
+  if (!touched) return null;
+  if (!trimmed && !prefilled) return null;
+  return trimmed;
+}
+
 export function normalizeRecommendation(item) {
   const bvid = normalizeText(item?.bvid);
   const sourcePlatform = normalizeSourcePlatform(item?.source_platform, item?.content_url) || "bilibili";

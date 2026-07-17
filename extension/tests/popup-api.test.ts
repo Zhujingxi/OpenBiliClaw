@@ -56,6 +56,54 @@ test("startInit sends Bangumi username in scoped source_options", async () => {
   });
 });
 
+test("startInit omits source_options when no username is supplied (keep configured)", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"] });
+  await startInit({ sources: ["bangumi"], bangumiUsername: null });
+
+  // A missing/null username must not send source_options.bangumi.username, so
+  // the backend keeps the configured value instead of erasing it.
+  assert.deepEqual(JSON.parse(calls[0].options.body), { force: false, sources: ["bangumi"] });
+  assert.deepEqual(JSON.parse(calls[1].options.body), { force: false, sources: ["bangumi"] });
+});
+
+test("startInit sends an empty username to clear the configured value", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: "" });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "" } },
+  });
+});
+
+test("popup resolves the Bangumi username omit-vs-clear before sending guided init", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /resolveInitBangumiUsername\(\{/);
+  assert.match(source, /bangumiUsername:\s*bangumiUsernameOption/);
+  assert.match(source, /state\.initBangumiUsernamePrefilled = true/);
+});
+
+test("popup surfaces guided-init 202 warnings via the hint banner", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /startResult = await startInit\(/);
+  assert.match(source, /startResult\?\.warnings/);
+  assert.match(source, /setHint\(\s*\n?\s*startWarnings\.length/);
+});
+
 test("popup preserves the Bangumi username across init-panel rerenders", () => {
   const source = readFileSync(resolve("popup/popup.js"), "utf8");
 

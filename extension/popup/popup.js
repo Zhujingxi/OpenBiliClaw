@@ -32,6 +32,7 @@ import {
   platformDisplayName,
   probeMessageKey,
   reconcileRecommendationReplacement,
+  resolveInitBangumiUsername,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -162,6 +163,7 @@ const state = {
   runtimeConfig: null,
   initBangumiUsername: "",
   initBangumiUsernameTouched: false,
+  initBangumiUsernamePrefilled: false,
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -486,6 +488,10 @@ function applyRuntimeConfig(config) {
   state.runtimeConfig = config;
   if (!state.initBangumiUsernameTouched) {
     state.initBangumiUsername = String(config.sources?.bangumi?.username || "").trim();
+    // Mark that a successful /api/config prefill populated the field, so an
+    // explicit clear afterwards is a deliberate reset (sends username="") while
+    // an untouched or never-prefilled empty field omits it (keeps configured).
+    state.initBangumiUsernamePrefilled = true;
     const input = document.getElementById("initBangumiUsername");
     if (input instanceof HTMLInputElement) {
       input.value = state.initBangumiUsername;
@@ -1266,6 +1272,17 @@ function _readInitBangumiUsername() {
   return state.initBangumiUsername;
 }
 
+// Decide what Bangumi username (if any) guided init should send, delegating the
+// omit-vs-clear rule to the shared pure helper. Returns the trimmed value to
+// send, or null to omit it so the backend keeps the configured username.
+function _resolveInitBangumiUsernameForSubmit(value) {
+  return resolveInitBangumiUsername({
+    touched: state.initBangumiUsernameTouched,
+    prefilled: state.initBangumiUsernamePrefilled,
+    value,
+  });
+}
+
 // Idle entry: source checkboxes + the actionable button + a one-line note.
 // Conditions are checked ON CLICK (no slow upfront probe / blank panel);
 // failures are surfaced only after a click that doesn't pass.
@@ -1470,6 +1487,7 @@ async function handleStartInitClick() {
   // Snapshot the source selection BEFORE we replace the panel contents.
   const selectedSources = _readSelectedInitSources();
   const bangumiUsername = _readInitBangumiUsername();
+  const bangumiUsernameOption = _resolveInitBangumiUsernameForSubmit(bangumiUsername);
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
@@ -1534,15 +1552,29 @@ async function handleStartInitClick() {
   // All conditions pass → start with the chosen sources. The backend
   // re-validates in its critical section, so a race can still 409 — surface
   // that and let the user retry.
+  let startResult;
   try {
-    await startInit({ force: false, sources: selectedSources, bangumiUsername });
+    startResult = await startInit({
+      force: false,
+      sources: selectedSources,
+      bangumiUsername: bangumiUsernameOption,
+    });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(describeInitStartError(error));
     return;
   }
-  setHint("初始化已开始，正在拉取数据…", "info");
+  // The 202 response may carry backend warnings (e.g. Bangumi selected without a
+  // public username → discovery-only). Surface them instead of the generic
+  // "已开始" note so the user knows the run is proceeding with a caveat.
+  const startWarnings = Array.isArray(startResult?.warnings)
+    ? startResult.warnings.filter((text) => typeof text === "string" && text.trim())
+    : [];
+  setHint(
+    startWarnings.length ? startWarnings.join(" ") : "初始化已开始，正在拉取数据…",
+    "info",
+  );
   renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
   _startInitProgressPoll();
 }

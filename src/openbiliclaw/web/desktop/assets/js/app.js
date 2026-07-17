@@ -51,6 +51,7 @@
       initSelectedSources: ["bilibili"],
       initBangumiUsername: "",
       initBangumiUsernameTouched: false,
+      initBangumiUsernamePrefilled: false,
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -1861,6 +1862,13 @@
       const bangumiUsername = String(
         $("#initBangumiUsername")?.value || state.initBangumiUsername || ""
       ).trim();
+      // Send an explicit username only when the user deliberately edited the
+      // field, or a successful /api/config prefill gave us the value to clear.
+      // Otherwise omit it so the backend keeps the configured username instead
+      // of erasing it with an empty, never-prefilled field.
+      const sendBangumiUsername =
+        state.initBangumiUsernameTouched &&
+        (bangumiUsername !== "" || state.initBangumiUsernamePrefilled);
       if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername) {
         state.initReason = INIT_REASON_TEXT.no_profile_signal_sources;
         state.initBusy = false;
@@ -1881,7 +1889,7 @@
       }
       try {
         const payload = { sources: selected };
-        if (selected.includes("bangumi")) {
+        if (selected.includes("bangumi") && sendBangumiUsername) {
           payload.source_options = { bangumi: { username: bangumiUsername } };
         }
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
@@ -1892,7 +1900,14 @@
         });
         state.initStatus = { ...(state.initStatus || {}), ...started };
         state.initBusy = false;
-        showToast("初始化已开始");
+        // The 202 response may carry backend warnings (e.g. Bangumi selected
+        // without a public username → discovery-only). Surface them in the
+        // onboarding reason and the toast instead of a bare "已开始".
+        const startWarnings = Array.isArray(started?.warnings)
+          ? started.warnings.filter((text) => typeof text === "string" && text.trim())
+          : [];
+        state.initReason = startWarnings.join(" ");
+        showToast(startWarnings.length ? startWarnings.join(" ") : "初始化已开始");
         renderAll();
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
       } catch (error) {
@@ -6087,6 +6102,10 @@
       setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
       if (!state.initBangumiUsernameTouched) {
         state.initBangumiUsername = config.sources?.bangumi?.username || "";
+        // A successful prefill populated the field; a later explicit clear is
+        // then a deliberate reset (sends ""), while an untouched or config-failed
+        // empty field omits the username to keep the configured value.
+        state.initBangumiUsernamePrefilled = true;
       }
       void renderSourcesStatus();
       void renderSourceCredentials();

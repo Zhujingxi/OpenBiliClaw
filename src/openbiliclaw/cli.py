@@ -10692,6 +10692,11 @@ def _run_bangumi_discovery(*, limit: int, force: bool = False) -> None:
         "throttled": ("info", "Bangumi discovery 尚未到期", "可使用 --force 手动验证。"),
         "rate_limited": ("warning", "Bangumi API 正在冷却", "到期后会自动重试。"),
         "pool_full": ("info", "候选池已满", "当前无需补充 Bangumi 候选。"),
+        "budget_exhausted": (
+            "info",
+            "Bangumi discovery 今日预算已用完",
+            "所有启用分支的每日预算均已耗尽，可在配置页调整对应分支预算或明日重试。",
+        ),
         "empty": ("info", "Bangumi discovery 返回为空", "官方 API 可达，但本轮无可转换条目。"),
         "error": ("warning", "Bangumi discovery 执行失败", str(result.get("mode_results") or "")),
     }

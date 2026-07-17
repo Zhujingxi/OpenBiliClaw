@@ -325,16 +325,20 @@ export async function fetchSourcesStatus() {
   return requestJson("/sources/status", { method: "GET" });
 }
 
-export async function startInit({ force = false, sources, bangumiUsername = "" } = {}) {
+export async function startInit({ force = false, sources, bangumiUsername = null } = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {
     payload.sources = sources;
   }
-  if (Array.isArray(sources) && sources.includes("bangumi")) {
+  // Send an explicit Bangumi username only when the caller has one to send.
+  // `null`/`undefined` means "leave the configured username untouched" (the
+  // backend treats an omitted username as keep-existing); an empty string is a
+  // deliberate clear the user asked for.
+  if (Array.isArray(sources) && sources.includes("bangumi") && bangumiUsername != null) {
     payload.source_options = {
-      bangumi: { username: String(bangumiUsername || "").trim() },
+      bangumi: { username: String(bangumiUsername).trim() },
     };
   }
   return requestJson("/init", {

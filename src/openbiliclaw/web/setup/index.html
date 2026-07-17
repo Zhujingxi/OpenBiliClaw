@@ -303,7 +303,7 @@
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let initPollInFlight = false, initPollPending = false, initOffline = false;
-    let initBangumiUsername = "", initBangumiUsernameTouched = false;
+    let initBangumiUsername = "", initBangumiUsernameTouched = false, initBangumiUsernamePrefilled = false;
     // Providers whose api_key is already persisted server-side (GET /api/config
     // returns it masked). Lets a relaunch save step 0 without re-pasting the
     // key: PUT /api/config only touches fields present in the payload.
@@ -1075,6 +1075,12 @@
       const bangumiUsername = String(
         bangumiUsernameInput ? bangumiUsernameInput.value : initBangumiUsername
       ).trim();
+      // Send an explicit username only when the user deliberately edited the
+      // field, or a successful /api/config prefill gave us the value to clear.
+      // Otherwise omit it so the backend keeps the configured username instead
+      // of erasing it with an empty, never-prefilled field.
+      const sendBangumiUsername =
+        initBangumiUsernameTouched && (bangumiUsername !== "" || initBangumiUsernamePrefilled);
       if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername) {
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
@@ -1097,9 +1103,10 @@
         return;
       }
 
+      let startBody = {};
       try {
         const payload = { sources: selected };
-        if (selected.includes("bangumi")) {
+        if (selected.includes("bangumi") && sendBangumiUsername) {
           payload.source_options = { bangumi: { username: bangumiUsername } };
         }
         const r = await fetchWithTimeout("/api/init", {
@@ -1107,10 +1114,9 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         }, 60000);
+        startBody = await r.json().catch(() => ({}));
         if (!r.ok) {
-          let details = {};
-          try { details = await r.json(); } catch {}
-          throw new Error(describeInitReason(details.error || details.reason) || details.detail || `HTTP ${r.status}`);
+          throw new Error(describeInitReason(startBody.error || startBody.reason) || startBody.detail || `HTTP ${r.status}`);
         }
       } catch (e) {
         renderInitChecklist(status, selected);
@@ -1122,6 +1128,12 @@
       connectInitStream();
       renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
       scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_START_POLL_MS);
+      // Surface backend warnings from the 202 (e.g. Bangumi selected without a
+      // public username → discovery-only). setInitReason renders via textContent.
+      const startWarnings = Array.isArray(startBody.warnings)
+        ? startBody.warnings.filter((text) => typeof text === "string" && text.trim())
+        : [];
+      if (startWarnings.length) setInitReason(startWarnings.join(" "), "warn");
     }
 
     async function cancelGuidedInit() {
@@ -1175,7 +1187,13 @@
           const data = await r.json();
           const llm = (data.config || data)?.llm || {};
           const bangumiUsername = (data.config || data)?.sources?.bangumi?.username || "";
-          if (!initBangumiUsernameTouched) initBangumiUsername = String(bangumiUsername);
+          if (!initBangumiUsernameTouched) {
+            initBangumiUsername = String(bangumiUsername);
+            // A successful prefill populated the field; an explicit clear
+            // afterwards deliberately sends "" while an untouched or config-
+            // failed empty field omits the username to keep the configured one.
+            initBangumiUsernamePrefilled = true;
+          }
           const bangumiInput = $("#initBangumiUsername");
           if (bangumiInput && !initBangumiUsernameTouched) {
             bangumiInput.value = initBangumiUsername;

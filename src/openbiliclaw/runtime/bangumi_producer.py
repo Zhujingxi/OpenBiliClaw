@@ -158,6 +158,13 @@ class BangumiDiscoveryProducer:
             reason = "error"
         elif errors:
             reason = "partial"
+        elif mode_results and all(
+            outcome == "budget_exhausted" for outcome in mode_results.values()
+        ):
+            # Every selected mode was skipped for spent daily budget — nothing
+            # was fetched, so this is distinct from a mode that ran and found
+            # nothing ("empty"). Surface it so the CLI/UI can point at budgets.
+            reason = "budget_exhausted"
         elif not items:
             reason = "empty"
         else:

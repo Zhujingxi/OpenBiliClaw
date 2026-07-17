@@ -85,6 +85,27 @@ def test_subject_normalization_drops_unsafe_or_malformed_rows(row: dict[str, obj
     assert bangumi_subject_to_content(row, strategy="bangumi-search") is None
 
 
+@pytest.mark.parametrize("meta_tags", ["TVA", {"TV": 1}, 42, True])
+def test_subject_tags_ignore_non_list_meta_tags(meta_tags: object) -> None:
+    # Schema drift (a bare string / dict / scalar) must not be walked
+    # character-by-character; tags then come only from the ``tags`` array.
+    item = bangumi_subject_to_content(
+        _subject(meta_tags=meta_tags, tags=[{"name": "科幻", "count": 9}]),
+        strategy="bangumi-ranked",
+    )
+    assert item is not None
+    assert item.tags == ["科幻"]
+
+
+def test_subject_tags_preserve_valid_list_meta_tags() -> None:
+    item = bangumi_subject_to_content(
+        _subject(meta_tags=["TV", "剧场版"], tags=[]),
+        strategy="bangumi-ranked",
+    )
+    assert item is not None
+    assert item.tags == ["TV", "剧场版"]
+
+
 @pytest.mark.parametrize(
     ("rate", "collection_type", "event_type", "strength", "feedback_type"),
     [
@@ -197,3 +218,93 @@ async def test_public_collection_fetch_balances_status_and_subject_type() -> Non
         for collection_type in range(1, 6)
         for subject_type in ("anime", "book")
     }
+
+
+@pytest.mark.asyncio
+async def test_public_collection_fetch_requests_full_api_pages() -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.limits: list[int] = []
+
+        async def get_user_collections(
+            self,
+            username: str,
+            *,
+            collection_type: int,
+            subject_type: str,
+            limit: int,
+            offset: int,
+        ) -> BangumiPage:
+            self.limits.append(limit)
+            type_index = {"anime": 1, "book": 2, "game": 3}[subject_type]
+            base = type_index * 1_000_000 + collection_type * 100_000 + offset
+            rows = [
+                {
+                    "subject_id": base + i,
+                    "type": collection_type,
+                    "private": False,
+                    "subject": {"id": base + i, "type": 2, "name": "x"},
+                }
+                for i in range(limit)
+            ]
+            return BangumiPage(rows, total=10_000, limit=limit, offset=offset)
+
+    client = _Client()
+    events = await fetch_bangumi_public_collection_events(
+        client,
+        username="sai",
+        subject_types=("anime", "book", "game"),
+        limit=300,
+    )
+
+    # 15 lanes → per_pair 20. Every request must ask for the 50-row API cap
+    # (not the small per_pair), and the fair-share cap holds each lane to one
+    # visit this round: 15 calls total, not 6 whole-page grabs.
+    assert len(events) == 300
+    assert set(client.limits) == {50}
+    assert len(client.limits) == 15
+
+
+@pytest.mark.asyncio
+async def test_public_collection_fetch_buffers_full_pages_across_visits() -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, str, int, int]] = []
+
+        async def get_user_collections(
+            self,
+            username: str,
+            *,
+            collection_type: int,
+            subject_type: str,
+            limit: int,
+            offset: int,
+        ) -> BangumiPage:
+            self.calls.append((collection_type, subject_type, limit, offset))
+            if collection_type == 2 and subject_type == "anime":
+                rows = [
+                    {
+                        "subject_id": 500_000 + offset + i,
+                        "type": 2,
+                        "private": False,
+                        "subject": {"id": 500_000 + offset + i, "type": 2, "name": "a"},
+                    }
+                    for i in range(limit)
+                ]
+                return BangumiPage(rows, total=10_000, limit=limit, offset=offset)
+            return BangumiPage([], total=0, limit=limit, offset=offset)
+
+    client = _Client()
+    events = await fetch_bangumi_public_collection_events(
+        client,
+        username="sai",
+        subject_types=("anime",),
+        limit=100,
+    )
+
+    # A single lane holds all the data. per_pair is 20 (100 / 5 lanes), but one
+    # buffered 50-row page serves 2.5 fair-share visits, so the heavy lane makes
+    # only ceil(100 / 50) = 2 paced calls (offsets 0 and 50) — never over-import.
+    assert len(events) == 100
+    heavy = [call for call in client.calls if call[0] == 2 and call[1] == "anime"]
+    assert [(limit, offset) for _, _, limit, offset in heavy] == [(50, 0), (50, 50)]

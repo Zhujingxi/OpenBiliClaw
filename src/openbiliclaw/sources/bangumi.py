@@ -5,12 +5,16 @@ from __future__ import annotations
 import math
 from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.sources.event_format import sanitize_comment_text
 
 VALID_SUBJECT_TYPE_IDS = frozenset({1, 2, 3, 4, 6})
+# Bangumi's v0 API caps a page at 50 rows. Normal bootstrap targets request the
+# full cap and buffer surplus rows; smaller global targets avoid over-fetching.
+BANGUMI_MAX_PAGE_SIZE = 50
 COLLECTION_TYPES = {
     1: "wish",
     2: "done",
@@ -56,10 +60,15 @@ def _cover_url(subject: Mapping[str, Any]) -> str:
 
 def _subject_tags(subject: Mapping[str, Any]) -> list[str]:
     candidates: list[tuple[int, str]] = []
-    for raw in subject.get("meta_tags") or []:
-        text = str(raw or "").strip()
-        if text:
-            candidates.append((2**31 - 1, text))
+    # ``meta_tags`` must be a JSON array. A schema drift that hands back a bare
+    # string (e.g. "TV") would otherwise be walked character-by-character, so
+    # only iterate genuine lists — mirroring the ``tags`` guard below.
+    meta_tags = subject.get("meta_tags")
+    if isinstance(meta_tags, list):
+        for raw in meta_tags:
+            text = str(raw or "").strip()
+            if text:
+                candidates.append((2**31 - 1, text))
     raw_tags = subject.get("tags") or []
     if isinstance(raw_tags, list):
         for raw in raw_tags:
@@ -214,6 +223,17 @@ def bangumi_collection_to_event(
     }
 
 
+@dataclass
+class _CollectionScope:
+    """One (collection status × subject type) pagination lane."""
+
+    collection_type: int
+    subject_type: str
+    offset: int = 0
+    exhausted: bool = False
+    buffer: deque[dict[str, Any]] = field(default_factory=deque)
+
+
 async def fetch_bangumi_public_collection_events(
     client: Any,
     *,
@@ -226,29 +246,49 @@ async def fetch_bangumi_public_collection_events(
     Collection status and subject type are separate API filters. Walking their
     Cartesian product avoids a large completed-anime list starving wishlist,
     reading, book, or game signals during bootstrap.
+
+    Each lane is sampled up to ``per_pair`` rows per round-robin visit (its fair
+    share), while network calls request up to ``BANGUMI_MAX_PAGE_SIZE`` rows
+    (bounded by the global target) and buffer surplus rows for later visits.
+    That preserves per-scope fairness and the global ``target`` cap while
+    collapsing many tiny pages into fewer paced calls (default ``per_pair`` is
+    20, well under the normal 50-row request size).
     """
 
     target = max(1, int(limit))
-    pairs = deque(
-        (collection_type, subject_type, 0)
+    scopes: deque[_CollectionScope] = deque(
+        _CollectionScope(collection_type, subject_type)
         for collection_type in COLLECTION_TYPES
         for subject_type in dict.fromkeys(subject_types)
     )
-    if not pairs:
+    if not scopes:
         return []
-    per_pair = max(1, math.ceil(target / len(pairs)))
+    per_pair = max(1, math.ceil(target / len(scopes)))
+    page_size = min(BANGUMI_MAX_PAGE_SIZE, target)
     events: list[dict[str, Any]] = []
     seen_subjects: set[str] = set()
-    while pairs and len(events) < target:
-        collection_type, subject_type, offset = pairs.popleft()
-        page = await client.get_user_collections(
-            username,
-            collection_type=collection_type,
-            subject_type=subject_type,
-            limit=min(50, per_pair),
-            offset=offset,
-        )
-        for row in page.data:
+    while scopes and len(events) < target:
+        scope = scopes.popleft()
+        # One paced request per drained-but-unexhausted lane; the buffered page
+        # can feed several fair-share visits before another call is needed.
+        if not scope.buffer and not scope.exhausted:
+            page = await client.get_user_collections(
+                username,
+                collection_type=scope.collection_type,
+                subject_type=scope.subject_type,
+                limit=page_size,
+                offset=scope.offset,
+            )
+            scope.buffer.extend(page.data)
+            scope.offset += len(page.data)
+            if len(page.data) < page.limit or scope.offset >= page.total:
+                scope.exhausted = True
+        # Fair share: examine at most ``per_pair`` buffered rows this visit so a
+        # dominant lane cannot starve the others or overshoot the global target.
+        examined = 0
+        while scope.buffer and examined < per_pair and len(events) < target:
+            row = scope.buffer.popleft()
+            examined += 1
             event = bangumi_collection_to_event(row, username=username)
             if event is None:
                 continue
@@ -257,9 +297,6 @@ async def fetch_bangumi_public_collection_events(
                 continue
             seen_subjects.add(subject_id)
             events.append(event)
-            if len(events) >= target:
-                break
-        next_offset = offset + len(page.data)
-        if len(page.data) == page.limit and next_offset < page.total:
-            pairs.append((collection_type, subject_type, next_offset))
+        if scope.buffer or not scope.exhausted:
+            scopes.append(scope)
     return events

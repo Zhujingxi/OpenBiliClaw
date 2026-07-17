@@ -44,6 +44,7 @@ import {
   normalizeProfileSummary,
   normalizeRuntimeStatus,
   platformDisplayName,
+  resolveInitBangumiUsername,
   shouldFetchProfileSummary,
   shouldAutoLoadRecommendations,
   validateCommentInput,
@@ -1909,4 +1910,53 @@ test("getHintBannerState normalizes supported tones", () => {
   assert.deepEqual(getHintBannerState("weird"), {
     tone: "info",
   });
+});
+
+test("resolveInitBangumiUsername sends a deliberately typed username", () => {
+  // Successful prefill, then the user types a real name → send it.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: " sai " }),
+    "sai",
+  );
+});
+
+test("resolveInitBangumiUsername sends '' to clear a successfully prefilled value", () => {
+  // Explicit clear of a prefilled field is a deliberate reset → send "".
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: "" }),
+    "",
+  );
+});
+
+test("resolveInitBangumiUsername omits an untouched field so config is kept", () => {
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: true, value: "sai" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits an empty field when prefill failed", () => {
+  // Config fetch failed/never populated the field → an empty value must not
+  // erase a configured username.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits on early submission before any prefill", () => {
+  // Nothing touched, nothing prefilled (fetch still pending) → omit.
+  assert.equal(resolveInitBangumiUsername({}), null);
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername still sends a typed name when prefill failed", () => {
+  // A deliberately typed value is trustworthy even without a prior prefill.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "kite" }),
+    "kite",
+  );
 });

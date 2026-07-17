@@ -324,6 +324,66 @@ async def test_budget_counts_only_final_globally_deduplicated_items(db: Database
 
 
 @pytest.mark.asyncio
+async def test_all_modes_budget_exhausted_reports_budget_exhausted(db: Database) -> None:
+    class _NoBudget(BangumiDiscoveryProducer):
+        def remaining_budget(self, mode: str, *, per_run_budget: int) -> int:
+            del mode, per_run_budget
+            return 0
+
+    producer = _NoBudget(
+        database=db,
+        soul_engine=_Soul(),
+        client=_Client(),
+        enabled=True,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due(limit=6)
+
+    assert result["reason"] == "budget_exhausted"
+    assert result["discovered"] == 0
+    assert result["mode_results"] == {
+        "search": "budget_exhausted",
+        "ranked": "budget_exhausted",
+        "latest": "budget_exhausted",
+    }
+
+
+@pytest.mark.asyncio
+async def test_partial_budget_exhaustion_still_reports_empty(db: Database) -> None:
+    class _EmptyBrowse(_Client):
+        async def browse_subjects(
+            self, subject_type: str, *, sort: str, **kwargs: Any
+        ) -> BangumiPage:
+            return BangumiPage([], 0, 1, 0)
+
+    class _SearchBudgetOnly(BangumiDiscoveryProducer):
+        def remaining_budget(self, mode: str, *, per_run_budget: int) -> int:
+            if mode == "search":
+                return 0
+            return super().remaining_budget(mode, per_run_budget=per_run_budget)
+
+    producer = _SearchBudgetOnly(
+        database=db,
+        soul_engine=_Soul(),
+        client=_EmptyBrowse(),
+        enabled=True,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due(limit=6)
+
+    # A genuine successful-but-empty fetch must not be mislabelled as exhausted.
+    assert result["reason"] == "empty"
+    assert result["discovered"] == 0
+    assert result["mode_results"] == {
+        "search": "budget_exhausted",
+        "ranked": "empty",
+        "latest": "empty",
+    }
+
+
+@pytest.mark.asyncio
 async def test_producer_stops_when_disabled_or_pool_full(db: Database) -> None:
     disabled = BangumiDiscoveryProducer(
         database=db, soul_engine=_Soul(), client=_Client(), enabled=False
