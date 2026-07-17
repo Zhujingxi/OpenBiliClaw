@@ -5,11 +5,25 @@
 #   mkdir -p litellm
 #   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
 #   curl -fsSL https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/litellm/config.yaml -o litellm/config.yaml
+#   # BEGIN private .env bootstrap
 #   umask 077
-#   printf 'LITELLM_POSTGRES_PASSWORD=%s\nLITELLM_MASTER_KEY=sk-%s\nOPENBILICLAW_SECRET_KEY=%s\nOPENBILICLAW_ACCESS_TOKEN=%s\n' \
-#     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" \
-#     "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env
-#   docker compose -f docker-compose.prebuilt.yml up -d
+#   touch .env
+#   chmod 600 .env
+#   ensure_secret() (
+#     key=$1
+#     prefix=${2-}
+#     if ! grep -Eq "^${key}=[^[:space:]].*$" .env; then
+#       printf '%s=%s%s\n' "$key" "$prefix" "$(openssl rand -hex 32)" >> .env
+#     fi
+#   )
+#   ensure_secret LITELLM_POSTGRES_PASSWORD
+#   ensure_secret LITELLM_MASTER_KEY sk-
+#   ensure_secret OPENBILICLAW_SECRET_KEY
+#   ensure_secret OPENBILICLAW_ACCESS_TOKEN
+#   ensure_secret OPENBILICLAW_SESSION_SECRET
+#   # END private .env bootstrap
+#   docker compose --env-file .env -f docker-compose.prebuilt.yml config >/dev/null
+#   docker compose --env-file .env -f docker-compose.prebuilt.yml up -d
 #   # configure obc-interactive, obc-analysis, and obc-embedding at
 #   # http://127.0.0.1:4000/ui
 #   # then configure sources through /api/v1/onboarding. The packaged static

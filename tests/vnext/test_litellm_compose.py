@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[2]
 COMPOSE_FILES = (ROOT / "docker-compose.yml", ROOT / "docker-compose.prebuilt.yml")
+
+
+def _prebuilt_env_bootstrap(source: str) -> str:
+    start_marker = "#   # BEGIN private .env bootstrap"
+    end_marker = "#   # END private .env bootstrap"
+    lines = source.splitlines()
+    start = lines.index(start_marker)
+    end = lines.index(end_marker)
+    shell_lines = lines[start + 1 : end]
+    assert shell_lines
+    assert all(line.startswith("#   ") for line in shell_lines)
+    return "\n".join(line.removeprefix("#   ") for line in shell_lines)
 
 
 def test_both_compose_paths_mount_the_same_policy_and_bind_admin_to_loopback() -> None:
@@ -34,6 +50,74 @@ def test_prebuilt_download_and_release_instructions_include_policy_file() -> Non
 
     for text in (prebuilt, docker_doc, release_helper):
         assert "litellm/config.yaml" in text
+
+
+def test_prebuilt_quick_start_privately_generates_and_preserves_compose_secrets(
+    tmp_path: Path,
+) -> None:
+    source = (ROOT / "docker-compose.prebuilt.yml").read_text(encoding="utf-8")
+    bootstrap = _prebuilt_env_bootstrap(source)
+    compose_path = tmp_path / "docker-compose.prebuilt.yml"
+    compose_path.write_text(source, encoding="utf-8")
+
+    first = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", bootstrap],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+    assert first.stdout == ""
+    assert first.stderr == ""
+    env_path = tmp_path / ".env"
+    assert env_path.stat().st_mode & 0o777 == 0o600
+    first_bytes = env_path.read_bytes()
+    values = dict(
+        line.split("=", 1)
+        for line in first_bytes.decode().splitlines()
+        if line and not line.startswith("#")
+    )
+    assert len(values["LITELLM_POSTGRES_PASSWORD"]) == 64
+    assert values["LITELLM_MASTER_KEY"].startswith("sk-")
+    assert len(values["OPENBILICLAW_SECRET_KEY"]) == 64
+    assert len(values["OPENBILICLAW_ACCESS_TOKEN"]) == 64
+    assert len(values["OPENBILICLAW_SESSION_SECRET"]) == 64
+
+    second = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", bootstrap],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert second.returncode == 0, second.stderr
+    assert second.stdout == ""
+    assert second.stderr == ""
+    assert env_path.read_bytes() == first_bytes
+
+    docker = shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker CLI is unavailable for Compose rendering")
+    rendered = subprocess.run(
+        [
+            "bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            '"$1" compose --env-file .env -f docker-compose.prebuilt.yml config >/dev/null',
+            "compose-render",
+            docker,
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "COMPOSE_PROJECT_NAME": "openbiliclaw-contract"},
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    assert rendered.stdout == ""
+    assert values["OPENBILICLAW_SESSION_SECRET"] not in rendered.stderr
 
 
 def test_compose_does_not_claim_unverified_signature() -> None:
