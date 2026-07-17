@@ -8,6 +8,7 @@ import os
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
         SourceAccountStatus,
         SourceId,
         SourceManifest,
+        SourceSettingsState,
         SourceTaskCompletion,
     )
     from openbiliclaw.features.system.domain import UserSettings
@@ -101,6 +103,12 @@ class SourcesPort(Protocol):
     def manifests(self) -> tuple[SourceManifest, ...]: ...
 
     def statuses(self) -> tuple[SourceAccountStatus, ...]: ...
+
+    def settings(self, source_id: SourceId) -> SourceSettingsState: ...
+
+    def update_settings(
+        self, source_id: SourceId, patch: Mapping[str, object]
+    ) -> SourceSettingsState: ...
 
     def configure(
         self, source_id: SourceId, account_key: str, credentials: Mapping[str, object]
@@ -212,6 +220,72 @@ def _unix_time() -> int:
 
 
 @dataclass(slots=True)
+class _RateLimitEntry:
+    failures: list[int] = field(default_factory=list)
+    locked_until: int | None = None
+
+
+class _BoundedRateLimiter:
+    """Per-client failure limiter with deterministic expiry and bounded memory."""
+
+    def __init__(
+        self,
+        *,
+        max_failures: int,
+        window_seconds: int,
+        lockout_seconds: int,
+        max_clients: int,
+        clock: Callable[[], int],
+    ) -> None:
+        if min(max_failures, window_seconds, lockout_seconds, max_clients) < 1:
+            raise ValueError("rate limit bounds must be positive")
+        self._max_failures = max_failures
+        self._window_seconds = window_seconds
+        self._lockout_seconds = lockout_seconds
+        self._max_clients = max_clients
+        self._clock = clock
+        self._entries: OrderedDict[str, _RateLimitEntry] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def retry_after(self, key: str) -> int | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            now = self._clock()
+            if entry.locked_until is not None and entry.locked_until > now:
+                self._entries.move_to_end(key)
+                return max(1, entry.locked_until - now)
+            if entry.locked_until is not None:
+                self._entries.pop(key, None)
+                return None
+            entry.failures = [
+                moment for moment in entry.failures if now - moment < self._window_seconds
+            ]
+            if not entry.failures:
+                self._entries.pop(key, None)
+            return None
+
+    def record_failure(self, key: str) -> None:
+        with self._lock:
+            now = self._clock()
+            entry = self._entries.pop(key, _RateLimitEntry())
+            entry.failures = [
+                moment for moment in entry.failures if now - moment < self._window_seconds
+            ]
+            entry.failures.append(now)
+            if len(entry.failures) >= self._max_failures:
+                entry.locked_until = now + self._lockout_seconds
+            self._entries[key] = entry
+            while len(self._entries) > self._max_clients:
+                self._entries.popitem(last=False)
+
+    def reset(self, key: str) -> None:
+        with self._lock:
+            self._entries.pop(key, None)
+
+
+@dataclass(slots=True)
 class AccessPolicy:
     """Secret-safe installer, browser-session, and extension-session policy."""
 
@@ -223,10 +297,32 @@ class AccessPolicy:
     extension_access_records: tuple[str, ...] = field(default=(), repr=False)
     extension_session_ttl_hours: int = 24
     clock: Callable[[], int] = field(default=_unix_time, repr=False)
+    rate_limit_max_failures: int = 5
+    rate_limit_window_seconds: int = 900
+    rate_limit_lockout_seconds: int = 900
+    rate_limit_max_clients: int = 2048
     epoch_getter: Callable[[], int] | None = field(default=None, repr=False)
     epoch_bumper: Callable[[], int] | None = field(default=None, repr=False)
+    fingerprint_reconciler: Callable[[str], bool] | None = field(default=None, repr=False)
     _epoch: int = field(default=0, init=False, repr=False)
+    _reconcile_ok: bool = field(default=True, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _login_limiter: _BoundedRateLimiter = field(init=False, repr=False)
+    _extension_limiter: _BoundedRateLimiter = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._login_limiter = self._new_rate_limiter()
+        self._extension_limiter = self._new_rate_limiter()
+        self._reconcile_ok = self.fingerprint_reconciler is None
+
+    def _new_rate_limiter(self) -> _BoundedRateLimiter:
+        return _BoundedRateLimiter(
+            max_failures=self.rate_limit_max_failures,
+            window_seconds=self.rate_limit_window_seconds,
+            lockout_seconds=self.rate_limit_lockout_seconds,
+            max_clients=self.rate_limit_max_clients,
+            clock=self.clock,
+        )
 
     @classmethod
     def from_environment(cls) -> AccessPolicy:
@@ -243,31 +339,66 @@ class AccessPolicy:
             if isinstance(parsed_records, list)
             else ()
         )
-        try:
-            from openbiliclaw.config import load_config
-
-            configured = load_config().api.auth
-        except Exception:
-            return cls(
-                token=token if token else None,
-                password_hash=password_hash,
-                session_secret=session_secret,
-                extension_access_enabled=bool(environment_records),
-                extension_access_records=environment_records,
-            )
-        password_hash = password_hash or (configured.password_hash if configured.enabled else "")
-        session_secret = session_secret or configured.session_secret
-        extension_records = environment_records or tuple(configured.extension_access_keys)
         return cls(
             token=token if token else None,
             password_hash=password_hash,
             session_secret=session_secret,
-            session_ttl_hours=configured.session_ttl_hours,
-            extension_access_enabled=configured.extension_access_enabled
-            or bool(environment_records),
-            extension_access_records=extension_records,
-            extension_session_ttl_hours=configured.extension_token_ttl_hours,
+            extension_access_enabled=bool(environment_records),
+            extension_access_records=environment_records,
         )
+
+    def attach_persistence(
+        self,
+        *,
+        epoch_getter: Callable[[], int],
+        epoch_bumper: Callable[[], int],
+        fingerprint_reconciler: Callable[[str], bool],
+    ) -> None:
+        """Attach vNext auth state before application startup."""
+
+        self.epoch_getter = epoch_getter
+        self.epoch_bumper = epoch_bumper
+        self.fingerprint_reconciler = fingerprint_reconciler
+        self._reconcile_ok = not self.password_configured
+
+    def reconcile_password_fingerprint(self) -> bool:
+        if not self.password_configured:
+            self._reconcile_ok = True
+            return False
+        reconciler = self.fingerprint_reconciler
+        if reconciler is None:
+            self._reconcile_ok = True
+            return False
+        fingerprint = auth_core.password_fingerprint(
+            self.session_secret,
+            plain=None,
+            password_hash=self.password_hash,
+        )
+        try:
+            changed = reconciler(fingerprint)
+        except Exception as error:
+            self._reconcile_ok = False
+            raise DependencyUnavailableError(
+                "authentication password state is unavailable"
+            ) from error
+        self._reconcile_ok = True
+        return changed
+
+    def auth_retry_after(self, kind: str, key: str) -> int | None:
+        return self._limiter(kind).retry_after(key)
+
+    def record_auth_failure(self, kind: str, key: str) -> None:
+        self._limiter(kind).record_failure(key)
+
+    def reset_auth_failures(self, kind: str, key: str) -> None:
+        self._limiter(kind).reset(key)
+
+    def _limiter(self, kind: str) -> _BoundedRateLimiter:
+        if kind == "login":
+            return self._login_limiter
+        if kind == "extension":
+            return self._extension_limiter
+        raise ValueError("unknown authentication rate limit")
 
     @property
     def password_configured(self) -> bool:
@@ -305,6 +436,8 @@ class AccessPolicy:
     def mint_session(self, *, ttl_hours: int | None = None) -> str:
         if not self.session_secret:
             raise DependencyUnavailableError("session authentication is not configured")
+        if not self._reconcile_ok:
+            raise DependencyUnavailableError("authentication password state is unavailable")
         try:
             epoch = self.current_epoch()
         except Exception as error:
@@ -321,6 +454,8 @@ class AccessPolicy:
     def verify_session(self, candidate: str | None) -> bool:
         if not candidate or not self.session_secret:
             return False
+        if not self._reconcile_ok:
+            raise DependencyUnavailableError("authentication password state is unavailable")
         try:
             epoch = self.current_epoch()
         except Exception as error:
@@ -411,8 +546,8 @@ def _is_trusted_loopback_request(request: Request, access_control: object | None
     if not auth_core.is_loopback_host(peer):
         return False
     origin_value = request.headers.get("Origin")
-    if auth_core.is_extension_origin(origin_value):
-        return True
+    if not origin_value or auth_core.is_extension_origin(origin_value):
+        return False
     if request.headers.get("Sec-Fetch-Site") in {"cross-site", "same-site"}:
         return False
     effective = auth_core.effective_scheme_host(
@@ -425,8 +560,6 @@ def _is_trusted_loopback_request(request: Request, access_control: object | None
     )
     if effective is None or not auth_core.is_loopback_host(effective[1]):
         return False
-    if not origin_value:
-        return True
     return auth_core.same_origin(auth_core.parse_origin(origin_value), effective)
 
 
@@ -485,9 +618,18 @@ def build_application_container() -> ApplicationContainer:
             uow.commit()
             return epoch
 
+    def reconcile_password_fingerprint(fingerprint: str) -> bool:
+        with uow_factory() as uow:
+            changed = uow.auth_state.reconcile_password_fingerprint(fingerprint)
+            uow.commit()
+            return changed
+
     access = AccessPolicy.from_environment()
-    access.epoch_getter = current_auth_epoch
-    access.epoch_bumper = bump_auth_epoch
+    access.attach_persistence(
+        epoch_getter=current_auth_epoch,
+        epoch_bumper=bump_auth_epoch,
+        fingerprint_reconciler=reconcile_password_fingerprint,
+    )
 
     registry = build_default_source_registry(session_factory)
     settings = SettingsService(
@@ -534,6 +676,7 @@ def build_application_container() -> ApplicationContainer:
             database_url=database_settings.url,
             alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
         )
+        access.reconcile_password_fingerprint()
         _apply_runtime_settings(settings.get())
         jobs.recover_interrupted()
 

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import UUID, uuid5
 
-from pydantic import HttpUrl
+from pydantic import BaseModel, HttpUrl
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.feed.domain import ContentItem
@@ -84,7 +84,7 @@ class NormalizingConnector:
         *,
         manifest: SourceManifest,
         transport: RetainedSourceTransport,
-        settings: object,
+        settings: BaseModel,
         normalize_content: Callable[[dict[str, Any]], ContentItem | None],
         normalize_activity: Callable[[dict[str, Any]], ActivityEvent | None] | None,
     ) -> None:

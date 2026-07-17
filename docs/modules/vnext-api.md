@@ -64,10 +64,13 @@ or the source installer owns schema writes; the API only performs a read-only
 schema-head check and fails before recovery or request handling when it is stale.
 
 Every JSON failure uses `ErrorEnvelope = {"error":{"code","message"}}`. Runtime and
-OpenAPI agree on validation `422`, authentication `401/403`, missing `404`, conflict `409`,
+OpenAPI agree on validation `422`, authentication `401/403`, missing `404`, method-not-allowed
+`405`, conflict `409`,
 rate-limited `429`, unavailable `503`, and safe internal `500`; the deterministic OpenAPI
 post-processor adds these responses without replacing success models, security schemes, or
-SSE metadata. Error payloads never contain exception text, traceback, SQL, request values,
+SSE metadata. The handler is registered for Starlette HTTP exceptions, so router/static misses
+and method mismatches use the same 404/405 envelope rather than Starlette's default `detail`
+shape. Error payloads never contain exception text, traceback, SQL, request values,
 credentials, or provider internals. `/web`,
 `/m`, and `/setup` remain mounted unchanged but keep legacy request wiring until
 Task 22.

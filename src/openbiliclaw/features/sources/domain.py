@@ -463,6 +463,15 @@ class SourceAccountDisconnectResult(BaseModel):
     idempotent: bool
 
 
+class SourceSettingsState(BaseModel):
+    """Safe persisted settings for one explicit built-in source."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_id: SourceId
+    settings: FrozenMetadata
+
+
 _CREDENTIAL_TOKENS = frozenset(
     {
         "apikey",

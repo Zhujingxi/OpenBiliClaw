@@ -39,3 +39,22 @@ def test_prebuilt_download_and_release_instructions_include_policy_file() -> Non
 def test_compose_does_not_claim_unverified_signature() -> None:
     source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "signed upstream release" not in source
+
+
+def test_compose_forwards_vnext_browser_auth_and_public_admin_configuration() -> None:
+    expected = {
+        "OPENBILICLAW_WEB_PASSWORD_HASH": "${OPENBILICLAW_WEB_PASSWORD_HASH:-}",
+        "OPENBILICLAW_SESSION_SECRET": (
+            "${OPENBILICLAW_SESSION_SECRET:?Set OPENBILICLAW_SESSION_SECRET to a generated secret}"
+        ),
+        "OPENBILICLAW_EXTENSION_ACCESS_KEYS": "${OPENBILICLAW_EXTENSION_ACCESS_KEYS:-[]}",
+        "OPENBILICLAW_LITELLM_ADMIN_URL": "${OPENBILICLAW_LITELLM_ADMIN_URL:-}",
+    }
+    for path in COMPOSE_FILES:
+        source = path.read_text(encoding="utf-8")
+        environment = yaml.safe_load(source)["services"]["api"]["environment"]
+        assert {key: environment[key] for key in expected} == expected
+        worker_environment = yaml.safe_load(source)["services"]["worker"]["environment"]
+        assert "OPENBILICLAW_EXTENSION_ACCESS_KEYS" not in worker_environment
+        assert "OPENBILICLAW_EXTENSION_DEVICE_KEY" not in source
+        assert "obc_ext_" not in source

@@ -191,6 +191,12 @@ class _SourceTasks:
 
 
 class _Sources:
+    def __init__(self) -> None:
+        self._settings_by_source: dict[str, dict[str, object]] = {
+            "bilibili": {"enabled": True},
+            "douyin": {"mode": "direct"},
+        }
+
     def manifests(self):
         return (
             {
@@ -218,6 +224,17 @@ class _Sources:
                 "enabled": False,
             },
         )
+
+    def settings(self, source_id: SourceId):
+        return {
+            "source_id": source_id.value,
+            "settings": self._settings_by_source.get(source_id.value, {}),
+        }
+
+    def update_settings(self, source_id: SourceId, patch: dict[str, object]):
+        current = self._settings_by_source.setdefault(source_id.value, {})
+        current.update(patch)
+        return {"source_id": source_id.value, "settings": current}
 
     def configure(self, source_id: SourceId, account_key: str, credentials: dict[str, object]):
         assert credentials
@@ -299,6 +316,18 @@ def test_router_groups_and_representative_happy_paths(client: TestClient) -> Non
     )
     assert client.get("/api/v1/sources", headers=headers).status_code == 200
     assert client.get("/api/v1/sources/status", headers=headers).status_code == 200
+    updated_source = client.put(
+        "/api/v1/sources/douyin/settings",
+        headers=headers,
+        json={"settings": {"mode": "extension"}},
+    )
+    assert updated_source.json() == {
+        "source_id": "douyin",
+        "settings": {"mode": "extension"},
+    }
+    assert client.get("/api/v1/sources/douyin/settings", headers=headers).json() == (
+        updated_source.json()
+    )
     configured = client.put(
         "/api/v1/sources/bilibili/accounts",
         headers=headers,

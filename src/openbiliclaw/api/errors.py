@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import OperationalError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from openbiliclaw.api.dependencies import DependencyUnavailableError
 from openbiliclaw.features.profile.service import (
@@ -25,6 +25,11 @@ from openbiliclaw.features.sources.service import (
 )
 from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.security.credentials import MissingCredentialKeyError
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from fastapi import FastAPI, Request
 
 _CONFLICTS: tuple[type[Exception], ...] = (
     ProfileRevisionConflict,
@@ -68,7 +73,7 @@ _HTTP_ERROR_CONTRACTS: dict[int, tuple[str, str]] = {
     503: ("unavailable", "required service is unavailable"),
 }
 
-_DOCUMENTED_ERROR_STATUSES = (401, 403, 404, 409, 422, 429, 500, 503)
+_DOCUMENTED_ERROR_STATUSES = (401, 403, 404, 405, 409, 422, 429, 500, 503)
 
 
 def _response(status_code: int, code: str, message: str) -> JSONResponse:
@@ -83,6 +88,15 @@ def _http_contract(status_code: int) -> tuple[str, str]:
     return _HTTP_ERROR_CONTRACTS.get(status_code, ("request_failed", "request failed"))
 
 
+def _register_handlers(
+    app: FastAPI,
+    exception_types: tuple[type[Exception], ...],
+    handler: Callable[[Request, Exception], Awaitable[JSONResponse]],
+) -> None:
+    for exception_type in exception_types:
+        app.add_exception_handler(exception_type, handler)
+
+
 def install_error_handlers(app: FastAPI) -> None:
     """Install stable mappings without echoing request data or exception values."""
 
@@ -92,8 +106,8 @@ def install_error_handlers(app: FastAPI) -> None:
     ) -> JSONResponse:
         return _response(422, "validation_error", "request validation failed")
 
-    @app.exception_handler(HTTPException)
-    async def http_error(_request: Request, error: HTTPException) -> JSONResponse:
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(_request: Request, error: StarletteHTTPException) -> JSONResponse:
         code, message = _http_contract(error.status_code)
         response = _response(error.status_code, code, message)
         if error.headers:
@@ -124,12 +138,9 @@ def install_error_handlers(app: FastAPI) -> None:
         ConnectionError,
         MissingCredentialKeyError,
     )
-    for conflict_type in _CONFLICTS:
-        app.add_exception_handler(conflict_type, conflict_error)
-    for validation_type in validation_errors:
-        app.add_exception_handler(validation_type, value_error)
-    for unavailable_type in unavailable_errors:
-        app.add_exception_handler(unavailable_type, unavailable_error)
+    _register_handlers(app, _CONFLICTS, conflict_error)
+    _register_handlers(app, validation_errors, value_error)
+    _register_handlers(app, unavailable_errors, unavailable_error)
 
     @app.exception_handler(Exception)
     async def internal_error(_request: Request, error: Exception) -> JSONResponse:

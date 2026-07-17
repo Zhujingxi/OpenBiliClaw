@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from openbiliclaw.features.system.domain import DatabaseSettings
+from openbiliclaw.features.system.domain import DatabaseSettings, UserSettings
 from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
 from openbiliclaw.infrastructure.ai.use_cases import TransactionalAIRunRecorder
@@ -29,9 +29,11 @@ from openbiliclaw.infrastructure.jobs.tasks import (
     JobService,
     configure_job_runtime,
 )
+from openbiliclaw.infrastructure.runtime_settings import applied_runtime_settings
 
 MAX_WORKERS = 4
 RuntimeFactory = Callable[[], tuple[JobService, Mapping[str, JobHandler]]]
+SettingsLoader = Callable[[], UserSettings]
 
 
 def _load_factory(path: str) -> RuntimeFactory:
@@ -75,21 +77,42 @@ def database_runtime_factory() -> tuple[JobService, Mapping[str, JobHandler]]:
     )
 
 
-def run_worker(runtime_factory: RuntimeFactory, *, workers: int = MAX_WORKERS) -> None:
+def _load_database_user_settings() -> UserSettings:
+    database = DatabaseSettings()
+    require_schema_at_head(
+        database_url=database.url,
+        alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
+    )
+    engine, session_factory = create_engine_and_session(database)
+    try:
+        service = SettingsService(cast("Callable[[], Any]", lambda: UnitOfWork(session_factory)))
+        return service.get()
+    finally:
+        engine.dispose()
+
+
+def run_worker(
+    runtime_factory: RuntimeFactory,
+    *,
+    workers: int = MAX_WORKERS,
+    settings_loader: SettingsLoader | None = None,
+) -> None:
     """Configure dependencies, recover interrupted runs, and start the consumer."""
 
     if not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"worker concurrency must be between 1 and {MAX_WORKERS}")
-    service, handlers = runtime_factory()
-    configure_job_runtime(service, handlers)
-    service.recover_interrupted()
-    consumer = huey.create_consumer(
-        workers=workers,
-        worker_type="thread",
-        periodic=True,
-        flush_locks=True,
-    )
-    consumer.start()
+    loader = settings_loader or _load_database_user_settings
+    with applied_runtime_settings(loader()):
+        service, handlers = runtime_factory()
+        configure_job_runtime(service, handlers)
+        service.recover_interrupted()
+        consumer = huey.create_consumer(
+            workers=workers,
+            worker_type="thread",
+            periodic=True,
+            flush_locks=True,
+        )
+        consumer.start()
 
 
 def main() -> None:

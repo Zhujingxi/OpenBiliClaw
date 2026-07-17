@@ -221,12 +221,17 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             "X-OBC-Auth",
             "extension-token",
             "auth_state.session_epoch",
+            "never receive `trust_loopback`",
+            "bounded per-peer failure limiters",
+            "environment-only",
+            "password rotation atomically invalidates",
         ),
         "docs/modules/vnext-api.md": (
             "LibraryItem",
             "ProfileEdit",
             "ChatHistoryPage",
             "ErrorEnvelope",
+            "`405`",
         ),
         "docs/modules/vnext-sources.md": (
             "settings_schema",
@@ -234,14 +239,46 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             "request_schema",
             "result_schema",
             "idempotent",
+            "source-config:<source_id>",
+            "registry rebuild",
         ),
         "docs/modules/vnext-ai.md": ("OPENBILICLAW_LITELLM_ADMIN_URL", "admin_url"),
-        "docs/modules/vnext-persistence.md": ("0002_auth_state", "auth_state"),
+        "docs/modules/vnext-persistence.md": (
+            "0002_auth_state",
+            "auth_state",
+            "password fingerprint",
+            "aware UTC `created_at`",
+        ),
+        "docs/modules/vnext-use-cases-jobs.md": (
+            "读取 persisted",
+            "network proxy",
+            "先前 process state",
+            "source-config:*",
+        ),
     }
     for name, markers in expected.items():
         source = _read(name)
         for marker in markers:
             assert marker in source, f"missing Task 21b marker in {name}: {marker}"
+
+
+def test_deployment_docs_name_compose_browser_auth_forwarding_without_plaintext_keys() -> None:
+    for name in (
+        "docs/docker-deployment.md",
+        "docs/agent-install.md",
+        "docs/agent-deployment.md",
+    ):
+        source = _read(name)
+        for marker in (
+            "OPENBILICLAW_WEB_PASSWORD_HASH",
+            "OPENBILICLAW_SESSION_SECRET",
+            "OPENBILICLAW_EXTENSION_ACCESS_KEYS",
+            "OPENBILICLAW_LITELLM_ADMIN_URL",
+            "worker",
+        ):
+            assert marker in source, f"missing Compose auth marker in {name}: {marker}"
+        assert "OPENBILICLAW_EXTENSION_DEVICE_KEY" not in source
+        assert re.search(r"obc_ext_[A-Za-z0-9._-]{16,}", source) is None
 
 
 def test_current_changelog_summary_does_not_repeat_superseded_authority() -> None:

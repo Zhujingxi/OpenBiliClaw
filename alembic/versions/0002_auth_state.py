@@ -22,16 +22,29 @@ def upgrade() -> None:
     op.create_table(
         "auth_state",
         sa.Column("key", sa.String(length=50), nullable=False),
-        sa.Column("value", sa.Integer(), nullable=False),
-        sa.CheckConstraint("value >= 0", name="ck_auth_state_non_negative"),
+        sa.Column("integer_value", sa.Integer(), nullable=True),
+        sa.Column("text_value", sa.String(length=128), nullable=True),
+        sa.CheckConstraint(
+            "(integer_value IS NOT NULL AND text_value IS NULL) OR "
+            "(integer_value IS NULL AND text_value IS NOT NULL)",
+            name=op.f("ck_auth_state_exactly_one_value"),
+        ),
+        sa.CheckConstraint(
+            "integer_value IS NULL OR integer_value >= 0",
+            name=op.f("ck_auth_state_non_negative_integer"),
+        ),
         sa.PrimaryKeyConstraint("key", name=op.f("pk_auth_state")),
     )
     table = sa.table(
         "auth_state",
         sa.column("key", sa.String(length=50)),
-        sa.column("value", sa.Integer()),
+        sa.column("integer_value", sa.Integer()),
+        sa.column("text_value", sa.String(length=128)),
     )
-    op.bulk_insert(table, [{"key": "session_epoch", "value": 0}])
+    op.bulk_insert(
+        table,
+        [{"key": "session_epoch", "integer_value": 0, "text_value": None}],
+    )
 
 
 def downgrade() -> None:

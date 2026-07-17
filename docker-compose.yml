@@ -78,10 +78,14 @@ services:
       # credentials stay in LiteLLM and are never injected into this service.
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
+      OPENBILICLAW_LITELLM_ADMIN_URL: ${OPENBILICLAW_LITELLM_ADMIN_URL:-}
       OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
       OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
       OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
+      OPENBILICLAW_WEB_PASSWORD_HASH: ${OPENBILICLAW_WEB_PASSWORD_HASH:-}
+      OPENBILICLAW_SESSION_SECRET: ${OPENBILICLAW_SESSION_SECRET:?Set OPENBILICLAW_SESSION_SECRET to a generated secret}
+      OPENBILICLAW_EXTENSION_ACCESS_KEYS: ${OPENBILICLAW_EXTENSION_ACCESS_KEYS:-[]}
       # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
     command: ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "8420"]
     # ``host.docker.internal`` resolves the host machine for explicit proxy

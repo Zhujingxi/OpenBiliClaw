@@ -39,6 +39,8 @@
 `(name, value.casefold())` 稳定去重；weight 必须有限并钳制到 `-1..1`，同一 facet
 不能同时 upsert/remove。application service 为一次 edit 创建一条 local
 `profile_override` evidence，并把所有 upsert 设为 `confidence=1` / `overridden=true`；
-无论编辑字段多少，事务只生成一个 revision，revision 冲突整体回滚。
+无论编辑字段多少，事务只生成一个 revision，revision 冲突整体回滚。新 revision 与对应
+override evidence 共用 fresh aware UTC timestamp；若 wall clock 未前进，时间仍严格大于上一
+revision，而不是沿用旧 snapshot 的 `created_at`。
 
 `CandidateAssessment` 将 relevance、quality、novelty、risk 的有限数值钳制到 `0..1`，并将组合 score 再次钳制到同一区间。`feed_deficit()` 仅在 unseen 数量严格低于 low watermark 时返回补至 high watermark 所需数量；等于或高于 low watermark 时返回 `0`。

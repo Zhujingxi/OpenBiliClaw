@@ -4,12 +4,14 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
+from openbiliclaw.features._metadata import FrozenMetadata
 from openbiliclaw.features.sources.domain import (
     SourceAccountDisconnectResult,
     SourceAccountStatus,
     SourceCredentialInput,
     SourceId,
     SourceManifest,
+    SourceSettingsState,
 )
 
 
@@ -18,6 +20,12 @@ class SourceConfiguration(BaseModel):
 
     account_key: str = Field(min_length=1, max_length=200)
     credentials: SourceCredentialInput
+
+
+class SourceSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    settings: FrozenMetadata
 
 
 router = APIRouter(prefix="/sources", tags=["sources"], dependencies=[Depends(require_access)])
@@ -39,6 +47,28 @@ def list_sources(container: Container) -> tuple[SourceManifest, ...]:
 )
 def source_status(container: Container) -> tuple[SourceAccountStatus, ...]:
     return container.sources.statuses()
+
+
+@router.get(
+    "/{source_id}/settings",
+    operation_id="v1_sources_get_settings",
+    response_model=SourceSettingsState,
+)
+def get_source_settings(source_id: SourceId, container: Container) -> SourceSettingsState:
+    return container.sources.settings(source_id)
+
+
+@router.put(
+    "/{source_id}/settings",
+    operation_id="v1_sources_update_settings",
+    response_model=SourceSettingsState,
+)
+def update_source_settings(
+    source_id: SourceId,
+    payload: SourceSettingsUpdate,
+    container: Container,
+) -> SourceSettingsState:
+    return container.sources.update_settings(source_id, payload.settings)
 
 
 @router.put(

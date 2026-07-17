@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
+EDITED_AT = datetime(2026, 7, 17, 13, 30, tzinfo=UTC)
 PROFILE_ID = UUID("00000000-0000-0000-0000-000000000320")
 OLD_EVIDENCE_ID = UUID("00000000-0000-0000-0000-000000000321")
 
@@ -149,6 +150,35 @@ def test_explicit_edit_creates_one_revision_and_high_confidence_evidence(
         ).all()
     assert len(evidence) == 2
     assert {str(facet.evidence_ids[0]) for facet in updated.facets} == {evidence[1].id}
+    engine.dispose()
+
+
+def test_explicit_edit_persists_a_fresh_aware_utc_revision_timestamp(
+    tmp_path: Path,
+) -> None:
+    engine, session_factory = _database(tmp_path)
+    original = _seed_profile(session_factory)
+    service = ProfileService(
+        cast("Any", lambda: UnitOfWork(session_factory)),
+        clock=lambda: EDITED_AT,
+    )
+
+    updated = service.edit(
+        ProfileEdit(
+            expected_revision=0,
+            upserts=(ProfileFacetEdit(name="values", value="Evidence", weight=1),),
+        )
+    )
+
+    assert updated.created_at == EDITED_AT
+    assert updated.created_at != original.created_at
+    assert updated.created_at.utcoffset() == timedelta(0)
+    with UnitOfWork(session_factory) as uow:
+        durable = uow.profiles.latest()
+    assert durable is not None
+    assert durable.created_at == EDITED_AT
+    assert durable.revision == 1
+    assert durable.facets[-1].evidence_ids == updated.facets[-1].evidence_ids
     engine.dispose()
 
 

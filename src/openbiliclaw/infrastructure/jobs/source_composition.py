@@ -7,25 +7,29 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from cryptography.fernet import InvalidToken
-from sqlalchemy import select
+from pydantic import BaseModel
+from sqlalchemy import inspect, select
 
 from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.features.sources.registry import SourceRegistry, build_source_registry
 from openbiliclaw.features.sources.service import SourceTaskService
-from openbiliclaw.infrastructure.database.models import SourceAccountModel
+from openbiliclaw.infrastructure.database.models import SettingModel, SourceAccountModel
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.tasks import PermanentJobError
 from openbiliclaw.infrastructure.security.credentials import (
     CredentialCipher,
     MissingCredentialKeyError,
 )
-from openbiliclaw.infrastructure.sources.bilibili import build_bilibili_connector
-from openbiliclaw.infrastructure.sources.douyin import build_douyin_connector
+from openbiliclaw.infrastructure.sources.bilibili import BilibiliSettings, build_bilibili_connector
+from openbiliclaw.infrastructure.sources.douyin import DouyinSettings, build_douyin_connector
 from openbiliclaw.infrastructure.sources.reddit import RedditSettings, build_reddit_connector
-from openbiliclaw.infrastructure.sources.twitter import build_twitter_connector
-from openbiliclaw.infrastructure.sources.xiaohongshu import build_xiaohongshu_connector
-from openbiliclaw.infrastructure.sources.youtube import build_youtube_connector
-from openbiliclaw.infrastructure.sources.zhihu import build_zhihu_connector
+from openbiliclaw.infrastructure.sources.twitter import TwitterSettings, build_twitter_connector
+from openbiliclaw.infrastructure.sources.xiaohongshu import (
+    XiaohongshuSettings,
+    build_xiaohongshu_connector,
+)
+from openbiliclaw.infrastructure.sources.youtube import YouTubeSettings, build_youtube_connector
+from openbiliclaw.infrastructure.sources.zhihu import ZhihuSettings, build_zhihu_connector
 from openbiliclaw.sources.douyin_direct import DouyinDirectClient
 from openbiliclaw.sources.x_client import XClient
 from openbiliclaw.youtube.client import YtScraperClient
@@ -94,6 +98,7 @@ def _credential_cookie(plaintext: str) -> str:
 
 
 ClientT = TypeVar("ClientT")
+SettingsT = TypeVar("SettingsT", bound=BaseModel)
 
 
 class _LazyClient(Generic[ClientT]):
@@ -108,6 +113,25 @@ class _LazyClient(Generic[ClientT]):
                 if self._client is None:
                     self._client = self._factory()
         return self._client
+
+
+def _source_settings(
+    session_factory: sessionmaker[Session],
+    source_id: str,
+    model: type[SettingsT],
+    *,
+    default: SettingsT | None = None,
+) -> SettingsT:
+    with session_factory() as session:
+        bind = session.get_bind()
+        if not inspect(bind).has_table(SettingModel.__tablename__):
+            return default if default is not None else model.model_validate({})
+        row = session.get(SettingModel, f"source-config:{source_id}")
+    if row is None:
+        return default if default is not None else model.model_validate({})
+    if not isinstance(row.value, dict):
+        raise ValueError(f"persisted {source_id} settings must be an object")
+    return model.model_validate_json(json.dumps(row.value))
 
 
 class _LazyBilibiliClient:
@@ -205,19 +229,34 @@ def build_default_source_registry(
 
     task_service = SourceTaskService(uow_factory, lambda: registry_box["registry"])
     credentials = _CredentialProvider(session_factory)
+    bilibili_settings = _source_settings(session_factory, "bilibili", BilibiliSettings)
+    xiaohongshu_settings = _source_settings(session_factory, "xiaohongshu", XiaohongshuSettings)
+    douyin_settings = _source_settings(session_factory, "douyin", DouyinSettings)
+    youtube_settings = _source_settings(session_factory, "youtube", YouTubeSettings)
+    twitter_settings = _source_settings(session_factory, "twitter", TwitterSettings)
+    zhihu_settings = _source_settings(session_factory, "zhihu", ZhihuSettings)
+    reddit_settings = _source_settings(
+        session_factory,
+        "reddit",
+        RedditSettings,
+        default=RedditSettings(backend="extension"),
+    )
     registry = build_source_registry(
-        bilibili=build_bilibili_connector(_LazyBilibiliClient(credentials), task_service),
-        xiaohongshu=build_xiaohongshu_connector(task_service),
+        bilibili=build_bilibili_connector(
+            _LazyBilibiliClient(credentials), task_service, bilibili_settings
+        ),
+        xiaohongshu=build_xiaohongshu_connector(task_service, xiaohongshu_settings),
         douyin=build_douyin_connector(
             task_service=task_service,
             direct_client=_LazyDouyinClient(credentials),
+            settings=douyin_settings,
         ),
-        youtube=build_youtube_connector(YtScraperClient(), task_service),
-        twitter=build_twitter_connector(_LazyTwitterClient(credentials)),
-        zhihu=build_zhihu_connector(task_service),
+        youtube=build_youtube_connector(YtScraperClient(), task_service, youtube_settings),
+        twitter=build_twitter_connector(_LazyTwitterClient(credentials), twitter_settings),
+        zhihu=build_zhihu_connector(task_service, zhihu_settings),
         reddit=build_reddit_connector(
             task_service=task_service,
-            settings=RedditSettings(backend="extension"),
+            settings=reddit_settings,
         ),
     )
     registry_box["registry"] = registry

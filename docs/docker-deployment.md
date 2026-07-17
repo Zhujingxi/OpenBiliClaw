@@ -58,6 +58,11 @@ device key/digest 各自独立，不能复用 `OPENBILICLAW_ACCESS_TOKEN`、
 `OPENBILICLAW_SECRET_KEY` 或 `LITELLM_MASTER_KEY`。API settings 只回报 password/bearer 是否
 已配置，不返回任何值。
 
+源码 `docker-compose.yml` 与预构建 `docker-compose.prebuilt.yml` 都把以上四个变量
+原样转发给 `api` service；`OPENBILICLAW_SESSION_SECRET` 是 Compose required value，另外
+三个可为空/`[]`。Browser-auth material 不转发给 worker。vNext API 只读取这些 environment
+values，不从 legacy `config.toml` 补值。部署检查应验证 Compose render，而不是输出变量值。
+
 ## 数据与 queue 一致性
 
 API 与 worker 都挂载：

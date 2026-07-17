@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -22,6 +23,25 @@ if TYPE_CHECKING:
     from openbiliclaw.features.activity.domain import ProfileSignal
 
 _UNSET = object()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _next_revision_timestamp(
+    observed_at: datetime,
+    current: ProfileSnapshot | None,
+) -> datetime:
+    """Return an aware UTC timestamp newer than the current revision."""
+
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("profile revision clock must return an aware datetime")
+    timestamp = observed_at.astimezone(UTC)
+    if current is None:
+        return timestamp
+    current_timestamp = current.created_at.astimezone(UTC)
+    return max(timestamp, current_timestamp + timedelta(microseconds=1))
 
 
 class InvalidProfileDeltaError(ValueError):
@@ -115,9 +135,11 @@ class ProfileService:
         uow_factory: Callable[[], ProfileUnitOfWork],
         *,
         ai: ProfileDeltaAI | None = None,
+        clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._uow_factory = uow_factory
         self._ai = ai
+        self._clock = clock
 
     def current(self) -> ProfileSnapshot | None:
         """Return the latest immutable evidence profile, if projected."""
@@ -137,9 +159,11 @@ class ProfileService:
                     f"latest is {actual_revision}"
                 )
 
+            created_at = _next_revision_timestamp(self._clock(), current)
             evidence = ActivityEvent(
                 source_id="local",
                 kind=ActivityKind.PROFILE_OVERRIDE,
+                occurred_at=created_at,
                 title="Explicit profile edit",
                 metadata={
                     "narrative_changed": edit.narrative is not None,
@@ -187,6 +211,7 @@ class ProfileService:
                     narrative=edit.narrative or "",
                     facets=ordered_facets,
                     confidence=confidence,
+                    created_at=created_at,
                 )
             else:
                 snapshot = current.model_copy(
@@ -197,6 +222,7 @@ class ProfileService:
                         ),
                         "facets": ordered_facets,
                         "confidence": confidence,
+                        "created_at": created_at,
                     }
                 )
             uow.profiles.append(snapshot, expected_revision=actual_revision)

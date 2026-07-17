@@ -65,6 +65,11 @@ screenshots, examples, or docs. Do not derive or reuse these values from the ins
 source-encryption secret, or LiteLLM master key. Existing unrelated `.env` entries are retained
 on installer rerun.
 
+Both source and prebuilt Compose files forward these four values to the `api` service only;
+`OPENBILICLAW_SESSION_SECRET` is required by Compose, while the password hash, digest-record
+array, and public Admin URL may be empty. The worker intentionally receives no browser-auth
+material. The vNext auth loader is environment-only and never imports legacy config auth.
+
 Source installs additionally require user values for:
 
 - `OPENBILICLAW_LITELLM_BASE_URL`

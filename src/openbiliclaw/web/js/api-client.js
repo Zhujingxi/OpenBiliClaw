@@ -373,6 +373,18 @@ export const API_OPERATIONS = Object.freeze({
     "stream": false,
     "sseEvents": {}
   },
+  "v1_sources_get_settings": {
+    "method": "GET",
+    "path": "/api/v1/sources/{source_id}/settings",
+    "pathParameters": [
+      "source_id"
+    ],
+    "queryParameters": [],
+    "requestType": null,
+    "responseType": "SourceSettingsState",
+    "stream": false,
+    "sseEvents": {}
+  },
   "v1_sources_list": {
     "method": "GET",
     "path": "/api/v1/sources",
@@ -390,6 +402,18 @@ export const API_OPERATIONS = Object.freeze({
     "queryParameters": [],
     "requestType": null,
     "responseType": "SourceAccountStatus",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_sources_update_settings": {
+    "method": "PUT",
+    "path": "/api/v1/sources/{source_id}/settings",
+    "pathParameters": [
+      "source_id"
+    ],
+    "queryParameters": [],
+    "requestType": "SourceSettingsUpdate",
+    "responseType": "SourceSettingsState",
     "stream": false,
     "sseEvents": {}
   },

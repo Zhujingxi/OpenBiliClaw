@@ -24,7 +24,8 @@
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |
-| Session revocation | ✅ | `SQLAlchemyAuthStateRepository` 以原子递增的 `auth_state.session_epoch` 使所有旧 Web/extension session 失效；表内不保存 cookie、bearer、device key 或 signing secret |
+| Session revocation | ✅ | `SQLAlchemyAuthStateRepository` 维护 non-secret `session_epoch` 与 keyed password fingerprint；password fingerprint 改变与 epoch increment 在同一事务提交，使旧 Web/extension session 原子失效；表内不保存 password/hash、cookie、bearer、device key 或 signing secret |
+| 来源 settings | ✅ | 七平台 strict settings 复用现有 `settings` table 的 `source-config:<source_id>` namespaced row；global settings replace 保留这些 rows，registry rebuild 时重新验证并应用 |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
 | worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
 | 后端生产切换 | ✅ | `/api/v1`、worker、运维 CLI、安装器 secret 生命周期与 fresh vNext database 已是权威；只剩 Task 22 的现有 Web/extension client 接线 |
@@ -44,7 +45,8 @@
 N+1。chat history 按 `conversation_id` 隔离并按 `created_at,id` 升序分页，公开投影不含
 `ai_run_id`。候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger
 都以外键关联活动证据，后者不受后续 facet 删除影响。显式 profile edit 的 override
-event、revision、evidence association 与 consumed ledger 在同一 UoW 提交。
+event、revision、evidence association 与 consumed ledger 在同一 UoW 提交；每个显式 revision
+取得新的 aware UTC `created_at`，即使注入 clock 没推进，也至少比上一 revision 新 1 微秒。
 `job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，但不是“消息仍在 queue”的证明：
 worker startup 会重新发布全部 pending row。progress 只允许单调前进。来源账户凭据列只
 保存 `encrypted_credentials`；disconnect 物理删除该 account row，重复调用成功且标记

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4, uuid5
 
 from pydantic import HttpUrl
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
@@ -94,6 +95,8 @@ class AuthStateRepository(Protocol):
     def current_epoch(self) -> int: ...
 
     def bump_epoch(self) -> int: ...
+
+    def reconcile_password_fingerprint(self, fingerprint: str) -> bool: ...
 
 
 class SourceAccountRepository(Protocol):
@@ -224,16 +227,22 @@ class AIRunRepository(Protocol):
 class SQLAlchemySettingsRepository:
     """SQLAlchemy settings adapter."""
 
+    _SOURCE_PREFIX = "source-config:"
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def get_all(self) -> dict[str, SettingValue]:
         rows = self._session.scalars(select(SettingModel)).all()
-        return {row.key: row.value for row in rows}
+        return {row.key: row.value for row in rows if not row.key.startswith(self._SOURCE_PREFIX)}
 
     def replace(self, values: Mapping[str, SettingValue]) -> None:
         now = _utc_now()
-        stored = {row.key: row for row in self._session.scalars(select(SettingModel)).all()}
+        stored = {
+            row.key: row
+            for row in self._session.scalars(select(SettingModel)).all()
+            if not row.key.startswith(self._SOURCE_PREFIX)
+        }
         stale_keys = set(stored) - set(values)
         if stale_keys:
             self._session.execute(delete(SettingModel).where(SettingModel.key.in_(stale_keys)))
@@ -245,31 +254,91 @@ class SQLAlchemySettingsRepository:
                 row.value = value
                 row.updated_at = now
 
+    def get_source_settings(self, source_id: str) -> Mapping[str, object] | None:
+        row = self._session.get(SettingModel, f"{self._SOURCE_PREFIX}{source_id}")
+        if row is None:
+            return None
+        if not isinstance(row.value, dict):
+            raise ValueError("persisted source settings must be an object")
+        return row.value
+
+    def replace_source_settings(self, source_id: str, settings: Mapping[str, object]) -> None:
+        key = f"{self._SOURCE_PREFIX}{source_id}"
+        row = self._session.get(SettingModel, key)
+        now = _utc_now()
+        value = dict(settings)
+        if row is None:
+            self._session.add(SettingModel(key=key, value=value, updated_at=now))
+            return
+        row.value = value
+        row.updated_at = now
+
 
 class SQLAlchemyAuthStateRepository:
     """Read and atomically advance the non-secret revocation epoch."""
 
     _EPOCH_KEY = "session_epoch"
+    _PASSWORD_FINGERPRINT_KEY = "password_fingerprint"
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def current_epoch(self) -> int:
         row = self._session.get(AuthStateModel, self._EPOCH_KEY)
-        if row is None or row.value < 0:
+        if row is None or row.integer_value is None or row.integer_value < 0:
             raise RuntimeError("authentication revocation state is unavailable")
-        return row.value
+        if row.text_value is not None:
+            raise RuntimeError("authentication revocation state is unavailable")
+        return row.integer_value
 
     def bump_epoch(self) -> int:
         next_epoch = self._session.scalar(
             update(AuthStateModel)
-            .where(AuthStateModel.key == self._EPOCH_KEY, AuthStateModel.value >= 0)
-            .values(value=AuthStateModel.value + 1)
-            .returning(AuthStateModel.value)
+            .where(
+                AuthStateModel.key == self._EPOCH_KEY,
+                AuthStateModel.integer_value >= 0,
+                AuthStateModel.text_value.is_(None),
+            )
+            .values(integer_value=AuthStateModel.integer_value + 1)
+            .returning(AuthStateModel.integer_value)
         )
         if next_epoch is None:
             raise RuntimeError("authentication revocation state is unavailable")
         return next_epoch
+
+    def reconcile_password_fingerprint(self, fingerprint: str) -> bool:
+        """Record first use, or atomically rotate fingerprint and session epoch."""
+
+        if not fingerprint or len(fingerprint) > 128:
+            raise ValueError("password fingerprint is invalid")
+        inserted = self._session.execute(
+            sqlite_insert(AuthStateModel)
+            .values(
+                key=self._PASSWORD_FINGERPRINT_KEY,
+                integer_value=None,
+                text_value=fingerprint,
+            )
+            .on_conflict_do_nothing(index_elements=[AuthStateModel.key])
+        )
+        if getattr(inserted, "rowcount", 0):
+            return False
+        stored = self._session.get(AuthStateModel, self._PASSWORD_FINGERPRINT_KEY)
+        if stored is None or stored.text_value is None or stored.integer_value is not None:
+            raise RuntimeError("authentication password state is unavailable")
+        changed = self._session.scalar(
+            update(AuthStateModel)
+            .where(
+                AuthStateModel.key == self._PASSWORD_FINGERPRINT_KEY,
+                AuthStateModel.integer_value.is_(None),
+                AuthStateModel.text_value != fingerprint,
+            )
+            .values(text_value=fingerprint)
+            .returning(AuthStateModel.key)
+        )
+        if changed is None:
+            return False
+        self.bump_epoch()
+        return True
 
 
 class SQLAlchemySourceAccountRepository:

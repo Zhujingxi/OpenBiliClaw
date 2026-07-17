@@ -15,7 +15,7 @@ feature service 只依赖自身声明的 repository、AI、settings 和 source P
 | 用例 | 行为 |
 |---|---|
 | activity ingestion | 先幂等持久化不可变 `ActivityEvent`，再产生带原 event UUID 的确定性 `ProfileSignal` |
-| profile projection/edit | analysis lane 生成 typed `ProfileDelta`；proposal 携带应用拥有的 base revision，latest 已变化时拒绝陈旧 delta 并让 job 重算。显式 `ProfileEdit` 创建一条 confidence=1 override evidence，支持 narrative 与五类 facet upsert/removal；expected revision、去重/钳制和同一 UoW 保证一次请求恰生成一个 revision，冲突整体回滚 |
+| profile projection/edit | analysis lane 生成 typed `ProfileDelta`；proposal 携带应用拥有的 base revision，latest 已变化时拒绝陈旧 delta 并让 job 重算。显式 `ProfileEdit` 创建一条 confidence=1 override evidence，支持 narrative 与五类 facet upsert/removal；expected revision、去重/钳制和同一 UoW 保证一次请求恰生成一个 revision，冲突整体回滚；revision/evidence 使用严格晚于上一 revision 的 fresh timestamp |
 | feed replenishment | 读取 typed source enable/weight settings，以稳定 SourceId tie-break 的 largest-remainder 算法精确分配有限候选预算；batch 前排除同 revision 已评估及历史 admitted/interacted/dismissed 内容，并有界扩量寻找新候选。所有评估都会持久化；topic hard cap 在任一 declared topic 饱和时拒绝该候选，只对实际 admitted 内容计数 |
 | feedback | 同一事务写 `Interaction` 和确定性 feedback `ActivityEvent`；repository rank adjustment 会让后续排序读取该反馈 |
 | library | 只写本地 `favorites` / `watch_later`，不调用平台账号 mutation；list 用一次 join 返回 collection metadata + renderable `ContentItem`，按 `added_at,id` 稳定排序 |
@@ -36,7 +36,22 @@ Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priorit
 
 `UserSettings.source_weights` 默认给七个平台相同合法权重，`source_enabled` 默认全部关闭。零权重来源不分配预算；负数、非有限权重和未知 SourceId 拒绝保存。worker composition 固定注册七个平台；启用来源缺少可用账户、凭据密文无法解密或缺少 Cookie 时，会以 `MissingSourceConfigurationError` 明确失败，不会发起匿名调用或伪装为空成功。
 
-worker 默认只读验证隔离 vNext 数据库已经位于 Alembic head，再构造 SQLAlchemy UoW、`SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。Compose 中唯一一次性 `migrate` 服务先完成 schema 写入；失败时 `service_completed_successfully` dependency 阻止 API/worker 启动。backend/API 与 worker 使用同一个 mounted `OPENBILICLAW_DATABASE_URL`，Huey 仍使用独立文件。production composition 逐项构造 Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，不扫描 entry point、不加载动态 source factory。direct/CLI client 在第一次真实调用时才从 `source_accounts` 读取 enabled account，并用 `CredentialCipher`/`OPENBILICLAW_SECRET_KEY` 解密；构造 registry 与全部来源 disabled 时不读取凭据、不创建网络 client。extension-assisted operation 统一使用 durable `QueuedBrowserTransport`；当前扩展 dispatcher 尚未切换，因此启用这类 operation 会等待 generic task callback。模型只读取 `OPENBILICLAW_LITELLM_BASE_URL` 与 `OPENBILICLAW_LITELLM_API_KEY`，provider credential 仍只存在于 LiteLLM。
+worker 默认只读验证隔离 vNext 数据库已经位于 Alembic head，再读取 persisted
+`UserSettings`。它在构造 registry、恢复任务和启动 consumer 前应用 network proxy 与
+OpenBiliClaw-owned logging handler levels，并在正常退出或 consumer/runtime 构造失败时恢复
+先前 process state，不修改 host-owned handler/root logger policy。随后构造 SQLAlchemy UoW、
+`SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。Compose 中唯一一次性
+`migrate` 服务先完成 schema 写入；失败时 `service_completed_successfully` dependency 阻止
+API/worker 启动。backend/API 与 worker 使用同一个 mounted
+`OPENBILICLAW_DATABASE_URL`，Huey 仍使用独立文件。production composition 逐项构造
+Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，并从 `settings` table 的
+`source-config:*` rows 恢复各 package settings；不扫描 entry point、不加载动态 source
+factory。direct/CLI client 在第一次真实调用时才从 `source_accounts` 读取 enabled account，
+并用 `CredentialCipher`/`OPENBILICLAW_SECRET_KEY` 解密；构造 registry 与全部来源 disabled
+时不读取凭据、不创建网络 client。extension-assisted operation 统一使用 durable
+`QueuedBrowserTransport`；当前扩展 dispatcher 尚未切换，因此启用这类 operation 会等待
+generic task callback。模型只读取 `OPENBILICLAW_LITELLM_BASE_URL` 与
+`OPENBILICLAW_LITELLM_API_KEY`，provider credential 仍只存在于 LiteLLM。
 
 ## 公开 Python API
 

@@ -55,6 +55,20 @@ def _access_control(container: Container) -> object | None:
     return getattr(container.settings.get(), "access_control", None)
 
 
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _enforce_auth_rate_limit(container: Container, *, kind: str, key: str) -> None:
+    retry_after = container.access.auth_retry_after(kind, key)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="request rate limit exceeded",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
 def _same_origin(request: Request) -> bool:
     origin_value = request.headers.get("Origin")
     if not origin_value:
@@ -147,8 +161,12 @@ def login(
         raise HTTPException(status_code=403, detail="web password authentication is disabled")
     if not container.access.password_configured:
         raise HTTPException(status_code=503, detail="password authentication is unavailable")
+    client_key = _client_key(request)
+    _enforce_auth_rate_limit(container, kind="login", key=client_key)
     if not container.access.verify_password(payload.password):
+        container.access.record_auth_failure("login", client_key)
         raise HTTPException(status_code=401, detail="invalid credentials")
+    container.access.reset_auth_failures("login", client_key)
     ttl_hours = int(
         getattr(access_control, "session_ttl_hours", container.access.session_ttl_hours)
     )
@@ -188,6 +206,8 @@ def extension_token(
     access_control = _access_control(container)
     if not bool(getattr(access_control, "extension_access_enabled", True)):
         raise HTTPException(status_code=403, detail="extension access is disabled")
+    client_key = _client_key(request)
+    _enforce_auth_rate_limit(container, kind="extension", key=client_key)
     ttl_hours = int(
         getattr(
             access_control,
@@ -195,7 +215,13 @@ def extension_token(
             container.access.extension_session_ttl_hours,
         )
     )
-    token = container.access.exchange_extension_key(payload.key, ttl_hours=ttl_hours)
+    try:
+        token = container.access.exchange_extension_key(payload.key, ttl_hours=ttl_hours)
+    except HTTPException as error:
+        if error.status_code == 401:
+            container.access.record_auth_failure("extension", client_key)
+        raise
+    container.access.reset_auth_failures("extension", client_key)
     expires_at = auth_core.token_expires_at(token)
     if expires_at is None:
         raise HTTPException(status_code=503, detail="finite extension session required")

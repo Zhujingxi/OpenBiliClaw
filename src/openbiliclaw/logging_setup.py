@@ -42,6 +42,25 @@ def apply_owned_handler_levels(*, console_level: str, file_level: str) -> None:
             handler.setLevel(levels[sink])
 
 
+def snapshot_owned_handler_levels() -> tuple[tuple[logging.Handler, int], ...]:
+    """Capture levels only for handlers installed by :func:`configure_logging`."""
+
+    return tuple(
+        (handler, handler.level)
+        for handler in logging.getLogger().handlers
+        if getattr(handler, _OWNED_SINK_ATTRIBUTE, None) in {"console", "file"}
+    )
+
+
+def restore_owned_handler_levels(
+    snapshot: tuple[tuple[logging.Handler, int], ...],
+) -> None:
+    """Restore a previously captured owned-handler level snapshot."""
+
+    for handler, level in snapshot:
+        handler.setLevel(level)
+
+
 def _build_file_handler(
     log_file: object,  # Path, but typed loose to avoid import
     *,

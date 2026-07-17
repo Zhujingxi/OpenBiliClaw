@@ -202,6 +202,60 @@ def test_runtime_errors_share_one_safe_typed_envelope(
         assert response.headers["www-authenticate"] == "Bearer"
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "expected_status", "expected_code", "expected_message"),
+    (
+        (
+            "GET",
+            "/api/v1/missing-password-secret",
+            404,
+            "not_found",
+            "resource not found",
+        ),
+        (
+            "DELETE",
+            "/api/v1/system/readiness",
+            405,
+            "method_not_allowed",
+            "method is not allowed",
+        ),
+    ),
+)
+def test_router_miss_and_method_mismatch_use_safe_error_envelope(
+    method: str,
+    path: str,
+    expected_status: int,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    client = TestClient(create_app(container=_container()))
+
+    response = client.request(
+        method,
+        path,
+        headers=AUTH,
+        json={"provider_api_key": "body-secret"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json() == {"error": {"code": expected_code, "message": expected_message}}
+    assert "detail" not in response.json()
+    assert "missing-password-secret" not in response.text
+    assert "provider_api_key" not in response.text
+    assert "body-secret" not in response.text
+
+
+def test_openapi_documents_router_miss_and_method_mismatch_envelopes() -> None:
+    operation = create_app().openapi()["paths"]["/api/v1/system/readiness"]["get"]
+
+    for status_code, expected_code in (("404", "not_found"), ("405", "method_not_allowed")):
+        documented = operation["responses"][status_code]
+        assert documented["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/ErrorEnvelope"
+        }
+        assert documented["x-error-code"] == expected_code
+
+
 def test_openapi_uses_error_envelope_without_losing_security_or_sse_metadata() -> None:
     schema = create_app().openapi()
     chat_stream = schema["paths"]["/api/v1/chat/stream"]["post"]

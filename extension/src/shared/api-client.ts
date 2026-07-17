@@ -84,6 +84,8 @@ export type SourceOperationSpec = { "capability": SourceCapability; "fallback_tr
 export type SourceResultKind = "activity" | "content";
 export type SourceSettings = { "enabled"?: { [key: string]: boolean; }; "weights"?: { [key: string]: number; }; };
 export type SourceSettingsPatch = { "enabled"?: { [key: string]: boolean; } | null; "weights"?: { [key: string]: number; } | null; };
+export type SourceSettingsState = { "settings": { [key: string]: unknown; }; "source_id": SourceId; };
+export type SourceSettingsUpdate = { "settings": { [key: string]: unknown; }; };
 export type SourceTaskCompletion = { "completed_at": string; "id": string; "idempotent": boolean; };
 export type SourceTransportKind = "direct" | "cli" | "browser";
 export type StreamErrorEvent = { "code": string; };
@@ -93,7 +95,7 @@ export type TaskSettingsPatch = { "model_alias"?: "obc-interactive" | "obc-analy
 export type UserSettings = { "access_control"?: AccessControlSettings; "feed"?: FeedSettings; "jobs"?: JobSettings; "logging"?: LoggingSettings; "network"?: NetworkSettings; "onboarding_complete"?: boolean; "profile"?: ProfileSettings; "schedules"?: ScheduleSettings; "sources"?: SourceSettings; "tasks"?: { [key: string]: TaskSettings; }; };
 export type UserSettingsPatch = { "access_control"?: AccessControlSettingsPatch | null; "feed"?: FeedSettingsPatch | null; "jobs"?: JobSettingsPatch | null; "logging"?: LoggingSettingsPatch | null; "network"?: NetworkSettingsPatch | null; "profile"?: ProfileSettingsPatch | null; "schedules"?: ScheduleSettingsPatch | null; "sources"?: SourceSettingsPatch | null; "tasks"?: { [key: string]: TaskSettingsPatch; } | null; };
 export type ValidationError = { "ctx"?: {  }; "input"?: unknown; "loc": ReadonlyArray<string | number>; "msg": string; "type": string; };
-export type ApiOperationId = "v1_auth_extension_token" | "v1_auth_login" | "v1_auth_logout" | "v1_auth_revoke" | "v1_auth_status" | "v1_chat_history" | "v1_chat_stream" | "v1_events_ingest" | "v1_feed_list" | "v1_interactions_create" | "v1_jobs_cancel" | "v1_jobs_events" | "v1_jobs_get" | "v1_jobs_list" | "v1_jobs_schedule" | "v1_library_add" | "v1_library_list" | "v1_library_remove" | "v1_onboarding_events" | "v1_onboarding_get" | "v1_onboarding_start" | "v1_profile_edit" | "v1_profile_get" | "v1_settings_get" | "v1_settings_patch" | "v1_source_tasks_claim" | "v1_source_tasks_complete" | "v1_sources_configure_account" | "v1_sources_disconnect_account" | "v1_sources_list" | "v1_sources_status" | "v1_system_ai_health" | "v1_system_readiness";
+export type ApiOperationId = "v1_auth_extension_token" | "v1_auth_login" | "v1_auth_logout" | "v1_auth_revoke" | "v1_auth_status" | "v1_chat_history" | "v1_chat_stream" | "v1_events_ingest" | "v1_feed_list" | "v1_interactions_create" | "v1_jobs_cancel" | "v1_jobs_events" | "v1_jobs_get" | "v1_jobs_list" | "v1_jobs_schedule" | "v1_library_add" | "v1_library_list" | "v1_library_remove" | "v1_onboarding_events" | "v1_onboarding_get" | "v1_onboarding_start" | "v1_profile_edit" | "v1_profile_get" | "v1_settings_get" | "v1_settings_patch" | "v1_source_tasks_claim" | "v1_source_tasks_complete" | "v1_sources_configure_account" | "v1_sources_disconnect_account" | "v1_sources_get_settings" | "v1_sources_list" | "v1_sources_status" | "v1_sources_update_settings" | "v1_system_ai_health" | "v1_system_readiness";
 export const API_OPERATIONS = {
   "v1_auth_extension_token": {
     "method": "POST",
@@ -468,6 +470,18 @@ export const API_OPERATIONS = {
     "stream": false,
     "sseEvents": {}
   },
+  "v1_sources_get_settings": {
+    "method": "GET",
+    "path": "/api/v1/sources/{source_id}/settings",
+    "pathParameters": [
+      "source_id"
+    ],
+    "queryParameters": [],
+    "requestType": null,
+    "responseType": "SourceSettingsState",
+    "stream": false,
+    "sseEvents": {}
+  },
   "v1_sources_list": {
     "method": "GET",
     "path": "/api/v1/sources",
@@ -485,6 +499,18 @@ export const API_OPERATIONS = {
     "queryParameters": [],
     "requestType": null,
     "responseType": "SourceAccountStatus",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_sources_update_settings": {
+    "method": "PUT",
+    "path": "/api/v1/sources/{source_id}/settings",
+    "pathParameters": [
+      "source_id"
+    ],
+    "queryParameters": [],
+    "requestType": "SourceSettingsUpdate",
+    "responseType": "SourceSettingsState",
     "stream": false,
     "sseEvents": {}
   },

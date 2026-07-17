@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid4
 
-from pydantic import JsonValue, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from openbiliclaw.features._metadata import freeze_metadata, serialize_metadata
 from openbiliclaw.features.sources.domain import (
@@ -20,6 +20,7 @@ from openbiliclaw.features.sources.domain import (
     SourceCredentialInput,
     SourceId,
     SourceManifest,
+    SourceSettingsState,
     SourceTaskCompletion,
     SourceTaskRequest,
     SourceTaskSnapshot,
@@ -114,8 +115,15 @@ class SourceAccountRepository(Protocol):
     def delete(self, *, source_id: str, account_key: str) -> bool: ...
 
 
+class SourceConfigurationRepository(Protocol):
+    def get_source_settings(self, source_id: str) -> Mapping[str, object] | None: ...
+
+    def replace_source_settings(self, source_id: str, settings: Mapping[str, object]) -> None: ...
+
+
 class SourceAccountUnitOfWork(Protocol):
     source_accounts: SourceAccountRepository
+    settings: SourceConfigurationRepository
 
     def __enter__(self) -> SourceAccountUnitOfWork: ...
 
@@ -131,6 +139,15 @@ class SourceAccountUnitOfWork(Protocol):
 
 class CredentialCipherPort(Protocol):
     def encrypt(self, plaintext: str) -> object: ...
+
+
+def _connector_settings(connector: object) -> BaseModel:
+    """Resolve the internal configurable capability without widening the public port."""
+
+    settings = getattr(connector, "settings", None)
+    if not isinstance(settings, BaseModel):
+        raise TypeError("source connector does not expose configurable settings")
+    return settings
 
 
 class SourceAccountService:
@@ -153,6 +170,44 @@ class SourceAccountService:
     def statuses(self) -> tuple[SourceAccountStatus, ...]:
         with self._uow_factory() as uow:
             return uow.source_accounts.list_statuses()
+
+    def settings(self, source_id: SourceId) -> SourceSettingsState:
+        connector = self._registry_provider().get(source_id.value)
+        connector_settings = _connector_settings(connector)
+        with self._uow_factory() as uow:
+            stored = uow.settings.get_source_settings(source_id.value)
+        settings = (
+            connector_settings
+            if stored is None
+            else type(connector_settings).model_validate_json(json.dumps(stored))
+        )
+        return SourceSettingsState(
+            source_id=source_id,
+            settings=settings.model_dump(mode="json"),
+        )
+
+    def update_settings(
+        self, source_id: SourceId, patch: Mapping[str, object]
+    ) -> SourceSettingsState:
+        """Validate through the source package before atomically persisting safe settings."""
+
+        connector = self._registry_provider().get(source_id.value)
+        connector_settings = _connector_settings(connector)
+        with self._uow_factory() as uow:
+            stored = uow.settings.get_source_settings(source_id.value)
+            current = (
+                connector_settings
+                if stored is None
+                else type(connector_settings).model_validate_json(json.dumps(stored))
+            )
+            candidate = type(current).model_validate(
+                {**current.model_dump(), **dict(patch)}, strict=True
+            )
+            safe_settings = candidate.model_dump(mode="json")
+            validate_source_task_payload(safe_settings)
+            uow.settings.replace_source_settings(source_id.value, safe_settings)
+            uow.commit()
+        return SourceSettingsState(source_id=source_id, settings=safe_settings)
 
     def configure(
         self,

@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -39,9 +40,21 @@ class AuthStateModel(Base):
     """Non-secret monotonic authentication revocation state."""
 
     __tablename__ = "auth_state"
+    __table_args__ = (
+        CheckConstraint(
+            "(integer_value IS NOT NULL AND text_value IS NULL) OR "
+            "(integer_value IS NULL AND text_value IS NOT NULL)",
+            name="exactly_one_value",
+        ),
+        CheckConstraint(
+            "integer_value IS NULL OR integer_value >= 0",
+            name="non_negative_integer",
+        ),
+    )
 
     key: Mapped[str] = mapped_column(String(50), primary_key=True)
-    value: Mapped[int] = mapped_column(Integer, nullable=False)
+    integer_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    text_value: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 class SourceAccountModel(Base):

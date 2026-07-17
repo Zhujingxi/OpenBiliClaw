@@ -60,7 +60,7 @@ def create_app(*, container: ApplicationContainer | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[],
-        allow_origin_regex=r"^(chrome-extension://[^/]+|moz-extension://[^/]+|http://(127\.0\.0\.1|localhost)(:\d+)?)$",
+        allow_origin_regex=r"^http://(127\.0\.0\.1|localhost)(:\d+)?$",
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "X-OBC-Auth"],
