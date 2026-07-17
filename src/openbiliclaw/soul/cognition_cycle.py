@@ -270,8 +270,12 @@ class CognitionCycle:
         total_added = 0
         for batch_index, batch in enumerate(_chunk(rows, _AWARENESS_EVENT_BATCH_SIZE)):
             events_for_call = (lookback + batch) if batch_index == 0 else batch
+            # Evidence chain: attribute produced notes to THIS round's consumed
+            # events (the batch), not the read-only lookback context.
+            batch_event_ids = [_coerce_int(item.get("id", 0)) for item in batch]
+            batch_event_ids = [eid for eid in batch_event_ids if eid > 0]
             new_notes = await self._awareness_with_retry(
-                events_for_call, preference, soul_profile_data
+                events_for_call, preference, soul_profile_data, batch_event_ids
             )
             if new_notes:
                 existing = self._load_awareness_notes()
@@ -291,6 +295,7 @@ class CognitionCycle:
         events: list[dict[str, Any]],
         preference: dict[str, Any],
         soul_profile_data: dict[str, Any],
+        source_event_ids: list[int],
     ) -> list[AwarenessNote]:
         """One awareness analyze call with a single retry on structured failure."""
         try:
@@ -299,6 +304,7 @@ class CognitionCycle:
                 preference=preference,
                 soul_profile=soul_profile_data,
                 max_tokens=_COGNITION_MAX_TOKENS,
+                source_event_ids=source_event_ids,
             )
         except AwarenessGenerationError:
             await asyncio.sleep(_AWARENESS_RETRY_BACKOFF_SECONDS)
@@ -307,6 +313,7 @@ class CognitionCycle:
                 preference=preference,
                 soul_profile=soul_profile_data,
                 max_tokens=_COGNITION_MAX_TOKENS,
+                source_event_ids=source_event_ids,
             )
 
     def _awareness_lookback(self, watermark: int) -> list[dict[str, Any]]:

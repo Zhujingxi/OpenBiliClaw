@@ -100,14 +100,14 @@ async def test_awareness_analyzer_accepts_object_wrapped_notes() -> None:
         soul_profile={},
     )
 
-    assert notes == [
-        AwarenessNote(
-            date="2026-03-08",
-            observation="最近连续浏览高信息密度内容。",
-            trend="更偏向深度解释而非轻量消遣。",
-            emotion_guess="可能处于主动吸收和整理信息的阶段。",
-        )
-    ]
+    # Phase 0 evidence chain adds a generative ``note_id`` per note, so compare
+    # the semantic fields rather than full dataclass equality.
+    assert len(notes) == 1
+    assert notes[0].date == "2026-03-08"
+    assert notes[0].observation == "最近连续浏览高信息密度内容。"
+    assert notes[0].trend == "更偏向深度解释而非轻量消遣。"
+    assert notes[0].emotion_guess == "可能处于主动吸收和整理信息的阶段。"
+    assert notes[0].note_id  # generated, non-empty
 
 
 @pytest.mark.asyncio

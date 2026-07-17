@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import uuid4
 
 from openbiliclaw.llm.base import LLMProviderError, LLMResponse
 from openbiliclaw.llm.json_utils import (
@@ -80,7 +81,18 @@ class AwarenessAnalyzer:
         preference: dict[str, object],
         soul_profile: dict[str, object],
         max_tokens: int = DEFAULT_STRUCTURED_MAX_TOKENS,
+        source_event_ids: list[int] | None = None,
     ) -> list[AwarenessNote]:
+        """Generate awareness notes.
+
+        ``source_event_ids`` (Phase 0 evidence chain) is the id subset of
+        events consumed this round; when provided, it is attached to every
+        produced note as approximate provenance (the LLM does not attribute
+        observations to specific events, so the whole batch rides along).
+        When ``None`` (non-cursor callers), ids are derived from any ``id``
+        fields on ``events`` — the awareness prompt itself is unchanged
+        either way, so the ``analyze()`` render path stays byte-identical.
+        """
         messages = build_awareness_prompt(
             events=events,
             preference_summary=preference,
@@ -98,7 +110,23 @@ class AwarenessAnalyzer:
         except (LLMProviderError, LLMServiceError) as exc:
             raise AwarenessGenerationError(str(exc)) from exc
         payload = self._parse_response(response.content)
-        return [self._build_note(item) for item in payload if isinstance(item, dict)]
+        evidence_ids = (
+            list(source_event_ids) if source_event_ids is not None else self._event_ids_from(events)
+        )
+        return [self._build_note(item, evidence_ids) for item in payload if isinstance(item, dict)]
+
+    @staticmethod
+    def _event_ids_from(events: list[dict[str, object]]) -> list[int]:
+        ids: list[int] = []
+        for event in events:
+            raw = event.get("id")
+            if isinstance(raw, bool) or not isinstance(raw, int | str | float):
+                continue
+            try:
+                ids.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        return ids
 
     def merge_notes(
         self,
@@ -168,12 +196,21 @@ class AwarenessAnalyzer:
         return None
 
     @staticmethod
-    def _build_note(raw_item: dict[str, object]) -> AwarenessNote:
+    def _build_note(
+        raw_item: dict[str, object],
+        source_event_ids: list[int],
+    ) -> AwarenessNote:
         return AwarenessNote(
             date=str(raw_item.get("date", "")).strip(),
             observation=str(raw_item.get("observation", "")).strip(),
             trend=str(raw_item.get("trend", "")).strip(),
             emotion_guess=str(raw_item.get("emotion_guess", "")).strip(),
+            note_id=uuid4().hex[:12],
+            source_event_ids=list(source_event_ids),
+            # Attribution is per-round, not per-note: the LLM does not map
+            # observations to specific events, so the whole consumed batch is
+            # attached to every note and flagged approximate.
+            source_event_ids_approximate=bool(source_event_ids),
         )
 
     @staticmethod

@@ -45,6 +45,7 @@ class _FlakyAwarenessAnalyzer:
         preference: dict[str, object],
         soul_profile: dict[str, object],
         max_tokens: int = 0,
+        source_event_ids: list[int] | None = None,
     ) -> list[Any]:
         self.call_count += 1
         if self.call_count <= self._fail_first_n:
@@ -235,9 +236,14 @@ class _RecordingAwarenessAnalyzer:
         preference: dict[str, object],
         soul_profile: dict[str, object],
         max_tokens: int = 0,
+        source_event_ids: list[int] | None = None,
     ) -> list[Any]:
         self.calls.append([dict(e) for e in events])
         self.max_tokens_seen.append(max_tokens)
+        self.source_event_ids_seen: list[list[int] | None] = getattr(
+            self, "source_event_ids_seen", []
+        )
+        self.source_event_ids_seen.append(source_event_ids)
         if self._fail_after_success is not None and self._success_count >= self._fail_after_success:
             raise AwarenessGenerationError("simulated failure after N successes")
         self._success_count += 1

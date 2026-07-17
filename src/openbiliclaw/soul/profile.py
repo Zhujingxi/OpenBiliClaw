@@ -60,12 +60,24 @@ class PreferenceLayer:
 
 @dataclass
 class AwarenessNote:
-    """A single awareness observation."""
+    """A single awareness observation.
+
+    ``note_id`` and ``source_event_ids`` (Phase 0 evidence chain) let later
+    waves (confusion ``evidence_refs``) trace an observation back to the raw
+    events that produced it. Both default empty for backward compatibility:
+    notes persisted before this field existed load with an empty id / no
+    source events. ``source_event_ids_approximate`` records that per-note
+    attribution was not available, so the whole consumed batch was attached
+    to every note of that round.
+    """
 
     date: str = ""
     observation: str = ""  # What was observed
     trend: str = ""  # What trend this suggests
     emotion_guess: str = ""  # Guessed emotional state
+    note_id: str = ""  # Short generative id (uuid4 hex prefix)
+    source_event_ids: list[int] = field(default_factory=list)
+    source_event_ids_approximate: bool = False
 
 
 @dataclass
@@ -319,7 +331,24 @@ def awareness_note_to_dict(note: AwarenessNote) -> dict[str, object]:
         "observation": note.observation,
         "trend": note.trend,
         "emotion_guess": note.emotion_guess,
+        "note_id": note.note_id,
+        "source_event_ids": list(note.source_event_ids),
+        "source_event_ids_approximate": note.source_event_ids_approximate,
     }
+
+
+def _as_int_list(raw_value: object) -> list[int]:
+    if not isinstance(raw_value, list):
+        return []
+    result: list[int] = []
+    for item in raw_value:
+        if isinstance(item, bool) or not isinstance(item, int | str | float):
+            continue
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def awareness_note_from_dict(raw_data: dict[str, object]) -> AwarenessNote:
@@ -328,6 +357,9 @@ def awareness_note_from_dict(raw_data: dict[str, object]) -> AwarenessNote:
         observation=str(raw_data.get("observation", "")),
         trend=str(raw_data.get("trend", "")),
         emotion_guess=str(raw_data.get("emotion_guess", "")),
+        note_id=str(raw_data.get("note_id", "")),
+        source_event_ids=_as_int_list(raw_data.get("source_event_ids")),
+        source_event_ids_approximate=bool(raw_data.get("source_event_ids_approximate", False)),
     )
 
 
