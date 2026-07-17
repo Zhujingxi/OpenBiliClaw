@@ -1,4 +1,23 @@
-# 新平台来源接入指南
+# vNext 平台来源接入指南与 v0.3 历史档案
+
+## 当前权威合同
+
+新来源必须在自己的 `infrastructure.sources.<platform>` package 内实现冻结 Pydantic
+settings、`SourceManifest` 与 `SourceConnector`，只返回规范化 `ActivityEvent` 或
+`ContentItem`。能力和 concrete operation 分开声明，unsupported operation 保持缺席；
+浏览器辅助工作只经 `/api/v1/source-tasks/claim` 与
+`/api/v1/source-tasks/{task_id}/complete`。built-in connector 在 API/worker composition
+root 显式注册，不使用动态 plugin discovery。每个平台必须通过共享 connector contract
+suite、mocked transport tests、无 live-call composition smoke 和 secret-safe payload tests。
+
+七个平台当前能力矩阵、deadline/lease/cancel/abandon 语义与公开 Python API 见
+[vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。现有 Web/extension
+dispatcher 的 generated-client 接线由 Task 22 完成；这不恢复旧平台专用 endpoint。
+
+## Historical v0.3 archive
+
+以下内容只保留旧来源接入、旧 API 与旧多端验证经验，不能作为 vNext 文件路径、CLI、
+endpoint、配置或发布合同。需要复用的产品经验必须先翻译到上面的 vNext 边界。
 
 > 这份指南沉淀自接入知乎来源的完整经历。目标是让后续新增任意平台时，都按同一套路径完成：事件抓取、初始化画像、discover、配置页、推荐卡、真实端到端测试、文档和发布。
 

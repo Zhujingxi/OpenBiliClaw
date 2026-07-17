@@ -46,6 +46,9 @@ flowchart LR
 
 OpenBiliClaw 只拥有任务语义、输入输出 schema、领域规则和持久化。Provider
 凭据、路由、fallback、冷却、网络重试、预算和缓存全部由 LiteLLM 管理。
+浏览器辅助工作只经权威 `/api/v1/source-tasks` claim/complete 合同；chat 直接经
+共享 `TaskRunner` 输出 SSE。Task 22 只重接现有 Web/extension client，不替换这些
+后端边界。
 
 ## 安装
 
@@ -63,7 +66,8 @@ MODE=docker bash scripts/install.sh
 secret，权限为 `0600`，重复执行会复用现有值。Compose 先运行一次性 `migrate`
 服务，再启动 `api`、`worker`、`litellm` 和 LiteLLM PostgreSQL；migration 失败会
 阻止 API/worker 启动。两个长期进程只读检查 schema head，并使用完全相同的应用库
-和 Huey queue 路径。
+和 Huey queue 路径。安装成功还要求 `migrate` 以 0 退出、API 和 worker 都处于
+`healthy`；worker probe 会验证 PID 1、schema head 和 Huey SQLite 可写事务。
 
 启动后在 `http://127.0.0.1:4000/ui` 配置 provider，并建立三个稳定 alias：
 
@@ -83,8 +87,10 @@ MODE=local bash scripts/install.sh
 也可在自动化环境预先设置 `OPENBILICLAW_LITELLM_BASE_URL` 与
 `OPENBILICLAW_LITELLM_API_KEY`。运行设置写入本地 `.env`，应用数据库写入
 `data/vnext/openbiliclaw.db`，queue 写入 `data/vnext/huey.db`。安装顺序固定为：
-依赖 → 私密环境 → Alembic migration → API + worker → `doctor` → public 和
-bearer-protected readiness。
+依赖 → 私密环境 → 验明并停止旧 managed pair → Alembic migration → API + worker →
+`doctor` → public 和 bearer-protected readiness。源码安装用独立的跨进程 lifecycle
+lock 串行整段流程，并用私密 installer UUID、canonical root 和单调 generation 绑定
+process state，避免并发安装、复制目录或旧失败清理覆盖新运行实例。
 
 安装器不会配置 provider 表单，也不会执行产品初始化；来源连接和 onboarding
 使用 `/api/v1/sources` 与 `/api/v1/onboarding`。

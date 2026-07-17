@@ -70,6 +70,10 @@ OPENBILICLAW_HUEY_PATH=/app/runtime/data/vnext/huey.db
 长期服务都不会启动；重复 `docker compose up` 可安全重跑幂等 migration。Source / uv
 安装仍由 installer 在启动 API/worker 之前完成同一 migration。
 
+`SKIP_START=1 MODE=docker bash scripts/install.sh` 仍会执行
+`docker compose run --rm migrate`，只是不启动长期服务。因此 `*_runtime_prepared`
+明确表示数据库已经迁移，而不是只生成了 `.env`。
+
 ## LiteLLM
 
 Admin 只绑定 `127.0.0.1:${LITELLM_PORT:-4000}`。打开
@@ -93,7 +97,12 @@ docker compose logs worker
 
 API public readiness 只表示进程可服务。Installer 还使用生成的 bearer secret
 请求受保护 settings 端点，确保 access control 与数据库依赖实际可用；它不会
-把 token 输出到终端。Source installer 在 migration 后启动 API/worker、等待 queue
+把 token 输出到终端。Docker installer 同时解析 `docker compose ps --all --format
+json`，要求 `migrate` 已成功退出且 API、worker 都是 `running/healthy`；worker
+healthcheck 不只检查文件存在，而是验证容器 PID 1 是正式 worker、应用 schema 位于
+Alembic head、Huey SQLite 完整且能取得可回滚的写事务。`restarting`、`exited` 或
+`unhealthy` worker 都会使安装非零失败，不能被 API readiness 掩盖。Source installer
+在 migration 后启动 API/worker、等待 queue
 文件就绪，再运行 `openbiliclaw doctor` 检查应用数据库、access token 和 LiteLLM
 配置；任一步失败都会停止这两个新进程并非零退出。
 

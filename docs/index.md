@@ -9,6 +9,7 @@
 - [vNext persistence](modules/vnext-persistence.md)
 - [vNext typed AI](modules/vnext-ai.md)
 - [vNext sources](modules/vnext-sources.md)
+- [Platform source integration](platform-source-integration.md)
 - [vNext use cases and jobs](modules/vnext-use-cases-jobs.md)
 - [CLI](modules/cli.md)
 - [Configuration](modules/config.md)

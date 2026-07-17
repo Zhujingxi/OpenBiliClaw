@@ -152,7 +152,9 @@ def test_local_install_migrates_then_starts_api_and_worker_without_secret_output
     assert result.api_pid == 1001
     assert result.worker_pid == 1002
     pid_state = json.loads((tmp_path / "data/vnext/runtime-processes.json").read_text())
-    assert pid_state["version"] == 1
+    assert pid_state["version"] == 2
+    assert pid_state["project_root"] == str(tmp_path.resolve())
+    assert pid_state["generation"] == 1
     assert pid_state["api"]["pid"] == 1001
     assert pid_state["worker"]["pid"] == 1002
     rendered = capsys.readouterr().out
@@ -266,7 +268,7 @@ def test_compose_prefix_supports_source_and_prebuilt_distributions(tmp_path: Pat
     assert bootstrap._compose_prefix(tmp_path) == ["docker", "compose"]
 
 
-def test_docker_install_delegates_migration_to_compose_dependency(
+def test_docker_skip_start_runs_one_shot_migration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     (tmp_path / "docker-compose.yml").touch()
@@ -281,12 +283,160 @@ def test_docker_install_delegates_migration_to_compose_dependency(
         return Result()
 
     monkeypatch.setattr(bootstrap.subprocess, "run", run)
+
+    result = bootstrap._install_docker_runtime(tmp_path, start=False)
+
+    assert result.status == "prepared"
+    assert calls == [["docker", "compose", "run", "--rm", "migrate"]]
+
+
+def test_docker_install_requires_migration_api_and_worker_health(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        calls.append(command)
+
+        class Result:
+            returncode = 0
+            stdout = (
+                '[{"Service":"migrate","State":"exited","ExitCode":0},'
+                '{"Service":"api","State":"running","Health":"healthy"},'
+                '{"Service":"worker","State":"running","Health":"healthy"}]'
+            )
+
+        return Result()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
     monkeypatch.setattr(bootstrap, "_probe_runtime", lambda *_args, **_kwargs: True)
 
     result = bootstrap._install_docker_runtime(tmp_path, start=True)
 
     assert result.status == "complete"
-    assert calls == [["docker", "compose", "up", "-d", "--build"]]
+    assert calls == [
+        ["docker", "compose", "up", "-d", "--build"],
+        [
+            "docker",
+            "compose",
+            "ps",
+            "--all",
+            "--format",
+            "json",
+            "migrate",
+            "api",
+            "worker",
+        ],
+    ]
+
+
+@pytest.mark.parametrize(
+    "worker",
+    [
+        {"Service": "worker", "State": "restarting", "Health": "unhealthy"},
+        {"Service": "worker", "State": "exited", "ExitCode": 1},
+        {"Service": "worker", "State": "running", "Health": "unhealthy"},
+    ],
+)
+def test_docker_install_rejects_worker_crash_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, worker: dict[str, object]
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        class Result:
+            returncode = 0
+            stdout = json.dumps(
+                [
+                    {"Service": "migrate", "State": "exited", "ExitCode": 0},
+                    {"Service": "api", "State": "running", "Health": "healthy"},
+                    worker,
+                ]
+            )
+
+        return Result()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="worker failed before becoming healthy"):
+        bootstrap._install_docker_runtime(tmp_path, start=True)
+
+
+@pytest.mark.parametrize(
+    ("migration", "api", "message"),
+    [
+        (
+            {"Service": "migrate", "State": "exited", "ExitCode": 1},
+            {"Service": "api", "State": "created"},
+            "migration service failed",
+        ),
+        (
+            {"Service": "migrate", "State": "exited", "ExitCode": 0},
+            {"Service": "api", "State": "running", "Health": "unhealthy"},
+            "api failed before becoming healthy",
+        ),
+    ],
+)
+def test_docker_install_rejects_migration_or_api_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    migration: dict[str, object],
+    api: dict[str, object],
+    message: str,
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        class Result:
+            returncode = 0
+            stdout = json.dumps(
+                [
+                    migration,
+                    api,
+                    {"Service": "worker", "State": "running", "Health": "healthy"},
+                ]
+            )
+
+        return Result()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match=message):
+        bootstrap._install_docker_runtime(tmp_path, start=True)
+
+
+def test_docker_install_requires_protected_api_readiness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        class Result:
+            returncode = 0
+            stdout = json.dumps(
+                [
+                    {"Service": "migrate", "State": "exited", "ExitCode": 0},
+                    {"Service": "api", "State": "running", "Health": "healthy"},
+                    {"Service": "worker", "State": "running", "Health": "healthy"},
+                ]
+            )
+
+        return Result()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+    monkeypatch.setattr(bootstrap, "_probe_runtime", lambda *_args, **_kwargs: False)
+
+    with pytest.raises(RuntimeError, match="protected readiness check failed"):
+        bootstrap._install_docker_runtime(tmp_path, start=True)
+
+
+def test_compose_status_parser_accepts_newline_delimited_json() -> None:
+    rows = bootstrap._compose_status_rows(
+        '{"Service":"api","State":"running"}\n{"Service":"worker","State":"running"}\n'
+    )
+
+    assert set(rows) == {"api", "worker"}
 
 
 def test_bootstrap_source_has_no_removed_feature_commands() -> None:

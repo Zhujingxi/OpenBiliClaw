@@ -135,6 +135,14 @@ services:
     command: ["python", "-m", "openbiliclaw.worker"]
     volumes:
       - openbiliclaw_data:/app/runtime/data
+    # Running PID 1 is necessary but insufficient: the probe also requires the
+    # application schema at Alembic head and an integrity-readable Huey queue.
+    healthcheck:
+      test: ["CMD", "python", "-m", "openbiliclaw.infrastructure.jobs.health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
     restart: unless-stopped
 
 volumes:

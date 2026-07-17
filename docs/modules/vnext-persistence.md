@@ -1,14 +1,15 @@
 # vNext 持久化与系统设置
 
 > Runtime update: the vNext API and operational CLI now use this database as
-> authority. `openbiliclaw db migrate/backup` are supported; legacy data remains
+> authority. `openbiliclaw db migrate` and `openbiliclaw db backup` are supported;
+> legacy data remains
 > untouched and is not imported.
 
 ## 状态与边界
 
-本模块是 backend-first vNext 的独立持久化基础，已经实现 SQLAlchemy 2.x 映射、repository、同步 Unit of Work、Alembic 基线迁移、类型化系统设置和 Fernet 凭据密文适配。它使用新的 `data/vnext/openbiliclaw.db`，不读取、迁移或替换当前 `storage/database.py` 管理的 legacy 数据库。
+本模块是权威 vNext 后端的持久化层，已经实现 SQLAlchemy 2.x 映射、repository、同步 Unit of Work、Alembic 基线迁移、类型化系统设置和 Fernet 凭据密文适配。它使用新的 `data/vnext/openbiliclaw.db`，不读取、迁移或替换 `storage/database.py` 管理的历史 v0.3 数据库。
 
-**独立 vNext worker 已构造并调用这套基础，但当前生产 API、legacy runtime、CLI 和前端尚未切换。** 因此它已经是 vNext 后台任务的业务状态来源，却仍不是现有用户请求与 legacy 数据的权威来源。后续任务必须显式完成 HTTP 接线、安装器 secret 生命周期、数据迁移和切换验证，才能改变这一状态。
+`/api/v1`、独立 worker 和运维 CLI 共同使用这套基础；应用数据库是设置、来源账户、活动、画像、Feed、library、chat、source task、job 与 AI run 的业务权威。Docker 与 source installer 都生成并复用来源加密 secret，先完成唯一 migration owner 的 schema 写入，再让 API/worker 执行只读 head gate。现有 static Web/extension 的 client 接线留给 Task 22；历史数据仅保留为不导入的手工 archive。
 
 ## 已实现功能
 
@@ -18,13 +19,14 @@
 | SQLAlchemy schema | ✅ | 16 张 vNext 业务表覆盖设置、来源账户、活动、画像与独立 consumed-evidence ledger、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
 | Alembic 基线 | ✅ | `0001_vnext_baseline` 支持从空库 upgrade、downgrade 后重建，并预置 `favorites` / `watch_later` 两个本地集合 |
 | runtime schema gate | ✅ | installer 或 Compose `migrate` 独占 Alembic 写入；API/worker startup 只读验证当前 revision 精确等于 head |
+| worker runtime health | ✅ | Compose probe 要求 PID 1 为正式 worker、schema 位于 head，并对独立 Huey SQLite 执行 integrity check 和 `BEGIN IMMEDIATE`/`ROLLBACK` 可写性验证 |
 | 安全在线备份 | ✅ | `db backup` 先以 no-follow FD 固定并验证 source inode，再在 `0700` 私有目录中 hard-link main 与当时存在的 WAL/SHM/journal；SQLite 从该稳定 link set 生成内存快照，前后校验 source/sidecar 集合与 inode，并以 `0600`、no-overwrite hard-link 原子发布目标 |
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
 | worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
-| 完整生产切换 | 🚧 | legacy storage/runtime 仍是公开请求权威；vNext API、安装器 secret 交付和数据迁移尚未实现 |
+| 后端生产切换 | ✅ | `/api/v1`、worker、运维 CLI、安装器 secret 生命周期与 fresh vNext database 已是权威；只剩 Task 22 的现有 Web/extension client 接线 |
 
 ## Schema
 
@@ -34,7 +36,7 @@
 | 活动与画像 | `activity_events`, `profile_revisions`, `profile_evidence`, `profile_consumed_evidence` |
 | 内容与推荐 | `content_items`, `candidate_assessments`, `feed_entries`, `interactions` |
 | 本地集合与聊天 | `collections`, `collection_items`, `chat_turns` |
-| 后续执行基础 | `source_tasks`, `job_runs`, `ai_runs` |
+| 执行与审计 | `source_tasks`, `job_runs`, `ai_runs` |
 
 内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger 都以外键关联活动证据，后者不受后续 facet 删除影响。`job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，但不是“消息仍在 queue”的证明：worker startup 会重新发布全部 pending row。progress 只允许单调前进。来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
 
@@ -44,6 +46,8 @@
 |------|-----------------|
 | `features.system` | `DatabaseSettings`, `UserSettings`, `SettingsService` |
 | `infrastructure.database` | `create_engine_and_session()`, `UnitOfWork` |
+| `infrastructure.database.operations` | `SQLiteOperationalStore.diagnose()` 同时报告 app DB migration/integrity 与 queue integrity/write access；`require_schema_at_head()` 提供只读 startup gate |
+| `infrastructure.jobs.health` | `worker_health_ready()` / module healthcheck entrypoint |
 | `infrastructure.database.repositories` | repository Protocol、SQLAlchemy adapter、`CollectionRecord`, `ProfileRevisionConflict` |
 | `infrastructure.security` | `CredentialCipher`, `EncryptedCredential` |
 | `infrastructure.security.credentials` | `MissingCredentialKeyError`, `SECRET_KEY_ENV` |
@@ -65,4 +69,4 @@
 
 开发者可在仓库根目录执行 `alembic upgrade head` 创建 vNext 空库；迁移环境会先为 file-backed SQLite URL 创建缺失的父目录。该命令只操作 `alembic.ini` 指向的 vNext URL；不得把 legacy 数据库 URL 传给这套迁移，也不得用 `Base.metadata.create_all()` 代替版本化迁移。
 
-凭据加解密要求进程提供非空 `OPENBILICLAW_SECRET_KEY`。数据库、日志、设置表和 AI run 均不得写入 plaintext credential 或派生 key；丢失或更换 secret 后，旧密文不可解密。当前安装器尚未接线该 secret，因此本模块不能被视为已经具备可升级的生产密钥生命周期。
+凭据加解密要求进程提供非空 `OPENBILICLAW_SECRET_KEY`。数据库、日志、设置表和 AI run 均不得写入 plaintext credential 或派生 key；丢失或更换 secret 后，旧密文不可解密。Docker 与 source installer 在私密 `.env` 中生成并幂等复用该 secret，以 mode `0600`、symlink 拒绝、同目录临时文件、`fsync` 和原子替换保护它；安装输出与 OpenAPI 都不暴露值。

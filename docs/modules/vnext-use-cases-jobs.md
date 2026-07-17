@@ -6,7 +6,7 @@
 
 ## 状态与边界
 
-本模块实现 vNext 的 activity、profile、feed、library、chat 应用服务，以及独立 SQLite Huey worker。Task 21 已把这些用例注入权威 `/api/v1` feature routers；现有 static Web 与 extension 的 client wiring 留给 Task 22。
+本模块实现权威 vNext 的 activity、profile、feed、library、chat 应用服务，以及独立 SQLite Huey worker。这些用例已注入 `/api/v1` feature routers；现有 static Web 与 extension 的 client wiring 留给 Task 22。
 
 feature service 只依赖自身声明的 repository、AI、settings 和 source Protocol，不导入 FastAPI、SQLAlchemy 或 Huey。SQLAlchemy adapter、共享 `TaskRunner` adapter、显式 `SourceRegistry` 与 Huey transport 都在 `infrastructure/` 组合。
 

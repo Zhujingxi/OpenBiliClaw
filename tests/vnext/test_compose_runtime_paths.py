@@ -46,6 +46,23 @@ def test_compose_serializes_migration_before_api_and_worker(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.prebuilt.yml"])
+def test_worker_healthcheck_validates_runtime_dependencies(name: str) -> None:
+    compose = yaml.safe_load((ROOT / name).read_text(encoding="utf-8"))
+    healthcheck = compose["services"]["worker"]["healthcheck"]
+
+    assert healthcheck["test"] == [
+        "CMD",
+        "python",
+        "-m",
+        "openbiliclaw.infrastructure.jobs.health",
+    ]
+    assert healthcheck["interval"] == "30s"
+    assert healthcheck["timeout"] == "5s"
+    assert healthcheck["start_period"] == "20s"
+    assert healthcheck["retries"] == 3
+
+
+@pytest.mark.parametrize("name", ["docker-compose.yml", "docker-compose.prebuilt.yml"])
 def test_compose_contains_no_retired_local_provider_stack(name: str) -> None:
     source = (ROOT / name).read_text(encoding="utf-8").lower()
 

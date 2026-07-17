@@ -91,7 +91,11 @@ $arguments = @(
 )
 if ($SkipStart -or $env:SKIP_START -eq '1') { $arguments += '--skip-start' }
 
-Log "Preparing the $Mode runtime (API, worker, migrations, and protected checks)"
+if ($SkipStart -or $env:SKIP_START -eq '1') {
+    Log "Preparing the $Mode runtime and applying migration (services remain stopped)"
+} else {
+    Log "Starting the $Mode runtime and verifying migration, API, worker, and protected access"
+}
 & $python.Source @arguments
 if ($LASTEXITCODE -ne 0) { Fail "bootstrap exited with code $LASTEXITCODE" }
 Log "Runtime secrets are stored in $InstallDir\.env with mode 0600 semantics and are reused on rerun."

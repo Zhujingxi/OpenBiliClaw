@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import suppress
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import pytest
@@ -13,6 +15,9 @@ from openbiliclaw.infrastructure.database.operations import (
     DatabaseBackupError,
     SQLiteOperationalStore,
 )
+
+if TYPE_CHECKING:
+    from openbiliclaw.infrastructure.database import operations
 
 
 def _healthy_aliases() -> AIHealthResult:
@@ -224,20 +229,53 @@ def test_backup_loses_publish_race_without_overwriting_destination(
     source = tmp_path / "app.db"
     destination = tmp_path / "backup.db"
     sqlite3.connect(source).close()
-    original_link = operations.os.link
+    original_reserve = operations._reserve_destination
 
-    def race_link(src: Path, dst: Path, *args: object, **kwargs: object) -> None:
-        if Path(dst) == destination:
-            Path(dst).write_text("racer-won", encoding="utf-8")
-        original_link(src, dst, *args, **kwargs)
+    def race_reserve(
+        *, directory: operations._DestinationDirectory, target: Path
+    ) -> operations._OwnedFile:
+        target.write_text("racer-won", encoding="utf-8")
+        return original_reserve(directory=directory, target=target)
 
-    monkeypatch.setattr(operations.os, "link", race_link)
+    monkeypatch.setattr(operations, "_reserve_destination", race_reserve)
 
     with pytest.raises(DatabaseBackupError, match="already exists"):
         SQLiteOperationalStore().backup(source=source, destination=destination)
 
     assert destination.read_text(encoding="utf-8") == "racer-won"
     assert not list(tmp_path.glob(".backup-*.tmp"))
+
+
+def test_backup_never_publishes_a_late_temp_path_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("create table identity (value text not null)")
+        connection.execute("insert into identity values ('verified')")
+    original_reserve = operations._reserve_destination
+
+    def replace_temp_before_publish(
+        *, directory: operations._DestinationDirectory, target: Path
+    ) -> operations._OwnedFile:
+        [temp] = list(directory.path.glob(".backup-*.tmp"))
+        temp.unlink()
+        temp.write_text("foreign-inode", encoding="utf-8")
+        return original_reserve(directory=directory, target=target)
+
+    monkeypatch.setattr(operations, "_reserve_destination", replace_temp_before_publish)
+
+    with suppress(DatabaseBackupError):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    if destination.exists():
+        with sqlite3.connect(destination) as connection:
+            assert connection.execute("select value from identity").fetchone() == ("verified",)
+    attacker_files = list(tmp_path.glob(".backup-*.tmp"))
+    assert all(path.read_text(encoding="utf-8") == "foreign-inode" for path in attacker_files)
 
 
 def test_backup_failure_only_cleans_up_the_temp_inode_it_created(
@@ -277,7 +315,7 @@ def test_backup_never_writes_or_unlinks_a_replacement_temp_inode(
     original_create = SQLiteOperationalStore._create_temp
 
     def replace_reserved_path(
-        self: SQLiteOperationalStore, directory: Path
+        self: SQLiteOperationalStore, directory: operations._DestinationDirectory
     ) -> tuple[Path, int, tuple[int, int]]:
         temp, descriptor, identity = original_create(self, directory)
         temp.unlink()
@@ -293,6 +331,66 @@ def test_backup_never_writes_or_unlinks_a_replacement_temp_inode(
     assert len(attacker_files) == 1
     assert attacker_files[0].read_text(encoding="utf-8") == "foreign-inode"
     assert not destination.exists()
+
+
+@pytest.mark.parametrize("operation", ["fchmod", "fsync"])
+def test_backup_wraps_descriptor_sync_failure_and_removes_its_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    sqlite3.connect(source).close()
+
+    def fail(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise OSError(f"simulated {operation} failure")
+
+    monkeypatch.setattr(operations.os, operation, fail)
+
+    with pytest.raises(DatabaseBackupError, match="database backup failed"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".backup-*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("operation", "failure_call"),
+    [("fchmod", 3), ("fsync", 3), ("fsync", 4)],
+)
+def test_backup_late_sync_failure_removes_reserved_destination_and_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    failure_call: int,
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    sqlite3.connect(source).close()
+    original = getattr(operations.os, operation)
+    calls = 0
+
+    def fail_late(*args: object, **kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == failure_call:
+            raise OSError(f"simulated late {operation} failure")
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(operations.os, operation, fail_late)
+
+    with pytest.raises(DatabaseBackupError, match="database backup failed"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert calls == failure_call
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".backup-*.tmp"))
 
 
 def test_backup_rejects_source_symlink(tmp_path: Path) -> None:
@@ -322,7 +420,7 @@ def test_backup_rejects_source_replaced_by_symlink_after_validation(
     original_create = SQLiteOperationalStore._create_temp
 
     def replace_source_after_validation(
-        self: SQLiteOperationalStore, directory: Path
+        self: SQLiteOperationalStore, directory: operations._DestinationDirectory
     ) -> tuple[Path, int, tuple[int, int]]:
         temp = original_create(self, directory)
         source.rename(original)
@@ -337,6 +435,86 @@ def test_backup_rejects_source_replaced_by_symlink_after_validation(
     assert not destination.exists()
     with sqlite3.connect(original) as connection:
         assert connection.execute("select value from identity").fetchone() == ("verified",)
+
+
+@pytest.mark.parametrize("replacement_point", ["reserve", "directory_sync"])
+def test_backup_rechecks_source_identity_before_and_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_point: str,
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    original = tmp_path / "original.db"
+    attacker = tmp_path / "attacker.db"
+    destination = tmp_path / "backup.db"
+    for database, value in ((source, "verified"), (attacker, "attacker")):
+        with sqlite3.connect(database) as connection:
+            connection.execute("create table identity (value text not null)")
+            connection.execute("insert into identity values (?)", (value,))
+    swapped = False
+
+    def swap_source() -> None:
+        nonlocal swapped
+        if swapped:
+            return
+        swapped = True
+        source.rename(original)
+        os.link(attacker, source, follow_symlinks=False)
+
+    if replacement_point == "reserve":
+        original_reserve = operations._reserve_destination
+
+        def reserve_then_swap(
+            *, directory: operations._DestinationDirectory, target: Path
+        ) -> operations._OwnedFile:
+            owned = original_reserve(directory=directory, target=target)
+            swap_source()
+            return owned
+
+        monkeypatch.setattr(operations, "_reserve_destination", reserve_then_swap)
+    else:
+        original_sync = operations._sync_directory
+
+        def sync_then_swap(directory: operations._DestinationDirectory) -> None:
+            original_sync(directory)
+            swap_source()
+
+        monkeypatch.setattr(operations, "_sync_directory", sync_then_swap)
+
+    with pytest.raises(DatabaseBackupError, match="source changed"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert not destination.exists()
+    with sqlite3.connect(original) as connection:
+        assert connection.execute("select value from identity").fetchone() == ("verified",)
+
+
+def test_backup_does_not_remove_destination_replacement_during_error_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    original_destination = tmp_path / "owned-unlinked.db"
+    sqlite3.connect(source).close()
+    original_copy = operations._copy_descriptor
+
+    def copy_then_replace(*, source: int, destination: int) -> None:
+        original_copy(source=source, destination=destination)
+        (tmp_path / "backup.db").rename(original_destination)
+        (tmp_path / "backup.db").write_text("attacker-owned", encoding="utf-8")
+        raise OSError("simulated publication failure")
+
+    monkeypatch.setattr(operations, "_copy_descriptor", copy_then_replace)
+
+    with pytest.raises(DatabaseBackupError, match="destination changed"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert destination.read_text(encoding="utf-8") == "attacker-owned"
+    assert not list(tmp_path.glob(".backup-*.tmp"))
 
 
 def test_backup_private_path_fallback_reads_pinned_source_after_path_swap(
@@ -426,7 +604,125 @@ def test_backup_private_path_fallback_fails_if_private_directory_changes(
     assert not destination.exists()
 
 
-def test_backup_rejects_sidecar_created_after_snapshot_enumeration(
+def test_backup_staging_directory_replacement_before_cleanup_is_a_safe_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    sqlite3.connect(source).close()
+    original_close = operations._close_stable_source
+    replacement: Path | None = None
+
+    def replace_before_cleanup(stable: operations._StableSQLiteSource) -> None:
+        nonlocal replacement
+        held = stable.directory.with_name(f"{stable.directory.name}-held")
+        stable.directory.rename(held)
+        stable.directory.mkdir(mode=0o700)
+        replacement = stable.directory
+        (stable.directory / "attacker.txt").write_text("do-not-touch", encoding="utf-8")
+        original_close(stable)
+
+    monkeypatch.setattr(operations, "_close_stable_source", replace_before_cleanup)
+
+    with pytest.raises(DatabaseBackupError, match="staging directory changed"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert replacement is not None
+    assert (replacement / "attacker.txt").read_text(encoding="utf-8") == "do-not-touch"
+    assert not destination.exists()
+
+
+def test_backup_path_identity_failure_does_not_leak_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    sqlite3.connect(source).close()
+    original_identity = operations._path_identity
+
+    def fail_staging_identity(path: Path) -> tuple[int, int]:
+        if path.name.startswith(".obc-backup-source-"):
+            raise OSError("simulated identity failure")
+        return original_identity(path)
+
+    monkeypatch.setattr(operations, "_path_identity", fail_staging_identity)
+
+    with pytest.raises(DatabaseBackupError, match="stable database backup source"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert not list(tmp_path.glob(".obc-backup-source-*"))
+    assert not list(tmp_path.glob(".backup-*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "database source changed during backup",
+        "database sidecar changed during backup",
+    ],
+)
+def test_backup_retries_bounded_source_and_sidecar_identity_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("create table identity (value text not null)")
+        connection.execute("insert into identity values ('verified')")
+    original_create = operations._create_stable_source
+    calls = 0
+
+    def transient_churn(**kwargs: object) -> operations._StableSQLiteSource:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise DatabaseBackupError(message)
+        return original_create(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(operations, "_create_stable_source", transient_churn)
+
+    SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert calls == 3
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("select value from identity").fetchone() == ("verified",)
+
+
+def test_backup_fails_closed_after_bounded_identity_churn_exhaustion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination = tmp_path / "backup.db"
+    sqlite3.connect(source).close()
+    calls = 0
+
+    def persistent_churn(**kwargs: object) -> operations._StableSQLiteSource:
+        nonlocal calls
+        del kwargs
+        calls += 1
+        raise DatabaseBackupError("database sidecar changed during backup")
+
+    monkeypatch.setattr(operations, "_create_stable_source", persistent_churn)
+
+    with pytest.raises(DatabaseBackupError, match="changed during backup"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert calls == 3
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".backup-*.tmp"))
+
+
+def test_backup_retries_sidecar_created_after_snapshot_enumeration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from openbiliclaw.infrastructure.database import operations
@@ -435,8 +731,11 @@ def test_backup_rejects_sidecar_created_after_snapshot_enumeration(
     destination = tmp_path / "backup.db"
     sqlite3.connect(source).close()
     original_uri = operations._stable_source_uri
+    calls = 0
 
     def create_late_wal(*, directory: Path, directory_descriptor: int) -> tuple[str, bool]:
+        nonlocal calls
+        calls += 1
         source.with_name(f"{source.name}-wal").write_bytes(b"late-wal")
         return original_uri(
             directory=directory,
@@ -445,10 +744,11 @@ def test_backup_rejects_sidecar_created_after_snapshot_enumeration(
 
     monkeypatch.setattr(operations, "_stable_source_uri", create_late_wal)
 
-    with pytest.raises(DatabaseBackupError, match="sidecar changed"):
-        SQLiteOperationalStore().backup(source=source, destination=destination)
+    SQLiteOperationalStore().backup(source=source, destination=destination)
 
-    assert not destination.exists()
+    assert calls >= 2
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("pragma integrity_check").fetchone() == ("ok",)
 
 
 @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="platform lacks O_NOFOLLOW")

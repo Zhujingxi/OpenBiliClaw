@@ -32,6 +32,19 @@ def _identity(pid: int, token: str) -> object:
     )
 
 
+def _write_state(tmp_path: Path, *, api: object, worker: object) -> object:
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        installation = bootstrap._load_or_create_installation_state(tmp_path)
+        ownership = bootstrap._advance_installation_generation(tmp_path, installation)
+        bootstrap._write_process_state(
+            tmp_path,
+            ownership=ownership,
+            api=api,
+            worker=worker,
+        )
+        return ownership
+
+
 class FakeProcess:
     def __init__(
         self,
@@ -97,11 +110,12 @@ def _install(
 
 def test_rerun_never_signals_reused_or_mismatched_pid(tmp_path: Path) -> None:
     expected = _identity(4321, "original-start")
-    bootstrap._write_process_state(tmp_path, api=expected, worker=expected)
+    ownership = _write_state(tmp_path, api=expected, worker=expected)
     signals: list[tuple[int, int]] = []
 
     bootstrap._stop_managed_processes(
         tmp_path,
+        installation=ownership,
         identity_probe=lambda _pid: _identity(4321, "reused-start"),
         signal_process=lambda pid, signum: signals.append((pid, signum)),
         wait_for_exit=lambda *_args, **_kwargs: True,
@@ -114,7 +128,7 @@ def test_rerun_never_signals_reused_or_mismatched_pid(tmp_path: Path) -> None:
 def test_rerun_signals_verified_identity_then_waits_before_escalating(tmp_path: Path) -> None:
     api = _identity(4321, "api-start")
     worker = _identity(4322, "worker-start")
-    bootstrap._write_process_state(tmp_path, api=api, worker=worker)
+    ownership = _write_state(tmp_path, api=api, worker=worker)
     signals: list[tuple[int, int]] = []
     waits: list[tuple[int, float]] = []
 
@@ -124,6 +138,7 @@ def test_rerun_signals_verified_identity_then_waits_before_escalating(tmp_path: 
 
     bootstrap._stop_managed_processes(
         tmp_path,
+        installation=ownership,
         identity_probe=lambda pid: {4321: api, 4322: worker}[pid],
         signal_process=lambda pid, signum: signals.append((pid, signum)),
         wait_for_exit=wait_for_exit,
@@ -139,11 +154,12 @@ def test_rerun_signals_verified_identity_then_waits_before_escalating(tmp_path: 
 
 def test_rerun_refuses_to_launch_when_verified_process_cannot_be_reaped(tmp_path: Path) -> None:
     api = _identity(4321, "api-start")
-    bootstrap._write_process_state(tmp_path, api=api, worker=api)
+    ownership = _write_state(tmp_path, api=api, worker=api)
 
     with pytest.raises(RuntimeError, match="managed processes did not stop"):
         bootstrap._stop_managed_processes(
             tmp_path,
+            installation=ownership,
             identity_probe=lambda _pid: api,
             signal_process=lambda *_args: None,
             wait_for_exit=lambda *_args: False,
@@ -261,7 +277,9 @@ def test_process_state_contains_verified_identity_not_bare_pids(tmp_path: Path) 
     _install(tmp_path, start_process=lambda *_args, **_kwargs: next(processes))
 
     state = json.loads((tmp_path / bootstrap.PROCESS_STATE).read_text(encoding="utf-8"))
-    assert state["version"] == 1
+    assert state["version"] == 2
+    assert state["project_root"] == str(tmp_path.resolve())
+    assert state["generation"] == 1
     assert state["api"] == {
         "argv_fingerprint": "argv-api-start",
         "executable": "/runtime/openbiliclaw",

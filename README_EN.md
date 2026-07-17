@@ -50,6 +50,9 @@ flowchart LR
 OpenBiliClaw owns task semantics, typed contracts, domain rules, and persistence.
 LiteLLM owns provider credentials, routing, fallback, cooldown, network retry,
 budgets, and caching.
+Browser-assisted work uses only the authoritative `/api/v1/source-tasks`
+claim/complete contract; chat streams SSE directly through the shared `TaskRunner`.
+Task 22 only rewires the existing Web/extension clients to these backend boundaries.
 
 ## Installation
 
@@ -67,7 +70,9 @@ The installer atomically generates PostgreSQL, LiteLLM, source-encryption, and A
 bearer secrets in a mode-`0600` `.env`; reruns reuse existing values. Compose runs a
 one-shot `migrate` service before `api`, `worker`, `litellm`, and LiteLLM PostgreSQL;
 a migration failure blocks both runtime processes. API and worker only verify schema
-head and use the exact same application database and Huey queue paths.
+head and use the exact same application database and Huey queue paths. Installation
+succeeds only after `migrate` exits zero and both API and worker report `healthy`; the
+worker probe verifies PID 1, schema head, and a writable Huey SQLite transaction.
 
 After startup, configure providers in `http://127.0.0.1:4000/ui` and create these
 stable aliases:
@@ -89,7 +94,11 @@ Automation may pre-set `OPENBILICLAW_LITELLM_BASE_URL` and
 `OPENBILICLAW_LITELLM_API_KEY`. Runtime settings are persisted in `.env`, the
 application database is `data/vnext/openbiliclaw.db`, and the queue is
 `data/vnext/huey.db`. The fixed order is dependencies → private environment →
-Alembic migration → API + worker → `doctor` → public and bearer-protected checks.
+verified stop of the previous managed pair → Alembic migration → API + worker →
+`doctor` → public and bearer-protected checks. A separate cross-process lifecycle
+lock serializes that entire source-install transaction. Private installer UUID,
+canonical-root, and monotonic-generation bindings prevent concurrent installs,
+copied state, or stale failure cleanup from taking ownership of a newer runtime.
 
 The installer does not implement a provider editor or run product initialization.
 Use `/api/v1/sources` and `/api/v1/onboarding` for source connection and bootstrap.

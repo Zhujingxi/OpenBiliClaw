@@ -88,7 +88,11 @@ if [ "$SKIP_START" = 1 ]; then
   arguments+=(--skip-start)
 fi
 
-log "Preparing the $MODE runtime (API, worker, migrations, and protected checks)"
+if [ "$SKIP_START" = 1 ]; then
+  log "Preparing the $MODE runtime and applying migration (services remain stopped)"
+else
+  log "Starting the $MODE runtime and verifying migration, API, worker, and protected access"
+fi
 python3 "$INSTALL_DIR/scripts/agent_bootstrap.py" "${arguments[@]}"
 log "Runtime secrets are stored in $INSTALL_DIR/.env with mode 0600 and are reused on rerun."
 if [ "$MODE" = docker ]; then

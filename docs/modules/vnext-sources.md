@@ -6,7 +6,7 @@
 
 ## 状态与边界
 
-本模块为 backend-first vNext 提供七个平台的能力声明、只读连接器边界、现有客户端适配器和通用浏览器任务服务。独立 worker 的 production composition 已显式注册全部七个平台，并通过无 live call 的 SQLite composition smoke test；它**尚未接入当前生产 API、legacy runtime 或浏览器插件 dispatcher**，因此 HTTP 路由与扩展切换仍由后续任务完成。当前 v0.3 来源模块与各平台旧任务 endpoint 仍是现有用户请求的实际运行路径。
+本模块是权威 vNext 来源边界，提供七个平台的能力声明、只读连接器、retained client adapter 和通用浏览器任务服务。API 与 worker 的 production composition 显式注册全部七个平台，并通过无 live call 的 SQLite composition smoke test；`/api/v1/sources` 暴露 manifest/status/account configuration，`/api/v1/source-tasks/claim` 与 `/api/v1/source-tasks/{task_id}/complete` 是唯一浏览器辅助任务 HTTP 合同。现有浏览器扩展 dispatcher 在 Task 22 前尚未消费这些 generic route，但旧平台 task endpoint 与 v0.3 producer 已不再是公开入口。
 
 连接器只公开不可变 `ActivityEvent` 或 `ContentItem`。HTTP、CLI、SDK、DOM 原始 row 只能存在于 `infrastructure.sources.<platform>` 内部；不支持的能力不会用空结果或其它操作模拟，而是抛出 `UnsupportedSourceOperationError`。连接器不提供 like、follow、favorite、save、upvote、subscribe 等账号写操作。
 
@@ -53,9 +53,9 @@ complete 对相同 lease token + 相同结果是幂等的；并行相同 complet
 
 这里没有“调用必在 execution timeout 的同一时刻返回”或“返回前一定已经写成 cancelled”的承诺：总等待最多还包含有限 cleanup window。若 insert/cancel 因数据库阻塞超过 cleanup bound，调用可在 row 尚未收敛前返回；row 随后落库时已携带过期 deadline，因此永远不能新 claim，下一次 snapshot/claim 会把它持久化为 `abandoned`。超界后仍在运行的 enqueue task 会保留 done callback，必定取走 result/exception；回调显式吞掉 `CancelledError`，其余所有 `BaseException`（包括 group、`SystemExit`、`KeyboardInterrupt`）都只按 exception class 记录，不包含 message/value，也不会逃逸到事件循环或触发 “Task exception was never retrieved”。成功 compensation 的 row 是 `cancelled`；两种状态都不可 claim/complete，且不会留下 actionable orphan。扩展仍在自己的登录 tab 执行任务，task payload 不承载浏览器 Cookie。
 
-## 尚未完成
+## 当前边界
 
-- 尚未新增 `/api/v1/source-tasks` HTTP claim/complete 路由。
-- 尚未把 legacy 各平台 task endpoint 或扩展 dispatcher 改接通用合同。
-- 各平台 retained-client/CLI/browser adapter 与 builder 已实现，但尚未在生产 composition root 构造并切换 runtime。
-- 尚未切换 legacy 数据或停止 v0.3 来源 producer。
+- API 与 worker composition root 已构造七个平台 retained-client/CLI/browser adapter；manifest/status/account configuration 和 generic claim/complete 均为权威 `/api/v1` route。
+- Task 22 只负责现有 Web/extension generated client 与 dispatcher 接线；登录 tab 执行能力在此之前不会伪装为可用。
+- 旧平台 task endpoint、v0.3 producer、native account save 与动态插件发现不属于 vNext 公开合同。
+- 历史数据库保持只读手工 archive，不导入 vNext；这不是待完成的数据迁移承诺。

@@ -163,7 +163,12 @@ def doctor() -> None:
         persistence and persistence.database_reachable and persistence.database_integrity_ok
     )
     migration_ready = bool(persistence and persistence.migration_at_head)
-    queue_ready = bool(persistence and persistence.queue_exists and persistence.queue_integrity_ok)
+    queue_ready = bool(
+        persistence
+        and persistence.queue_exists
+        and persistence.queue_integrity_ok
+        and persistence.queue_writable
+    )
     separation_ready = bool(persistence and persistence.paths_separate)
     typer.echo(f"database: {'ready' if database_ready else 'not-ready'}")
     typer.echo(f"migration: {'head' if migration_ready else 'stale'}")

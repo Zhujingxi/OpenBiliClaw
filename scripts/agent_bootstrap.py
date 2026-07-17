@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -31,6 +33,9 @@ DEFAULT_HEALTH_PATH = "/api/v1/system/readiness"
 PROTECTED_CHECK_PATH = "/api/v1/settings"
 RUNTIME_ENV_NAME = ".env"
 PROCESS_STATE = Path("data/vnext/runtime-processes.json")
+INSTALLATION_STATE = Path("data/vnext/installer-instance.json")
+LIFECYCLE_LOCK = Path("data/vnext/install-lifecycle.lock")
+LIFECYCLE_LOCK_TIMEOUT = 120.0
 
 
 class ProcessLike(Protocol):
@@ -93,6 +98,42 @@ class InstallResult:
     worker_pid: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class InstallationState:
+    """Canonical source-install identity and its latest runtime generation."""
+
+    project_root: str
+    instance_id: str
+    generation: int
+
+    def to_dict(self) -> dict[str, int | str]:
+        return {
+            "version": 1,
+            "project_root": self.project_root,
+            "instance_id": self.instance_id,
+            "generation": self.generation,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> InstallationState | None:
+        if not isinstance(value, dict) or value.get("version") != 1:
+            return None
+        project_root = value.get("project_root")
+        instance_id = value.get("instance_id")
+        generation = value.get("generation")
+        if (
+            not isinstance(project_root, str)
+            or not project_root
+            or not isinstance(instance_id, str)
+            or not _is_canonical_uuid(instance_id)
+            or not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+        ):
+            return None
+        return cls(project_root, instance_id, generation)
+
+
 def _emit(status: str, message: str, **details: object) -> None:
     """Emit a machine-readable event containing no credential values."""
 
@@ -135,8 +176,56 @@ def _read_env(path: Path) -> tuple[list[str], dict[str, str]]:
     return lines, values
 
 
+def _lock_descriptor(descriptor: int, *, blocking: bool) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        flag = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK  # type: ignore[attr-defined]
+        msvcrt.locking(descriptor, flag, 1)  # type: ignore[attr-defined]
+        return
+    import fcntl
+
+    flag = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+    fcntl.flock(descriptor, flag)
+
+
+def _unlock_descriptor(descriptor: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def _acquire_lock_before(descriptor: int, *, path: Path, timeout: float | None) -> None:
+    if timeout is None:
+        _lock_descriptor(descriptor, blocking=True)
+        return
+    if timeout < 0:
+        raise ValueError("lock timeout must not be negative")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            _lock_descriptor(descriptor, blocking=False)
+            return
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"timed out waiting for lifecycle lock: {path}")
+        time.sleep(min(0.05, remaining))
+
+
 @contextmanager
-def _exclusive_lock(path: Path) -> Iterator[None]:
+def _exclusive_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     if path.is_symlink():
         raise RuntimeError(f"refusing to use symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,38 +234,27 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
         descriptor = os.open(path, flags, 0o600)
     except OSError as exc:
         raise RuntimeError(f"unable to open lock safely: {path}") from exc
+    acquired = False
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise RuntimeError(f"lock is not a regular file: {path}")
         os.chmod(path, 0o600)
-        if os.name == "nt":
-            import msvcrt
-
-            if os.fstat(descriptor).st_size == 0:
-                os.write(descriptor, b"0")
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
-        else:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        _acquire_lock_before(descriptor, path=path, timeout=timeout)
+        acquired = True
         yield
     finally:
-        if os.name == "nt":
-            import msvcrt
-
+        if acquired:
             with suppress(OSError):
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                unlock_flag = msvcrt.LK_UNLCK  # type: ignore[attr-defined]
-                msvcrt.locking(  # type: ignore[attr-defined]
-                    descriptor, unlock_flag, 1
-                )
-        else:
-            import fcntl
-
-            with suppress(OSError):
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                _unlock_descriptor(descriptor)
         os.close(descriptor)
+
+
+@contextmanager
+def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
+    """Serialize a complete source-install lifecycle across processes."""
+
+    with _exclusive_lock(project_dir.resolve() / LIFECYCLE_LOCK, timeout=timeout):
+        yield
 
 
 def _atomic_write_private_file(path: Path, content: str) -> None:
@@ -200,6 +278,78 @@ def _atomic_write_private_file(path: Path, content: str) -> None:
                 os.close(directory)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _is_canonical_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def _read_private_json(path: Path, *, description: str) -> object:
+    if path.is_symlink():
+        raise RuntimeError(f"refusing to use symlink: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise RuntimeError(f"unable to open {description} safely: {path}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f"{description} is not a regular file: {path}")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            try:
+                return json.load(stream)
+            except ValueError as exc:
+                raise RuntimeError(f"invalid {description}: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _load_or_create_installation_state(project_dir: Path) -> InstallationState:
+    """Load a root-bound installer identity while the lifecycle lock is held."""
+
+    project_dir = project_dir.resolve()
+    path = project_dir / INSTALLATION_STATE
+    try:
+        value = _read_private_json(path, description="installer ownership metadata")
+    except FileNotFoundError:
+        created = InstallationState(str(project_dir), str(uuid4()), 0)
+        _atomic_write_private_file(path, json.dumps(created.to_dict(), sort_keys=True) + "\n")
+        return created
+    parsed = InstallationState.from_dict(value)
+    if parsed is None:
+        raise RuntimeError(f"invalid installer ownership metadata: {path}")
+    if parsed.project_root != str(project_dir):
+        raise RuntimeError("installer ownership metadata belongs to a different project root")
+    return parsed
+
+
+def _advance_installation_generation(
+    project_dir: Path, current: InstallationState
+) -> InstallationState:
+    """Allocate the next monotonic runtime owner while lifecycle-locked."""
+
+    observed = _load_or_create_installation_state(project_dir)
+    if observed != current:
+        raise RuntimeError("installer ownership metadata changed during installation")
+    advanced = InstallationState(
+        current.project_root,
+        current.instance_id,
+        current.generation + 1,
+    )
+    _atomic_write_private_file(
+        project_dir.resolve() / INSTALLATION_STATE,
+        json.dumps(advanced.to_dict(), sort_keys=True) + "\n",
+    )
+    return advanced
 
 
 def _merge_environment(path: Path, required: Mapping[str, str]) -> dict[str, str]:
@@ -503,14 +653,70 @@ def _inspect_process(pid: int) -> ProcessIdentity | None:
 
 
 def _write_process_state(
-    project_dir: Path, *, api: ProcessIdentity, worker: ProcessIdentity
+    project_dir: Path,
+    *,
+    ownership: InstallationState,
+    api: ProcessIdentity,
+    worker: ProcessIdentity,
 ) -> None:
     path = project_dir / PROCESS_STATE
+    current = _load_or_create_installation_state(project_dir)
+    if current != ownership:
+        raise RuntimeError("runtime state ownership is no longer current")
+    payload = {
+        "version": 2,
+        "project_root": ownership.project_root,
+        "instance_id": ownership.instance_id,
+        "generation": ownership.generation,
+        "api": api.to_dict(),
+        "worker": worker.to_dict(),
+    }
     _atomic_write_private_file(
         path,
-        json.dumps({"version": 1, "api": api.to_dict(), "worker": worker.to_dict()}, sort_keys=True)
-        + "\n",
+        json.dumps(payload, sort_keys=True) + "\n",
     )
+
+
+def _process_state_ownership(value: object) -> InstallationState | None:
+    if not isinstance(value, dict) or value.get("version") != 2:
+        return None
+    candidate = {
+        "version": 1,
+        "project_root": value.get("project_root"),
+        "instance_id": value.get("instance_id"),
+        "generation": value.get("generation"),
+    }
+    return InstallationState.from_dict(candidate)
+
+
+def _read_process_state(
+    path: Path,
+) -> tuple[InstallationState, ProcessIdentity, ProcessIdentity]:
+    value = _read_private_json(path, description="runtime process state")
+    ownership = _process_state_ownership(value)
+    if ownership is None or not isinstance(value, dict):
+        raise RuntimeError(f"invalid runtime process state ownership: {path}")
+    api = ProcessIdentity.from_dict(value.get("api"))
+    worker = ProcessIdentity.from_dict(value.get("worker"))
+    if api is None or worker is None:
+        raise RuntimeError(f"invalid runtime process identity: {path}")
+    return ownership, api, worker
+
+
+def _remove_process_state_if_owned(project_dir: Path, ownership: InstallationState) -> bool:
+    """Remove state only when it still belongs to the calling generation."""
+
+    path = project_dir.resolve() / PROCESS_STATE
+    if not path.exists() or path.is_symlink():
+        return False
+    try:
+        value = _read_private_json(path, description="runtime process state")
+    except (FileNotFoundError, RuntimeError):
+        return False
+    if _process_state_ownership(value) != ownership:
+        return False
+    path.unlink(missing_ok=True)
+    return True
 
 
 def _signal_process(pid: int, signum: int) -> None:
@@ -541,45 +747,58 @@ def _wait_for_identity_exit(identity: ProcessIdentity, timeout: float) -> bool:
     return _inspect_process(identity.pid) != identity
 
 
+def _stop_verified_identity(
+    expected: ProcessIdentity,
+    *,
+    identity_probe: Callable[[int], ProcessIdentity | None],
+    signal_process: Callable[[int, int], None],
+    wait_for_exit: Callable[[ProcessIdentity, float], bool],
+) -> bool:
+    if identity_probe(expected.pid) != expected:
+        return True
+    with suppress(ProcessLookupError, PermissionError):
+        signal_process(expected.pid, signal.SIGTERM)
+    if wait_for_exit(expected, 5.0):
+        return True
+    if identity_probe(expected.pid) != expected:
+        return True
+    with suppress(ProcessLookupError, PermissionError):
+        signal_process(expected.pid, signal.SIGKILL)
+    return wait_for_exit(expected, 5.0)
+
+
 def _stop_managed_processes(
     project_dir: Path,
     *,
+    installation: InstallationState | None = None,
     identity_probe: Callable[[int], ProcessIdentity | None] = _inspect_process,
     signal_process: Callable[[int, int], None] = _signal_process,
     wait_for_exit: Callable[[ProcessIdentity, float], bool] = _wait_for_identity_exit,
 ) -> None:
+    project_dir = project_dir.resolve()
     path = project_dir / PROCESS_STATE
     if path.is_symlink():
         raise RuntimeError(f"refusing to use symlink: {path}")
     if not path.is_file():
         return
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        path.unlink(missing_ok=True)
-        return
-    if not isinstance(state, dict) or state.get("version") != 1:
-        path.unlink(missing_ok=True)
-        return
+    current = installation or _load_or_create_installation_state(project_dir)
+    ownership, api, worker = _read_process_state(path)
+    if ownership != current:
+        raise RuntimeError("runtime process state ownership does not match this installation")
     survivors: list[str] = []
-    for name in ("api", "worker"):
-        expected = ProcessIdentity.from_dict(state.get(name))
-        if expected is None or identity_probe(expected.pid) != expected:
-            continue
-        with suppress(ProcessLookupError, PermissionError):
-            signal_process(expected.pid, signal.SIGTERM)
-        if wait_for_exit(expected, 5.0):
-            continue
-        if identity_probe(expected.pid) != expected:
-            continue
-        with suppress(ProcessLookupError, PermissionError):
-            signal_process(expected.pid, signal.SIGKILL)
-        if not wait_for_exit(expected, 5.0):
+    for name, expected in (("api", api), ("worker", worker)):
+        if not _stop_verified_identity(
+            expected,
+            identity_probe=identity_probe,
+            signal_process=signal_process,
+            wait_for_exit=wait_for_exit,
+        ):
             survivors.append(name)
     if survivors:
         joined = ", ".join(survivors)
         raise RuntimeError(f"managed processes did not stop: {joined}")
-    path.unlink(missing_ok=True)
+    if not _remove_process_state_if_owned(project_dir, ownership):
+        raise RuntimeError("runtime process state ownership changed while stopping")
 
 
 def _signal_started_process(process: ProcessLike, signum: int) -> None:
@@ -647,50 +866,44 @@ def _wait_for_file(path: Path, *, timeout: float = 10.0) -> bool:
     return False
 
 
-def install_local_runtime(
+def _install_source_dependencies(project_dir: Path, run_command: Callable[..., None]) -> None:
+    if shutil.which("uv"):
+        run_command(["uv", "sync", "--frozen"], cwd=project_dir, env=dict(os.environ))
+        return
+    run_command(
+        [sys.executable, "-m", "pip", "install", "-e", ".[dev]"],
+        cwd=project_dir,
+        env=dict(os.environ),
+    )
+
+
+def _cleanup_failed_launch(
+    project_dir: Path,
+    ownership: InstallationState,
+    started: list[ProcessLike],
+) -> None:
+    try:
+        _terminate_started_processes(started)
+    finally:
+        _remove_process_state_if_owned(project_dir, ownership)
+
+
+def _launch_local_runtime(
     project_dir: Path,
     *,
+    ownership: InstallationState,
     host: str,
     port: int,
-    litellm_base_url: str,
-    litellm_api_key: str,
-    install_dependencies: bool = True,
-    start: bool = True,
-    run_command: Callable[..., None] = _run_checked,
-    start_process: Callable[..., ProcessLike] = _start_detached,
-    readiness_probe: Callable[..., bool] = _probe_runtime,
-    queue_probe: Callable[..., bool] = _wait_for_file,
-    identity_probe: Callable[[int], ProcessIdentity | None] = _inspect_process,
-    state_writer: Callable[..., None] = _write_process_state,
-) -> InstallResult:
-    """Prepare, migrate, and manage the source-install API and worker."""
-
-    project_dir = project_dir.resolve()
-    if install_dependencies:
-        if shutil.which("uv"):
-            run_command(["uv", "sync", "--frozen"], cwd=project_dir, env=dict(os.environ))
-        else:
-            run_command(
-                [sys.executable, "-m", "pip", "install", "-e", ".[dev]"],
-                cwd=project_dir,
-                env=dict(os.environ),
-            )
-    values = ensure_local_runtime_environment(
-        project_dir,
-        litellm_base_url=litellm_base_url,
-        litellm_api_key=litellm_api_key,
-    )
-    environment = _runtime_env(values)
-    prefix = _command_prefix(project_dir)
-    if start:
-        _stop_managed_processes(project_dir)
-    run_command([*prefix, "db", "migrate"], cwd=project_dir, env=environment)
-    health_url = f"http://127.0.0.1:{port}{DEFAULT_HEALTH_PATH}"
-    if not start:
-        result = InstallResult(status="prepared", mode="local", health_url=health_url)
-        _emit("complete", "local_runtime_prepared", mode="local", health_url=health_url)
-        return result
-
+    values: Mapping[str, str],
+    environment: dict[str, str],
+    prefix: list[str],
+    run_command: Callable[..., None],
+    start_process: Callable[..., ProcessLike],
+    readiness_probe: Callable[..., bool],
+    queue_probe: Callable[..., bool],
+    identity_probe: Callable[[int], ProcessIdentity | None],
+    state_writer: Callable[..., None],
+) -> tuple[ProcessLike, ProcessLike]:
     started: list[ProcessLike] = []
     try:
         api = start_process(
@@ -713,34 +926,133 @@ def install_local_runtime(
         worker_identity = identity_probe(worker.pid)
         if api_identity is None or worker_identity is None:
             raise RuntimeError("unable to verify launched process identity")
-        state_writer(project_dir, api=api_identity, worker=worker_identity)
-        _require_process_alive(api, "API")
-        _require_process_alive(worker, "worker")
-        if not queue_probe(Path(values["OPENBILICLAW_HUEY_PATH"])):
-            raise RuntimeError("worker queue did not initialize")
-        _require_process_alive(api, "API")
-        _require_process_alive(worker, "worker")
-        run_command([*prefix, "doctor"], cwd=project_dir, env=environment)
-        _require_process_alive(api, "API")
-        _require_process_alive(worker, "worker")
-        protected_ready = readiness_probe(host, port, values["OPENBILICLAW_ACCESS_TOKEN"])
-        _require_process_alive(api, "API")
-        _require_process_alive(worker, "worker")
-        if not protected_ready:
-            raise RuntimeError("protected readiness check failed")
+        state_writer(
+            project_dir,
+            ownership=ownership,
+            api=api_identity,
+            worker=worker_identity,
+        )
+        _verify_local_runtime(
+            project_dir,
+            host=host,
+            port=port,
+            values=values,
+            environment=environment,
+            prefix=prefix,
+            api=api,
+            worker=worker,
+            run_command=run_command,
+            readiness_probe=readiness_probe,
+            queue_probe=queue_probe,
+        )
+        return api, worker
     except BaseException:
-        _terminate_started_processes(started)
-        (project_dir / PROCESS_STATE).unlink(missing_ok=True)
+        _cleanup_failed_launch(project_dir, ownership, started)
         raise
-    result = InstallResult(
-        status="complete",
-        mode="local",
-        health_url=health_url,
-        api_pid=api.pid,
-        worker_pid=worker.pid,
-    )
-    _emit("complete", "local_runtime_ready", mode="local", health_url=health_url)
-    return result
+
+
+def _verify_local_runtime(
+    project_dir: Path,
+    *,
+    host: str,
+    port: int,
+    values: Mapping[str, str],
+    environment: dict[str, str],
+    prefix: list[str],
+    api: ProcessLike,
+    worker: ProcessLike,
+    run_command: Callable[..., None],
+    readiness_probe: Callable[..., bool],
+    queue_probe: Callable[..., bool],
+) -> None:
+    _require_process_alive(api, "API")
+    _require_process_alive(worker, "worker")
+    if not queue_probe(Path(values["OPENBILICLAW_HUEY_PATH"])):
+        raise RuntimeError("worker queue did not initialize")
+    _require_process_alive(api, "API")
+    _require_process_alive(worker, "worker")
+    run_command([*prefix, "doctor"], cwd=project_dir, env=environment)
+    _require_process_alive(api, "API")
+    _require_process_alive(worker, "worker")
+    protected_ready = readiness_probe(host, port, values["OPENBILICLAW_ACCESS_TOKEN"])
+    _require_process_alive(api, "API")
+    _require_process_alive(worker, "worker")
+    if not protected_ready:
+        raise RuntimeError("protected readiness check failed")
+
+
+def install_local_runtime(
+    project_dir: Path,
+    *,
+    host: str,
+    port: int,
+    litellm_base_url: str,
+    litellm_api_key: str,
+    install_dependencies: bool = True,
+    start: bool = True,
+    run_command: Callable[..., None] = _run_checked,
+    start_process: Callable[..., ProcessLike] = _start_detached,
+    readiness_probe: Callable[..., bool] = _probe_runtime,
+    queue_probe: Callable[..., bool] = _wait_for_file,
+    identity_probe: Callable[[int], ProcessIdentity | None] = _inspect_process,
+    signal_process: Callable[[int, int], None] = _signal_process,
+    wait_for_exit: Callable[[ProcessIdentity, float], bool] = _wait_for_identity_exit,
+    state_writer: Callable[..., None] = _write_process_state,
+    lifecycle_timeout: float = LIFECYCLE_LOCK_TIMEOUT,
+) -> InstallResult:
+    """Prepare, migrate, and manage the source-install API and worker."""
+
+    project_dir = project_dir.resolve()
+    health_url = f"http://127.0.0.1:{port}{DEFAULT_HEALTH_PATH}"
+    with _lifecycle_lock(project_dir, timeout=lifecycle_timeout):
+        installation = _load_or_create_installation_state(project_dir)
+        if install_dependencies:
+            _install_source_dependencies(project_dir, run_command)
+        values = ensure_local_runtime_environment(
+            project_dir,
+            litellm_base_url=litellm_base_url,
+            litellm_api_key=litellm_api_key,
+        )
+        environment = _runtime_env(values)
+        prefix = _command_prefix(project_dir)
+        _stop_managed_processes(
+            project_dir,
+            installation=installation,
+            identity_probe=identity_probe,
+            signal_process=signal_process,
+            wait_for_exit=wait_for_exit,
+        )
+        if start:
+            installation = _advance_installation_generation(project_dir, installation)
+        run_command([*prefix, "db", "migrate"], cwd=project_dir, env=environment)
+        if not start:
+            result = InstallResult(status="prepared", mode="local", health_url=health_url)
+            _emit("complete", "local_runtime_prepared", mode="local", health_url=health_url)
+            return result
+        api, worker = _launch_local_runtime(
+            project_dir,
+            ownership=installation,
+            host=host,
+            port=port,
+            values=values,
+            environment=environment,
+            prefix=prefix,
+            run_command=run_command,
+            start_process=start_process,
+            readiness_probe=readiness_probe,
+            queue_probe=queue_probe,
+            identity_probe=identity_probe,
+            state_writer=state_writer,
+        )
+        result = InstallResult(
+            status="complete",
+            mode="local",
+            health_url=health_url,
+            api_pid=api.pid,
+            worker_pid=worker.pid,
+        )
+        _emit("complete", "local_runtime_ready", mode="local", health_url=health_url)
+        return result
 
 
 def _compose_prefix(project_dir: Path) -> list[str]:
@@ -751,14 +1063,97 @@ def _compose_prefix(project_dir: Path) -> list[str]:
     raise RuntimeError("no supported Compose file found")
 
 
+def _compose_status_rows(output: str) -> dict[str, dict[str, object]]:
+    """Normalize Compose's array and newline-delimited JSON output forms."""
+
+    try:
+        parsed = json.loads(output)
+        values = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        try:
+            values = [json.loads(line) for line in output.splitlines() if line.strip()]
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("unable to read Docker Compose service status") from exc
+    rows: dict[str, dict[str, object]] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        service = value.get("Service")
+        if isinstance(service, str):
+            rows[service] = value
+    return rows
+
+
+def _wait_for_docker_runtime(
+    project_dir: Path, compose: list[str], *, timeout: float = 90.0
+) -> None:
+    """Require successful migration plus healthy API and worker containers."""
+
+    deadline = time.monotonic() + timeout
+    command = [
+        *compose,
+        "ps",
+        "--all",
+        "--format",
+        "json",
+        "migrate",
+        "api",
+        "worker",
+    ]
+    while time.monotonic() < deadline:
+        result = subprocess.run(  # noqa: S603
+            command,
+            cwd=project_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        rows = _compose_status_rows(result.stdout)
+        migration = rows.get("migrate")
+        api = rows.get("api")
+        worker = rows.get("worker")
+        if migration is not None:
+            migration_exit = migration.get("ExitCode")
+            if migration_exit not in (None, 0, "0"):
+                raise RuntimeError("migration service failed")
+        if worker is not None and (
+            str(worker.get("State", "")).lower() in {"dead", "exited", "restarting"}
+            or str(worker.get("Health", "")).lower() == "unhealthy"
+        ):
+            raise RuntimeError("worker failed before becoming healthy")
+        if api is not None and (
+            str(api.get("State", "")).lower() in {"dead", "exited", "restarting"}
+            or str(api.get("Health", "")).lower() == "unhealthy"
+        ):
+            raise RuntimeError("api failed before becoming healthy")
+        if (
+            migration is not None
+            and str(migration.get("State", "")).lower() == "exited"
+            and migration.get("ExitCode") in (0, "0")
+            and api is not None
+            and str(api.get("State", "")).lower() == "running"
+            and str(api.get("Health", "")).lower() == "healthy"
+            and worker is not None
+            and str(worker.get("State", "")).lower() == "running"
+            and str(worker.get("Health", "")).lower() == "healthy"
+        ):
+            return
+        time.sleep(0.25)
+    raise RuntimeError("Docker runtime did not become healthy")
+
+
 def _install_docker_runtime(project_dir: Path, *, start: bool) -> InstallResult:
     values = ensure_docker_infrastructure_secrets(project_dir)
     health_url = f"http://127.0.0.1:{DEFAULT_PORT}{DEFAULT_HEALTH_PATH}"
+    compose = _compose_prefix(project_dir)
     if not start:
+        subprocess.run(  # noqa: S603
+            [*compose, "run", "--rm", "migrate"], cwd=project_dir, check=True
+        )
         _emit("complete", "docker_runtime_prepared", mode="docker", health_url=health_url)
         return InstallResult(status="prepared", mode="docker", health_url=health_url)
-    compose = _compose_prefix(project_dir)
     subprocess.run([*compose, "up", "-d", "--build"], cwd=project_dir, check=True)  # noqa: S603
+    _wait_for_docker_runtime(project_dir, compose)
     if not _probe_runtime(
         "127.0.0.1", DEFAULT_PORT, values["OPENBILICLAW_ACCESS_TOKEN"], timeout=90
     ):

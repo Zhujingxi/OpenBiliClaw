@@ -59,7 +59,10 @@ URL; they never contain secret values or the LiteLLM URL.
 
 ## Source-install sequence
 
-The order is intentionally fixed and failures propagate:
+The order is intentionally fixed and failures propagate. A dedicated bounded
+cross-process lifecycle lock serializes the complete sequence; it is separate from
+the short `.env` writer lock, so concurrent prepare/start invocations cannot overlap
+migrations or publish competing process pairs:
 
 1. Install dependencies with `uv sync --frozen`, or a Python editable fallback.
 2. Persist stable access/encryption secrets and the supplied LiteLLM connection.
@@ -74,16 +77,24 @@ The order is intentionally fixed and failures propagate:
 9. Check public readiness and a bearer-protected settings request, followed by
    another API and worker liveness check.
 
-Verified identities are stored privately in `data/vnext/runtime-processes.json`;
-bare or stale PIDs are never signalled. Managed shutdown sends TERM, waits for a
-bounded interval, and escalates only while the same identity is still present.
+The installer persists a private UUID in `data/vnext/installer-instance.json` and
+binds process state to that UUID, the canonical checkout root, and a monotonic
+generation. Verified identities are stored privately in
+`data/vnext/runtime-processes.json`; bare or stale PIDs are never signalled. Copied,
+moved, malformed, or ownership-mismatched state is refused instead of managed.
+Managed shutdown sends TERM, waits for a bounded interval, and escalates only while
+the same identity is still present. Failure cleanup removes process state only when
+its root, instance, and generation still belong to that invocation, so an older
+cleanup cannot delete newer state.
 Logs are separate at `logs/api.log` and `logs/worker.log`. A failed migration starts
 nothing. A partial launch, state-write failure, dead worker, or failed protected
 check terminates and reaps every newly started child and returns non-zero.
 
 For CI or image preparation, set `SKIP_START=1`; this still installs, persists the
-environment, and migrates, but does not daemonize either process or run the live
-worker/LiteLLM checks in `doctor`.
+environment, verifiably stops a previously managed local pair, and migrates, but
+does not daemonize either process or run the live worker/LiteLLM checks in `doctor`.
+In Docker mode it runs the isolated
+`docker compose run --rm migrate` service before returning `docker_runtime_prepared`.
 
 ## Docker sequence
 
@@ -91,7 +102,11 @@ Docker mode atomically fills missing infrastructure secrets and runs Compose. Th
 one-shot `migrate` service applies Alembic first; `api` and `worker` both require its
 successful completion and only perform a read-only schema-head startup check. A
 migration failure therefore blocks both long-running processes. The installer then
-verifies public and bearer-protected API access. The three application services mount
+requires Compose to report `migrate` exited with code zero and both API and worker as
+`running/healthy`, then verifies public and bearer-protected API access. A restarting,
+exited, or unhealthy worker fails the install even if API readiness succeeds. The
+worker healthcheck validates the PID 1 worker command, schema head, queue integrity,
+and a read/write SQLite transaction that is rolled back. The three application services mount
 `openbiliclaw_data:/app/runtime/data`; API and worker use exactly:
 
 ```text

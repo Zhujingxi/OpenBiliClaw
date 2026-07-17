@@ -1,10 +1,14 @@
-# OpenBiliClaw — 项目规格说明书 (SPEC) v0.3
+# OpenBiliClaw — vNext 后端规格与 v0.3 历史档案
 
 > *你的跨平台 AI 内容朋友，比你更懂你想看什么* 🎯
 
+> **Authority boundary:** §3.1 是当前权威 vNext 后端规格。§1–2 与 §3.2–6 是
+> **Historical v0.3 archive**，只保留旧产品语义与删除追踪，不定义当前 API、CLI、
+> 配置、安装或数据流。现有 Web/extension client 重接是唯一留给 Task 22 的运行面工作。
+
 ---
 
-## 1. 项目定位
+## Historical v0.3 archive — 1. 项目定位
 
 OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
 
@@ -25,7 +29,7 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 
 ---
 
-## 2. 核心功能模块
+## Historical v0.3 archive — 2. 核心功能模块
 
 ### 2.1 🧠 用户灵魂引擎 (User Soul Engine)
 
@@ -209,7 +213,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ### 3.1 vNext 领域、薄 `/api/v1` 与独立 worker（前端待重接）
 
-v0.4.0 已实现 feature-oriented 领域契约、七平台 connector、generic source task、隔离 persistence、类型化设置、凭据加密、只经 LiteLLM 的 typed AI，以及 activity/profile/feed/library/chat application service 和四任务 Huey worker。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure 可按 undispatched row reconcile，worker startup 则重发全部 pending row，覆盖 dequeue 后、应用 claim 前崩溃，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。每个 handler 的条件 running guard 与其 feature writes 共用一个 UoW；cancellation 及其它 running state transition 也以条件 UPDATE 开始而不先读，两个 SQLite writer 按写序和有限 busy timeout 原子排序 cancellation 与 activity、profile+ledger、feed graph、cleanup effect，等待耗尽显式失败。profile 另使用独立 consumed-evidence ledger 与 expected base revision；Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。该 worker 已可运行，但 v0.3 API、legacy runtime、扩展 dispatcher 和四端客户端尚未切换。
+v0.4.0 的权威后端由 feature-oriented 领域契约、七平台 connector、generic source task、SQLAlchemy persistence、类型化设置、凭据加密、只经 LiteLLM 的 typed AI、activity/profile/feed/library/chat application service、薄 `/api/v1` 和四任务 Huey worker 组成。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure 可按 undispatched row reconcile，worker startup 则重发全部 pending row，覆盖 dequeue 后、应用 claim 前崩溃，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。每个 handler 的条件 running guard 与其 feature writes 共用一个 UoW；cancellation 及其它 running state transition 也以条件 UPDATE 开始而不先读，两个 SQLite writer 按写序和有限 busy timeout 原子排序 cancellation 与 activity、profile+ledger、feed graph、cleanup effect，等待耗尽显式失败。profile 另使用独立 consumed-evidence ledger 与 expected base revision；Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。`/api/v1`、运维 CLI、API/worker、fresh vNext database 和 installer secret lifecycle 均已切换；只有现有 Web/extension client 与 generic dispatcher 接线留给 Task 22。
 
 ```text
 HTTP / CLI / logged-in browser transports
@@ -247,20 +251,23 @@ Huey (separate huey.db) ─► source_sync / profile_projection / feed_replenish
                               └─► JobService ─► all-pending recovery/claim/cancel/txn guard
 
 Implemented now: domain contracts/policies, seven source manifests/connectors/settings,
-                 generic lease-safe source tasks, schema/migration, repositories/UoW,
-                 typed settings, encrypted source credentials, six typed AI tasks,
-                 application services, seven-source composition, four durable jobs,
-                 embedding/health clients, offline eval datasets, LiteLLM/Huey Compose
-Deferred: HTTP/extension composition, legacy data migration, /api/v1, frontend cutover,
-          installer source-secret lifecycle and LiteLLM virtual key
-Authoritative now: vNext job state for the worker; v0.3 legacy storage/runtime for public requests
+                 generic lease-safe source tasks and HTTP claim/complete, schema/migration,
+                 repositories/UoW, typed settings, encrypted source credentials and installer
+                 lifecycle, six typed AI tasks, application services, seven-source composition,
+                 four durable jobs, embedding/health clients, offline eval datasets,
+                 thin /api/v1 routers, SSE chat/progress, bearer auth, operational CLI,
+                 deterministic OpenAPI, LiteLLM/Huey Compose
+Deferred: existing Web/extension generated-client and dispatcher wiring (Task 22),
+          final unreachable legacy deletion (Task 23); legacy data is archived, not migrated
+Authoritative now: /api/v1, vNext application database, API/worker, source-task routes,
+                   TaskRunner chat, job_runs product state, and operational CLI
 ```
 
 三个模型别名必须精确为 `obc-interactive`、`obc-analysis`、`obc-embedding`。应用层不得选择 provider deployment；provider routing/fallback、网络重试、限流和缓存由 LiteLLM 独占，`TaskRunner` 只允许 task 声明的 semantic output retry，并把 BYPASS 映射为 proxy 的 `cache.no-cache`。六个内置 task 覆盖 profile、keyword、单候选、batch candidate、chat 与 recommendation；candidate assessment row ID 由 application 层生成。AI run schema/API 只接收 metadata/usage/error class，不存在输入或输出 payload 字段。Docker Compose 要求本地生成的 LiteLLM master key 与 PostgreSQL password，源码/预构建路径挂同一 policy，Admin 默认只绑定 loopback；唯一 `migrate` 服务成功后才允许 API/worker 启动，两个 runtime 只读检查 schema head；本阶段没有 live provider/Compose E2E。`/health?model` 可能调用 provider，仅用于显式诊断，并区分 degraded、transport、auth、missing alias、server 与 provider unhealthy。
 
 FastAPI 只公开 `/api/v1/system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat 与 progress 走 SSE，扩展来源工作走 generic claim/complete。Bearer token 只从 installer/runtime 环境读取。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展待下一任务重接。
 
-### 3.2 已停止作为入口的 v0.3 架构
+### 3.2 Historical v0.3 archive — 已停止作为入口的实现
 
 ```text
 interactive ─────────────────────────────────────────┐
@@ -510,7 +517,7 @@ descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
 
 ---
 
-## 4. 技术选型
+## Historical v0.3 archive — 4. 技术选型
 
 | 模块 | 技术方案 | 说明 |
 |------|---------|------|
@@ -526,7 +533,7 @@ descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
 
 ---
 
-## 5. 版本规划
+## Historical v0.3 archive — 5. 版本规划
 
 ### v0.1 — MVP：最小推荐闭环
 
@@ -571,7 +578,7 @@ descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
 
 ---
 
-## 6. 设计原则
+## Historical v0.3 archive — 6. 设计原则
 
 1. **灵魂优于标签** — 理解一个人，而不是给他贴标签
 2. **有温度的表达** — Agent 的每一次输出都像朋友在说话
@@ -582,4 +589,4 @@ descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
 
 ---
 
-*文档版本: v0.3 | 日期: 2026-06-25 | 状态: 持续更新*
+*当前规格: vNext §3.1 | Historical v0.3 archive snapshot: 2026-06-25*
