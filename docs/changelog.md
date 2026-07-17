@@ -4,6 +4,15 @@
 
 ---
 
+## v0.3.176：认知画像流水线 Wave C——态势门控（2026-07-17）
+
+认知画像流水线的 **Wave C（Phase 3）**：给深层画像写入一道一致性闸门。规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`。
+
+- **态势门控 builder + 执行体（Task 6）**：新增 `llm/prompts.py::build_posture_gate_prompt`（静态 system——三判定 accept/downgrade/reject + 「冲突不是错误是新假设」+ `sort_keys`，入 invariance 清单）与 `soul/posture_gate.py::PostureGate`。三模式：`off`=完全旁路（门控 LLM 零调用、逐字节等价）；`shadow`(默认)=commit boundary 捕获不可变快照 `{before,after,source_refs,gate_id}`，异步旁路任务只消费快照（判定前活状态再写入不污染，带断言）、**零延迟不阻塞原写入**、判定落台账 `shadow_accept/downgrade/reject`、LLM 异常落 `shadow_error`；`enforce`=同步判定，异常/解析失败/非白名单 verdict 保守 downgrade。新 caller `soul.posture_gate` 注册 usage recorder。
+- **配置 + save-time 校验（Task 6）**：`[soul].posture_gate_mode`（默认 `shadow`）与 `posture_gate_force_enforce`（默认 `false`）。切到 `enforce` 需 save-time 三条件——最早有效 shadow 判定距今 ≥14 天 **且** 近 14 天有效判定 ≥10 条 **且** 近 7 天 ≥1 条，否则 blocking 拒绝（`Database.posture_gate_shadow_stats` 供数，config PUT 处理器接线）；`posture_gate_force_enforce=true` 无条件放行（有风险，文档注明）。
+- **三接入点接线（Task 7）**：①对话候选按 kind 分流——interest/dislike 现路径，goal/value/state 过门控（reject 丢弃、downgrade 置信×0.6 转 insight）；②管线 VALUES/CORE 层 updater 写入前过门控（downgrade 固定置信 0.5 转 insight、层写入回滚；ROLE 不过门控）；③soul 整份重建 diff 过门控（downgrade/reject→放弃本次 rebuild + 台账）。`off` 模式 `learn_from_dialogue` + pipeline 与现状逐字节一致（回放门）。
+- **Wave B 遗留接线**：**held 重放消费端**——`ConfusionManager.pending_replays` + `SoulEngine.replay_held_updates`：resolved 真实兴趣型的 replaying held 项作为证据并入下一次偏好分析（rebase 语义，不直接写权重），成功后回调 `mark_replay_applied`（幂等）；引擎构造时 `recover_replaying` 处理上一次会话崩溃残留（置 `applied_unverified` 不重复提交），反馈批后运行消费端。**代理行为折价**——疑惑 `proxy_behavior` 出口对 `evidence_refs` 关联事件调 `Database.discount_events_by_confusion`（盖 `discounted_by_confusion` + 强度折至 0.2，`real_interest` 不折）。
+
 ## v0.3.175：认知画像流水线 Wave B——疑惑机制「看不懂」（2026-07-17）
 
 认知画像流水线的 **Wave B（Phase 2）**：给系统一个表达「看不懂」的形式。规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`。
