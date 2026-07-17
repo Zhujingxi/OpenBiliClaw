@@ -68,15 +68,15 @@ Tasks 5–7.
 
 **Steps:**
 
-- [ ] Write failing tests: (a) sentinel portrait `"PORTRAIT_SENTINEL_XYZ"` absent from the
+- [x] Write failing tests: (a) sentinel portrait `"PORTRAIT_SENTINEL_XYZ"` absent from the
       serialized output of each of the three dict serializers and of
       `to_llm_context(include_portrait=False)`; (b) two-call byte-equality per serializer;
       (c) openclaw `get_profile` with 8 traits / 8 interests returns exactly 5 of each.
-- [ ] Run `.venv/bin/python -m pytest tests/test_profile_views_guards.py tests/test_openclaw_adapter.py -q`;
+- [x] Run `.venv/bin/python -m pytest tests/test_profile_views_guards.py tests/test_openclaw_adapter.py -q`;
       confirm the new tests FAIL only if a real defect exists — expected result is PASS for
       (a)/(b) (behavior already correct, tests pin it) and PASS for (c); if any FAILS, stop and
       report before changing production code.
-- [ ] Run touched regression tests, `.venv/bin/ruff check`, `.venv/bin/mypy src/`.
+- [x] Run touched regression tests, `.venv/bin/ruff check`, `.venv/bin/mypy src/`.
 
 **Acceptance:**
 

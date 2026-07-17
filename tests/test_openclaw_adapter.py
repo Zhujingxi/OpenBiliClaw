@@ -633,6 +633,38 @@ async def test_get_profile_returns_trimmed_profile_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_profile_trims_traits_and_interests_to_five() -> None:
+    """The external ProfileResponse caps each list at 5 items (operations:114-120).
+
+    Guards the ``[:5]`` slices against silently returning the full profile lists;
+    previously never exercised with more than 5 entries.
+    """
+
+    class _EightItemSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                personality_portrait="八项画像。",
+                core_traits=[f"特质-{i}" for i in range(8)],
+                deep_needs=[f"需求-{i}" for i in range(8)],
+                preferences=PreferenceLayer(
+                    interests=[
+                        InterestTag(name=f"兴趣-{i}", category="知识", weight=1.0 - i * 0.1)
+                        for i in range(8)
+                    ]
+                ),
+            )
+
+    services = SimpleNamespace(soul_engine=_EightItemSoulEngine())
+    result = await OpenClawAdapter(services=services).get_profile()
+
+    assert len(result.core_traits) == 5
+    assert len(result.deep_needs) == 5
+    assert len(result.top_interests) == 5
+    assert result.core_traits == [f"特质-{i}" for i in range(5)]
+    assert result.top_interests == [f"兴趣-{i}" for i in range(5)]
+
+
+@pytest.mark.asyncio
 async def test_openclaw_recommend_updates_gate_after_durable_pool_commit(tmp_path: Path) -> None:
     from openbiliclaw.llm.concurrency import InventoryPriorityState, LLMConcurrencyGate
     from openbiliclaw.recommendation.engine import RecommendationEngine
