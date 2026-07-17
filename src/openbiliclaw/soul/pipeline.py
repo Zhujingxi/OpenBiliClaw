@@ -694,10 +694,17 @@ class ProfileUpdatePipeline:
         # speculator only needs periodic expire/promote checks; idle
         # cadence at 30 minutes is plenty.
         self._speculator_idle_min_interval = timedelta(minutes=speculator_idle_interval_minutes)
+        # Phase 3 posture gate over VALUES/CORE layer writes (access point ②).
+        # None until the SoulEngine wires it in; None ⇒ no gating (byte-identical).
+        self._posture_gate: Any | None = None
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or replace the embedding service for semantic operations."""
         self._embedding_service = embedding_service
+
+    def set_posture_gate(self, posture_gate: Any) -> None:
+        """Attach the posture gate for VALUES/CORE deep-layer writes (Phase 3)."""
+        self._posture_gate = posture_gate
 
     def set_cognition_cycle(self, cognition_cycle: Any) -> None:
         """Attach or replace the cognition cycle runner."""
@@ -1030,6 +1037,7 @@ class ProfileUpdatePipeline:
                 profile_builder=self._profile_builder,
                 embedding_service=self._embedding_service,
                 llm_service=getattr(self._preference_analyzer, "registry", None),
+                posture_gate=self._posture_gate,
             )
         except Exception:
             logger.exception("Failed to update layer %s", layer.value)

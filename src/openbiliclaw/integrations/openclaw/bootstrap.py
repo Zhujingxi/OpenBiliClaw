@@ -109,6 +109,10 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         llm=llm_registry,
         memory=memory_manager,
         usage_recorder=usage_recorder,
+        posture_gate_mode=str(getattr(config.soul, "posture_gate_mode", "shadow")),
+        posture_gate_force_enforce=bool(
+            getattr(config.soul, "posture_gate_force_enforce", False)
+        ),
         module_overrides=module_overrides,
         llm_concurrency=llm_concurrency,
         llm_concurrency_gate=llm_gate,

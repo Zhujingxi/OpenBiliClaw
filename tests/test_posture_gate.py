@@ -18,12 +18,16 @@ from openbiliclaw.config import (
     posture_gate_enforce_readiness_issue,
 )
 from openbiliclaw.llm.prompts import build_posture_gate_prompt
+from openbiliclaw.memory.manager import MemoryManager
+from openbiliclaw.soul.engine import SoulEngine
 from openbiliclaw.soul.posture_gate import (
     ACCEPT,
     DOWNGRADE,
     REJECT,
+    GateDecision,
     PostureGate,
 )
+from openbiliclaw.soul.profile import OnionProfile
 
 
 class _FakeResponse:
@@ -251,3 +255,203 @@ def test_save_time_shadow_mode_never_blocks() -> None:
 
 def test_observation_days_constant_is_14() -> None:
     assert POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS == 14
+
+
+# --------------------------------------------------------------------------
+# Task 7: three access-point wiring (matrix of mode × access point)
+# --------------------------------------------------------------------------
+
+
+class _StubGate:
+    """Deterministic gate stand-in for wiring tests (no LLM)."""
+
+    def __init__(self, mode: str, decision: GateDecision) -> None:
+        self._mode = mode
+        self._decision = decision
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self._mode != "off"
+
+    async def evaluate(self, **kwargs: Any) -> GateDecision:
+        self.calls.append(kwargs)
+        return self._decision
+
+
+def _engine(tmp_path: Any) -> SoulEngine:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    class _FR:
+        async def complete(self, *a: Any, **k: Any) -> _FakeResponse:
+            return _FakeResponse("{}")
+
+    return SoulEngine(llm=_FR(), memory=memory)
+
+
+# --- Access point ①: dialogue candidates ---------------------------------
+
+
+async def test_ap1_interest_dislike_bypass_gate(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate("enforce", GateDecision(verdict=REJECT, enforced=True))  # type: ignore[assignment]
+    cands = [{"kind": "interest", "content": "a"}, {"kind": "dislike", "content": "b"}]
+    kept = await engine._gate_dialogue_candidates(cands)
+    assert kept == cands
+    assert engine._posture_gate.calls == []  # type: ignore[attr-defined]
+
+
+async def test_ap1_goal_enforce_reject_dropped(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate("enforce", GateDecision(verdict=REJECT, enforced=True))  # type: ignore[assignment]
+    kept = await engine._gate_dialogue_candidates([{"kind": "goal", "content": "转行"}])
+    assert kept == []
+
+
+async def test_ap1_value_enforce_downgrade_becomes_insight(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate(  # type: ignore[assignment]
+        "enforce", GateDecision(verdict=DOWNGRADE, enforced=True)
+    )
+    kept = await engine._gate_dialogue_candidates(
+        [{"kind": "value", "content": "追求效率", "confidence": 0.9, "evidence": "e"}]
+    )
+    assert kept == []
+    insights = engine._load_insights()
+    assert len(insights) == 1
+    assert insights[0].confidence == round(0.9 * 0.6, 4)
+
+
+async def test_ap1_off_is_byte_identical_passthrough(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate("off", GateDecision(verdict=REJECT, enforced=True))  # type: ignore[assignment]
+    cands = [{"kind": "goal", "content": "转行"}]
+    kept = await engine._gate_dialogue_candidates(cands)
+    assert kept is cands  # untouched, no gate call
+    assert engine._posture_gate.calls == []  # type: ignore[attr-defined]
+
+
+async def test_ap1_shadow_keeps_all(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))  # type: ignore[assignment]
+    cands = [{"kind": "goal", "content": "转行", "confidence": 0.8}]
+    kept = await engine._gate_dialogue_candidates(cands)
+    assert kept == cands
+    assert engine._posture_gate.calls  # judgement scheduled  # type: ignore[attr-defined]
+
+
+# --- Access point ③: soul rebuild ----------------------------------------
+
+
+async def test_ap3_rebuild_enforce_downgrade_abandons(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate(  # type: ignore[assignment]
+        "enforce", GateDecision(verdict=DOWNGRADE, enforced=True)
+    )
+    proceed = await engine._gate_soul_rebuild({"interests": []}, {"interests": [{"name": "x"}]}, [])
+    assert proceed is False
+
+
+async def test_ap3_rebuild_shadow_proceeds(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))  # type: ignore[assignment]
+    proceed = await engine._gate_soul_rebuild({}, {"interests": [{"name": "x"}]}, [])
+    assert proceed is True
+
+
+async def test_ap3_rebuild_off_proceeds_without_gate_call(tmp_path: Any) -> None:
+    engine = _engine(tmp_path)
+    engine._posture_gate = _StubGate("off", GateDecision(verdict=REJECT, enforced=True))  # type: ignore[assignment]
+    proceed = await engine._gate_soul_rebuild({}, {"interests": [{"name": "x"}]}, [])
+    assert proceed is True
+    assert engine._posture_gate.calls == []  # type: ignore[attr-defined]
+
+
+# --- Access point ②: pipeline VALUES/CORE layer --------------------------
+
+
+class _FakeBuilderRegistry:
+    def __init__(self, content: str) -> None:
+        self._content = content
+
+    async def complete_structured_task(self, **kwargs: Any) -> _FakeResponse:
+        return _FakeResponse(self._content)
+
+
+class _FakeBuilder:
+    def __init__(self, content: str) -> None:
+        self.registry = _FakeBuilderRegistry(content)
+
+
+async def test_ap2_values_enforce_downgrade_rolls_back_and_makes_insight(tmp_path: Any) -> None:
+    from openbiliclaw.soul.layer_updaters import update_layer
+    from openbiliclaw.soul.pipeline import OnionLayer
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    profile = OnionProfile()
+    builder = _FakeBuilder('{"changed": true, "values": ["效率"], "reason": "x"}')
+    gate = _StubGate("enforce", GateDecision(verdict=DOWNGRADE, enforced=True))
+    signals = [{"payload": {"event_type": "view", "title": "t", "content": "深度思考"}}]
+
+    result = await update_layer(
+        layer=OnionLayer.VALUES,
+        signals=signals,
+        profile=profile,
+        memory=memory,
+        preference_analyzer=None,
+        profile_builder=builder,
+        posture_gate=gate,
+    )
+    assert result.changed is False
+    assert profile.values_layer.values == []  # rolled back
+    hypotheses = memory.get_layer("insight").data.get("hypotheses", [])
+    assert hypotheses and hypotheses[0]["confidence"] == 0.5
+
+
+async def test_ap2_values_shadow_keeps_write(tmp_path: Any) -> None:
+    from openbiliclaw.soul.layer_updaters import update_layer
+    from openbiliclaw.soul.pipeline import OnionLayer
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    profile = OnionProfile()
+    builder = _FakeBuilder('{"changed": true, "values": ["效率"], "reason": "x"}')
+    gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))
+    signals = [{"payload": {"event_type": "view", "title": "t", "content": "深度思考"}}]
+
+    result = await update_layer(
+        layer=OnionLayer.VALUES,
+        signals=signals,
+        profile=profile,
+        memory=memory,
+        preference_analyzer=None,
+        profile_builder=builder,
+        posture_gate=gate,
+    )
+    assert result.changed is True
+    assert profile.values_layer.values == ["效率"]
+
+
+async def test_ap2_role_layer_is_not_gated(tmp_path: Any) -> None:
+    from openbiliclaw.soul.layer_updaters import update_layer
+    from openbiliclaw.soul.pipeline import OnionLayer
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    profile = OnionProfile()
+    builder = _FakeBuilder('{"changed": false}')
+    gate = _StubGate("enforce", GateDecision(verdict=REJECT, enforced=True))
+    signals = [{"payload": {"event_type": "view", "title": "t"}}]
+
+    await update_layer(
+        layer=OnionLayer.ROLE,
+        signals=signals,
+        profile=profile,
+        memory=memory,
+        preference_analyzer=None,
+        profile_builder=builder,
+        posture_gate=gate,
+    )
+    assert gate.calls == []  # ROLE bypasses the gate

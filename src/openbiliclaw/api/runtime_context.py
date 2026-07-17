@@ -659,6 +659,10 @@ class RuntimeContext:
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             satisfaction_filter_enabled=satisfaction_filter_enabled,
+            posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
+            posture_gate_force_enforce=bool(
+                getattr(soul_cfg, "posture_gate_force_enforce", False)
+            ),
             module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
             llm_concurrency_gate=new_llm_gate,

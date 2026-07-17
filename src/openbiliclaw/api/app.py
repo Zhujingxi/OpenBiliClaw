@@ -647,7 +647,7 @@ def _posture_gate_enforce_issue(cfg: Any, database: Any | None) -> Any | None:
 
     if str(getattr(cfg.soul, "posture_gate_mode", "")).strip().lower() != "enforce":
         return None
-    stats = {"earliest_valid_at": "", "valid_count_14d": 0, "valid_count_7d": 0}
+    stats: dict[str, Any] = {"earliest_valid_at": "", "valid_count_14d": 0, "valid_count_7d": 0}
     getter = getattr(database, "posture_gate_shadow_stats", None) if database is not None else None
     if callable(getter):
         try:

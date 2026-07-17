@@ -68,6 +68,16 @@ def _json_object(value: object) -> dict[str, JSONValue]:
     return value if isinstance(value, dict) else {}
 
 
+# Deep layers whose writes pass the posture gate (access point ②). SURFACE /
+# INTEREST are the fast line; ROLE is intentionally NOT gated — it captures usage
+# patterns whose mis-inference is cheap (calibration: spec §Phase 3 접입점②).
+_GATED_LAYERS = frozenset({OnionLayer.VALUES, OnionLayer.CORE})
+# Fixed downgrade confidence for a gated layer change demoted to a hypothesis —
+# the layer diff carries no per-candidate confidence (spec §Phase 3). Revisit
+# after a provider swap (pitfall #3).
+_LAYER_DOWNGRADE_CONFIDENCE = 0.5
+
+
 async def update_layer(
     *,
     layer: OnionLayer,
@@ -78,11 +88,26 @@ async def update_layer(
     profile_builder: ProfileBuilder,
     embedding_service: Any | None = None,
     llm_service: Any | None = None,
+    posture_gate: Any | None = None,
 ) -> LayerUpdateResult:
-    """Dispatch to the appropriate layer updater."""
+    """Dispatch to the appropriate layer updater.
+
+    VALUES/CORE changes pass the posture gate (access point ②) when one is
+    attached and enabled. Under enforce a reject/downgrade rolls the mutated
+    layer back to its pre-update snapshot; a downgrade additionally records an
+    insight hypothesis (fixed confidence 0.5). off/shadow/accept keep the write.
+    """
     updater: LayerUpdater | None = _LAYER_UPDATERS.get(layer)
     if updater is None:
         return LayerUpdateResult(layer=layer, changed=False)
+
+    gate_active = (
+        posture_gate is not None
+        and getattr(posture_gate, "enabled", False)
+        and layer in _GATED_LAYERS
+    )
+    snapshot = _snapshot_layer(profile, layer) if gate_active else None
+
     result = await updater(
         signals=signals,
         profile=profile,
@@ -92,6 +117,24 @@ async def update_layer(
         embedding_service=embedding_service,
         llm_service=llm_service,
     )
+
+    if result.changed and gate_active and posture_gate is not None:
+        decision = await posture_gate.evaluate(
+            write_point=f"pipeline_layer_{getattr(layer, 'value', layer)}",
+            change={"layer": getattr(layer, "value", str(layer)), "changes": list(result.changes)},
+            core_memory=_core_memory(memory),
+            ledger_digest=_gate_ledger_digest(memory),
+            source_refs=list(result.changes) or [f"layer:{getattr(layer, 'value', layer)}"],
+        )
+        if decision.blocks:
+            _restore_layer(profile, layer, snapshot)
+            if decision.downgraded:
+                _record_layer_downgrade_insight(memory=memory, layer=layer, result=result)
+            _record_layer_ledger(
+                memory=memory, layer=layer, result=result, gate_verdict=decision.verdict
+            )
+            return LayerUpdateResult(layer=layer, changed=False)
+
     # Ledger write point D5 #3: pipeline per-layer updater persistence. One row
     # per layer that actually changed (a no-op update writes nothing).
     if result.changed:
@@ -99,23 +142,106 @@ async def update_layer(
     return result
 
 
-def _record_layer_ledger(
+def _snapshot_layer(profile: OnionProfile, layer: OnionLayer) -> Any:
+    """Deep-copy the mutable sub-object a gated layer updater will mutate."""
+    if layer == OnionLayer.VALUES:
+        return deepcopy(profile.values_layer)
+    if layer == OnionLayer.CORE:
+        return deepcopy(profile.core)
+    return None
+
+
+def _restore_layer(profile: OnionProfile, layer: OnionLayer, snapshot: Any) -> None:
+    """Roll a gated layer back to its pre-update snapshot (gate rejected)."""
+    if snapshot is None:
+        return
+    if layer == OnionLayer.VALUES:
+        profile.values_layer = snapshot
+    elif layer == OnionLayer.CORE:
+        profile.core = snapshot
+
+
+def _core_memory(memory: MemoryManager) -> dict[str, Any]:
+    getter = getattr(memory, "get_core_memory", None)
+    if callable(getter):
+        try:
+            value = getter()
+            if isinstance(value, dict):
+                return value
+        except Exception:
+            return {}
+    return {}
+
+
+def _gate_ledger_digest(memory: MemoryManager) -> list[dict[str, Any]]:
+    db = getattr(memory, "_database", None)
+    query = getattr(db, "query_profile_ledger", None)
+    if not callable(query):
+        return []
+    try:
+        rows = query(days=30, limit=30)
+    except Exception:
+        return []
+    return [
+        {
+            "write_point": str(row.get("write_point", "")),
+            "outcome": str(row.get("outcome", "")),
+            "gate_verdict": str(row.get("gate_verdict", "")),
+        }
+        for row in rows
+    ]
+
+
+def _record_layer_downgrade_insight(
     *,
     memory: MemoryManager,
     layer: OnionLayer,
     result: LayerUpdateResult,
 ) -> None:
+    """Persist a downgraded VALUES/CORE change as an insight hypothesis (0.5)."""
+    from openbiliclaw.soul.profile import InsightHypothesis, insight_hypothesis_to_dict
+
+    layer_name = getattr(layer, "value", str(layer))
+    hypothesis = InsightHypothesis(
+        hypothesis=f"[{layer_name}] " + "; ".join(result.changes),
+        evidence=list(result.changes),
+        confidence=_LAYER_DOWNGRADE_CONFIDENCE,
+    )
+    try:
+        insight_layer = memory.get_layer("insight")
+        existing = insight_layer.data.get("hypotheses", [])
+        existing_list = list(existing) if isinstance(existing, list) else []
+        existing_list.append(insight_hypothesis_to_dict(hypothesis))
+        insight_layer.data["hypotheses"] = existing_list
+        insight_layer.save()
+    except Exception:
+        logger.debug("failed to persist downgraded layer insight", exc_info=True)
+
+
+def _record_layer_ledger(
+    *,
+    memory: MemoryManager,
+    layer: OnionLayer,
+    result: LayerUpdateResult,
+    gate_verdict: str = "",
+) -> None:
     from openbiliclaw.soul.ledger import ProfileLedger
 
     ledger = ProfileLedger(getattr(memory, "_database", None))
     layer_name = getattr(layer, "value", str(layer))
+    gated_out = gate_verdict in {"downgrade", "reject"}
     ledger.record(
         write_point="pipeline_layer_update",
         source=f"pipeline:{layer_name}",
         before={"layer": layer_name},
-        after={"layer": layer_name, "changes": list(result.changes)},
+        after={
+            "layer": layer_name,
+            "changes": list(result.changes),
+            "gated_out": gated_out,
+        },
         source_refs=list(result.changes) or [f"layer:{layer_name}"],
-        outcome="success",
+        outcome="failed" if gated_out else "success",
+        gate_verdict=gate_verdict,
     )
 
 

@@ -39,6 +39,7 @@ from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
 from .pipeline import ProfileUpdatePipeline
+from .posture_gate import PostureGate
 from .preference_analyzer import (
     DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
     INIT_COGNITION_CONTEXT_KEY,
@@ -57,6 +58,10 @@ from .profile_builder import ProfileBuilder
 from .speculator import InterestSpeculator
 
 logger = logging.getLogger(__name__)
+
+# Dialogue candidate kinds that write DEEP profile layers and therefore pass the
+# posture gate (access point ①). interest/dislike take the fast line unchanged.
+_DEEP_CANDIDATE_KINDS = frozenset({"goal", "value", "state"})
 
 
 def _memory_database(memory: Any) -> Any | None:
@@ -168,6 +173,8 @@ class SoulEngine:
         profile_consolidation_like_target_soft: int = 450,
         profile_consolidation_archive_enabled: bool = True,
         feedback_batch_threshold: int = 3,
+        posture_gate_mode: str = "shadow",
+        posture_gate_force_enforce: bool = False,
         database: Any | None = None,
     ) -> None:
         self._llm = llm
@@ -277,6 +284,19 @@ class SoulEngine:
         attach_ledger = getattr(self._speculator, "attach_ledger", None)
         if callable(attach_ledger):
             attach_ledger(self._ledger)
+        # Phase 3 posture gate over deep writes (dialogue deep candidates /
+        # pipeline VALUES+CORE / soul rebuild). shadow (default) is a zero-delay
+        # async side-channel; off is a byte-identical bypass. The pipeline shares
+        # the same instance so its VALUES/CORE updater gates through it.
+        self._posture_gate = PostureGate(
+            mode=posture_gate_mode,
+            registry=self._llm_service,
+            ledger=self._ledger,
+            background_tasks=self._background_edit_tasks,
+        )
+        set_gate = getattr(self._pipeline, "set_posture_gate", None)
+        if callable(set_gate):
+            set_gate(self._posture_gate)
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or update the embedding service after construction.
@@ -929,6 +949,21 @@ class SoulEngine:
                 "profile_rebuilt": False,
             }
 
+        # Posture-gate access point ① (Phase 3): interest/dislike take the fast
+        # line unchanged; goal/value/state deep candidates pass the gate. In
+        # ``off`` this is a no-op (byte-identical feed); in ``shadow`` every deep
+        # candidate stays but its judgement is recorded asynchronously; only
+        # ``enforce`` drops rejected candidates and demotes downgraded ones to
+        # insight hypotheses (confidence × 0.6).
+        gated_candidates = await self._gate_dialogue_candidates(eligible_candidates)
+        if not gated_candidates:
+            return {
+                "event_logged": True,
+                "candidate_count": len(extracted),
+                "preference_updated": False,
+                "profile_rebuilt": False,
+            }
+
         preference_layer = self._memory.get_layer("preference")
         existing_preference = dict(preference_layer.data)
         existing_profile = dict(self._memory.get_layer("soul").data)
@@ -945,7 +980,7 @@ class SoulEngine:
                         "occurrences": item.get("occurrences", 1),
                     },
                 }
-                for item in eligible_candidates
+                for item in gated_candidates
             ],
             existing_preference=existing_preference,
         )
@@ -1018,7 +1053,11 @@ class SoulEngine:
             )
 
         profile_rebuilt = False
-        if self._preference_changed_significantly(existing_preference, updated_preference):
+        if self._preference_changed_significantly(
+            existing_preference, updated_preference
+        ) and await self._gate_soul_rebuild(
+            existing_preference, updated_preference, candidate_refs
+        ):
             # Ledger write point D5 #1b: dialogue-driven full soul rebuild.
             try:
                 with self._ledger.action(
@@ -1671,6 +1710,140 @@ class SoulEngine:
             outcome="success" if terminal else "failed",
             turn_id=turn_id,
         )
+
+    # -- Posture gate (Phase 3) ----------------------------------------------
+
+    def _ledger_digest_for_gate(self) -> list[dict[str, object]]:
+        """Compact 30-day ledger digest fed to the posture gate as context."""
+        query = getattr(self._ledger_database, "query_profile_ledger", None)
+        if not callable(query):
+            return []
+        try:
+            rows = query(days=30, limit=30)
+        except Exception:
+            return []
+        digest: list[dict[str, object]] = []
+        for row in rows:
+            digest.append(
+                {
+                    "write_point": str(row.get("write_point", "")),
+                    "source": str(row.get("source", "")),
+                    "outcome": str(row.get("outcome", "")),
+                    "gate_verdict": str(row.get("gate_verdict", "")),
+                }
+            )
+        return digest
+
+    async def _gate_dialogue_candidates(
+        self, candidates: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        """Access point ①: gate goal/value/state candidates (Phase 3).
+
+        ``off`` returns the input untouched (byte-identical feed). Otherwise
+        interest/dislike pass through; deep kinds are judged. Under enforce a
+        rejected candidate is dropped and a downgraded one is demoted to an
+        insight hypothesis (confidence × 0.6). Shadow keeps every candidate (its
+        judgement is recorded asynchronously).
+        """
+        if not self._posture_gate.enabled:
+            return candidates
+        core_memory = self._memory.get_core_memory()
+        ledger_digest = self._ledger_digest_for_gate()
+        kept: list[dict[str, object]] = []
+        downgraded: list[InsightHypothesis] = []
+        for item in candidates:
+            kind = str(item.get("kind", "")).strip()
+            if kind not in _DEEP_CANDIDATE_KINDS:
+                kept.append(item)
+                continue
+            content = str(item.get("content", ""))
+            decision = await self._posture_gate.evaluate(
+                write_point="dialogue_deep_candidate",
+                change={
+                    "kind": kind,
+                    "content": content,
+                    "confidence": item.get("confidence", 0.0),
+                    "evidence": item.get("evidence", ""),
+                },
+                core_memory=core_memory,
+                ledger_digest=ledger_digest,
+                source_refs=[f"{kind}:{content[:60]}"],
+            )
+            if not decision.blocks:
+                kept.append(item)
+                continue
+            # enforce reject / downgrade: excluded from the deep write.
+            if decision.downgraded:
+                downgraded.append(self._candidate_to_insight(item))
+        if downgraded:
+            self._persist_downgraded_insights(downgraded)
+        return kept
+
+    def _candidate_to_insight(self, item: dict[str, object]) -> InsightHypothesis:
+        """Demote a downgraded deep candidate to a hypothesis (confidence × 0.6)."""
+        raw_conf = item.get("confidence", 0.0)
+        try:
+            confidence = float(raw_conf)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            confidence = 0.0
+        evidence_text = str(item.get("evidence", "")).strip()
+        return InsightHypothesis(
+            hypothesis=str(item.get("content", "")).strip(),
+            evidence=[evidence_text] if evidence_text else [],
+            confidence=round(max(0.0, min(1.0, confidence)) * 0.6, 4),
+        )
+
+    def _persist_downgraded_insights(self, insights: list[InsightHypothesis]) -> None:
+        existing = self._load_insights()
+        self._save_insights(existing + insights)
+        for insight in insights:
+            self._ledger.record(
+                write_point="posture_gate_downgrade_insight",
+                source="posture_gate",
+                after={"hypothesis": insight.hypothesis[:80], "confidence": insight.confidence},
+                source_refs=[insight.hypothesis[:60]],
+                gate_verdict="downgrade",
+            )
+
+    async def _gate_soul_rebuild(
+        self,
+        existing_preference: dict[str, object],
+        updated_preference: dict[str, object],
+        candidate_refs: list[str],
+    ) -> bool:
+        """Access point ③: gate a full soul rebuild (Phase 3).
+
+        Returns True if the rebuild should proceed. ``off``/``shadow``/accept →
+        proceed; enforce downgrade/reject → abandon this rebuild (no hypothesis
+        to convert — a rebuild carries no single candidate) and record a ledger
+        row. ``off`` never calls the gate (byte-identical).
+        """
+        if not self._posture_gate.enabled:
+            return True
+        core_memory = self._memory.get_core_memory()
+        decision = await self._posture_gate.evaluate(
+            write_point="dialogue_soul_rebuild",
+            change={
+                "kind": "soul_rebuild",
+                "before_interests": existing_preference.get("interests", []),
+                "after_interests": updated_preference.get("interests", []),
+            },
+            core_memory=core_memory,
+            ledger_digest=self._ledger_digest_for_gate(),
+            source_refs=candidate_refs,
+        )
+        if decision.blocks:
+            self._ledger.record(
+                write_point="dialogue_soul_rebuild",
+                source="posture_gate",
+                before={"rebuild": "requested"},
+                after={"rebuild": "abandoned", "verdict": decision.verdict},
+                source_refs=candidate_refs,
+                gate_verdict=decision.verdict,
+                outcome="failed",
+            )
+            return False
+        return True
 
     @staticmethod
     def _candidate_ledger_refs(candidates: list[dict[str, object]]) -> list[str]:

@@ -671,6 +671,8 @@ def _build_soul_engine() -> Any:
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
+        posture_gate_mode=cfg.soul.posture_gate_mode,
+        posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
         module_overrides=module_overrides_from_config(cfg),
         llm_concurrency=cfg.llm.concurrency,
         llm_concurrency_gate=_build_llm_concurrency_gate(),
