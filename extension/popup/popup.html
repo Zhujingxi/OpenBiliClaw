@@ -596,134 +596,23 @@
       overflow-wrap: anywhere;
     }
 
-
-
-
-
-
-
-
-
-
     /* 16:9 cover — same visual treatment as .recommendation-cover.
        Inset highlight, pink/blue gradient backdrop, and a bottom
        darkening scrim so a ✨ badge overlay reads in any light/dark
        cover image. */
 
-
-
-
     /* ✨ overlay badge — instant "this one is special" marker. */
 
     /* Bottom scrim to keep covers readable + match rec-card style */
-
-
-
-
-
-
-
-
-
-
-
-
 
     /* Nav buttons (‹ / ›). 28×28 visible target plus a transparent
        ::before that extends the hit area to 36×36 — keeps the visual
        compact in the kicker row while staying comfortably clickable
        in a popup. */
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     /* Reveal full title once the user has chosen to expand the banner —
        collapsed state still respects the row-height budget with a
        3-line clamp, but the expanded state shouldn't hide content. */
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     .recommendation-list,
     .chat-shell {
@@ -1036,8 +925,6 @@
         gap: 8px;
       }
 
-
-
       .recommendation-card {
         padding: 6px;
       }
@@ -1082,8 +969,6 @@
         gap: 4px;
         justify-content: space-between;
       }
-
-
 
       .action-button {
         min-height: 30px;
@@ -1224,8 +1109,6 @@
       background: rgba(230, 240, 255, 0.96);
       color: var(--text-main);
     }
-
-
 
     .chat-input {
       width: 100%;
@@ -1402,19 +1285,6 @@
       border-bottom: 1px solid rgba(231, 238, 248, 0.6);
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     /* ── Interest tree (domain → specifics) ── */
     .interest-tree {
       margin-top: 10px;
@@ -1560,20 +1430,6 @@
       white-space: nowrap;
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     .spec-specific-chip {
       display: inline-flex;
       align-items: center;
@@ -1597,52 +1453,6 @@
       color: #fff;
       background: #c57b2e;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /* ── Editable profile (Phase 2) ── */
     .profile-edit-bar {
@@ -1872,128 +1682,6 @@
       color: var(--brand-strong);
       font-variant-numeric: tabular-nums;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     .empty-state {
       padding: 28px 20px;
@@ -2343,9 +2031,6 @@
     .chat-thinking-label {
       letter-spacing: 0.02em;
     }
-
-
-
 
     @keyframes chat-thinking-fadein {
       from { opacity: 0; transform: translateY(4px); }
@@ -2731,11 +2416,6 @@
       white-space: nowrap;
     }
 
-
-
-
-
-
     /* ── Mobile QR overlay ───────────────────────────────────── */
 
     .mobile-overlay {
@@ -2831,60 +2511,6 @@
       gap: 8px;
       width: 100%;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /* ── Settings panel ─────────────────────────────────────── */
 
@@ -3161,14 +2787,6 @@
 
     .settings-secondary-btn:hover { border-color: var(--sky); }
 
-
-
-
-
-
-
-
-
     .settings-link {
       color: var(--brand-strong);
       font-weight: 700;
@@ -3197,51 +2815,6 @@
       display: flex;
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     .settings-field > span {
       font-size: 10.5px;
       font-weight: 800;
@@ -3255,64 +2828,6 @@
       font-size: 10px;
       line-height: 1.45;
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     .small-btn {
       padding: 6px 8px;
@@ -3329,28 +2844,6 @@
       border-color: rgba(251, 114, 153, 0.42);
       background: var(--brand-soft);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     .settings-actions {
       display: flex;
@@ -3463,130 +2956,11 @@
     }
 
     /* 保存动作：稍后再看=时钟 / 收藏=星星 SVG 图标按钮 */
-    .saved-toggle {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 38px;
-    }
-
-
-    .saved-toggle svg { width: 16px; height: 16px; }
-    .saved-toggle.watch-later-btn[aria-pressed="true"] {
-      color: var(--brand, #fb7299);
-      background: var(--brand-soft, rgba(251, 114, 153, 0.12));
-    }
-    .saved-toggle.favorite-btn[aria-pressed="true"] {
-      color: #e8a33d;
-      background: rgba(232, 163, 61, 0.12);
-    }
-    .saved-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
 
     /* ── Favorites view (收藏夹) ───────────────────────────── */
-    .saved-card {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 10px;
-      border: 1px solid var(--border, rgba(0,0,0,0.08));
-      border-radius: 12px;
-      background: var(--surface, #fff);
-      margin-bottom: 8px;
-    }
-    .saved-card-open {
-      flex: 1;
-      min-width: 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      text-align: left;
-      border: none;
-      background: transparent;
-      cursor: pointer;
-      padding: 0;
-    }
-    .saved-card-cover {
-      position: relative;
-      width: 84px;
-      aspect-ratio: 16 / 9;
-      flex: 0 0 84px;
-      overflow: hidden;
-      border-radius: 8px;
-      background:
-        linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 249, 255, 0.92)),
-        linear-gradient(145deg, rgba(251, 114, 153, 0.12), rgba(90, 169, 255, 0.12));
-      border: 1px solid rgba(230, 237, 248, 0.96);
-    }
-    .saved-card-cover img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    .saved-card-copy {
-      min-width: 0;
-      flex: 1;
-    }
-    .saved-card-title {
-      font-size: 13px;
-      line-height: 1.35;
-      max-height: 2.7em;
-      overflow: hidden;
-      color: var(--text, #1a1a1a);
-    }
-    .saved-card-up {
-      margin-top: 3px;
-      font-size: 11px;
-      color: var(--text-muted, #888);
-    }
-    .saved-card-remove {
-      flex-shrink: 0;
-      border: none;
-      background: transparent;
-      color: var(--text-muted, #888);
-      font-size: 12px;
-      cursor: pointer;
-      padding: 4px 8px;
-      border-radius: 8px;
-    }
-    .saved-card-remove:hover {
-      background: var(--brand-soft, rgba(200,85,61,0.1));
-      color: var(--brand, #c8553d);
-    }
-
-
-    .saved-card-actions {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      flex-shrink: 0;
-    }
-    .saved-card-remove {
-      min-height: 36px;
-      border: 0;
-      border-radius: 8px;
-      padding: 6px 8px;
-      cursor: pointer;
-      color: var(--text-muted, #777);
-      background: transparent;
-    }
-
-
-    .saved-card-remove:focus-visible {
-      outline: 2px solid var(--brand, #c8553d);
-      outline-offset: 2px;
-    }
-
-
-
-
-
-
 
     @media (max-width: 520px), (pointer: coarse) {
-      .saved-toggle { min-width: 44px; min-height: 44px; }
-      .saved-card-remove,
-    .saved-load-retry { min-width: 44px; min-height: 44px; }
+
     }
 
     /* vNext keeps the original popup visual system; these two affordances did

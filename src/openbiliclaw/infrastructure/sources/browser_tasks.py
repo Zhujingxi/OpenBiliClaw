@@ -78,12 +78,9 @@ class SQLAlchemyBrowserTaskRepository:
         self,
         *,
         source_id: str,
-        allowed_operations: frozenset[str],
         lease_token: str,
         lease_seconds: int,
     ) -> ClaimedSourceTask | None:
-        if not allowed_operations:
-            return None
         self._abandon_expired(source_id=source_id)
         claimable = and_(
             _database_time_is_before(SourceTaskModel.request_deadline_at),
@@ -100,7 +97,6 @@ class SQLAlchemyBrowserTaskRepository:
                 select(SourceTaskModel.id)
                 .where(
                     SourceTaskModel.source_id == source_id,
-                    SourceTaskModel.operation.in_(allowed_operations),
                     claimable,
                 )
                 .order_by(SourceTaskModel.created_at, SourceTaskModel.id)
@@ -349,7 +345,6 @@ class QueuedBrowserTransport:
         )
         if self._cleanup_timeout <= 0:
             raise ValueError("browser transport cleanup timeout must be positive")
-        self._late_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def fetch(
         self, *, operation: str, query: str | None, limit: int
@@ -392,60 +387,22 @@ class QueuedBrowserTransport:
                         )
                     await asyncio.sleep(self._poll_interval)
         except BaseException as original_error:
-            cleanup_task = asyncio.create_task(self._compensate(enqueue_task, task_id))
-            await self._await_cleanup_resistant(cleanup_task)
+            await self._compensate(enqueue_task, task_id)
             raise original_error
 
     async def _compensate(self, enqueue_task: asyncio.Task[UUID], task_id: UUID) -> None:
-        """Try to cancel a persisted row within the finite local persistence bound."""
+        """Resolve persistence and terminalize its row before the parent may unwind."""
 
         try:
-            async with asyncio.timeout(self._cleanup_timeout):
-                try:
-                    await asyncio.shield(enqueue_task)
-                except Exception:
-                    return
-                await asyncio.to_thread(self._service.cancel, task_id)
-        except TimeoutError:
-            enqueue_task.add_done_callback(
-                lambda task: self._handle_late_enqueue_outcome(task, task_id)
-            )
-            logger.warning("source task cleanup reached its persistence deadline")
-        except Exception as error:
-            logger.warning("source task cleanup failed (%s)", type(error).__name__)
-
-    async def _await_cleanup_resistant(self, cleanup_task: asyncio.Task[None]) -> None:
-        """Ignore repeated parent cancellation until cleanup finishes or reaches its own bound."""
-
-        while not cleanup_task.done():
-            try:
-                await asyncio.shield(cleanup_task)
-            except asyncio.CancelledError:
-                continue
-            except BaseException as error:
-                logger.warning("source task cleanup failed (%s)", type(error).__name__)
-                break
-
-    def _handle_late_enqueue_outcome(
-        self, enqueue_task: asyncio.Task[UUID], task_id: UUID
-    ) -> None:
-        """Terminalize a successful insert that finished after local compensation returned."""
-
-        if not _consume_late_enqueue_outcome(enqueue_task):
-            return
-        cleanup_task = asyncio.create_task(self._cancel_late_enqueue(task_id))
-        self._late_cleanup_tasks.add(cleanup_task)
-        cleanup_task.add_done_callback(self._late_cleanup_tasks.discard)
-
-    async def _cancel_late_enqueue(self, task_id: UUID) -> None:
-        try:
-            await asyncio.to_thread(self._service.cancel, task_id)
-        except asyncio.CancelledError:
-            return
+            await _await_task_resistant(enqueue_task)
         except BaseException as error:
-            # Never include exception messages: database/adapter errors may
-            # contain persisted payload or credential-adjacent diagnostics.
-            logger.warning("late source task cancellation failed (%s)", type(error).__name__)
+            logger.warning("source task enqueue cleanup failed (%s)", type(error).__name__)
+            return
+        cancel_task = asyncio.create_task(asyncio.to_thread(self._service.cancel, task_id))
+        try:
+            await _await_task_resistant(cancel_task)
+        except BaseException as error:
+            logger.warning("source task cleanup failed (%s)", type(error).__name__)
 
 
 def _aware(value: datetime) -> datetime:
@@ -485,14 +442,12 @@ def _database_time_is_at_or_after(column: Any) -> Any:
     return func.julianday(column) <= func.julianday("now")
 
 
-def _consume_late_enqueue_outcome(task: asyncio.Task[UUID]) -> bool:
-    """Retrieve a late enqueue result so its exception never reaches the loop handler."""
+async def _await_task_resistant(task: asyncio.Task[Any]) -> Any:
+    """Await owned thread work despite repeated cancellation of its parent task."""
 
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return False
-    except BaseException as error:
-        logger.warning("late source task enqueue failed (%s)", type(error).__name__)
-        return False
-    return True
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()

@@ -43,6 +43,33 @@ export function recordInteraction(contentId, kind, surface) {
   });
 }
 
+export async function saveContentToLibrary(
+  collection,
+  contentId,
+  surface,
+  { libraryPersisted = false } = {},
+) {
+  if (!libraryPersisted) {
+    try {
+      await request("v1_library_add", {
+        path: { collection },
+        body: { content_id: contentId, note: "" },
+      });
+    } catch (error) {
+      if (error?.status !== 409) throw error;
+    }
+  }
+
+  const interactionKind =
+    collection === "favorites" ? "save_favorite" : "save_watch_later";
+  try {
+    await recordInteraction(contentId, interactionKind, surface);
+    return { libraryPersisted: true, interactionPending: false };
+  } catch {
+    return { libraryPersisted: true, interactionPending: true };
+  }
+}
+
 export const escapeHtml = (value) =>
   String(value ?? "")
     .replaceAll("&", "&amp;")

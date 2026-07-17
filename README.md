@@ -41,7 +41,7 @@ flowchart LR
     AI --> PYD["PydanticAI"]
     PYD --> LLM["LiteLLM Proxy"]
     REPOS --> DB["SQLite + Alembic"]
-    DB -. "per-job source settings refresh" .-> SOURCES
+    DB -. "per-operation API / per-job worker source settings" .-> SOURCES
     JOBS --> QUEUE["Separate Huey SQLite"]
     LLM --> PG["LiteLLM PostgreSQL"]
 ```

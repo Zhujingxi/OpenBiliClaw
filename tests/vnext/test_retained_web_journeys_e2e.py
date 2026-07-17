@@ -95,6 +95,8 @@ def _settings(onboarding_complete: bool) -> dict[str, Any]:
 
 @dataclass
 class StubState:
+    auth_enabled: bool = False
+    authenticated: bool = True
     onboarding_complete: bool = True
     onboarding_result: str = "succeeded"
     fail_interaction: bool = False
@@ -184,7 +186,13 @@ def retained_server() -> tuple[str, StubState]:
             if self._static(path):
                 return
             if path == "/api/v1/auth/status":
-                return _json(self, {"enabled": False, "authenticated": True})
+                return _json(
+                    self,
+                    {
+                        "enabled": state.auth_enabled,
+                        "authenticated": state.authenticated,
+                    },
+                )
             if path == "/api/v1/system/readiness":
                 return _json(self, {"ready": True, "version": "test", "checks": []})
             if path == "/api/v1/settings":
@@ -263,9 +271,16 @@ def retained_server() -> tuple[str, StubState]:
                     )
                 state.collections[collection].add(payload["content_id"])
                 return _json(self, _library_item(collection)["collection_item"], 201)
-            if path == "/api/v1/onboarding":
+            if path == "/api/v1/onboarding/start":
                 return _json(self, {"id": "55555555-5555-4555-8555-555555555555"}, 202)
             if path == "/api/v1/auth/login":
+                if payload.get("password") != "correct horse":
+                    return _json(
+                        self,
+                        {"error": {"code": "invalid_password", "message": "密码不正确"}},
+                        401,
+                    )
+                state.authenticated = True
                 return _json(self, {"authenticated": True})
             self.send_error(404)
 
@@ -299,7 +314,7 @@ def retained_server() -> tuple[str, StubState]:
 @pytest.fixture()
 def browser_page() -> Page:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(channel="chrome", headless=True)
+        browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         yield page
         browser.close()
@@ -308,40 +323,40 @@ def browser_page() -> Page:
 def _install_popup_chrome(page: Page, base_url: str) -> None:
     port = int(base_url.rsplit(":", 1)[-1])
     page.add_init_script(
-        """
-        ({port}) => {
-          const values = {
-            popup_backend_endpoint: {scheme: "http", host: "127.0.0.1", port},
+        script=f"""
+        (() => {{
+          const port = {json.dumps(port)};
+          const values = {{
+            popup_backend_endpoint: {{scheme: "http", host: "127.0.0.1", port}},
             obc_extension_device_key: "device-key",
-            obc_auth_session: {token: "session", expires_at: 2000000000},
-          };
-          window.chrome = {
-            storage: {
-              local: {
-                get(keys, callback) {
+            obc_auth_session: {{token: "session", expires_at: 2000000000}},
+          }};
+          window.chrome = {{
+            storage: {{
+              local: {{
+                get(keys, callback) {{
                   const selected = Array.isArray(keys) ? keys : [keys];
                   const entries = selected
                     .filter(key => key in values)
                     .map(key => [key, values[key]]);
                   callback(Object.fromEntries(entries));
-                },
-                set(items, callback) { Object.assign(values, items); callback?.(); },
-                remove(keys, callback) {
+                }},
+                set(items, callback) {{ Object.assign(values, items); callback?.(); }},
+                remove(keys, callback) {{
                   for (const key of (Array.isArray(keys) ? keys : [keys])) delete values[key];
                   callback?.();
-                },
-              },
-              onChanged: { addListener() {} },
-            },
-            tabs: { async create() {} },
-            permissions: {
-              contains(_details, callback) { callback(true); },
-              request(_details, callback) { callback(true); },
-            },
-          };
-        }
+                }},
+              }},
+              onChanged: {{ addListener() {{}} }},
+            }},
+            tabs: {{ async create() {{}} }},
+            permissions: {{
+              contains(_details, callback) {{ callback(true); }},
+              request(_details, callback) {{ callback(true); }},
+            }},
+          }};
+        }})()
         """,
-        arg={"port": port},
     )
 
 
@@ -352,7 +367,7 @@ def _install_popup_chrome(page: Page, base_url: str) -> None:
         ("mobile", "/m/#/recommend", '[data-kind="positive"]', '[data-save="favorites"]'),
     ],
 )
-def test_failed_retained_writes_never_mark_controls_successful(
+def test_failed_writes_and_partial_saves_keep_truthful_retryable_state(
     retained_server: tuple[str, StubState],
     browser_page: Page,
     surface: str,
@@ -375,10 +390,28 @@ def test_failed_retained_writes_never_mark_controls_successful(
 
     save = card.locator(save_selector)
     save.click()
-    browser_page.wait_for_timeout(100)
+    expect(save).to_be_enabled()
     expect(save).not_to_have_attribute("aria-pressed", "true")
     assert save.evaluate("button => !button.classList.contains('active')")
     assert state.collections["favorites"] == set()
+
+    state.fail_library_add = False
+    save.click()
+    _wait_until(lambda: CONTENT_ID in state.collections["favorites"])
+    expect(save).to_have_attribute("aria-pressed", "true")
+    expect(save).to_have_attribute("data-library-persisted", "true")
+    expect(save).to_have_attribute("data-interaction-pending", "true")
+    add_count = sum(
+        request["path"] == "/api/v1/library/favorites" for request in state.requests
+    )
+
+    state.fail_interaction = False
+    save.click()
+    _wait_until(lambda: any(item["kind"] == "save_favorite" for item in state.interactions))
+    expect(save).not_to_have_attribute("data-interaction-pending", "true")
+    assert sum(
+        request["path"] == "/api/v1/library/favorites" for request in state.requests
+    ) == add_count
 
 
 @pytest.mark.parametrize(
@@ -401,6 +434,11 @@ def test_favorites_add_list_and_remove_round_trip(
     browser_page.locator(card_selector).locator('[data-save="favorites"]').click()
     _wait_until(lambda: CONTENT_ID in state.collections["favorites"])
 
+    if url == "/web/":
+        browser_page.locator("#sideDrawerBtn").click()
+        expect(browser_page.locator("#sideDrawer")).to_have_attribute(
+            "aria-hidden", "false"
+        )
     browser_page.locator(tab_selector).click()
     saved = browser_page.locator(list_selector).locator(card_selector)
     expect(saved).to_have_count(1)
@@ -464,6 +502,44 @@ def test_popup_onboarding_error_is_retryable_and_success_enters_product(
     start.click()
     expect(browser_page.locator(".tabs-shell")).to_be_visible()
     assert state.onboarding_complete is True
+
+
+@pytest.mark.parametrize(
+    ("url", "gate_selector", "password_selector", "submit_selector", "error_selector"),
+    [
+        ("/web/", "#loginGate", "#loginPassword", "#loginForm button", "#loginError"),
+        (
+            "/m/#/recommend",
+            ".login-view",
+            "#mobilePassword",
+            "#mobileLogin button",
+            "#mobileLoginError",
+        ),
+    ],
+)
+def test_password_login_recovers_the_retained_surface(
+    retained_server: tuple[str, StubState],
+    browser_page: Page,
+    url: str,
+    gate_selector: str,
+    password_selector: str,
+    submit_selector: str,
+    error_selector: str,
+) -> None:
+    base_url, state = retained_server
+    state.auth_enabled = True
+    state.authenticated = False
+    browser_page.goto(base_url + url)
+    expect(browser_page.locator(gate_selector)).to_be_visible()
+
+    browser_page.locator(password_selector).fill("wrong")
+    browser_page.locator(submit_selector).click()
+    expect(browser_page.locator(error_selector)).to_contain_text("密码不正确")
+
+    browser_page.locator(password_selector).fill("correct horse")
+    browser_page.locator(submit_selector).click()
+    expect(browser_page.locator(".video-card" if url == "/web/" else ".rec-card")).to_have_count(1)
+    assert state.authenticated is True
 
 
 def test_ids_used_by_browser_contract_are_valid_uuids() -> None:

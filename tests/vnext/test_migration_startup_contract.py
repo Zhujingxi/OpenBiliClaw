@@ -15,12 +15,17 @@ from sqlalchemy.orm import Session
 
 from openbiliclaw.api import dependencies as dependencies_module
 from openbiliclaw.api.dependencies import build_application_container
-from openbiliclaw.features.sources.domain import SourceId, SourceOperation
+from openbiliclaw.features.sources.domain import SourceId, SourceOperation, SourceTaskRequest
+from openbiliclaw.features.sources.service import SourceTaskService
+from openbiliclaw.features.system.domain import DatabaseSettings
+from openbiliclaw.infrastructure.database.base import create_engine_and_session
 from openbiliclaw.infrastructure.database.models import SettingModel
 from openbiliclaw.infrastructure.database.operations import (
     SchemaNotReadyError,
     require_schema_at_head,
 )
+from openbiliclaw.infrastructure.database.uow import UnitOfWork
+from openbiliclaw.infrastructure.jobs.source_composition import build_default_source_registry
 from openbiliclaw.infrastructure.jobs.worker import database_runtime_factory
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -68,10 +73,10 @@ def test_api_defers_source_settings_and_registry_until_after_schema_guard(
     calls = 0
     real_builder = dependencies_module.build_default_source_registry
 
-    def observed_builder(session_factory):  # type: ignore[no-untyped-def]
+    def observed_builder(session_factory, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal calls
         calls += 1
-        return real_builder(session_factory)
+        return real_builder(session_factory, **kwargs)
 
     monkeypatch.setattr(dependencies_module, "build_default_source_registry", observed_builder)
 
@@ -94,7 +99,6 @@ def test_api_defers_source_settings_and_registry_until_after_schema_guard(
 
         container.sources.update_settings(SourceId.DOUYIN, {"mode": "direct"})
 
-        assert calls == 2
         assert (
             next(
                 manifest
@@ -121,14 +125,14 @@ def test_concurrent_source_setting_updates_serialize_registry_rebuilds(
     active_builds = 0
     max_active_builds = 0
 
-    def observed_builder(session_factory):  # type: ignore[no-untyped-def]
+    def observed_builder(session_factory, **kwargs):  # type: ignore[no-untyped-def]
         nonlocal active_builds, max_active_builds
         with state_lock:
             active_builds += 1
             max_active_builds = max(max_active_builds, active_builds)
         try:
             time.sleep(0.05)
-            return real_builder(session_factory)
+            return real_builder(session_factory, **kwargs)
         finally:
             with state_lock:
                 active_builds -= 1
@@ -168,6 +172,109 @@ def test_concurrent_source_setting_updates_serialize_registry_rebuilds(
             == "cli"
         )
     finally:
+        asyncio.run(container.shutdown())
+
+
+def test_independent_api_containers_read_the_same_persisted_source_registry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "multi-container-source-refresh.db"
+    _migrate(database)
+    monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", _database_url(database))
+    monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
+    first = build_application_container()
+    second = build_application_container()
+    try:
+        asyncio.run(first.startup())
+        asyncio.run(second.startup())
+        first.sources.update_settings(SourceId.DOUYIN, {"mode": "extension"})
+        second.sources.update_settings(SourceId.REDDIT, {"backend": "rdt"})
+
+        for container in (first, second):
+            manifests = {
+                manifest.source_id: manifest for manifest in container.sources.manifests()
+            }
+            assert (
+                manifests[SourceId.DOUYIN]
+                .operation_spec(SourceOperation.SEARCH)
+                .transport_kind.value
+                == "browser"
+            )
+            assert (
+                manifests[SourceId.REDDIT]
+                .operation_spec(SourceOperation.SEARCH)
+                .transport_kind.value
+                == "cli"
+            )
+    finally:
+        asyncio.run(first.shutdown())
+        asyncio.run(second.shutdown())
+
+
+def test_source_registry_preflight_failure_does_not_commit_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "atomic-source-refresh.db"
+    _migrate(database)
+    monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", _database_url(database))
+    monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
+    real_builder = dependencies_module.build_default_source_registry
+    reject_builds = False
+
+    def controlled_builder(session_factory, **kwargs):  # type: ignore[no-untyped-def]
+        if reject_builds:
+            raise RuntimeError("registry preflight failed")
+        return real_builder(session_factory, **kwargs)
+
+    monkeypatch.setattr(dependencies_module, "build_default_source_registry", controlled_builder)
+    container = build_application_container()
+    try:
+        asyncio.run(container.startup())
+        reject_builds = True
+        with pytest.raises(RuntimeError, match="preflight failed"):
+            container.sources.update_settings(SourceId.DOUYIN, {"mode": "extension"})
+        reject_builds = False
+        assert container.sources.settings(SourceId.DOUYIN).settings["mode"] == "direct"
+    finally:
+        asyncio.run(container.shutdown())
+
+
+def test_browser_row_enqueued_before_mode_switch_remains_claimable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "source-mode-switch-drain.db"
+    _migrate(database)
+    url = _database_url(database)
+    monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", url)
+    monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
+    container = build_application_container()
+    engine = None
+    try:
+        asyncio.run(container.startup())
+        container.sources.update_settings(SourceId.DOUYIN, {"mode": "extension"})
+        engine, session_factory = create_engine_and_session(DatabaseSettings(url=url))
+        extension_registry = build_default_source_registry(session_factory)
+        worker_tasks = SourceTaskService(
+            lambda: UnitOfWork(session_factory), extension_registry
+        )
+        task_id = worker_tasks.enqueue(
+            SourceTaskRequest.model_validate(
+                {
+                    "source_id": "douyin",
+                    "payload": {"operation": "search", "query": "python", "limit": 3},
+                }
+            )
+        )
+
+        container.sources.update_settings(SourceId.DOUYIN, {"mode": "direct"})
+
+        claimed = container.source_tasks.claim("douyin")
+        assert claimed is not None
+        assert claimed.id == task_id
+        assert claimed.operation is SourceOperation.SEARCH
+    finally:
+        if engine is not None:
+            engine.dispose()
         asyncio.run(container.shutdown())
 
 

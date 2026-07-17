@@ -189,7 +189,7 @@ def test_retained_cards_use_safe_links_and_local_library_operations() -> None:
     for controller in (desktop, mobile):
         assert 'target="_blank" rel="noreferrer" data-open' in controller
         assert "recordInteraction(" in controller
-        assert 'request("v1_library_add"' in controller
+        assert "saveContentToLibrary(" in controller
         assert 'request("v1_library_remove"' in controller
         assert "saved-sync" not in controller
         assert "native-save" not in controller
@@ -249,6 +249,20 @@ def test_desktop_and_mobile_do_not_restore_dropped_feature_controls() -> None:
         assert dropped not in desktop
     for dropped in ("delight-tray", "messages-overlay", "mbti-type", "awareness-item"):
         assert dropped not in mobile
+
+
+def test_desktop_and_mobile_stylesheets_drop_removed_feature_selectors() -> None:
+    desktop = _read("desktop/assets/css/app.css")
+    mobile = _read("css/app.css")
+
+    for stylesheet in (desktop, mobile):
+        for dropped_selector in (
+            ".delight",
+            ".awareness",
+            ".saved-sync",
+            ".mobile-model-route",
+        ):
+            assert dropped_selector not in stylesheet
 
 
 def test_setup_stage_controls_preserve_forward_and_back_navigation() -> None:

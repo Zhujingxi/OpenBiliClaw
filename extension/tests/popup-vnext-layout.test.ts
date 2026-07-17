@@ -19,7 +19,10 @@ function assertInOrder(markers: string[]): void {
 }
 
 test("popup keeps the original visual system and responsive side-panel contract", () => {
-  assert.ok(style.split("\n").length > 3_000, "retained popup stylesheet was replaced with a reduced shell");
+  assert.ok(
+    style.split("\n").filter((line) => line.trim()).length > 2_500,
+    "retained popup stylesheet was replaced with a reduced shell",
+  );
   for (const selector of [
     ".side-panel-shell",
     ".hero-sub",
@@ -190,6 +193,7 @@ test("dropped feature CSS is not shipped after the retained stylesheet is restor
   for (const selector of [
     ".delight-banner", ".embedding-banner", ".messages-button", ".messages-overlay",
     ".popup-model-shell", ".saved-sync-toolbar", ".speculative-list", ".awareness-list",
+    ".saved-toggle", ".saved-card", ".saved-load-retry",
   ]) {
     assert.doesNotMatch(style, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }

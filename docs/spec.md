@@ -229,7 +229,7 @@ HTTP / CLI / logged-in browser transports
         │ typed repository contracts
         ▼
 SQLAlchemy repositories + UnitOfWork
-        ├─ nested settings + serialized API / per-job worker source-registry refresh
+        ├─ nested settings + per-operation API / per-job worker persisted registry
         ├─ auth_state.session_epoch (non-secret session revocation)
         ├─ source_accounts ── Fernet ciphertext ◄── OPENBILICLAW_SECRET_KEY
         ├─ activity/profile + consumed-evidence/content/feed/collection/chat tables
@@ -249,7 +249,7 @@ Application services + worker handlers
                                              LiteLLM ─► dedicated PostgreSQL
 
 Huey (separate huey.db) ─► source_sync / profile_projection / feed_replenishment / cleanup
-                              ├─► current source registry ◄── persisted source settings
+                              ├─► per-operation source registry ◄── persisted source settings
                               └─► JobService ─► all-pending recovery/claim/cancel/txn guard
 
 Implemented now: domain contracts/policies, seven source manifests/connectors/settings,
@@ -267,7 +267,7 @@ Authoritative now: /api/v1, vNext application database, API/worker, source-task 
 
 三个模型别名必须精确为 `obc-interactive`、`obc-analysis`、`obc-embedding`。应用层不得选择 provider deployment；provider routing/fallback、网络重试、限流和缓存由 LiteLLM 独占，`TaskRunner` 只允许 task 声明的 semantic output retry，并把 BYPASS 映射为 proxy 的 `cache.no-cache`。六个内置 task 覆盖 profile、keyword、单候选、batch candidate、chat 与 recommendation；candidate assessment row ID 由 application 层生成。AI run schema/API 只接收 metadata/usage/error class，不存在输入或输出 payload 字段。浏览器 Admin 导航只来自显式、credential-free `OPENBILICLAW_LITELLM_ADMIN_URL`，不从 internal proxy base/key 推导。Docker Compose 要求本地生成的 LiteLLM master key 与 PostgreSQL password，源码/预构建路径挂同一 policy；唯一 `migrate` 服务成功后才允许 API/worker 启动，两个 runtime 只读检查 schema head；本阶段没有 live provider/Compose E2E。`/health?model` 可能调用 provider，仅用于显式诊断，并区分 degraded、transport、auth、missing alias、server 与 provider unhealthy。
 
-FastAPI 只公开 `/api/v1/auth|system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat send 与 progress 走 SSE，chat history 是 bounded JSON page，扩展来源工作走 generic typed claim/complete。vNext auth 只从 runtime environment 读取，不 fallback legacy config；Web 使用 same-origin password→HttpOnly cookie 并对 unsafe request 强制 `Origin + X-OBC-Auth`。Extension origin 即使来自 loopback 也不能使用 `trust_loopback`/CORS bypass，只能 device-key exchange finite bearer。Login/exchange 使用分离、per-peer、有界且可过期的 failure limiter。`auth_state` epoch 统一撤销 session，不撤销 installer bearer；startup password state 对 fresh absent/first enable/unchanged 保持幂等，rotation、removal 的 `disabled` sentinel 与 re-enable 都和 epoch bump 原子提交。Source manifest 暴露 safe settings/credential/per-operation schemas；API 只在 schema-head gate 成功后构造 settings-backed registry。五个平台没有 per-source field，Douyin `mode` 与 Reddit `backend` 各自有明确 transport consumer；其余 enabled/weights/schedule/feed policy 由 global `UserSettings` 管理。per-source settings 经 GET/PUT 写入现有 `settings` table 并在 registry rebuild 时应用，disconnect 幂等删除 encrypted material；library read 返回 joined renderable content。Explicit profile revision 的 timestamp 严格晚于上一 revision。Worker 在 composition/recovery/consumer 前安装/reuse owned console/file sinks 并应用 persisted network/logging settings；退出或失败时只清理本次创建的 sinks，保留 host root policy，并精确恢复 proxy、package logger 与四个 CA environment variables。包括 Starlette 404/405 在内的所有 JSON error 使用同一个 `{error:{code,message}}` runtime/OpenAPI envelope。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展已通过 generated clients 接线，旧运行树留待最终删除。
+FastAPI 只公开 `/api/v1/auth|system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat send 与 progress 走 SSE，chat history 是 bounded JSON page，扩展来源工作走 generic typed claim/complete。vNext auth 只从 runtime environment 读取，不 fallback legacy config；Web 使用 same-origin password→HttpOnly cookie 并对 unsafe request 强制 `Origin + X-OBC-Auth`。Extension origin 即使来自 loopback 也不能使用 `trust_loopback`/CORS bypass，只能 device-key exchange finite bearer。Login/exchange 使用分离、per-peer、有界且可过期的 failure limiter。`auth_state` epoch 统一撤销 session，不撤销 installer bearer。Source manifest 暴露 safe settings/credential/per-operation schemas；API 只在 schema-head gate 成功后启用 settings-backed provider，此后每个操作从持久化 rows 构造 registry，worker 每个 job 同样读取 DB。per-source candidate 先完成 full-registry preflight 再 commit；已入队 browser row 按 enqueue-time contract 排空，mode switch 只阻止新 enqueue。五个平台没有 per-source field，Douyin `mode` 与 Reddit `backend` 各自有明确 transport consumer；其余 enabled/weights/schedule/feed policy 由 global `UserSettings` 管理。disconnect 幂等删除 encrypted material；library read 返回 joined renderable content。包括 Starlette 404/405 在内的所有 JSON error 使用同一个 `{error:{code,message}}` runtime/OpenAPI envelope。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展已通过 generated clients 接线，旧运行树留待最终删除。
 
 ### 3.2 Historical v0.3 archive — 已停止作为入口的实现
 

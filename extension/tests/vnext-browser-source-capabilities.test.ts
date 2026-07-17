@@ -8,7 +8,10 @@ import {
   executeBrowserSourceTask,
   LOCAL_BROWSER_SOURCE_OPERATIONS,
 } from "../src/background/browser-source-executor.ts";
-import type { ClaimedSourceTask } from "../src/background/generic-source-task-dispatcher.ts";
+import {
+  createSourceTaskDispatcher,
+  type ClaimedSourceTask,
+} from "../src/background/generic-source-task-dispatcher.ts";
 import type {
   SourceId,
   SourceManifest,
@@ -98,12 +101,48 @@ test("dispatcher operations follow all seven backend manifests and browser fallb
     {
       bilibili: ["search"],
       xiaohongshu: ["bootstrap_import", "search", "creator"],
-      douyin: ["bootstrap_import"],
+      douyin: ["bootstrap_import", "search", "trending", "feed"],
       youtube: ["bootstrap_import"],
       zhihu: ["bootstrap_import", "search", "trending", "feed", "creator", "related"],
       reddit: ["bootstrap_import", "search", "trending", "community", "related"],
     },
   );
+});
+
+test("Douyin direct manifest still drains an already-claimed browser search", async () => {
+  const directOperations = browserOperationsFromManifests([
+    manifest("douyin", [
+      ["bootstrap_import", "browser"],
+      ["search", "direct"],
+      ["trending", "direct"],
+      ["feed", "direct"],
+    ]),
+  ]).douyin;
+  assert.deepEqual(directOperations, ["bootstrap_import", "search", "trending", "feed"]);
+  const claimed = claimedTask(
+    "douyin",
+    { operation: "search", query: "persisted-before-switch", limit: 3 },
+  );
+  const completions: unknown[] = [];
+  const dispatcher = createSourceTaskDispatcher({
+    sourceId: "douyin",
+    operations: directOperations!,
+    transport: {
+      async claim() {
+        return claimed;
+      },
+      async complete(_taskId, _leaseToken, result) {
+        completions.push(result);
+      },
+      async fail() {
+        assert.fail("a locally executable pre-switch row must drain successfully");
+      },
+    },
+    execute: async (task) => ({ operation: task.payload.operation, items: [] }),
+  });
+
+  assert.equal(await dispatcher.pollOnce(), true);
+  assert.deepEqual(completions, [{ operation: "search", items: [] }]);
 });
 
 test("persisted Douyin extension mode dynamically exposes its browser discovery operations", () => {

@@ -87,26 +87,20 @@ class DependencyUnavailableError(RuntimeError):
 
 
 class _DeferredSourceRegistry:
-    """Install the settings-backed registry only after the schema guard succeeds."""
+    """Resolve persisted settings only after the schema guard succeeds."""
 
-    def __init__(self) -> None:
-        self._registry: SourceRegistry | None = None
+    def __init__(self, builder: Callable[[], SourceRegistry]) -> None:
+        self._builder = builder
+        self._ready = False
 
-    def install(self, registry: SourceRegistry) -> None:
-        if self._registry is None:
-            self._registry = registry
-
-    def replace(self, registry: SourceRegistry) -> None:
-        """Atomically publish a registry rebuilt from persisted source settings."""
-
-        if self._registry is None:
-            raise DependencyUnavailableError("source registry is not initialized")
-        self._registry = registry
+    def install(self) -> None:
+        self._builder()
+        self._ready = True
 
     def get(self) -> SourceRegistry:
-        if self._registry is None:
+        if not self._ready:
             raise DependencyUnavailableError("source registry is not initialized")
-        return self._registry
+        return self._builder()
 
 
 class SettingsPort(Protocol):
@@ -703,7 +697,16 @@ def build_application_container() -> ApplicationContainer:
         fingerprint_reconciler=reconcile_password_fingerprint,
     )
 
-    registry = _DeferredSourceRegistry()
+    registry = _DeferredSourceRegistry(lambda: build_default_source_registry(session_factory))
+
+    def validate_source_settings_change(
+        source_id: str, candidate: Mapping[str, object]
+    ) -> None:
+        build_default_source_registry(
+            session_factory,
+            settings_overrides={source_id: candidate},
+        )
+
     settings = SettingsService(
         cast("Callable[[], Any]", uow_factory),
         on_change=_apply_runtime_settings,
@@ -717,7 +720,7 @@ def build_application_container() -> ApplicationContainer:
         cast("Callable[[], Any]", uow_factory),
         cipher=_DeferredCredentialCipher(),
         registry=registry.get,
-        on_settings_change=lambda: registry.replace(build_default_source_registry(session_factory)),
+        validate_settings_change=validate_source_settings_change,
     )
     runner, resolver = _build_task_runner(uow_factory, settings)
     profile = ProfileService(
@@ -749,7 +752,7 @@ def build_application_container() -> ApplicationContainer:
             database_url=database_settings.url,
             alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
         )
-        registry.install(build_default_source_registry(session_factory))
+        registry.install()
         access.reconcile_password_fingerprint()
         _apply_runtime_settings(settings.get())
         jobs.recover_interrupted()

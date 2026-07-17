@@ -35,7 +35,7 @@ from openbiliclaw.sources.x_client import XClient
 from openbiliclaw.youtube.client import YtScraperClient
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from sqlalchemy.orm import Session, sessionmaker
 
@@ -131,6 +131,21 @@ def _source_settings(
     return model.model_validate_json(json.dumps(row.value))
 
 
+def _resolved_source_settings(
+    session_factory: sessionmaker[Session],
+    source_id: str,
+    model: type[SettingsT],
+    overrides: Mapping[str, Mapping[str, object]],
+    *,
+    default: SettingsT | None = None,
+) -> SettingsT:
+    """Read one persisted model, substituting a validated pre-commit candidate when supplied."""
+
+    if source_id in overrides:
+        return model.model_validate(dict(overrides[source_id]), strict=True)
+    return _source_settings(session_factory, source_id, model, default=default)
+
+
 class _LazyBilibiliClient:
     def __init__(self, credentials: _CredentialProvider) -> None:
         self._client: _LazyClient[BilibiliAPIClient] = _LazyClient(
@@ -216,9 +231,12 @@ class _LazyTwitterClient:
 
 def build_default_source_registry(
     session_factory: sessionmaker[Session],
+    *,
+    settings_overrides: Mapping[str, Mapping[str, object]] | None = None,
 ) -> SourceRegistry:
     """Register every built-in connector without importing plugins or making live calls."""
 
+    overrides = settings_overrides or {}
     registry_box: dict[str, SourceRegistry] = {}
 
     def uow_factory() -> SourceTaskUnitOfWork:
@@ -226,16 +244,29 @@ def build_default_source_registry(
 
     task_service = SourceTaskService(uow_factory, lambda: registry_box["registry"])
     credentials = _CredentialProvider(session_factory)
-    bilibili_settings = _source_settings(session_factory, "bilibili", BilibiliSettings)
-    xiaohongshu_settings = _source_settings(session_factory, "xiaohongshu", XiaohongshuSettings)
-    douyin_settings = _source_settings(session_factory, "douyin", DouyinSettings)
-    youtube_settings = _source_settings(session_factory, "youtube", YouTubeSettings)
-    twitter_settings = _source_settings(session_factory, "twitter", TwitterSettings)
-    zhihu_settings = _source_settings(session_factory, "zhihu", ZhihuSettings)
-    reddit_settings = _source_settings(
+    bilibili_settings = _resolved_source_settings(
+        session_factory, "bilibili", BilibiliSettings, overrides
+    )
+    xiaohongshu_settings = _resolved_source_settings(
+        session_factory, "xiaohongshu", XiaohongshuSettings, overrides
+    )
+    douyin_settings = _resolved_source_settings(
+        session_factory, "douyin", DouyinSettings, overrides
+    )
+    youtube_settings = _resolved_source_settings(
+        session_factory, "youtube", YouTubeSettings, overrides
+    )
+    twitter_settings = _resolved_source_settings(
+        session_factory, "twitter", TwitterSettings, overrides
+    )
+    zhihu_settings = _resolved_source_settings(
+        session_factory, "zhihu", ZhihuSettings, overrides
+    )
+    reddit_settings = _resolved_source_settings(
         session_factory,
         "reddit",
         RedditSettings,
+        overrides,
         default=RedditSettings(backend="extension"),
     )
     registry = build_source_registry(

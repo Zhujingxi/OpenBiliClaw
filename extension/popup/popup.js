@@ -298,7 +298,8 @@ async function startOnboarding(event) {
       }
       if (message.event === "error") throw new Error(message.data?.code || "初始化失败");
       if (message.event === "done" && message.data?.status !== "succeeded") {
-        throw new Error(`初始化${message.data?.status || "失败"}`);
+        const statusLabel = message.data?.status === "cancelled" ? "已取消" : "失败";
+        throw new Error(`初始化${statusLabel}`);
       }
     });
     toast("初始化完成");

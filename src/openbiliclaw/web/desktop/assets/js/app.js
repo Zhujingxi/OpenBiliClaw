@@ -5,6 +5,7 @@ import {
   errorMessage,
   newConversationId,
   recordInteraction,
+  saveContentToLibrary,
   safeWebUrl,
 } from "/m/js/vnext-api.js";
 
@@ -161,8 +162,19 @@ function contentCard(content, explanation = "", collection = "") {
     button.addEventListener("click", async () => {
       button.disabled = true;
       try {
-        if (await saveItem(button.dataset.save, content.id)) {
+        const result = await saveItem(
+          button.dataset.save,
+          content.id,
+          button.dataset.libraryPersisted === "true",
+        );
+        if (result.libraryPersisted) {
           button.setAttribute("aria-pressed", "true");
+          button.dataset.libraryPersisted = "true";
+        }
+        if (result.interactionPending) {
+          button.dataset.interactionPending = "true";
+        } else {
+          delete button.dataset.interactionPending;
         }
       } finally {
         button.disabled = false;
@@ -188,25 +200,23 @@ function interact(contentId, kind) {
   return recordInteraction(contentId, kind, "web");
 }
 
-async function saveItem(collection, contentId) {
+async function saveItem(collection, contentId, libraryPersisted) {
   try {
-    await request("v1_library_add", {
-      path: { collection },
-      body: { content_id: contentId, note: "" },
-    });
-    await interact(
+    const result = await saveContentToLibrary(
+      collection,
       contentId,
-      collection === "favorites" ? "save_favorite" : "save_watch_later",
+      "web",
+      { libraryPersisted },
     );
-    toast("已保存到本地列表");
-    return true;
+    toast(
+      result.interactionPending
+        ? "已保存到本地列表；行为记录失败，点击可重试"
+        : "已保存到本地列表",
+    );
+    return result;
   } catch (error) {
-    if (error.status === 409) {
-      toast("已在列表中");
-      return true;
-    }
     toast(errorMessage(error));
-    return false;
+    return { libraryPersisted: false, interactionPending: false };
   }
 }
 

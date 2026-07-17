@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +16,6 @@ from openbiliclaw.features.sources.domain import (
     SourceTaskStatus,
 )
 from openbiliclaw.infrastructure.database.models import SourceTaskModel
-from openbiliclaw.infrastructure.sources import browser_tasks as browser_tasks_module
 from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
 
 from .test_browser_tasks import task_context  # noqa: F401
@@ -25,39 +23,6 @@ from .test_browser_tasks import task_context  # noqa: F401
 
 class LateEnqueueFatalError(BaseException):
     """Test-only fatal enqueue outcome that must never escape a done callback."""
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [
-        KeyboardInterrupt("keyboard-secret"),
-        SystemExit("system-exit-secret"),
-        BaseExceptionGroup(
-            "group-secret",
-            [LateEnqueueFatalError("nested-group-secret")],
-        ),
-    ],
-    ids=("keyboard-interrupt", "system-exit", "base-exception-group"),
-)
-def test_late_enqueue_outcome_callback_contains_fatal_base_exceptions(
-    failure: BaseException,
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FailedTask:
-        @staticmethod
-        def result() -> None:
-            raise failure
-
-    source_logger = logging.getLogger("openbiliclaw.infrastructure.sources.browser_tasks")
-    monkeypatch.setattr(source_logger, "disabled", False)
-    with caplog.at_level(logging.WARNING):
-        browser_tasks_module._consume_late_enqueue_outcome(  # noqa: SLF001
-            FailedTask()  # type: ignore[arg-type]
-        )
-
-    assert type(failure).__name__ in caplog.text
-    assert str(failure) not in caplog.text
 
 
 async def test_queue_transport_awaits_a_completed_typed_result(
@@ -242,9 +207,11 @@ async def test_late_successful_enqueue_after_early_cancellation_is_terminalized(
     )
     assert await asyncio.to_thread(started.wait, 1)
     pending.cancel()
+    await asyncio.sleep(0.05)
+    assert not pending.done()
+    release.set()
     with pytest.raises(asyncio.CancelledError):
         await pending
-    release.set()
 
     row = None
     for _ in range(200):
@@ -253,6 +220,56 @@ async def test_late_successful_enqueue_after_early_cancellation_is_terminalized(
         if row is not None and row.status == SourceTaskStatus.CANCELLED.value:
             break
         await asyncio.sleep(0.001)
+    assert row is not None
+    assert row.status == SourceTaskStatus.CANCELLED.value
+    assert service.claim("zhihu") is None
+
+
+async def test_cancellation_structurally_drains_enqueue_before_parent_can_finish(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+) -> None:
+    session_factory, _, service = task_context
+    started = threading.Event()
+    release = threading.Event()
+
+    class DelayedService:
+        persistence_timeout_seconds = 0.01
+
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
+            started.set()
+            release.wait(timeout=1)
+            return service.enqueue(
+                request, task_id=task_id, request_deadline_at=request_deadline_at
+            )
+
+        def cancel(self, task_id: Any) -> Any:
+            return service.cancel(task_id)
+
+        def snapshot(self, task_id: Any) -> Any:
+            return service.snapshot(task_id)
+
+    transport = QueuedBrowserTransport(
+        DelayedService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=10,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.02,
+    )
+    pending = asyncio.create_task(
+        transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    pending.cancel()
+    await asyncio.sleep(0.05)
+    pending.cancel()
+    await asyncio.sleep(0)
+    assert not pending.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    with session_factory() as session:
+        row = session.scalar(select(SourceTaskModel))
     assert row is not None
     assert row.status == SourceTaskStatus.CANCELLED.value
     assert service.claim("zhihu") is None
@@ -296,21 +313,17 @@ async def test_late_cancellation_failure_logs_only_its_exception_type(
     )
     assert await asyncio.to_thread(started.wait, 1)
     pending.cancel()
+    release.set()
     with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
         await pending
-    release.set()
     assert await asyncio.to_thread(cancel_called.wait, 1)
-    for _ in range(20):
-        if not transport._late_cleanup_tasks:  # noqa: SLF001
-            break
-        await asyncio.sleep(0)
 
     assert "RuntimeError" in caplog.text
     assert secret not in caplog.text
-    assert not transport._late_cleanup_tasks  # noqa: SLF001
+    assert not hasattr(transport, "_late_cleanup_tasks")
 
 
-async def test_enqueue_delay_beyond_operation_timeout_has_bounded_cleanup_and_no_actionable_row(
+async def test_enqueue_delay_beyond_operation_timeout_waits_for_terminal_row(
     task_context: tuple[Any, Any, Any],  # noqa: F811
 ) -> None:
     session_factory, _, service = task_context
@@ -344,13 +357,11 @@ async def test_enqueue_delay_beyond_operation_timeout_has_bounded_cleanup_and_no
         transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
     )
     await asyncio.to_thread(started.wait, 1)
-    before = asyncio.get_running_loop().time()
-    try:
-        with pytest.raises(TimeoutError):
-            await pending
-        assert asyncio.get_running_loop().time() - before < 0.2
-    finally:
-        release.set()
+    await asyncio.sleep(0.05)
+    assert not pending.done()
+    release.set()
+    with pytest.raises(TimeoutError):
+        await pending
 
     for _ in range(100):
         with session_factory() as session:
@@ -498,14 +509,16 @@ async def test_late_enqueue_exception_is_drained_without_secret_or_loop_error(
         cleanup_timeout_seconds=0.02,
     )
     try:
-        with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
-            await transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+        pending = asyncio.create_task(
+            transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        await asyncio.sleep(0.02)
+        assert not pending.done()
         release.set()
+        with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
+            await pending
         assert await asyncio.to_thread(finished.wait, 1)
-        for _ in range(5):
-            await asyncio.sleep(0)
-        gc.collect()
-        await asyncio.sleep(0)
     finally:
         release.set()
         loop.set_exception_handler(previous_handler)
@@ -555,14 +568,16 @@ async def test_late_enqueue_base_exception_is_drained_without_secret_or_loop_err
         cleanup_timeout_seconds=0.02,
     )
     try:
-        with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
-            await transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+        pending = asyncio.create_task(
+            transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        await asyncio.sleep(0.02)
+        assert not pending.done()
         release.set()
+        with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
+            await pending
         assert await asyncio.to_thread(finished.wait, 1)
-        for _ in range(5):
-            await asyncio.sleep(0)
-        gc.collect()
-        await asyncio.sleep(0)
     finally:
         release.set()
         loop.set_exception_handler(previous_handler)

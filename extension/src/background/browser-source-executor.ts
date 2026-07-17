@@ -41,13 +41,14 @@ export function browserOperationsFromManifests(
     const local = LOCAL_BROWSER_SOURCE_OPERATIONS[manifest.source_id];
     if (!local) continue;
     const supported = new Set(local);
-    const operations = manifest.operations
-      .filter((spec) => (
+    const shouldPoll = manifest.operations
+      .some((spec) => (
         spec.transport_kind === "browser" || spec.fallback_transport_kind === "browser"
-      ))
-      .map((spec) => spec.operation)
-      .filter((operation) => supported.has(operation));
-    if (operations.length > 0) selected[manifest.source_id] = Object.freeze(operations);
+      ) && supported.has(spec.operation));
+    // The current manifest gates whether this source polls at all. Once the
+    // backend returns a durable row, validate it against the installed local
+    // executor so work enqueued before a transport-mode switch can drain.
+    if (shouldPoll) selected[manifest.source_id] = local;
   }
   return selected;
 }

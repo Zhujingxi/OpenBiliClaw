@@ -134,3 +134,60 @@ test("interaction requests reject so callers cannot commit success UI after a ba
     (globalThis as { window?: unknown }).window = originalWindow;
   }
 });
+
+test("partial saves retry only the interaction after library persistence", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  const originalWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = { dispatchEvent() {} };
+  globalThis.fetch = (async (input) => {
+    calls.push(String(input));
+    if (calls.length === 1) {
+      return Response.json({
+        id: "33333333-3333-4333-8333-333333333333",
+        collection: "favorites",
+        content_id: "11111111-1111-4111-8111-111111111111",
+        added_at: "2026-07-17T00:00:00Z",
+        note: "",
+      }, { status: 201 });
+    }
+    if (calls.length === 2) {
+      return Response.json(
+        { error: { code: "interaction_unavailable", message: "retry later" } },
+        { status: 503 },
+      );
+    }
+    return Response.json({
+      signal: {
+        id: "44444444-4444-4444-8444-444444444444",
+        content_id: "11111111-1111-4111-8111-111111111111",
+        kind: "save_favorite",
+        occurred_at: "2026-07-17T00:00:00Z",
+        metadata: { surface: "web" },
+      },
+    }, { status: 201 });
+  }) as typeof fetch;
+  try {
+    const { saveContentToLibrary } = await import(
+      "../../src/openbiliclaw/web/js/vnext-api.js?partial-save-contract"
+    );
+    const first = await saveContentToLibrary("favorites", "11111111-1111-4111-8111-111111111111", "web");
+    assert.deepEqual(first, { libraryPersisted: true, interactionPending: true });
+
+    const retry = await saveContentToLibrary(
+      "favorites",
+      "11111111-1111-4111-8111-111111111111",
+      "web",
+      { libraryPersisted: first.libraryPersisted },
+    );
+    assert.deepEqual(retry, { libraryPersisted: true, interactionPending: false });
+    assert.deepEqual(calls, [
+      "/api/v1/library/favorites",
+      "/api/v1/interactions",
+      "/api/v1/interactions",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    (globalThis as { window?: unknown }).window = originalWindow;
+  }
+});

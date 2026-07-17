@@ -23,6 +23,10 @@ deployment facts 只读。`/m` 只投影 feed 水位/最低分、来源同步间
 与 extension access 子集。AI 界面只展示三个稳定 alias 的健康状态和后端提供的
 LiteLLM Admin URL，不编辑 provider 凭据或路由。
 
+Library 保存把 durable collection write 与 interaction signal 分成两个阶段：`201` 或
+`409` 都立即呈现已保存；若 interaction 暂时失败，按钮只重试 signal，不重复发送可能冲突的
+collection add。
+
 生成检查：
 
 ```bash

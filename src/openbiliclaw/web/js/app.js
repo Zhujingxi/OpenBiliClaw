@@ -5,6 +5,7 @@ import {
   errorMessage,
   newConversationId,
   recordInteraction,
+  saveContentToLibrary,
   safeWebUrl,
 } from "./vnext-api.js";
 
@@ -100,19 +101,28 @@ function interaction(content_id, kind) {
   return recordInteraction(content_id, kind, "mobile_web");
 }
 async function save(collection, content_id, button) {
+  button.disabled = true;
   try {
-    await request("v1_library_add", {
-      path: { collection },
-      body: { content_id, note: "" },
-    });
-    await interaction(
+    const result = await saveContentToLibrary(
+      collection,
       content_id,
-      collection === "favorites" ? "save_favorite" : "save_watch_later",
+      "mobile_web",
+      { libraryPersisted: button.dataset.libraryPersisted === "true" },
     );
+    button.dataset.libraryPersisted = "true";
+    button.setAttribute("aria-pressed", "true");
     button.classList.add("active");
-    button.textContent = "已保存";
+    if (result.interactionPending) {
+      button.dataset.interactionPending = "true";
+      button.textContent = "已保存 · 重试";
+    } else {
+      delete button.dataset.interactionPending;
+      button.textContent = "已保存";
+    }
   } catch (error) {
-    button.textContent = error.status === 409 ? "已保存" : "重试";
+    button.textContent = "重试";
+  } finally {
+    button.disabled = false;
   }
 }
 function card(content, entry, collection = "") {

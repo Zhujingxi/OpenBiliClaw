@@ -72,7 +72,6 @@ class SourceTaskRepository(Protocol):
         self,
         *,
         source_id: str,
-        allowed_operations: frozenset[str],
         lease_token: str,
         lease_seconds: int,
     ) -> ClaimedSourceTask | None: ...
@@ -169,12 +168,12 @@ class SourceAccountService:
         *,
         cipher: CredentialCipherPort,
         registry: SourceRegistry | Callable[[], SourceRegistry],
-        on_settings_change: Callable[[], None] | None = None,
+        validate_settings_change: Callable[[str, Mapping[str, object]], None] | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._cipher = cipher
         self._registry_provider = registry if callable(registry) else lambda: registry
-        self._on_settings_change = on_settings_change
+        self._validate_settings_change = validate_settings_change
         self._settings_update_lock = threading.Lock()
 
     def manifests(self) -> tuple[SourceManifest, ...]:
@@ -222,10 +221,10 @@ class SourceAccountService:
                 )
                 safe_settings = candidate.model_dump(mode="json")
                 validate_source_task_payload(safe_settings)
+                if self._validate_settings_change is not None:
+                    self._validate_settings_change(source_id.value, safe_settings)
                 uow.settings.replace_source_settings(source_id.value, safe_settings)
                 uow.commit()
-            if self._on_settings_change is not None:
-                self._on_settings_change()
         return SourceSettingsState(source_id=source_id, settings=safe_settings)
 
     def configure(
@@ -331,18 +330,13 @@ class SourceTaskService:
         return persisted_id
 
     def claim(self, source_id: str) -> ClaimedSourceTask | None:
-        """Lease the oldest pending or expired task for one canonical source."""
+        """Lease durable work by its enqueue-time contract, independent of current mode."""
 
-        connector = self._registry_provider().get(source_id)
+        SourceId(source_id)
         token = uuid4().hex
         with self._uow_factory() as uow:
             task = uow.source_tasks.claim(
                 source_id=source_id,
-                allowed_operations=frozenset(
-                    spec.operation.value
-                    for spec in connector.manifest.operations
-                    if spec.browser_assisted
-                ),
                 lease_token=token,
                 lease_seconds=self._lease_seconds,
             )
