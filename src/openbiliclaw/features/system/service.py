@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Generic, Protocol, Self, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, Self, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from types import TracebackType
+    from uuid import UUID
 
 from openbiliclaw.features.system.domain import UserSettings
 
@@ -98,7 +100,7 @@ class JobRun(Protocol):
     def status(self) -> object: ...
 
     @property
-    def id(self) -> object: ...
+    def id(self) -> UUID: ...
 
 
 JobRunCo = TypeVar("JobRunCo", bound=JobRun, covariant=True)
@@ -116,7 +118,24 @@ class JobScheduler(Protocol[JobRunCo]):
 
     def register_success_callback(self, callback: Callable[[JobRunCo], None]) -> None: ...
 
-    def restart_terminal(self, run_id: object) -> JobRunCo: ...
+    def restart_terminal(self, run_id: UUID) -> JobRunCo: ...
+
+    def inspect(self, run_id: UUID) -> JobRunCo: ...
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> JobRunCo | None: ...
+
+
+OnboardingStage = Literal["source_sync", "profile_projection", "feed_replenishment"]
+
+
+@dataclass(frozen=True, slots=True)
+class OnboardingWorkflowProgress(Generic[JobRunT]):
+    """Persisted current-stage projection for one onboarding root run."""
+
+    root_run_id: UUID
+    stage: OnboardingStage
+    run: JobRunT
+    onboarding_complete: bool
 
 
 class OnboardingService(Generic[JobRunT]):
@@ -137,11 +156,12 @@ class OnboardingService(Generic[JobRunT]):
 
     def start(self, source_ids: tuple[str, ...]) -> JobRunT:
         selected = frozenset(source_ids)
-        if selected:
-            current = self._settings.get()
-            enabled = {source_id: source_id in selected for source_id in current.source_enabled}
-            self._settings.update({"source_enabled": enabled})
-        source_key = ",".join(sorted(selected)) or "all-enabled"
+        if not selected:
+            raise ValueError("onboarding requires at least one source")
+        current = self._settings.get()
+        enabled = {source_id: source_id in selected for source_id in current.source_enabled}
+        self._settings.update({"source_enabled": enabled})
+        source_key = ",".join(sorted(selected))
         run = self._jobs.schedule(
             "source_sync",
             idempotency_key=f"onboarding:{source_key}",
@@ -150,6 +170,33 @@ class OnboardingService(Generic[JobRunT]):
         # Explicit restart walks an existing successful prefix and resumes its stopped stage.
         self._advance(run, resume_terminal=True)
         return run
+
+    def progress(self, root_run_id: UUID) -> OnboardingWorkflowProgress[JobRunT]:
+        """Resolve the current durable child without creating continuation rows."""
+
+        root = self._jobs.inspect(root_run_id)
+        root_prefix = "source_sync:onboarding:"
+        if root.job_name != "source_sync" or not root.idempotency_key.startswith(root_prefix):
+            raise LookupError("job run is not an onboarding root")
+
+        workflow_key = root.idempotency_key.removeprefix("source_sync:")
+        stage: OnboardingStage = "source_sync"
+        current = root
+        if str(root.status) == "succeeded":
+            for candidate_stage in ("profile_projection", "feed_replenishment"):
+                child = self._jobs.find_by_idempotency_key(f"{candidate_stage}:{workflow_key}")
+                if child is None:
+                    break
+                stage = candidate_stage
+                current = child
+                if str(child.status) != "succeeded":
+                    break
+        return OnboardingWorkflowProgress(
+            root_run_id=root.id,
+            stage=stage,
+            run=current,
+            onboarding_complete=self._settings.get().onboarding_complete,
+        )
 
     def _on_success(self, run: JobRunT) -> None:
         self._advance(run, resume_terminal=False)

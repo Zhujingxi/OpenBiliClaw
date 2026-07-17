@@ -6,10 +6,9 @@ import inspect
 import os
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
-from alembic import command
-from alembic.config import Config
 from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -36,6 +35,7 @@ from openbiliclaw.infrastructure.ai.use_cases import (
     TransactionalAIRunRecorder,
 )
 from openbiliclaw.infrastructure.database.base import create_engine_and_session
+from openbiliclaw.infrastructure.database.operations import require_schema_at_head
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.source_composition import build_default_source_registry
 from openbiliclaw.infrastructure.jobs.tasks import HueyJobQueue, JobService
@@ -54,9 +54,11 @@ if TYPE_CHECKING:
         ClaimedSourceTask,
         SourceAccountStatus,
         SourceId,
+        SourceManifest,
         SourceTaskCompletion,
     )
     from openbiliclaw.features.system.domain import UserSettings
+    from openbiliclaw.features.system.service import OnboardingWorkflowProgress
     from openbiliclaw.infrastructure.jobs.tasks import JobRunSnapshot
 
 ACCESS_TOKEN_ENV = "OPENBILICLAW_ACCESS_TOKEN"
@@ -78,9 +80,11 @@ class OnboardingPort(Protocol):
 
     def start(self, source_ids: tuple[str, ...]) -> object: ...
 
+    def progress(self, root_run_id: UUID) -> OnboardingWorkflowProgress[JobRunSnapshot]: ...
+
 
 class SourcesPort(Protocol):
-    def manifests(self) -> tuple[object, ...]: ...
+    def manifests(self) -> tuple[SourceManifest, ...]: ...
 
     def statuses(self) -> tuple[SourceAccountStatus, ...]: ...
 
@@ -282,9 +286,10 @@ def build_application_container() -> ApplicationContainer:
     ai_health, health_client = _build_ai_health()
 
     def startup() -> None:
-        config = Config(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini"))
-        config.set_main_option("sqlalchemy.url", database_settings.url)
-        command.upgrade(config, "head")
+        require_schema_at_head(
+            database_url=database_settings.url,
+            alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
+        )
         jobs.recover_interrupted()
 
     async def shutdown() -> None:

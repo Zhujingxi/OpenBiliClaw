@@ -6,7 +6,7 @@
 
 ## 状态与边界
 
-本模块已实现 vNext 的 activity、profile、feed、library、chat 应用服务，以及独立 SQLite Huey worker。它是可运行的后台 composition，但尚未提供公开 HTTP API；Task 21 才会把这些用例接到 `/api/v1`。legacy backend 服务和现有前端路径在切换前保持不变。
+本模块实现 vNext 的 activity、profile、feed、library、chat 应用服务，以及独立 SQLite Huey worker。Task 21 已把这些用例注入权威 `/api/v1` feature routers；现有 static Web 与 extension 的 client wiring 留给 Task 22。
 
 feature service 只依赖自身声明的 repository、AI、settings 和 source Protocol，不导入 FastAPI、SQLAlchemy 或 Huey。SQLAlchemy adapter、共享 `TaskRunner` adapter、显式 `SourceRegistry` 与 Huey transport 都在 `infrastructure/` 组合。
 
@@ -30,13 +30,13 @@ Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priorit
 
 四个 handler 都使用 `JobExecutionContext.checkpoint()` 在外部 source/model 边界后提交可见且不回退的 progress，并使用 `JobExecutionContext.guard()` 保护最终持久化。guard 不是独立的“先检查再写”：它在 activity、profile revision+consumed ledger、content+assessment+feed entry 或 terminal cleanup 的同一个 UoW 中，以条件 `running` update 取得 SQLite write lock 后才允许业务写入。cancellation 同样以 pending/running→cancelled 条件 UPDATE 作为事务的第一条语句，不先 SELECT 再升级读锁；checkpoint、succeed/fail/retry 与 running recovery 也采用 write-first 条件 SQL。若 cancellation 先取得写序，guard 等待后失败且整个 feature UoW 无 effect；若 guard 先取得写序，cancellation 按有限 `busy_timeout` 等待 feature effect 原子提交后再写 cancelled。锁等待耗尽会明确抛错，不会伪装成功。retry 保留已达到的最高 progress。
 
-三个 priority 常量按 `interactive > user-triggered > scheduled-maintenance` 排序；chat 虽使用 interactive lane，但永不进入后台队列。worker 使用最多四个 thread workers，并通过 `python -m openbiliclaw.infrastructure.jobs.worker` 启动。源码与预构建 Compose 都挂载独立 Huey 文件；legacy `openbiliclaw-backend` 服务在 Task 21 前不改名。
+三个公开 priority lane 按 `interactive > user-triggered > scheduled` 排序；chat 虽使用 interactive lane，但永不进入后台队列。worker 使用最多四个 thread workers，并通过 `openbiliclaw worker` 或 `python -m openbiliclaw.worker` 启动。源码与预构建 Compose 都让 API/worker 挂载同一个独立 Huey 文件。
 
 ## 配置与生产组合
 
 `UserSettings.source_weights` 默认给七个平台相同合法权重，`source_enabled` 默认全部关闭。零权重来源不分配预算；负数、非有限权重和未知 SourceId 拒绝保存。worker composition 固定注册七个平台；启用来源缺少可用账户、凭据密文无法解密或缺少 Cookie 时，会以 `MissingSourceConfigurationError` 明确失败，不会发起匿名调用或伪装为空成功。
 
-worker 默认迁移隔离 vNext 数据库，构造 SQLAlchemy UoW、`SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。Compose 中 backend/API 与 worker 使用同一个 mounted `OPENBILICLAW_DATABASE_URL`，Huey 仍使用独立文件。production composition 逐项构造 Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，不扫描 entry point、不加载动态 source factory。direct/CLI client 在第一次真实调用时才从 `source_accounts` 读取 enabled account，并用 `CredentialCipher`/`OPENBILICLAW_SECRET_KEY` 解密；构造 registry 与全部来源 disabled 时不读取凭据、不创建网络 client。extension-assisted operation 统一使用 durable `QueuedBrowserTransport`；当前扩展 dispatcher 尚未切换，因此启用这类 operation 会等待 generic task callback。模型只读取 `OPENBILICLAW_LITELLM_BASE_URL` 与 `OPENBILICLAW_LITELLM_API_KEY`，provider credential 仍只存在于 LiteLLM。
+worker 默认只读验证隔离 vNext 数据库已经位于 Alembic head，再构造 SQLAlchemy UoW、`SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。Compose 中唯一一次性 `migrate` 服务先完成 schema 写入；失败时 `service_completed_successfully` dependency 阻止 API/worker 启动。backend/API 与 worker 使用同一个 mounted `OPENBILICLAW_DATABASE_URL`，Huey 仍使用独立文件。production composition 逐项构造 Bilibili、小红书、抖音、YouTube、X、知乎与 Reddit connector，不扫描 entry point、不加载动态 source factory。direct/CLI client 在第一次真实调用时才从 `source_accounts` 读取 enabled account，并用 `CredentialCipher`/`OPENBILICLAW_SECRET_KEY` 解密；构造 registry 与全部来源 disabled 时不读取凭据、不创建网络 client。extension-assisted operation 统一使用 durable `QueuedBrowserTransport`；当前扩展 dispatcher 尚未切换，因此启用这类 operation 会等待 generic task callback。模型只读取 `OPENBILICLAW_LITELLM_BASE_URL` 与 `OPENBILICLAW_LITELLM_API_KEY`，provider credential 仍只存在于 LiteLLM。
 
 ## 公开 Python API
 

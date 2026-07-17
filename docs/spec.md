@@ -231,7 +231,8 @@ SQLAlchemy repositories + UnitOfWork
         └─ source_tasks/job_runs/ai_runs foundations
         │
         ▼
-Alembic 0001 ──► isolated data/vnext/openbiliclaw.db
+installer / Compose one-shot migrate ─► Alembic 0001 ─► isolated data/vnext/openbiliclaw.db
+API + worker startup ─► read-only schema-head gate
 
 Application services + worker handlers
         ├─ typed TaskSpec/PydanticAI Agent ─► TaskRunner ─► ai_runs metadata only
@@ -255,7 +256,7 @@ Deferred: HTTP/extension composition, legacy data migration, /api/v1, frontend c
 Authoritative now: vNext job state for the worker; v0.3 legacy storage/runtime for public requests
 ```
 
-三个模型别名必须精确为 `obc-interactive`、`obc-analysis`、`obc-embedding`。应用层不得选择 provider deployment；provider routing/fallback、网络重试、限流和缓存由 LiteLLM 独占，`TaskRunner` 只允许 task 声明的 semantic output retry，并把 BYPASS 映射为 proxy 的 `cache.no-cache`。六个内置 task 覆盖 profile、keyword、单候选、batch candidate、chat 与 recommendation；candidate assessment row ID 由 application 层生成。AI run schema/API 只接收 metadata/usage/error class，不存在输入或输出 payload 字段。Docker Compose 要求本地生成的 LiteLLM master key 与 PostgreSQL password，源码/预构建路径挂同一 policy，Admin 默认只绑定 loopback；本阶段没有 live provider/Compose E2E。`/health?model` 可能调用 provider，仅用于显式诊断，并区分 degraded、transport、auth、missing alias、server 与 provider unhealthy。
+三个模型别名必须精确为 `obc-interactive`、`obc-analysis`、`obc-embedding`。应用层不得选择 provider deployment；provider routing/fallback、网络重试、限流和缓存由 LiteLLM 独占，`TaskRunner` 只允许 task 声明的 semantic output retry，并把 BYPASS 映射为 proxy 的 `cache.no-cache`。六个内置 task 覆盖 profile、keyword、单候选、batch candidate、chat 与 recommendation；candidate assessment row ID 由 application 层生成。AI run schema/API 只接收 metadata/usage/error class，不存在输入或输出 payload 字段。Docker Compose 要求本地生成的 LiteLLM master key 与 PostgreSQL password，源码/预构建路径挂同一 policy，Admin 默认只绑定 loopback；唯一 `migrate` 服务成功后才允许 API/worker 启动，两个 runtime 只读检查 schema head；本阶段没有 live provider/Compose E2E。`/health?model` 可能调用 provider，仅用于显式诊断，并区分 degraded、transport、auth、missing alias、server 与 provider unhealthy。
 
 FastAPI 只公开 `/api/v1/system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat 与 progress 走 SSE，扩展来源工作走 generic claim/complete。Bearer token 只从 installer/runtime 环境读取。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展待下一任务重接。
 

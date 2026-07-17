@@ -780,6 +780,12 @@ class SQLAlchemyJobRunRepository:
             raise LookupError(f"job run does not exist: {run_id}")
         return _job_snapshot(row)
 
+    def get_by_idempotency_key(self, idempotency_key: str) -> JobRunSnapshot | None:
+        row = self._session.scalar(
+            select(JobRunModel).where(JobRunModel.idempotency_key == idempotency_key)
+        )
+        return _job_snapshot(row) if row is not None else None
+
     def list(self, *, limit: int) -> tuple[JobRunSnapshot, ...]:
         rows = self._session.scalars(
             select(JobRunModel)

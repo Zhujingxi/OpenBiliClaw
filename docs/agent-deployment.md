@@ -36,8 +36,16 @@ OPENBILICLAW_LITELLM_API_KEY=<user LiteLLM key>
 ## 3. 判定成功
 
 脚本必须完成 migration、`doctor`、API/worker（API 与 worker）启动，并通过 public readiness
-和 bearer-protected settings 检查。仅有端口监听不算成功；只启动 API、不启动
+和 bearer-protected settings 检查。Docker 由一次性 `migrate` 服务串行 migration，
+其成功后才能启动 API/worker；source installer 则在启动两个进程前执行 migration。
+两个运行时都只读检查 schema head。仅有端口监听不算成功；只启动 API、不启动
 worker 也不算成功。
+
+源码安装的进程状态不保存裸 PID，而是同时保存 OS 启动时间、可执行文件和命令指纹。
+重跑时只有四项仍完全匹配才会发信号；先 TERM 并限时等待，身份仍相同且未退出才升级
+KILL。新启动流程会轮询 API 与 worker 两个子进程；旧 queue 文件和 API HTTP readiness
+都不能掩盖 worker 已退出。任一部分启动、状态写入或 readiness 失败都会终止并回收本轮
+已启动的所有子进程。
 
 成功事件：
 

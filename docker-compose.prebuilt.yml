@@ -65,33 +65,14 @@ services:
       start_period: 40s
     restart: unless-stopped
 
-  # Ollama sidecar — bundled embedding service so users don't need to
-  # install Ollama on their host. Pulls bge-m3 on first start (~1.1GB,
-  # CPU-only) and keeps the daemon running on the internal Docker
-  # network at http://ollama:11434. The backend's [llm.embedding] gets
-  # seeded to point here automatically on first config bootstrap.
-  #
-  # Prefer a cloud embedding provider instead? Remove this block plus
-  # the backend's depends_on and OPENBILICLAW_SEED_OLLAMA_DEFAULTS.
-  ollama:
-    # Prebuilt multi-arch image with bge-m3 BAKED IN (~1.1GB), published by
-    # .github/workflows/release-docker.yml. Its entrypoint seeds the baked
-    # model into the store before serving — ZERO network pull, offline-ready.
-    image: ghcr.io/whiteguo233/openbiliclaw-ollama:${OPENBILICLAW_VERSION:-latest}
-    container_name: openbiliclaw-ollama
+  migrate:
+    image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
+    environment:
+      OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
+    command: ["openbiliclaw", "db", "migrate"]
     volumes:
-      - openbiliclaw_ollama:/root/.ollama
-    # Set OPENBILICLAW_OLLAMA_ALLOW_PULL=1 to opt into a network pull if the
-    # baked seed is ever missing/corrupt (default: fail loud, not degrade).
-    healthcheck:
-      # Healthy = daemon up AND bge-m3 is locally available (seconds with the
-      # baked seed; start_period stays generous only for opt-in runtime pull).
-      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q '^bge-m3'"]
-      interval: 30s
-      timeout: 10s
-      retries: 6
-      start_period: 300s
-    restart: unless-stopped
+      - openbiliclaw_data:/app/runtime/data
+    restart: "no"
 
   api:
     # Multi-arch image (linux/amd64 + linux/arm64) published by
@@ -100,13 +81,8 @@ services:
     image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
     container_name: openbiliclaw-api
     depends_on:
-      # service_started (not service_healthy) on purpose: the sidecar is
-      # only "healthy" once bge-m3 finished downloading. A health gate
-      # here would keep the backend from ever starting when the first
-      # pull fails — instead the backend boots immediately and /setup/
-      # surfaces "embedding not ready yet" until the pull completes.
-      ollama:
-        condition: service_started
+      migrate:
+        condition: service_completed_successfully
       litellm:
         condition: service_healthy
     environment:
@@ -115,12 +91,6 @@ services:
       OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
       OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
       OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
-      # On first config bootstrap, seed [llm.ollama] base_url and
-      # [llm.embedding] to point at the bundled sidecar above. Existing
-      # config.toml is never overwritten.
-      OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
-      OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
-      OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
@@ -128,9 +98,8 @@ services:
       OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
     command: ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "8420"]
-    # ``host.docker.internal`` resolves the host machine from inside the
-    # container (proxy auto-detect, host-side Ollama). Required on Linux
-    # Docker; auto-provided by Docker Desktop on Mac / Windows.
+    # ``host.docker.internal`` resolves an explicitly configured host proxy.
+    # Required on Linux Docker; auto-provided by Docker Desktop on Mac/Windows.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -151,6 +120,8 @@ services:
     image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
     container_name: openbiliclaw-worker
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       litellm:
         condition: service_healthy
     environment:
@@ -170,7 +141,4 @@ volumes:
   openbiliclaw_config:
   openbiliclaw_data:
   openbiliclaw_logs:
-  # Persists ollama models across container recreations so users don't
-  # have to re-pull bge-m3 on every rebuild.
-  openbiliclaw_ollama:
   openbiliclaw_litellm_postgres:

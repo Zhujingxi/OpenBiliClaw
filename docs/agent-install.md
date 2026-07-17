@@ -7,8 +7,8 @@ provider-editor and feature-command setup flows.
 
 The installer prepares one of two runtimes:
 
-- **Docker, recommended:** Compose manages `api`, `worker`, `litellm`, and
-  `litellm-postgres`.
+- **Docker, recommended:** Compose manages one-shot `migrate`, `api`, `worker`,
+  `litellm`, and `litellm-postgres`.
 - **Source / uv:** the installer manages both `openbiliclaw serve` and
   `openbiliclaw worker` and connects them to a user-supplied LiteLLM proxy.
 
@@ -65,15 +65,21 @@ The order is intentionally fixed and failures propagate:
 2. Persist stable access/encryption secrets and the supplied LiteLLM connection.
 3. Set the application database to `data/vnext/openbiliclaw.db`.
 4. Set Huey transport to the separate `data/vnext/huey.db`.
-5. Run `openbiliclaw db migrate`.
-6. Stop only API/worker PIDs previously recorded by this installer.
+5. Stop only a previous API/worker whose PID, OS start time, executable, and
+   command fingerprint still match this installer's private state.
+6. Run `openbiliclaw db migrate` before launching either new process.
 7. Start `openbiliclaw serve` and `openbiliclaw worker` with the exact same env.
-8. Run `openbiliclaw doctor` after the worker has opened the queue.
-9. Check public readiness and a bearer-protected settings request.
+8. Poll both child processes and require the worker queue, then run
+   `openbiliclaw doctor`.
+9. Check public readiness and a bearer-protected settings request, followed by
+   another API and worker liveness check.
 
-Process IDs are stored privately in `data/vnext/runtime-processes.json`; logs are
-separate at `logs/api.log` and `logs/worker.log`. A failed migration starts nothing.
-A failed protected check stops both newly managed processes and returns non-zero.
+Verified identities are stored privately in `data/vnext/runtime-processes.json`;
+bare or stale PIDs are never signalled. Managed shutdown sends TERM, waits for a
+bounded interval, and escalates only while the same identity is still present.
+Logs are separate at `logs/api.log` and `logs/worker.log`. A failed migration starts
+nothing. A partial launch, state-write failure, dead worker, or failed protected
+check terminates and reaps every newly started child and returns non-zero.
 
 For CI or image preparation, set `SKIP_START=1`; this still installs, persists the
 environment, and migrates, but does not daemonize either process or run the live
@@ -81,10 +87,12 @@ worker/LiteLLM checks in `doctor`.
 
 ## Docker sequence
 
-Docker mode atomically fills missing infrastructure secrets, runs Compose, explicitly
-applies Alembic migration in the API container, then verifies both public and
-bearer-protected API access. Compose is responsible for both API and worker lifecycle.
-The two services mount `openbiliclaw_data:/app/runtime/data` and use exactly:
+Docker mode atomically fills missing infrastructure secrets and runs Compose. The
+one-shot `migrate` service applies Alembic first; `api` and `worker` both require its
+successful completion and only perform a read-only schema-head startup check. A
+migration failure therefore blocks both long-running processes. The installer then
+verifies public and bearer-protected API access. The three application services mount
+`openbiliclaw_data:/app/runtime/data`; API and worker use exactly:
 
 ```text
 OPENBILICLAW_DATABASE_URL=sqlite:////app/runtime/data/vnext/openbiliclaw.db

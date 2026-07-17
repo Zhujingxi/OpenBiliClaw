@@ -12,7 +12,7 @@ web app, browser extension, `/api/v1`, or the four durable jobs.
 | `openbiliclaw doctor` | Report database, access-token, and LiteLLM configuration state without printing secret values. |
 | `openbiliclaw eval [--dataset NAME]` | Validate versioned offline Pydantic Evals datasets; no provider call. |
 | `openbiliclaw db migrate` | Upgrade the configured fresh vNext database with Alembic. |
-| `openbiliclaw db backup DESTINATION` | Use SQLite's backup API to create a new consistent backup. |
+| `openbiliclaw db backup DESTINATION` | Create a private, no-overwrite SQLite snapshot from an inode-pinned main/WAL/SHM/journal source set. |
 
 The old feature commands (`init`, `profile`, `recommend`, source-specific fetch
 commands, model editors, updater, and desktop helpers) are not compatibility

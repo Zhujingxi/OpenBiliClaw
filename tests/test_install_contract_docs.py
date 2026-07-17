@@ -38,11 +38,19 @@ def test_shell_installer_hides_key_and_propagates_failure() -> None:
 
 def test_powershell_installer_hides_key_and_propagates_failure() -> None:
     source = _read("scripts/install.ps1")
+    bootstrap = _read("scripts/agent_bootstrap.py")
 
     assert "Read-Host 'LiteLLM API key' -AsSecureString" in source
     assert "$ErrorActionPreference = 'Stop'" in source
     assert "if ($LASTEXITCODE -ne 0)" in source
     assert "Runtime secrets are stored" in source
+    # PowerShell delegates lifecycle management to this Python bootstrap. Its
+    # Windows path must verify creation time, executable, and command line.
+    assert "Get-CimInstance Win32_Process" in bootstrap
+    assert "CreationDate" in bootstrap
+    assert "ExecutablePath" in bootstrap
+    assert "CommandLine" in bootstrap
+    assert '["taskkill", "/PID", str(pid), "/T"]' in bootstrap
 
 
 @pytest.mark.parametrize("name", ("docker-compose.yml", "docker-compose.prebuilt.yml"))

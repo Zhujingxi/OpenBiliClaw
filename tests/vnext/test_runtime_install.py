@@ -24,6 +24,30 @@ def _load_bootstrap_module():
 bootstrap = _load_bootstrap_module()
 
 
+class _LiveProcess:
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.exit_code: int | None = None
+
+    def poll(self) -> int | None:
+        return self.exit_code
+
+    def terminate(self) -> None:
+        self.exit_code = -15
+
+    def kill(self) -> None:
+        self.exit_code = -9
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        assert self.exit_code is not None
+        return self.exit_code
+
+
+def _identity(pid: int):
+    return bootstrap.ProcessIdentity(pid, f"start-{pid}", "/test/openbiliclaw", "a" * 64)
+
+
 def _read_env(path: Path) -> dict[str, str]:
     return dict(
         line.split("=", 1)
@@ -96,16 +120,12 @@ def test_local_install_migrates_then_starts_api_and_worker_without_secret_output
         calls.append((command, env))
         timeline.append(command[-1])
 
-    class Process:
-        def __init__(self, pid: int) -> None:
-            self.pid = pid
-
     def start_process(
         command: list[str], *, cwd: Path, env: dict[str, str], log_path: Path
-    ) -> Process:
+    ) -> _LiveProcess:
         processes.append((command, env))
         timeline.append(command[-1])
-        return Process(1000 + len(processes))
+        return _LiveProcess(1000 + len(processes))
 
     result = bootstrap.install_local_runtime(
         tmp_path,
@@ -118,6 +138,7 @@ def test_local_install_migrates_then_starts_api_and_worker_without_secret_output
         start_process=start_process,
         readiness_probe=lambda *_args, **_kwargs: True,
         queue_probe=lambda *_args, **_kwargs: True,
+        identity_probe=lambda pid: _identity(pid),
     )
 
     assert calls[0][0][-2:] == ["db", "migrate"]
@@ -131,7 +152,9 @@ def test_local_install_migrates_then_starts_api_and_worker_without_secret_output
     assert result.api_pid == 1001
     assert result.worker_pid == 1002
     pid_state = json.loads((tmp_path / "data/vnext/runtime-processes.json").read_text())
-    assert pid_state == {"api": 1001, "worker": 1002}
+    assert pid_state["version"] == 1
+    assert pid_state["api"]["pid"] == 1001
+    assert pid_state["worker"]["pid"] == 1002
     rendered = capsys.readouterr().out
     assert "sentinel-proxy-secret" not in rendered
     assert "https://models.example/v1" not in rendered
@@ -167,9 +190,6 @@ def test_local_install_fails_if_protected_readiness_fails_and_cleans_pid_state(
     def run_command(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
         commands.append(command)
 
-    class Process:
-        pid = 1234
-
     with pytest.raises(RuntimeError, match="protected readiness check failed"):
         bootstrap.install_local_runtime(
             tmp_path,
@@ -179,9 +199,10 @@ def test_local_install_fails_if_protected_readiness_fails_and_cleans_pid_state(
             litellm_api_key="proxy-secret",
             install_dependencies=False,
             run_command=run_command,
-            start_process=lambda *_args, **_kwargs: Process(),
+            start_process=lambda *_args, **_kwargs: _LiveProcess(1234),
             readiness_probe=lambda *_args, **_kwargs: False,
             queue_probe=lambda *_args, **_kwargs: True,
+            identity_probe=lambda pid: _identity(pid),
         )
     assert any(command[-1] == "doctor" for command in commands)
     assert not (tmp_path / "data/vnext/runtime-processes.json").exists()
@@ -195,9 +216,6 @@ def test_local_install_propagates_doctor_failure_and_cleans_processes(tmp_path: 
         if command[-1] == "doctor":
             raise RuntimeError("doctor failed")
 
-    class Process:
-        pid = 1234
-
     with pytest.raises(RuntimeError, match="doctor failed"):
         bootstrap.install_local_runtime(
             tmp_path,
@@ -207,9 +225,10 @@ def test_local_install_propagates_doctor_failure_and_cleans_processes(tmp_path: 
             litellm_api_key="proxy-secret",
             install_dependencies=False,
             run_command=run_command,
-            start_process=lambda *_args, **_kwargs: Process(),
+            start_process=lambda *_args, **_kwargs: _LiveProcess(1234),
             readiness_probe=lambda *_args, **_kwargs: True,
             queue_probe=lambda *_args, **_kwargs: True,
+            identity_probe=lambda pid: _identity(pid),
         )
     assert commands[0][-1] == "migrate"
     assert commands[1][-1] == "doctor"
@@ -217,9 +236,6 @@ def test_local_install_propagates_doctor_failure_and_cleans_processes(tmp_path: 
 
 
 def test_local_install_cleans_processes_when_worker_queue_never_opens(tmp_path: Path) -> None:
-    class Process:
-        pid = 1234
-
     with pytest.raises(RuntimeError, match="worker queue did not initialize"):
         bootstrap.install_local_runtime(
             tmp_path,
@@ -229,9 +245,10 @@ def test_local_install_cleans_processes_when_worker_queue_never_opens(tmp_path: 
             litellm_api_key="proxy-secret",
             install_dependencies=False,
             run_command=lambda *_args, **_kwargs: None,
-            start_process=lambda *_args, **_kwargs: Process(),
+            start_process=lambda *_args, **_kwargs: _LiveProcess(1234),
             readiness_probe=lambda *_args, **_kwargs: True,
             queue_probe=lambda *_args, **_kwargs: False,
+            identity_probe=lambda pid: _identity(pid),
         )
     assert not (tmp_path / "data/vnext/runtime-processes.json").exists()
 
@@ -247,6 +264,29 @@ def test_compose_prefix_supports_source_and_prebuilt_distributions(tmp_path: Pat
 
     (tmp_path / "docker-compose.yml").touch()
     assert bootstrap._compose_prefix(tmp_path) == ["docker", "compose"]
+
+
+def test_docker_install_delegates_migration_to_compose_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        calls.append(command)
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+    monkeypatch.setattr(bootstrap, "_probe_runtime", lambda *_args, **_kwargs: True)
+
+    result = bootstrap._install_docker_runtime(tmp_path, start=True)
+
+    assert result.status == "complete"
+    assert calls == [["docker", "compose", "up", "-d", "--build"]]
 
 
 def test_bootstrap_source_has_no_removed_feature_commands() -> None:

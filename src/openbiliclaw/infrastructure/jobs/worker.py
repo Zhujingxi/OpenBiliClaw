@@ -8,13 +8,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import cast
 
-from alembic import command
-from alembic.config import Config
-
 from openbiliclaw.features.system.domain import DatabaseSettings
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
 from openbiliclaw.infrastructure.ai.use_cases import TransactionalAIRunRecorder
 from openbiliclaw.infrastructure.database.base import create_engine_and_session
+from openbiliclaw.infrastructure.database.operations import require_schema_at_head
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.orchestration import (
     WorkerDependencies,
@@ -49,9 +47,10 @@ def database_runtime_factory() -> tuple[JobService, Mapping[str, JobHandler]]:
     """Compose real handlers with all seven explicit built-in source connectors."""
 
     settings = DatabaseSettings()
-    config = Config(os.getenv("OPENBILICLAW_ALEMBIC_INI", str(Path("alembic.ini"))))
-    config.set_main_option("sqlalchemy.url", settings.url)
-    command.upgrade(config, "head")
+    require_schema_at_head(
+        database_url=settings.url,
+        alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
+    )
     _engine, session_factory = create_engine_and_session(settings)
     source_registry = build_default_source_registry(session_factory)
     base_url = os.getenv("OPENBILICLAW_LITELLM_BASE_URL", "http://litellm:4000")

@@ -811,6 +811,41 @@
         "title": "JobRunResponse",
         "type": "object"
       },
+      "OnboardingProgressEvent": {
+        "additionalProperties": false,
+        "description": "Current persisted stage and its concrete child job run.",
+        "properties": {
+          "onboarding_complete": {
+            "title": "Onboarding Complete",
+            "type": "boolean"
+          },
+          "root_run_id": {
+            "format": "uuid",
+            "title": "Root Run Id",
+            "type": "string"
+          },
+          "run": {
+            "$ref": "#/components/schemas/JobRunResponse"
+          },
+          "stage": {
+            "enum": [
+              "source_sync",
+              "profile_projection",
+              "feed_replenishment"
+            ],
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_run_id",
+          "stage",
+          "run",
+          "onboarding_complete"
+        ],
+        "title": "OnboardingProgressEvent",
+        "type": "object"
+      },
       "OnboardingStart": {
         "additionalProperties": false,
         "properties": {
@@ -818,11 +853,62 @@
             "items": {
               "$ref": "#/components/schemas/SourceId"
             },
+            "minItems": 1,
             "title": "Source Ids",
             "type": "array"
           }
         },
+        "required": [
+          "source_ids"
+        ],
         "title": "OnboardingStart",
+        "type": "object"
+      },
+      "OnboardingTerminalEvent": {
+        "additionalProperties": false,
+        "description": "Terminal state propagated from the current durable onboarding child.",
+        "properties": {
+          "onboarding_complete": {
+            "title": "Onboarding Complete",
+            "type": "boolean"
+          },
+          "root_run_id": {
+            "format": "uuid",
+            "title": "Root Run Id",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "source_sync",
+              "profile_projection",
+              "feed_replenishment"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "root_run_id",
+          "stage",
+          "run_id",
+          "status",
+          "onboarding_complete"
+        ],
+        "title": "OnboardingTerminalEvent",
         "type": "object"
       },
       "ProfileFacet": {
@@ -1649,7 +1735,7 @@
                   "items": {
                     "$ref": "#/components/schemas/FeedItem"
                   },
-                  "title": "Response 200 V1 Feed List",
+                  "title": "Response V1 Feed List",
                   "type": "array"
                 }
               }
@@ -2002,7 +2088,7 @@
                   "items": {
                     "$ref": "#/components/schemas/CollectionItem"
                   },
-                  "title": "Response 200 V1 Library List",
+                  "title": "Response V1 Library List",
                   "type": "array"
                 }
               }
@@ -2233,7 +2319,7 @@
                 "x-sse-events": {
                   "done": {
                     "schema": {
-                      "$ref": "#/components/schemas/StreamTerminalEvent"
+                      "$ref": "#/components/schemas/OnboardingTerminalEvent"
                     }
                   },
                   "error": {
@@ -2243,7 +2329,7 @@
                   },
                   "progress": {
                     "schema": {
-                      "$ref": "#/components/schemas/JobRunResponse"
+                      "$ref": "#/components/schemas/OnboardingProgressEvent"
                     }
                   }
                 }
@@ -2508,7 +2594,7 @@
                   "items": {
                     "$ref": "#/components/schemas/SourceManifest"
                   },
-                  "title": "Response 200 V1 Sources List",
+                  "title": "Response V1 Sources List",
                   "type": "array"
                 }
               }
@@ -2538,7 +2624,7 @@
                   "items": {
                     "$ref": "#/components/schemas/SourceAccountStatus"
                   },
-                  "title": "Response 200 V1 Sources Status",
+                  "title": "Response V1 Sources Status",
                   "type": "array"
                 }
               }

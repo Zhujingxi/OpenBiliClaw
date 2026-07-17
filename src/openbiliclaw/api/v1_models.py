@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 from uuid import UUID  # noqa: TC003 - Pydantic resolves runtime fields
 
 from fastapi.encoders import jsonable_encoder
@@ -14,6 +14,7 @@ from openbiliclaw.features.feed.domain import Interaction  # noqa: TC001
 
 ModelAlias = Literal["obc-interactive", "obc-analysis", "obc-embedding"]
 JobStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
+OnboardingStage = Literal["source_sync", "profile_projection", "feed_replenishment"]
 
 
 class AliasHealthResponse(BaseModel):
@@ -68,6 +69,20 @@ class InteractionResponse(BaseModel):
     signal: ProfileSignal
 
 
+class EventIngestResult(TypedDict):
+    """Typed handler value validated against :class:`EventIngestResponse`."""
+
+    event_id: UUID
+    signals: tuple[ProfileSignal, ...]
+
+
+class InteractionResult(TypedDict):
+    """Typed handler value validated against :class:`InteractionResponse`."""
+
+    interaction: Interaction
+    signal: ProfileSignal
+
+
 class StreamErrorEvent(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -79,6 +94,29 @@ class StreamTerminalEvent(BaseModel):
 
     status: Literal["succeeded", "failed", "cancelled"]
     id: UUID | None = None
+
+
+class OnboardingProgressEvent(BaseModel):
+    """Current persisted stage and its concrete child job run."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    root_run_id: UUID
+    stage: OnboardingStage
+    run: JobRunResponse
+    onboarding_complete: bool
+
+
+class OnboardingTerminalEvent(BaseModel):
+    """Terminal state propagated from the current durable onboarding child."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    root_run_id: UUID
+    stage: OnboardingStage
+    run_id: UUID
+    status: Literal["succeeded", "failed", "cancelled"]
+    onboarding_complete: bool
 
 
 class ChatDoneEvent(BaseModel):
@@ -96,6 +134,8 @@ SSE_COMPONENT_MODELS = (
     ChatChunk,
     ChatDoneEvent,
     JobRunResponse,
+    OnboardingProgressEvent,
+    OnboardingTerminalEvent,
     StreamErrorEvent,
     StreamTerminalEvent,
 )
@@ -134,9 +174,13 @@ __all__ = [
     "AIHealthResponse",
     "AliasHealthResponse",
     "ChatDoneEvent",
+    "EventIngestResult",
     "EventIngestResponse",
+    "InteractionResult",
     "InteractionResponse",
     "JobRunResponse",
+    "OnboardingProgressEvent",
+    "OnboardingTerminalEvent",
     "SSE_COMPONENT_MODELS",
     "StreamErrorEvent",
     "StreamTerminalEvent",

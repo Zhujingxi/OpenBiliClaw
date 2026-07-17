@@ -130,6 +130,20 @@ def test_sse_operations_document_typed_event_stream_contracts() -> None:
             assert ref.rsplit("/", 1)[-1] in schema["components"]["schemas"]
 
 
+def test_onboarding_openapi_requires_sources_and_tracks_durable_child_runs() -> None:
+    schema = create_app().openapi()
+    by_id = {operation["operationId"]: operation for operation in _operations(schema)}
+    start_schema = schema["components"]["schemas"]["OnboardingStart"]
+    events = by_id["v1_onboarding_events"]["responses"]["200"]["content"]["text/event-stream"][
+        "x-sse-events"
+    ]
+
+    assert start_schema["required"] == ["source_ids"]
+    assert start_schema["properties"]["source_ids"]["minItems"] == 1
+    assert events["progress"]["schema"] == {"$ref": "#/components/schemas/OnboardingProgressEvent"}
+    assert events["done"]["schema"] == {"$ref": "#/components/schemas/OnboardingTerminalEvent"}
+
+
 def test_frozen_metadata_is_a_string_keyed_json_object_schema() -> None:
     schema = ActivityEvent.model_json_schema()
     metadata = schema["properties"]["metadata"]

@@ -1,10 +1,9 @@
 """Feed feedback and interaction writes."""
 
 from fastapi import APIRouter, Depends, status
-from fastapi.encoders import jsonable_encoder
 
 from openbiliclaw.api.dependencies import Container, require_access
-from openbiliclaw.api.v1_models import InteractionResponse
+from openbiliclaw.api.v1_models import InteractionResponse, InteractionResult
 from openbiliclaw.features.feed.domain import Interaction
 
 router = APIRouter(
@@ -15,15 +14,14 @@ router = APIRouter(
 @router.post(
     "",
     operation_id="v1_interactions_create",
-    response_model=None,
-    responses={status.HTTP_201_CREATED: {"model": InteractionResponse}},
+    response_model=InteractionResponse,
     status_code=status.HTTP_201_CREATED,
 )
 def create_interaction(
     interaction: Interaction,
     container: Container,
-) -> object:
+) -> InteractionResult:
     return {
-        "interaction": interaction.model_dump(mode="json"),
-        "signal": jsonable_encoder(container.feedback.record(interaction)),
+        "interaction": interaction,
+        "signal": container.feedback.record(interaction),
     }

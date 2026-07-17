@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -34,6 +35,53 @@ PROCESS_STATE = Path("data/vnext/runtime-processes.json")
 
 class ProcessLike(Protocol):
     pid: int
+
+    def poll(self) -> int | None: ...
+
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessIdentity:
+    """Stable OS identity used to distinguish a managed process from PID reuse."""
+
+    pid: int
+    start_token: str
+    executable: str
+    argv_fingerprint: str
+
+    def to_dict(self) -> dict[str, int | str]:
+        return {
+            "pid": self.pid,
+            "start_token": self.start_token,
+            "executable": self.executable,
+            "argv_fingerprint": self.argv_fingerprint,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> ProcessIdentity | None:
+        if not isinstance(value, dict):
+            return None
+        pid = value.get("pid")
+        start_token = value.get("start_token")
+        executable = value.get("executable")
+        argv_fingerprint = value.get("argv_fingerprint")
+        if (
+            not isinstance(pid, int)
+            or pid <= 1
+            or not isinstance(start_token, str)
+            or not start_token
+            or not isinstance(executable, str)
+            or not executable
+            or not isinstance(argv_fingerprint, str)
+            or len(argv_fingerprint) < 8
+        ):
+            return None
+        return cls(pid, start_token, executable, argv_fingerprint)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +155,7 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
             if os.fstat(descriptor).st_size == 0:
                 os.write(descriptor, b"0")
             os.lseek(descriptor, 0, os.SEEK_SET)
-            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
         else:
             import fcntl
 
@@ -119,7 +167,10 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 
             with suppress(OSError):
                 os.lseek(descriptor, 0, os.SEEK_SET)
-                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                unlock_flag = msvcrt.LK_UNLCK  # type: ignore[attr-defined]
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    descriptor, unlock_flag, 1
+                )
         else:
             import fcntl
 
@@ -237,8 +288,6 @@ def _runtime_env(values: Mapping[str, str]) -> dict[str, str]:
 
 
 def _command_prefix(project_dir: Path) -> list[str]:
-    if shutil.which("uv"):
-        return ["uv", "run", "openbiliclaw"]
     executable = (
         project_dir
         / ".venv"
@@ -247,6 +296,8 @@ def _command_prefix(project_dir: Path) -> list[str]:
     )
     if executable.exists():
         return [str(executable)]
+    if shutil.which("uv"):
+        return ["uv", "run", "openbiliclaw"]
     return [sys.executable, "-m", "openbiliclaw.cli"]
 
 
@@ -260,32 +311,243 @@ def _start_detached(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     stream = log_path.open("ab")
     try:
-        options: dict[str, object] = {}
         if os.name == "nt":
-            options["creationflags"] = 0x00000008 | 0x00000200
-        else:
-            options["start_new_session"] = True
+            return subprocess.Popen(  # noqa: S603
+                command,
+                cwd=cwd,
+                env=env,
+                stdout=stream,
+                stderr=stream,
+                creationflags=0x00000008 | 0x00000200,
+            )
         return subprocess.Popen(  # noqa: S603
             command,
             cwd=cwd,
             env=env,
             stdout=stream,
             stderr=stream,
-            **options,
+            start_new_session=True,
         )
     finally:
         stream.close()
 
 
-def _write_process_state(project_dir: Path, *, api_pid: int, worker_pid: int) -> None:
-    path = project_dir / PROCESS_STATE
-    _atomic_write_private_file(
-        path,
-        json.dumps({"api": api_pid, "worker": worker_pid}, sort_keys=True) + "\n",
+def _command_fingerprint(command_line: bytes | str) -> str:
+    payload = command_line if isinstance(command_line, bytes) else command_line.encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _inspect_linux_process(pid: int) -> ProcessIdentity | None:
+    process_dir = Path("/proc") / str(pid)
+    try:
+        first_stat = (process_dir / "stat").read_text(encoding="utf-8")
+        executable = os.readlink(process_dir / "exe")
+        command_line = (process_dir / "cmdline").read_bytes()
+        second_stat = (process_dir / "stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return None
+    if first_stat != second_stat or not command_line:
+        return None
+    close_paren = first_stat.rfind(")")
+    fields = first_stat[close_paren + 2 :].split() if close_paren >= 0 else []
+    if len(fields) <= 19:
+        return None
+    return ProcessIdentity(
+        pid=pid,
+        start_token=fields[19],
+        executable=executable,
+        argv_fingerprint=_command_fingerprint(command_line),
     )
 
 
-def _stop_managed_processes(project_dir: Path) -> None:
+def _run_ps_field(pid: int, field: str) -> str | None:
+    completed = subprocess.run(  # noqa: S603
+        ["ps", "-ww", "-p", str(pid), "-o", f"{field}="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = completed.stdout.strip()
+    return value if completed.returncode == 0 and value else None
+
+
+def _macos_process_details(pid: int) -> tuple[str, str] | None:
+    """Return a microsecond-resolution start token and executable path."""
+
+    import ctypes
+
+    class ProcBsdInfo(ctypes.Structure):
+        _fields_ = [
+            ("pbi_flags", ctypes.c_uint32),
+            ("pbi_status", ctypes.c_uint32),
+            ("pbi_xstatus", ctypes.c_uint32),
+            ("pbi_pid", ctypes.c_uint32),
+            ("pbi_ppid", ctypes.c_uint32),
+            ("pbi_uid", ctypes.c_uint32),
+            ("pbi_gid", ctypes.c_uint32),
+            ("pbi_ruid", ctypes.c_uint32),
+            ("pbi_rgid", ctypes.c_uint32),
+            ("pbi_svuid", ctypes.c_uint32),
+            ("pbi_svgid", ctypes.c_uint32),
+            ("rfu_1", ctypes.c_uint32),
+            ("pbi_comm", ctypes.c_char * 16),
+            ("pbi_name", ctypes.c_char * 32),
+            ("pbi_nfiles", ctypes.c_uint32),
+            ("pbi_pgid", ctypes.c_uint32),
+            ("pbi_pjobc", ctypes.c_uint32),
+            ("e_tdev", ctypes.c_uint32),
+            ("e_tpgid", ctypes.c_uint32),
+            ("pbi_nice", ctypes.c_int32),
+            ("pbi_start_tvsec", ctypes.c_uint64),
+            ("pbi_start_tvusec", ctypes.c_uint64),
+        ]
+
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        info = ProcBsdInfo()
+        size = ctypes.sizeof(info)
+        read = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), size)
+        if read != size or info.pbi_pid != pid:
+            return None
+        path_buffer = ctypes.create_string_buffer(4096)
+        path_size = libproc.proc_pidpath(pid, path_buffer, len(path_buffer))
+        if path_size <= 0:
+            return None
+        executable = path_buffer.value.decode("utf-8", errors="surrogateescape")
+    except (OSError, ValueError):
+        return None
+    if not executable:
+        return None
+    return f"{info.pbi_start_tvsec}:{info.pbi_start_tvusec}", executable
+
+
+def _inspect_macos_process(pid: int) -> ProcessIdentity | None:
+    first_details = _macos_process_details(pid)
+    command_line = _run_ps_field(pid, "command")
+    second_details = _macos_process_details(pid)
+    if first_details is None or first_details != second_details or command_line is None:
+        return None
+    start_token, executable = first_details
+    return ProcessIdentity(
+        pid=pid,
+        start_token=start_token,
+        executable=executable,
+        argv_fingerprint=_command_fingerprint(command_line),
+    )
+
+
+def _inspect_posix_process(pid: int) -> ProcessIdentity | None:
+    first_start = _run_ps_field(pid, "lstart")
+    executable = _run_ps_field(pid, "comm")
+    command_line = _run_ps_field(pid, "command")
+    second_start = _run_ps_field(pid, "lstart")
+    if (
+        first_start is None
+        or first_start != second_start
+        or executable is None
+        or command_line is None
+    ):
+        return None
+    return ProcessIdentity(
+        pid=pid,
+        start_token=first_start,
+        executable=executable,
+        argv_fingerprint=_command_fingerprint(command_line),
+    )
+
+
+def _inspect_windows_process(pid: int) -> ProcessIdentity | None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if powershell is None:
+        return None
+    script = (
+        f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}'; "
+        "if ($null -eq $p) { exit 3 }; "
+        "@{CreationDate=$p.CreationDate;ExecutablePath=$p.ExecutablePath;"
+        "CommandLine=$p.CommandLine}|ConvertTo-Json -Compress"
+    )
+    completed = subprocess.run(  # noqa: S603
+        [powershell, "-NoProfile", "-NonInteractive", "-Command", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    try:
+        value = json.loads(completed.stdout)
+    except ValueError:
+        return None
+    start = value.get("CreationDate") if isinstance(value, dict) else None
+    executable = value.get("ExecutablePath") if isinstance(value, dict) else None
+    command_line = value.get("CommandLine") if isinstance(value, dict) else None
+    if not isinstance(start, str) or not start:
+        return None
+    if not isinstance(executable, str) or not executable:
+        return None
+    if not isinstance(command_line, str) or not command_line:
+        return None
+    return ProcessIdentity(pid, start, executable, _command_fingerprint(command_line))
+
+
+def _inspect_process(pid: int) -> ProcessIdentity | None:
+    if pid <= 1:
+        return None
+    if os.name == "nt":
+        return _inspect_windows_process(pid)
+    if sys.platform.startswith("linux") and Path("/proc").is_dir():
+        return _inspect_linux_process(pid)
+    if sys.platform == "darwin":
+        return _inspect_macos_process(pid)
+    return _inspect_posix_process(pid)
+
+
+def _write_process_state(
+    project_dir: Path, *, api: ProcessIdentity, worker: ProcessIdentity
+) -> None:
+    path = project_dir / PROCESS_STATE
+    _atomic_write_private_file(
+        path,
+        json.dumps({"version": 1, "api": api.to_dict(), "worker": worker.to_dict()}, sort_keys=True)
+        + "\n",
+    )
+
+
+def _signal_process(pid: int, signum: int) -> None:
+    if os.name == "nt":
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if signum == signal.SIGKILL:
+            command.append("/F")
+        completed = subprocess.run(  # noqa: S603
+            command, check=False, capture_output=True, text=True
+        )
+        if completed.returncode != 0:
+            raise ProcessLookupError(pid)
+        return
+    if os.name != "nt":
+        with suppress(ProcessLookupError, PermissionError):
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, signum)
+                return
+    os.kill(pid, signum)
+
+
+def _wait_for_identity_exit(identity: ProcessIdentity, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _inspect_process(identity.pid) != identity:
+            return True
+        time.sleep(0.05)
+    return _inspect_process(identity.pid) != identity
+
+
+def _stop_managed_processes(
+    project_dir: Path,
+    *,
+    identity_probe: Callable[[int], ProcessIdentity | None] = _inspect_process,
+    signal_process: Callable[[int, int], None] = _signal_process,
+    wait_for_exit: Callable[[ProcessIdentity, float], bool] = _wait_for_identity_exit,
+) -> None:
     path = project_dir / PROCESS_STATE
     if path.is_symlink():
         raise RuntimeError(f"refusing to use symlink: {path}")
@@ -296,12 +558,64 @@ def _stop_managed_processes(project_dir: Path) -> None:
     except (OSError, ValueError):
         path.unlink(missing_ok=True)
         return
-    for value in state.values():
-        if not isinstance(value, int) or value <= 1:
+    if not isinstance(state, dict) or state.get("version") != 1:
+        path.unlink(missing_ok=True)
+        return
+    survivors: list[str] = []
+    for name in ("api", "worker"):
+        expected = ProcessIdentity.from_dict(state.get(name))
+        if expected is None or identity_probe(expected.pid) != expected:
             continue
         with suppress(ProcessLookupError, PermissionError):
-            os.kill(value, signal.SIGTERM)
+            signal_process(expected.pid, signal.SIGTERM)
+        if wait_for_exit(expected, 5.0):
+            continue
+        if identity_probe(expected.pid) != expected:
+            continue
+        with suppress(ProcessLookupError, PermissionError):
+            signal_process(expected.pid, signal.SIGKILL)
+        if not wait_for_exit(expected, 5.0):
+            survivors.append(name)
+    if survivors:
+        joined = ", ".join(survivors)
+        raise RuntimeError(f"managed processes did not stop: {joined}")
     path.unlink(missing_ok=True)
+
+
+def _signal_started_process(process: ProcessLike, signum: int) -> None:
+    if isinstance(process, subprocess.Popen):
+        _signal_process(process.pid, signum)
+    elif signum == signal.SIGTERM:
+        process.terminate()
+    else:
+        process.kill()
+
+
+def _terminate_started_processes(processes: list[ProcessLike]) -> None:
+    live = [process for process in processes if process.poll() is None]
+    for process in live:
+        with suppress(ProcessLookupError, PermissionError):
+            _signal_started_process(process, signal.SIGTERM)
+    for process in live:
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            if process.poll() is not None:
+                continue
+            with suppress(ProcessLookupError, PermissionError):
+                _signal_started_process(process, signal.SIGKILL)
+            with suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=5.0)
+    survivors = [process.pid for process in live if process.poll() is None]
+    if survivors:
+        joined = ", ".join(str(pid) for pid in survivors)
+        raise RuntimeError(f"newly started processes did not stop: {joined}")
+
+
+def _require_process_alive(process: ProcessLike, name: str) -> None:
+    exit_code = process.poll()
+    if exit_code is not None:
+        raise RuntimeError(f"{name} exited before readiness (code {exit_code})")
 
 
 def _probe_runtime(host: str, port: int, token: str, *, timeout: float = 30.0) -> bool:
@@ -318,7 +632,7 @@ def _probe_runtime(host: str, port: int, token: str, *, timeout: float = 30.0) -
                 protected_url, headers={"Authorization": f"Bearer {token}"}
             )
             with urllib.request.urlopen(request, timeout=2) as response:  # noqa: S310
-                return response.status == 200
+                return int(response.status) == 200
         except (OSError, RuntimeError, urllib.error.URLError):
             time.sleep(0.25)
     return False
@@ -346,6 +660,8 @@ def install_local_runtime(
     start_process: Callable[..., ProcessLike] = _start_detached,
     readiness_probe: Callable[..., bool] = _probe_runtime,
     queue_probe: Callable[..., bool] = _wait_for_file,
+    identity_probe: Callable[[int], ProcessIdentity | None] = _inspect_process,
+    state_writer: Callable[..., None] = _write_process_state,
 ) -> InstallResult:
     """Prepare, migrate, and manage the source-install API and worker."""
 
@@ -375,35 +691,47 @@ def install_local_runtime(
         _emit("complete", "local_runtime_prepared", mode="local", health_url=health_url)
         return result
 
-    api = start_process(
-        [*prefix, "serve", "--host", host, "--port", str(port)],
-        cwd=project_dir,
-        env=environment,
-        log_path=project_dir / "logs/api.log",
-    )
+    started: list[ProcessLike] = []
     try:
+        api = start_process(
+            [*prefix, "serve", "--host", host, "--port", str(port)],
+            cwd=project_dir,
+            env=environment,
+            log_path=project_dir / "logs/api.log",
+        )
+        started.append(api)
+        _require_process_alive(api, "API")
         worker = start_process(
             [*prefix, "worker"],
             cwd=project_dir,
             env=environment,
             log_path=project_dir / "logs/worker.log",
         )
-    except BaseException:
-        with suppress(ProcessLookupError, PermissionError):
-            os.kill(api.pid, signal.SIGTERM)
-        raise
-    _write_process_state(project_dir, api_pid=api.pid, worker_pid=worker.pid)
-    try:
+        started.append(worker)
+        _require_process_alive(worker, "worker")
+        api_identity = identity_probe(api.pid)
+        worker_identity = identity_probe(worker.pid)
+        if api_identity is None or worker_identity is None:
+            raise RuntimeError("unable to verify launched process identity")
+        state_writer(project_dir, api=api_identity, worker=worker_identity)
+        _require_process_alive(api, "API")
+        _require_process_alive(worker, "worker")
         if not queue_probe(Path(values["OPENBILICLAW_HUEY_PATH"])):
             raise RuntimeError("worker queue did not initialize")
+        _require_process_alive(api, "API")
+        _require_process_alive(worker, "worker")
         run_command([*prefix, "doctor"], cwd=project_dir, env=environment)
+        _require_process_alive(api, "API")
+        _require_process_alive(worker, "worker")
         protected_ready = readiness_probe(host, port, values["OPENBILICLAW_ACCESS_TOKEN"])
+        _require_process_alive(api, "API")
+        _require_process_alive(worker, "worker")
+        if not protected_ready:
+            raise RuntimeError("protected readiness check failed")
     except BaseException:
-        _stop_managed_processes(project_dir)
+        _terminate_started_processes(started)
+        (project_dir / PROCESS_STATE).unlink(missing_ok=True)
         raise
-    if not protected_ready:
-        _stop_managed_processes(project_dir)
-        raise RuntimeError("protected readiness check failed")
     result = InstallResult(
         status="complete",
         mode="local",
@@ -431,11 +759,6 @@ def _install_docker_runtime(project_dir: Path, *, start: bool) -> InstallResult:
         return InstallResult(status="prepared", mode="docker", health_url=health_url)
     compose = _compose_prefix(project_dir)
     subprocess.run([*compose, "up", "-d", "--build"], cwd=project_dir, check=True)  # noqa: S603
-    subprocess.run(  # noqa: S603
-        [*compose, "exec", "-T", "api", "openbiliclaw", "db", "migrate"],
-        cwd=project_dir,
-        check=True,
-    )
     if not _probe_runtime(
         "127.0.0.1", DEFAULT_PORT, values["OPENBILICLAW_ACCESS_TOKEN"], timeout=90
     ):

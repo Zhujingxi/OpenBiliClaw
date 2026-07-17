@@ -9,6 +9,8 @@ from uuid import UUID, uuid4
 
 import anyio
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
@@ -21,12 +23,13 @@ from openbiliclaw.api.routers.chat import ChatRequest, _chat_events
 from openbiliclaw.api.routers.jobs import _job_events
 from openbiliclaw.api.routers.onboarding import _progress_events
 from openbiliclaw.api.routers.source_tasks import claim_source_task
-from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
+from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind, ProfileSignal
 from openbiliclaw.features.chat.service import ChatChunk, ChatChunkKind
 from openbiliclaw.features.library.domain import CollectionKind  # noqa: TC001
 from openbiliclaw.features.profile.domain import ProfileSnapshot
 from openbiliclaw.features.sources.domain import SourceId, SourceTaskCompletion
 from openbiliclaw.features.system.domain import UserSettings
+from openbiliclaw.features.system.service import OnboardingWorkflowProgress
 from openbiliclaw.infrastructure.ai.health import AIHealthResult, AliasHealth
 from openbiliclaw.infrastructure.jobs.tasks import JobRunSnapshot, JobRunStatus
 
@@ -48,8 +51,16 @@ class _Settings:
 
 
 class _Activity:
-    def ingest(self, event: ActivityEvent) -> tuple[object, ...]:
-        return (SimpleNamespace(model_dump=lambda mode=None: {"event_id": str(event.id)}),)
+    def ingest(self, event: ActivityEvent) -> tuple[ProfileSignal, ...]:
+        return (
+            ProfileSignal(
+                facet="interests",
+                value="typed APIs",
+                weight=0.5,
+                confidence=0.8,
+                evidence_ids=(event.id,),
+            ),
+        )
 
 
 class _Profile:
@@ -65,8 +76,14 @@ class _Feed:
 
 
 class _Feedback:
-    def record(self, interaction: object) -> object:
-        return SimpleNamespace(model_dump=lambda mode=None: {"facet": "interests"})
+    def record(self, interaction: object) -> ProfileSignal:
+        return ProfileSignal(
+            facet="interests",
+            value="positive feedback",
+            weight=0.5,
+            confidence=0.8,
+            evidence_ids=(interaction.id,),  # type: ignore[attr-defined]
+        )
 
 
 class _Library:
@@ -136,6 +153,20 @@ class _Onboarding:
             "source_sync", idempotency_key=f"onboarding:{','.join(source_ids)}"
         )
 
+    def progress(self, root_run_id: object):
+        run = self._jobs.inspect(root_run_id).model_copy(
+            update={
+                "job_name": "feed_replenishment",
+                "idempotency_key": "feed_replenishment:onboarding:bilibili",
+            }
+        )
+        return OnboardingWorkflowProgress(
+            root_run_id=root_run_id,
+            stage="feed_replenishment",
+            run=run,
+            onboarding_complete=True,
+        )
+
 
 class _SourceTasks:
     def claim(self, source_id: str):
@@ -169,7 +200,14 @@ class _Sources:
         )
 
     def statuses(self):
-        return ({"source_id": "bilibili", "configured": False, "enabled": False},)
+        return (
+            {
+                "source_id": "bilibili",
+                "account_key": "primary",
+                "configured": False,
+                "enabled": False,
+            },
+        )
 
     def configure(self, source_id: SourceId, account_key: str, credentials: dict[str, object]):
         assert credentials
@@ -287,6 +325,66 @@ def test_router_groups_and_representative_happy_paths(client: TestClient) -> Non
         "obc-analysis",
         "obc-embedding",
     ]
+
+
+@pytest.mark.parametrize(
+    ("route_name", "method", "path", "payload"),
+    (
+        (
+            "events",
+            "POST",
+            "/api/v1/events",
+            ActivityEvent(source_id="bilibili", kind=ActivityKind.VIEW, title="x").model_dump(
+                mode="json"
+            ),
+        ),
+        ("feed", "GET", "/api/v1/feed", None),
+        (
+            "interactions",
+            "POST",
+            "/api/v1/interactions",
+            {"content_id": str(uuid4()), "kind": "positive"},
+        ),
+        ("sources", "GET", "/api/v1/sources", None),
+        ("source_status", "GET", "/api/v1/sources/status", None),
+        ("library_list", "GET", "/api/v1/library/favorites", None),
+        (
+            "library_add",
+            "POST",
+            "/api/v1/library/favorites",
+            {"content_id": str(uuid4())},
+        ),
+    ),
+)
+def test_json_routes_reject_malformed_service_output(
+    route_name: str,
+    method: str,
+    path: str,
+    payload: dict[str, object] | None,
+) -> None:
+    container = _container()
+    malformed = ({"not": "the documented contract"},)
+    if route_name == "events":
+        container.activity.ingest = lambda _event: malformed  # type: ignore[method-assign]
+    elif route_name == "feed":
+        container.feed.list_entries = lambda **_kwargs: malformed  # type: ignore[method-assign]
+    elif route_name == "interactions":
+        container.feedback.record = lambda _interaction: malformed[0]  # type: ignore[method-assign]
+    elif route_name == "sources":
+        container.sources.manifests = lambda: malformed  # type: ignore[method-assign]
+    elif route_name == "source_status":
+        container.sources.statuses = lambda: malformed  # type: ignore[method-assign]
+    elif route_name == "library_list":
+        container.library.list = lambda _collection: malformed  # type: ignore[method-assign]
+    else:
+        container.library.save = lambda *_args, **_kwargs: malformed[0]  # type: ignore[method-assign]
+
+    response = TestClient(create_app(container=container), raise_server_exceptions=False).request(
+        method, path, headers=_auth(), json=payload
+    )
+
+    assert response.status_code == 500
+    assert "documented contract" not in response.text
 
 
 def test_public_settings_patch_cannot_complete_onboarding(client: TestClient) -> None:
@@ -410,6 +508,19 @@ def test_onboarding_public_only_until_completed() -> None:
     assert client.get("/api/v1/onboarding").status_code == 401
 
 
+@pytest.mark.parametrize("payload", [{}, {"source_ids": []}])
+def test_onboarding_rejects_an_empty_source_selection(payload: dict[str, object]) -> None:
+    container = _container()
+    client = TestClient(create_app(container=container))
+
+    response = client.post("/api/v1/onboarding/start", json=payload)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {"code": "validation_error", "message": "request validation failed"}
+    }
+
+
 def test_domain_errors_map_without_leaking_values(client: TestClient) -> None:
     response = client.patch(
         "/api/v1/settings", headers=_auth(), json={"feed_low_watermark": 99_999}
@@ -455,6 +566,27 @@ async def test_chat_disconnect_stops_before_calling_service() -> None:
     )
     assert [event async for event in iterator] == []
     assert not called
+
+
+@pytest.mark.asyncio
+async def test_onboarding_stream_lookup_error_closes_with_typed_error_only() -> None:
+    container = _container()
+
+    def unavailable(_run_id: UUID):
+        raise DependencyUnavailableError("private upstream detail")
+
+    container.onboarding.progress = unavailable  # type: ignore[method-assign]
+    events = [
+        event
+        async for event in _progress_events(
+            container.jobs.run.id,
+            _ConnectedRequest(),  # type: ignore[arg-type]
+            container,
+        )
+    ]
+
+    assert events == ['event: error\ndata: {"code":"onboarding_status_unavailable"}\n\n']
+    assert "private upstream detail" not in "".join(events)
 
 
 class _ConnectedRequest:
@@ -589,10 +721,13 @@ def test_missing_runtime_access_token_fails_closed() -> None:
     assert "token" not in response.text.casefold()
 
 
-def test_default_composition_migrates_fresh_db_without_live_dependencies(
+def test_default_composition_serves_migrated_db_without_live_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "vnext.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
+    command.upgrade(config, "head")
     monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", f"sqlite:///{database}")
     monkeypatch.setenv("OPENBILICLAW_ACCESS_TOKEN", "local-test-token")
     monkeypatch.delenv("OPENBILICLAW_LITELLM_API_KEY", raising=False)
@@ -602,7 +737,6 @@ def test_default_composition_migrates_fresh_db_without_live_dependencies(
         health = client.get("/api/v1/system/ai-health", headers=headers).json()
         assert health["proxy_reachable"] is False
         assert len(health["aliases"]) == 3
-    assert database.is_file()
 
 
 def test_legacy_and_websocket_routes_are_absent(client: TestClient) -> None:

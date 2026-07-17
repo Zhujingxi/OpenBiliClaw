@@ -17,6 +17,8 @@
 | 独立数据库配置 | ✅ | `DatabaseSettings` 默认指向 `sqlite:///data/vnext/openbiliclaw.db`；URL、echo 与有限 SQLite busy timeout 可通过 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS` 覆盖 |
 | SQLAlchemy schema | ✅ | 16 张 vNext 业务表覆盖设置、来源账户、活动、画像与独立 consumed-evidence ledger、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
 | Alembic 基线 | ✅ | `0001_vnext_baseline` 支持从空库 upgrade、downgrade 后重建，并预置 `favorites` / `watch_later` 两个本地集合 |
+| runtime schema gate | ✅ | installer 或 Compose `migrate` 独占 Alembic 写入；API/worker startup 只读验证当前 revision 精确等于 head |
+| 安全在线备份 | ✅ | `db backup` 先以 no-follow FD 固定并验证 source inode，再在 `0700` 私有目录中 hard-link main 与当时存在的 WAL/SHM/journal；SQLite 从该稳定 link set 生成内存快照，前后校验 source/sidecar 集合与 inode，并以 `0600`、no-overwrite hard-link 原子发布目标 |
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |

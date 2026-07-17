@@ -3,7 +3,6 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Response, status
-from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
@@ -23,31 +22,27 @@ router = APIRouter(prefix="/library", tags=["library"], dependencies=[Depends(re
 @router.get(
     "/{collection}",
     operation_id="v1_library_list",
-    response_model=None,
-    responses={200: {"model": tuple[CollectionItem, ...]}},
+    response_model=tuple[CollectionItem, ...],
 )
 def list_collection(
     collection: CollectionKind,
     container: Container,
-) -> object:
-    return jsonable_encoder(container.library.list(collection))
+) -> tuple[CollectionItem, ...]:
+    return container.library.list(collection)
 
 
 @router.post(
     "/{collection}",
     operation_id="v1_library_add",
-    response_model=None,
-    responses={status.HTTP_201_CREATED: {"model": CollectionItem}},
+    response_model=CollectionItem,
     status_code=status.HTTP_201_CREATED,
 )
 def add_collection_item(
     collection: CollectionKind,
     payload: SaveCollectionItem,
     container: Container,
-) -> object:
-    return jsonable_encoder(
-        container.library.save(collection, payload.content_id, note=payload.note)
-    )
+) -> CollectionItem:
+    return container.library.save(collection, payload.content_id, note=payload.note)
 
 
 @router.delete(

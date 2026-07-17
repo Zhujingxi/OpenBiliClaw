@@ -16,6 +16,7 @@ from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
     SourceAccountStatus,
     SourceId,
+    SourceManifest,
     SourceTaskCompletion,
     SourceTaskRequest,
     SourceTaskSnapshot,
@@ -182,7 +183,7 @@ class SourceAccountService:
         self._cipher = cipher
         self._registry_provider = registry if callable(registry) else lambda: registry
 
-    def manifests(self) -> tuple[object, ...]:
+    def manifests(self) -> tuple[SourceManifest, ...]:
         return tuple(self._registry_provider().manifests.values())
 
     def statuses(self) -> tuple[SourceAccountStatus, ...]:

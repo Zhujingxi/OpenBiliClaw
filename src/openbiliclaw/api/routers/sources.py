@@ -3,7 +3,6 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
@@ -23,21 +22,19 @@ router = APIRouter(prefix="/sources", tags=["sources"], dependencies=[Depends(re
 @router.get(
     "",
     operation_id="v1_sources_list",
-    response_model=None,
-    responses={200: {"model": tuple[SourceManifest, ...]}},
+    response_model=tuple[SourceManifest, ...],
 )
-def list_sources(container: Container) -> object:
-    return jsonable_encoder(container.sources.manifests())
+def list_sources(container: Container) -> tuple[SourceManifest, ...]:
+    return container.sources.manifests()
 
 
 @router.get(
     "/status",
     operation_id="v1_sources_status",
-    response_model=None,
-    responses={200: {"model": tuple[SourceAccountStatus, ...]}},
+    response_model=tuple[SourceAccountStatus, ...],
 )
-def source_status(container: Container) -> object:
-    return jsonable_encoder(container.sources.statuses())
+def source_status(container: Container) -> tuple[SourceAccountStatus, ...]:
+    return container.sources.statuses()
 
 
 @router.put(
@@ -49,5 +46,5 @@ def configure_source(
     source_id: SourceId,
     payload: SourceConfiguration,
     container: Container,
-) -> object:
+) -> SourceAccountStatus:
     return container.sources.configure(source_id, payload.account_key, payload.credentials)

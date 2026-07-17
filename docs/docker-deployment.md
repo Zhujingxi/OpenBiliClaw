@@ -2,9 +2,9 @@
 
 [← README](../README.md)
 
-Docker 是推荐安装方式。Compose 运行 `api`、独立 `worker`、LiteLLM Proxy 和
-LiteLLM PostgreSQL。OpenBiliClaw 应用数据仍是 SQLite；PostgreSQL 只属于
-LiteLLM Admin 与其配置。
+Docker 是推荐安装方式。Compose 运行一次性 `migrate`、`api`、独立 `worker`、
+LiteLLM Proxy 和 LiteLLM PostgreSQL。OpenBiliClaw 应用数据仍是 SQLite；
+PostgreSQL 只属于 LiteLLM Admin 与其配置。
 
 ## 快速开始
 
@@ -61,6 +61,14 @@ OPENBILICLAW_HUEY_PATH=/app/runtime/data/vnext/huey.db
 应用 SQLite 和 Huey SQLite 是两个文件。Huey result store 是 transport 状态；
 用户可见 job 状态以应用库 `job_runs` 为准。不要给 API 与 worker 配不同 volume
 或 host path，否则任务会排入 worker 看不到的 queue。
+
+## Migration 所有权
+
+`migrate` 是 Compose 中唯一执行 `openbiliclaw db migrate` 的服务。`api` 与
+`worker` 都以 `service_completed_successfully` 等待它，并在自身 startup 只读检查
+应用库 revision 是否等于 Alembic head，不再竞争 SQLite DDL。migration 失败时两个
+长期服务都不会启动；重复 `docker compose up` 可安全重跑幂等 migration。Source / uv
+安装仍由 installer 在启动 API/worker 之前完成同一 migration。
 
 ## LiteLLM
 

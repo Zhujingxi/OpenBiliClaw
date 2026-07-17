@@ -17,18 +17,25 @@ from openbiliclaw.api.dependencies import (
 )
 from openbiliclaw.api.sse import disconnected, frame, response
 from openbiliclaw.api.threading import run_sync_port
-from openbiliclaw.api.v1_models import JobRunResponse, job_response, sse_response, terminal_job
+from openbiliclaw.api.v1_models import (
+    JobRunResponse,
+    OnboardingProgressEvent,
+    OnboardingTerminalEvent,
+    job_response,
+    sse_response,
+)
 from openbiliclaw.features.sources.domain import SourceId  # noqa: TC001
 from openbiliclaw.features.system.domain import UserSettings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from typing import Literal
 
 
 class OnboardingStart(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source_ids: tuple[SourceId, ...] = Field(default_factory=tuple)
+    source_ids: tuple[SourceId, ...] = Field(min_length=1)
 
 
 router = APIRouter(
@@ -65,8 +72,8 @@ def start_onboarding(
     operation_id="v1_onboarding_events",
     responses=sse_response(
         {
-            "progress": "JobRunResponse",
-            "done": "StreamTerminalEvent",
+            "progress": "OnboardingProgressEvent",
+            "done": "OnboardingTerminalEvent",
             "error": "StreamErrorEvent",
         },
         description="First-run onboarding progress event stream.",
@@ -85,10 +92,37 @@ async def _progress_events(
 ) -> AsyncIterator[str]:
     try:
         while not await disconnected(request):
-            snapshot = await run_sync_port(container.jobs.inspect, run_id)
-            yield frame("progress", snapshot.model_dump(mode="json"))
-            if terminal_job(snapshot.status):
-                yield frame("done", {"id": str(snapshot.id), "status": snapshot.status.value})
+            workflow = await run_sync_port(container.onboarding.progress, run_id)
+            snapshot = job_response(workflow.run)
+            progress = OnboardingProgressEvent(
+                root_run_id=workflow.root_run_id,
+                stage=workflow.stage,
+                run=snapshot,
+                onboarding_complete=workflow.onboarding_complete,
+            )
+            yield frame("progress", progress.model_dump(mode="json"))
+            status_value = snapshot.status
+            succeeded = (
+                workflow.stage == "feed_replenishment"
+                and status_value == "succeeded"
+                and workflow.onboarding_complete
+            )
+            terminal_status: Literal["succeeded", "failed", "cancelled"] | None = None
+            if status_value == "failed":
+                terminal_status = "failed"
+            elif status_value == "cancelled":
+                terminal_status = "cancelled"
+            elif succeeded:
+                terminal_status = "succeeded"
+            if terminal_status is not None:
+                done = OnboardingTerminalEvent(
+                    root_run_id=workflow.root_run_id,
+                    stage=workflow.stage,
+                    run_id=snapshot.id,
+                    status=terminal_status,
+                    onboarding_complete=workflow.onboarding_complete,
+                )
+                yield frame("done", done.model_dump(mode="json"))
                 return
             await asyncio.sleep(0.25)
     except asyncio.CancelledError:
@@ -96,4 +130,3 @@ async def _progress_events(
     except Exception:
         if not await disconnected(request):
             yield frame("error", {"code": "onboarding_status_unavailable"})
-            yield frame("done", {"status": "failed"})

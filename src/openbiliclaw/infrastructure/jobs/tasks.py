@@ -78,6 +78,8 @@ class JobRunRepository(Protocol):
 
     def get(self, run_id: UUID) -> JobRunSnapshot | Mapping[str, object]: ...
 
+    def get_by_idempotency_key(self, idempotency_key: str) -> JobRunSnapshot | None: ...
+
     def claim(self, run_id: UUID) -> bool: ...
 
     def mark_dispatched(self, run_id: UUID) -> None: ...
@@ -250,6 +252,12 @@ class JobService:
         with self._uow_factory() as uow:
             value = uow.job_runs.get(run_id)
         return _snapshot(run_id, value)
+
+    def find_by_idempotency_key(self, idempotency_key: str) -> JobRunSnapshot | None:
+        """Find one durable run by its full application-owned idempotency key."""
+
+        with self._uow_factory() as uow:
+            return uow.job_runs.get_by_idempotency_key(idempotency_key)
 
     def list(self, *, limit: int = 100) -> tuple[JobRunSnapshot, ...]:
         if not 1 <= limit <= 500:

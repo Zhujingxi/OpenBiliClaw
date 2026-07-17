@@ -34,6 +34,9 @@ flowchart LR
     UC --> REPOS["SQLAlchemy repositories"]
     UC --> SOURCES["Seven explicit connectors"]
     UC --> AI["Typed TaskRunner"]
+    MIGRATE["One-shot Alembic migration"] --> DB
+    MIGRATE --> API
+    MIGRATE --> JOBS
     AI --> PYD["PydanticAI"]
     PYD --> LLM["LiteLLM Proxy"]
     REPOS --> DB["SQLite + Alembic"]
@@ -57,8 +60,9 @@ MODE=docker bash scripts/install.sh
 ```
 
 安装器以原子方式生成 `.env` 中的 PostgreSQL、LiteLLM、来源加密和 API bearer
-secret，权限为 `0600`，重复执行会复用现有值。Compose 同时启动 `api`、
-`worker`、`litellm` 和 LiteLLM PostgreSQL；API 与 worker 使用完全相同的应用库
+secret，权限为 `0600`，重复执行会复用现有值。Compose 先运行一次性 `migrate`
+服务，再启动 `api`、`worker`、`litellm` 和 LiteLLM PostgreSQL；migration 失败会
+阻止 API/worker 启动。两个长期进程只读检查 schema head，并使用完全相同的应用库
 和 Huey queue 路径。
 
 启动后在 `http://127.0.0.1:4000/ui` 配置 provider，并建立三个稳定 alias：

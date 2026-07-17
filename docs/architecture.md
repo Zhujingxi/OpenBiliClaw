@@ -20,7 +20,8 @@ features: Activity ──► Profile ─────┐
         ▼
 infrastructure.database
         ├─ SQLAlchemy mappings + repositories + UnitOfWork
-        ├─ Alembic 0001 ──► data/vnext/openbiliclaw.db
+        ├─ installer / Compose one-shot migrate ─► Alembic 0001 ─► data/vnext/openbiliclaw.db
+        ├─ API + worker startup ─► read-only schema-head gate
         └─ settings / source_accounts / activity / profile + consumed evidence / content
            / feed / collections / chat / source_tasks / job_runs / ai_runs
         │
@@ -64,7 +65,7 @@ vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legac
 
 AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。六个 task 覆盖 profile、keyword、单候选、batch candidate、chat 和 recommendation；profile/feed worker 已构造共享 runner adapter，chat adapter 等待 HTTP 接线。四份 versioned Pydantic Evals dataset 继续覆盖既有核心任务。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
 
-worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展 dispatcher 到 Task 22 才消费这些 route。下方 v0.3 图只用于最终删除前追踪不可达实现。
+worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。Docker Compose 以唯一一次性 `migrate` 服务串行 Alembic 写入，并以 successful-completion dependency 阻止失败时启动 API/worker；两个 runtime startup 只执行 schema-head 只读 gate。Source installer 也在启动两个进程前独占 migration。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展 dispatcher 到 Task 22 才消费这些 route。下方 v0.3 图只用于最终删除前追踪不可达实现。
 
 ## 已停止作为入口的 v0.3 实现
 

@@ -37,6 +37,9 @@ flowchart LR
     UC --> REPOS["SQLAlchemy repositories"]
     UC --> SOURCES["Seven explicit connectors"]
     UC --> AI["Typed TaskRunner"]
+    MIGRATE["One-shot Alembic migration"] --> DB
+    MIGRATE --> API
+    MIGRATE --> JOBS
     AI --> PYD["PydanticAI"]
     PYD --> LLM["LiteLLM Proxy"]
     REPOS --> DB["SQLite + Alembic"]
@@ -61,9 +64,10 @@ MODE=docker bash scripts/install.sh
 ```
 
 The installer atomically generates PostgreSQL, LiteLLM, source-encryption, and API
-bearer secrets in a mode-`0600` `.env`; reruns reuse existing values. Compose starts
-`api`, `worker`, `litellm`, and LiteLLM PostgreSQL. The API and worker use the exact
-same application database and Huey queue paths.
+bearer secrets in a mode-`0600` `.env`; reruns reuse existing values. Compose runs a
+one-shot `migrate` service before `api`, `worker`, `litellm`, and LiteLLM PostgreSQL;
+a migration failure blocks both runtime processes. API and worker only verify schema
+head and use the exact same application database and Huey queue paths.
 
 After startup, configure providers in `http://127.0.0.1:4000/ui` and create these
 stable aliases:
