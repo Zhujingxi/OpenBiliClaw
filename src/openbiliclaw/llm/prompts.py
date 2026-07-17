@@ -925,24 +925,32 @@ def build_search_queries_prompt(
     ]
 
 
-def build_dialogue_insight_prompt(
-    *,
-    user_message: str,
-    assistant_reply: str,
-    core_memory: dict[str, object],
-) -> list[dict[str, str]]:
-    """Build a structured prompt for extracting candidate insights from dialogue."""
-    system_prompt = """
+# 100% static system prompt for dialogue-insight extraction (v0.3.174+
+# prompt-cache compliance). All per-call data — core memory, the dialogue
+# turn, and the active-list to settle against — lives in the user message.
+_DIALOGUE_INSIGHT_SYSTEM_PROMPT = """
 <task>
-你要从一轮用户对话中提取少量高价值的候选理解，用于后续长期画像更新。
+你要从一轮用户对话中做两件事:
+1) 提取少量高价值的候选理解 (candidates),用于后续长期画像更新;
+2) 依据 user 消息里的 <active_list>,判断这轮对话是否结算 (settles) 了其中某些
+   活跃对象 (系统当前的推测兴趣 / 洞察假设 / 疑惑)。
+core_memory、这轮对话、以及 active_list 都在 user 消息里给出。
 </task>
 
 <rules>
-1. 输出必须是严格 JSON，不要附带解释。
-2. 只提取用户明确表达或高度暗示的稳定信号，不要记录瞬时情绪碎片。
-3. kind 只允许: interest, dislike, goal, value, state。
-4. confidence 保持保守，0~1。
+1. 输出必须是严格 JSON,不要附带解释。
+2. 只提取用户明确表达或高度暗示的稳定信号,不要记录瞬时情绪碎片。
+3. candidates 的 kind 只允许: interest, dislike, goal, value, state。
+4. confidence 保持保守,0~1。
 5. 最多返回 3 条 candidates。
+6. settles 只允许引用 <active_list> 中真实出现过的对象:
+   - kind 为 speculation 时,ref 必须是 active_list.speculations[].domain;
+   - kind 为 insight 时,ref 必须是 active_list.insights[].hash;
+   - kind 为 confusion 时,ref 必须是 active_list.confusions[].id。
+   不要凭空编造 ref;不确定就不要写进 settles。
+7. settles[].verdict 只允许: confirm (这轮明确印证), reject (这轮明确否定)。
+   只有用户明确表态才结算,含糊不清时不结算。
+8. 若没有可结算对象,settles 返回空数组。
 </rules>
 
 <output_schema>
@@ -954,15 +962,42 @@ def build_dialogue_insight_prompt(
       "confidence": 0.84,
       "evidence": "用户明确说想把国际新闻看得更透。"
     }
+  ],
+  "settles": [
+    {
+      "kind": "speculation",
+      "ref": "桌游",
+      "verdict": "confirm",
+      "note": "用户说最近确实在玩。"
+    }
   ]
 }
 </output_schema>
 """.strip()
+
+
+def build_dialogue_insight_prompt(
+    *,
+    user_message: str,
+    assistant_reply: str,
+    core_memory: dict[str, object],
+    active_list: dict[str, object] | None = None,
+) -> list[dict[str, str]]:
+    """Build a structured prompt for extracting candidate insights from dialogue.
+
+    ``active_list`` (v0.3.174+) carries the round's injected settle targets
+    (speculations by ``domain`` / insights by content ``hash`` / confusions by
+    ``id``). The system prompt is a module-level constant; all per-call data is
+    ordered most-stable-first in the user message (prompt-cache convention).
+    """
     user_prompt = "\n\n".join(
         [
             "<core_memory>",
-            json.dumps(core_memory, ensure_ascii=False, indent=2),
+            json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
             "</core_memory>",
+            "<active_list>",
+            json.dumps(active_list or {}, ensure_ascii=False, indent=2, sort_keys=True),
+            "</active_list>",
             "<dialogue_turn>",
             json.dumps(
                 {
@@ -971,12 +1006,13 @@ def build_dialogue_insight_prompt(
                 },
                 ensure_ascii=False,
                 indent=2,
+                sort_keys=True,
             ),
             "</dialogue_turn>",
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _DIALOGUE_INSIGHT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 

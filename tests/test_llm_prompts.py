@@ -700,6 +700,21 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             ),
         ),
         (
+            "build_dialogue_insight_prompt",
+            dict(
+                user_message="我最近在玩桌游",
+                assistant_reply="听起来不错",
+                core_memory={"a": 1},
+                active_list={"speculations": [{"domain": "桌游"}]},
+            ),
+            dict(
+                user_message="不想再看带货了",
+                assistant_reply="明白",
+                core_memory={"a": 2},
+                active_list={"insights": [{"hash": "abcd1234", "hypothesis": "H"}]},
+            ),
+        ),
+        (
             "build_batch_content_evaluation_prompt",
             dict(
                 profile_summary={"a": 1},

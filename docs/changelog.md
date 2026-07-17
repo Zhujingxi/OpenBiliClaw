@@ -4,6 +4,15 @@
 
 ---
 
+## v0.3.174：认知画像流水线 Wave A——台账 + 觉察证据链 + 对话线（2026-07-17）
+
+认知画像流水线（三线更新 / 疑惑假设生命周期 / 态势门控 / 统一台账，规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`，经 Codex 对抗 review 六轮）的 **Wave A（Phase 0 + 1）**。
+
+- **画像更新台账（Phase 0）**：新增只追加审计表 `profile_update_ledger` 与 `soul/ledger.py::ProfileLedger`。每个画像写点在**动作结束后一次 INSERT**（`outcome=success|failed`、before/after 摘要、`diff`≤2000 字符、`source_refs`、`turn_id`，并为后续 Wave 预留 `gate_verdict`/`held_id`）。台账为 best-effort 观察者:写失败只 WARNING、绝不阻断底层写入。枚举写点全挂钩(8 点 + 发现的 `init_soul_build` 额外点):对话偏好覆写/整份重建、dislike 清池、反馈批偏好/重建、管线各层 updater、推测 promote/confirm/reject、12h 整理 apply/revert、init 建像、cognition sync。清单进 `docs/modules/soul.md`(新写点纳入 code review 义务)。新增 CLI `openbiliclaw ledger [--line] [--days] [--write-point]`。
+- **觉察证据链（Phase 0）**：`AwarenessNote` 新增生成式 `note_id`、`source_event_ids`(本轮 cursor 消费的事件 id)与 `source_event_ids_approximate`(归属为按轮非按 note)。`analyze()` 新增可选 `source_event_ids`,觉察 prompt 一字不动(回放不变性);`cognition_cycle` 传入每批事件 id。向后兼容旧数据。是 Wave B 疑惑 evidence_refs 的前置。
+- **对话学习串行队列（Phase 1）**：`learn_from_dialogue` 改由 `DialogueLearnQueue` 单 worker 串行消费,消除相邻轮并发 read/merge/write。worker 自持生命周期(不入 `cancel_all` 注册表):热重载在 cancel_all 之前 pause-drain 旧队列、成功停旧启新、失败回滚 resume;进程退出经 shutdown 钩子 drain。
+- **对话窗口 + 回灌 + 结算（Phase 1）**：对话历史截断到最近 `DIALOGUE_WINDOW_TURNS=20` 轮(≤窗口字节不变);durable popup + scope='chat' + completed 的 `chat_turns` 在重启后回灌恢复线索(CLI/probe/confusion 不回灌)。`build_dialogue_insight_prompt` 收敛为模块级静态 system + `sort_keys`(入 invariance 清单)并注入活跃清单(推测按 domain/洞察按内容 hash8/疑惑按 id);`extract()` 返回 `{candidates, settles}`,`learn_from_dialogue` 仅 scope='chat' 处理 settles(单一所有权,白名单=当轮注入清单),结算调既有函数并进台账(带 turn_id、幂等)。
+
 ## v0.3.173 / extension v0.3.173 / desktop v0.3.173：自动更新链路全面加固（2026-07-16）
 
 后端源码走 `backend-v0.3.173`，浏览器插件走 `extension-v0.3.173`，桌面安装包走 `desktop-v0.3.173`。三渠道版本重新对齐（0.3.172 因未发 extension tag 导致聚合校验失败、Latest 页面短暂空资产,已降级为 prerelease;本版为所有渠道的推荐升级目标）。

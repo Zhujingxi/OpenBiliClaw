@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Cap the dialogue history folded into each prompt. Calibration (2026-07-17,
+# first-round — revisit after a provider swap): one exchange ≈ 2 short messages
+# ≈ 80 tokens; 20 exchanges ≈ 1.6k tokens of history, which keeps the socratic
+# prompt bounded without losing the near-term thread. Below the window the
+# prompt bytes are unchanged (baseline test), so provider prompt cache still
+# fires for short sessions.
+DIALOGUE_WINDOW_TURNS = 20
+
 
 @dataclass
 class DialogueTurn:
@@ -58,12 +66,20 @@ class SocraticDialogue:
         tool_dispatcher: Any | None = None,
         module_overrides: Mapping[str, ModuleOverride] | None = None,
         learn_queue: Any | None = None,
+        database: Any | None = None,
     ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
         self._llm_service = llm_service
         self._session = session
         self._history: list[DialogueTurn] = []
+        # Phase 1 durable-history regurgitation: after a restart the in-process
+        # history is empty, but the durable popup ``chat_turns`` table holds the
+        # completed exchanges. Lazily reload them once so a popup session keeps
+        # its thread across restarts. Only popup + scope='chat' + completed rows
+        # qualify (CLI has no DB; probe/confusion scopes carry prefixed context).
+        self._database = database
+        self._history_loaded = False
         self._respond_lock = asyncio.Lock()
         self._tools = tools or []
         self._tool_dispatcher = tool_dispatcher
@@ -101,6 +117,7 @@ class SocraticDialogue:
             Agent's response.
         """
         async with self._respond_lock:
+            self._ensure_history_loaded()
             history_length = len(self._history)
             self._history.append(DialogueTurn(role="user", content=user_message))
 
@@ -237,14 +254,54 @@ class SocraticDialogue:
         """Clear the dialogue history."""
         self._history.clear()
 
+    def _ensure_history_loaded(self) -> None:
+        """Regurgitate durable popup chat history once (spec Phase 1, r1 #3).
+
+        No-op unless this is a fresh popup session with a database and an empty
+        in-process history. Loads only completed ``scope='chat'`` turns, keeping
+        the last ``DIALOGUE_WINDOW_TURNS`` exchanges.
+        """
+        if self._history_loaded:
+            return
+        self._history_loaded = True
+        if self._session != "popup" or self._database is None or self._history:
+            return
+        lister = getattr(self._database, "list_chat_turns", None)
+        if not callable(lister):
+            return
+        try:
+            rows = lister(session="popup", scope="chat", limit=DIALOGUE_WINDOW_TURNS)
+        except Exception:
+            logger.debug("Failed to regurgitate durable chat history", exc_info=True)
+            return
+        for row in rows:
+            if str(row.get("status", "")) != "completed":
+                continue
+            message = str(row.get("message", "")).strip()
+            reply = str(row.get("reply", "")).strip()
+            if not message or not reply:
+                continue
+            self._history.append(DialogueTurn(role="user", content=message))
+            self._history.append(DialogueTurn(role="agent", content=reply))
+
     def _history_to_messages(self) -> list[dict[str, str]]:
-        """Convert prior dialogue turns to chat messages for the LLM."""
+        """Convert prior dialogue turns to chat messages for the LLM.
+
+        Truncated to the last ``DIALOGUE_WINDOW_TURNS`` exchanges (each ≈ a
+        user+agent pair) so the prompt stays bounded. Sessions at or below the
+        window are unaffected — the returned bytes match the pre-window
+        baseline, keeping provider prompt cache warm for short chats.
+        """
+        prior = self._history[:-1]
+        window_messages = DIALOGUE_WINDOW_TURNS * 2
+        if len(prior) > window_messages:
+            prior = prior[-window_messages:]
         return [
             {
                 "role": "assistant" if turn.role == "agent" else turn.role,
                 "content": turn.content,
             }
-            for turn in self._history[:-1]
+            for turn in prior
         ]
 
     def _build_service(self) -> LLMService:

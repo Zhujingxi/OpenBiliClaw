@@ -33,6 +33,7 @@ from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
     DialogueInsightAnalyzer,
 )
+from .identity import build_hash8_map
 from .insight_analyzer import InsightAnalyzer
 from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
@@ -60,6 +61,12 @@ logger = logging.getLogger(__name__)
 def _memory_database(memory: Any) -> Any | None:
     """Resolve the SQLite database handle a memory manager owns (may be None)."""
     return getattr(memory, "_database", None)
+
+
+def _as_dict_list(raw_value: object) -> list[dict[str, object]]:
+    if not isinstance(raw_value, list):
+        return []
+    return [item for item in raw_value if isinstance(item, dict)]
 
 
 SOURCE_LABELS = {
@@ -868,15 +875,38 @@ class SoulEngine:
                 },
             }
         )
+        active_list, insight_hash_map = self._build_dialogue_active_list()
         try:
-            extracted = await self._dialogue_insight_analyzer.extract(
+            extract_result = await self._dialogue_insight_analyzer.extract(
                 user_message=user_message,
                 assistant_reply=assistant_reply,
                 core_memory=self._memory.get_core_memory(),
+                active_list=active_list,
             )
+            # Tolerate the legacy list return as well as the new
+            # {"candidates", "settles"} dict.
+            if isinstance(extract_result, dict):
+                extracted = list(extract_result.get("candidates", []))
+                settles = list(extract_result.get("settles", []))
+            else:
+                extracted = list(extract_result)
+                settles = []
         except DialogueInsightAnalysisError:
             logger.exception("Failed to extract dialogue insight candidates.")
             extracted = []
+            settles = []
+
+        # Process settles (single ownership, spec §invariant 6): only plain
+        # scope="chat" turns settle here — probe / confusion durable turns are
+        # settled by the durable side-effect path, so skip to avoid double
+        # settling.
+        if scope == "chat" and settles:
+            await self._process_dialogue_settles(
+                settles=settles,
+                active_list=active_list,
+                insight_hash_map=insight_hash_map,
+                turn_id=turn_id,
+            )
 
         merged_candidates = self._merge_insight_candidates(
             self._memory.load_insight_candidates(),
@@ -1450,6 +1480,125 @@ class SoulEngine:
                 existing["evidence"] = evidence
             existing["updated_at"] = now
         return merged
+
+    def _build_dialogue_active_list(
+        self,
+    ) -> tuple[dict[str, object], dict[str, str]]:
+        """Assemble the settle-injection list (speculations / insights / confusions).
+
+        Returns ``(active_list, insight_hash_map)`` where ``insight_hash_map``
+        maps the injected insight hash key -> hypothesis text. Confusions are an
+        empty list in Wave A (the confusion object lands in Wave B).
+        """
+        speculations: list[dict[str, object]] = []
+        try:
+            active_specs = self._speculator.get_active_speculations()
+            # Cap at 10 (spec: activelist speculation ≤10) to bound the prompt.
+            for spec in active_specs[:10]:
+                domain = str(getattr(spec, "domain", "")).strip()
+                if domain:
+                    speculations.append({"domain": domain})
+        except Exception:
+            logger.debug("Failed to load active speculations for settles", exc_info=True)
+
+        insight_hypotheses = [
+            item.hypothesis for item in self._load_insights() if item.hypothesis.strip()
+        ]
+        insight_hash_map = build_hash8_map(insight_hypotheses)
+        # Reverse map (hypothesis -> key) preserves injection order for the prompt.
+        key_by_text = {text: key for key, text in insight_hash_map.items()}
+        insights = [
+            {"hash": key_by_text[text], "hypothesis": text}
+            for text in insight_hypotheses
+            if text in key_by_text
+        ]
+
+        active_list: dict[str, object] = {
+            "speculations": speculations,
+            "insights": insights,
+            "confusions": [],
+        }
+        return active_list, insight_hash_map
+
+    async def _process_dialogue_settles(
+        self,
+        *,
+        settles: list[dict[str, object]],
+        active_list: dict[str, object],
+        insight_hash_map: dict[str, str],
+        turn_id: str,
+    ) -> None:
+        """Settle active objects referenced by a chat turn (whitelist = injected).
+
+        ``ref`` must appear in the round's injection list (spec §invariant 5);
+        unknown refs are dropped with WARNING. Settling calls existing functions
+        (speculation confirm/reject, insight feedback) and records a ledger row
+        stamped with ``turn_id`` (idempotency observation key).
+        """
+        spec_domains = {
+            str(item.get("domain", "")).strip()
+            for item in _as_dict_list(active_list.get("speculations"))
+        }
+        for settle in settles:
+            kind = str(settle.get("kind", "")).strip()
+            ref = str(settle.get("ref", "")).strip()
+            verdict = str(settle.get("verdict", "")).strip()
+            if not ref:
+                continue
+            if kind == "speculation":
+                if ref not in spec_domains:
+                    logger.warning("dialogue settle ref not in injected list: %s", ref)
+                    continue
+                await self._settle_speculation(ref, verdict, turn_id)
+            elif kind == "insight":
+                hypothesis = insight_hash_map.get(ref)
+                if hypothesis is None:
+                    logger.warning("dialogue settle ref not in injected list: %s", ref)
+                    continue
+                await self._settle_insight(hypothesis, verdict, turn_id)
+            elif kind == "confusion":
+                # Confusion objects land in Wave B; no injected confusions yet.
+                logger.warning("dialogue settle ref not in injected list: %s", ref)
+            else:
+                logger.warning("dialogue settle dropped: unknown kind=%s", kind)
+
+    async def _settle_speculation(self, domain: str, verdict: str, turn_id: str) -> None:
+        before = {"domain": domain, "verdict": verdict}
+        applied = False
+        try:
+            if verdict == "confirm":
+                applied = bool(self._speculator.user_confirm_speculation(domain))
+            elif verdict == "reject":
+                applied = bool(self._speculator.user_reject_speculation(domain))
+        except Exception:
+            logger.exception("Failed to settle speculation %s", domain)
+        self._ledger.record(
+            write_point="settle_speculation",
+            source="chat",
+            before=before,
+            after={"domain": domain, "applied": applied},
+            source_refs=[domain],
+            outcome="success" if applied else "failed",
+            turn_id=turn_id,
+        )
+
+    async def _settle_insight(self, hypothesis: str, verdict: str, turn_id: str) -> None:
+        signal = "confirm" if verdict == "confirm" else "reject"
+        result: dict[str, Any] = {}
+        try:
+            result = await self.update_from_feedback({"hypothesis": hypothesis, "signal": signal})
+        except Exception:
+            logger.exception("Failed to settle insight via feedback")
+        matched = bool(result.get("matched", result.get("updated", False)))
+        self._ledger.record(
+            write_point="settle_insight",
+            source="chat",
+            before={"hypothesis": hypothesis[:80], "verdict": verdict},
+            after={"matched": matched},
+            source_refs=[hypothesis[:60]],
+            outcome="success" if matched else "failed",
+            turn_id=turn_id,
+        )
 
     @staticmethod
     def _candidate_ledger_refs(candidates: list[dict[str, object]]) -> list[str]:

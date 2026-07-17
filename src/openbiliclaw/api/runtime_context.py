@@ -1206,6 +1206,7 @@ class RuntimeContext:
             tools=SOURCE_TOOLS,
             tool_dispatcher=source_tool_dispatcher,
             learn_queue=new_learn_queue,
+            database=self.database,
         )
 
         # 11. Auto-update service

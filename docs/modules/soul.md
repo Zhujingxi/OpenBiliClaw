@@ -58,6 +58,11 @@
 | 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
 | DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
 | SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新。`SocraticDialogue` 派发这条用户主动学习链时使用 task-local background-admission bypass：空库存或后台 LLM 暂停不会把 `soul.dialogue_insight` 永久 park，但所有 provider 调用仍经过 total gate。若本轮真正新增 `disliked_topics`，偏好落盘后会立即按新旧差集调度共享 `purge_pool_for_new_dislikes`：精确清池先执行，embedding + LLM 精判与完整画像重建并行；行为与手动画像编辑、反馈批处理和避雷探针一致，且不阻塞对话回复。对话 prompt 会如实区分本地长期画像/推荐过滤与平台自身推荐算法 |
+| 画像更新台账（`soul/ledger.py`，v0.3.174+） | ✅ | `ProfileLedger` 是画像写点的**只追加审计观察者**：动作结束后一次 `INSERT` 到 `profile_update_ledger`，行含 `outcome(success\|failed)`、before/after 摘要、`diff`（top-level changed keys，≤2000 字符）、`source_refs`、`turn_id`（对话/结算幂等观察键），以及为后续 Wave 预留的 `gate_verdict`（Phase 3 shadow_*）/`held_id`（Phase 2）。台账为 **best-effort**：写失败只记 WARNING，绝不阻断底层画像写入。`action()` 上下文管理器包裹写入动作，正常出块记 success、异常记 failed 并**重新抛出**（不改变原控制流）。枚举写点见下「[画像写点台账挂钩清单](#画像写点台账挂钩清单)」。CLI 查询：`openbiliclaw ledger [--line] [--days] [--write-point]` |
+| 觉察证据链（`AwarenessNote.note_id / source_event_ids`，v0.3.174+） | ✅ | `AwarenessNote` 新增生成式 `note_id`（uuid hex 前 12）、`source_event_ids`（本轮 cursor 消费的事件 id）与 `source_event_ids_approximate`（归属为**按轮**非按 note——LLM 不把观察映射到具体事件，故整批挂到每条 note 并标注近似）。`analyze()` 新增可选 `source_event_ids`，觉察 prompt 一字不动（回放不变性）；`cognition_cycle` 传入每批事件 id。向后兼容:旧 note 缺字段默认空。是 Wave B 疑惑 evidence_refs 的前置 |
+| 对话学习串行队列（`soul/dialogue_learn_queue.py`，v0.3.174+） | ✅ | `learn_from_dialogue` 不再每轮 `asyncio.create_task`（相邻轮会交错 read/merge/write 共享偏好/画像）；改由 `DialogueLearnQueue` 单 worker 串行消费。worker **自持生命周期**（不入 `cancel_all` 注册表）：热重载在 `cancel_all` **之前** pause-drain 旧队列,构建成功停旧启新、构建失败回滚 resume 旧队列;进程退出经 shutdown 钩子 drain。`SocraticDialogue` 注入 queue 时投递、否则回退旧 detached-task 路径（CLI/OpenClaw） |
+| 对话窗口 + 回灌（v0.3.174+） | ✅ | `DIALOGUE_WINDOW_TURNS=20`：`_history_to_messages` 截断到最近 20 轮(≤窗口字节不变,provider 缓存不破)。回灌**仅 popup + scope='chat' + completed** 的 `chat_turns`(重启后恢复对话线索);CLI 无 DB、probe/confusion scope 带前缀语境,均不回灌 |
+| 对话结算 settles（v0.3.174+） | ✅ | `build_dialogue_insight_prompt` 收敛为模块级静态 system + `sort_keys=True`(prompt-cache 合规,入 invariance 清单),新增 `active_list` 注入(推测兴趣按 `domain` ≤10 / 洞察按内容 hash8 / 疑惑按 id——Wave A 疑惑为空)。`extract()` 返回 `{candidates, settles}`;`learn_from_dialogue` **仅 scope='chat'** 处理 settles(单一所有权:probe/confusion 归 durable 侧效应),白名单=当轮注入清单(未见 ref 丢弃+WARNING),结算调既有 `user_confirm/reject_speculation`(domain)/`update_from_feedback`(insight)并进台账(带 turn_id,幂等)。hash8=SHA-256(NFC+strip+空白折叠)hex 前 8,清单内碰撞升 hex16、仍碰撞跳过 |
 | 兴趣探针聊天情绪判断 | ✅ | `/api/interest-probes/respond` 的 chat 分支会先让对话引擎回复，再用非 JSON 的单词分类 LLM 调用判断 `strong_positive / weak_positive / neutral_deferred / neutral / negative`（系统提示是 `llm/prompts.py:build_probe_sentiment_prompt` 的静态常量，走 prompt 缓存），失败时回退关键词；强正向直接确认，弱正向进入短期探索 buffer，`neutral_deferred`（用户主动说「先放着」「稍后再看」）走 defer 搁置状态机，`neutral`（态度模糊，如「再看看」）不改状态，避免一句“有点意思”立刻写成长期兴趣 |
 | 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
 | 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
@@ -283,6 +288,26 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 - `src/openbiliclaw/soul/dislike_writeback.py` — confirmed dislike 写回、profile 同步和候选池清理
 - `src/openbiliclaw/llm/prompts.py` — `build_avoidance_generation_prompt()`
 - `tests/test_avoidance_speculator.py` — avoidance lifecycle / novelty / probe selection 单元测试
+
+## 画像写点台账挂钩清单
+
+> 认知画像流水线 Phase 0。以下每个画像写点在动作结束后经 `ProfileLedger`（`soul/ledger.py`）追加一行台账（best-effort，写失败只 WARNING）。**新增画像写点必须补挂钩并更新本清单（code review 义务）。**
+
+| # | 写点 | write_point | 实现位置 |
+|---|------|-------------|----------|
+| 1a | 对话学习偏好覆写 | `dialogue_preference_overwrite` | `engine.learn_from_dialogue` |
+| 1b | 对话学习整份重建 | `dialogue_soul_rebuild` | `engine.learn_from_dialogue` |
+| 2 | dislike 清池 | `dislike_purge` | `engine.learn_from_dialogue`（调度时记录） |
+| 3 | 管线各层 updater 持久化 | `pipeline_layer_update` | `layer_updaters.update_layer`（层 changed 时，每层一行） |
+| 4a | 反馈批偏好覆写 | `feedback_preference_overwrite` | `engine._process_feedback_batch_if_needed_locked` |
+| 4b | 反馈批整份重建 | `feedback_soul_rebuild` | `engine._process_feedback_batch_if_needed_locked` |
+| 5 | 推测 promote/confirm/reject | `speculation_promote` / `speculation_confirm` / `speculation_reject` | `speculator`（引擎构造时 `attach_ledger`） |
+| 6 | 12h 整理 应用 / 回滚 | `consolidation_apply` / `consolidation_revert` | `consolidator.run` / `consolidator.revert` |
+| 7 | init 全量建像（偏好 + soul） | `init_preference_build` / `init_soul_build` | `engine.analyze_events` / `engine.build_initial_profile` |
+| 8 | cognition sync（觉察/洞察 → soul） | `cognition_sync` | `cognition_cycle._sync_to_profile` |
+| — | 对话结算（Phase 1） | `settle_speculation` / `settle_insight` | `engine._process_dialogue_settles`（带 turn_id） |
+
+> `init_soul_build` 是实现中发现的清单外写点（原 clist #7 只点名偏好写入），已一并挂钩。CLI 观测：`openbiliclaw ledger --line` / 按写点聚合 `openbiliclaw ledger`；shadow 门控采数（Phase 3）：`SELECT gate_verdict, COUNT(*) FROM profile_update_ledger WHERE gate_verdict LIKE 'shadow_%' GROUP BY 1`。
 
 ## 画像更新逻辑详解
 

@@ -1020,6 +1020,7 @@ async def test_learn_from_dialogue_persists_event_and_candidate_below_threshold(
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         assert core_memory["soul_summary"]["personality_portrait"] == ""
         return [
@@ -1063,6 +1064,7 @@ async def test_learn_from_dialogue_updates_preference_for_single_high_confidence
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1130,6 +1132,7 @@ async def test_learn_from_dialogue_new_dislike_triggers_pool_purge(
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         del assistant_reply, core_memory
         return [
@@ -1253,6 +1256,7 @@ async def test_learn_from_dialogue_updates_preference_for_repeated_lower_confide
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1314,6 +1318,7 @@ async def test_learn_from_dialogue_records_immediate_cognition_for_strong_single
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1362,6 +1367,7 @@ async def test_learn_from_dialogue_does_not_duplicate_same_immediate_cognition(
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1402,6 +1408,7 @@ async def test_learn_from_dialogue_records_immediate_cognition_for_interest_cand
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1458,6 +1465,7 @@ async def test_learn_from_dialogue_rebuilds_profile_after_candidate_reaches_thre
         user_message: str,
         assistant_reply: str,
         core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
     ) -> list[dict[str, object]]:
         return [
             {
@@ -1949,3 +1957,139 @@ def test_effective_disliked_topics_honors_specific_removal(tmp_path: Path) -> No
     effective = engine.get_effective_disliked_topics()
     assert "标题党" not in effective  # specific removal must reach the hard filter
     assert "低质内容" in effective
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 settles (single ownership, whitelist, ledger turn_id, idempotency)
+# ---------------------------------------------------------------------------
+
+
+def _seed_active_speculation(engine: SoulEngine, tmp_path: Path, domain: str) -> None:
+    from openbiliclaw.soul.speculator import SpeculativeInterest, save_speculative_state
+
+    state = engine._speculator._load_state()
+    state.active.append(SpeculativeInterest(domain=domain, category="游戏", status="active"))
+    save_speculative_state(tmp_path, state)
+
+
+def _settles_extract(settles: list[dict[str, object]]):  # type: ignore[no-untyped-def]
+    async def fake_extract(
+        *,
+        user_message: str,
+        assistant_reply: str,
+        core_memory: dict[str, object],
+        active_list: dict[str, object] | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        del user_message, assistant_reply, core_memory, active_list
+        return {"candidates": [], "settles": settles}
+
+    return fake_extract
+
+
+def _ledger_rows(memory: MemoryManager, write_point: str) -> list[dict[str, object]]:
+    return memory._database.query_profile_ledger(days=30, write_point=write_point)
+
+
+@pytest.mark.asyncio
+async def test_settles_confirm_speculation_on_chat_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="最近确实在玩桌游",
+        assistant_reply="不错",
+        session="popup",
+        scope="chat",
+        turn_id="turn-42",
+    )
+
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" not in active  # confirmed → no longer active
+    rows = _ledger_rows(memory, "settle_speculation")
+    assert len(rows) == 1
+    assert rows[0]["turn_id"] == "turn-42"
+    assert rows[0]["outcome"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_settles_skipped_for_non_chat_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="关于桌游的探针回复",
+        assistant_reply="ok",
+        session="popup",
+        scope="probe",
+        turn_id="turn-probe",
+    )
+
+    # Non-chat scope → settles skipped (durable side-effect path owns it).
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" in active
+    assert _ledger_rows(memory, "settle_speculation") == []
+
+
+@pytest.mark.asyncio
+async def test_settles_unknown_ref_dropped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "不存在的域", "verdict": "confirm"}]),
+    )
+
+    await engine.learn_from_dialogue(
+        user_message="随便说说",
+        assistant_reply="ok",
+        session="popup",
+        scope="chat",
+        turn_id="turn-x",
+    )
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" in active  # untouched — ref not in injected list
+    assert _ledger_rows(memory, "settle_speculation") == []
+
+
+@pytest.mark.asyncio
+async def test_settles_confirm_is_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_active_speculation(engine, tmp_path, "桌游")
+    monkeypatch.setattr(
+        engine._dialogue_insight_analyzer,
+        "extract",
+        _settles_extract([{"kind": "speculation", "ref": "桌游", "verdict": "confirm"}]),
+    )
+    kwargs = dict(
+        user_message="确实在玩", assistant_reply="ok", session="popup", scope="chat", turn_id="t"
+    )
+    await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    # Re-run same turn: state must not degrade (still confirmed, not resurrected).
+    await engine.learn_from_dialogue(**kwargs)  # type: ignore[arg-type]
+    active = {s.domain for s in engine._speculator.get_active_speculations()}
+    assert "桌游" not in active

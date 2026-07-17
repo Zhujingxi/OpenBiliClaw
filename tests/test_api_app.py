@@ -2019,12 +2019,14 @@ class TestBackendAPI:
                 tools: object | None = None,
                 tool_dispatcher: object | None = None,
                 learn_queue: object | None = None,
+                database: object | None = None,
             ) -> None:
                 self.llm = llm
                 self.soul_engine = soul_engine
                 self.llm_service = llm_service
                 self.session = session
                 self.learn_queue = learn_queue
+                self.database = database
 
         fake_config = SimpleNamespace(
             data_path=Path("/tmp/openbiliclaw-test-data"),
