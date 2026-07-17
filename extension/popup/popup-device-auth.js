@@ -118,7 +118,10 @@ async function exchange(options = {}, keyOverride = "") {
   if (!response.ok) {
     try {
       const payload = await response.json();
-      lastExchangeError = String(payload?.error || "invalid_device_key");
+      const error = payload?.error;
+      lastExchangeError = typeof error === "string"
+        ? error
+        : String(error?.code || "invalid_device_key");
     } catch {
       lastExchangeError = "invalid_device_key";
     }
@@ -126,7 +129,7 @@ async function exchange(options = {}, keyOverride = "") {
     return null;
   }
   const payload = await response.json();
-  if (!payload?.ok || !payload?.token || !Number.isFinite(Number(payload?.expires_at))) {
+  if (!payload?.token || !Number.isFinite(Number(payload?.expires_at))) {
     lastExchangeError = "invalid_device_key";
     await clearPopupSession();
     return null;

@@ -77,6 +77,6 @@ The authoritative vNext auth loader is environment-only: `OPENBILICLAW_ACCESS_TO
 `OPENBILICLAW_EXTENSION_ACCESS_KEYS`. It never falls back to legacy `config.toml` auth fields,
 and it never accepts an environment variable containing a complete extension device key.
 
-Task 22 is limited to generated-client and extension dispatcher wiring; these backend auth
-contracts are already authoritative. This task does not claim a browser or native Windows
-end-to-end run.
+Web and extension generated clients now consume these authoritative contracts. Web uses
+same-origin cookie + CSRF; extension origins only use device-key exchange and finite bearer.
+Native Windows and live-browser end-to-end runs remain separate verification environments.

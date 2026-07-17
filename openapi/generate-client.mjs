@@ -8,6 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const targets = {
   web: resolve(root, "src/openbiliclaw/web/js/api-client.js"),
   extension: resolve(root, "extension/src/shared/api-client.ts"),
+  popup: resolve(root, "extension/popup/api-client.js"),
 };
 const mode = process.argv[2] ?? "--check";
 if (mode !== "--write" && mode !== "--check") {
@@ -21,6 +22,7 @@ const banner = "// Generated from openapi/openapi.json by openapi/generate-clien
 const generated = {
   web: `${banner}export const API_OPERATIONS = Object.freeze(${JSON.stringify(operations, null, 2)});\n${jsRuntime()}`,
   extension: `${banner}${tsSchemas(document.components?.schemas ?? {})}${tsOperations(operations)}${tsRuntime()}`,
+  popup: `${banner}export const API_OPERATIONS = Object.freeze(${JSON.stringify(operations, null, 2)});\n${jsRuntime()}`,
 };
 
 let stale = false;

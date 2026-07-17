@@ -4,7 +4,7 @@
 
 > **Authority boundary:** §3.1 是当前权威 vNext 后端规格。§1–2 与 §3.2–6 是
 > **Historical v0.3 archive**，只保留旧产品语义与删除追踪，不定义当前 API、CLI、
-> 配置、安装或数据流。现有 Web/extension client 重接是唯一留给 Task 22 的运行面工作。
+> 配置、安装或数据流。现有 Web/extension 已通过 generated client 消费该权威合同。
 
 ---
 
@@ -211,9 +211,9 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 ## 3. 系统架构
 
-### 3.1 vNext 领域、薄 `/api/v1` 与独立 worker（前端待重接）
+### 3.1 vNext 领域、薄 `/api/v1`、独立 worker 与 generated clients
 
-v0.4.0 的权威后端由 feature-oriented 领域契约、七平台 connector、generic source task、SQLAlchemy persistence、nested typed settings、来源凭据加密、cookie/CSRF + bearer access、只经 LiteLLM 的 typed AI、activity/profile/feed/library/chat application service、薄 `/api/v1` 和四任务 Huey worker 组成。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure 可按 undispatched row reconcile，worker startup 则重发全部 pending row，覆盖 dequeue 后、应用 claim 前崩溃，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。每个 handler 的条件 running guard 与其 feature writes 共用一个 UoW；cancellation 及其它 running state transition 也以条件 UPDATE 开始而不先读，两个 SQLite writer 按写序和有限 busy timeout 原子排序 cancellation 与 activity、profile+ledger、feed graph、cleanup effect，等待耗尽显式失败。profile 另使用独立 consumed-evidence ledger 与 expected base revision；explicit edit 把 override evidence 与一个新 revision 原子提交。Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。`/api/v1`、运维 CLI、API/worker、fresh vNext database 和 installer secret lifecycle 均已切换；只有现有 Web/extension client 与 generic dispatcher 接线留给 Task 22。
+v0.4.0 的权威运行面由 feature-oriented 领域契约、七平台 connector、generic source task、SQLAlchemy persistence、nested typed settings、来源凭据加密、cookie/CSRF + bearer access、只经 LiteLLM 的 typed AI、activity/profile/feed/library/chat application service、薄 `/api/v1`、四任务 Huey worker 和 OpenAPI-generated Web/extension clients 组成。worker 固定注册七个平台，不扫描动态插件；direct/CLI client 与凭据解密均延迟到首次真实调用，默认全部来源 disabled，因此 composition 不触发 live call。DB→Huey 先提交 pending row，再 immediate enqueue，最后写 dispatch marker；queue failure 可按 undispatched row reconcile，worker startup 则重发全部 pending row，覆盖 dequeue 后、应用 claim 前崩溃，重复消息由原子 claim 消解。Huey result 只属于 transport，业务状态、幂等、运行中取消、单调 progress 与恢复以 `job_runs` 为唯一权威。每个 handler 的条件 running guard 与其 feature writes 共用一个 UoW；cancellation 及其它 running state transition 也以条件 UPDATE 开始而不先读，两个 SQLite writer 按写序和有限 busy timeout 原子排序 cancellation 与 activity、profile+ledger、feed graph、cleanup effect，等待耗尽显式失败。profile 另使用独立 consumed-evidence ledger 与 expected base revision；explicit edit 把 override evidence 与一个新 revision 原子提交。Feed 在 batch 前排除 durable 历史并执行任一 topic 饱和即拒绝的 hard cap。Web 使用 cookie + CSRF，扩展使用 finite bearer；SSE 经 authenticated fetch stream，浏览器任务只经 generic claim/complete dispatcher。
 
 ```text
 HTTP / CLI / logged-in browser transports
@@ -258,15 +258,15 @@ Implemented now: domain contracts/policies, seven source manifests/connectors/se
                  four durable jobs, embedding/health clients, offline eval datasets,
                  thin /api/v1 routers, SSE chat/progress, browser/extension auth, operational CLI,
                  deterministic OpenAPI + unified error envelope, LiteLLM/Huey Compose
-Deferred: existing Web/extension generated-client and dispatcher wiring (Task 22),
-          final unreachable legacy deletion (Task 23); legacy data is archived, not migrated
+Implemented: existing Web/extension generated-client and generic dispatcher wiring
+Deferred: final unreachable legacy deletion (Task 23); legacy data is archived, not migrated
 Authoritative now: /api/v1, vNext application database, API/worker, source-task routes,
                    TaskRunner chat, job_runs product state, and operational CLI
 ```
 
 三个模型别名必须精确为 `obc-interactive`、`obc-analysis`、`obc-embedding`。应用层不得选择 provider deployment；provider routing/fallback、网络重试、限流和缓存由 LiteLLM 独占，`TaskRunner` 只允许 task 声明的 semantic output retry，并把 BYPASS 映射为 proxy 的 `cache.no-cache`。六个内置 task 覆盖 profile、keyword、单候选、batch candidate、chat 与 recommendation；candidate assessment row ID 由 application 层生成。AI run schema/API 只接收 metadata/usage/error class，不存在输入或输出 payload 字段。浏览器 Admin 导航只来自显式、credential-free `OPENBILICLAW_LITELLM_ADMIN_URL`，不从 internal proxy base/key 推导。Docker Compose 要求本地生成的 LiteLLM master key 与 PostgreSQL password，源码/预构建路径挂同一 policy；唯一 `migrate` 服务成功后才允许 API/worker 启动，两个 runtime 只读检查 schema head；本阶段没有 live provider/Compose E2E。`/health?model` 可能调用 provider，仅用于显式诊断，并区分 degraded、transport、auth、missing alias、server 与 provider unhealthy。
 
-FastAPI 只公开 `/api/v1/auth|system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat send 与 progress 走 SSE，chat history 是 bounded JSON page，扩展来源工作走 generic typed claim/complete。vNext auth 只从 runtime environment 读取，不 fallback legacy config；Web 使用 same-origin password→HttpOnly cookie 并对 unsafe request 强制 `Origin + X-OBC-Auth`。Extension origin 即使来自 loopback 也不能使用 `trust_loopback`/CORS bypass，只能 device-key exchange finite bearer。Login/exchange 使用分离、per-peer、有界且可过期的 failure limiter。`auth_state` epoch 统一撤销 session，不撤销 installer bearer；startup password state 对 fresh absent/first enable/unchanged 保持幂等，rotation、removal 的 `disabled` sentinel 与 re-enable 都和 epoch bump 原子提交。Source manifest 暴露 safe settings/credential/per-operation schemas；API 只在 schema-head gate 成功后构造 settings-backed registry。五个平台没有 per-source field，Douyin `mode` 与 Reddit `backend` 各自有明确 transport consumer；其余 enabled/weights/schedule/feed policy 由 global `UserSettings` 管理。per-source settings 经 GET/PUT 写入现有 `settings` table 并在 registry rebuild 时应用，disconnect 幂等删除 encrypted material；library read 返回 joined renderable content。Explicit profile revision 的 timestamp 严格晚于上一 revision。Worker 在 composition/recovery/consumer 前安装/reuse owned console/file sinks 并应用 persisted network/logging settings；退出或失败时只清理本次创建的 sinks，保留 host root policy，并精确恢复 proxy、package logger 与四个 CA environment variables。包括 Starlette 404/405 在内的所有 JSON error 使用同一个 `{error:{code,message}}` runtime/OpenAPI envelope。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展待下一任务重接。
+FastAPI 只公开 `/api/v1/auth|system|settings|onboarding|sources|source-tasks|events|profile|feed|interactions|library|chat|jobs`。Router 只调用注入的 application service；chat send 与 progress 走 SSE，chat history 是 bounded JSON page，扩展来源工作走 generic typed claim/complete。vNext auth 只从 runtime environment 读取，不 fallback legacy config；Web 使用 same-origin password→HttpOnly cookie 并对 unsafe request 强制 `Origin + X-OBC-Auth`。Extension origin 即使来自 loopback 也不能使用 `trust_loopback`/CORS bypass，只能 device-key exchange finite bearer。Login/exchange 使用分离、per-peer、有界且可过期的 failure limiter。`auth_state` epoch 统一撤销 session，不撤销 installer bearer；startup password state 对 fresh absent/first enable/unchanged 保持幂等，rotation、removal 的 `disabled` sentinel 与 re-enable 都和 epoch bump 原子提交。Source manifest 暴露 safe settings/credential/per-operation schemas；API 只在 schema-head gate 成功后构造 settings-backed registry。五个平台没有 per-source field，Douyin `mode` 与 Reddit `backend` 各自有明确 transport consumer；其余 enabled/weights/schedule/feed policy 由 global `UserSettings` 管理。per-source settings 经 GET/PUT 写入现有 `settings` table 并在 registry rebuild 时应用，disconnect 幂等删除 encrypted material；library read 返回 joined renderable content。Explicit profile revision 的 timestamp 严格晚于上一 revision。Worker 在 composition/recovery/consumer 前安装/reuse owned console/file sinks 并应用 persisted network/logging settings；退出或失败时只清理本次创建的 sinks，保留 host root policy，并精确恢复 proxy、package logger 与四个 CA environment variables。包括 Starlette 404/405 在内的所有 JSON error 使用同一个 `{error:{code,message}}` runtime/OpenAPI envelope。CLI 只保留 `serve`、`worker`、`doctor`、`eval` 与 `db migrate/backup`。现有静态 Web/扩展已通过 generated clients 接线，旧运行树留待最终删除。
 
 ### 3.2 Historical v0.3 archive — 已停止作为入口的实现
 

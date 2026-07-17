@@ -75,5 +75,5 @@ SSE metadata. The handler is registered for Starlette HTTP exceptions, so router
 and method mismatches use the same 404/405 envelope rather than Starlette's default `detail`
 shape. Error payloads never contain exception text, traceback, SQL, request values,
 credentials, or provider internals. `/web`,
-`/m`, and `/setup` remain mounted unchanged but keep legacy request wiring until
-Task 22.
+`/m`, and `/setup` consume this contract through deterministic generated clients,
+cookie/CSRF or finite-bearer auth, and authenticated fetch-SSE.

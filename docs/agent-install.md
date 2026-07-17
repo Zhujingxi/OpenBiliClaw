@@ -12,8 +12,8 @@ The installer prepares one of two runtimes:
 - **Source / uv:** the installer manages both `openbiliclaw serve` and
   `openbiliclaw worker` and connects them to a user-supplied LiteLLM proxy.
 
-The existing static Web and extension assets remain mounted, but their vNext API
-wiring is pending Task 22. Do not describe the legacy UI as a completed setup path.
+The existing Web and extension use deterministic OpenAPI-generated clients for the
+vNext API. Provider credentials and routing remain exclusively in LiteLLM Admin.
 
 ## One-line entry points
 

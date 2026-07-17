@@ -67,10 +67,10 @@ def test_current_docs_name_the_runtime_authorities() -> None:
         "docs/modules/vnext-persistence.md": ("openbiliclaw db backup", "OPENBILICLAW_SECRET_KEY"),
         "docs/modules/vnext-ai.md": ("/api/v1/chat", "SSE"),
         "docs/modules/vnext-sources.md": ("/api/v1/source-tasks", "claim"),
-        "docs/modules/vnext-api.md": ("only public API namespace", "Task 22"),
+        "docs/modules/vnext-api.md": ("only public API namespace", "generated clients"),
         "docs/modules/cli.md": ("operations interface only", "openbiliclaw doctor"),
-        "docs/modules/config.md": ("GET/PATCH /api/v1/settings", "Task 22"),
-        "docs/modules/api-auth.md": ("/api/v1/auth", "Task 22"),
+        "docs/modules/config.md": ("GET/PATCH /api/v1/settings", "generated API client"),
+        "docs/modules/api-auth.md": ("/api/v1/auth", "generated clients"),
     }
     for name, markers in expected.items():
         source = _read(name)
@@ -90,12 +90,12 @@ def test_readmes_name_vnext_backend_as_authoritative(name: str, authority_marker
         "TaskRunner",
         "SSE",
         "openbiliclaw doctor",
-        "Task 22",
+        "generated",
     ):
         assert marker in source
 
 
-def test_only_web_and_extension_client_wiring_remains_task22_work() -> None:
+def test_task22_references_are_only_historical_or_client_scoped() -> None:
     active_surfaces = {
         name: _read(name)
         for name in (

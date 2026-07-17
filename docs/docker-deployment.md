@@ -154,8 +154,8 @@ anchor UUID/device/inode；guard 校验全部 complete history，并为每代写
 operation schema；断开账号使用 typed idempotent DELETE，只删除 encrypted material。
 浏览器辅助任务统一使用 `/api/v1/source-tasks/claim` 与 typed completion endpoint。
 
-现有 static Web/extension 仍被挂载，但其 vNext API client wiring 在 Task 22；
-在此之前用 OpenAPI/API tests 验证，不要使用旧 UI 配置来源或 AI。
+现有 Web/extension 已通过 generated client 接入 vNext。来源与产品设置可在 OpenBiliClaw
+界面配置；provider credential、fallback 与 routing 只在 LiteLLM Admin 配置。
 
 ## 运维
 

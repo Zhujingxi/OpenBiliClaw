@@ -9,7 +9,7 @@
 
 本模块是权威 vNext 后端的持久化层，已经实现 SQLAlchemy 2.x 映射、repository、同步 Unit of Work、Alembic 基线迁移、类型化系统设置和 Fernet 凭据密文适配。它使用新的 `data/vnext/openbiliclaw.db`，不读取、迁移或替换 `storage/database.py` 管理的历史 v0.3 数据库。
 
-`/api/v1`、独立 worker 和运维 CLI 共同使用这套基础；应用数据库是设置、来源账户、活动、画像、Feed、library、chat、source task、job 与 AI run 的业务权威。Docker 与 source installer 都生成并复用来源加密 secret，先完成唯一 migration owner 的 schema 写入，再让 API/worker 执行只读 head gate。现有 static Web/extension 的 client 接线留给 Task 22；历史数据仅保留为不导入的手工 archive。
+`/api/v1`、独立 worker、运维 CLI 和 Web/extension generated clients 共同使用这套基础；应用数据库是设置、来源账户、活动、画像、Feed、library、chat、source task、job 与 AI run 的业务权威。Docker 与 source installer 都生成并复用来源加密 secret，先完成唯一 migration owner 的 schema 写入，再让 API/worker 执行只读 head gate。历史数据仅保留为不导入的手工 archive。
 
 ## 已实现功能
 
@@ -28,7 +28,7 @@
 | 来源 settings | ✅ | 七平台 strict settings 复用现有 `settings` table 的 `source-config:<source_id>` namespaced row；global settings replace 保留这些 rows。API 先通过 schema-head gate 再构造 settings-backed registry；只有 Douyin `mode` 与 Reddit `backend` 是有 runtime consumer 的 per-source 字段，其它五个平台 schema 为空 |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
 | worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
-| 后端生产切换 | ✅ | `/api/v1`、worker、运维 CLI、安装器 secret 生命周期与 fresh vNext database 已是权威；只剩 Task 22 的现有 Web/extension client 接线 |
+| 生产切换 | ✅ | `/api/v1`、worker、运维 CLI、安装器 secret 生命周期、fresh vNext database 与 Web/extension clients 已是权威 |
 
 ## Schema
 

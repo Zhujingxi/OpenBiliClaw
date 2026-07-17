@@ -102,4 +102,4 @@ Log "Runtime secrets are stored in $InstallDir\.env with mode 0600 semantics and
 if ($Mode -eq 'docker') {
     Log 'Configure provider credentials and the obc-interactive, obc-analysis, and obc-embedding aliases at http://127.0.0.1:4000/ui'
 }
-Log 'The static UI is mounted for compatibility but remains pending Task 22 API rewiring.'
+Log 'Web and extension clients use the generated vNext API contract.'

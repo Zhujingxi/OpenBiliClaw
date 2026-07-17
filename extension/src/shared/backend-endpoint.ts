@@ -5,8 +5,8 @@
  * (default 127.0.0.1:8420). Store-distributed builds only declare loopback
  * backend host permissions; custom LAN/self-hosted origins require a build or
  * future optional-permission flow that grants that origin. Every fetch and
- * WebSocket in the extension goes through this module so a single source of
- * truth resolves the current host + port at call time.
+ * vNext API requests in the extension go through this module so a single
+ * source of truth resolves the current host + port at call time.
  *
  * Storage:
  *   chrome.storage.local key ``popup_backend_endpoint`` =
@@ -186,16 +186,7 @@ export async function getBackendOrigin(): Promise<string> {
 export async function apiUrl(path: string): Promise<string> {
   const ep = await ensureLoaded();
   const suffix = path.startsWith("/") ? path : `/${path}`;
-  return `${ep.scheme}://${ep.host}:${ep.port}/api${suffix}`;
-}
-
-export async function wsUrl(path: string, token?: string | null): Promise<string> {
-  const ep = await ensureLoaded();
-  const suffix = path.startsWith("/") ? path : `/${path}`;
-  const sep = suffix.includes("?") ? "&" : "?";
-  const qs = token ? `${sep}token=${encodeURIComponent(token)}` : "";
-  const wsScheme = ep.scheme === "https" ? "wss" : "ws";
-  return `${wsScheme}://${ep.host}:${ep.port}/api${suffix}${qs}`;
+  return `${ep.scheme}://${ep.host}:${ep.port}/api/v1${suffix}`;
 }
 
 export function isPrivateHttpHost(host: string): boolean {

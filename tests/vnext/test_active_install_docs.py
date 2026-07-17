@@ -32,10 +32,10 @@ def test_active_docs_do_not_advertise_removed_commands(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", ("README.md", "README_EN.md"))
-def test_readme_marks_static_ui_as_pending(name: str) -> None:
+def test_readme_marks_generated_clients_as_active(name: str) -> None:
     text = (ROOT / name).read_text(encoding="utf-8")
-    assert "Task 22" in text
-    assert "static" in text.lower()
+    assert "generated" in text.lower()
+    assert "wiring pending" not in text.lower()
 
 
 def test_install_docs_require_litellm_and_both_runtime_processes() -> None:

@@ -27,7 +27,7 @@
 #   # configure obc-interactive, obc-analysis, and obc-embedding at
 #   # http://127.0.0.1:4000/ui
 #   # then configure sources through /api/v1/onboarding. The packaged static
-#   # UI remains mounted but is not authoritative until Task 22 rewires it.
+#   # Web and extension clients consume the generated vNext API contract.
 #
 # Upgrade to the newest release:
 #

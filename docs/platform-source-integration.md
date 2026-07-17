@@ -23,7 +23,7 @@ disconnect 和 credential/non-finite rejection tests。
 
 七个平台当前能力矩阵、deadline/lease/cancel/abandon 语义与公开 Python API 见
 [vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。现有 Web/extension
-dispatcher 的 generated-client 接线由 Task 22 完成；这不恢复旧平台专用 endpoint。
+dispatcher 已通过 generated client 接线；这不恢复旧平台专用 endpoint。
 该前端待办不等于 extension wiring、browser execution 或真实平台 E2E 已完成。
 
 ## Historical v0.3 archive

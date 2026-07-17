@@ -1,7 +1,6 @@
 # vNext 手动端到端联调
 
-本 runbook 只覆盖新的 `/api/v1`、独立 worker 和 LiteLLM。现有 static
-Web/extension 的 API wiring 等待 Task 22，不在当前通过矩阵中。
+本 runbook 覆盖新的 `/api/v1`、独立 worker、LiteLLM、Web 与 extension generated clients。
 
 ## 1. 启动基础设施
 
@@ -79,5 +78,5 @@ collection 上的 `CollectionItem`，没有 native platform mutation。通过 ch
 ## 8. 完成条件
 
 完整旅程为：first-run → LiteLLM aliases → source connection → bootstrap → evidence
-profile → feed → feedback changes later ranking → chat → local save。Task 22 完成后，
-同一旅程再加入 Web/extension generated-client smoke；不恢复 legacy API。
+profile → feed → feedback changes later ranking → chat → local save。Web 与 extension
+对同一 Docker backend 执行 generated-client smoke；不恢复 legacy API。

@@ -14,9 +14,9 @@ OpenBiliClaw 正在进行不兼容的 vNext 后端切换。权威运行时已经
 拆分的 `/api/v1`、独立 Huey worker、SQLite 应用库、PydanticAI typed tasks 和
 LiteLLM Proxy。旧 API、旧数据格式和旧功能 CLI 不再受支持。
 
-现有 static Web 与浏览器扩展仍随 API 挂载，但 **Task 22 完成 API client
-重接前不属于可用的 vNext 产品界面**。当前后端验证请使用 OpenAPI、受保护的
-API 和运维 CLI；不要依赖静态页面显示的旧设置或旧流程。
+现有 static Web 与浏览器扩展已通过由 OpenAPI 确定性生成的 client 接入 vNext。
+Web 使用 same-origin HttpOnly cookie + CSRF，扩展使用 device-key 换取有限期 bearer；
+两端的 SSE 都通过可带认证的 `fetch` stream 消费。
 
 保留的核心旅程是：来源连接与 bootstrap → 活动证据 → revisioned profile →
 发现 feed → feedback → chat → 本地收藏与稍后观看。内置来源包括 Bilibili、
@@ -26,7 +26,7 @@ API 和运维 CLI；不要依赖静态页面显示的旧设置或旧流程。
 
 ```mermaid
 flowchart LR
-    UI["Existing Web + Extension<br/>Task 22 wiring pending"] --> AUTH["Cookie+CSRF / finite extension bearer"]
+    UI["Existing Web + Extension<br/>generated API clients"] --> AUTH["Cookie+CSRF / finite extension bearer"]
     AUTH --> API["FastAPI /api/v1 routers"]
     API --> UC["Feature use cases"]
     API --> SSE["SSE chat and progress"]
@@ -48,11 +48,11 @@ flowchart LR
 OpenBiliClaw 只拥有任务语义、输入输出 schema、领域规则和持久化。Provider
 凭据、路由、fallback、冷却、网络重试、预算和缓存全部由 LiteLLM 管理。
 浏览器辅助工作只经权威 `/api/v1/source-tasks` claim/complete 合同；chat 直接经
-共享 `TaskRunner` 输出 SSE。Task 22 只重接现有 Web/extension client，不替换这些
-后端边界。
-后端已提供 password→HttpOnly cookie + CSRF、extension device-key→finite bearer、session
-epoch revoke、joined library、explicit profile edit、chat history、typed source schemas/disconnect
-和统一 error envelope；这不表示现有页面、扩展 dispatcher 或真实浏览器已完成接线/验证。
+共享 `TaskRunner` 输出 SSE。Web 与 popup 覆盖 onboarding、来源、证据 profile、feed、
+feedback、chat、本地收藏/稍后观看、完整嵌套设置与 LiteLLM alias health；扩展后台通过
+同一个 generic source-task claim/complete dispatcher 执行七来源声明的浏览器操作，并把
+被动捕获统一归一为 `ActivityEvent`。旧 provider editor、native save/saved sync、delight、
+self-update 与 desktop 控件不再进入产品运行图。
 
 ## 安装
 

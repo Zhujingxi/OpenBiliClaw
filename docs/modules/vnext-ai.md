@@ -2,7 +2,7 @@
 
 > 状态：本模块是权威 vNext AI 边界。Profile/feed 在独立 worker 中运行，
 > `/api/v1/chat/stream` 通过同一个 `TaskRunner` 直接输出 SSE；运维 CLI 只提供离线
-> `eval` 与 `doctor`。Task 22 仅负责把现有 Web/extension client 重接这些接口。
+> `eval` 与 `doctor`。现有 Web/extension client 已通过 generated client 消费这些接口。
 
 ## 边界
 
@@ -71,7 +71,7 @@ Compose 启动后可在 loopback Admin 中添加 provider deployments，并把 m
 一行 Docker installer / `agent_bootstrap.py --mode docker` 会在跨进程锁内补齐 `.env`，拒绝 symlink，保留无关条目，用同目录 mode-`0600` 临时文件写入、flush/`fsync` 后原子替换，并在支持时同步目录。手动 Compose 用户必须先生成 `.env`。不要提交该文件。私有 Compose 网络中的 API 与 worker 使用 installer 生成的 proxy key；provider credentials、key rotation 和可选的最小权限 virtual key 均由 LiteLLM Admin 管理，不是 OpenBiliClaw 的 provider 配置面。
 
 `OPENBILICLAW_LITELLM_ADMIN_URL` 不是 credential。Docker/source 部署可在私密 runtime
-environment 中设置同一个安全 public URL，使 API/system health 和 Task 22 client 得到一致
+environment 中设置同一个安全 public URL，使 API/system health 和 Web/extension client 得到一致
 导航目标；安装/health output 仍不得打印 private LiteLLM base URL、proxy key 或 provider key。
 
 源码与预构建 Compose 都挂载同一 `litellm/config.yaml` 并使用同一 command/policy；预构建用户必须同时下载 compose 与 policy 文件。镜像固定的是 upstream version tag `v1.92.0`，本项目没有宣称或执行签名验证。

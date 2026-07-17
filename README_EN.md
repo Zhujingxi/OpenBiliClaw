@@ -15,10 +15,10 @@ authoritative runtime is now the feature-oriented `/api/v1`, an independent Huey
 worker, a SQLite application database, PydanticAI typed tasks, and LiteLLM Proxy.
 Legacy APIs, stored-data formats, and feature CLI commands are unsupported.
 
-The existing static Web and browser-extension assets are still mounted by the API,
-but **they are not a usable vNext product interface until Task 22 rewires the shared
-API client**. Validate the backend through OpenAPI, protected APIs, and the
-operational CLI; do not rely on legacy settings or flows rendered by those assets.
+The existing static Web and browser extension now consume vNext through deterministic
+OpenAPI-generated clients. Web uses same-origin HttpOnly cookies plus CSRF, the
+extension exchanges its device key for a finite bearer, and both consume SSE with
+authenticated `fetch` streams.
 
 The retained journey is source connection and bootstrap → activity evidence →
 revisioned profile → discovery feed → feedback → chat → local favorites and watch
@@ -29,7 +29,7 @@ Reddit. Each connector exposes only capabilities it actually supports.
 
 ```mermaid
 flowchart LR
-    UI["Existing Web + Extension<br/>Task 22 wiring pending"] --> AUTH["Cookie+CSRF / finite extension bearer"]
+    UI["Existing Web + Extension<br/>generated API clients"] --> AUTH["Cookie+CSRF / finite extension bearer"]
     AUTH --> API["FastAPI /api/v1 routers"]
     API --> UC["Feature use cases"]
     API --> SSE["SSE chat and progress"]
@@ -53,11 +53,11 @@ LiteLLM owns provider credentials, routing, fallback, cooldown, network retry,
 budgets, and caching.
 Browser-assisted work uses only the authoritative `/api/v1/source-tasks`
 claim/complete contract; chat streams SSE directly through the shared `TaskRunner`.
-Task 22 only rewires the existing Web/extension clients to these backend boundaries.
-The backend now provides password-to-HttpOnly-cookie plus CSRF, extension device-key-to-finite-
-bearer exchange, session-epoch revocation, joined library reads, explicit profile edits, chat
-history, typed source schemas/disconnect, and one error envelope. This does not claim that the
-existing pages, extension dispatcher, or a real browser have been wired or verified.
+Web and popup expose onboarding, sources, the evidence profile, feed, feedback, chat,
+local favorites/watch later, all nested settings, and LiteLLM alias health. The extension
+uses one generic dispatcher for declared browser operations and normalizes passive capture
+to `ActivityEvent`. Provider editors, native saves/saved sync, delight, self-update, and
+desktop controls are no longer part of the active product graph.
 
 ## Installation
 

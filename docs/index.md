@@ -14,6 +14,8 @@
 - [CLI](modules/cli.md)
 - [Configuration](modules/config.md)
 - [API authentication](modules/api-auth.md)
+- [Web client](modules/web.md)
+- [Browser extension](modules/extension.md)
 
 ## 安装与验证
 
@@ -26,7 +28,7 @@
 
 ## 迁移状态
 
-Backend、API、worker、persistence、sources 与 typed AI 已切到 vNext。现有 static
-Web/extension 在 Task 22 前只保持挂载，不是权威界面。`docs/plans/`、
+Backend、API、worker、persistence、sources、typed AI、static Web 与 extension 已切到
+vNext；浏览器端使用 generated clients、fetch-SSE 和 generic source-task dispatcher。`docs/plans/`、
 `docs/specs/`、旧 module 文档和早期 changelog 是历史设计记录，不应作为当前
 命令、API 或配置说明；Task 23 会删除剩余不可达 legacy tree。

@@ -1,6 +1,6 @@
 # 架构设计
 
-## vNext 领域、薄 `/api/v1` 与独立 worker（前端待重接）
+## vNext 领域、薄 `/api/v1`、独立 worker 与 generated clients
 
 backend-first vNext 已交付冻结 Pydantic 领域契约与纯策略、七平台 connector 与 generic browser task、SQLAlchemy/Alembic persistence、类型化设置和 Fernet 凭据、只经 LiteLLM 的 PydanticAI typed-task 边界，以及 activity/profile/feed/library/chat application service 和独立 Huey worker。领域与 feature service 不导入 FastAPI、SQLAlchemy 或 Huey；来源原始 HTTP/CLI/SDK/DOM row 只存在于各自 infrastructure source package。
 
@@ -44,7 +44,7 @@ Huey scheduler/transport (data/vnext/huey.db, result enabled)
         └─► source_sync / profile_projection / feed_replenishment / cleanup
               └─► JobService ─► job_runs (all-pending recovery/claim/cancel/txn guard)
 
-Existing Web + Extension (Task 22 rewiring pending)
+Existing Web + Extension (OpenAPI-generated clients)
         └─► cookie+CSRF / finite extension bearer / fetch-SSE
               └─► FastAPI feature routers (/api/v1 only)
                     ├─► auth status/login/logout/exchange/revoke
@@ -58,7 +58,8 @@ Implemented: domain contracts/policies; seven source manifests/connectors/settin
              explicit seven-source worker composition; four durable jobs; LiteLLM/Huey Compose;
              thin FastAPI v1 routers, cookie/CSRF + bearer auth, SSE, operational CLI,
              deterministic OpenAPI and unified error envelope
-Deferred: web/extension client rewiring and final legacy deletion; stored legacy data is not migrated
+Implemented: web/extension generated clients, cookie/bearer auth, fetch-SSE, generic browser dispatcher
+Deferred: final unreachable legacy-tree deletion; stored legacy data is not migrated
 ```
 
 vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS`；SQLite driver timeout 与 `PRAGMA busy_timeout` 使用同一个有限值。`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
@@ -95,7 +96,7 @@ sinks 并作用 persisted network/logging policy；退出或失败时保留 host
 OpenAPI post-processor统一使用 `{error:{code,message}}`，不覆盖 success/security/SSE metadata，
 Starlette 404/405 也走该 envelope；边界不向客户端泄露 traceback、SQL、credential 或 provider text。
 
-worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。Docker Compose 以唯一一次性 `migrate` 服务串行 Alembic 写入，并以 successful-completion dependency 阻止失败时启动 API/worker；两个 runtime startup 只执行 schema-head 只读 gate。Source installer 也在启动两个进程前独占 migration。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展 dispatcher 到 Task 22 才消费这些 route。下方 v0.3 图只用于最终删除前追踪不可达实现。
+worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。Docker Compose 以唯一一次性 `migrate` 服务串行 Alembic 写入，并以 successful-completion dependency 阻止失败时启动 API/worker；两个 runtime startup 只执行 schema-head 只读 gate。Source installer 也在启动两个进程前独占 migration。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展已消费这些 route：Web 使用 cookie + CSRF，扩展使用 finite bearer，SSE 统一使用 authenticated fetch stream，浏览器任务统一经 generic claim/complete dispatcher。下方 v0.3 图只用于最终删除前追踪不可达实现。
 
 Source-install stable-root boundary 由 held checkout root、append-only root guard 与内层 lifecycle anchor 组成。Guard 对每代写入相同 pending/committed record 并校验完整历史；只在 active lease 内恢复 generation 0 初始 pending，或同 root/instance/anchor 恰落后一代的 installer/process record。环境、installer 与 process state 的 replacement 保留 temp FD、只对 FD 改 mode，并在 replace 前后验证 inode，失败不 pathname-unlink 不确定 temp；Windows temp 由 `CreateFileW(CREATE_NEW)` 以 read/write/delete sharing 打开并把 handle ownership 转交给仍跨越 `os.replace` 的 CRT FD。Windows runtime logs 以不共享 delete 的 native reparse-aware handles 固定目录与 final；POSIX 保持 held dirfd。Queue health 正常 pathname connect 后要求全部新增普通 FD 都来自预先固定的 main/WAL/SHM identity set。Backup publication 在 Linux 保持 anonymous payload + `linkat`；macOS 从 locked held payload FD `fclonefileat`，并以 32 个固定、成功后 descriptor-zero/reuse、失败时有界保留的槽消除 temp pathname authority。
 

@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-本模块是权威 vNext 后端的领域层，只定义无框架依赖的不可变契约与纯策略。相邻的 [vNext 持久化模块](vnext-persistence.md) 提供 SQLAlchemy/Alembic adapter，[vNext 用例与后台任务](vnext-use-cases-jobs.md) 在 API 与独立 worker 中组合这些类型；公开请求只经 `/api/v1`，功能型 legacy CLI 已删除。领域模块本身仍不得导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。仅现有 static Web/extension 的 generated-client 接线留给 Task 22；这不改变后端领域合同的权威性。
+本模块是权威 vNext 后端的领域层，只定义无框架依赖的不可变契约与纯策略。相邻的 [vNext 持久化模块](vnext-persistence.md) 提供 SQLAlchemy/Alembic adapter，[vNext 用例与后台任务](vnext-use-cases-jobs.md) 在 API 与独立 worker 中组合这些类型；公开请求只经 `/api/v1`，功能型 legacy CLI 已删除。领域模块本身仍不得导入 FastAPI、SQLAlchemy、Huey、PydanticAI、legacy Soul 或 legacy storage。Web/extension generated clients 只消费这些合同，不反向成为领域依赖。
 
 ## 已实现功能
 
@@ -16,7 +16,7 @@
 | 来源能力 | ✅ | `SourceId` / `SourceManifest` 分开声明 capability 与 concrete operation，并附 Pydantic-derived settings/credential/request/result schema；`SourceConnector` 只返回规范化活动或内容对象 |
 | 来源任务合同 | ✅ | 七种 discriminated browser request/result、`SourceTaskRequest`、`ClaimedSourceTask`、`SourceTaskSnapshot`、`SourceTaskCompletion` 冻结通用任务边界；claim/snapshot 暴露 durable request deadline 与 `cancelled/abandoned` 终态；`SourceAccountDisconnectResult` 表达 secret-free idempotent disconnect |
 | 相邻持久化与 worker adapter | ✅ | vNext SQLAlchemy/Alembic 基础和四任务 worker 已实现，但不属于本领域模块；`/api/v1` 公开请求与 worker 共用这些合同 |
-| 运行时接线 | ✅ | AI、来源 adapter、application use case、`/api/v1`、运维 CLI 与独立 worker 已切换；Task 22 只重接现有 Web/extension client |
+| 运行时接线 | ✅ | AI、来源 adapter、application use case、`/api/v1`、运维 CLI、独立 worker 与现有 Web/extension clients 已切换 |
 
 ## 公开 API
 

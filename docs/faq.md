@@ -1,10 +1,10 @@
 # 常见问题（vNext）
 
-## 为什么静态 Web 或扩展里还有旧设置？
+## Web 或扩展在哪里配置模型？
 
-后端已切换到 `/api/v1`，但现有 static Web/extension 的 generated client wiring
-要在 Task 22 完成。当前页面只保持挂载和样式，不是权威配置界面。请用 OpenAPI
-和受保护 API 验证后端。
+Web/extension 已通过 generated client 接入 `/api/v1`，只展示三个稳定 alias 的健康状态
+和 LiteLLM Admin 入口。Provider credential、routing、fallback、budget 与 cache 在 LiteLLM
+Admin 配置，不在 OpenBiliClaw 重复实现 provider editor。
 
 ## 为什么源码安装必须提供 LiteLLM？
 

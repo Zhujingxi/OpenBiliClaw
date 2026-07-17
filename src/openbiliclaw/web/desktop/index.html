@@ -1,802 +1,397 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>OpenBiliClaw 推荐首页</title>
-  <script>
-    (() => {
-      try {
-        const theme = window.localStorage?.getItem("obc.theme");
-        if (theme === "light" || theme === "dark") {
-          document.documentElement.dataset.theme = theme;
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>OpenBiliClaw</title>
+    <link rel="stylesheet" href="/web/assets/css/app.css" />
+    <link rel="modulepreload" href="/m/js/api-client.js" />
+    <style>
+      .vnext-shell {
+        max-width: 1440px;
+        margin: auto;
+      }
+      .vnext-nav {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        padding: 14px 24px;
+        border-bottom: 1px solid var(--line);
+      }
+      .vnext-nav button[aria-current="page"] {
+        background: var(--pink-soft);
+        color: var(--pink);
+      }
+      .vnext-page {
+        padding: 28px 32px;
+      }
+      .vnext-page[hidden] {
+        display: none;
+      }
+      .vnext-empty {
+        padding: 48px 24px;
+        text-align: center;
+        color: var(--muted);
+      }
+      .vnext-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .vnext-card-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+      .vnext-card-actions button[aria-pressed="true"] {
+        color: var(--pink);
+        border-color: var(--pink);
+      }
+      .vnext-cover {
+        aspect-ratio: 16/9;
+        background: var(--surface-2);
+        overflow: hidden;
+        border-radius: 12px;
+      }
+      .vnext-cover img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .vnext-settings {
+        display: grid;
+        gap: 20px;
+      }
+      .vnext-settings section {
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px;
+        background: var(--surface);
+      }
+      .vnext-fields {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .vnext-fields label {
+        display: grid;
+        gap: 6px;
+      }
+      .vnext-fields input,
+      .vnext-fields select,
+      .vnext-fields textarea {
+        width: 100%;
+      }
+      .vnext-source-row,
+      .vnext-job-row,
+      .vnext-alias-row {
+        display: grid;
+        grid-template-columns: minmax(130px, 1fr) 2fr auto;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .vnext-chat-log {
+        min-height: 280px;
+        max-height: 58vh;
+        overflow: auto;
+        display: grid;
+        gap: 10px;
+      }
+      .vnext-chat-turn {
+        padding: 12px 14px;
+        border-radius: 14px;
+        background: var(--surface-2);
+        max-width: 82%;
+      }
+      .vnext-chat-turn.user {
+        justify-self: end;
+        background: var(--pink-soft);
+      }
+      .vnext-login {
+        position: fixed;
+        inset: 0;
+        background: #0008;
+        display: grid;
+        place-items: center;
+        z-index: 99;
+      }
+      .vnext-login[hidden] {
+        display: none;
+      }
+      .vnext-login form {
+        background: var(--surface);
+        padding: 24px;
+        border-radius: 18px;
+        width: min(420px, calc(100% - 32px));
+        box-shadow: var(--shadow-lg);
+      }
+      .vnext-toast {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        padding: 12px 16px;
+        border-radius: 12px;
+        z-index: 100;
+      }
+      .vnext-toast[hidden] {
+        display: none;
+      }
+      @media (max-width: 760px) {
+        .vnext-page {
+          padding: 20px 16px;
         }
-        const hue = window.localStorage?.getItem("obc.themeHue");
-        if (hue) { document.documentElement.style.setProperty("--hue-primary", hue); }
-      } catch {}
-    })();
-  </script>
-  <link rel="stylesheet" href="/web/assets/css/app.css">
-</head>
-<body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="top-left">
-        <button class="icon-btn side-drawer-btn" id="sideDrawerBtn" type="button" aria-label="打开侧边菜单">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>
-        </button>
-        <a class="brand" href="#home" aria-label="OpenBiliClaw 首页">
-          <span class="brand-mark">B</span>
-          <span class="brand-copy"><span class="brand-title">OpenBiliClaw</span><span class="brand-sub">你的本地全网推荐入口</span></span>
-        </a>
-      </div>
-      <form class="search" id="searchForm">
-        <input id="searchInput" type="search" placeholder="搜索推荐、UP 主、兴趣方向或解释文本">
-        <button type="submit">搜索</button>
-      </form>
-      <div class="top-actions" aria-label="状态与消息">
-        <button class="gh-star" id="starButton" type="button" title="觉得 OpenBiliClaw 好用的话，在 GitHub 给项目点个 Star" aria-label="觉得好用的话，在 GitHub 给 OpenBiliClaw 点个 Star">
-          <span class="gh-star-left">
-            <svg class="gh-star-mark" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.89.88 2.35.67.07-.52.28-.88.51-1.08-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-            <span class="gh-star-copy">好用求 Star</span>
-          </span>
-          <span class="gh-star-count" id="starCount" hidden></span>
-        </button>
-        <button class="backend-status-pill" id="openSettingsHero" type="button">
-          <span class="badge-dot"></span><span id="statusLabel">已连接本地后端</span>
-        </button>
-        <button class="top-theme-btn icon-btn" id="themeToggleBtn" type="button" title="主题：跟随系统" aria-label="主题：跟随系统">
-          <span id="themeToggleGlyph" aria-hidden="true">◐</span>
-        </button>
-        <div class="mobile-entry-wrap">
-          <button class="top-mobile-btn" id="mobileQrBtn" type="button" title="扫码在手机上使用" aria-label="手机版入口：扫码在手机上使用">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2" width="11" height="20" rx="2.8"/><path d="M10.2 5.2h3.6"/><circle cx="12" cy="18.4" r="0.5" fill="currentColor" stroke="none"/></svg>
-            <span>手机版</span>
-            <span class="mobile-new-dot" id="mobileQrDot" hidden></span>
-          </button>
-          <div class="mobile-qr-callout" id="mobileQrCallout" hidden>
-            <button class="mobile-qr-callout-body" id="mobileQrCalloutOpen" type="button">手机扫码，躺着刷推荐 →</button>
-            <button class="mobile-qr-callout-close" id="mobileQrCalloutClose" type="button" aria-label="关闭提示">×</button>
-          </div>
+        .vnext-fields {
+          grid-template-columns: 1fr;
+        }
+        .vnext-source-row,
+        .vnext-job-row,
+        .vnext-alias-row {
+          grid-template-columns: 1fr;
+        }
+        .search {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell vnext-shell">
+      <header class="topbar">
+        <a class="brand" href="#feed"
+          ><span class="brand-mark">B</span
+          ><span class="brand-copy"
+            ><span class="brand-title">OpenBiliClaw</span
+            ><span class="brand-sub">你的全网发现入口</span></span
+          ></a
+        >
+        <form class="search" id="searchForm">
+          <input
+            id="searchInput"
+            type="search"
+            placeholder="筛选当前发现流"
+          /><button>搜索</button>
+        </form>
+        <div class="top-actions">
+          <span class="backend-status-pill"
+            ><span class="badge-dot"></span
+            ><span id="statusLabel">连接中</span></span
+          ><a class="top-mobile-btn" href="/m/">手机版</a>
         </div>
-        <button class="top-message-btn" id="messagesBtn" type="button" aria-label="消息">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
-            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M13.73 21a2 2 0 0 1-3.46 0" stroke-linecap="round"/>
-          </svg>
-          <span class="message-dot" id="messagesDot" hidden></span>
-        </button>
-      </div>
-      <button class="icon-btn mobile-menu-btn" id="mobileMenuBtn" type="button" aria-label="打开手机菜单">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round"/></svg>
-      </button>
-    </header>
-
-    <div class="fatal-banner" id="fatalBanner" role="alert"></div>
-
-    <div class="app-body">
-      <aside class="side-drawer" id="sideDrawer" aria-label="侧边菜单" aria-hidden="true">
-        <div class="side-drawer-scrim" id="sideDrawerScrim"></div>
-        <div class="side-drawer-panel" aria-label="侧边菜单">
-          <nav class="side-drawer-nav" aria-label="全局功能">
-          <button class="nav-action" id="homeBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span><span>首页</span></button>
-          <button class="nav-action" id="watchLaterBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span><span>稍后再看</span><span class="nav-count-badge" id="watchLaterCountBadge" hidden></span></button>
-          <button class="nav-action" id="favoritesBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></span><span>我的收藏</span><span class="nav-count-badge" id="favoritesCountBadge" hidden></span></button>
-          <button class="nav-action" id="profileBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h3a1 1 0 0 0 1 -1v-1a2 2 0 0 1 4 0v1a1 1 0 0 0 1 1h3a1 1 0 0 1 1 1v3a1 1 0 0 0 1 1h1a2 2 0 0 1 0 4h-1a1 1 0 0 0 -1 1v3a1 1 0 0 1 -1 1h-3a1 1 0 0 1 -1 -1v-1a2 2 0 0 0 -4 0v1a1 1 0 0 1 -1 1h-3a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1h1a2 2 0 0 0 0 -4h-1a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1"/></svg></span><span>我的画像</span></button>
-          <button class="nav-action" id="chatBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span><span>聊聊口味</span></button>
-          <button class="nav-action" id="settingsBtn" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span><span>设置</span></button>
-        </nav>
-        <section class="side-section side-runtime-panel" aria-label="实时运行摘要">
-          <p class="eyebrow">Runtime</p>
-          <h3>推荐池实时看板</h3>
-          <p id="runtimeSummary">连接 FastAPI 后，这里会显示候选池、补货和新动作记录。</p>
-          <div class="hero-status-grid" aria-label="推荐池实时状态">
-            <div><span>当前可换库存</span><strong id="poolAvailable">—</strong></div>
-            <div><span>上次成功补货</span><strong id="poolReplenished">—</strong></div>
-            <div><span>补货状态</span><strong id="poolRefreshState">—</strong></div>
-          </div>
-          <div class="metric-row">
-            <div class="metric"><strong id="metricPool">—</strong><span>当前可换</span></div>
-            <div class="metric"><strong id="metricUnread">—</strong><span>通知数</span></div>
-            <div class="metric"><strong id="metricSources">—</strong><span>内容源</span></div>
-          </div>
-          <p class="hero-topics">最近主题：<span id="poolTopics">等待后端同步</span></p>
-        </section>
-        <section class="side-section side-activity-section" data-od-id="activity-rail" aria-label="后台动态摘要">
-          <p class="eyebrow">Activity</p>
-          <h3>后台刚记住的事</h3>
-          <div class="activity-list" id="activityList"></div>
-          <div class="drawer-actions"><button class="small-btn" id="activityBtn" type="button">查看全部动态</button></div>
-        </section>
-      </div>
-    </aside>
-
-    <main class="layout" id="home">
-      <section class="main-col" id="homePage" aria-label="推荐首页" data-od-id="recommendation-home">
-        <section class="delight" id="delightBanner" data-od-id="delight-banner">
-          <div class="thumb" id="delightThumb" role="button" tabindex="0" aria-label="打开当前惊喜推荐"></div>
-          <div class="delight-body">
-            <div class="delight-meta">
-              <p class="eyebrow">惊喜推荐</p>
-              <div class="delight-queue-tools" aria-label="惊喜推荐队列管理">
-                <div class="delight-nav" aria-label="惊喜推荐队列导航">
-                  <button class="icon-btn" data-delight="prev" type="button" aria-label="上一条惊喜推荐">‹</button>
-                  <span id="delightCount">1/1</span>
-                  <button class="icon-btn" data-delight="next" type="button" aria-label="下一条惊喜推荐">›</button>
-                </div>
-              </div>
-            </div>
-            <div class="delight-copy">
-              <h3 id="delightTitle">你可能会意外喜欢：县域经济的债务齿轮</h3>
-              <p id="delightStats" class="video-stats" hidden></p>
-              <p id="delightPublished" class="published-time" hidden></p>
-              <div id="delightExcerpt" class="delight-excerpt" hidden>
-                <p id="delightExcerptText" class="delight-excerpt-text"></p>
-                <button id="delightExcerptToggle" class="delight-excerpt-toggle" type="button" aria-expanded="false" aria-controls="delightExcerptText" hidden>展开正文</button>
-              </div>
-              <p id="delightReason">你最近的轨迹同时出现了宏观债务、地方财政和长叙事内容，这条把它们咬合得很清楚。</p>
-              <div class="delight-chat-turns" id="delightTurns" hidden></div>
-            </div>
-          </div>
-          <div class="delight-actions" aria-label="惊喜推荐操作">
-            <div class="delight-main-actions" aria-label="打开或讨论这条推荐">
-                <button class="small-btn" data-delight="view" type="button">去看看</button>
-                <div class="comment-field"><input id="delightCommentInput" placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
-                <button class="small-btn composer-cancel" data-delight="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
-                <button class="small-btn chat-action" data-delight="chat" type="button">聊一聊</button>
-              </div>
-              <div class="delight-feedback-actions card-feedback-icons" aria-label="反馈这条推荐">
-                <button class="feedback-icon-btn" data-delight="like" type="button" aria-label="喜欢" title="喜欢" aria-pressed="false">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
-                </button>
-                <span class="feedback-separator" aria-hidden="true">/</span>
-                <button class="feedback-icon-btn" data-delight="dislike" type="button" aria-label="不感兴趣" title="不感兴趣">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
-                </button>
-                <span class="feedback-separator" aria-hidden="true">/</span>
-                <button class="feedback-icon-btn" data-delight="dismiss" type="button" aria-label="忽略" title="忽略">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg>
-                </button>
-                <span class="feedback-separator" aria-hidden="true">/</span>
-                <button class="feedback-icon-btn watch-later-btn" data-delight="watch-later" type="button" aria-label="稍后再看" title="稍后再看" aria-pressed="false">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>
-                </button>
-                <span class="feedback-separator" aria-hidden="true">/</span>
-                <button class="feedback-icon-btn favorite-btn" data-delight="favorite" type="button" aria-label="收藏" title="收藏" aria-pressed="false">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>
-                </button>
-              </div>
-          </div>
-          <p class="status-line" id="delightStatus" aria-live="polite"></p>
-        </section>
-
-        <section data-od-id="recommendations">
+      </header>
+      <nav class="vnext-nav" aria-label="主要功能">
+        <button class="pill-btn" data-page="feed">发现</button
+        ><button class="pill-btn" data-page="watch_later">稍后再看</button
+        ><button class="pill-btn" data-page="favorites">收藏</button
+        ><button class="pill-btn" data-page="profile">画像</button
+        ><button class="pill-btn" data-page="chat">对话</button
+        ><button class="pill-btn" data-page="jobs">任务</button
+        ><button class="pill-btn" data-page="settings">设置</button>
+      </nav>
+      <main>
+        <section class="vnext-page" data-page-panel="feed">
           <div class="section-head">
             <div>
-              <p class="eyebrow">Recommendations</p>
-              <h2>为你推荐的内容</h2>
-              <p>阿B 根据你的近期兴趣筛选的内容，有任何意见尽管和我聊~</p>
+              <p class="eyebrow">Discovery feed</p>
+              <h1>为你发现的内容</h1>
+              <p>基于证据画像、来源多样性和新鲜度生成。</p>
             </div>
-            <div class="drawer-actions recommendation-actions">
-              <label class="reshuffle-toggle" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
-                <input id="dismissOnReshuffleToggle" type="checkbox">
-                <span class="reshuffle-switch" aria-hidden="true"></span>
-                <span>换一批时忽略当前</span>
-              </label>
-              <button class="icon-btn" id="reshuffleBtn" type="button" aria-label="换一批" title="换一批">↻</button>
-              <button class="pill-btn" id="resetFiltersBtn" type="button" hidden="">重置筛选</button>
+            <div class="vnext-actions">
+              <button class="pill-btn" id="refreshFeed">刷新</button
+              ><button class="pill-btn dark" id="replenishFeed">
+                补齐发现流
+              </button>
             </div>
           </div>
-          <div class="filter-row" id="filterRow" aria-label="推荐筛选"></div>
-          <!-- 首屏骨架占位：后端推荐取回前先撑住版面，renderVideos 首次渲染时整体替换 -->
-          <div class="card-grid" id="videoGrid">
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
-            <article class="video-card is-skeleton" aria-hidden="true"><div class="cover skeleton-shimmer"></div><div><p class="video-title skeleton-line skeleton-shimmer"></p><p class="video-meta skeleton-line skeleton-shimmer short"></p></div><p class="reason skeleton-line skeleton-shimmer"></p></article>
+          <div class="filter-row" id="sourceFilters"></div>
+          <div class="card-grid" id="feedGrid"></div>
+          <div class="load-row">
+            <button class="pill-btn dark" id="loadMoreFeed">加载更多</button>
           </div>
-          <div id="loadMoreSentinel" aria-hidden="true"></div>
-          <div class="load-row"><button class="pill-btn dark" id="loadMoreBtn" type="button">加载更多推荐</button></div>
         </section>
-      </section>
-
-      <section class="saved-page content-page" id="watchLaterPage" aria-label="稍后再看" hidden>
-        <div class="content-page-head">
-          <div>
-            <p class="eyebrow">Watch later</p>
-            <h2 data-saved-heading tabindex="-1">稍后再看</h2>
-            <p class="video-meta">你加入稍后再看的内容会在这里排队，看完随手移除即可。</p>
+        <section
+          class="vnext-page watch-later"
+          data-page-panel="watch_later"
+          hidden
+        >
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Watch later</p>
+              <h1>稍后再看</h1>
+              <p>只保存在 OpenBiliClaw 本地。</p>
+            </div>
           </div>
-          <button class="pill-btn" id="watchLaterSyncAll" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
-        </div>
-        <p class="saved-sync-status" id="watchLaterSyncStatus" aria-live="polite"></p>
-        <div class="saved-grid" id="watchLaterList"></div>
-        <div class="saved-empty" id="watchLaterEmpty" hidden>还没有稍后再看的内容，去推荐里点时钟图标加入吧。</div>
-      </section>
-
-      <section class="saved-page content-page" id="favoritesPage" aria-label="我的收藏" hidden>
-        <div class="content-page-head">
-          <div>
-            <p class="eyebrow">Favorites</p>
-            <h2 data-saved-heading tabindex="-1">我的收藏</h2>
-            <p class="video-meta">点 ★ 收藏的内容会长期留在这里，和稍后再看互相独立。</p>
+          <div class="saved-grid" id="watchLaterGrid"></div>
+        </section>
+        <section class="vnext-page" data-page-panel="favorites" hidden>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Favorites</p>
+              <h1>我的收藏</h1>
+              <p>跨平台的统一本地收藏。</p>
+            </div>
           </div>
-          <button class="pill-btn" id="favoritesSyncAll" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
-        </div>
-        <p class="saved-sync-status" id="favoritesSyncStatus" aria-live="polite"></p>
-        <div class="saved-grid" id="favoritesList"></div>
-        <div class="saved-empty" id="favoritesEmpty" hidden>还没有收藏的内容，去推荐里点星标收藏吧。</div>
-      </section>
-
-      <section class="profile-page" id="profilePage" aria-label="我的画像" hidden>
-        <div class="profile-page-head">
-          <div>
-            <p class="eyebrow">Soul profile</p>
-            <h2>我的画像</h2>
+          <div class="saved-grid" id="favoritesGrid"></div>
+        </section>
+        <section class="vnext-page" data-page-panel="profile" hidden>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Evidence profile</p>
+              <h1>我的画像</h1>
+              <p id="profileMeta"></p>
+            </div>
           </div>
-        </div>
-        <div class="profile-list profile-page-list" id="profileDetails"></div>
-        <div class="drawer-actions profile-page-actions"><button class="pill-btn dark" id="profileMemoryMoreBtn" type="button" hidden="">加载更多近期记忆</button></div>
-      </section>
-
-      <section class="chat-page content-page" id="chatPage" aria-label="聊聊口味" hidden>
-        <div class="content-page-head">
-          <div>
-            <p class="eyebrow">Dialogue</p>
-            <h2>聊聊口味</h2>
-            <p class="video-meta">告诉阿B你的偏好、边界和最近想看的方向。</p>
-          </div>
-        </div>
-        <div class="chat-log" id="chatLog"></div>
-      <form class="chat-input" id="chatForm"><input id="chatInput" placeholder="说说你最近怎么想——你是什么样的人、喜欢什么、讨厌什么，都可以直接说。"><button class="pill-btn primary" type="submit">发送</button></form>
-      </section>
-
-      <section class="settings-page content-page" id="settingsPage" aria-label="后端设置" hidden>
-        <div class="content-page-head">
-          <div>
-            <p class="eyebrow">Settings</p>
-            <h2>后端与模型设置</h2>
-            <p class="video-meta">配置模型、平台源、调度和本地运行参数。</p>
-          </div>
-        </div>
-        <form id="settingsForm" class="settings-grid">
-        <div class="settings-tabs" role="tablist" aria-label="设置分类">
-          <button class="settings-tab is-active" type="button" data-settings-tab="models">模型</button>
-          <button class="settings-tab" type="button" data-settings-tab="sources">平台源</button>
-          <button class="settings-tab" type="button" data-settings-tab="scheduler">调度</button>
-          <button class="settings-tab" type="button" data-settings-tab="general">通用</button>
-          <button class="settings-tab" type="button" data-settings-tab="frontend">前端</button>
-          <button class="settings-tab" type="button" data-settings-tab="logging">日志</button>
-        </div>
-
-        <div class="settings-panel model-settings-panel" data-settings-panel="models">
-          <fieldset class="model-editor-boundary" id="modelEditorBoundary" aria-label="模型路由编辑器" aria-busy="false">
-          <div class="model-route-tabs" id="modelRouteTabs" role="tablist" aria-label="模型类型">
-            <button class="model-route-tab is-active" type="button" role="tab" aria-selected="true" data-model-route="chat">Chat route</button>
-            <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="embedding">Embedding route</button>
-            <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="runtime">Runtime</button>
-          </div>
-
-          <div class="model-remote-banner" id="modelRemoteBanner" role="status" hidden>
-            <span>模型配置已在别处更新。当前草稿仍保留，请先保存、放弃或重新加载。</span>
-            <button class="small-btn" id="modelReloadRemote" type="button">重新加载</button>
-          </div>
-          <section class="model-override-notice" id="modelOverrideNotice" role="status" aria-label="只读模型配置覆盖" hidden></section>
-          <div class="model-error-summary" id="modelErrorSummary" role="alert" hidden></div>
-          <section class="model-migration-panel" id="modelMigrationPanel" aria-label="旧模型配置迁移" hidden></section>
-
-          <section class="model-route-view" data-model-view="route">
-            <section class="model-embedding-shared" id="modelEmbeddingSharedSettings" aria-label="Embedding 共享设置" hidden>
-              <div class="model-section-heading">
-                <div><p class="eyebrow">Shared vector space</p><h3>Embedding 共享模型设置</h3></div>
-                <label class="settings-toggle-row"><input id="modelEmbeddingEnabled" type="checkbox"><span>启用 Embedding route</span></label>
-              </div>
-              <div class="model-shared-grid">
-                <label class="settings-field"><span>共享模型</span><input id="modelEmbeddingModel" autocomplete="off"></label>
-                <label class="settings-field"><span>输出维度</span><input id="modelEmbeddingDimension" type="number" min="0" step="1" inputmode="numeric"></label>
-                <label class="settings-field"><span>相似度阈值</span><input id="modelEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" inputmode="decimal"></label>
-                <label class="settings-toggle-row"><input id="modelEmbeddingMultimodal" type="checkbox"><span>启用多模态探测</span></label>
-              </div>
-              <p class="settings-note-inline">列表内所有 Provider 使用完全相同的模型、维度、阈值与多模态设置。</p>
+          <form id="profileForm" class="vnext-settings">
+            <section>
+              <label
+                >画像叙述<textarea id="profileNarrative" rows="6"></textarea>
+              </label>
             </section>
-
-            <div class="model-route-layout" id="modelRouteLayout">
-              <section class="model-route-list-pane" id="modelRouteListPane" aria-label="模型路由列表">
-                <div class="model-section-heading">
-                  <div><p class="eyebrow" id="modelRouteEyebrow">调用顺序</p><h3 id="modelRouteTitle">Chat 路由</h3></div>
-                  <button class="pill-btn" id="modelAddConnection" type="button">添加连接</button>
-                </div>
-                <p class="settings-note-inline" id="modelRouteHelp">从上到下依次调用；第 1 项为主连接，最多 10 项。</p>
-                <div class="model-route-list" id="modelRouteList" role="list" aria-live="polite"></div>
-              </section>
-
-              <section class="model-inspector-pane" id="modelInspectorPane" aria-label="模型连接详情">
-                <button class="small-btn model-inspector-back" id="modelInspectorBack" type="button">← 返回列表</button>
-                <div class="model-inspector" id="modelInspector">
-                  <div class="model-section-heading">
-                    <div><p class="eyebrow" id="modelInspectorRole">Primary</p><h3 id="modelInspectorTitle">连接详情</h3></div>
-                    <div class="model-order-actions" aria-label="调整优先级">
-                      <button class="small-btn" id="modelMoveUp" type="button">Move Up</button>
-                      <button class="small-btn" id="modelMoveDown" type="button">Move Down</button>
-                    </div>
-                  </div>
-                  <div class="model-inspector-fields" id="modelInspectorFields"></div>
-                  <fieldset class="model-type-chooser">
-                    <legend>连接类型</legend>
-                    <label class="settings-field full"><span>搜索连接类型</span><input id="modelTypeSearch" type="search" autocomplete="off" placeholder="协议、本地运行时或 OAuth"></label>
-                    <div class="model-connection-type-groups" id="modelConnectionTypeGroups" role="listbox" aria-label="连接类型"></div>
-                  </fieldset>
-                  <div class="model-descriptor-fields" id="modelDescriptorFields"></div>
-                  <section class="model-credential-editor" id="modelCredentialEditor" aria-label="凭据来源"></section>
-                  <div class="settings-probe-row">
-                    <button class="pill-btn" id="modelProbeButton" type="button">测试当前连接</button>
-                    <span class="settings-probe-status" id="modelProbeStatus" aria-live="polite"></span>
-                  </div>
-                  <div class="model-inspector-danger">
-                    <button class="small-btn danger" id="modelRemoveConnection" type="button">移除连接</button>
-                  </div>
-                </div>
-              </section>
+            <section>
+              <h2>证据维度</h2>
+              <div id="profileFacets"></div>
+              <div class="vnext-fields">
+                <label
+                  >维度<select id="facetName">
+                    <option value="interests">兴趣</option>
+                    <option value="avoidances">回避</option>
+                    <option value="style_preferences">风格偏好</option>
+                    <option value="values">价值观</option>
+                    <option value="source_affinities">来源倾向</option>
+                  </select></label
+                ><label>内容<input id="facetValue" maxlength="500" /></label
+                ><label
+                  >权重<input
+                    id="facetWeight"
+                    type="number"
+                    min="-1"
+                    max="1"
+                    step="0.05"
+                    value="1"
+                /></label>
+              </div>
+              <button type="button" class="pill-btn" id="addFacet">
+                添加覆盖
+              </button>
+            </section>
+            <div class="vnext-actions">
+              <button class="pill-btn primary">保存画像新版本</button>
             </div>
-          </section>
-
-          <section class="model-runtime-view" id="modelRuntimeView" data-model-view="runtime" hidden>
-            <div class="model-section-heading"><div><p class="eyebrow">Route policy</p><h3>Runtime</h3></div></div>
-            <div class="model-runtime-grid">
-              <label class="settings-field"><span>Chat 并发数</span><input id="modelChatConcurrency" type="number" min="1" max="16" inputmode="numeric"></label>
-              <label class="settings-field"><span>整条 route 超时（秒）</span><input id="modelChatTimeout" type="number" min="10" inputmode="numeric"></label>
+          </form>
+        </section>
+        <section class="vnext-page" data-page-panel="chat" hidden>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Taste dialogue</p>
+              <h1>聊聊你的口味</h1>
+              <p>可选择让本轮对话成为新的画像证据。</p>
             </div>
-            <div class="model-runtime-summary" id="modelRuntimeSummary" aria-live="polite"></div>
-          </section>
-
-          <div class="model-save-bar">
-            <span class="settings-probe-status" id="modelSaveStatus" aria-live="polite">正在读取模型配置…</span>
-            <button class="pill-btn primary" id="modelSaveButton" type="button">保存模型路由</button>
           </div>
-          </fieldset>
+          <div class="chat-log vnext-chat-log" id="chatLog"></div>
+          <form class="chat-input" id="chatForm">
+            <input
+              id="chatInput"
+              maxlength="20000"
+              placeholder="说说你最近喜欢什么、为什么，或明确不想再看到什么"
+              required
+            /><label><input id="chatLearn" type="checkbox" /> 学习本轮</label
+            ><button class="pill-btn primary">发送</button>
+          </form>
+        </section>
+        <section class="vnext-page" data-page-panel="jobs" hidden>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Background jobs</p>
+              <h1>后台任务</h1>
+              <p>用户可见状态来自应用数据库。</p>
+            </div>
+            <button class="pill-btn" id="refreshJobs">刷新</button>
+          </div>
+          <form id="jobForm" class="vnext-actions">
+            <select id="jobName">
+              <option value="source_sync">同步来源</option>
+              <option value="profile_projection">更新画像</option>
+              <option value="feed_replenishment">补齐发现流</option>
+              <option value="cleanup">清理</option></select
+            ><button class="pill-btn primary">运行</button>
+          </form>
+          <div id="jobList"></div>
+        </section>
+        <section class="vnext-page" data-page-panel="settings" hidden>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Settings</p>
+              <h1>产品设置</h1>
+              <p>所有用户可调整项统一保存在 vNext 数据库中。</p>
+            </div>
+          </div>
+          <form id="settingsForm" class="vnext-settings">
+            <section>
+              <h2>AI 别名</h2>
+              <p>凭据、供应商、回退、预算和缓存由 LiteLLM 管理。</p>
+              <div id="aliasHealth"></div>
+              <a
+                id="litellmAdmin"
+                class="pill-btn"
+                target="_blank"
+                rel="noreferrer"
+                hidden
+                >打开 LiteLLM Admin ↗</a
+              >
+            </section>
+            <section>
+              <h2>内容源与权重</h2>
+              <div id="sourceSettings"></div>
+              <div id="sourceModuleSettings"></div>
+              <h3>账号连接</h3>
+              <div id="sourceAccounts"></div>
+            </section>
+            <section>
+              <h2>发现流</h2>
+              <div class="vnext-fields" id="feedSettings"></div>
+            </section>
+            <section>
+              <h2>画像与任务</h2>
+              <div class="vnext-fields" id="profileSettings"></div>
+              <div id="taskSettings"></div>
+            </section>
+            <section>
+              <h2>计划任务与保留</h2>
+              <div class="vnext-fields" id="scheduleSettings"></div>
+            </section>
+            <section>
+              <h2>网络、日志与访问控制</h2>
+              <div class="vnext-fields" id="runtimeSettings"></div>
+            </section>
+            <div class="vnext-actions">
+              <button class="pill-btn primary">保存全部设置</button>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+    <div class="vnext-login" id="loginGate" hidden>
+      <form id="loginForm">
+        <h2>登录 OpenBiliClaw</h2>
+        <p class="video-meta">输入安装时设置的访问密码。</p>
+        <input
+          id="loginPassword"
+          type="password"
+          autocomplete="current-password"
+          required
+        />
+        <div class="vnext-actions">
+          <button class="pill-btn primary">登录</button>
         </div>
-
-        <div class="settings-panel" data-settings-panel="sources" hidden>
-          <div class="inline-row">
-            <label class="settings-field"><span>Bilibili</span><select id="bilibiliEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-            <label class="settings-field"><span>小红书</span><select id="xhsEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-            <label class="settings-field"><span>抖音</span><select id="douyinEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-            <label class="settings-field"><span>YouTube</span><select id="youtubeEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-            <label class="settings-field"><span>X (Twitter)</span><select id="twitterEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-            <label class="settings-field"><span>知乎</span><select id="zhihuEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-            <label class="settings-field"><span>Reddit</span><select id="redditEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
-          </div>
-          <p class="settings-section-title">来源接入状态</p>
-          <p class="settings-note-inline">来源开关决定是否进入调度；接入状态只说明 cookie、令牌或插件任务是否可用。修改开关后需保存配置才会生效。</p>
-          <div id="sourceStatusList" class="source-status-list">
-            <div class="source-status-row" data-source-status="bilibili">
-              <div class="source-status-head"><strong>Bilibili</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-            <div class="source-status-row" data-source-status="xiaohongshu">
-              <div class="source-status-head"><strong>小红书</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-            <div class="source-status-row" data-source-status="douyin">
-              <div class="source-status-head"><strong>抖音</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-            <div class="source-status-row" data-source-status="youtube">
-              <div class="source-status-head"><strong>YouTube</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-            <div class="source-status-row" data-source-status="twitter">
-              <div class="source-status-head"><strong>X (Twitter)</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-            <div class="source-status-row" data-source-status="zhihu">
-              <div class="source-status-head"><strong>知乎</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-            <div class="source-status-row" data-source-status="reddit">
-              <div class="source-status-head"><strong>Reddit</strong><span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span></span></div>
-              <p class="src-detail">加载中…</p>
-            </div>
-          </div>
-          <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用你的登录态取数，YouTube 走公开接口，这三个平台没有也不需要 Cookie 输入框，浏览器登录后插件自动接通。</p>
-          <div id="sourceCredentialList" class="source-credential-list">
-            <details class="source-credential-row" data-source-credential="bilibili">
-              <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="xiaohongshu">
-              <summary><strong>小红书<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="douyin">
-              <summary><strong>抖音<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="youtube">
-              <summary><strong>YouTube<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="twitter">
-              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="zhihu">
-              <summary><strong>知乎<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="reddit">
-              <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-          </div>
-          <label class="settings-field"><span>B 站认证</span><select id="biliAuth"><option value="cookie">Cookie</option><option value="qrcode">二维码</option><option value="none">无</option></select></label>
-          <label class="settings-field full"><span>B 站 Cookie</span><textarea id="biliCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie"></textarea></label>
-          <label class="settings-field"><span>agent-browser 路径</span><input id="biliBrowserExecutable" placeholder="留空使用全局安装"></label>
-          <label class="settings-field"><span>B 站登录窗口</span><select id="biliBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
-          <label class="settings-field"><span>通用网页 CDP URL</span><input id="sourcesBrowserCdp" placeholder="http://localhost:9222"></label>
-          <label class="settings-field"><span>回退浏览器窗口</span><select id="sourcesBrowserHeaded"><option value="off">隐藏</option><option value="on">显示</option></select></label>
-          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>小红书每日搜索</span><input id="xhsDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>小红书每日创作者</span><input id="xhsDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>小红书间隔秒数</span><input id="xhsTaskInterval" inputmode="numeric" placeholder="45"></label>
-            <label class="settings-field"><span>抖音 Cookie 环境变量</span><input id="douyinCookieEnv" placeholder="OPENBILICLAW_DOUYIN_COOKIE"></label>
-          </div>
-          <label class="settings-field full"><span>抖音 Cookie</span><textarea id="douyinCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录抖音后插件会自动同步）"></textarea></label>
-          <div class="inline-row">
-            <label class="settings-field"><span>抖音每日搜索</span><input id="douyinDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>抖音每日热点</span><input id="douyinDailyHotBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>抖音每日推荐流</span><input id="douyinDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>抖音请求间隔秒数</span><input id="douyinRequestInterval" inputmode="numeric" placeholder="2"></label>
-          </div>
-          <div class="inline-row">
-            <label class="settings-field"><span>YouTube 搜索预算</span><input id="youtubeDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>YouTube 热门预算</span><input id="youtubeDailyTrendingBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>YouTube 频道预算</span><input id="youtubeDailyChannelBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>YouTube 请求间隔秒数</span><input id="youtubeRequestInterval" inputmode="numeric" placeholder="2"></label>
-          </div>
-          <label class="settings-field"><span>YouTube 最小调度间隔分钟</span><input id="youtubeMinInterval" inputmode="numeric" placeholder="60"></label>
-          <p class="settings-note-inline">YouTube 预算限制 yt_search / yt_trending / yt_channel 三个 discovery 策略的单轮规模。</p>
-          <p class="settings-section-title">X (Twitter)</p>
-          <p class="settings-note-inline">在浏览器登录 x.com 后，插件会自动同步 cookie；也可在下方手动粘贴（需含 auth_token 和 ct0）。</p>
-          <label class="settings-field full"><span>X Cookie</span><textarea id="twitterCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录 x.com 后插件会自动同步）"></textarea></label>
-          <label class="settings-field"><span>X Cookie 环境变量</span><input id="twitterCookieEnv" placeholder="OPENBILICLAW_X_COOKIE"></label>
-          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>X 每日搜索</span><input id="twitterDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>X 每日 For-You</span><input id="twitterDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>X 每日订阅作者</span><input id="twitterDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>X 请求间隔秒数</span><input id="twitterRequestInterval" inputmode="numeric" placeholder="3"></label>
-          </div>
-          <label class="settings-field"><span>X 最小调度间隔分钟</span><input id="twitterMinInterval" inputmode="numeric" placeholder="60"></label>
-          <p class="settings-section-title">知乎</p>
-          <p class="settings-note-inline">知乎 discovery 由已登录浏览器插件执行搜索 / 热榜 / 首页 / 作者 / 相关任务，后端只入队任务并接收结果。</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>搜索分支</span><input id="zhihuModeSearch" type="checkbox"></label>
-            <label class="settings-field"><span>热榜分支</span><input id="zhihuModeHot" type="checkbox"></label>
-            <label class="settings-field"><span>首页分支</span><input id="zhihuModeFeed" type="checkbox"></label>
-            <label class="settings-field"><span>作者分支</span><input id="zhihuModeCreator" type="checkbox"></label>
-            <label class="settings-field"><span>相关分支</span><input id="zhihuModeRelated" type="checkbox"></label>
-          </div>
-          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>知乎每日搜索</span><input id="zhihuDailySearchBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>知乎每日热榜</span><input id="zhihuDailyHotBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>知乎每日首页</span><input id="zhihuDailyFeedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>知乎每日作者</span><input id="zhihuDailyCreatorBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>知乎每日相关</span><input id="zhihuDailyRelatedBudget" inputmode="numeric" placeholder="0 = 不限"></label>
-            <label class="settings-field"><span>知乎请求间隔秒数</span><input id="zhihuRequestInterval" inputmode="numeric" placeholder="3"></label>
-            <label class="settings-field"><span>知乎最小调度间隔分钟</span><input id="zhihuMinInterval" inputmode="numeric" placeholder="60"></label>
-          </div>
-          <p class="settings-section-title">Reddit</p>
-          <p class="settings-note-inline">Reddit 日常 discovery 默认使用 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved/upvoted/subscribed 信号仍通过插件复用当前浏览器登录态。每个 discovery 分支默认每日 300 条。</p>
-          <label class="settings-field"><span>Reddit 后端</span><select id="redditBackend"><option value="rdt">rdt-cli</option><option value="extension">OpenBiliClaw 插件</option><option value="opencli">OpenCLI extension</option><option value="auto">自动选择命令后端</option></select></label>
-          <label class="settings-field full"><span>Reddit Cookie（需含 reddit_session）</span><textarea id="redditCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie（登录 reddit.com 后插件会自动同步）"></textarea></label>
-          <div class="inline-row">
-            <label class="settings-field"><span>搜索分支</span><input id="redditModeSearch" type="checkbox"></label>
-            <label class="settings-field"><span>热门分支</span><input id="redditModeHot" type="checkbox"></label>
-            <label class="settings-field"><span>Subreddit 分支</span><input id="redditModeSubreddit" type="checkbox"></label>
-            <label class="settings-field"><span>相关分支</span><input id="redditModeRelated" type="checkbox"></label>
-          </div>
-          <p class="settings-note-inline">预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限（Reddit 各分支默认 300）。</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>Reddit 每日搜索</span><input id="redditDailySearchBudget" inputmode="numeric" placeholder="300"></label>
-            <label class="settings-field"><span>Reddit 每日热门</span><input id="redditDailyHotBudget" inputmode="numeric" placeholder="300"></label>
-            <label class="settings-field"><span>Reddit 每日 subreddit</span><input id="redditDailySubredditBudget" inputmode="numeric" placeholder="300"></label>
-            <label class="settings-field"><span>Reddit 每日相关</span><input id="redditDailyRelatedBudget" inputmode="numeric" placeholder="300"></label>
-            <label class="settings-field"><span>Reddit 命令间隔秒数</span><input id="redditRequestInterval" inputmode="numeric" placeholder="3"></label>
-            <label class="settings-field"><span>Reddit 最小调度间隔分钟</span><input id="redditMinInterval" inputmode="numeric" placeholder="60"></label>
-          </div>
-          <p class="settings-section-title">候选池来源占比</p>
-          <p class="settings-note-inline">下面是候选池来源占比/权重，不是每日抓取任务数。例如 5 / 1 / 1 / 1 / 1 / 1 表示 B 站候选约占 5 份，其余来源各 1 份。</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>B 站占比</span><input id="shareBilibili" value="5" inputmode="numeric"></label>
-            <label class="settings-field"><span>小红书占比</span><input id="shareXhs" value="1" inputmode="numeric"></label>
-            <label class="settings-field"><span>抖音占比</span><input id="shareDouyin" value="1" inputmode="numeric"></label>
-            <label class="settings-field"><span>YouTube 占比</span><input id="shareYoutube" value="1" inputmode="numeric"></label>
-            <label class="settings-field"><span>X 占比</span><input id="shareTwitter" value="1" inputmode="numeric"></label>
-            <label class="settings-field"><span>知乎占比</span><input id="shareZhihu" value="1" inputmode="numeric"></label>
-            <label class="settings-field"><span>Reddit 占比</span><input id="shareReddit" value="1" inputmode="numeric"></label>
-          </div>
-          <div class="drawer-actions" style="grid-column: 1 / -1"><button class="pill-btn" id="suggestSharesBtn" type="button">按历史行为建议占比</button></div>
-        </div>
-
-        <div class="settings-panel" data-settings-panel="scheduler" hidden>
-          <p class="settings-section-title">调度</p>
-          <label class="settings-field"><span>后台 LLM 请求</span><select id="schedulerEnabled"><option value="on">开启</option><option value="off">暂停</option></select></label>
-          <label class="settings-field"><span>浏览器关闭后</span><select id="pauseDisconnect"><option value="pause">暂停后台</option><option value="keep">继续运行</option></select></label>
-          <label class="settings-field"><span>断开宽限秒数</span><input id="extensionDisconnectGrace" inputmode="numeric" placeholder="90"></label>
-          <label class="settings-field"><span>候选池目标数</span><input id="poolTarget" value="600" inputmode="numeric"></label>
-          <label class="settings-field"><span>账户同步间隔小时</span><input id="accountSyncInterval" inputmode="numeric" placeholder="6"></label>
-          <label class="settings-field"><span>自动更新</span><select id="autoUpdate"><option value="off">关闭</option><option value="on">开启</option></select></label>
-          <label class="settings-field"><span>自动更新检查小时</span><input id="autoUpdateInterval" inputmode="numeric" placeholder="6"></label>
-          <p class="settings-probe-status" id="updateStatusLine" style="grid-column: 1 / -1; margin: 0" aria-live="polite" hidden></p>
-          <div class="settings-update-actions" id="updateActions" style="grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap" hidden>
-            <button type="button" id="updateCheckBtn" class="pill-btn">立即检查</button>
-            <button type="button" id="updateApplyBtn" class="pill-btn primary" hidden>立即应用</button>
-            <a id="updateDownloadLink" class="pill-btn primary" href="https://github.com/whiteguo233/OpenBiliClaw/releases" target="_blank" rel="noopener" hidden>前往下载新安装包</a>
-          </div>
-          <p class="settings-section-title">运行节奏</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>刷新轮询秒数</span><input id="refreshCheckInterval" inputmode="numeric" placeholder="60"></label>
-            <label class="settings-field"><span>行为触发阈值</span><input id="signalEventThreshold" inputmode="numeric" placeholder="6"></label>
-            <label class="settings-field"><span>反馈分析积累阈值</span><input id="feedbackBatchThreshold" inputmode="numeric" placeholder="3"></label>
-            <label class="settings-field"><span>单轮发现上限</span><input id="discoveryLimit" inputmode="numeric" placeholder="30"></label>
-          </div>
-          <p class="settings-section-title">搜索词生成</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>搜索词生成模式</span><select id="keywordGenerationMode"><option value="legacy">经典</option><option value="hybrid">混合</option><option value="inspiration">灵感</option></select></label>
-            <span></span>
-            <span></span>
-            <span></span>
-          </div>
-          <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
-          <p class="settings-section-title">评估输入</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>候选评估并发</span><input id="candidateEvalConcurrency" inputmode="numeric" placeholder="3" min="1" max="3"></label>
-            <label class="settings-field"><span>封面图评估</span><select id="multimodalEvaluationEnabled"><option value="off">关闭</option><option value="on">开启</option></select></label>
-            <label class="settings-field"><span>图文批量大小</span><input id="multimodalBatchSize" inputmode="numeric" placeholder="8" min="1" max="12"></label>
-            <label class="settings-field"><span>封面最大边</span><input id="multimodalImageMaxPx" inputmode="numeric" placeholder="384" min="128" max="768"></label>
-            <label class="settings-field"><span>JPEG 质量</span><input id="multimodalImageQuality" inputmode="numeric" placeholder="72" min="40" max="90"></label>
-          </div>
-          <div class="inline-row">
-            <label class="settings-field"><span>封面超时秒数</span><input id="multimodalImageTimeout" inputmode="numeric" placeholder="6" min="1" max="20"></label>
-            <p class="settings-probe-status" id="multimodalEvaluationStatus" style="align-self: end; margin: 0" aria-live="polite">关闭</p>
-            <span></span>
-            <span></span>
-          </div>
-          <div class="inline-row">
-            <label class="settings-field"><span>热门刷新小时</span><input id="trendingRefreshHours" inputmode="numeric" placeholder="3"></label>
-            <label class="settings-field"><span>探索刷新小时</span><input id="exploreRefreshHours" inputmode="numeric" placeholder="12"></label>
-            <label class="settings-field"><span>主动推送轮询秒数</span><input id="proactivePushInterval" inputmode="numeric" placeholder="120"></label>
-            <label class="settings-field"><span>猜测器空闲检查分钟</span><input id="speculatorIdleInterval" inputmode="numeric" placeholder="30"></label>
-          </div>
-          <p class="settings-section-title">猜测兴趣</p>
-          <div class="inline-row">
-            <label class="settings-field"><span>猜测兴趣间隔分钟</span><input id="speculationInterval" inputmode="numeric" placeholder="10"></label>
-            <label class="settings-field"><span>猜测兴趣存活天数</span><input id="speculationTtl" inputmode="numeric" placeholder="3"></label>
-            <label class="settings-field"><span>猜测兴趣冷却天数</span><input id="speculationCooldown" inputmode="numeric" placeholder="7"></label>
-            <label class="settings-field"><span>猜测确认阈值</span><input id="speculationThreshold" inputmode="numeric" placeholder="3"></label>
-          </div>
-          <div class="inline-row">
-            <label class="settings-field"><span>最大活跃猜测数</span><input id="speculationMaxActive" inputmode="numeric" placeholder="5"></label>
-            <label class="settings-field"><span>主要兴趣域上限</span><input id="speculationMaxPrimary" inputmode="numeric" placeholder="15"></label>
-            <label class="settings-field"><span>次要兴趣项上限</span><input id="speculationMaxSecondary" inputmode="numeric" placeholder="60"></label>
-            <span></span>
-          </div>
-        </div>
-
-        <div class="settings-panel" data-settings-panel="general" hidden>
-          <p class="settings-section-title">通用</p>
-          <label class="settings-field"><span>语言</span><select id="language"><option value="zh">中文</option><option value="en">English</option></select></label>
-          <label class="settings-field"><span>数据目录</span><input id="dataDir" placeholder="data"></label>
-          <label class="settings-field full"><span>SQLite 数据库路径</span><input id="storageDbPath" placeholder="data/openbiliclaw.db"></label>
-          <p class="settings-section-title">保存与平台同步</p>
-          <label class="settings-field full settings-switch-field">
-            <span>保存时自动同步到对应平台</span>
-            <span class="settings-switch-copy">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</span>
-            <span class="reshuffle-toggle settings-toggle-inline">
-              <input id="savedAutoSync" type="checkbox">
-              <span class="reshuffle-switch" aria-hidden="true"></span>
-              <span id="savedAutoSyncText">关闭</span>
-            </span>
-          </label>
-          <p class="settings-note-inline" id="savedAutoSyncStatus" aria-live="polite"></p>
-          <p class="settings-section-title">本机访问与启动</p>
-          <label class="settings-field"><span>局域网访问密码</span><input id="authEnabled" type="checkbox"></label>
-          <label class="settings-field" id="authPasswordField" hidden><span>访问密码</span><input id="authPassword" type="password" autocomplete="new-password" placeholder="设置局域网 / 远程访问密码"></label>
-          <div class="drawer-actions" id="authSaveRow" style="grid-column: 1 / -1" hidden><button class="pill-btn" id="authSave" type="button">保存密码设置</button></div>
-          <p class="settings-note-inline" id="authHint">本机与浏览器插件免登录；开启后局域网 / 远程设备访问需要密码。</p>
-          <label class="settings-field"><span>开机自启动</span><input id="autostartEnabled" type="checkbox"></label>
-          <p class="settings-note-inline" id="autostartHint">开启后下次登录系统会自动拉起后端（不影响当前进程）。</p>
-          <p class="settings-section-title">网络</p>
-          <label class="settings-field"><span>海外网络模式</span><select id="networkProxyMode"><option value="direct">直连（忽略系统代理）</option><option value="system">跟随系统代理</option><option value="custom">自定义代理</option></select></label>
-          <label class="settings-field full"><span>自定义代理地址</span><input id="networkProxy" placeholder="socks5://127.0.0.1:1080"></label>
-          <div class="settings-probe-row">
-            <button class="pill-btn" id="probeNetworkProxy" type="button">测试代理</button>
-            <span class="settings-probe-status" id="probeNetworkProxyStatus" aria-live="polite"></span>
-          </div>
-          <p class="settings-note-inline" id="networkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
-        </div>
-
-        <div class="settings-panel" data-settings-panel="frontend" hidden>
-          <p class="settings-section-title">前端相关设置</p>
-          <label class="settings-field"><span>后端地址</span><input id="backendHost" placeholder="默认跟随当前页面地址"></label>
-          <label class="settings-field"><span>后端端口</span><input id="backendPort" inputmode="numeric" placeholder="默认跟随当前页面端口"></label>
-          <label class="settings-field"><span>惊喜推荐加载数量</span><input id="delightQueueLimit" value="20" inputmode="numeric" min="1" max="100"></label>
-          <div class="settings-field full settings-theme-field">
-            <span>外观主题</span>
-            <div class="theme-segmented" id="themeModeSetting" role="radiogroup" aria-label="外观主题">
-              <button type="button" data-theme-choice="auto">跟随系统</button>
-              <button type="button" data-theme-choice="light">浅色</button>
-              <button type="button" data-theme-choice="dark">深色</button>
-            </div>
-          </div>
-          <div class="settings-field full settings-hue-field">
-            <span>主题色相</span>
-            <div class="hue-swatches" id="themeHueSetting" role="radiogroup" aria-label="主题色相">
-              <button type="button" data-hue="0" class="hue-swatch" style="--swatch:oklch(80% 0.16 0)" title="烈焰红">烈焰红</button>
-              <button type="button" data-hue="30" class="hue-swatch" style="--swatch:oklch(80% 0.16 30)" title="珊瑚橙">珊瑚橙</button>
-              <button type="button" data-hue="60" class="hue-swatch" style="--swatch:oklch(80% 0.16 60)" title="柠檬黄">柠檬黄</button>
-              <button type="button" data-hue="90" class="hue-swatch" style="--swatch:oklch(80% 0.16 90)" title="嫩草绿">嫩草绿</button>
-              <button type="button" data-hue="120" class="hue-swatch" style="--swatch:oklch(80% 0.16 120)" title="薄荷绿">薄荷绿</button>
-              <button type="button" data-hue="150" class="hue-swatch" style="--swatch:oklch(80% 0.16 150)" title="自然绿">自然绿</button>
-              <button type="button" data-hue="180" class="hue-swatch" style="--swatch:oklch(80% 0.16 180)" title="青瓷色">青瓷色</button>
-              <button type="button" data-hue="210" class="hue-swatch" style="--swatch:oklch(80% 0.16 210)" title="极客蓝">极客蓝</button>
-              <button type="button" data-hue="240" class="hue-swatch" style="--swatch:oklch(80% 0.16 240)" title="星空蓝">星空蓝</button>
-              <button type="button" data-hue="270" class="hue-swatch" style="--swatch:oklch(80% 0.16 270)" title="暗夜紫">暗夜紫</button>
-              <button type="button" data-hue="300" class="hue-swatch" style="--swatch:oklch(80% 0.16 300)" title="梦幻紫">梦幻紫</button>
-              <button type="button" data-hue="330" class="hue-swatch" style="--swatch:oklch(80% 0.16 330)" title="元气粉">元气粉</button>
-            </div>
-            <div class="hue-slider-wrap">
-              <input type="range" id="hueSlider" min="0" max="360" value="20" class="hue-slider" aria-label="自定义色相">
-              <input type="number" id="hueValueInput" min="0" max="360" value="20" class="hue-value" aria-label="色相值">
-            </div>
-          </div>
-          <label class="settings-field full settings-switch-field" title="开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。">
-            <span>换一批时忽略当前</span>
-            <span class="settings-switch-copy">开启：换一批前先将当前显示的推荐标记为忽略；关闭：只重排当前推荐池，不反馈当前内容。</span>
-            <span class="reshuffle-toggle settings-toggle-inline">
-              <input id="dismissOnReshuffleSetting" type="checkbox">
-              <span class="reshuffle-switch" aria-hidden="true"></span>
-              <span id="dismissOnReshuffleSettingText">关闭</span>
-            </span>
-          </label>
-          <label class="settings-field full settings-switch-field" title="开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。">
-            <span>滚动到底自动加载推荐</span>
-            <span class="settings-switch-copy">开启：滚动到底部且推荐池可用时自动加载更多；关闭：保留纯手动加载。</span>
-            <span class="reshuffle-toggle settings-toggle-inline">
-              <input id="autoLoadOnScrollSetting" type="checkbox" checked>
-              <span class="reshuffle-switch" aria-hidden="true"></span>
-              <span id="autoLoadOnScrollSettingText">开启</span>
-            </span>
-          </label>
-          <p class="settings-note-inline">后端地址、端口、外观主题、换一批偏好和自动加载偏好保存在当前浏览器；惊喜推荐加载数量会随保存配置写入后端，供桌面 Web、移动 Web 和插件共享。</p>
-        </div>
-
-        <div class="settings-panel" data-settings-panel="logging" hidden>
-          <p class="settings-section-title">日志</p>
-          <label class="settings-field"><span>控制台级别</span><select id="logLevel" translate="no"><option value="DEBUG">DEBUG</option><option value="INFO" selected="">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
-          <label class="settings-field"><span>文件级别</span><select id="logFileLevel" translate="no"><option value="DEBUG" selected="">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></label>
-          <label class="settings-field full"><span>完整日志路径</span><input id="logPath" placeholder="logs/openbiliclaw.log"></label>
-          <div class="inline-row">
-            <label class="settings-field"><span>单日志文件上限 MB</span><input id="logMaxFileSize" inputmode="numeric" placeholder="100"></label>
-            <label class="settings-field"><span>日志备份份数</span><input id="logBackupCount" inputmode="numeric" placeholder="1"></label>
-            <label class="settings-field"><span>日志目录预算 MB</span><input id="logAggregateBudget" inputmode="numeric" placeholder="500"></label>
-            <label class="settings-field"><span>非托管日志保留天数</span><input id="logUnmanagedMaxAge" inputmode="numeric" placeholder="30"></label>
-          </div>
-          <label class="settings-field"><span>非托管日志截断 MB</span><input id="logUnmanagedTruncate" inputmode="numeric" placeholder="200"></label>
-        </div>
-
-        <label class="settings-field full"><span>配置状态</span><textarea id="configStatus" rows="3" readonly="" aria-live="polite">可连接 FastAPI：/api/health、/api/config、/api/runtime-status。保存后调用 PUT /api/config，并热重载运行时。</textarea></label>
-        <div class="drawer-actions" id="generalSettingsActions" style="grid-column: 1 / -1" hidden><button class="pill-btn primary" type="submit">保存通用配置</button></div>
+        <p id="loginError" class="status-line"></p>
       </form>
-      </section>
-    </main>
     </div>
-  </div>
-
-  <section class="mobile-menu" id="mobileMenu" aria-label="手机菜单">
-    <div class="mobile-menu-panel">
-      <div class="mobile-menu-head">
-        <div><p class="eyebrow">OpenBiliClaw</p><h2>菜单</h2></div>
-        <button class="icon-btn" id="mobileMenuClose" type="button" aria-label="关闭手机菜单">×</button>
-      </div>
-      <form class="mobile-search" id="mobileSearchForm">
-        <input id="mobileSearchInput" type="search" placeholder="搜索推荐、UP 主、兴趣方向或解释文本">
-        <button class="pill-btn dark" type="submit">搜索</button>
-      </form>
-      <div class="mobile-menu-list" aria-label="手机功能入口">
-        <button class="mobile-menu-item" data-mobile-page="profilePage" type="button"><span>我的画像</span><small id="mobileProfileHint">查看完整画像和近期记忆</small></button>
-        <button class="mobile-menu-item" data-mobile-page="chatPage" type="button"><span>聊聊口味</span><small>告诉阿B你的偏好和边界</small></button>
-        <button class="mobile-menu-item" data-mobile-panel="messagesDrawer" type="button"><span>消息</span><small><span id="mobileMessageCount">0</span> 条通知</small></button>
-        <button class="mobile-menu-item" data-mobile-page="settingsPage" data-settings="models" type="button"><span>设置</span><small>模型、前端、平台源和调度配置</small></button>
-      </div>
-      <section class="mobile-summary-card" aria-label="阿B 眼里的你">
-        <div class="mobile-summary-head"><p class="eyebrow">Profile</p><button class="small-btn" data-mobile-page="profilePage" type="button">查看画像</button></div>
-        <h3>阿B 眼里的你</h3>
-        <div class="profile-chip-row" id="mobileProfileChips"></div>
-        <p class="video-meta" id="mobileProfilePortrait">偏好结构化解释、长视频和跨学科桥接。</p>
-        <div class="kv">
-          <div class="kv-row"><span>MBTI 推断</span><strong id="mobileRailMbti">—</strong></div>
-          <div class="kv-row"><span>探索开放度</span><strong id="mobileRailOpenness">—</strong></div>
-          <div class="kv-row"><span>深度偏好</span><strong id="mobileRailDepth">—</strong></div>
-        </div>
-      </section>
-      <section class="mobile-summary-card" aria-label="后台刚记住的事">
-        <div class="mobile-summary-head"><p class="eyebrow">Activity</p><button class="small-btn" data-mobile-panel="activityDrawer" type="button">查看全部</button></div>
-        <h3>后台刚记住的事</h3>
-        <div class="activity-list" id="mobileActivityList"></div>
-      </section>
-    </div>
-  </section>
-
-  <section class="drawer" id="messagesDrawer" aria-label="消息中心" data-od-id="messages-drawer">
-    <div class="scrim" data-close="messagesDrawer"></div>
-    <div class="drawer-panel" id="messagesPanel">
-      <div class="drawer-head" id="messagesHead"><button class="small-btn mobile-back-btn" data-mobile-back type="button">← 返回菜单</button><div><p class="eyebrow">Inbox</p><h2>消息</h2></div><button class="icon-btn" data-close="messagesDrawer" type="button">×</button></div>
-      <div class="message-list" id="messageList"></div>
-      <div class="message-chat-view" id="messageChatView" hidden>
-        <div class="drawer-head message-chat-head">
-          <button class="small-btn" id="messageChatBackBtn" type="button">← 返回消息</button>
-          <button class="icon-btn" data-close="messagesDrawer" type="button">×</button>
-        </div>
-        <p class="eyebrow">Taste dialogue</p>
-        <h2 id="messageChatTitle">聊聊这个兴趣</h2>
-        <p class="video-meta" id="messageChatContext">这轮对话会沿用同一个后端聊天会话。</p>
-        <div class="chat-log" id="messageChatLog"></div>
-        <form class="chat-input" id="messageChatForm"><input id="messageChatInput" placeholder="继续补充你的口味、边界或例子"><button class="pill-btn primary" type="submit">发送</button></form>
-      </div>
-    </div>
-  </section>
-
-  <section class="drawer" id="mobileQrDrawer" aria-label="手机版入口" data-od-id="mobile-qr-drawer">
-    <div class="scrim" data-close="mobileQrDrawer"></div>
-    <div class="drawer-panel mobile-qr-panel">
-      <div class="drawer-head"><div><p class="eyebrow">Mobile web</p><h2>手机上也能用</h2></div><button class="icon-btn" data-close="mobileQrDrawer" type="button">×</button></div>
-      <p class="video-meta mobile-qr-lead">推荐点开直接拉起 B站 / 小红书等 App，躺着刷更顺手。</p>
-      <div class="mobile-qr-card">
-        <div class="mobile-qr-canvas" id="mobileQrCanvas" aria-live="polite"></div>
-        <code class="mobile-qr-url" id="mobileQrUrl"></code>
-        <div class="drawer-actions">
-          <button class="pill-btn primary" id="mobileQrCopyBtn" type="button">复制链接</button>
-        </div>
-      </div>
-      <ol class="mobile-qr-steps" aria-label="使用步骤">
-        <li><span class="step-num">1</span>手机和这台电脑连同一个 WiFi</li>
-        <li><span class="step-num">2</span>用相机或浏览器扫码打开</li>
-        <li><span class="step-num">3</span>「添加到主屏幕」，下次像 App 一样直接开</li>
-      </ol>
-      <p class="mobile-qr-hint" id="mobileQrHint" hidden></p>
-    </div>
-  </section>
-
-  <section class="drawer" id="activityDrawer" aria-label="动态历史" data-od-id="activity-drawer">
-    <div class="scrim" data-close="activityDrawer"></div>
-    <div class="drawer-panel">
-      <div class="drawer-head"><button class="small-btn mobile-back-btn" data-mobile-back type="button">← 返回菜单</button><div><p class="eyebrow">Activity history</p><h2>动态历史</h2></div><button class="icon-btn" data-close="activityDrawer" type="button">×</button></div>
-      <div class="activity-list" id="activityHistory"></div>
-      <div class="drawer-actions"><button class="pill-btn dark" id="activityMoreBtn" type="button">加载更早动态</button></div>
-    </div>
-  </section>
-
-  <div class="toast-container" id="toastContainer" role="status" aria-live="polite"></div>
-  <script src="/web/assets/js/mobile-qr.js" defer></script>
-  <script src="/web/assets/js/pending-actions.js" defer></script>
-  <script src="/web/assets/js/saved-sync-core.js" defer></script>
-  <script src="/web/assets/js/app.js" defer></script>
-  <script type="module" src="/web/assets/js/model-settings.js"></script>
-</body></html>
+    <div class="vnext-toast" id="toast" hidden></div>
+    <script type="module" src="/web/assets/js/app.js"></script>
+  </body>
+</html>

@@ -2,11 +2,11 @@
 
 > Runtime update: manifests/status/account configuration are exposed under
 > `/api/v1/sources`; browser execution uses only generic
-> `/api/v1/source-tasks` claim/complete. Extension wiring lands in Task 22.
+> `/api/v1/source-tasks` claim/complete. The extension uses one generic dispatcher.
 
 ## 状态与边界
 
-本模块是权威 vNext 来源边界，提供七个平台的能力声明、只读连接器、retained client adapter 和通用浏览器任务服务。API 与 worker 的 production composition 显式注册全部七个平台，并通过无 live call 的 SQLite composition smoke test；`/api/v1/sources` 暴露 self-describing manifest、per-source settings read/write、secret-free status、write-only account configuration 与 typed idempotent disconnect，`/api/v1/source-tasks/claim` 与 `/api/v1/source-tasks/{task_id}/complete` 是唯一浏览器辅助任务 HTTP 合同。现有浏览器扩展 dispatcher 在 Task 22 前尚未消费这些 generic route，但旧平台 task endpoint 与 v0.3 producer 已不再是公开入口。
+本模块是权威 vNext 来源边界，提供七个平台的能力声明、只读连接器、retained client adapter 和通用浏览器任务服务。API 与 worker 的 production composition 显式注册全部七个平台，并通过无 live call 的 SQLite composition smoke test；`/api/v1/sources` 暴露 self-describing manifest、per-source settings read/write、secret-free status、write-only account configuration 与 typed idempotent disconnect，`/api/v1/source-tasks/claim` 与 `/api/v1/source-tasks/{task_id}/complete` 是唯一浏览器辅助任务 HTTP 合同。浏览器扩展通过一个 generic dispatcher 消费这些 route；旧平台 task endpoint 与 v0.3 producer 已不再是公开入口。
 
 连接器只公开不可变 `ActivityEvent` 或 `ContentItem`。HTTP、CLI、SDK、DOM 原始 row 只能存在于 `infrastructure.sources.<platform>` 内部；不支持的能力不会用空结果或其它操作模拟，而是抛出 `UnsupportedSourceOperationError`。连接器不提供 like、follow、favorite、save、upvote、subscribe 等账号写操作。
 
@@ -98,6 +98,6 @@ complete 对相同 lease token + 相同结果是幂等的；并行相同 complet
 ## 当前边界
 
 - API 与 worker composition root 已构造七个平台 retained-client/CLI/browser adapter；manifest/status/account configuration 和 generic claim/complete 均为权威 `/api/v1` route。
-- Task 22 只负责现有 Web/extension generated client 与 dispatcher 接线；登录 tab 执行能力在此之前不会伪装为可用。
+- Web/extension generated client 与 generic dispatcher 已接线；登录 tab 只执行 manifest 声明的 browser-assisted operation。
 - 旧平台 task endpoint、v0.3 producer、native account save 与动态插件发现不属于 vNext 公开合同。
 - 历史数据库保持只读手工 archive，不导入 vNext；这不是待完成的数据迁移承诺。

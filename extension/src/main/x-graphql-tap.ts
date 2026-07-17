@@ -1,7 +1,7 @@
 /**
  * X (Twitter) MAIN-world GraphQL tap.
  *
- * Pattern (mirrors `dy-fetch-tap.ts` + `xhs-token-sniffer.ts`): wrap
+ * Pattern: wrap
  * `window.fetch` and `XMLHttpRequest` in MAIN world to **observe** the
  * user's own engagement mutations on x.com / twitter.com, then
  * `postMessage({ source: "obc-x-tap", ... })` back to the isolated-world
@@ -379,7 +379,7 @@ export function installXTap(target: Window): () => void {
 
 // Auto-install only in a real browser MAIN-world context. Guard on
 // `typeof window` so node:test importing this module for the pure helpers
-// doesn't wrap anything. Mirrors xhs-token-sniffer.ts.
+// doesn't wrap anything.
 if (typeof window !== "undefined" && typeof XMLHttpRequest !== "undefined") {
   installXTap(window);
   // eslint-disable-next-line no-console
