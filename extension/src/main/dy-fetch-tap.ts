@@ -930,9 +930,22 @@ async function harvestSearchViaApi(
       );
       let json: unknown;
       try {
-        const resp = await w.fetch(url, { credentials: "include" });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        json = (await resp.json()) as unknown;
+        // search/single hangs indefinitely when risk-control withholds the
+        // response body (no a_bogus). Abort at 15s — ample for a genuine
+        // response — so a stuck path fast-fails instead of pinning the whole
+        // keyword task against the 45s content-script bridge timeout.
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15_000);
+        try {
+          const resp = await w.fetch(url, {
+            credentials: "include",
+            signal: controller.signal,
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          json = (await resp.json()) as unknown;
+        } finally {
+          clearTimeout(timer);
+        }
       } catch (err) {
         if (page === 0 && path === paths[0]) throw err;
         break;
