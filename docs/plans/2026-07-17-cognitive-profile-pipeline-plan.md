@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-17-cognitive-profile-pipeline-spec.md`](./2026-07-17-cognitive-profile-pipeline-spec.md)
-> **Status:** r2 — codex 第一轮 20 findings 已修订,待第二轮 review
+> **Status:** r3 — codex 第二轮 8 findings 已修订,待第三轮 review
 > **Execution order:** Wave A(Task 0→1→2→3)→ Wave B(Task 4→5)→ Wave C(Task 6→7)→ Wave D(Task 8→9,RECOMMENDED)。每 Wave 最后完成其文档子集方可交付。A 独立;B 依赖 A;C 依赖 A(部分依赖 B:疑惑直接结算出口,B 未上则直写);D 依赖 A。
 > **Tech:** Python 3.11+/仓库 `.venv/bin/python`;测试 `PYTHONPATH=$PWD/src <venv>/python -m pytest <file> -q`(worktree 根,PYTHONPATH 指 worktree src);`ruff format/check src/ tests/`;`mypy src/`(strict)。无扩展侧改动。
 
@@ -28,14 +28,14 @@
 
 **Files:** 修改 `src/openbiliclaw/storage/database.py`(建表+DAO)、`src/openbiliclaw/soul/engine.py`(挂钩:preference 覆写 855-885 / soul 重建 900-920 / dislike purge 887-898 / feedback batch 写入 / init 建像 307 附近 / cognition sync)、`src/openbiliclaw/soul/layer_updaters.py`(pipeline 各层持久化,184 附近)、`src/openbiliclaw/soul/speculator.py`(promote/confirm/reject)、12h 整理(压缩/归档/revert,实现时定位)、`src/openbiliclaw/cli.py`(`ledger` 子命令);新增 `tests/test_profile_ledger.py`。
 
-**Interfaces:** Consumes: 各写点 before/after 摘要 + source refs。Produces: 只追加行(spec schema);挂钩 try/except WARNING;CLI 表格输出(--line/--days 过滤)。
+**Interfaces:** Consumes: 各写点 before/after 摘要 + source refs。Produces: **动作结束后一次 INSERT**,行含 `outcome(success|failed)`(r3/R2-6,不做 attempted 预写);挂钩 try/except WARNING;CLI 表格输出(--line/--days 过滤)。
 
 **Steps:**
 
 - [ ] Write one focused failing test:DAO 落行/过滤。
 - [ ] Run `PYTHONPATH=$PWD/src <venv>/python -m pytest tests/test_profile_ledger.py -q` and confirm FAIL。
 - [ ] 建表(幂等迁移)+ DAO → PASS。
-- [ ] Failing tests:**8 个写点逐一**(spec D5 清单)→ 动作后台账行存在、source_refs 非空、diff ≤2000 字符;台账写失败 WARNING 主流程照常。
+- [ ] Failing tests:**8 个写点逐一**(spec D5 清单)→ 动作后台账行存在(outcome=success)、source_refs 非空、diff ≤2000 字符;写点动作抛异常 → outcome=failed 行;台账写失败 WARNING 主流程照常。
 - [ ] 逐点挂钩 → PASS;实现中发现清单外写点 → 补挂钩 + 更新 spec/soul.md 清单(记录进 PR)。
 - [ ] CLI 子命令 + 输出测试。
 - [ ] Run `pytest tests/test_soul_engine.py tests/test_database.py tests/test_cli.py -q` 回归 + ruff + mypy。
@@ -63,13 +63,13 @@
 
 ### Task 2: 对话学习串行队列 + scope/turn_id 透传
 
-**Files:** 新增 `src/openbiliclaw/soul/dialogue_learn_queue.py`(单 worker asyncio 队列;注册后台任务注册表——实现时核对现有注册机制,无则挂 runtime 生命周期管理;drain 语义);修改 `src/openbiliclaw/soul/dialogue.py`(`respond` 后投递队列替代 `asyncio.create_task`,`dialogue.py:133`;签名扩展透传 scope/turn_id,默认 scope="chat")、`api/app.py`(durable 路径把 scope/turn_id 传入);新增 `tests/test_dialogue_learn_queue.py`。
+**Files:** 新增 `src/openbiliclaw/soul/dialogue_learn_queue.py`(单 worker asyncio 队列;drain 时序:stop-accepting → `queue.join()` → 停 worker → swap/shutdown,r3/R2-1);修改 `src/openbiliclaw/soul/dialogue.py`(`respond` 后投递队列替代 `asyncio.create_task`,`dialogue.py:133`;签名扩展透传 scope/turn_id,默认 scope="chat")、**`src/openbiliclaw/api/runtime_context.py`(`:506` 的 `cancel_all` 之前先 drain 本队列)**、**`src/openbiliclaw/api/app.py`(durable 路径传 scope/turn_id;`:4005` 附近 shutdown 钩子补 drain)**;新增 `tests/test_dialogue_learn_queue.py`。
 
 **Steps:**
 
 - [ ] Failing test:并发投递 5 个学习任务 → 严格串行执行(执行顺序断言 + 无交错)。
 - [ ] Confirm FAIL → 队列实现 → PASS。
-- [ ] Failing test:drain(队列有积压时关闭 → 全部执行完再退出);热重载场景(新旧 engine 切换,旧队列 drain)。
+- [ ] Failing test:drain 时序(积压时关闭 → stop-accepting 拒绝新投递 → join 清空 → worker 停);热重载场景(runtime_context `cancel_all` 前旧队列已 drain,新旧 engine 切换无交错写);uvicorn shutdown 钩子触发 drain(生命周期测试)。
 - [ ] Failing test:scope/turn_id 透传到 learn 调用参数。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_soul_engine.py tests/test_api_app.py -q` 回归 + ruff + mypy。
@@ -88,7 +88,7 @@
 - [ ] **基线先行**(单独提交):≤20 轮对话 prompt 字节快照;dialogue-insight 提取 prompt 快照(builder 合规化是行为等价重构,对照用)。
 - [ ] Failing tests:25 轮→截断 20;≤20 轮→字节同基线;回灌仅 popup+chat+completed(CLI 构造无 DB 不回灌、probe scope 行排除、pending/failed 排除)。
 - [ ] Confirm FAIL → 实现 → PASS。
-- [ ] Failing tests:注入清单含三类自然键;settles 结算 speculation(domain)/insight(hash8)/未知键丢弃+WARNING/非 chat scope 跳过;结算台账行含 turn_id;同一 turn 的重复 settles(幂等观察:二次结算被 speculator/insight 既有幂等语义吸收,断言状态不劣化)。
+- [ ] Failing tests:注入清单含三类自然键;**hash8 稳定性(r3/R2-8):SHA-256+NFC+strip+空白折叠的 canonicalization 对等价文本产出同键、对不同文本稳定;清单内碰撞 → 扩展 hex16,仍碰撞跳过+WARNING**;settles 结算 speculation(domain)/insight(hash8)/未知键丢弃+WARNING/非 chat scope 跳过;结算台账行含 turn_id;同一 turn 重复 settles 幂等(状态不劣化断言)。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] builder invariance 清单核对(新旧 builder 全绿)。
 - [ ] Run `pytest tests/test_soul_engine.py tests/test_llm_prompts.py tests/test_api_app.py -q` + ruff + mypy。
@@ -105,13 +105,13 @@
 
 ### Task 4: confusions 表(DB 约束)+ 生命周期 + 两产生源
 
-**Files:** 修改 `src/openbiliclaw/storage/database.py`(confusions 表 + partial unique index `WHERE status='clarifying'` + DAO 含原子 claim:`UPDATE ... SET status='clarifying' WHERE id=? AND NOT EXISTS(clarifying)` 语义)、新增 `src/openbiliclaw/soul/confusion.py`(状态机 + TTL 扫描并入 12h 循环)、修改 `src/openbiliclaw/soul/awareness_analyzer.py`(**复合返回** `(notes, confusion_candidates)`,旧调用方兼容缺省空)、`src/openbiliclaw/llm/prompts.py`(awareness prompt 静态扩展:candidates ≤2 契约)、`src/openbiliclaw/soul/cognition_cycle.py`(候选落库)、`src/openbiliclaw/soul/speculator.py`(expire 钩子:`0 < confirmation_count < threshold` → 生成疑惑,现存字段可判定);新增 `tests/test_confusion_lifecycle.py`。
+**Files:** 修改 `src/openbiliclaw/storage/database.py`(confusions 表 + partial unique index `WHERE status='clarifying'` + DAO 含原子 claim:`UPDATE ... SET status='clarifying' WHERE id=? AND NOT EXISTS(clarifying)` 语义)、新增 `src/openbiliclaw/soul/confusion.py`(状态机 + TTL 扫描并入 12h 循环)、修改 `src/openbiliclaw/soul/awareness_analyzer.py`(r3/R2-5:**保留 `analyze()` 完全不变**,新增 `analyze_with_confusions() -> (notes, confusion_candidates)`;仅 cognition_cycle 切换新 API,`engine.py:1253` 等旧调用方零改动)、`src/openbiliclaw/llm/prompts.py`(awareness prompt 静态扩展:candidates ≤2 契约)、`src/openbiliclaw/soul/cognition_cycle.py`(候选落库)、`src/openbiliclaw/soul/speculator.py`(expire 钩子:`0 < confirmation_count < threshold` → 生成疑惑,现存字段可判定);新增 `tests/test_confusion_lifecycle.py`。
 
 **Steps:**
 
 - [ ] Failing test:DAO 全生命周期 + **跨连接并发 claim**(两个独立 SQLite 连接并发置 clarifying → 恰一成功)。
 - [ ] Confirm FAIL → 表 + index + 状态机 → PASS。
-- [ ] Failing test:复合返回兼容(无 candidates 时旧行为字节不变);合法候选落库、越界(>2 条/字段缺失)丢弃+WARNING。
+- [ ] Failing test:`analyze()` 行为字节不变(旧调用方零回归);`analyze_with_confusions` 无候选时 notes 与 `analyze()` 一致;合法候选落库、越界(>2 条/字段缺失)丢弃+WARNING。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Failing test:speculation 部分确认 expire → 疑惑生成(speculation 照常 expire)+ 台账两行;零确认 expire → 不生成。
 - [ ] Confirm FAIL → 实现 → PASS。
@@ -131,7 +131,9 @@
 - [ ] Failing test:scope="confusion" durable turn → 回复结算到解读 → resolved;defer → 冷却持久化(重启后仍在冷却)。
 - [ ] Failing test:并发 claim 恰一(复用 Task 4 index)+ 72h 冷却拒绝二问。
 - [ ] Failing test:三出口(转正 insight / 直接结算+事件折扣标记 / dismissed),台账链完整。
-- [ ] Failing test(冻结):open 疑惑关联 topic → 新增被搁置进 held_updates + 台账;已有权重不动;resolved → held 重放进下次偏好输入;expired → 丢弃。
+- [ ] Failing test(冻结):open 疑惑关联 topic → 新增被搁置进 held_updates(每项稳定 id + 状态 held)+ 台账;已有权重不动。
+- [ ] Failing test(重放状态机,r3/R2-2/R2-3):resolved-真实兴趣型 → held→replaying(持久化)→ 并入下次偏好分析输入(rebase 语义,LLM 以当前画像重评估)→ 成功后置 applied 并清除;resolved-代理行为/误读型 → 直接 discarded(不重放);expired/dismissed → discarded。
+- [ ] Failing test(崩溃与幂等):replaying 中断 → 12h 扫描重试;`replay_attempts` 达 2 上限 → discarded+WARNING;重复 resolve → 已 applied/discarded 项跳过(状态不劣化断言)。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_api_app.py tests/test_preference_analyzer.py tests/test_soul_engine.py -q` 回归 + ruff + mypy。
 - [ ] **Wave B 文档 gate**:`docs/modules/soul.md`、`docs/modules/storage.md`(confusions)、`docs/changelog.md`。
@@ -147,14 +149,14 @@
 
 ### Task 6: gate builder + 执行体(异步 shadow / enforce 校验 / off 逐字节)
 
-**Files:** 修改 `src/openbiliclaw/llm/prompts.py`(`build_posture_gate_prompt`:静态 system + sort_keys,入 invariance 清单)、新增 `src/openbiliclaw/soul/posture_gate.py`(执行体:verdict 白名单、解析失败→downgrade、caller 注册;shadow=异步旁路任务进注册表、enforce=同步、off=旁路)、`src/openbiliclaw/config.py`(`posture_gate_mode: shadow|enforce|off` 默认 shadow;`posture_gate_force_enforce: false`;save-time 校验:enforce 且非 force 时查台账最早 shadow 行距今 ≥14 天否则 blocking 拒绝)、新增 `tests/test_posture_gate.py`。
+**Files:** 修改 `src/openbiliclaw/llm/prompts.py`(`build_posture_gate_prompt`:静态 system + sort_keys,入 invariance 清单)、新增 `src/openbiliclaw/soul/posture_gate.py`(执行体:verdict 白名单、解析失败→downgrade、caller 注册;shadow=异步旁路任务进注册表、enforce=同步、off=旁路)、`src/openbiliclaw/config.py`(`posture_gate_mode: shadow|enforce|off` 默认 shadow;`posture_gate_force_enforce: false`;save-time 校验 r3/R2-7:enforce 且非 force 时需「近 14 天有效 shadow 判定(accept/downgrade/reject,不含 error)≥10 条 **且** 最近 7 天 ≥1 条」否则 blocking 拒绝)、新增 `tests/test_posture_gate.py`。
 
 **Steps:**
 
 - [ ] Failing test:builder invariance + user 段三要素(候选/core memory/台账 30 天摘要)。
 - [ ] Confirm FAIL → builder → PASS。
-- [ ] Failing tests:三 verdict;解析失败→downgrade;**shadow 异步零延迟**(写入完成时判定未跑,判定事后落台账 shadow_* 行;LLM 异常→shadow_error 行);enforce 同步拦截;off 完全旁路(门控 LLM 零调用断言)。
-- [ ] Failing test:save-time——shadow 数据不足 14 天存 enforce 被拒(blocking issue);force=true 放行。
+- [ ] Failing tests:三 verdict;解析失败→downgrade;**shadow 异步零延迟 + 快照隔离**(写入完成时判定未跑;commit boundary 捕获不可变快照 {before, after, source_refs, gate_id},判定任务只消费快照——判定前对活状态再做一次写入,断言判定输入不受污染,r3/R2-4;判定事后落台账 shadow_* 行;LLM 异常→shadow_error 行);enforce 同步拦截;off 完全旁路(门控 LLM 零调用断言)。
+- [ ] Failing test:save-time 四态(r3/R2-7)——有效判定 <10 条拒;仅 shadow_error 拒;近 7 天无判定拒(一条 15 天前的旧记录不放行);达标放行;force=true 无条件放行。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_llm_prompts.py tests/test_config.py tests/test_api_config_guards.py -q` + ruff + mypy。
 

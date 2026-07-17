@@ -24,9 +24,9 @@
 2. **回放不变性(作用域=既有渲染与行为路径)**:不含新语义对象的输入,偏好分析渲染、对话 prompt(≤窗口)、awareness 输出路径与改动前一致;基线快照先行单独提交。`posture_gate_mode=off` 时 `learn_from_dialogue` 与 pipeline 行为与现状逐字节一致。
 3. **门控只拦深层,shadow 先行且异步**:门控作用面 =(a)dialogue candidates 的 goal/value/state 类;(b)pipeline 的 VALUES/CORE 层 updater 写入;(c)soul 整份重建。topic/interest 快线(preference 兴趣域、ROLE 层)永不过门控。shadow 判定不阻塞写入(事后旁路);enforce 需 shadow 台账数据 ≥14 天,save-time blocking 校验(逃生门 `posture_gate_force_enforce`,文档注明风险)。enforce 下 LLM 异常/解析失败 → downgrade(保守)+ WARNING。
 4. **台账只追加**:只 INSERT;回滚以补偿行表达;挂钩异常 WARNING 不阻断主流程。
-5. **收编不迁移,身份用自然键**:speculation 与 insight hypothesis 存储/状态机不动。结算身份模型:speculation → `domain`(其存储主键);insight hypothesis → 内容规范化 hash 前 8 位(注入清单时生成并携带);confusion → 表自增 id。`settles[].ref` 只接受**当轮注入清单中出现过的键**(白名单即注入清单,未见键丢弃 + WARNING)。
+5. **收编不迁移,身份用自然键**:speculation 与 insight hypothesis 存储/状态机不动。结算身份模型:speculation → `domain`(其存储主键);insight hypothesis → 内容 hash8(r3/R2-8 定义:SHA-256 over「NFC 规范化 + 首尾 strip + 连续空白折叠为单空格」后的 UTF-8 字节,取 hex 前 8;当轮注入清单内发生碰撞 → 碰撞项扩展至 hex16,仍碰撞则跳过注入该项 + WARNING);confusion → 表自增 id。`settles[].ref` 只接受**当轮注入清单中出现过的键**(白名单即注入清单,未见键丢弃 + WARNING)。
 6. **结算单一所有权**:带 scope 前缀的 durable turn(probe/avoidance_probe/confusion)的结算**只归** durable side-effect 路径(`api/app.py` 成功侧效应);`learn_from_dialogue` 的 `settles` 通道**只处理普通 chat scope 轮次**(scope 随 learn 调用传入,非 chat 时跳过 settles)。杜绝同一回复双路径重复结算(r1 finding 2)。
-7. **对话学习串行化**:`learn_from_dialogue` 后台任务改经**单 worker asyncio 队列**(进程内串行,消除相邻轮并发 read/merge/write);worker 任务注册进后台任务注册表(实现时核对现有 BackgroundTaskRegistry 或等价机制),热重载/关闭时 drain 队列再退出(r1 finding 1)。
+7. **对话学习串行化**:`learn_from_dialogue` 后台任务改经**单 worker asyncio 队列**(进程内串行,消除相邻轮并发 read/merge/write)。**drain 时序(r3/R2-1)**:热重载与关闭时按「stop-accepting(新投递拒绝/落日志)→ `queue.join()` 等积压清空 → 停 worker → swap/shutdown」执行;必须接入两处现有生命周期点:`api/runtime_context.py:506` 的 `cancel_all` **之前**先 drain 本队列,`api/app.py:4005` 附近的 shutdown 钩子补 drain。带 uvicorn 生命周期测试(r1 finding 1)。
 8. **疑惑不写画像 + DB 级打扰预算**:疑惑只产出下游对象;`status='clarifying'` 由 partial unique index 保证全局至多 1(跨连接原子);冷却 ≥72h 持久化在行内(`asked_at`);defer 语义复用探针忽略状态机。
 9. **阈值有出处 + LLM 输出防御**:新常量带校准注释并标注首轮重校;结构化输出白名单/clamp + WARNING;解析失败保守化(门控→downgrade,settles/confusion_candidates→丢弃)。
 10. **单用户全量注入**:不建向量检索;core memory、活跃清单(speculation ≤10 + insight + open 疑惑)全量入 user prompt;新 LLM caller(posture_gate、confusion 相关)注册 usage recorder 供 `cost --by caller` 观察。
@@ -54,7 +54,7 @@
 ### D3. 系统缺少「看不懂」的表达形式
 
 - awareness 产出观察(12h 认知循环,**cursor 增量读取** events,`soul/cognition_cycle.py`;r2 修正:非全量重读);`AwarenessNote` 无 id、无 source_event_ids(`soul/profile.py:61`)——证据链在觉察环节断裂,必须先补(r1 finding 7)。
-- `awareness_analyzer` 解析器只返回 note 数组(`soul/awareness_analyzer.py:83`)——输出 confusion_candidates 需扩展复合返回契约并保持旧行为兼容(r1 finding 6)。
+- `awareness_analyzer` 解析器只返回 note 数组(`soul/awareness_analyzer.py:83`),且存在多处 list 语义调用方(如 `engine.py:1253`)——r3/R2-5:**保留 `analyze()` 签名与行为完全不变**,新增复合 API `analyze_with_confusions() -> (notes, confusion_candidates)`,仅 `cognition_cycle` 切换到新 API,其余调用方零改动(r1 finding 6)。
 - speculation 的 CooldownEntry 只存 domain/时间(`speculator.py:158`),无正反信号历史——"正反混合"判据在不迁移约束下不可判定;僵局判据必须只用现存字段(r1 finding 5)。
 - 「问用户」目前只服务 probe scope 的假设确认,不服务认知失调。
 
@@ -93,7 +93,7 @@
 
 ### Phase 0 — 台账 + 觉察证据链前置
 
-**`profile_update_ledger`**(schema 同 r1,增 `attempted BOOLEAN`——挂钩进入即写 attempted 行,主写入成功后补 result 行?否——简化:单行,`diff` 为空表示写入未完成)。挂钩 D5 清单全部 8 点;每点 try/except WARNING。
+**`profile_update_ledger`**(schema 同 r1,增 `outcome TEXT(success|failed)`;r3/R2-6:**动作结束后一次 INSERT**——挂钩包裹写入动作,成功/失败后各记一行含 outcome,不做进入即写的 attempted 行,保持只追加单行语义)。挂钩 D5 清单全部 8 点;每点 try/except WARNING。
 **CLI**:`openbiliclaw ledger [--line] [--days N]`(Wave A 内交付,`docs/modules/cli.md` 同步)。
 **觉察证据链前置**:`AwarenessNote` 增加 `note_id`(生成式 uuid 短码)与 `source_event_ids`(本轮 cursor 消费的事件 id 子集,解析器按 note 归属拆分;拆分不可得时整批挂到各 note,标注 approximate);旧数据缺字段默认空,兼容读。此项从 r1 的 Wave D 提前(疑惑的 evidence_refs 依赖它)。
 **验收门**:8 挂钩点用例 + CLI 输出用例 + AwarenessNote 兼容用例;`pytest tests/test_profile_ledger.py -q`。
@@ -117,14 +117,17 @@
 **冻结反压(r2 语义精确化 + 补偿,r1 findings 12/13)**:
 - 冻结集过滤实现在**preference 持久化 chokepoint**(`layer_updaters.py:184` 附近的 flat persist 与 `engine.py:855-885` 覆写共同经过的最窄处;实现时确认唯一收敛点,不可收敛则两处都挂,清单化)。
 - 语义:**防后续强化**——冻结 topic 的新增/权重上调被搁置进 `held_updates`;已有权重与已入域事实不回滚(快线抢跑数小时可接受,Expected impact 措辞同步修正)。**例外补偿**:related topic 若处 trial 态(Wave D 后)→ 回滚至候选;Wave D 前记台账不回滚。
-- 解冻:resolved → `held_updates` 重放(合并入下次偏好分析输入);dismissed/expired → 丢弃并台账。
+- 解冻(r3/R2-2/R2-3):
+  - **按 resolution outcome 筛选**:resolved 且解读为「真实兴趣」型 → 重放;resolved 且解读为「代理行为/误读」型 → 丢弃(同 dismissed);dismissed/expired → 丢弃。全部进台账。
+  - **重放 = rebase 提交**:held 项作为证据并入下次偏好分析输入,由 LLM 以当前画像为基重新评估(不直接写权重)。
+  - **held 项状态机**:每项带稳定 id 与状态 `held → replaying → applied|discarded`(持久化于 confusions.held_updates 内);重放前置 replaying,偏好分析成功吸收后置 applied 并清除;崩溃恢复:replaying 项在 12h 扫描时重试,`replay_attempts` 上限 2(超限置 discarded + WARNING,防重复强化);重复 resolve 幂等(已 applied/discarded 项跳过)。
 **验收门**:唯一约束的跨连接竞争测试(两连接并发置 clarifying,恰一成功)、held 存储/重放/丢弃、僵局判据、复合返回兼容;`pytest tests/test_confusion_lifecycle.py -q`。
 
 ### Phase 3 — 态势门控(r2:异步 shadow、三接入点、enforce 校验)
 
 **模式语义(不变量 3,r1 findings 14/15)**:
-- `shadow`(默认):原写入**立即执行**(零延迟零阻塞);判定作为异步旁路任务(进后台注册表)事后跑,结果进台账(`shadow_*` verdict);LLM 异常记 `shadow_error` 行。
-- `enforce`:写入前同步判定;异常/解析失败 → downgrade + WARNING(保守 fail-closed-to-hypothesis);save-time 校验:台账最早 shadow 行距今 <14 天则拒绝保存 enforce(blocking issue,pitfall #7),`posture_gate_force_enforce=true` 逃生门。
+- `shadow`(默认):原写入**立即执行**(零延迟零阻塞);**在 commit boundary 捕获不可变快照**(before/after 摘要、source_refs、gate_id;r3/R2-4)——异步旁路任务(进后台注册表)只消费该快照,不回读活状态(后续写入不得污染判定语境,带断言测试);结果进台账(`shadow_*` verdict);LLM 异常记 `shadow_error` 行。
+- `enforce`:写入前同步判定;异常/解析失败 → downgrade + WARNING(保守 fail-closed-to-hypothesis);save-time 校验(r3/R2-7 收紧):保存 enforce 需同时满足——近 14 天内**有效** shadow 判定行(shadow_accept/downgrade/reject,不含 shadow_error)≥10 条(校准:单用户日均 ~1-3 次深层候选 × 14 天的下界)且最近 7 天 ≥1 条(近期覆盖);任一不满足则 blocking 拒绝(pitfall #7),`posture_gate_force_enforce=true` 逃生门(文档注明风险)。
 - `off`:完全旁路,行为与现状逐字节一致(回放门)。
 **三接入点(r1 finding 10/11)**:
 1. dialogue candidates:按 kind 分流(interest/dislike → 现路径;goal/value/state → 门控;downgrade 置信 = candidate confidence × 0.6)。
