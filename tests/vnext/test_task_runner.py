@@ -20,7 +20,7 @@ from openbiliclaw.infrastructure.ai.evaluators import TASK_EVALUATOR_TYPES
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
 from openbiliclaw.infrastructure.ai.spec import CachePolicy, TaskLane, TaskSpec
 from openbiliclaw.infrastructure.ai.tasks import (
-    CANDIDATE_ASSESSMENT_TASK,
+    CANDIDATE_BATCH_ASSESSMENT_TASK,
     KEYWORD_GENERATION_TASK,
     PROFILE_DELTA_TASK,
     RECOMMENDATION_EXPLANATION_TASK,
@@ -68,7 +68,14 @@ class RecordingSpy:
     ) -> None:
         self.succeeded.append((run_id, usage))
 
-    def fail(self, run_id: UUID, *, error_kind: str) -> None:
+    def fail(
+        self,
+        run_id: UUID,
+        *,
+        error_kind: str,
+        usage: dict[str, int] | None = None,
+    ) -> None:
+        del usage
         self.failed.append((run_id, error_kind))
 
 
@@ -276,7 +283,14 @@ def test_task_spec_rejects_unknown_or_embedding_aliases() -> None:
 
 
 def test_candidate_output_excludes_application_owned_assessment_id() -> None:
-    assert "id" not in CANDIDATE_ASSESSMENT_TASK.output_type.model_fields
+    annotation = CANDIDATE_BATCH_ASSESSMENT_TASK.output_type.model_fields["assessments"].annotation
+    assert annotation is not None
+    assert (
+        "id"
+        not in CANDIDATE_BATCH_ASSESSMENT_TASK.output_type.model_json_schema()["$defs"][
+            "CandidateAssessmentOutput"
+        ]["properties"]
+    )
 
 
 async def test_litellm_resolver_normalizes_v1_and_disables_sdk_retries() -> None:
@@ -337,7 +351,7 @@ async def test_cache_policy_is_forwarded_to_litellm_without_local_caching(
     [
         ("profile_delta", PROFILE_DELTA_TASK),
         ("keyword_generation", KEYWORD_GENERATION_TASK),
-        ("candidate_assessment", CANDIDATE_ASSESSMENT_TASK),
+        ("candidate_batch_assessment", CANDIDATE_BATCH_ASSESSMENT_TASK),
         ("recommendation_explanation", RECOMMENDATION_EXPLANATION_TASK),
     ],
 )
@@ -383,17 +397,26 @@ def test_eval_dataset_cases_match_contracts_and_configure_real_evaluators(
             {"keywords": ["duplicate", "Duplicate", "third", "fourth", "fifth"]},
         ),
         (
-            "candidate_assessment",
-            CANDIDATE_ASSESSMENT_TASK,
+            "keyword_generation",
+            KEYWORD_GENERATION_TASK,
+            {"keywords": [" ", "valid procedural modeling"]},
+        ),
+        (
+            "candidate_batch_assessment",
+            CANDIDATE_BATCH_ASSESSMENT_TASK,
             {
-                "content_id": "00000000-0000-0000-0000-000000009999",
-                "profile_revision": 999,
-                "relevance": 0.5,
-                "quality": 0.5,
-                "novelty": 0.5,
-                "risk": 0.1,
-                "topics": ["procedural modeling"],
-                "explanation": "grounded",
+                "assessments": [
+                    {
+                        "content_id": "00000000-0000-0000-0000-000000009999",
+                        "profile_revision": 999,
+                        "relevance": 0.5,
+                        "quality": 0.5,
+                        "novelty": 0.5,
+                        "risk": 0.1,
+                        "topics": ["procedural modeling"],
+                        "explanation": "grounded",
+                    }
+                ]
             },
         ),
         (

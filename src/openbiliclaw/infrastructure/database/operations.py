@@ -85,22 +85,6 @@ def require_schema_at_head(*, database_url: str, alembic_ini: Path) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class _StableSQLiteSource:
-    """Pinned private link set used to preserve SQLite sidecar semantics."""
-
-    directory: Path
-    directory_descriptor: int | None
-    directory_identity: tuple[int, int]
-    source: Path
-    database_identity: tuple[int, int]
-    sidecar_descriptors: tuple[int, ...]
-    sidecar_identities: tuple[tuple[Path, tuple[int, int] | None], ...]
-    staging_entries: tuple[tuple[str, tuple[int, int]], ...]
-    uri: str
-    descriptor_backed: bool
-
-
-@dataclass(frozen=True, slots=True)
 class _DestinationDirectory:
     """Pinned destination directory used for relative no-follow operations."""
 
@@ -119,7 +103,6 @@ class _OwnedFile:
 
 
 _SNAPSHOT_ATTEMPTS = 3
-_MAX_RETAINED_STAGING_DIRECTORIES = 32
 _COPY_BUFFER_SIZE = 1024 * 1024
 
 
@@ -209,6 +192,7 @@ class SQLiteOperationalStore:
         temp_path, temp_descriptor, temp_identity = self._create_temp(directory)
         temp = _OwnedFile(temp_path, temp_descriptor, temp_identity)
         try:
+            _require_unlinked_payload(temp.descriptor, temp.identity)
             self._backup_into_descriptor(
                 source=source,
                 source_descriptor=source_descriptor,
@@ -216,6 +200,7 @@ class SQLiteOperationalStore:
                 snapshot_parent=directory.path,
                 descriptor=temp.descriptor,
             )
+            _require_unlinked_payload(temp.descriptor, temp.identity)
             _require_source_identity(source, source_identity)
             _sync_descriptor(temp.descriptor, temp.identity)
             final = _atomic_publish_no_replace(
@@ -241,7 +226,7 @@ class SQLiteOperationalStore:
         if directory.descriptor is None:
             raise DatabaseBackupError("secure backup publication is unavailable")
         if sys.platform == "darwin":
-            payload_path, descriptor = _reserve_macos_payload_slot(directory)
+            payload_path, descriptor = _create_unlinked_macos_payload(directory)
         else:
             descriptor = _create_anonymous_payload(directory)
             payload_path = directory.path / ".anonymous-backup-payload"
@@ -250,6 +235,7 @@ class SQLiteOperationalStore:
             identity = (metadata.st_dev, metadata.st_ino)
             if not stat.S_ISREG(metadata.st_mode):
                 raise DatabaseBackupError("backup payload is not a regular file")
+            _require_unlinked_payload(descriptor, identity)
             os.fchmod(descriptor, 0o600)
             os.fsync(descriptor)
             return payload_path, descriptor, identity
@@ -274,6 +260,8 @@ class SQLiteOperationalStore:
             source_identity=source_identity,
             snapshot_parent=snapshot_parent,
         )
+        identity = _descriptor_identity(descriptor)
+        _require_unlinked_payload(descriptor, identity)
         os.ftruncate(descriptor, 0)
         os.lseek(descriptor, 0, os.SEEK_SET)
         view = memoryview(payload)
@@ -282,27 +270,23 @@ class SQLiteOperationalStore:
             if written <= 0:
                 raise DatabaseBackupError("database backup failed while writing snapshot")
             view = view[written:]
+        _require_unlinked_payload(descriptor, identity)
 
 
-def _reserve_macos_payload_slot(directory: _DestinationDirectory) -> tuple[Path, int]:
-    import fcntl
+def _create_unlinked_macos_payload(directory: _DestinationDirectory) -> tuple[Path, int]:
+    """Create a never-reused payload and unlink it before snapshot bytes exist."""
 
     assert directory.descriptor is not None
     create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    reuse_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    for slot in range(32):
-        name = f".backup-{slot:02d}.tmp"
+    for _attempt in range(32):
+        name = f".backup-{secrets.token_hex(16)}.tmp"
         try:
             descriptor = os.open(name, create_flags, 0o600, dir_fd=directory.descriptor)
         except FileExistsError:
-            try:
-                descriptor = os.open(name, reuse_flags, dir_fd=directory.descriptor)
-            except OSError:
-                continue
+            continue
         except OSError as exc:
-            raise DatabaseBackupError("could not reserve a private backup payload slot") from exc
+            raise DatabaseBackupError("could not reserve a private backup payload") from exc
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             held = os.fstat(descriptor)
             named = os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
             if (
@@ -312,23 +296,31 @@ def _reserve_macos_payload_slot(directory: _DestinationDirectory) -> tuple[Path,
                 or held.st_size != 0
                 or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
             ):
-                os.close(descriptor)
-                continue
+                raise DatabaseBackupError("backup payload changed during creation")
+            os.unlink(name, dir_fd=directory.descriptor)
+            unlinked = os.fstat(descriptor)
+            if unlinked.st_nlink != 0 or (unlinked.st_dev, unlinked.st_ino) != (
+                held.st_dev,
+                held.st_ino,
+            ):
+                raise DatabaseBackupError("backup payload changed during creation")
+            try:
+                os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise DatabaseBackupError("backup payload path reappeared during creation")
             return directory.path / name, descriptor
-        except (BlockingIOError, OSError):
+        except BaseException:
             os.close(descriptor)
-            continue
-    raise DatabaseBackupError(
-        "backup temporary staging capacity reached; remove .backup-00.tmp through "
-        ".backup-31.tmp only while no backup is running"
-    )
+            raise
+    raise DatabaseBackupError("could not reserve a unique private backup payload")
 
 
 def _recycle_macos_payload(payload: _OwnedFile) -> None:
     if sys.platform != "darwin":
         return
-    if _descriptor_identity(payload.descriptor) != payload.identity:
-        raise DatabaseBackupError("backup payload changed before slot recycling")
+    _require_unlinked_payload(payload.descriptor, payload.identity)
     os.ftruncate(payload.descriptor, 0)
     os.fsync(payload.descriptor)
 
@@ -367,29 +359,94 @@ def _snapshot_once(
     source_identity: tuple[int, int],
     snapshot_parent: Path,
 ) -> bytes:
+    del snapshot_parent
     _require_source_identity(source, source_identity)
-    stable = _create_stable_source(
-        source=source,
-        source_descriptor=source_descriptor,
-        source_identity=source_identity,
-        snapshot_parent=snapshot_parent,
+    sidecar_descriptors, sidecar_identities = _pin_backup_sidecars(source)
+    allowed_identities = frozenset(
+        {source_identity, *(_descriptor_identity(value) for value in sidecar_descriptors)}
     )
+    before_fds = _process_file_descriptors()
+    if before_fds is None:
+        _close_descriptors(sidecar_descriptors)
+        raise DatabaseBackupError("secure database source verification is unavailable")
+    uri = f"file:{quote(str(source), safe='/')}?mode=ro"
     try:
         with (
-            sqlite3.connect(stable.uri, uri=True) as source_db,
+            sqlite3.connect(uri, uri=True) as source_db,
             sqlite3.connect(":memory:") as snapshot,
         ):
-            _require_stable_source(stable)
+            _require_pinned_backup_connection(
+                source=source,
+                source_descriptor=source_descriptor,
+                source_identity=source_identity,
+                sidecar_identities=sidecar_identities,
+                before_fds=before_fds,
+                allowed_identities=allowed_identities,
+            )
             source_db.backup(snapshot)
-            _require_stable_source(stable)
+            _require_pinned_backup_connection(
+                source=source,
+                source_descriptor=source_descriptor,
+                source_identity=source_identity,
+                sidecar_identities=sidecar_identities,
+                before_fds=before_fds,
+                allowed_identities=allowed_identities,
+            )
             result = snapshot.execute("PRAGMA integrity_check").fetchone()
             if result != ("ok",):
                 raise DatabaseBackupError("database backup failed integrity verification")
             payload = snapshot.serialize()
-        _require_stable_source(stable)
+        _require_source_identity(source, source_identity)
+        _require_sidecar_identities(sidecar_identities)
         return payload
     finally:
-        _close_stable_source(stable)
+        _close_descriptors(sidecar_descriptors)
+
+
+def _pin_backup_sidecars(
+    source: Path,
+) -> tuple[tuple[int, ...], tuple[tuple[Path, tuple[int, int] | None], ...]]:
+    descriptors: list[int] = []
+    identities: list[tuple[Path, tuple[int, int] | None]] = []
+    try:
+        for suffix in ("-wal", "-shm", "-journal"):
+            sidecar = source.with_name(f"{source.name}{suffix}")
+            try:
+                descriptor = os.open(
+                    sidecar,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                identities.append((sidecar, None))
+                continue
+            if not _descriptor_matches_regular_path(sidecar, descriptor):
+                os.close(descriptor)
+                raise DatabaseBackupError("database sidecar changed during backup")
+            descriptors.append(descriptor)
+            identities.append((sidecar, _descriptor_identity(descriptor)))
+        return tuple(descriptors), tuple(identities)
+    except BaseException:
+        _close_descriptors(descriptors)
+        raise
+
+
+def _require_pinned_backup_connection(
+    *,
+    source: Path,
+    source_descriptor: int,
+    source_identity: tuple[int, int],
+    sidecar_identities: tuple[tuple[Path, tuple[int, int] | None], ...],
+    before_fds: frozenset[int],
+    allowed_identities: frozenset[tuple[int, int]],
+) -> None:
+    if not _connection_opened_held_inode(
+        source_descriptor,
+        before_fds,
+        allowed_identities,
+    ):
+        raise DatabaseBackupError("database source changed during backup")
+    _require_source_identity(source, source_identity)
+    _require_sidecar_identities(sidecar_identities)
 
 
 def _retryable_identity_churn(error: DatabaseBackupError) -> bool:
@@ -602,237 +659,12 @@ def _open_source(source: Path) -> tuple[int, tuple[int, int]]:
         raise
 
 
-def _create_stable_source(
-    *,
-    source: Path,
-    source_descriptor: int,
-    source_identity: tuple[int, int],
-    snapshot_parent: Path,
-) -> _StableSQLiteSource:
-    """Create private hard links for the database and its live sidecars."""
-
-    last_error: BaseException | None = None
-    parents = tuple(dict.fromkeys((source.parent, snapshot_parent)))
-    for parent in parents:
-        try:
-            directory = _reserve_staging_slot(parent)
-        except DatabaseBackupError as exc:
-            last_error = exc
-            continue
-        try:
-            return _populate_stable_source(
-                directory=directory,
-                source=source,
-                source_descriptor=source_descriptor,
-                source_identity=source_identity,
-            )
-        except OSError as exc:
-            last_error = exc
-    if isinstance(last_error, DatabaseBackupError):
-        raise last_error
-    raise DatabaseBackupError("could not create a stable database backup source") from last_error
-
-
-def _reserve_staging_slot(parent: Path) -> Path:
-    for slot in range(_MAX_RETAINED_STAGING_DIRECTORIES):
-        directory = parent / f".obc-backup-source-{slot:02d}"
-        try:
-            directory.mkdir(mode=0o700)
-        except FileExistsError:
-            continue
-        except OSError as exc:
-            raise DatabaseBackupError("could not reserve database backup staging slot") from exc
-        return directory
-    raise DatabaseBackupError(
-        "database backup staging capacity reached; remove .obc-backup-source-00 through "
-        ".obc-backup-source-31 only while no backup is running"
-    )
-
-
-def _populate_stable_source(
-    *,
-    directory: Path,
-    source: Path,
-    source_descriptor: int,
-    source_identity: tuple[int, int],
-) -> _StableSQLiteSource:
-    directory_descriptor: int | None = None
-    directory_identity: tuple[int, int] | None = None
-    sidecar_descriptors: list[int] = []
-    sidecar_identities: list[tuple[Path, tuple[int, int] | None]] = []
-    staging_entries: list[tuple[str, tuple[int, int]]] = []
-    try:
-        initial_metadata = directory.lstat()
-        directory_identity = (initial_metadata.st_dev, initial_metadata.st_ino)
-        directory_descriptor = _open_directory(directory)
-        directory_metadata = (
-            directory.lstat() if directory_descriptor is None else os.fstat(directory_descriptor)
-        )
-        opened_identity = (directory_metadata.st_dev, directory_metadata.st_ino)
-        if opened_identity != directory_identity or _path_identity(directory) != directory_identity:
-            raise DatabaseBackupError("backup staging directory changed during creation")
-        os.chmod(directory, 0o700)
-        _require_directory_identity(directory, directory_identity)
-        stable_database = directory / "source.db"
-        _link_verified_file(
-            source=source,
-            source_descriptor=source_descriptor,
-            source_identity=source_identity,
-            destination=stable_database,
-        )
-        staging_entries.append((stable_database.name, source_identity))
-        for suffix in ("-wal", "-shm", "-journal"):
-            sidecar = source.with_name(f"{source.name}{suffix}")
-            pinned_sidecar = _link_optional_sidecar(
-                source=sidecar,
-                destination=directory / f"source.db{suffix}",
-            )
-            if pinned_sidecar is None:
-                sidecar_identities.append((sidecar, None))
-            else:
-                sidecar_descriptor, sidecar_identity = pinned_sidecar
-                sidecar_descriptors.append(sidecar_descriptor)
-                sidecar_identities.append((sidecar, sidecar_identity))
-                staging_entries.append((f"source.db{suffix}", sidecar_identity))
-        uri, descriptor_backed = _stable_source_uri(
-            directory=directory,
-            directory_descriptor=directory_descriptor,
-        )
-        return _StableSQLiteSource(
-            directory=directory,
-            directory_descriptor=directory_descriptor,
-            directory_identity=directory_identity,
-            source=source,
-            database_identity=source_identity,
-            sidecar_descriptors=tuple(sidecar_descriptors),
-            sidecar_identities=tuple(sidecar_identities),
-            staging_entries=tuple(staging_entries),
-            uri=uri,
-            descriptor_backed=descriptor_backed,
-        )
-    except BaseException as exc:
-        close_error: DatabaseBackupError | None = None
-        try:
-            _close_descriptors(sidecar_descriptors)
-        except DatabaseBackupError as descriptor_error:
-            close_error = descriptor_error
-        try:
-            if directory_identity is not None:
-                _cleanup_staging_directory(
-                    directory=directory,
-                    directory_descriptor=directory_descriptor,
-                    directory_identity=directory_identity,
-                    entries=tuple(staging_entries),
-                )
-        except BaseException as cleanup_error:
-            raise DatabaseBackupError("database backup staging cleanup failed") from cleanup_error
-        finally:
-            if directory_descriptor is not None:
-                os.close(directory_descriptor)
-        if close_error is not None:
-            raise close_error from exc
-        if isinstance(exc, DatabaseBackupError):
-            raise exc
-        raise
-
-
-def _link_verified_file(
-    *,
-    source: Path,
-    source_descriptor: int,
-    source_identity: tuple[int, int],
-    destination: Path,
-) -> None:
-    opened = os.fstat(source_descriptor)
-    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != source_identity:
-        raise DatabaseBackupError("database source changed during backup")
-    os.link(source, destination, follow_symlinks=False)
-    try:
-        linked = destination.lstat()
-        if stat.S_ISLNK(linked.st_mode) or (linked.st_dev, linked.st_ino) != source_identity:
-            raise DatabaseBackupError("database source changed during backup")
-        _require_source_identity(source, source_identity)
-    except BaseException:
-        raise
-
-
-def _link_optional_sidecar(
-    *, source: Path, destination: Path
-) -> tuple[int, tuple[int, int]] | None:
-    try:
-        metadata = source.lstat()
-    except FileNotFoundError:
-        return None
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise DatabaseBackupError("database sidecar changed during backup")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(source, flags)
-    try:
-        opened = os.fstat(descriptor)
-        identity = (opened.st_dev, opened.st_ino)
-        if not stat.S_ISREG(opened.st_mode) or identity != (
-            metadata.st_dev,
-            metadata.st_ino,
-        ):
-            raise DatabaseBackupError("database sidecar changed during backup")
-        os.link(source, destination, follow_symlinks=False)
-        linked_metadata = destination.lstat()
-        current = source.lstat()
-        if (
-            stat.S_ISLNK(linked_metadata.st_mode)
-            or (linked_metadata.st_dev, linked_metadata.st_ino) != identity
-            or stat.S_ISLNK(current.st_mode)
-            or (current.st_dev, current.st_ino) != identity
-        ):
-            raise DatabaseBackupError("database sidecar changed during backup")
-        return descriptor, identity
-    except BaseException:
-        os.close(descriptor)
-        raise
-
-
 def _open_directory(directory: Path) -> int | None:
     if os.name == "nt":
         return None
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     directory_flags |= getattr(os, "O_NOFOLLOW", 0)
     return os.open(directory, directory_flags)
-
-
-def _stable_source_uri(*, directory: Path, directory_descriptor: int | None) -> tuple[str, bool]:
-    if directory_descriptor is not None:
-        for descriptor_root in (Path("/proc/self/fd"), Path("/dev/fd")):
-            pinned_directory = descriptor_root / str(directory_descriptor)
-            database = pinned_directory / "source.db"
-            if database.is_file():
-                return f"file:{quote(str(database), safe='/')}?mode=ro", True
-    database = directory / "source.db"
-    return f"file:{quote(str(database), safe='/')}?mode=ro", False
-
-
-def _require_stable_source(stable: _StableSQLiteSource) -> None:
-    _require_source_identity(stable.source, stable.database_identity)
-    _require_sidecar_identities(stable.sidecar_identities)
-    if not stable.descriptor_backed:
-        _require_directory_identity(stable.directory, stable.directory_identity)
-    metadata = (
-        (stable.directory / "source.db").lstat()
-        if stable.directory_descriptor is None
-        else os.stat(
-            "source.db",
-            dir_fd=stable.directory_descriptor,
-            follow_symlinks=False,
-        )
-    )
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or (
-            metadata.st_dev,
-            metadata.st_ino,
-        )
-        != stable.database_identity
-    ):
-        raise DatabaseBackupError("stable database source changed during backup")
 
 
 def _require_sidecar_identities(
@@ -853,34 +685,6 @@ def _require_sidecar_identities(
             raise DatabaseBackupError("database sidecar changed during backup")
 
 
-def _require_directory_identity(directory: Path, identity: tuple[int, int]) -> None:
-    metadata = directory.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise DatabaseBackupError("stable database source changed during backup")
-    if (metadata.st_dev, metadata.st_ino) != identity:
-        raise DatabaseBackupError("stable database source changed during backup")
-
-
-def _close_stable_source(stable: _StableSQLiteSource) -> None:
-    close_error: DatabaseBackupError | None = None
-    try:
-        _close_descriptors(stable.sidecar_descriptors)
-    except DatabaseBackupError as exc:
-        close_error = exc
-    try:
-        _cleanup_staging_directory(
-            directory=stable.directory,
-            directory_descriptor=stable.directory_descriptor,
-            directory_identity=stable.directory_identity,
-            entries=stable.staging_entries,
-        )
-    finally:
-        if stable.directory_descriptor is not None:
-            os.close(stable.directory_descriptor)
-    if close_error is not None:
-        raise close_error
-
-
 def _close_descriptors(descriptors: tuple[int, ...] | list[int]) -> None:
     first_error: OSError | None = None
     for descriptor in descriptors:
@@ -890,84 +694,6 @@ def _close_descriptors(descriptors: tuple[int, ...] | list[int]) -> None:
             first_error = first_error or exc
     if first_error is not None:
         raise DatabaseBackupError("database backup descriptor cleanup failed") from first_error
-
-
-def _cleanup_staging_directory(
-    *,
-    directory: Path,
-    directory_descriptor: int | None,
-    directory_identity: tuple[int, int],
-    entries: tuple[tuple[str, tuple[int, int]], ...],
-) -> None:
-    try:
-        _require_directory_identity(directory, directory_identity)
-    except (DatabaseBackupError, OSError) as exc:
-        raise DatabaseBackupError(
-            "stable database source changed; backup staging directory changed during cleanup"
-        ) from exc
-
-    if directory_descriptor is not None:
-        opened = os.fstat(directory_descriptor)
-        if (opened.st_dev, opened.st_ino) != directory_identity:
-            raise DatabaseBackupError("backup staging directory changed during cleanup")
-    expected = dict(entries)
-    names = set(os.listdir(directory_descriptor if directory_descriptor is not None else directory))
-    if "source.db" in expected and "source.db" not in names:
-        raise DatabaseBackupError("backup staging directory changed during cleanup")
-    allowed_dynamic = {"source.db-wal", "source.db-shm", "source.db-journal"}
-    if not names.issubset(set(expected) | allowed_dynamic):
-        raise DatabaseBackupError("backup staging directory changed during cleanup")
-    dynamic_entries = tuple(
-        (name, _staging_entry_identity(directory, directory_descriptor, name))
-        for name in names - set(expected)
-    )
-    owned_entries = (
-        *(entry for entry in entries if entry[0] in names),
-        *dynamic_entries,
-    )
-    for name, identity in owned_entries:
-        _require_staging_entry(
-            directory=directory,
-            directory_descriptor=directory_descriptor,
-            name=name,
-            identity=identity,
-        )
-    # POSIX and macOS do not provide compare-and-unlink-by-inode. Retain this
-    # bounded, private hard-link set for explicit maintenance rather than risk
-    # deleting a pathname replacement after the identity check above.
-
-
-def _staging_entry_identity(
-    directory: Path, directory_descriptor: int | None, name: str
-) -> tuple[int, int]:
-    metadata = (
-        (directory / name).lstat()
-        if directory_descriptor is None
-        else os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
-    )
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise DatabaseBackupError("backup staging directory changed during cleanup")
-    return metadata.st_dev, metadata.st_ino
-
-
-def _require_staging_entry(
-    *,
-    directory: Path,
-    directory_descriptor: int | None,
-    name: str,
-    identity: tuple[int, int],
-) -> None:
-    metadata = (
-        (directory / name).lstat()
-        if directory_descriptor is None
-        else os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
-    )
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISREG(metadata.st_mode)
-        or (metadata.st_dev, metadata.st_ino) != identity
-    ):
-        raise DatabaseBackupError("backup staging directory changed during cleanup")
 
 
 def _require_source_identity(source: Path, identity: tuple[int, int]) -> None:
@@ -1011,31 +737,22 @@ def _create_anonymous_payload(directory: _DestinationDirectory) -> int:
             )
         except OSError as exc:
             raise DatabaseBackupError("secure backup publication is unavailable") from exc
-    if sys.platform == "darwin":
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        for _attempt in range(32):
-            name = f".backup-{secrets.token_hex(12)}.tmp"
-            try:
-                payload = os.open(name, flags, 0o600, dir_fd=descriptor)
-            except FileExistsError:
-                continue
-            identity = _descriptor_identity(payload)
-            try:
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                if (metadata.st_dev, metadata.st_ino) != identity:
-                    raise DatabaseBackupError("backup temporary file changed")
-                os.unlink(name, dir_fd=descriptor)
-                return payload
-            except BaseException:
-                os.close(payload)
-                raise
-        raise DatabaseBackupError("could not reserve a private backup payload")
     raise DatabaseBackupError("secure backup publication is unavailable")
 
 
 def _descriptor_identity(descriptor: int) -> tuple[int, int]:
     metadata = os.fstat(descriptor)
     return metadata.st_dev, metadata.st_ino
+
+
+def _require_unlinked_payload(descriptor: int, identity: tuple[int, int]) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 0
+        or (metadata.st_dev, metadata.st_ino) != identity
+    ):
+        raise DatabaseBackupError("backup payload lost private ownership")
 
 
 def _atomic_publish_no_replace(
@@ -1054,8 +771,9 @@ def _atomic_publish_no_replace_impl(
     """Publish a held anonymous payload atomically without replacing a name."""
 
     descriptor = directory.descriptor
-    if descriptor is None or _descriptor_identity(payload.descriptor) != payload.identity:
+    if descriptor is None:
         raise DatabaseBackupError("backup payload changed before publication")
+    _require_unlinked_payload(payload.descriptor, payload.identity)
     _require_destination_directory(directory)
     if sys.platform.startswith("linux"):
         _link_anonymous_linux(payload.descriptor, descriptor, target.name)

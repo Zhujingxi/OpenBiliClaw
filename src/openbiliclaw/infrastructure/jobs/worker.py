@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import logging
 import os
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
@@ -15,8 +17,11 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any, cast
 
+from pydantic import SecretStr
+
 from openbiliclaw.features.system.domain import DatabaseSettings, UserSettings
 from openbiliclaw.features.system.service import SettingsService
+from openbiliclaw.infrastructure.ai.embedding import EmbeddingService, EmbeddingSettings
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
 from openbiliclaw.infrastructure.ai.use_cases import TransactionalAIRunRecorder
 from openbiliclaw.infrastructure.database.base import create_engine_and_session
@@ -34,6 +39,7 @@ from openbiliclaw.infrastructure.jobs.source_composition import (
 from openbiliclaw.infrastructure.jobs.tasks import (
     JobHandler,
     JobService,
+    WorkerInterruptedError,
     configure_job_runtime,
 )
 from openbiliclaw.infrastructure.runtime_settings import applied_runtime_settings
@@ -46,6 +52,7 @@ MAX_WORKERS = 4
 ASYNC_JOB_TIMEOUT_SECONDS = 3600
 ASYNC_SHUTDOWN_TIMEOUT_SECONDS = 30
 SettingsLoader = Callable[[], UserSettings]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +71,34 @@ class WorkerRuntime:
 
 
 RuntimeFactory = Callable[[], WorkerRuntime | tuple[JobService, Mapping[str, JobHandler]]]
+
+
+class JobRecoveryMonitor:
+    """Worker-lifecycle sweep for expired leases and successful continuations."""
+
+    def __init__(self, service: JobService) -> None:
+        self._service = service
+        self._stop = Event()
+        self._interval = float(getattr(service, "recovery_interval_seconds", 30.0))
+        self._thread = Thread(
+            target=self._run,
+            name="openbiliclaw-job-recovery",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self._interval + 1)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                self._service.recover_expired_leases()
+            except Exception as error:
+                logger.warning("job lifecycle recovery deferred (%s)", type(error).__name__)
 
 
 class AsyncJobExecutor:
@@ -159,6 +194,14 @@ class AsyncJobExecutor:
         future.add_done_callback(self._future_finished)
         try:
             future.result(timeout=ASYNC_JOB_TIMEOUT_SECONDS)
+        except FutureCancelledError:
+            with self._state_lock:
+                closed = self._closed
+            if closed:
+                raise WorkerInterruptedError(
+                    "worker async execution was interrupted by shutdown"
+                ) from None
+            raise
         except FutureTimeoutError as exc:
             cancelled = future.cancel()
             if not completion.wait(timeout=ASYNC_SHUTDOWN_TIMEOUT_SECONDS):
@@ -254,6 +297,16 @@ def database_runtime_factory() -> WorkerRuntime:
         recorder=TransactionalAIRunRecorder(lambda: UnitOfWork(session_factory)),
         settings=product_settings,
     )
+    embedding_base_url = base_url.rstrip("/")
+    if not embedding_base_url.endswith("/v1"):
+        embedding_base_url = f"{embedding_base_url}/v1"
+    embedding_service = EmbeddingService(
+        EmbeddingSettings(
+            base_url=embedding_base_url,
+            api_key=SecretStr(api_key),
+            profile_version="feed-v1",
+        )
+    )
     service, handlers = build_worker_runtime(
         WorkerDependencies(
             session_factory=session_factory,
@@ -261,12 +314,18 @@ def database_runtime_factory() -> WorkerRuntime:
             # The worker is long-lived and must not retain its startup mode.
             source_registry=lambda: build_default_source_registry(session_factory),
             task_runner=runner,
+            embedding_service=embedding_service,
         )
     )
+
+    async def close_ai_transports() -> None:
+        await model_resolver.aclose()
+        await embedding_service.aclose()
+
     return WorkerRuntime(
         service=service,
         handlers=handlers,
-        async_shutdown=model_resolver.aclose,
+        async_shutdown=close_ai_transports,
     )
 
 
@@ -311,8 +370,11 @@ def run_worker(
             async_job_runner=async_executor.run,
         )
         consumer: Any | None = None
+        recovery_monitor: JobRecoveryMonitor | None = None
         try:
             runtime.service.recover_interrupted()
+            recovery_monitor = JobRecoveryMonitor(runtime.service)
+            recovery_monitor.start()
             consumer = huey.create_consumer(
                 workers=workers,
                 worker_type="thread",
@@ -325,6 +387,8 @@ def run_worker(
             consumer.run()
         finally:
             try:
+                if recovery_monitor is not None:
+                    recovery_monitor.close()
                 if consumer is not None:
                     # SIGTERM is non-graceful inside Huey: ``run()`` returns
                     # before thread workers finish. Join them before removing
@@ -354,6 +418,7 @@ if __name__ == "__main__":
 __all__ = [
     "MAX_WORKERS",
     "AsyncJobExecutor",
+    "JobRecoveryMonitor",
     "MissingSourceConfigurationError",
     "WorkerRuntime",
     "build_default_source_registry",

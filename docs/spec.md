@@ -46,17 +46,17 @@ Features own their domain types, ports, use cases, router, and tests. Infrastruc
 
 `ContentItem` is the normalized cross-source content identity. `CandidateAssessment` binds a typed assessment to content and profile revision. `FeedEntry` is an admitted item; `Interaction` records user feedback. Favorites and watch later are predefined local collections. Library reads return `LibraryItem (CollectionItem + ContentItem)` rather than source-specific save records.
 
-AI may propose profile deltas, keywords, candidate assessments, chat output, and recommendation explanations. Deterministic application policy owns validation, allocation, deduplication, diversity, novelty, scoring, transaction boundaries, and persistence.
+AI may propose profile deltas, source-neutral keywords, batch candidate assessments, chat output, and recommendation explanations. Feed uses embeddings to derive bounded within-batch semantic diversity. Deterministic application policy owns query allocation, validation, deduplication, admission, diversity, novelty, scoring, transaction boundaries, and persistence.
 
 #### AI execution
 
 Every generative task has typed input/output, a reusable PydanticAI agent, stable model alias, semantic retry limit, timeout, usage limits, cache policy, and execution lane. Production features call the shared `TaskRunner`; they do not implement provider routing, HTTP retry, JSON repair, or fallback.
 
-Only `obc-interactive` and `obc-analysis` are valid generative aliases. Embeddings use the separate `obc-embedding` service and namespace vectors by alias, dimension, and profile version. Provider credentials and deployments exist only in LiteLLM. Product health is an alias-only redacted status; it never projects provider credentials or deployment payloads.
+Only `obc-interactive` and `obc-analysis` are valid generative aliases, and each task setting must retain the alias declared by its execution lane. Embeddings use the separate `obc-embedding` service and namespace vectors by alias, dimension, and profile version. Provider credentials and deployments exist only in LiteLLM. Product health is an alias-only redacted status; it never projects provider credentials or deployment payloads.
 
 #### Jobs
 
-The worker registers `source_sync`, `profile_projection`, `feed_replenishment`, and `cleanup`. Business status is persisted in `job_runs`. Operations are idempotent; duplicate delivery and restart recovery must not duplicate feature effects. Interactive chat bypasses Huey and streams through SSE.
+The worker registers `source_sync`, `profile_projection`, `feed_replenishment`, and `cleanup`. Until onboarding completes, periodic `source_sync`, `profile_projection`, and `feed_replenishment` ticks are suppressed and do not create durable buckets; periodic `cleanup` remains active. Explicit onboarding/API scheduling bypasses that periodic gate. After completion, per-minute transport ticks resolve every interval persisted under `UserSettings.schedules` and normal job-specific idempotent time-bucket scheduling resumes. Business status and successful-continuation acknowledgement are persisted in `job_runs`; the live worker sweep retries an unacknowledged continuation without requiring restart. Operations and continuations are idempotent, so duplicate delivery and recovery must not duplicate feature effects. Interactive chat bypasses Huey and streams through SSE.
 
 #### Persistence and configuration
 
@@ -90,7 +90,7 @@ Public route groups are:
 /api/v1/jobs
 ```
 
-Web 使用 same-origin password→HttpOnly cookie；unsafe requests also require the CSRF header. Extension origin 即使来自 loopback，也必须先把 provisioned device key exchange 为 finite bearer，不能继承 Web trust。Installer bearer access is a separate operational credential. Authentication failures, validation errors, and internal failures use the shared safe error envelope and never echo secrets or provider payloads.
+Web 使用 same-origin password→HttpOnly cookie；unsafe requests and the lease-mutating source-task claim GET also require the same-origin CSRF header. Extension origin 即使来自 loopback，也必须先把 provisioned device key exchange 为 finite bearer，不能继承 Web trust。Installer bearer access is a separate operational credential. Authentication failures, validation errors, and internal failures use the shared safe error envelope and never echo secrets or provider payloads.
 
 Chat and onboarding/job progress use an authenticated fetch stream over SSE. The extension uses long-poll generic source-task claim and typed completion.
 

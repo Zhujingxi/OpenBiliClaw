@@ -179,8 +179,19 @@ def _merge_facet(current: ProfileFacet, proposed: ProfileFacet) -> ProfileFacet:
     )
 
 
-def apply_profile_delta(current: ProfileSnapshot, delta: ProfileDelta) -> ProfileSnapshot:
+def apply_profile_delta(
+    current: ProfileSnapshot,
+    delta: ProfileDelta,
+    *,
+    created_at: datetime | None = None,
+) -> ProfileSnapshot:
     """Apply a delta without deleting or weakening explicit user overrides."""
+
+    revision_created_at = created_at or datetime.now(UTC)
+    if revision_created_at.tzinfo is None or revision_created_at.utcoffset() is None:
+        raise ValueError("profile revision timestamp must be timezone-aware")
+    if revision_created_at <= current.created_at:
+        raise ValueError("profile revision timestamp must be newer than its base revision")
 
     by_key: dict[tuple[FacetName, str], ProfileFacet] = {}
     for facet in current.facets:
@@ -213,5 +224,6 @@ def apply_profile_delta(current: ProfileSnapshot, delta: ProfileDelta) -> Profil
             "narrative": narrative,
             "facets": facets,
             "confidence": confidence,
+            "created_at": revision_created_at,
         }
     )

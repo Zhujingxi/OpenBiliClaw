@@ -242,11 +242,22 @@ async function renderLibrary(collection) {
 async function renderProfile() {
   empty("正在读取证据画像…");
   try {
-    state.profile = await request("v1_profile_get");
+    try {
+      state.profile = await request("v1_profile_get");
+    } catch (error) {
+      if (error?.status !== 404) throw error;
+      state.profile = {
+        revision: null,
+        narrative: "",
+        facets: [],
+        confidence: 0,
+      };
+    }
     const p = state.profile;
+    const revisionLabel = p.revision === null ? "尚未创建" : `版本 ${p.revision}`;
     showView(
       "profile",
-      `<div class="profile-section"><div class="profile-section-title">证据画像</div><div class="profile-portrait">版本 ${p.revision} · 置信度 ${Math.round((p.confidence || 0) * 100)}%</div></div><form id="mobileProfile"><div class="profile-section"><label class="profile-section-title" for="mobileNarrative">画像叙述</label><textarea id="mobileNarrative" class="edit-text-input" rows="6" placeholder="画像叙述">${escapeHtml(p.narrative || "")}</textarea></div><div class="profile-section"><div class="profile-section-title">证据维度</div><div class="chip-list">${(p.facets || []).map((f) => `<span class="chip">${escapeHtml(f.name)} · ${escapeHtml(f.value)}</span>`).join("")}</div></div><button class="btn btn-brand">保存叙述</button></form>`,
+      `<div class="profile-section"><div class="profile-section-title">证据画像</div><div class="profile-portrait">${revisionLabel} · 置信度 ${Math.round((p.confidence || 0) * 100)}%</div></div><form id="mobileProfile"><div class="profile-section"><label class="profile-section-title" for="mobileNarrative">画像叙述</label><textarea id="mobileNarrative" class="edit-text-input" rows="6" placeholder="画像叙述">${escapeHtml(p.narrative || "")}</textarea></div><div class="profile-section"><div class="profile-section-title">证据维度</div><div class="chip-list">${(p.facets || []).map((f) => `<span class="chip">${escapeHtml(f.name)} · ${escapeHtml(f.value)}</span>`).join("")}</div></div><button class="btn btn-brand">保存叙述</button></form>`,
     );
     document
       .getElementById("mobileProfile")
@@ -337,7 +348,7 @@ async function renderSettings() {
     const modal = document.createElement("section");
     modal.className = "settings-sheet open";
     const adminUrl = safeWebUrl(health.admin_url);
-    modal.innerHTML = `<div class="settings-sheet-panel"><div class="settings-head"><h2>设置</h2><button id="closeMobileSettings" class="badge-btn">×</button></div><h3>AI 别名</h3>${(health.aliases || []).map((item) => `<p><strong>${escapeHtml(item.alias)}</strong> · ${escapeHtml(item.state)}</p>`).join("")}${adminUrl ? `<a class="btn btn-brand" href="${escapeHtml(adminUrl)}" target="_blank" rel="noreferrer">LiteLLM Admin ↗</a>` : ""}<form id="mobileSettingsForm"><h3>常用产品设置</h3><label>发现流低水位<input id="mLow" type="number" min="0" max="1000" value="${settings.feed.low_watermark}"></label><label>发现流高水位<input id="mHigh" type="number" min="1" max="2000" value="${settings.feed.high_watermark}"></label><label>最低推荐分<input id="mScore" type="number" min="0" max="1" step="0.01" value="${settings.feed.min_score}"></label><label>来源同步间隔（分钟）<input id="mSync" type="number" min="1" max="10080" value="${settings.schedules.source_sync_interval_minutes}"></label><label>网络模式<select id="mNetwork"><option value="direct">直接连接</option><option value="system">系统代理</option><option value="custom">自定义代理</option></select></label><label>代理 URL<input id="mProxy" value="${escapeHtml(settings.network.proxy_url)}"></label><label><input id="mExtension" type="checkbox" ${settings.access_control.extension_access_enabled ? "checked" : ""}> 允许浏览器扩展</label><p class="hint">完整的来源权重、任务限制、日志和访问控制设置可在桌面 Web 中调整。</p><button class="btn btn-brand">保存</button></form></div>`;
+    modal.innerHTML = `<div class="settings-sheet-panel"><div class="settings-head"><h2>设置</h2><button id="closeMobileSettings" class="badge-btn">×</button></div><h3>AI 别名</h3>${(health.aliases || []).map((item) => `<p><strong>${escapeHtml(item.alias)}</strong> · ${escapeHtml(item.state)}</p>`).join("")}${adminUrl ? `<a class="btn btn-brand" href="${escapeHtml(adminUrl)}" target="_blank" rel="noreferrer">LiteLLM Admin ↗</a>` : ""}<form id="mobileSettingsForm"><h3>常用产品设置</h3><label>发现流低水位<input id="mLow" type="number" min="0" max="1000" value="${settings.feed.low_watermark}"></label><label>发现流高水位<input id="mHigh" type="number" min="1" max="2000" value="${settings.feed.high_watermark}"></label><label>最低推荐分<input id="mScore" type="number" min="0" max="1" step="0.01" value="${settings.feed.min_score}"></label><label>来源同步间隔（分钟）<input id="mSync" type="number" min="1" max="10080" value="${settings.schedules.source_sync_interval_minutes}"></label><label>画像投影间隔（分钟）<input id="mProfileSchedule" type="number" min="1" max="10080" value="${settings.schedules.profile_projection_interval_minutes}"></label><label>发现流补充间隔（分钟）<input id="mFeedSchedule" type="number" min="1" max="10080" value="${settings.schedules.feed_replenishment_interval_minutes}"></label><label>清理间隔（分钟）<input id="mCleanupSchedule" type="number" min="1" max="10080" value="${settings.schedules.cleanup_interval_minutes}"></label><label>网络模式<select id="mNetwork"><option value="direct">直接连接</option><option value="system">系统代理</option><option value="custom">自定义代理</option></select></label><label>代理 URL<input id="mProxy" value="${escapeHtml(settings.network.proxy_url)}"></label><label><input id="mExtension" type="checkbox" ${settings.access_control.extension_access_enabled ? "checked" : ""}> 允许浏览器扩展</label><p class="hint">完整的来源权重、任务限制、日志和访问控制设置可在桌面 Web 中调整。</p><button class="btn btn-brand">保存</button></form></div>`;
     document.body.appendChild(modal);
     document.getElementById("mNetwork").value = settings.network.mode;
     document
@@ -359,10 +370,22 @@ async function renderSettings() {
                 source_sync_interval_minutes: Number(
                   document.getElementById("mSync").value,
                 ),
+                profile_projection_interval_minutes: Number(
+                  document.getElementById("mProfileSchedule").value,
+                ),
+                feed_replenishment_interval_minutes: Number(
+                  document.getElementById("mFeedSchedule").value,
+                ),
+                cleanup_interval_minutes: Number(
+                  document.getElementById("mCleanupSchedule").value,
+                ),
               },
               network: {
                 mode: document.getElementById("mNetwork").value,
-                proxy_url: document.getElementById("mProxy").value,
+                proxy_url:
+                  document.getElementById("mNetwork").value === "custom"
+                    ? document.getElementById("mProxy").value
+                    : "",
               },
               access_control: {
                 extension_access_enabled:

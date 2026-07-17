@@ -9,7 +9,8 @@
 `GET /api/v1/auth/status` is public and returns only readiness booleans. Same-origin
 `POST /api/v1/auth/login` validates the password and sets `HttpOnly`, `SameSite=Lax`,
 path `/`, and `Secure` on HTTPS; it never returns a session token in JSON. Cookie-authenticated
-unsafe requests (`POST`, `PUT`, `PATCH`, `DELETE`) additionally require a same-origin
+unsafe requests (`POST`, `PUT`, `PATCH`, `DELETE`) and the lease-mutating source-task
+claim GET additionally require a same-origin
 `Origin` plus the presence of `X-OBC-Auth`. `POST /api/v1/auth/logout` clears the cookie.
 
 Extension bootstrap uses `POST /api/v1/auth/extension-token` only from an extension
@@ -50,8 +51,11 @@ Authorization: Bearer <installer token or finite extension session>
 Missing/malformed authentication returns `401`; a recognized but unauthorized credential
 returns `403`. Errors use the shared `{ "error": { "code", "message" } }` envelope and never
 echo a submitted password, header, cookie, device key, session, hash, or signing secret.
-`GET /api/v1/system/readiness` is public. Onboarding is public only while
-`onboarding_complete=false`; afterward it uses the same access policy and cookie-CSRF rules.
+`GET /api/v1/system/readiness` is public. Onboarding uses the same access policy and
+cookie-CSRF rules whenever any installer/browser/extension credential is configured, including
+the fresh first-run window. Only an explicitly unconfigured manual-recovery deployment may
+reach incomplete onboarding without authentication; the supported installers always provision
+credentials before starting the API.
 
 ## Provisioning boundary
 
@@ -63,14 +67,19 @@ Browser authentication credentials are infrastructure secrets, not `UserSettings
 | session signing key | installer-generated random `OPENBILICLAW_SESSION_SECRET`, persisted once and reused |
 | extension device key | complete key delivered once to the extension; only digest record retained in `OPENBILICLAW_EXTENSION_ACCESS_KEYS` |
 
-The source and Docker installers generate `OPENBILICLAW_SESSION_SECRET` before runtime or
-Compose preparation, write it to the mode-`0600` `.env`, and preserve the existing non-empty
-value on rerun. Password hashes and extension digest records remain explicit optional
-provisioning inputs. Write all browser credentials directly to the private `.env` or a
-deployment secret store. Do not paste generated values into docs,
-shell history, issue text, screenshots, API examples, logs, OpenAPI examples, or generated
-clients. `GET/PATCH /api/v1/settings` exposes only `password_configured` and
-`installer_bearer_configured` deployment facts plus mutable access behavior.
+The source and Docker installers generate `OPENBILICLAW_SESSION_SECRET`, a Web password/hash,
+and an extension key/digest before runtime or Compose preparation. They persist only the
+signing secret, scrypt hash, and digest records in a private `.env` (POSIX mode `0600` or a
+verified current-user-only Windows DACL), preserving non-empty
+values on rerun. The plaintext password and complete extension key appear in exactly one
+purpose-built `BOOTSTRAP_STATUS first_run_access` event, then are discarded and cannot be
+recovered on rerun. Transfer that event privately; do not paste it into docs, shell history,
+issue text, screenshots, API examples, general logs, OpenAPI examples, or generated clients.
+`GET/PATCH /api/v1/settings` exposes only `password_configured` and
+`installer_bearer_configured` deployment facts plus safe mutable access behavior.
+`web_password_enabled` is read-only and remains enabled, so a cookie-authenticated browser
+cannot remove its own login path. Lost first-run credentials are recovered with installer
+`--rotate-access`, which replaces both verifier records only after a successful runtime check.
 
 The authoritative vNext auth loader is environment-only: `OPENBILICLAW_ACCESS_TOKEN`,
 `OPENBILICLAW_WEB_PASSWORD_HASH`, `OPENBILICLAW_SESSION_SECRET`, and digest-only

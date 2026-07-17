@@ -474,14 +474,25 @@ class YtScraperClient:
 
     async def search_videos(self, query: str, *, limit: int = 20) -> list[dict[str, Any]]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, partial(_scrapetube_search, query, limit))
+        rows = await loop.run_in_executor(None, partial(_scrapetube_search, query, limit))
+        return _dict_rows(rows)
 
     async def get_trending(self, *, limit: int = 50) -> list[dict[str, Any]]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        rows = await loop.run_in_executor(
             None, partial(_innertube_trending, self.region_code, limit)
         )
+        return _dict_rows(rows)
 
     async def get_channel_videos(self, channel_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, partial(_scrapetube_channel, channel_id, limit))
+        rows = await loop.run_in_executor(None, partial(_scrapetube_channel, channel_id, limit))
+        return _dict_rows(rows)
+
+
+def _dict_rows(value: object) -> list[dict[str, Any]]:
+    """Keep malformed third-party rows behind the source-client boundary."""
+
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]

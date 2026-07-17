@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from openbiliclaw.features._metadata import freeze_metadata, serialize_metadata
+from openbiliclaw.features._urls import sanitize_public_url
 from openbiliclaw.features.sources.domain import (
     BrowserOperationResult,
     BrowserOperationResultValue,
@@ -93,6 +94,8 @@ class SourceTaskRepository(Protocol):
     ) -> SourceTaskCompletion: ...
 
     def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
+
+    def source_id(self, task_id: UUID) -> SourceId: ...
 
     def cancel(self, task_id: UUID) -> SourceTaskSnapshot: ...
 
@@ -357,10 +360,30 @@ class SourceTaskService:
             snapshot = uow.source_tasks.get_snapshot(task_id)
             raw_result = result.model_dump(mode="json")
             safe_result = _safe_json_object(raw_result)
-            typed_result = BrowserOperationResult.validate_python(safe_result)
+            sanitized_result = _sanitize_public_url_values(safe_result)
+            typed_result = BrowserOperationResult.validate_python(sanitized_result)
             serialized_result = typed_result.model_dump(mode="json")
-            if snapshot.operation is not typed_result.operation:
-                raise ValueError("source task completion operation does not match request")
+            source_id = uow.source_tasks.source_id(task_id)
+            try:
+                if snapshot.operation is not typed_result.operation:
+                    raise ValueError("source task completion operation does not match request")
+                connector = self._registry_provider().get(source_id.value)
+                validator = getattr(connector, "validate_browser_completion", None)
+                if not callable(validator):
+                    raise TypeError("source connector has no browser result validator")
+                validator(typed_result.operation, typed_result.items)
+            except (TypeError, ValueError):
+                failure = SourceTaskFailure(
+                    code="result_mismatch",
+                    error_type="SourceResultMismatch",
+                )
+                completion = uow.source_tasks.fail(
+                    task_id=task_id,
+                    lease_token=lease_token,
+                    failure=_safe_json_object(failure.model_dump(mode="json")),
+                )
+                uow.commit()
+                return completion
             completion = uow.source_tasks.complete(
                 task_id=task_id,
                 lease_token=lease_token,
@@ -416,6 +439,19 @@ def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     frozen = freeze_metadata(value)
     result = _JSON_OBJECT.validate_python(serialize_metadata(frozen), strict=True)
     return result
+
+
+def _sanitize_public_url_values(value: JsonValue) -> JsonValue:
+    """Recursively remove credential query parameters from transport URL strings."""
+
+    if isinstance(value, str):
+        sanitized = sanitize_public_url(value)
+        return sanitized if isinstance(sanitized, str) else value
+    if isinstance(value, list):
+        return [_sanitize_public_url_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_public_url_values(item) for key, item in value.items()}
+    return value
 
 
 def validate_source_task_payload(value: Mapping[str, object]) -> dict[str, JsonValue]:

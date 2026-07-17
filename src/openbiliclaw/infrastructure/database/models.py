@@ -292,7 +292,10 @@ class JobRunModel(Base):
     """Application-owned durable status for one background job run."""
 
     __tablename__ = "job_runs"
-    __table_args__ = (Index("job_status_created", "status", "created_at"),)
+    __table_args__ = (
+        Index("job_status_created", "status", "created_at"),
+        Index("job_running_lease", "status", "lease_expires_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     job_name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -307,6 +310,17 @@ class JobRunModel(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    worker_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    retry_not_before: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    continuation_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AIRunModel(Base):

@@ -20,6 +20,7 @@ from openbiliclaw.features.sources.service import SourceTaskService
 from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_engine_and_session
 from openbiliclaw.infrastructure.database.models import SourceTaskModel
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
+from openbiliclaw.infrastructure.sources._base import allocate_scope_limits
 from openbiliclaw.infrastructure.sources.bilibili import build_bilibili_connector
 from openbiliclaw.infrastructure.sources.bilibili_client import BilibiliAPIError
 from openbiliclaw.infrastructure.sources.douyin import (
@@ -151,6 +152,100 @@ async def test_production_builders_wrap_retained_bilibili_and_x_clients(
         "feed",
         "creator",
     }
+
+
+def test_multi_scope_limit_allocation_is_balanced_and_deterministic() -> None:
+    assert allocate_scope_limits(7, ("first", "second", "third")) == {
+        "first": 3,
+        "second": 2,
+        "third": 2,
+    }
+    assert allocate_scope_limits(2, ("first", "second", "third", "fourth")) == {
+        "first": 1,
+        "second": 1,
+        "third": 0,
+        "fourth": 0,
+    }
+
+
+class FullScopeBilibiliClient(BilibiliClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.limits: list[tuple[str, int]] = []
+
+    async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
+        self.limits.append(("history", max_items))
+        return [{"bvid": f"history-{index}"} for index in range(max_items)]
+
+    async def get_all_favorites(
+        self,
+        *,
+        max_folders: int = 10,
+        max_items_per_folder: int = 50,
+        max_total_items: int | None = None,
+    ) -> list[Any]:
+        assert max_total_items is not None
+        self.limits.append(("favorites", max_total_items))
+        return [
+            SimpleNamespace(
+                items=[{"bvid": f"favorite-{index}"} for index in range(max_total_items)]
+            )
+        ]
+
+    async def get_following(self, *, page: int = 1, page_size: int = 50) -> list[Any]:
+        self.limits.append(("following", page_size))
+        return [
+            SimpleNamespace(mid=index + 1, uname=f"creator-{index}") for index in range(page_size)
+        ]
+
+
+class FullScopeTwitterClient(TwitterClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.limits: list[tuple[str, int]] = []
+
+    async def likes(self, *, limit: int) -> list[dict[str, Any]]:
+        self.limits.append(("likes", limit))
+        return [{"id": f"liked-{index}", "text": "liked"} for index in range(limit)]
+
+    async def bookmarks(self, *, limit: int) -> list[dict[str, Any]]:
+        self.limits.append(("bookmarks", limit))
+        return [{"id": f"saved-{index}", "text": "saved"} for index in range(limit)]
+
+
+async def test_direct_multi_scope_bootstrap_cannot_be_monopolized_by_first_scope(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+) -> None:
+    _, _, service = task_context
+    bilibili_client = FullScopeBilibiliClient()
+    twitter_client = FullScopeTwitterClient()
+
+    bilibili_events = await build_bilibili_connector(bilibili_client, service).execute(
+        SourceOperation.BOOTSTRAP_IMPORT,
+        limit=6,
+    )
+    twitter_events = await build_twitter_connector(twitter_client).execute(
+        SourceOperation.BOOTSTRAP_IMPORT,
+        limit=5,
+    )
+
+    assert bilibili_client.limits == [("history", 2), ("favorites", 2), ("following", 2)]
+    assert [event.kind.value for event in bilibili_events] == [
+        "view",
+        "view",
+        "favorite",
+        "favorite",
+        "follow",
+        "follow",
+    ]
+    assert twitter_client.limits == [("likes", 3), ("bookmarks", 2)]
+    assert [event.kind.value for event in twitter_events] == [
+        "like",
+        "like",
+        "like",
+        "favorite",
+        "favorite",
+    ]
 
 
 class DouyinClient:

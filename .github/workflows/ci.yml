@@ -57,13 +57,18 @@ jobs:
       - name: Run pytest
         run: uv run --frozen pytest -q tests/vnext --cov --cov-report=term-missing
 
+      - name: Enforce vNext source connector coverage
+        run: bash scripts/check-source-contracts.sh
+
       - name: Validate Compose distributions
         env:
           LITELLM_POSTGRES_PASSWORD: test-postgres-password
           LITELLM_MASTER_KEY: sk-test-master-key
           OPENBILICLAW_SECRET_KEY: test-source-secret
           OPENBILICLAW_ACCESS_TOKEN: test-access-token
+          OPENBILICLAW_WEB_PASSWORD_HASH: test-installer-scrypt-hash
           OPENBILICLAW_SESSION_SECRET: test-session-secret
+          OPENBILICLAW_EXTENSION_ACCESS_KEYS: test-installer-extension-digest
         run: |
           docker compose -f docker-compose.yml config --quiet
           docker compose -f docker-compose.prebuilt.yml config --quiet

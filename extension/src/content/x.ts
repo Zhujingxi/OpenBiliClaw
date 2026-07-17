@@ -25,6 +25,7 @@ import type {
   XEventType,
 } from "../main/x-graphql-tap.js";
 import type { BehaviorEvent } from "../shared/types.js";
+import { handoffBehaviorEvent } from "./activity-handoff.js";
 
 // Keep CapturedXRequest referenced so the type import survives tree-shaking
 // (the tap and this file share the same engagement contract).
@@ -64,11 +65,7 @@ function buildEvent(engagement: XEngagement): BehaviorEvent {
 }
 
 function sendEvent(event: BehaviorEvent): void {
-  try {
-    chrome.runtime.sendMessage({ action: "BEHAVIOR_EVENT", data: event });
-  } catch {
-    // best effort — never break the page
-  }
+  void handoffBehaviorEvent(event);
 }
 
 function isXEngagement(value: unknown): value is XEngagement {

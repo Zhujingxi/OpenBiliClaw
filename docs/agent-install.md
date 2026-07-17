@@ -38,7 +38,9 @@ is rejected.
 
 The authoritative runtime file is `<checkout>/.env`. It is ignored by Git, written
 through a same-directory temporary file and atomic replace, and uses mode `0600` on
-POSIX. `.env` and its lock must be regular files; symlinks are rejected. Existing
+POSIX. Native Windows applies and verifies a protected DACL owned by the current user with
+only that SID granted full control before secret bytes are written; missing PowerShell, owner
+mismatch, inheritance, or any additional access rule fails closed. `.env` and its lock must be regular files; symlinks are rejected. Existing
 non-empty secrets and the external LiteLLM connection are reused on every rerun.
 Installer-owned `OPENBILICLAW_PROJECT_ROOT`, installer instance ID, application DB,
 and Huey paths are always rebound to the current canonical checkout and private
@@ -51,26 +53,38 @@ Docker generates:
 - `OPENBILICLAW_SECRET_KEY`
 - `OPENBILICLAW_ACCESS_TOKEN`
 - `OPENBILICLAW_SESSION_SECRET`
+- `OPENBILICLAW_WEB_PASSWORD_HASH`
+- `OPENBILICLAW_EXTENSION_ACCESS_KEYS`
 
-Optional browser access is provisioned as separate secrets:
+Browser access is provisioned as separate secrets:
+
+The installer must create the session secret independently from every access credential.
 
 - `OPENBILICLAW_WEB_PASSWORD_HASH`: scrypt hash only, never a plaintext password;
 - `OPENBILICLAW_SESSION_SECRET`: independent Web/extension signing secret generated above;
 - `OPENBILICLAW_EXTENSION_ACCESS_KEYS`: JSON array of `key-id:sha256-digest` records;
 - `OPENBILICLAW_LITELLM_ADMIN_URL`: optional credential-free public navigation URL.
 
-Both source and Docker install paths create the session secret before migration/Compose,
-persist it once in the private `.env`, preserve the existing non-empty value on rerun, and do
-not print it. The complete extension device key is delivered once to the intended extension and is not
-retained in runtime configuration. Provisioning must write generated values directly to the
-private `.env`/secret store without command-line arguments, shell history, status JSON, logs,
-screenshots, examples, or docs. Do not derive or reuse these values from the installer bearer,
-source-encryption secret, or LiteLLM master key. Existing unrelated `.env` entries are retained
-on installer rerun.
+Both source and Docker install paths stage a random Web password/hash and extension key/digest
+in memory for migration and runtime verification. Only after success are verifier records atomically
+persisted in the private `.env` and plaintext emitted once in the `BOOTSTRAP_STATUS`
+`first_run_access` event. Failures do neither. Non-empty records are preserved on rerun; set
+`ROTATE_ACCESS=1` (or pass `--rotate-access` directly) if the final event was lost. The operator must transfer that event privately to a password
+manager and the intended extension; plaintext must not be copied into `.env`, shell history,
+screenshots, docs, or issue logs. Do not derive these values from the installer bearer,
+source-encryption secret, or LiteLLM master key.
+
+The same lifecycle lock covers Docker/source credential staging, runtime or Compose start,
+verifier commit, one-time disclosure, and rotation. Concurrent invocations serialize before
+staging, so one invocation cannot run with another invocation's access pair. Supported setup
+authenticates with the staged Web password before onboarding; browser settings cannot disable
+this login path. Recovery is an explicit successful `--rotate-access` transaction.
 
 Both source and prebuilt Compose files forward these four values to the `api` service only;
-`OPENBILICLAW_SESSION_SECRET` is required by Compose, while the password hash, digest-record
-array, and public Admin URL may be empty. The worker intentionally receives no browser-auth
+password hash, signing secret, and digest-record array are required by Compose. Docker defaults
+the credential-free Admin navigation URL to `http://127.0.0.1:${LITELLM_PORT:-4000}/ui`.
+An explicit Docker `--litellm-admin-url` replaces and persists that value; a rerun without an
+explicit value preserves an existing custom URL. Source installs persist no Admin URL unless the operator supplies `--litellm-admin-url` or `OPENBILICLAW_LITELLM_ADMIN_URL`. The worker intentionally receives no browser-auth
 material. The vNext auth loader is environment-only and never imports legacy config auth.
 
 Source installs additionally require user values for:
@@ -78,9 +92,12 @@ Source installs additionally require user values for:
 - `OPENBILICLAW_LITELLM_BASE_URL`
 - `OPENBILICLAW_LITELLM_API_KEY`
 
-The shell and PowerShell installers collect a missing LiteLLM key with terminal echo
-disabled. Status events contain only step names, paths, process IDs, and a health
-URL; they never contain secret values or the LiteLLM URL.
+The shell and PowerShell installers never parse `.env`; the Python bootstrap performs the
+no-follow private read and verifies POSIX owner/mode or the Windows owner-only DACL. On a new source install the wrappers collect a missing
+LiteLLM key with terminal echo disabled. All status events are secret-free except the single purpose-built
+`first_run_access` event. It contains only the newly generated Web password and extension key;
+it never contains the installer bearer, encryption key, signing secret, LiteLLM master/API key,
+provider credential, or LiteLLM connection URL.
 
 ## Source-install sequence
 
@@ -123,6 +140,11 @@ of the entire root or of every Windows coordination object.
    `openbiliclaw doctor`.
 9. Check public readiness and a bearer-protected settings request, followed by
    another API and worker liveness check.
+
+Every operational CLI command loads `<checkout>/.env` before constructing runtime settings and
+uses set-if-absent semantics, so an explicit process environment remains authoritative. Docker
+installer `HOST`/`PORT` values are persisted as `OPENBILICLAW_API_HOST`/`OPENBILICLAW_API_PORT`
+and drive the Compose port mapping, API port, healthcheck, protected probe, and completion URL.
 
 The installer bearer remains the operational probe credential. Cookie login and extension
 exchange are optional product auth paths; their absence is reported as deployment facts and is

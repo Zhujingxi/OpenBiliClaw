@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -54,18 +54,39 @@ class MemoryJobs:
             "error": None,
             "attempts": 0,
             "dispatched_at": None,
+            "worker_id": None,
+            "claim_token": None,
+            "lease_expires_at": None,
+            "retry_not_before": None,
         }
         return run_id, True
 
     def get(self, run_id: UUID) -> dict[str, object]:
         return self.rows[run_id]
 
-    def claim(self, run_id: UUID) -> bool:
+    def claim(
+        self,
+        run_id: UUID,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+        max_attempts: int,
+    ) -> bool:
         row = self.rows[run_id]
-        if row["status"] is not JobRunStatus.PENDING:
+        retry_not_before = row["retry_not_before"]
+        if (
+            row["status"] is not JobRunStatus.PENDING
+            or int(cast("int", row["attempts"])) >= max_attempts
+            or (isinstance(retry_not_before, datetime) and retry_not_before > datetime.now(UTC))
+        ):
             return False
         row["status"] = JobRunStatus.RUNNING
         row["attempts"] = int(row["attempts"]) + 1
+        row["worker_id"] = worker_id
+        row["claim_token"] = claim_token
+        row["lease_expires_at"] = lease_expires_at
+        row["retry_not_before"] = None
         return True
 
     def mark_dispatched(self, run_id: UUID) -> None:
@@ -75,23 +96,77 @@ class MemoryJobs:
         return tuple(
             run_id
             for run_id, row in self.rows.items()
-            if row["status"] is JobRunStatus.PENDING and row["dispatched_at"] is None
+            if row["status"] is JobRunStatus.PENDING
+            and row["dispatched_at"] is None
+            and (
+                row["retry_not_before"] is None
+                or cast("datetime", row["retry_not_before"]) <= datetime.now(UTC)
+            )
         )
 
     def pending(self) -> tuple[UUID, ...]:
         return tuple(
-            run_id for run_id, row in self.rows.items() if row["status"] is JobRunStatus.PENDING
+            run_id
+            for run_id, row in self.rows.items()
+            if row["status"] is JobRunStatus.PENDING
+            and (
+                row["retry_not_before"] is None
+                or cast("datetime", row["retry_not_before"]) <= datetime.now(UTC)
+            )
         )
 
-    def guard_running(self, run_id: UUID) -> bool:
-        return self.rows[run_id]["status"] is JobRunStatus.RUNNING
-
-    def checkpoint(self, run_id: UUID, progress: float) -> bool:
+    def guard_running(
+        self,
+        run_id: UUID,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+    ) -> bool:
         row = self.rows[run_id]
-        if row["status"] is not JobRunStatus.RUNNING:
+        owned = (
+            row["status"] is JobRunStatus.RUNNING
+            and row["worker_id"] == worker_id
+            and row["claim_token"] == claim_token
+        )
+        if owned:
+            row["lease_expires_at"] = lease_expires_at
+        return owned
+
+    def checkpoint(
+        self,
+        run_id: UUID,
+        progress: float,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        row = self.rows[run_id]
+        if (
+            row["status"] is not JobRunStatus.RUNNING
+            or row["worker_id"] != worker_id
+            or row["claim_token"] != claim_token
+        ):
             return False
         row["progress"] = max(float(row["progress"]), progress)
+        row["lease_expires_at"] = lease_expires_at
         return True
+
+    def heartbeat(
+        self,
+        run_id: UUID,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        return self.guard_running(
+            run_id,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            lease_expires_at=lease_expires_at,
+        )
 
     def update(
         self,
@@ -100,24 +175,58 @@ class MemoryJobs:
         status: JobRunStatus,
         progress: float,
         error: str | None = None,
-    ) -> None:
+        worker_id: str,
+        claim_token: str,
+        retry_not_before: datetime | None = None,
+    ) -> bool:
+        if (
+            self.rows[run_id].get("worker_id") != worker_id
+            or self.rows[run_id].get("claim_token") != claim_token
+        ):
+            return False
         self.rows[run_id].update(status=status, progress=progress, error=error)
+        self.rows[run_id].update(
+            worker_id=None,
+            claim_token=None,
+            lease_expires_at=None,
+            retry_not_before=retry_not_before,
+        )
         if status is JobRunStatus.PENDING:
             self.rows[run_id]["dispatched_at"] = None
+        return True
 
     def cancel(self, run_id: UUID) -> bool:
         row = self.rows[run_id]
         if row["status"] in {JobRunStatus.SUCCEEDED, JobRunStatus.FAILED}:
             return False
         row["status"] = JobRunStatus.CANCELLED
+        row["worker_id"] = None
+        row["claim_token"] = None
+        row["lease_expires_at"] = None
+        row["retry_not_before"] = None
         return True
 
-    def recover_running(self) -> tuple[UUID, ...]:
+    def recover_expired(self, *, now: datetime, max_attempts: dict[str, int]) -> tuple[UUID, ...]:
         recovered = []
         for run_id, row in self.rows.items():
-            if row["status"] is JobRunStatus.RUNNING:
+            lease = row.get("lease_expires_at")
+            if row["status"] is JobRunStatus.RUNNING and (
+                lease is None or (isinstance(lease, datetime) and lease <= now)
+            ):
+                if int(cast("int", row["attempts"])) >= max_attempts[str(row["job_name"])]:
+                    row["status"] = JobRunStatus.FAILED
+                    row["error"] = "WorkerInterrupted"
+                    row["worker_id"] = None
+                    row["claim_token"] = None
+                    row["lease_expires_at"] = None
+                    row["retry_not_before"] = None
+                    continue
                 row["status"] = JobRunStatus.PENDING
                 row["dispatched_at"] = None
+                row["worker_id"] = None
+                row["claim_token"] = None
+                row["lease_expires_at"] = None
+                row["retry_not_before"] = None
                 recovered.append(run_id)
         return tuple(recovered)
 
@@ -175,7 +284,7 @@ def test_exactly_four_job_names_are_public() -> None:
     [
         (source_sync, "source-sync", PRIORITY_SCHEDULED, 2),
         (profile_projection, "profile-projection", PRIORITY_SCHEDULED, 2),
-        (feed_replenishment, "feed-replenishment", PRIORITY_USER_TRIGGERED, 2),
+        (feed_replenishment, "feed-replenishment", PRIORITY_SCHEDULED, 2),
         (cleanup, "cleanup", PRIORITY_SCHEDULED, 1),
     ],
 )
@@ -285,7 +394,7 @@ def test_cancellation_is_business_state_and_prevents_claim() -> None:
     run = service.schedule("cleanup", idempotency_key="cleanup:once")
 
     assert service.cancel(run.id).status is JobRunStatus.CANCELLED
-    assert service.claim(run.id) is False
+    assert service.claim(run.id) is None
 
 
 def test_restart_recovery_requeues_only_application_running_rows() -> None:
@@ -293,7 +402,8 @@ def test_restart_recovery_requeues_only_application_running_rows() -> None:
     queue = Queue()
     service = JobService(lambda: JobUow(jobs), queue=queue)
     run = service.schedule("feed_replenishment", idempotency_key="feed:1")
-    assert service.claim(run.id) is True
+    assert service.claim(run.id) is not None
+    jobs.rows[run.id]["lease_expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
 
     recovered = service.recover_interrupted()
 
@@ -306,8 +416,9 @@ def test_running_cancellation_is_visible_at_checkpoint_and_progress_is_monotonic
     jobs = MemoryJobs()
     service = JobService(lambda: JobUow(jobs), queue=Queue())
     run = service.schedule("feed_replenishment", idempotency_key="progress")
-    assert service.claim(run.id)
-    context = JobExecutionContext(service, run.id)
+    claim_token = service.claim(run.id)
+    assert claim_token is not None
+    context = JobExecutionContext(service, run.id, claim_token)
 
     context.checkpoint(0.4)
     context.checkpoint(0.2)
@@ -324,35 +435,118 @@ def test_retry_keeps_monotonic_business_progress() -> None:
     jobs = MemoryJobs()
     service = JobService(lambda: JobUow(jobs), queue=Queue())
     run = service.schedule("source_sync", idempotency_key="retry-progress")
-    assert service.claim(run.id)
-    first = JobExecutionContext(service, run.id)
+    first_claim = service.claim(run.id)
+    assert first_claim is not None
+    first = JobExecutionContext(service, run.id, first_claim)
     first.checkpoint(0.6)
-    service.retry(run.id, TransientJobError("retry"))
-    assert service.claim(run.id)
+    service.retry(
+        run.id,
+        TransientJobError("retry"),
+        delay_seconds=0,
+        claim_token=first_claim,
+    )
+    second_claim = service.claim(run.id)
+    assert second_claim is not None
 
-    JobExecutionContext(service, run.id).checkpoint(0.3)
+    JobExecutionContext(service, run.id, second_claim).checkpoint(0.3)
 
     assert service.inspect(run.id).progress == 0.6
 
 
-@pytest.mark.parametrize("interval", [5, 30])
-def test_source_sync_periodic_buckets_follow_typed_setting(interval: int) -> None:
+@pytest.mark.parametrize(
+    ("job_name", "interval"),
+    [
+        ("source_sync", 30),
+        ("profile_projection", 10),
+        ("feed_replenishment", 5),
+        ("cleanup", 1440),
+    ],
+)
+def test_periodic_buckets_follow_each_current_typed_setting(job_name: str, interval: int) -> None:
+    jobs = MemoryJobs()
+    queue = Queue()
+    intervals = {
+        "source_sync": 30,
+        "profile_projection": 10,
+        "feed_replenishment": 5,
+        "cleanup": 1440,
+    }
+    service = JobService(
+        lambda: JobUow(jobs),
+        queue=queue,
+        schedule_interval_minutes=lambda name: intervals[name],
+    )
+    base = datetime(2026, 7, 17, 1, 0, tzinfo=UTC)
+    bucket_seconds = interval * 60
+    now = datetime.fromtimestamp(
+        int(base.timestamp()) // bucket_seconds * bucket_seconds,
+        tz=UTC,
+    )
+
+    first = service.schedule_periodic(job_name, now=now)  # type: ignore[arg-type]
+    duplicate = service.schedule_periodic(  # type: ignore[arg-type]
+        job_name, now=now + timedelta(minutes=interval - 1)
+    )
+    intervals[job_name] = 1
+    later = service.schedule_periodic(  # type: ignore[arg-type]
+        job_name, now=now + timedelta(minutes=interval)
+    )
+
+    assert first.id == duplicate.id
+    assert later.id != first.id
+    assert len(queue.enqueued) == 2
+
+
+@pytest.mark.parametrize(
+    "job_name",
+    ["source_sync", "profile_projection", "feed_replenishment"],
+)
+def test_ineligible_periodic_product_maintenance_is_a_no_op(job_name: str) -> None:
     jobs = MemoryJobs()
     queue = Queue()
     service = JobService(
         lambda: JobUow(jobs),
         queue=queue,
-        source_sync_interval_minutes=lambda: interval,
+        periodic_job_eligible=lambda name: name == "cleanup",
     )
-    now = datetime(2026, 7, 17, 1, 0, tzinfo=UTC)
 
-    first = service.schedule_periodic("source_sync", now=now)
-    duplicate = service.schedule_periodic("source_sync", now=now + timedelta(minutes=interval - 1))
-    later = service.schedule_periodic("source_sync", now=now + timedelta(minutes=interval))
+    result = service.schedule_periodic(job_name)  # type: ignore[arg-type]
 
-    assert first.id == duplicate.id
-    assert later.id != first.id
-    assert len(queue.enqueued) == 2
+    assert result is None
+    assert jobs.rows == {}
+    assert queue.enqueued == []
+
+
+def test_cleanup_periodic_remains_enabled_when_product_maintenance_is_ineligible() -> None:
+    jobs = MemoryJobs()
+    queue = Queue()
+    service = JobService(
+        lambda: JobUow(jobs),
+        queue=queue,
+        periodic_job_eligible=lambda name: name == "cleanup",
+    )
+
+    run = service.schedule_periodic("cleanup")
+
+    assert run is not None
+    assert run.priority == PRIORITY_SCHEDULED
+    assert run.idempotency_key.startswith("cleanup:periodic:")
+    assert queue.enqueued == [("cleanup", run.id, PRIORITY_SCHEDULED)]
+
+
+def test_periodic_eligibility_does_not_affect_explicit_scheduling() -> None:
+    jobs = MemoryJobs()
+    queue = Queue()
+    service = JobService(
+        lambda: JobUow(jobs),
+        queue=queue,
+        periodic_job_eligible=lambda _name: False,
+    )
+
+    run = service.schedule("feed_replenishment", idempotency_key="onboarding:continue")
+
+    assert run.priority == PRIORITY_USER_TRIGGERED
+    assert queue.enqueued == [("feed_replenishment", run.id, PRIORITY_USER_TRIGGERED)]
 
 
 @pytest.mark.parametrize("compose_name", ["docker-compose.yml", "docker-compose.prebuilt.yml"])

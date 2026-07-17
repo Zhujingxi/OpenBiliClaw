@@ -7,6 +7,7 @@ import argparse
 import ctypes
 import errno
 import hashlib
+import importlib.util
 import json
 import os
 import secrets
@@ -17,13 +18,14 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
@@ -42,6 +44,46 @@ LIFECYCLE_LOCK = Path("data/vnext/install-lifecycle.lock")
 ROOT_LIFECYCLE_GUARD = Path(".openbiliclaw-install-root.lock")
 LIFECYCLE_LOCK_TIMEOUT = 120.0
 
+_WINDOWS_PRIVATE_ACL_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$Mode = $env:OPENBILICLAW_PRIVATE_ACL_MODE
+$Target = $env:OPENBILICLAW_PRIVATE_ACL_TARGET
+if ([string]::IsNullOrWhiteSpace($Target)) { exit 18 }
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$sid = $identity.User
+if ($null -eq $sid) { exit 17 }
+if ($Mode -eq 'apply') {
+    $acl = New-Object System.Security.AccessControl.FileSecurity
+    $acl.SetOwner($sid)
+    $acl.SetAccessRuleProtection($true, $false)
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $sid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Target -AclObject $acl
+} elseif ($Mode -ne 'verify') {
+    exit 18
+}
+$current = Get-Acl -LiteralPath $Target
+$owner = $current.GetOwner([System.Security.Principal.SecurityIdentifier])
+$rules = @($current.GetAccessRules(
+    $true,
+    $true,
+    [System.Security.Principal.SecurityIdentifier]
+))
+$full = [System.Security.AccessControl.FileSystemRights]::FullControl
+if (-not $current.AreAccessRulesProtected -or $owner.Value -ne $sid.Value) { exit 19 }
+if ($rules.Count -ne 1) { exit 19 }
+$only = $rules[0]
+if ($only.IdentityReference.Value -ne $sid.Value) { exit 19 }
+if ($only.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+    exit 19
+}
+if (($only.FileSystemRights -band $full) -ne $full) { exit 19 }
+"""
+
 
 class ProcessLike(Protocol):
     pid: int
@@ -53,6 +95,12 @@ class ProcessLike(Protocol):
     def kill(self) -> None: ...
 
     def wait(self, timeout: float | None = None) -> int: ...
+
+
+class AuthCorePrimitives(Protocol):
+    def hash_password(self, plain: str) -> str: ...
+
+    def generate_extension_access_key(self) -> tuple[str, str, str]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +149,31 @@ class InstallResult:
     health_url: str
     api_pid: int | None = None
     worker_pid: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OneTimeAccess:
+    """Plaintext first-run access values that are never written to disk."""
+
+    web_password: str | None = None
+    extension_access_key: str | None = None
+
+    @property
+    def created(self) -> bool:
+        return self.web_password is not None or self.extension_access_key is not None
+
+
+class RuntimeEnvironment(dict[str, str]):
+    """Persisted environment plus ephemeral access values from this merge only."""
+
+    def __init__(
+        self,
+        values: Mapping[str, str],
+        *,
+        one_time_access: OneTimeAccess | None = None,
+    ) -> None:
+        super().__init__(values)
+        self.one_time_access = one_time_access or OneTimeAccess()
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,10 +256,37 @@ _ACTIVE_LIFECYCLE_LEASE: ContextVar[_ActiveLifecycleLease | None] = ContextVar(
 
 
 def _emit(status: str, message: str, **details: object) -> None:
-    """Emit a machine-readable event containing no credential values."""
+    """Emit one machine-readable installer event."""
 
     payload = {"status": status, "message": message, "details": details}
     print(f"BOOTSTRAP_STATUS:{json.dumps(payload, ensure_ascii=False, sort_keys=True)}")
+
+
+def _emit_first_run_access(values: RuntimeEnvironment) -> None:
+    """Disclose newly created browser credentials once, never persisted plaintext."""
+
+    access = values.one_time_access
+    if not access.created:
+        return
+    details: dict[str, str] = {}
+    if access.web_password is not None:
+        details["web_password"] = access.web_password
+    if access.extension_access_key is not None:
+        details["extension_access_key"] = access.extension_access_key
+    _emit("credentials", "first_run_access", **details)
+
+
+@lru_cache(maxsize=1)
+def _load_auth_core() -> AuthCorePrimitives:
+    """Load the stdlib-only shared auth primitives before project installation."""
+
+    path = Path(__file__).resolve().parents[1] / "src/openbiliclaw/auth_core.py"
+    spec = importlib.util.spec_from_file_location("openbiliclaw_installer_auth_core", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load access credential primitives")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return cast("AuthCorePrimitives", module)
 
 
 def _validate_env_value(name: str, value: str) -> str:
@@ -197,18 +297,22 @@ def _validate_env_value(name: str, value: str) -> str:
 
 
 def _read_env(path: Path) -> tuple[list[str], dict[str, str]]:
-    if path.is_symlink():
-        raise RuntimeError(f"refusing to use symlink: {path}")
-    if not path.exists():
+    try:
+        path_metadata = path.lstat()
+    except FileNotFoundError:
         return [], {}
+    if stat.S_ISLNK(path_metadata.st_mode):
+        raise RuntimeError(f"refusing to use symlink: {path}")
+    if not stat.S_ISREG(path_metadata.st_mode):
+        raise RuntimeError(f"runtime environment is not a regular file: {path}")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
         raise RuntimeError(f"unable to open runtime environment safely: {path}") from exc
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise RuntimeError(f"runtime environment is not a regular file: {path}")
+        metadata = os.fstat(descriptor)
+        _validate_env_metadata(path, path_metadata, metadata)
         with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
             descriptor = -1
             lines = stream.read().splitlines()
@@ -222,6 +326,67 @@ def _read_env(path: Path) -> tuple[list[str], dict[str, str]]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
     return lines, values
+
+
+def _validate_env_metadata(
+    path: Path, path_metadata: os.stat_result, metadata: os.stat_result
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"runtime environment is not a regular file: {path}")
+    if (metadata.st_dev, metadata.st_ino) != (
+        path_metadata.st_dev,
+        path_metadata.st_ino,
+    ):
+        raise RuntimeError(f"runtime environment changed during secure read: {path}")
+    if os.name == "nt":
+        _verify_windows_private_acl(path)
+        after_acl = path.lstat()
+        if (after_acl.st_dev, after_acl.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
+        ):
+            raise RuntimeError(f"runtime environment changed during secure read: {path}")
+        return
+    if metadata.st_uid != os.getuid():
+        raise RuntimeError(f"runtime environment is not owned by this user: {path}")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise RuntimeError(f"runtime environment must have mode 0600: {path}")
+
+
+def _windows_private_acl(path: Path, *, mode: str) -> None:
+    """Apply or verify an owner-only DACL without exposing file contents."""
+
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if powershell is None:
+        raise RuntimeError("unable to enforce private Windows ACL")
+    result = subprocess.run(  # noqa: S603
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            _WINDOWS_PRIVATE_ACL_SCRIPT,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "OPENBILICLAW_PRIVATE_ACL_MODE": mode,
+            "OPENBILICLAW_PRIVATE_ACL_TARGET": str(path),
+        },
+    )
+    if result.returncode != 0:
+        raise RuntimeError("unable to enforce private Windows ACL")
+
+
+def _apply_windows_private_acl(path: Path) -> None:
+    _windows_private_acl(path, mode="apply")
+
+
+def _verify_windows_private_acl(path: Path) -> None:
+    _windows_private_acl(path, mode="verify")
 
 
 def _lock_descriptor(descriptor: int, *, blocking: bool) -> None:
@@ -1170,6 +1335,15 @@ def _atomic_write_private_file(path: Path, content: str) -> None:
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     replaced = False
     try:
+        if os.name == "nt":
+            _apply_windows_private_acl(temporary)
+            prepared = temporary.lstat()
+            prepared_held = os.fstat(descriptor)
+            if (prepared.st_dev, prepared.st_ino) != (
+                prepared_held.st_dev,
+                prepared_held.st_ino,
+            ):
+                raise RuntimeError("private file source changed during Windows ACL setup")
         with os.fdopen(os.dup(descriptor), "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
             stream.flush()
@@ -1190,7 +1364,12 @@ def _atomic_write_private_file(path: Path, content: str) -> None:
         final = path.lstat()
         if not stat.S_ISREG(final.st_mode) or (final.st_dev, final.st_ino) != held_identity:
             raise RuntimeError("private file destination changed during publication")
-        if os.name != "nt":
+        if os.name == "nt":
+            _verify_windows_private_acl(path)
+            verified = path.lstat()
+            if (verified.st_dev, verified.st_ino) != held_identity:
+                raise RuntimeError("private file destination changed during Windows ACL check")
+        else:
             directory = os.open(path.parent, os.O_RDONLY)
             try:
                 os.fsync(directory)
@@ -1290,13 +1469,14 @@ def _merge_environment(
     required: Mapping[str, str],
     *,
     managed: frozenset[str] = frozenset(),
-) -> dict[str, str]:
+) -> RuntimeEnvironment:
     """Fill missing values while preserving stable, non-empty existing values."""
 
     with _exclusive_lock(path.with_name(f"{path.name}.lock")):
         lines, existing = _read_env(path)
+        pending = dict(required)
         merged = dict(existing)
-        for key, value in required.items():
+        for key, value in pending.items():
             if key in managed or not merged.get(key, "").strip():
                 merged[key] = _validate_env_value(key, value)
 
@@ -1316,7 +1496,66 @@ def _merge_environment(
             if key not in emitted:
                 output.append(f"{key}={value}")
         _atomic_write_private_file(path, "\n".join(output).rstrip("\n") + "\n")
-        return merged
+        return RuntimeEnvironment(merged)
+
+
+def _validate_litellm_admin_url(value: str) -> str:
+    """Accept only an explicit credential-free public HTTP(S) navigation URL."""
+
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    parsed = urllib.parse.urlsplit(normalized)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("LiteLLM Admin URL must be a credential-free HTTP(S) URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or any(character.isspace() for character in normalized)
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ValueError("LiteLLM Admin URL must be a credential-free HTTP(S) URL")
+    return normalized
+
+
+def _stage_runtime_access(
+    values: Mapping[str, str], *, rotate_access: bool = False
+) -> RuntimeEnvironment:
+    """Create digest records in memory; plaintext never reaches persistent storage."""
+
+    staged = dict(values)
+    auth_core = _load_auth_core()
+    web_password: str | None = None
+    extension_access_key: str | None = None
+    if rotate_access or not staged.get("OPENBILICLAW_WEB_PASSWORD_HASH", "").strip():
+        web_password = secrets.token_urlsafe(18)
+        staged["OPENBILICLAW_WEB_PASSWORD_HASH"] = auth_core.hash_password(web_password)
+    if rotate_access or not staged.get("OPENBILICLAW_EXTENSION_ACCESS_KEYS", "").strip():
+        _key_id, extension_access_key, record = auth_core.generate_extension_access_key()
+        staged["OPENBILICLAW_EXTENSION_ACCESS_KEYS"] = json.dumps([record], separators=(",", ":"))
+    return RuntimeEnvironment(
+        staged,
+        one_time_access=OneTimeAccess(
+            web_password=web_password,
+            extension_access_key=extension_access_key,
+        ),
+    )
+
+
+def _commit_runtime_access(path: Path, values: RuntimeEnvironment) -> None:
+    """Atomically persist only verifier material after runtime verification succeeds."""
+
+    if not values.one_time_access.created:
+        return
+    keys = frozenset({"OPENBILICLAW_WEB_PASSWORD_HASH", "OPENBILICLAW_EXTENSION_ACCESS_KEYS"})
+    _merge_environment(path, {key: values[key] for key in keys}, managed=keys)
 
 
 def _sqlite_url(path: Path) -> str:
@@ -1328,8 +1567,9 @@ def ensure_local_runtime_environment(
     *,
     litellm_base_url: str,
     litellm_api_key: str,
+    litellm_admin_url: str = "",
     installation: InstallationState | None = None,
-) -> dict[str, str]:
+) -> RuntimeEnvironment:
     """Persist stable source-install runtime settings in a mode-0600 env file."""
 
     project_dir = _canonical_project_root(project_dir)
@@ -1340,6 +1580,7 @@ def ensure_local_runtime_environment(
                 project_dir,
                 litellm_base_url=litellm_base_url,
                 litellm_api_key=litellm_api_key,
+                litellm_admin_url=litellm_admin_url,
                 installation=current,
             )
     if installation.project_root != str(project_dir):
@@ -1363,28 +1604,52 @@ def ensure_local_runtime_environment(
         "OPENBILICLAW_DATABASE_URL": _sqlite_url(data_dir / "openbiliclaw.db"),
         "OPENBILICLAW_HUEY_PATH": str((data_dir / "huey.db").resolve()),
     }
-    managed = frozenset(
-        {
-            "OPENBILICLAW_PROJECT_ROOT",
-            "OPENBILICLAW_INSTALLER_INSTANCE_ID",
-            "OPENBILICLAW_DATABASE_URL",
-            "OPENBILICLAW_HUEY_PATH",
-        }
-    )
+    validated_admin_url = _validate_litellm_admin_url(litellm_admin_url)
+    if validated_admin_url:
+        required["OPENBILICLAW_LITELLM_ADMIN_URL"] = validated_admin_url
+    managed_values = {
+        "OPENBILICLAW_PROJECT_ROOT",
+        "OPENBILICLAW_INSTALLER_INSTANCE_ID",
+        "OPENBILICLAW_DATABASE_URL",
+        "OPENBILICLAW_HUEY_PATH",
+    }
+    if validated_admin_url:
+        managed_values.add("OPENBILICLAW_LITELLM_ADMIN_URL")
+    managed = frozenset(managed_values)
     return _merge_environment(env_path, required, managed=managed)
 
 
-def ensure_docker_infrastructure_secrets(project_dir: Path) -> dict[str, str]:
+def ensure_docker_infrastructure_secrets(
+    project_dir: Path,
+    *,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    litellm_admin_url: str = "",
+) -> RuntimeEnvironment:
     """Persist stable Compose infrastructure secrets without provider credentials."""
 
+    env_path = project_dir.resolve() / RUNTIME_ENV_NAME
+    _lines, existing = _read_env(env_path)
+    explicit_admin_url = _validate_litellm_admin_url(litellm_admin_url)
+    admin_url = explicit_admin_url or existing.get("OPENBILICLAW_LITELLM_ADMIN_URL", "")
+    if not admin_url:
+        admin_url = _validate_litellm_admin_url(
+            f"http://127.0.0.1:{os.getenv('LITELLM_PORT', '4000')}/ui"
+        )
     required = {
         "LITELLM_POSTGRES_PASSWORD": secrets.token_hex(32),
         "LITELLM_MASTER_KEY": f"sk-{secrets.token_hex(32)}",
         "OPENBILICLAW_SECRET_KEY": secrets.token_hex(32),
         "OPENBILICLAW_ACCESS_TOKEN": secrets.token_urlsafe(48),
         "OPENBILICLAW_SESSION_SECRET": secrets.token_urlsafe(48),
+        "OPENBILICLAW_API_HOST": host,
+        "OPENBILICLAW_API_PORT": str(port),
+        "OPENBILICLAW_LITELLM_ADMIN_URL": admin_url,
     }
-    return _merge_environment(project_dir.resolve() / RUNTIME_ENV_NAME, required)
+    managed = {"OPENBILICLAW_API_HOST", "OPENBILICLAW_API_PORT"}
+    if explicit_admin_url:
+        managed.add("OPENBILICLAW_LITELLM_ADMIN_URL")
+    return _merge_environment(env_path, required, managed=frozenset(managed))
 
 
 def _runtime_env(values: Mapping[str, str]) -> dict[str, str]:
@@ -2175,8 +2440,10 @@ def install_local_runtime(
     port: int,
     litellm_base_url: str,
     litellm_api_key: str,
+    litellm_admin_url: str = "",
     install_dependencies: bool = True,
     start: bool = True,
+    rotate_access: bool = False,
     run_command: Callable[..., None] = _run_checked,
     start_process: Callable[..., ProcessLike] = _start_detached,
     readiness_probe: Callable[..., bool] = _probe_runtime,
@@ -2190,17 +2457,20 @@ def install_local_runtime(
     """Prepare, migrate, and manage the source-install API and worker."""
 
     project_dir = _canonical_project_root(project_dir)
-    health_url = f"http://127.0.0.1:{port}{DEFAULT_HEALTH_PATH}"
+    probe_host = "127.0.0.1" if host == "0.0.0.0" else host
+    health_url = f"http://{probe_host}:{port}{DEFAULT_HEALTH_PATH}"
     with _lifecycle_lock(project_dir, timeout=lifecycle_timeout):
         installation = _load_or_create_installation_state(project_dir)
         if install_dependencies:
             _install_source_dependencies(project_dir, run_command)
-        values = ensure_local_runtime_environment(
+        persisted_values = ensure_local_runtime_environment(
             project_dir,
             litellm_base_url=litellm_base_url,
             litellm_api_key=litellm_api_key,
+            litellm_admin_url=litellm_admin_url,
             installation=installation,
         )
+        values = _stage_runtime_access(persisted_values, rotate_access=rotate_access)
         environment = _runtime_env(values)
         prefix = _command_prefix(project_dir)
         _reconcile_process_state_generation(project_dir, installation)
@@ -2215,6 +2485,8 @@ def install_local_runtime(
             installation = _advance_installation_generation(project_dir, installation)
         run_command([*prefix, "db", "migrate"], cwd=project_dir, env=environment)
         if not start:
+            _commit_runtime_access(project_dir / RUNTIME_ENV_NAME, values)
+            _emit_first_run_access(values)
             result = InstallResult(status="prepared", mode="local", health_url=health_url)
             _emit("complete", "local_runtime_prepared", mode="local", health_url=health_url)
             return result
@@ -2233,6 +2505,8 @@ def install_local_runtime(
             identity_probe=identity_probe,
             state_writer=state_writer,
         )
+        _commit_runtime_access(project_dir / RUNTIME_ENV_NAME, values)
+        _emit_first_run_access(values)
         result = InstallResult(
             status="complete",
             mode="local",
@@ -2274,7 +2548,11 @@ def _compose_status_rows(output: str) -> dict[str, dict[str, object]]:
 
 
 def _wait_for_docker_runtime(
-    project_dir: Path, compose: list[str], *, timeout: float = 90.0
+    project_dir: Path,
+    compose: list[str],
+    *,
+    environment: Mapping[str, str] | None = None,
+    timeout: float = 90.0,
 ) -> None:
     """Require successful migration plus healthy API and worker containers."""
 
@@ -2296,6 +2574,7 @@ def _wait_for_docker_runtime(
             check=True,
             capture_output=True,
             text=True,
+            env=dict(environment) if environment is not None else None,
         )
         rows = _compose_status_rows(result.stdout)
         migration = rows.get("migrate")
@@ -2331,25 +2610,54 @@ def _wait_for_docker_runtime(
     raise RuntimeError("Docker runtime did not become healthy")
 
 
-def _install_docker_runtime(project_dir: Path, *, start: bool) -> InstallResult:
-    values = ensure_docker_infrastructure_secrets(project_dir)
-    health_url = f"http://127.0.0.1:{DEFAULT_PORT}{DEFAULT_HEALTH_PATH}"
-    compose = _compose_prefix(project_dir)
-    if not start:
-        subprocess.run(  # noqa: S603
-            [*compose, "run", "--rm", "migrate"], cwd=project_dir, check=True
+def _install_docker_runtime(
+    project_dir: Path,
+    *,
+    start: bool,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    rotate_access: bool = False,
+    litellm_admin_url: str = "",
+    lifecycle_timeout: float = LIFECYCLE_LOCK_TIMEOUT,
+) -> InstallResult:
+    project_dir = _canonical_project_root(project_dir)
+    with _lifecycle_lock(project_dir, timeout=lifecycle_timeout):
+        persisted_values = ensure_docker_infrastructure_secrets(
+            project_dir,
+            host=host,
+            port=port,
+            litellm_admin_url=litellm_admin_url,
         )
-        _emit("complete", "docker_runtime_prepared", mode="docker", health_url=health_url)
-        return InstallResult(status="prepared", mode="docker", health_url=health_url)
-    subprocess.run([*compose, "up", "-d", "--build"], cwd=project_dir, check=True)  # noqa: S603
-    _wait_for_docker_runtime(project_dir, compose)
-    if not _probe_runtime(
-        "127.0.0.1", DEFAULT_PORT, values["OPENBILICLAW_ACCESS_TOKEN"], timeout=90
-    ):
-        raise RuntimeError("protected readiness check failed")
-    _wait_for_docker_runtime(project_dir, compose)
-    _emit("complete", "docker_runtime_ready", mode="docker", health_url=health_url)
-    return InstallResult(status="complete", mode="docker", health_url=health_url)
+        values = _stage_runtime_access(persisted_values, rotate_access=rotate_access)
+        environment = _runtime_env(values)
+        probe_host = "127.0.0.1" if host == "0.0.0.0" else host
+        health_url = f"http://{probe_host}:{port}{DEFAULT_HEALTH_PATH}"
+        compose = _compose_prefix(project_dir)
+        if not start:
+            subprocess.run(  # noqa: S603
+                [*compose, "run", "--rm", "migrate"],
+                cwd=project_dir,
+                check=True,
+                env=environment,
+            )
+            _commit_runtime_access(project_dir / RUNTIME_ENV_NAME, values)
+            _emit_first_run_access(values)
+            _emit("complete", "docker_runtime_prepared", mode="docker", health_url=health_url)
+            return InstallResult(status="prepared", mode="docker", health_url=health_url)
+        subprocess.run(  # noqa: S603
+            [*compose, "up", "-d", "--build"],
+            cwd=project_dir,
+            check=True,
+            env=environment,
+        )
+        _wait_for_docker_runtime(project_dir, compose, environment=environment)
+        if not _probe_runtime(probe_host, port, values["OPENBILICLAW_ACCESS_TOKEN"], timeout=90):
+            raise RuntimeError("protected readiness check failed")
+        _wait_for_docker_runtime(project_dir, compose, environment=environment)
+        _commit_runtime_access(project_dir / RUNTIME_ENV_NAME, values)
+        _emit_first_run_access(values)
+        _emit("complete", "docker_runtime_ready", mode="docker", health_url=health_url)
+        return InstallResult(status="complete", mode="docker", health_url=health_url)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2363,8 +2671,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("OPENBILICLAW_LITELLM_BASE_URL", ""),
         help="User-managed LiteLLM OpenAI-compatible base URL (source installs)",
     )
+    parser.add_argument(
+        "--litellm-admin-url",
+        default=os.getenv("OPENBILICLAW_LITELLM_ADMIN_URL", ""),
+        help="Optional credential-free public LiteLLM Admin HTTP(S) URL",
+    )
     parser.add_argument("--skip-install", action="store_true", help="Skip dependency installation")
     parser.add_argument("--skip-start", action="store_true", help="Prepare and migrate only")
+    parser.add_argument(
+        "--rotate-access",
+        action="store_true",
+        help="Rotate browser and extension access after a lost first-run disclosure",
+    )
     return parser
 
 
@@ -2375,7 +2693,12 @@ def run(args: argparse.Namespace) -> InstallResult:
         mode = "docker" if shutil.which("docker") else "local"
     if mode == "docker":
         return _install_docker_runtime(
-            _canonical_project_root(project_dir), start=not args.skip_start
+            _canonical_project_root(project_dir),
+            start=not args.skip_start,
+            host=args.host,
+            port=args.port,
+            rotate_access=args.rotate_access,
+            litellm_admin_url=args.litellm_admin_url,
         )
     return install_local_runtime(
         project_dir,
@@ -2383,8 +2706,10 @@ def run(args: argparse.Namespace) -> InstallResult:
         port=args.port,
         litellm_base_url=args.litellm_base_url,
         litellm_api_key=os.getenv("OPENBILICLAW_LITELLM_API_KEY", ""),
+        litellm_admin_url=args.litellm_admin_url,
         install_dependencies=not args.skip_install,
         start=not args.skip_start,
+        rotate_access=args.rotate_access,
     )
 
 

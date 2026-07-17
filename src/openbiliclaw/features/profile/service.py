@@ -257,6 +257,7 @@ class ProfileService:
                     f"latest is {actual_revision}"
                 )
             expected_revision = actual_revision
+            created_at = _next_revision_timestamp(self._clock(), current)
             if current is None:
                 snapshot = ProfileSnapshot(
                     id=uuid4(),
@@ -268,9 +269,10 @@ class ProfileService:
                         if delta.upserts
                         else 0.0
                     ),
+                    created_at=created_at,
                 )
             else:
-                snapshot = apply_profile_delta(current, delta)
+                snapshot = apply_profile_delta(current, delta, created_at=created_at)
             uow.profiles.append(snapshot, expected_revision=expected_revision)
             uow.profiles.mark_evidence_consumed(evidence_ids, profile_revision=snapshot.revision)
             uow.commit()

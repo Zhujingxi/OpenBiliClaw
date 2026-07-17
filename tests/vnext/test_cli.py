@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import os
 import sqlite3
+import stat
 import subprocess
 import sys
 from pathlib import Path  # noqa: TC003 - pytest fixtures resolve annotations
@@ -73,6 +75,62 @@ def test_process_commands_use_injected_boundaries(monkeypatch) -> None:
     assert runner.invoke(cli.app, ["worker"]).exit_code == 0
     assert runner.invoke(cli.app, ["eval"]).exit_code == 0
     assert calls == ["serve", "worker", "eval"]
+
+
+def test_operational_cli_loads_installer_env_without_overriding_process_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cli = importlib.import_module("openbiliclaw.cli")
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "OPENBILICLAW_ACCESS_TOKEN=from-installer\nOPENBILICLAW_HUEY_PATH=/installer/huey.db\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENBILICLAW_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("OPENBILICLAW_HUEY_PATH", "/explicit/huey.db")
+    observed: dict[str, str | None] = {}
+    monkeypatch.setattr(
+        cli,
+        "run_worker_process",
+        lambda _workers: observed.update(
+            token=os.getenv("OPENBILICLAW_ACCESS_TOKEN"),
+            queue=os.getenv("OPENBILICLAW_HUEY_PATH"),
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["worker"])
+
+    assert result.exit_code == 0, result.output
+    assert observed == {
+        "token": "from-installer",
+        "queue": "/explicit/huey.db",
+    }
+    assert "OPENBILICLAW_ACCESS_TOKEN" not in os.environ
+
+
+def test_operational_cli_rejects_symlinked_or_public_installer_env(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cli = importlib.import_module("openbiliclaw.cli")
+    outside = tmp_path / "outside.env"
+    outside.write_text("OPENBILICLAW_ACCESS_TOKEN=unsafe\n", encoding="utf-8")
+    (tmp_path / ".env").symlink_to(outside)
+    monkeypatch.chdir(tmp_path)
+
+    linked = CliRunner().invoke(cli.app, ["worker"])
+    assert linked.exit_code != 0
+    assert "private regular file" in linked.output
+
+    (tmp_path / ".env").unlink()
+    (tmp_path / ".env").write_text("OPENBILICLAW_ACCESS_TOKEN=public\n", encoding="utf-8")
+    if os.name != "nt":
+        (tmp_path / ".env").chmod(0o644)
+        public = CliRunner().invoke(cli.app, ["worker"])
+        assert public.exit_code != 0
+        assert "mode 0600" in public.output
+        assert stat.S_IMODE((tmp_path / ".env").stat().st_mode) == 0o644
 
 
 def test_worker_module_main_uses_the_configured_worker_entrypoint(monkeypatch) -> None:

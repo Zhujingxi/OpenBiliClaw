@@ -18,7 +18,8 @@ cd OpenBiliClaw
 MODE=docker bash scripts/install.sh
 ```
 
-This is the supported easy-install path for both source-built and prebuilt deployments. `docker-compose.prebuilt.yml` is intended for release automation or operators who already manage the required private `.env` and `litellm/config.yaml`; it is not a second interactive installer.
+This is the supported easy-install path for source-built deployments. The quick-start block in `docker-compose.prebuilt.yml` provides the equivalent locked, atomic first-run transaction for the released image and bundled LiteLLM policy.
+The prebuilt two-file flow downloads that policy to `litellm/config.yaml` before running the transaction.
 
 ## Secrets
 
@@ -29,8 +30,10 @@ The installer creates and reuses these private values:
 - `OPENBILICLAW_SECRET_KEY`;
 - `OPENBILICLAW_ACCESS_TOKEN`;
 - `OPENBILICLAW_SESSION_SECRET`.
+- `OPENBILICLAW_WEB_PASSWORD_HASH` (scrypt hash only);
+- `OPENBILICLAW_EXTENSION_ACCESS_KEYS` (digest records only).
 
-Optional browser access uses `OPENBILICLAW_WEB_PASSWORD_HASH`, digest-only `OPENBILICLAW_EXTENSION_ACCESS_KEYS`, and credential-free `OPENBILICLAW_LITELLM_ADMIN_URL`. Provider credentials go only into LiteLLM Admin.
+Only a successfully migrated and healthy runtime commits the Web password hash/extension digest and emits their plaintext pair once. Failed Compose runs disclose neither value. The installer lifecycle lock covers staging, Compose start, commit, disclosure, and `ROTATE_ACCESS=1`, so concurrent runs cannot cross-persist credential pairs. Use rotation when a successful event was lost. The credential-free `OPENBILICLAW_LITELLM_ADMIN_URL` defaults to `http://127.0.0.1:${LITELLM_PORT:-4000}/ui`; an explicit `--litellm-admin-url` replaces and persists it, while an unconfigured rerun preserves the current custom URL. Provider credentials go only into LiteLLM Admin.
 
 The `.env` file must remain a private regular file and must not be committed, printed, attached to issues, or included in screenshots. Do not reuse secrets across purposes.
 
@@ -67,6 +70,12 @@ docker compose logs api worker
 
 Installation succeeds only when migration exits zero and API and worker are healthy. API readiness alone is not proof that jobs can run.
 
+Set `HOST` and `PORT` on the installer to change the public API binding. Those values drive the Compose mapping, API listen port, healthcheck and installer probe together; LiteLLM Admin remains loopback-only unless separately configured.
+
+The installer-provisioned Web password is required before first-run onboarding even on a fresh
+database. Product settings cannot disable that login path; use successful access rotation for
+credential recovery.
+
 ## LiteLLM
 
 Open `http://127.0.0.1:4000/ui` and configure deployments for:
@@ -85,7 +94,7 @@ After the three aliases are healthy, open:
 - desktop Web: `http://127.0.0.1:8420/web/`;
 - mobile Web: `http://127.0.0.1:8420/m/`.
 
-Connect sources through setup. Browser-assisted sources require the extension and its finite-bearer provisioning. Follow the [Docker first-run](e2e/docker-first-run.md), [Web](e2e/web.md), and [extension](e2e/extension.md) runbooks.
+Log in with the first-run Web password. Setup renders backend credential inputs directly from each manifest's `credential_schema`, configures selected credential-bearing accounts before onboarding, and shows no unusable credential form for extension-only sources. Browser-assisted sources require the extension and its one-time access key. Follow the [Docker first-run](e2e/docker-first-run.md), [Web](e2e/web.md), and [extension](e2e/extension.md) runbooks.
 
 ## Operations
 

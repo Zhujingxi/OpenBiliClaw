@@ -54,18 +54,29 @@ FEED_ITEM = {
 def _settings(onboarding_complete: bool) -> dict[str, Any]:
     tasks = {
         name: {
-            "model_alias": "obc-interactive" if name == "chat" else "obc-analysis",
+            "model_alias": ("obc-interactive" if name == "chat_response" else "obc-analysis"),
             "semantic_retry_limit": 1,
             "timeout_seconds": 30,
             "request_limit": 2,
             "total_tokens_limit": 4096,
         }
-        for name in ("chat", "profile_projection", "candidate_assessment", "expression_copy")
+        for name in (
+            "profile_delta",
+            "keyword_generation",
+            "candidate_batch_assessment",
+            "chat_response",
+            "recommendation_explanation",
+        )
     }
     return {
         "onboarding_complete": onboarding_complete,
         "sources": {"enabled": {}, "weights": {}},
-        "schedules": {"source_sync_interval_minutes": 60},
+        "schedules": {
+            "source_sync_interval_minutes": 60,
+            "profile_projection_interval_minutes": 10,
+            "feed_replenishment_interval_minutes": 5,
+            "cleanup_interval_minutes": 1440,
+        },
         "feed": {
             "low_watermark": 10,
             "high_watermark": 50,
@@ -106,6 +117,9 @@ class StubState:
         default_factory=lambda: {"favorites": set(), "watch_later": set()}
     )
     requests: list[dict[str, Any]] = field(default_factory=list)
+    configured_sources: set[str] = field(default_factory=set)
+    network_mode: str = "custom"
+    network_proxy_url: str = "http://127.0.0.1:7890"
 
 
 def _json(handler: BaseHTTPRequestHandler, payload: Any, status: int = 200) -> None:
@@ -159,14 +173,19 @@ def _get_payload(path: str, state: StubState) -> object:
     if path == "/api/v1/system/readiness":
         return {"ready": True, "version": "test", "checks": []}
     if path == "/api/v1/settings":
-        return _settings(state.onboarding_complete)
+        settings = _settings(state.onboarding_complete)
+        settings["network"] = {
+            "mode": state.network_mode,
+            "proxy_url": state.network_proxy_url,
+        }
+        return settings
     if path == "/api/v1/system/ai-health":
         return {
             "aliases": [
                 {"alias": alias, "state": "available", "available": True, "reason": None}
                 for alias in ("obc-interactive", "obc-analysis", "obc-embedding")
             ],
-            "admin_url": None,
+            "admin_url": "http://127.0.0.1:4000/ui",
         }
     if path == "/api/v1/sources":
         return [
@@ -174,10 +193,31 @@ def _get_payload(path: str, state: StubState) -> object:
                 "source_id": "bilibili",
                 "display_name": "Bilibili",
                 "capabilities": ["history"],
-            }
+                "credential_schema": {
+                    "type": "object",
+                    "required": ["cookie"],
+                    "properties": {
+                        "cookie": {
+                            "type": "string",
+                            "title": "Cookie",
+                            "writeOnly": True,
+                            "minLength": 1,
+                        }
+                    },
+                },
+            },
+            {
+                "source_id": "reddit",
+                "display_name": "Reddit",
+                "capabilities": ["browser_assisted"],
+                "credential_schema": {},
+                "settings_schema": {"type": "object", "properties": {}},
+            },
         ]
     if path == "/api/v1/sources/status":
         return []
+    if path.startswith("/api/v1/sources/") and path.endswith("/settings"):
+        return {"source_id": path.split("/")[4], "settings": {}}
     if path == "/api/v1/feed":
         return [FEED_ITEM]
     if path.startswith("/api/v1/library/"):
@@ -279,6 +319,55 @@ class _RetainedHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/v1/auth/login":
             self._login(payload)
+            return
+        self.send_error(404)
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        payload = _body(self)
+        self.state.requests.append(
+            {"path": path, "body": payload, "auth": self.headers.get("X-OBC-Auth")}
+        )
+        if path == "/api/v1/settings":
+            network = payload.get("network", {})
+            self.state.network_mode = network.get("mode", self.state.network_mode)
+            self.state.network_proxy_url = network.get("proxy_url", self.state.network_proxy_url)
+            _json(self, _get_payload(path, self.state))
+            return
+        if path == "/api/v1/profile":
+            _json(
+                self,
+                {
+                    "revision": 0,
+                    "narrative": payload["narrative"],
+                    "facets": [],
+                    "confidence": 1,
+                    "created_at": "2026-07-17T00:00:00Z",
+                },
+            )
+            return
+        self.send_error(404)
+
+    def do_PUT(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        payload = _body(self)
+        self.state.requests.append(
+            {"path": path, "body": payload, "auth": self.headers.get("X-OBC-Auth")}
+        )
+        if path.startswith("/api/v1/sources/") and path.endswith("/settings"):
+            _json(self, {"source_id": path.split("/")[4], "settings": payload["settings"]})
+            return
+        if path == "/api/v1/sources/bilibili/accounts":
+            self.state.configured_sources.add("bilibili")
+            _json(
+                self,
+                {
+                    "source_id": "bilibili",
+                    "account_key": payload["account_key"],
+                    "configured": True,
+                    "enabled": True,
+                },
+            )
             return
         self.send_error(404)
 
@@ -581,6 +670,7 @@ def test_setup_onboarding_error_is_retryable_and_success_reaches_ready_step(
     next_ai.click()
     browser_page.locator("#next1").click()
     expect(browser_page.locator("#initSources input:checked")).to_have_count(1)
+    browser_page.locator('[data-source-credential="bilibili"][name="cookie"]').fill("SESSDATA=test")
 
     start = browser_page.locator("#startInit")
     start.click()
@@ -591,6 +681,113 @@ def test_setup_onboarding_error_is_retryable_and_success_reaches_ready_step(
     start.click()
     expect(browser_page.locator('[data-panel="3"]')).to_have_class("panel active")
     expect(browser_page.locator("#runMessage")).to_contain_text("初始化完成")
+    assert state.configured_sources == {"bilibili"}
+
+
+def test_setup_first_run_login_admin_link_and_manifest_source_configuration(
+    retained_server: tuple[str, StubState], browser_page: Page
+) -> None:
+    base_url, state = retained_server
+    state.auth_enabled = True
+    state.authenticated = False
+    state.onboarding_complete = False
+    browser_page.goto(base_url + "/setup/")
+
+    expect(browser_page.locator("#loginBox")).to_be_visible()
+    browser_page.locator("#password").fill("correct horse")
+    browser_page.locator("#loginForm button").click()
+    expect(browser_page.locator("#adminLink")).to_have_attribute("href", "http://127.0.0.1:4000/ui")
+
+    browser_page.locator("#nextAi").click()
+    browser_page.locator("#next1").click()
+    credential = browser_page.locator('[data-source-credential="bilibili"][name="cookie"]')
+    expect(credential).to_have_attribute("type", "password")
+    credential.fill("SESSDATA=first-run")
+    browser_page.locator("#startInit").click()
+
+    expect(browser_page.locator('[data-panel="3"]')).to_have_class("panel active")
+    configure = next(
+        request
+        for request in state.requests
+        if request["path"] == "/api/v1/sources/bilibili/accounts"
+    )
+    assert configure["body"] == {
+        "account_key": "default",
+        "credentials": {"cookie": "SESSDATA=first-run"},
+    }
+    onboarding_index = next(
+        index
+        for index, request in enumerate(state.requests)
+        if request["path"] == "/api/v1/onboarding/start"
+    )
+    configure_index = state.requests.index(configure)
+    assert configure_index < onboarding_index
+
+
+def test_desktop_source_forms_follow_manifest_and_direct_network_clears_proxy(
+    retained_server: tuple[str, StubState], browser_page: Page
+) -> None:
+    base_url, state = retained_server
+    browser_page.goto(base_url + "/web/#settings")
+    expect(browser_page.locator("#settingsForm")).to_be_visible()
+    _wait_until(
+        lambda: browser_page.locator("[data-account-source]").count() > 0,
+        timeout=5,
+    )
+    bilibili_credential = browser_page.locator(
+        '[data-account-source="bilibili"] [data-source-credential="bilibili"]'
+    )
+    assert bilibili_credential.count() == 1, browser_page.locator("#sourceAccounts").inner_html()
+    expect(
+        browser_page.locator('[data-account-source="reddit"] [data-source-credential="reddit"]')
+    ).to_have_count(0)
+
+    browser_page.locator('[data-settings-tab="runtime"]').click()
+    browser_page.locator("#network-mode").select_option("direct")
+    browser_page.locator("#settingsForm > .vnext-actions button").click()
+    _wait_until(lambda: any(request["path"] == "/api/v1/settings" for request in state.requests))
+    patch = next(request for request in state.requests if request["path"] == "/api/v1/settings")
+    assert patch["body"]["network"] == {"mode": "direct", "proxy_url": ""}
+
+
+def test_desktop_first_manual_profile_edit_uses_absent_revision_contract(
+    retained_server: tuple[str, StubState], browser_page: Page
+) -> None:
+    base_url, state = retained_server
+    browser_page.goto(base_url + "/web/#profile")
+    expect(browser_page.locator("#profileForm")).to_be_visible()
+    browser_page.locator("#profileNarrative").fill("My first explicit profile")
+    browser_page.locator("#profileForm > .vnext-actions button").click()
+    _wait_until(lambda: any(request["path"] == "/api/v1/profile" for request in state.requests))
+    edit = next(request for request in state.requests if request["path"] == "/api/v1/profile")
+    assert edit["body"]["expected_revision"] is None
+
+
+def test_mobile_first_manual_profile_edit_uses_absent_revision_contract(
+    retained_server: tuple[str, StubState], browser_page: Page
+) -> None:
+    base_url, state = retained_server
+    browser_page.goto(base_url + "/m/#/profile")
+    expect(browser_page.locator("#mobileProfile")).to_be_visible()
+    browser_page.locator("#mobileNarrative").fill("My first mobile profile")
+    browser_page.locator("#mobileProfile button").click()
+    _wait_until(lambda: any(request["path"] == "/api/v1/profile" for request in state.requests))
+    edit = next(request for request in state.requests if request["path"] == "/api/v1/profile")
+    assert edit["body"]["expected_revision"] is None
+
+
+def test_mobile_direct_network_mode_clears_hidden_custom_proxy(
+    retained_server: tuple[str, StubState], browser_page: Page
+) -> None:
+    base_url, state = retained_server
+    browser_page.goto(base_url + "/m/#/recommend")
+    browser_page.locator("#mobileSettings").click()
+    expect(browser_page.locator("#mobileSettingsForm")).to_be_visible()
+    browser_page.locator("#mNetwork").select_option("direct")
+    browser_page.locator("#mobileSettingsForm button").click()
+    _wait_until(lambda: any(request["path"] == "/api/v1/settings" for request in state.requests))
+    patch = next(request for request in state.requests if request["path"] == "/api/v1/settings")
+    assert patch["body"]["network"] == {"mode": "direct", "proxy_url": ""}
 
 
 def test_popup_onboarding_error_is_retryable_and_success_enters_product(

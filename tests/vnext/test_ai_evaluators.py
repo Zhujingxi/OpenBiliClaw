@@ -1,4 +1,4 @@
-"""Offline semantic-evaluation contracts for the four typed AI tasks."""
+"""Offline semantic-evaluation contracts for retained typed AI tasks."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pydantic_evals import Case, Dataset
 from pydantic_evals.evaluators import LLMJudge
 
 from openbiliclaw.infrastructure.ai.evaluators import (
-    CandidateAssessmentInvariants,
+    CandidateBatchAssessmentInvariants,
     KeywordGenerationInvariants,
     ProfileDeltaInvariants,
     RecommendationExplanationInvariants,
@@ -22,7 +22,7 @@ models.ALLOW_MODEL_REQUESTS = False
 EVALUATOR_TYPES = (
     ProfileDeltaInvariants,
     KeywordGenerationInvariants,
-    CandidateAssessmentInvariants,
+    CandidateBatchAssessmentInvariants,
     RecommendationExplanationInvariants,
 )
 
@@ -83,18 +83,26 @@ async def _offline_assertions(name: str, output: dict[str, object]) -> dict[str,
             {"keyword_constraints_valid", "keyword_relevance_valid", "keyword_source_neutral"},
         ),
         (
-            "candidate_assessment",
+            "candidate_batch_assessment",
             {
-                "content_id": "00000000-0000-0000-0000-000000000201",
-                "profile_revision": 1,
-                "relevance": 0.82,
-                "quality": 0.76,
-                "novelty": 0.55,
-                "risk": 0.08,
-                "topics": ["geometry nodes", "3D workflow"],
-                "explanation": "A practical project aligned with the supplied profile.",
+                "assessments": [
+                    {
+                        "content_id": "00000000-0000-0000-0000-000000000201",
+                        "profile_revision": 1,
+                        "relevance": 0.82,
+                        "quality": 0.76,
+                        "novelty": 0.55,
+                        "risk": 0.08,
+                        "topics": ["geometry nodes", "3D workflow"],
+                        "explanation": "A practical project aligned with the supplied profile.",
+                    }
+                ]
             },
-            {"candidate_identity_valid", "candidate_score_ranges_valid", "candidate_topics_valid"},
+            {
+                "candidate_batch_identity_valid",
+                "candidate_batch_score_ranges_valid",
+                "candidate_batch_topics_valid",
+            },
         ),
         (
             "recommendation_explanation",
@@ -189,46 +197,58 @@ async def test_offline_invariants_accept_semantically_valid_alternatives(
             "keyword_source_neutral",
         ),
         (
-            "candidate_assessment",
+            "candidate_batch_assessment",
             {
-                "content_id": "00000000-0000-0000-0000-000000009999",
-                "profile_revision": 1,
-                "relevance": 0.8,
-                "quality": 0.8,
-                "novelty": 0.6,
-                "risk": 0.1,
-                "topics": ["geometry nodes"],
-                "explanation": "Grounded.",
+                "assessments": [
+                    {
+                        "content_id": "00000000-0000-0000-0000-000000009999",
+                        "profile_revision": 1,
+                        "relevance": 0.8,
+                        "quality": 0.8,
+                        "novelty": 0.6,
+                        "risk": 0.1,
+                        "topics": ["geometry nodes"],
+                        "explanation": "Grounded.",
+                    }
+                ]
             },
-            "candidate_identity_valid",
+            "candidate_batch_identity_valid",
         ),
         (
-            "candidate_assessment",
+            "candidate_batch_assessment",
             {
-                "content_id": "00000000-0000-0000-0000-000000000201",
-                "profile_revision": 1,
-                "relevance": 0.2,
-                "quality": 0.8,
-                "novelty": 0.6,
-                "risk": 0.1,
-                "topics": ["geometry nodes"],
-                "explanation": "Grounded.",
+                "assessments": [
+                    {
+                        "content_id": "00000000-0000-0000-0000-000000000201",
+                        "profile_revision": 1,
+                        "relevance": 0.2,
+                        "quality": 0.8,
+                        "novelty": 0.6,
+                        "risk": 0.1,
+                        "topics": ["geometry nodes"],
+                        "explanation": "Grounded.",
+                    }
+                ]
             },
-            "candidate_score_ranges_valid",
+            "candidate_batch_score_ranges_valid",
         ),
         (
-            "candidate_assessment",
+            "candidate_batch_assessment",
             {
-                "content_id": "00000000-0000-0000-0000-000000000201",
-                "profile_revision": 1,
-                "relevance": 0.8,
-                "quality": 0.8,
-                "novelty": 0.6,
-                "risk": 0.1,
-                "topics": ["bread baking"],
-                "explanation": "Grounded.",
+                "assessments": [
+                    {
+                        "content_id": "00000000-0000-0000-0000-000000000201",
+                        "profile_revision": 1,
+                        "relevance": 0.8,
+                        "quality": 0.8,
+                        "novelty": 0.6,
+                        "risk": 0.1,
+                        "topics": ["bread baking"],
+                        "explanation": "Grounded.",
+                    }
+                ]
             },
-            "candidate_topics_valid",
+            "candidate_batch_topics_valid",
         ),
         (
             "recommendation_explanation",

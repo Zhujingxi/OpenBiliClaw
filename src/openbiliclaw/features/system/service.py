@@ -19,6 +19,7 @@ SettingValue = bool | int | float | str | dict[str, Any] | None
 _READ_ONLY_PATHS = frozenset(
     {
         "onboarding_complete",
+        "access_control.web_password_enabled",
         "access_control.installer_bearer_configured",
         "access_control.password_configured",
         "jobs.worker_concurrency",
@@ -80,7 +81,12 @@ class SettingsRepository(Protocol):
 
     def get_all(self) -> dict[str, SettingValue]: ...
 
-    def replace(self, values: Mapping[str, SettingValue]) -> None: ...
+    def patch(
+        self,
+        *,
+        defaults: Mapping[str, SettingValue],
+        changes: Mapping[str, SettingValue],
+    ) -> None: ...
 
 
 class SettingsUnitOfWork(Protocol):
@@ -101,7 +107,7 @@ class SettingsUnitOfWork(Protocol):
 
 
 class SettingsService:
-    """Validate the complete setting set before atomically replacing stored values."""
+    """Validate complete settings while persisting only scoped top-level keys."""
 
     def __init__(
         self,
@@ -126,7 +132,7 @@ class SettingsService:
         return self._overlay(UserSettings.model_validate(values))
 
     def update(self, patch: Mapping[str, object]) -> UserSettings:
-        """Validate a partial update and persist the full typed settings atomically."""
+        """Validate a partial update and atomically persist only patched setting rows."""
 
         if "onboarding_complete" in patch:
             raise ValueError("onboarding completion is workflow-owned and read-only")
@@ -135,27 +141,34 @@ class SettingsService:
                 raise ValueError(f"{path} is deployment-owned and read-only")
 
         with self._uow_factory() as uow:
-            current = self._overlay(UserSettings.model_validate(uow.settings.get_all()))
-            candidate = self._overlay(
-                UserSettings.model_validate(_deep_merge(current.model_dump(), patch))
-            )
-            uow.settings.replace(candidate.model_dump())
+            current = UserSettings.model_validate(uow.settings.get_all())
+        candidate = UserSettings.model_validate(_deep_merge(current.model_dump(), patch))
+        values = candidate.model_dump()
+        changes = {key: values[key] for key in patch}
+        with self._uow_factory() as uow:
+            uow.settings.patch(defaults=values, changes=changes)
             uow.commit()
+        resolved = self.get()
         if self._on_change is not None:
-            self._on_change(candidate)
-        return candidate
+            self._on_change(resolved)
+        return resolved
 
     def complete_onboarding(self) -> UserSettings:
         """Monotonically close the first-run access window after feed admission succeeds."""
 
         with self._uow_factory() as uow:
-            current = self._overlay(UserSettings.model_validate(uow.settings.get_all()))
-            if current.onboarding_complete:
-                return current
-            completed = current.model_copy(update={"onboarding_complete": True})
-            uow.settings.replace(completed.model_dump())
+            current = UserSettings.model_validate(uow.settings.get_all())
+        if current.onboarding_complete:
+            return self._overlay(current)
+        completed = current.model_copy(update={"onboarding_complete": True})
+        values = completed.model_dump()
+        with self._uow_factory() as uow:
+            uow.settings.patch(
+                defaults=values,
+                changes={"onboarding_complete": True},
+            )
             uow.commit()
-        return completed
+        return self.get()
 
 
 class JobRun(Protocol):

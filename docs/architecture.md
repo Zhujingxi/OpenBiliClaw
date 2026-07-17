@@ -73,17 +73,17 @@ Application code knows only:
 - `obc-analysis` for profile, keyword, assessment, and explanation tasks;
 - `obc-embedding` for the OpenAI-compatible embedding service.
 
-`TaskRunner` validates typed input/output, applies semantic retry and usage/timeout limits, and records provider-neutral run metadata. LiteLLM owns credentials, deployments, routing, fallback, network retry, cooldown, rate limiting, budgets, and cache. Static instructions remain separate from dynamic profile/content data.
+`TaskRunner` validates typed input/output, applies semantic retry and usage/timeout limits, and records provider-neutral run metadata. Feed replenishment uses keyword generation for input-requiring source discovery, one batch assessment, the dedicated embedding service for bounded semantic diversity, and recommendation explanations only after deterministic admission. LiteLLM owns credentials, deployments, routing, fallback, network retry, cooldown, rate limiting, budgets, and cache. Static instructions remain separate from dynamic profile/content data.
 
 ## Jobs
 
-Only four durable job types are registered: `source_sync`, `profile_projection`, `feed_replenishment`, and `cleanup`. Priorities are interactive, user-triggered, and scheduled maintenance. Chat runs directly through the shared runner and SSE. Job handlers are idempotent and use application transactions for visible status and feature effects.
+Only four durable job types are registered: `source_sync`, `profile_projection`, `feed_replenishment`, and `cleanup`. Before onboarding completes, periodic `source_sync`, `profile_projection`, and `feed_replenishment` ticks are suppressed and do not create durable buckets; periodic `cleanup` remains active. Explicit onboarding/API scheduling bypasses that periodic gate. After completion, per-minute Huey ticks read each mutable database interval and normal idempotent time-bucket scheduling resumes. Priorities are interactive, user-triggered, and scheduled maintenance. Chat runs directly through the shared runner and SSE. Job handlers are idempotent and use application transactions for visible status and feature effects. A successful job remains eligible for live continuation replay until all registered idempotent callbacks are durably acknowledged.
 
 ## Sources and browser tasks
 
 The composition root explicitly registers Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit. Each connector publishes a strict manifest and only real capabilities. Raw HTTP, CLI, SDK, and DOM responses stay inside the platform package.
 
-Browser-assisted work uses typed `GET /api/v1/source-tasks/claim` and `POST /api/v1/source-tasks/{task_id}/complete`. Requests have deadlines and leases; late or mismatched completion is rejected. The extension uses one generic dispatcher.
+Browser-assisted work uses typed `GET /api/v1/source-tasks/claim` and `POST /api/v1/source-tasks/{task_id}/complete`. Claim is a state-changing GET: cookie sessions require the same-origin CSRF proof, while the extension uses its finite bearer. Requests have deadlines and leases; late or mismatched completion is rejected. The extension uses one generic dispatcher. Public URLs are normalized before persistence by removing userinfo, credential/signature query fields, and credential-bearing fragment fields.
 
 ## Public interfaces
 

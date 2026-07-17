@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime, timedelta
 from threading import Thread
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from sqlalchemy import select, update
 
 from openbiliclaw.api.app import create_app
 from openbiliclaw.api.dependencies import (
@@ -27,6 +29,7 @@ from openbiliclaw.infrastructure.database.base import (
     DatabaseSettings,
     create_engine_and_session,
 )
+from openbiliclaw.infrastructure.database.models import JobRunModel
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.queue import build_huey
 from openbiliclaw.infrastructure.jobs.tasks import (
@@ -67,6 +70,20 @@ class ConnectedRequest:
         return False
 
 
+class FailFirstOnboardingCompletion(SettingsService):
+    """Deterministically expose a transient continuation failure after job success."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.completion_attempts = 0
+
+    def complete_onboarding(self):  # type: ignore[no-untyped-def]
+        self.completion_attempts += 1
+        if self.completion_attempts == 1:
+            raise ConnectionError("transient settings write failure")
+        return super().complete_onboarding()
+
+
 def test_public_settings_cannot_complete_or_reopen_onboarding(tmp_path: Path) -> None:
     engine, session_factory = _database(tmp_path)
     settings = SettingsService(lambda: UnitOfWork(session_factory))
@@ -81,14 +98,11 @@ def test_public_settings_cannot_complete_or_reopen_onboarding(tmp_path: Path) ->
     engine.dispose()
 
 
-def test_onboarding_access_window_closes_only_after_workflow_completion(tmp_path: Path) -> None:
+def test_configured_onboarding_requires_access_before_and_after_completion(tmp_path: Path) -> None:
     engine, session_factory = _database(tmp_path)
     settings = SettingsService(lambda: UnitOfWork(session_factory))
     container = SimpleNamespace(settings=settings, access=AccessPolicy(token="test-access-token"))
     anonymous = Request({"type": "http", "headers": []})
-
-    require_onboarding_access(anonymous, container)  # type: ignore[arg-type]
-    settings.complete_onboarding()
 
     with pytest.raises(HTTPException) as denied:
         require_onboarding_access(anonymous, container)  # type: ignore[arg-type]
@@ -100,6 +114,12 @@ def test_onboarding_access_window_closes_only_after_workflow_completion(tmp_path
             "headers": [(b"authorization", b"Bearer test-access-token")],
         }
     )
+    require_onboarding_access(authorized, container)  # type: ignore[arg-type]
+    settings.complete_onboarding()
+
+    with pytest.raises(HTTPException) as denied_after_completion:
+        require_onboarding_access(anonymous, container)  # type: ignore[arg-type]
+    assert denied_after_completion.value.status_code == 401
     require_onboarding_access(authorized, container)  # type: ignore[arg-type]
     engine.dispose()
 
@@ -115,9 +135,10 @@ def test_onboarding_chain_advances_only_after_terminal_success(
     onboarding = OnboardingService(settings, jobs)
 
     source = onboarding.start(("bilibili",))
-    assert jobs.claim(source.id)
+    source_token = jobs.claim(source.id)
+    assert source_token is not None
     if terminal is JobRunStatus.FAILED:
-        jobs.fail(source.id, RuntimeError("transport failed"))
+        jobs.fail(source.id, RuntimeError("transport failed"), claim_token=source_token)
     else:
         jobs.cancel(source.id)
 
@@ -153,12 +174,18 @@ def test_explicit_onboarding_restart_resumes_failed_or_cancelled_stage(
     jobs = JobService(lambda: UnitOfWork(session_factory), queue=queue)
     onboarding = OnboardingService(settings, jobs)
     source = onboarding.start(("bilibili",))
-    assert jobs.claim(source.id)
-    jobs.succeed(source.id)
+    source_token = jobs.claim(source.id)
+    assert source_token is not None
+    jobs.succeed(source.id, claim_token=source_token)
     profile = next(run for run in jobs.list() if run.job_name == "profile_projection")
-    assert jobs.claim(profile.id)
+    profile_token = jobs.claim(profile.id)
+    assert profile_token is not None
     if terminal is JobRunStatus.FAILED:
-        jobs.fail(profile.id, RuntimeError("profile unavailable"))
+        jobs.fail(
+            profile.id,
+            RuntimeError("profile unavailable"),
+            claim_token=profile_token,
+        )
     else:
         jobs.cancel(profile.id)
 
@@ -183,8 +210,9 @@ def test_restart_reconciles_success_gap_idempotently(tmp_path: Path) -> None:
     first_queue = RecordingQueue()
     first_jobs = JobService(lambda: UnitOfWork(session_factory), queue=first_queue)
     source = first_jobs.schedule("source_sync", idempotency_key="onboarding:bilibili")
-    assert first_jobs.claim(source.id)
-    first_jobs.succeed(source.id)
+    source_token = first_jobs.claim(source.id)
+    assert source_token is not None
+    first_jobs.succeed(source.id, claim_token=source_token)
 
     restarted_queue = RecordingQueue()
     restarted_jobs = JobService(lambda: UnitOfWork(session_factory), queue=restarted_queue)
@@ -202,6 +230,109 @@ def test_restart_reconciles_success_gap_idempotently(tmp_path: Path) -> None:
     engine.dispose()
 
 
+def test_live_lifecycle_sweep_replays_unacknowledged_success_once(tmp_path: Path) -> None:
+    engine, session_factory = _database(tmp_path)
+    settings = FailFirstOnboardingCompletion(lambda: UnitOfWork(session_factory))
+    jobs = JobService(lambda: UnitOfWork(session_factory), queue=RecordingQueue())
+    onboarding = OnboardingService(settings, jobs)
+
+    source = onboarding.start(("bilibili",))
+    source_token = jobs.claim(source.id)
+    assert source_token is not None
+    jobs.succeed(source.id, claim_token=source_token)
+    profile = next(run for run in jobs.list() if run.job_name == "profile_projection")
+    profile_token = jobs.claim(profile.id)
+    assert profile_token is not None
+    jobs.succeed(profile.id, claim_token=profile_token)
+    feed = next(run for run in jobs.list() if run.job_name == "feed_replenishment")
+    feed_token = jobs.claim(feed.id)
+    assert feed_token is not None
+
+    jobs.succeed(feed.id, claim_token=feed_token)
+
+    assert settings.get().onboarding_complete is False
+    assert settings.completion_attempts == 1
+
+    jobs.recover_expired_leases()
+    assert settings.get().onboarding_complete is True
+    assert settings.completion_attempts == 2
+
+    jobs.recover_expired_leases()
+    assert settings.completion_attempts == 2
+    engine.dispose()
+
+
+def test_cleanup_retains_success_until_continuation_is_acknowledged(tmp_path: Path) -> None:
+    engine, session_factory = _database(tmp_path)
+    settings = FailFirstOnboardingCompletion(lambda: UnitOfWork(session_factory))
+    jobs = JobService(lambda: UnitOfWork(session_factory), queue=RecordingQueue())
+    onboarding = OnboardingService(settings, jobs)
+
+    source = onboarding.start(("bilibili",))
+    source_token = jobs.claim(source.id)
+    assert source_token is not None
+    jobs.succeed(source.id, claim_token=source_token)
+    profile = next(run for run in jobs.list() if run.job_name == "profile_projection")
+    profile_token = jobs.claim(profile.id)
+    assert profile_token is not None
+    jobs.succeed(profile.id, claim_token=profile_token)
+    feed = next(run for run in jobs.list() if run.job_name == "feed_replenishment")
+    feed_token = jobs.claim(feed.id)
+    assert feed_token is not None
+    jobs.succeed(feed.id, claim_token=feed_token)
+    assert settings.get().onboarding_complete is False
+
+    with session_factory() as session:
+        session.execute(
+            update(JobRunModel)
+            .where(JobRunModel.id == str(feed.id))
+            .values(finished_at=datetime.now(UTC) - timedelta(days=2))
+        )
+        session.commit()
+
+    assert jobs.cleanup_finished(retention_days=1) == 0
+    assert jobs.inspect(feed.id).status is JobRunStatus.SUCCEEDED
+
+    jobs.recover_expired_leases()
+    with session_factory() as session:
+        persisted = session.scalar(select(JobRunModel).where(JobRunModel.id == str(feed.id)))
+        assert persisted is not None
+        assert persisted.continuation_completed_at is not None
+    assert settings.get().onboarding_complete is True
+
+    assert jobs.cleanup_finished(retention_days=1) == 1
+    with pytest.raises(LookupError, match="does not exist"):
+        jobs.inspect(feed.id)
+    engine.dispose()
+
+
+@pytest.mark.parametrize("terminal", [JobRunStatus.FAILED, JobRunStatus.CANCELLED])
+def test_cleanup_still_removes_aged_non_success_terminal_rows(
+    tmp_path: Path, terminal: JobRunStatus
+) -> None:
+    engine, session_factory = _database(tmp_path)
+    jobs = JobService(lambda: UnitOfWork(session_factory), queue=RecordingQueue())
+    run = jobs.schedule("cleanup", idempotency_key=f"retention:{terminal.value}")
+    if terminal is JobRunStatus.FAILED:
+        claim_token = jobs.claim(run.id)
+        assert claim_token is not None
+        jobs.fail(run.id, RuntimeError("terminal"), claim_token=claim_token)
+    else:
+        jobs.cancel(run.id)
+    with session_factory() as session:
+        session.execute(
+            update(JobRunModel)
+            .where(JobRunModel.id == str(run.id))
+            .values(finished_at=datetime.now(UTC) - timedelta(days=2))
+        )
+        session.commit()
+
+    assert jobs.cleanup_finished(retention_days=1) == 1
+    with pytest.raises(LookupError, match="does not exist"):
+        jobs.inspect(run.id)
+    engine.dispose()
+
+
 def test_workflow_progress_resolves_persisted_child_after_process_restart(
     tmp_path: Path,
 ) -> None:
@@ -210,8 +341,9 @@ def test_workflow_progress_resolves_persisted_child_after_process_restart(
     first_jobs = JobService(lambda: UnitOfWork(session_factory), queue=RecordingQueue())
     first_onboarding = OnboardingService(settings, first_jobs)
     root = first_onboarding.start(("bilibili",))
-    assert first_jobs.claim(root.id)
-    first_jobs.succeed(root.id)
+    root_token = first_jobs.claim(root.id)
+    assert root_token is not None
+    first_jobs.succeed(root.id, claim_token=root_token)
     profile = next(run for run in first_jobs.list() if run.job_name == "profile_projection")
 
     restarted_jobs = JobService(lambda: UnitOfWork(session_factory), queue=RecordingQueue())
@@ -235,12 +367,14 @@ async def test_stream_propagates_terminal_child_status_and_identity(
     jobs = JobService(lambda: UnitOfWork(session_factory), queue=RecordingQueue())
     onboarding = OnboardingService(settings, jobs)
     root = onboarding.start(("bilibili",))
-    assert jobs.claim(root.id)
-    jobs.succeed(root.id)
+    root_token = jobs.claim(root.id)
+    assert root_token is not None
+    jobs.succeed(root.id, claim_token=root_token)
     profile = next(run for run in jobs.list() if run.job_name == "profile_projection")
-    assert jobs.claim(profile.id)
+    profile_token = jobs.claim(profile.id)
+    assert profile_token is not None
     if terminal is JobRunStatus.FAILED:
-        jobs.fail(profile.id, RuntimeError("private detail"))
+        jobs.fail(profile.id, RuntimeError("private detail"), claim_token=profile_token)
     else:
         jobs.cancel(profile.id)
 
@@ -272,9 +406,10 @@ def test_restart_recovers_child_persisted_before_queue_dispatch_failure(tmp_path
     jobs = JobService(lambda: UnitOfWork(session_factory), queue=FailAfterRootQueue())
     onboarding = OnboardingService(settings, jobs)
     source = onboarding.start(("bilibili",))
-    assert jobs.claim(source.id)
+    source_token = jobs.claim(source.id)
+    assert source_token is not None
 
-    jobs.succeed(source.id)
+    jobs.succeed(source.id, claim_token=source_token)
 
     profile = next(run for run in jobs.list() if run.job_name == "profile_projection")
     assert jobs.inspect(source.id).status is JobRunStatus.SUCCEEDED
@@ -301,8 +436,9 @@ def test_app_database_and_file_queue_complete_full_onboarding_once(tmp_path: Pat
     def execute(job_name: str, run_id: str) -> None:
         service = runtime["service"]
         resolved = UUID(run_id)
-        assert service.claim(resolved)
-        service.succeed(resolved)
+        claim_token = service.claim(resolved)
+        assert claim_token is not None
+        service.succeed(resolved, claim_token=claim_token)
 
     tasks: dict[str, Any] = {}
     for job_name in ("source_sync", "profile_projection", "feed_replenishment"):
@@ -356,9 +492,10 @@ def test_real_app_stream_follows_durable_onboarding_children(tmp_path: Path) -> 
             del _job_name
             service = runtime["service"]
             resolved = UUID(run_id)
-            if service.claim(resolved):
+            claim_token = service.claim(resolved)
+            if claim_token is not None:
                 time.sleep(0.3)
-                service.succeed(resolved)
+                service.succeed(resolved, claim_token=claim_token)
 
         tasks[job_name] = execute_stage
 
@@ -389,6 +526,7 @@ def test_real_app_stream_follows_durable_onboarding_children(tmp_path: Path) -> 
     with TestClient(create_app(container=container)) as client:
         started = client.post(
             "/api/v1/onboarding/start",
+            headers={"Authorization": "Bearer test-access-token"},
             json={"source_ids": ["bilibili"]},
         )
         assert started.status_code == 202
@@ -404,7 +542,10 @@ def test_real_app_stream_follows_durable_onboarding_children(tmp_path: Path) -> 
 
         worker = Thread(target=execute_queue, daemon=True)
         worker.start()
-        streamed = client.get(f"/api/v1/onboarding/{root_id}/events")
+        streamed = client.get(
+            f"/api/v1/onboarding/{root_id}/events",
+            headers={"Authorization": "Bearer test-access-token"},
+        )
         worker.join(timeout=3)
 
     assert streamed.status_code == 200

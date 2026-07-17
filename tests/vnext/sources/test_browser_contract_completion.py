@@ -50,7 +50,12 @@ def test_all_manifests_expose_pydantic_derived_safe_form_and_operation_schemas(
 ) -> None:
     for manifest in registry.manifests.values():
         assert manifest.settings_schema["type"] == "object"
-        if manifest.source_id is SourceId.REDDIT:
+        if manifest.source_id in {
+            SourceId.XIAOHONGSHU,
+            SourceId.YOUTUBE,
+            SourceId.ZHIHU,
+            SourceId.REDDIT,
+        }:
             assert dict(manifest.credential_schema) == {}
         else:
             assert manifest.credential_schema["type"] == "object"

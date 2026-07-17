@@ -43,7 +43,7 @@ class XiaohongshuSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.XIAOHONGSHU,
     display_name="Xiaohongshu",
-    **source_form_schema_fields(XiaohongshuSettings),
+    **source_form_schema_fields(XiaohongshuSettings, accepts_credentials=False),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

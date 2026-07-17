@@ -8,6 +8,7 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, HttpUrl
 
+from openbiliclaw.features._metadata import FrozenMetadata, serialize_metadata
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.feed.domain import ContentItem
 from openbiliclaw.features.sources.domain import (
@@ -50,6 +51,24 @@ class RoutedTransport:
         except KeyError as exc:
             raise UnsupportedSourceOperationError(f"no transport for {operation}") from exc
         return await transport.fetch(operation=operation, query=query, limit=limit)
+
+
+def allocate_scope_limits(limit: int, scopes: tuple[str, ...]) -> dict[str, int]:
+    """Divide one public result limit across ordered bootstrap scopes.
+
+    Earlier scopes receive at most one more item when the budget does not divide
+    evenly.  This preserves each source's declared scope order without allowing
+    the first full scope to consume the entire operation budget.
+    """
+
+    if limit < 0:
+        raise ValueError("scope limit must not be negative")
+    if not scopes:
+        raise ValueError("at least one scope is required")
+    if len(set(scopes)) != len(scopes):
+        raise ValueError("scope names must be unique")
+    base, remainder = divmod(limit, len(scopes))
+    return {scope: base + (1 if index < remainder else 0) for index, scope in enumerate(scopes)}
 
 
 def operation_spec(
@@ -137,6 +156,31 @@ class NormalizingConnector:
         if spec.result_kind is SourceResultKind.ACTIVITY:
             return await self.import_activity(limit)
         return await self.discover(operation, query, limit)
+
+    def validate_browser_completion(
+        self,
+        operation: SourceOperation,
+        items: tuple[FrozenMetadata, ...],
+    ) -> None:
+        """Prove every browser row normalizes to this source and operation result kind."""
+
+        spec = self._require(operation)
+        normalizer: Callable[[dict[str, Any]], ActivityEvent | ContentItem | None]
+        if spec.result_kind is SourceResultKind.ACTIVITY:
+            if self._normalize_activity is None:
+                raise ValueError("browser result has no activity normalizer")
+            normalizer = self._normalize_activity
+        else:
+            normalizer = self._normalize_content
+        expected_source = self.manifest.source_id.value
+        for item in items:
+            raw = serialize_metadata(item)
+            declared_source = raw.get("source_id")
+            if declared_source is not None and declared_source != expected_source:
+                raise ValueError("browser result declares a different source")
+            normalized = normalizer(raw)
+            if normalized is None or normalized.source_id != expected_source:
+                raise ValueError("browser result item does not match its source schema")
 
     def _require(self, operation: SourceOperation):  # type: ignore[no-untyped-def]
         return self.manifest.operation_spec(operation)

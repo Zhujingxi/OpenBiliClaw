@@ -30,7 +30,6 @@ GenerativeAlias = Literal["obc-interactive", "obc-analysis"]
 TaskName = Literal[
     "profile_delta",
     "keyword_generation",
-    "candidate_assessment",
     "candidate_batch_assessment",
     "chat_response",
     "recommendation_explanation",
@@ -50,7 +49,6 @@ _SOURCE_IDS: tuple[SourceId, ...] = (
 _TASK_NAMES: tuple[TaskName, ...] = (
     "profile_delta",
     "keyword_generation",
-    "candidate_assessment",
     "candidate_batch_assessment",
     "chat_response",
     "recommendation_explanation",
@@ -110,6 +108,9 @@ class ScheduleSettings(_SettingsGroup):
     """User-controlled durable job schedules."""
 
     source_sync_interval_minutes: int = Field(default=30, ge=1, le=10080)
+    profile_projection_interval_minutes: int = Field(default=10, ge=1, le=10080)
+    feed_replenishment_interval_minutes: int = Field(default=5, ge=1, le=10080)
+    cleanup_interval_minutes: int = Field(default=1440, ge=1, le=10080)
 
 
 class FeedSettings(_SettingsGroup):
@@ -163,13 +164,6 @@ def _default_tasks() -> dict[TaskName, TaskSettings]:
             request_limit=3,
             total_tokens_limit=8_000,
         ),
-        "candidate_assessment": TaskSettings(
-            model_alias="obc-analysis",
-            semantic_retry_limit=2,
-            timeout_seconds=60,
-            request_limit=3,
-            total_tokens_limit=8_000,
-        ),
         "candidate_batch_assessment": TaskSettings(
             model_alias="obc-analysis",
             semantic_retry_limit=2,
@@ -179,13 +173,13 @@ def _default_tasks() -> dict[TaskName, TaskSettings]:
         ),
         "chat_response": TaskSettings(
             model_alias="obc-interactive",
-            semantic_retry_limit=1,
+            semantic_retry_limit=0,
             timeout_seconds=45,
             request_limit=2,
             total_tokens_limit=8_000,
         ),
         "recommendation_explanation": TaskSettings(
-            model_alias="obc-interactive",
+            model_alias="obc-analysis",
             semantic_retry_limit=1,
             timeout_seconds=30,
             request_limit=2,
@@ -227,7 +221,7 @@ class LoggingSettings(_SettingsGroup):
 class AccessControlSettings(_SettingsGroup):
     """Mutable access behavior and secret-free deployment readiness flags."""
 
-    web_password_enabled: StrictBool = False
+    web_password_enabled: StrictBool = Field(default=True, json_schema_extra=_READ_ONLY)
     trust_loopback: StrictBool = False
     session_ttl_hours: int = Field(default=24, ge=0, le=8760)
     extension_access_enabled: StrictBool = True
@@ -282,6 +276,17 @@ class UserSettings(BaseModel):
             raise ValueError("task settings must contain every built-in task")
         if any(not math.isfinite(task.timeout_seconds) for task in self.tasks.values()):
             raise ValueError("task timeout must be finite")
+        analysis_tasks = {
+            "profile_delta",
+            "keyword_generation",
+            "candidate_batch_assessment",
+            "recommendation_explanation",
+        }
+        for name, task in self.tasks.items():
+            expected = "obc-analysis" if name in analysis_tasks else "obc-interactive"
+            lane = "analysis" if name in analysis_tasks else "interactive"
+            if task.model_alias != expected:
+                raise ValueError(f"{lane} lane requires model alias {expected}")
         return self
 
 

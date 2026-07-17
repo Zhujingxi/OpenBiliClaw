@@ -43,7 +43,7 @@ class ZhihuSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.ZHIHU,
     display_name="Zhihu",
-    **source_form_schema_fields(ZhihuSettings),
+    **source_form_schema_fields(ZhihuSettings, accepts_credentials=False),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

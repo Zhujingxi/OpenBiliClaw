@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from inspect import signature
 from pathlib import Path
@@ -10,17 +12,28 @@ from uuid import UUID
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
-from openbiliclaw.features.feed.domain import ContentItem
+from openbiliclaw.features.activity.service import ActivityService, project_activity_event
+from openbiliclaw.features.feed.domain import (
+    CandidateAssessment,
+    ContentItem,
+    FeedEntry,
+    Interaction,
+    InteractionKind,
+)
 from openbiliclaw.features.profile.domain import ProfileFacet, ProfileSnapshot
 from openbiliclaw.infrastructure.database.base import (
     DatabaseSettings,
     create_engine_and_session,
 )
-from openbiliclaw.infrastructure.database.models import AIRunModel, SourceTaskModel
+from openbiliclaw.infrastructure.database.models import (
+    ActivityEventModel,
+    AIRunModel,
+    SourceTaskModel,
+)
 from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 
@@ -184,6 +197,60 @@ def test_content_identity_is_unique_per_source(migrated_database: Path) -> None:
     engine.dispose()
 
 
+def test_unseen_feed_diversity_keys_include_topics_until_seen(
+    migrated_database: Path,
+) -> None:
+    engine, session_factory = create_engine_and_session(
+        DatabaseSettings(url=_url(migrated_database))
+    )
+    profile = ProfileSnapshot(id=PROFILE_ID, revision=0, created_at=NOW)
+    item = ContentItem(
+        id=CONTENT_ID,
+        source_id="bilibili",
+        external_id="BV1diversity",
+        url="https://www.bilibili.com/video/BV1diversity",
+        title="Diversity",
+    )
+    assessment = CandidateAssessment(
+        content_id=item.id,
+        profile_revision=profile.revision,
+        relevance=1,
+        quality=1,
+        novelty=1,
+        risk=0,
+        topics=("Python", "Architecture"),
+    )
+    entry = FeedEntry(
+        content_id=item.id,
+        assessment_id=assessment.id,
+        position=0,
+        admitted_at=NOW,
+    )
+    with UnitOfWork(session_factory) as uow:
+        uow.profiles.append(profile, expected_revision=None)
+        uow.content.add(item)
+        uow.content.flush()
+        uow.assessments.add(assessment)
+        uow.content.flush()
+        uow.feed.add(entry)
+        uow.commit()
+
+    with UnitOfWork(session_factory) as uow:
+        assert uow.feed.unseen_diversity_keys() == (("bilibili", ("Python", "Architecture")),)
+        uow.interactions.add(
+            Interaction(
+                content_id=item.id,
+                kind=InteractionKind.IMPRESSION,
+                occurred_at=NOW,
+            )
+        )
+        uow.commit()
+
+    with UnitOfWork(session_factory) as uow:
+        assert uow.feed.unseen_diversity_keys() == ()
+    engine.dispose()
+
+
 def test_profile_append_rejects_stale_expected_revision(migrated_database: Path) -> None:
     engine, session_factory = create_engine_and_session(
         DatabaseSettings(url=_url(migrated_database))
@@ -294,4 +361,70 @@ def test_profile_facets_round_trip_with_persisted_activity_evidence(
 
     with UnitOfWork(session_factory) as uow:
         assert uow.profiles.latest() == profile
+    engine.dispose()
+
+
+def test_concurrent_duplicate_activity_ingestion_is_idempotent(
+    migrated_database: Path,
+) -> None:
+    """Two extension retries may race without turning the duplicate into a 500."""
+
+    engine, session_factory = create_engine_and_session(
+        DatabaseSettings(url=_url(migrated_database))
+    )
+    events = (
+        ActivityEvent(
+            id=EVENT_ID,
+            source_id="xiaohongshu",
+            kind=ActivityKind.VIEW,
+            occurred_at=NOW,
+            content_external_id="note-1",
+            title="First concurrent payload",
+        ),
+        ActivityEvent(
+            id=EVENT_ID,
+            source_id="xiaohongshu",
+            kind=ActivityKind.VIEW,
+            occurred_at=NOW,
+            content_external_id="note-1",
+            title="Conflicting concurrent payload",
+        ),
+    )
+    ready = threading.Barrier(2)
+    service = ActivityService(lambda: UnitOfWork(session_factory))
+
+    def ingest(event: ActivityEvent) -> tuple[object, ...]:
+        return service.ingest(event, transaction_guard=lambda _uow: ready.wait(timeout=5))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(executor.map(ingest, events))
+
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(ActivityEventModel)) == 1
+    with UnitOfWork(session_factory) as uow:
+        authoritative = uow.activities.list_all()[0]
+    assert results[0] == results[1] == project_activity_event(authoritative)
+    engine.dispose()
+
+
+def test_sequential_same_id_conflict_projects_the_first_persisted_event(
+    migrated_database: Path,
+) -> None:
+    engine, session_factory = create_engine_and_session(
+        DatabaseSettings(url=_url(migrated_database))
+    )
+    first = ActivityEvent(
+        id=EVENT_ID,
+        source_id="bilibili",
+        kind=ActivityKind.FAVORITE,
+        occurred_at=NOW,
+        title="Authoritative first payload",
+    )
+    conflicting_retry = first.model_copy(update={"title": "Phantom retry payload"})
+    service = ActivityService(lambda: UnitOfWork(session_factory))
+
+    assert service.ingest(first) == project_activity_event(first)
+    assert service.ingest(conflicting_retry) == project_activity_event(first)
+    with UnitOfWork(session_factory) as uow:
+        assert uow.activities.list_all() == (first,)
     engine.dispose()

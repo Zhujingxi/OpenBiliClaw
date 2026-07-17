@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openbiliclaw.api.dependencies import Container, require_access
+from openbiliclaw.api.dependencies import Container, require_access, require_cookie_state_change
 from openbiliclaw.api.threading import run_sync_port
 from openbiliclaw.features.sources.domain import (
     BrowserOperationResultValue,
@@ -42,6 +42,7 @@ router = APIRouter(
 @router.get(
     "/claim",
     operation_id="v1_source_tasks_claim",
+    dependencies=[Depends(require_cookie_state_change)],
     response_model=ClaimedSourceTask | None,
     responses={204: {"description": "No task available"}},
 )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,6 +17,7 @@ from openbiliclaw.features.system.domain import UserSettings
 from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_engine_and_session
 from openbiliclaw.infrastructure.database.models import SettingModel, SourceAccountModel
+from openbiliclaw.infrastructure.database.repositories import SQLAlchemySettingsRepository
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.security.credentials import (
     CredentialCipher,
@@ -96,6 +99,75 @@ def test_settings_update_is_atomic_on_validation_failure(tmp_path: Path) -> None
         service.update({"feed": {"low_watermark": 50, "high_watermark": 20}})
 
     assert service.get() == original
+    engine.dispose()
+
+
+def _synchronize_first_two_settings_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    reads = 0
+    original = SQLAlchemySettingsRepository.get_all
+
+    def synchronized(repository: SQLAlchemySettingsRepository):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        values = original(repository)
+        with lock:
+            should_wait = reads < 2
+            reads += 1
+        if should_wait:
+            barrier.wait(timeout=3)
+        return values
+
+    monkeypatch.setattr(SQLAlchemySettingsRepository, "get_all", synchronized)
+
+
+def test_cross_session_disjoint_settings_updates_are_retained(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine, session_factory = _session_factory(tmp_path)
+    first = SettingsService(lambda: UnitOfWork(session_factory))
+    second = SettingsService(lambda: UnitOfWork(session_factory))
+    _synchronize_first_two_settings_reads(monkeypatch)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        feed = executor.submit(
+            first.update,
+            {"feed": {"low_watermark": 11, "high_watermark": 31}},
+        )
+        schedule = executor.submit(
+            second.update,
+            {"schedules": {"feed_replenishment_interval_minutes": 17}},
+        )
+        feed.result(timeout=5)
+        schedule.result(timeout=5)
+
+    persisted = SettingsService(lambda: UnitOfWork(session_factory)).get()
+    assert persisted.feed.low_watermark == 11
+    assert persisted.feed.high_watermark == 31
+    assert persisted.schedules.feed_replenishment_interval_minutes == 17
+    engine.dispose()
+
+
+def test_cross_session_onboarding_completion_preserves_unrelated_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine, session_factory = _session_factory(tmp_path)
+    api_settings = SettingsService(lambda: UnitOfWork(session_factory))
+    worker_settings = SettingsService(lambda: UnitOfWork(session_factory))
+    _synchronize_first_two_settings_reads(monkeypatch)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        public_update = executor.submit(
+            api_settings.update,
+            {"logging": {"console_level": "WARNING"}},
+        )
+        completion = executor.submit(worker_settings.complete_onboarding)
+        public_update.result(timeout=5)
+        completion.result(timeout=5)
+
+    persisted = SettingsService(lambda: UnitOfWork(session_factory)).get()
+    assert persisted.logging.console_level == "WARNING"
+    assert persisted.onboarding_complete is True
     engine.dispose()
 
 

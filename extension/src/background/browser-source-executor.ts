@@ -4,6 +4,7 @@ import type {
 } from "./generic-source-task-dispatcher.ts";
 import type { SourceId, SourceOperation } from "../shared/api-client.ts";
 import type { SourceManifest } from "../shared/api-client.ts";
+import { sanitizeOutboundUrl } from "../shared/url-sanitizer.ts";
 
 const TAB_READY_TIMEOUT_MS = 12_000;
 const CONTENT_READY_TIMEOUT_MS = 8_000;
@@ -73,7 +74,7 @@ export async function executeBrowserSourceTask(
   for (let index = 0; index < executions.length; index += 1) {
     const execution = executions[index]!;
     const result = results[index]!;
-    items.push(...execution.items(result).map(stripCredentialFields));
+    items.push(...execution.items(result).map(sanitizeOutboundRecord));
   }
   return { operation: task.payload.operation, items };
 }
@@ -139,20 +140,25 @@ function xiaohongshuExecution(taskId: string, payload: TaskPayload): LegacyExecu
 
 function douyinExecutions(taskId: string, payload: TaskPayload): LegacyExecution[] {
   if (payload.operation === "bootstrap_import") {
-    return ["dy_post", "dy_collect", "dy_like", "dy_follow"].map((scope) => ({
-      url: "https://www.douyin.com/",
-      action: "DY_SCOPE_EXECUTE",
-      resultAction: "DY_SCOPE_RESULT",
-      data: {
-        task_id: taskId,
-        scope,
-        max_items_per_scope: payload.limit,
-        max_scroll_rounds: 4,
-        max_stagnant_scroll_rounds: 3,
-      },
-      active: true,
-      items: (result: RuntimeMessage) => recordArray(result.items),
-    }));
+    const scopes = ["dy_post", "dy_collect", "dy_like", "dy_follow"] as const;
+    const allocation = allocateScopeLimits(payload.limit ?? 20, scopes.length);
+    return scopes.flatMap((scope, index) => {
+      const scopeLimit = allocation[index] ?? 0;
+      return scopeLimit > 0 ? [{
+        url: "https://www.douyin.com/",
+        action: "DY_SCOPE_EXECUTE",
+        resultAction: "DY_SCOPE_RESULT",
+        data: {
+          task_id: taskId,
+          scope,
+          max_items_per_scope: scopeLimit,
+          max_scroll_rounds: 4,
+          max_stagnant_scroll_rounds: 3,
+        },
+        active: true,
+        items: (result: RuntimeMessage) => recordArray(result.items),
+      }] : [];
+    });
   }
   if (payload.operation === "search") {
     return [{
@@ -199,14 +205,27 @@ function youtubeExecutions(taskId: string, payload: TaskPayload): LegacyExecutio
     ["yt_subscriptions", "https://www.youtube.com/feed/channels"],
     ["yt_likes", "https://www.youtube.com/playlist?list=LL"],
   ] as const;
-  return scopes.map(([scope, url]) => ({
-    url,
-    action: "YT_SCOPE_EXECUTE",
-    resultAction: "YT_SCOPE_RESULT",
-    data: { task_id: taskId, scope, max_items_per_scope: payload.limit, max_scroll_rounds: 10 },
-    active: true,
-    items: (result) => recordArray(result.items),
-  }));
+  const allocation = allocateScopeLimits(payload.limit ?? 20, scopes.length);
+  return scopes.flatMap(([scope, url], index) => {
+    const scopeLimit = allocation[index] ?? 0;
+    return scopeLimit > 0 ? [{
+      url,
+      action: "YT_SCOPE_EXECUTE",
+      resultAction: "YT_SCOPE_RESULT",
+      data: { task_id: taskId, scope, max_items_per_scope: scopeLimit, max_scroll_rounds: 10 },
+      active: true,
+      items: (result) => recordArray(result.items),
+    }] : [];
+  });
+}
+
+function allocateScopeLimits(limit: number, scopeCount: number): number[] {
+  const base = Math.floor(limit / scopeCount);
+  const remainder = limit % scopeCount;
+  return Array.from(
+    { length: scopeCount },
+    (_value, index) => base + (index < remainder ? 1 : 0),
+  );
 }
 
 function zhihuExecution(taskId: string, payload: TaskPayload): LegacyExecution {
@@ -532,15 +551,19 @@ function recordArray(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.map(asRecord).filter((item) => Object.keys(item).length > 0) : [];
 }
 
-function stripCredentialFields(value: Record<string, unknown>): Record<string, unknown> {
+export function sanitizeOutboundRecord(value: Record<string, unknown>): Record<string, unknown> {
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
     if (/(cookie|credential|password|secret|session|token|authorization|apikey)$/.test(normalized)) continue;
     if (Array.isArray(child)) {
-      output[key] = child.map((item) => isRecord(item) ? stripCredentialFields(item) : item);
+      output[key] = child.map((item) => isRecord(item)
+        ? sanitizeOutboundRecord(item)
+        : typeof item === "string" ? sanitizeOutboundUrl(item) : item);
     } else if (isRecord(child)) {
-      output[key] = stripCredentialFields(child);
+      output[key] = sanitizeOutboundRecord(child);
+    } else if (typeof child === "string") {
+      output[key] = sanitizeOutboundUrl(child);
     } else {
       output[key] = child;
     }

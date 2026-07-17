@@ -296,6 +296,14 @@ class SQLAlchemyBrowserTaskRepository:
             }
         )
 
+    def source_id(self, task_id: UUID) -> SourceId:
+        source_id = self._session.scalar(
+            select(SourceTaskModel.source_id).where(SourceTaskModel.id == str(task_id))
+        )
+        if source_id is None:
+            raise LookupError(f"source task does not exist: {task_id}")
+        return SourceId(source_id)
+
     def _abandon_expired(
         self,
         *,

@@ -11,6 +11,9 @@ uv sync --frozen
 ```
 
 Provide `OPENBILICLAW_LITELLM_BASE_URL` and `OPENBILICLAW_LITELLM_API_KEY` through the current process or secret manager. Do not paste values into the command line or report.
+Optionally provide a separately verified `OPENBILICLAW_LITELLM_ADMIN_URL` (or
+`--litellm-admin-url`) when the browser should show an Admin link. Confirm the link is absent when
+this value is omitted; the installer must not derive it from the model API base URL.
 
 ## 2. Preparation-only path
 
@@ -21,6 +24,12 @@ uv run openbiliclaw doctor
 ```
 
 Pass when the fresh database is at Alembic head, `data/vnext/huey.db` is separate, and no API/worker process was started by the preparation-only path.
+Capture the first-run structured access event privately. Confirm `.env` contains the password
+hash and extension digest records but neither disclosed plaintext value; rerun preparation and
+confirm the event is not emitted again.
+Force migration failure in a disposable checkout and confirm neither verifier record nor event
+exists. Simulate a lost successful event, rerun with `ROTATE_ACCESS=1`, and confirm one new pair
+replaces both old verifier records.
 
 ## 3. Managed runtime
 
@@ -41,6 +50,16 @@ uv run openbiliclaw serve --host 127.0.0.1 --port 8420
 uv run openbiliclaw worker
 uv run openbiliclaw eval
 ```
+
+Do not source `.env` manually for this step. Confirm each command reads the installer-written
+runtime paths through a no-follow descriptor, while an explicitly exported `OPENBILICLAW_*`
+value still takes precedence. A symlink, non-regular file, wrong owner, or POSIX mode other than
+`0600` must fail closed without reading the target.
+
+On native Windows, additionally confirm the installer applies a protected DACL owned by the
+current user SID with no inherited or additional access rules before writing `.env`. Change the
+owner or add another allow rule and require the next installer/CLI read to fail closed. A missing
+PowerShell ACL facility is a failed installation, not a warning.
 
 Then verify backup publishes a new destination without overwriting an existing one:
 

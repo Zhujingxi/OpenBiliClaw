@@ -21,7 +21,6 @@ const SOURCES = [
 const TASKS = [
   "profile_delta",
   "keyword_generation",
-  "candidate_assessment",
   "candidate_batch_assessment",
   "chat_response",
   "recommendation_explanation",
@@ -496,13 +495,31 @@ function renderSettings() {
   );
   $("#taskSettings").innerHTML = TASKS.map((task) => {
     const config = settings.tasks[task];
-    return `<fieldset><legend>${escapeHtml(task)}</legend><div class="vnext-fields"><label>模型别名<select id="task-alias-${task}"><option ${config.model_alias === "obc-analysis" ? "selected" : ""}>obc-analysis</option><option ${config.model_alias === "obc-interactive" ? "selected" : ""}>obc-interactive</option></select></label>${numberField(`task-retry-${task}`, "语义重试", config.semantic_retry_limit, { min: 0, max: 10 })}${numberField(`task-timeout-${task}`, "超时秒数", config.timeout_seconds, { min: 1, max: 600, step: 0.1 })}${numberField(`task-request-${task}`, "请求次数上限", config.request_limit, { min: 1, max: 20 })}${numberField(`task-token-${task}`, "总 Token 上限", config.total_tokens_limit, { min: 1, max: 1000000 })}</div></fieldset>`;
+    return `<fieldset><legend>${escapeHtml(task)}</legend><div class="vnext-fields"><label>模型别名（任务 lane）<input id="task-alias-${task}" value="${escapeHtml(config.model_alias)}" readonly></label>${numberField(`task-retry-${task}`, "语义重试", config.semantic_retry_limit, { min: 0, max: 10 })}${numberField(`task-timeout-${task}`, "超时秒数", config.timeout_seconds, { min: 1, max: 600, step: 0.1 })}${numberField(`task-request-${task}`, "请求次数上限", config.request_limit, { min: 1, max: 20 })}${numberField(`task-token-${task}`, "总 Token 上限", config.total_tokens_limit, { min: 1, max: 1000000 })}</div></fieldset>`;
   }).join("");
   $("#scheduleSettings").innerHTML =
     numberField(
       "schedule-sync",
       "来源同步间隔（分钟）",
       settings.schedules.source_sync_interval_minutes,
+      { min: 1, max: 10080 },
+    ) +
+    numberField(
+      "schedule-profile",
+      "画像投影间隔（分钟）",
+      settings.schedules.profile_projection_interval_minutes,
+      { min: 1, max: 10080 },
+    ) +
+    numberField(
+      "schedule-feed",
+      "发现流补充间隔（分钟）",
+      settings.schedules.feed_replenishment_interval_minutes,
+      { min: 1, max: 10080 },
+    ) +
+    numberField(
+      "schedule-cleanup",
+      "清理间隔（分钟）",
+      settings.schedules.cleanup_interval_minutes,
       { min: 1, max: 10080 },
     ) +
     numberField(
@@ -513,7 +530,7 @@ function renderSettings() {
     ) +
     `<label>Worker 并发（部署项）<input value="${settings.jobs.worker_concurrency}" disabled></label>`;
   $("#runtimeSettings").innerHTML =
-    `<label>网络模式<select id="network-mode"><option value="direct">直接连接</option><option value="system">系统代理</option><option value="custom">自定义代理</option></select></label><label>代理 URL<input id="network-proxy" value="${escapeHtml(settings.network.proxy_url)}"></label><label>控制台日志<select id="log-console">${["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"].map((v) => `<option ${v === settings.logging.console_level ? "selected" : ""}>${v}</option>`).join("")}</select></label><label>文件日志<select id="log-file">${["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"].map((v) => `<option ${v === settings.logging.file_level ? "selected" : ""}>${v}</option>`).join("")}</select></label>${checkboxField("access-web", "启用 Web 密码", settings.access_control.web_password_enabled)}${checkboxField("access-loopback", "信任本机回环", settings.access_control.trust_loopback)}${checkboxField("access-extension", "允许浏览器扩展", settings.access_control.extension_access_enabled)}${numberField("access-session", "Web 会话小时", settings.access_control.session_ttl_hours, { min: 0, max: 8760 })}${numberField("access-extension-ttl", "扩展会话小时", settings.access_control.extension_session_ttl_hours, { min: 1, max: 168 })}`;
+    `<label>网络模式<select id="network-mode"><option value="direct">直接连接</option><option value="system">系统代理</option><option value="custom">自定义代理</option></select></label><label>代理 URL<input id="network-proxy" value="${escapeHtml(settings.network.proxy_url)}"></label><label>控制台日志<select id="log-console">${["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"].map((v) => `<option ${v === settings.logging.console_level ? "selected" : ""}>${v}</option>`).join("")}</select></label><label>文件日志<select id="log-file">${["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"].map((v) => `<option ${v === settings.logging.file_level ? "selected" : ""}>${v}</option>`).join("")}</select></label>${checkboxField("access-loopback", "信任本机回环", settings.access_control.trust_loopback)}${checkboxField("access-extension", "允许浏览器扩展", settings.access_control.extension_access_enabled)}${numberField("access-session", "Web 会话小时", settings.access_control.session_ttl_hours, { min: 0, max: 8760 })}${numberField("access-extension-ttl", "扩展会话小时", settings.access_control.extension_session_ttl_hours, { min: 1, max: 168 })}`;
   $("#network-mode").value = settings.network.mode;
   renderSourceAccounts();
 }
@@ -525,18 +542,51 @@ function renderSourceAccounts() {
   $("#sourceAccounts").innerHTML = state.manifests
     .map((manifest) => {
       const account = bySource.get(manifest.source_id);
-      return `<form class="vnext-source-row" data-account-source="${escapeHtml(manifest.source_id)}"><strong>${escapeHtml(manifest.display_name)}</strong><span>${account?.configured ? `已连接 ${escapeHtml(account.account_key)}` : "需要浏览器 Cookie 才能直接配置"}</span><span class="vnext-actions">${account?.configured ? '<button type="button" class="small-btn" data-disconnect>断开</button>' : `<input name="cookie" type="password" autocomplete="off" placeholder="Cookie"><button class="small-btn">连接</button>`}</span></form>`;
+      const properties = manifest.credential_schema?.properties || {};
+      const fields = Object.entries(properties)
+        .map(
+          ([name, schema]) =>
+            `<label>${escapeHtml(schema.title || name)}<input data-source-credential="${escapeHtml(manifest.source_id)}" name="${escapeHtml(name)}" type="${schema.writeOnly ? "password" : "text"}" autocomplete="off"></label>`,
+        )
+        .join("");
+      const accountState = account?.configured
+        ? `已连接 ${escapeHtml(account.account_key)}`
+        : Object.keys(properties).length
+          ? "填写此来源声明的后端凭据"
+          : "通过浏览器扩展执行，无需后端凭据";
+      const actions = account?.configured
+        ? '<button type="button" class="small-btn" data-disconnect>断开</button>'
+        : Object.keys(properties).length
+          ? `${fields}<button type="button" class="small-btn" data-connect>连接</button>`
+          : "";
+      return `<div class="vnext-source-row" data-account-source="${escapeHtml(manifest.source_id)}"><strong>${escapeHtml(manifest.display_name)}</strong><span>${accountState}</span><span class="vnext-actions">${actions}</span></div>`;
     })
     .join("");
-  document.querySelectorAll("[data-account-source]").forEach((form) => {
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const source_id = form.dataset.accountSource;
-      const cookie = new FormData(form).get("cookie");
+  document.querySelectorAll("[data-account-source]").forEach((row) => {
+    row.querySelector("[data-connect]")?.addEventListener("click", async () => {
+      const source_id = row.dataset.accountSource;
+      const manifest = state.manifests.find(
+        (item) => item.source_id === source_id,
+      );
+      const properties = manifest?.credential_schema?.properties || {};
+      if (!Object.keys(properties).length) return;
+      const credentials = Object.fromEntries(
+        Object.keys(properties).map((name) => [
+          name,
+          row.querySelector(`[name="${name}"]`)?.value || "",
+        ]),
+      );
+      const missing = (manifest.credential_schema?.required || []).find(
+        (name) => !credentials[name],
+      );
+      if (missing) {
+        toast(`请填写 ${properties[missing]?.title || missing}`);
+        return;
+      }
       try {
         await request("v1_sources_configure_account", {
           path: { source_id },
-          body: { account_key: "default", credentials: { cookie } },
+          body: { account_key: "default", credentials },
         });
         toast("来源账号已连接");
         await loadSettings();
@@ -544,10 +594,10 @@ function renderSourceAccounts() {
         toast(errorMessage(error));
       }
     });
-    form
+    row
       .querySelector("[data-disconnect]")
       ?.addEventListener("click", async () => {
-        const account = bySource.get(form.dataset.accountSource);
+        const account = bySource.get(row.dataset.accountSource);
         await request("v1_sources_disconnect_account", {
           path: {
             source_id: account.source_id,
@@ -560,6 +610,7 @@ function renderSourceAccounts() {
 }
 
 function settingsPayload() {
+  const networkMode = valueOf("network-mode", "string");
   return {
     sources: {
       enabled: Object.fromEntries(
@@ -592,18 +643,23 @@ function settingsPayload() {
         },
       ]),
     ),
-    schedules: { source_sync_interval_minutes: valueOf("schedule-sync") },
+    schedules: {
+      source_sync_interval_minutes: valueOf("schedule-sync"),
+      profile_projection_interval_minutes: valueOf("schedule-profile"),
+      feed_replenishment_interval_minutes: valueOf("schedule-feed"),
+      cleanup_interval_minutes: valueOf("schedule-cleanup"),
+    },
     jobs: { retention_days: valueOf("job-retention") },
     network: {
-      mode: valueOf("network-mode", "string"),
-      proxy_url: valueOf("network-proxy", "string"),
+      mode: networkMode,
+      proxy_url:
+        networkMode === "custom" ? valueOf("network-proxy", "string") : "",
     },
     logging: {
       console_level: valueOf("log-console", "string"),
       file_level: valueOf("log-file", "string"),
     },
     access_control: {
-      web_password_enabled: valueOf("access-web", "boolean"),
       trust_loopback: valueOf("access-loopback", "boolean"),
       extension_access_enabled: valueOf("access-extension", "boolean"),
       session_ttl_hours: valueOf("access-session"),
@@ -773,7 +829,7 @@ $("#profileForm").addEventListener("submit", async (event) => {
   try {
     state.profile = await request("v1_profile_edit", {
       body: {
-        expected_revision: state.profile?.revision ?? 0,
+        expected_revision: state.profile?.revision ?? null,
         narrative: $("#profileNarrative").value,
         upserts: state.pendingFacets.map(({ name, value, weight }) => ({
           name,

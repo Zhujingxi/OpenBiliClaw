@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class CollectionRepository(Protocol):
-    def add(self, item: CollectionItem) -> None: ...
+    def add(self, item: CollectionItem) -> CollectionItem: ...
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
 
@@ -52,9 +52,9 @@ class LibraryService:
     ) -> CollectionItem:
         item = CollectionItem(collection=collection, content_id=content_id, note=note)
         with self._uow_factory() as uow:
-            uow.collections.add(item)
+            stored = uow.collections.add(item)
             uow.commit()
-        return item
+        return stored
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool:
         with self._uow_factory() as uow:

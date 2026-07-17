@@ -96,6 +96,28 @@ test("execution failures are reported without secret-bearing error text", async 
   assert.equal(JSON.stringify(failures).includes("do-not-send"), false);
 });
 
+test("an ambiguous success completion is never converted into execution_failed", async () => {
+  let executions = 0;
+  let failures = 0;
+  const dispatcher = createSourceTaskDispatcher({
+    sourceId: "bilibili",
+    operations: ["search"],
+    transport: {
+      async claim() { return claim; },
+      async complete() { throw new TypeError("completion response lost"); },
+      async fail() { failures += 1; },
+    },
+    execute: async () => {
+      executions += 1;
+      return { operation: "search", items: [{ external_id: "one" }] };
+    },
+  });
+
+  await assert.rejects(() => dispatcher.pollOnce(), /completion response lost/);
+  assert.equal(executions, 1);
+  assert.equal(failures, 0);
+});
+
 test("a claimed source mismatch is reported through the failure completion", async () => {
   const failures: unknown[] = [];
   const dispatcher = createSourceTaskDispatcher({

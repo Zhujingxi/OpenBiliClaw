@@ -19,6 +19,7 @@ from openbiliclaw.features.sources.domain import (
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
+    allocate_scope_limits,
     content_item,
     first_text,
     nested,
@@ -49,8 +50,15 @@ class TwitterCliTransport:
 
     async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
         if operation == SourceOperation.BOOTSTRAP_IMPORT:
-            liked = await self._client.likes(limit=limit)
-            bookmarked = await self._client.bookmarks(limit=limit)
+            allocation = allocate_scope_limits(limit, ("liked", "saved"))
+            liked = (
+                await self._client.likes(limit=allocation["liked"]) if allocation["liked"] else []
+            )
+            bookmarked = (
+                await self._client.bookmarks(limit=allocation["saved"])
+                if allocation["saved"]
+                else []
+            )
             return [dict(row, scope="liked") for row in liked] + [
                 dict(row, scope="saved") for row in bookmarked
             ]

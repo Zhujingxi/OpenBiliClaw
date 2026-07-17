@@ -180,15 +180,20 @@ def test_source_settings_state_and_manifest_are_credential_free(
     assert "password" not in settings_contracts
 
 
-def test_extension_only_reddit_rejects_unused_account_credentials(
+@pytest.mark.parametrize(
+    "source_id",
+    (SourceId.XIAOHONGSHU, SourceId.YOUTUBE, SourceId.ZHIHU, SourceId.REDDIT),
+)
+def test_extension_only_sources_reject_unused_account_credentials(
     settings_context: tuple[Any, Any, SourceAccountService],
+    source_id: SourceId,
 ) -> None:
     session_factory, registry, service = settings_context
-    reddit = registry.get(SourceId.REDDIT.value)
-    assert dict(reddit.manifest.credential_schema) == {}
+    connector = registry.get(source_id.value)
+    assert dict(connector.manifest.credential_schema) == {}
 
     with pytest.raises(ValueError, match="does not accept backend credentials"):
-        service.configure(SourceId.REDDIT, "primary", {"cookie": "reddit_session=secret"})
+        service.configure(source_id, "primary", {"cookie": "unused_session=secret"})
 
     with session_factory() as session:
         assert session.execute(select(SourceAccountModel)).scalars().all() == []

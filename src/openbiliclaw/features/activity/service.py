@@ -9,12 +9,15 @@ from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind, P
 if TYPE_CHECKING:
     from collections.abc import Callable
     from types import TracebackType
+    from uuid import UUID
 
 
 class ActivityRepository(Protocol):
     """Persistence port owned by the activity feature."""
 
     def add_if_absent(self, event: ActivityEvent) -> bool: ...
+
+    def get_activity(self, event_id: UUID) -> ActivityEvent | None: ...
 
 
 class ActivityUnitOfWork(Protocol):
@@ -47,6 +50,7 @@ _EVIDENCE_WEIGHTS: dict[ActivityKind, tuple[float, float]] = {
     ActivityKind.CHAT_LEARNING: (0.8, 0.9),
     ActivityKind.PROFILE_OVERRIDE: (1.0, 1.0),
 }
+_PROFILE_SIGNAL_VALUE_LIMIT = 500
 
 
 def project_activity_event(event: ActivityEvent) -> tuple[ProfileSignal, ...]:
@@ -56,6 +60,9 @@ def project_activity_event(event: ActivityEvent) -> tuple[ProfileSignal, ...]:
     value = str(metadata.get("value") or event.title or event.text or "").strip()
     if not value:
         return ()
+    # Activity text is intentionally broader than one profile facet. Keep every
+    # currently valid event ingestible and project a stable bounded prefix.
+    value = value[:_PROFILE_SIGNAL_VALUE_LIMIT]
     override = event.kind is ActivityKind.PROFILE_OVERRIDE
     if override:
         facet = str(metadata.get("facet") or "interests")
@@ -97,11 +104,14 @@ class ActivityService:
     ) -> tuple[ProfileSignal, ...]:
         """Store an immutable event before exposing its evidence projection."""
 
-        signals = project_activity_event(event)
         with self._uow_factory() as uow:
             if transaction_guard is not None:
                 transaction_guard(uow)
-            uow.activities.add_if_absent(event)
+            inserted = uow.activities.add_if_absent(event)
+            authoritative = event if inserted else uow.activities.get_activity(event.id)
+            if authoritative is None:
+                raise RuntimeError("activity conflict did not resolve to a persisted event")
+            signals = project_activity_event(authoritative)
             uow.commit()
         return signals
 

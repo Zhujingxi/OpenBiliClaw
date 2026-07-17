@@ -37,7 +37,9 @@ from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunn
 from openbiliclaw.infrastructure.ai.use_cases import (
     TaskRunnerBatchAssessor,
     TaskRunnerChatResponder,
+    TaskRunnerKeywordPlanner,
     TaskRunnerProfileDeltaAI,
+    TaskRunnerRecommendationExplainer,
     TransactionalAIRunRecorder,
 )
 from openbiliclaw.infrastructure.database.base import create_engine_and_session
@@ -50,7 +52,7 @@ from openbiliclaw.logging_setup import apply_owned_handler_levels
 from openbiliclaw.network import set_outbound_proxy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
     from uuid import UUID
 
     from openbiliclaw.features.activity.domain import ActivityEvent, ProfileSignal
@@ -180,7 +182,7 @@ class LibraryPort(Protocol):
 class ChatPort(Protocol):
     def stream(
         self, *, conversation_id: UUID, message: str, learn: bool = False
-    ) -> AsyncIterator[ChatChunk]: ...
+    ) -> AsyncGenerator[ChatChunk]: ...
 
     def history(
         self, *, conversation_id: UUID, limit: int = 50, offset: int = 0
@@ -211,8 +213,16 @@ class _UnavailableAssessor:
 
 
 class _UnavailableResponder:
-    async def respond(self, *, conversation_id: object, message: str) -> str:
+    async def stream(
+        self,
+        *,
+        conversation_id: object,
+        message: str,
+        history: tuple[object, ...],
+    ) -> AsyncIterator[object]:
+        del conversation_id, message, history
         raise DependencyUnavailableError("interactive AI is not configured")
+        yield  # pragma: no cover - makes this an async iterator
 
 
 class _DeferredCredentialCipher:
@@ -729,6 +739,8 @@ def build_application_container() -> ApplicationContainer:
         cast("Callable[[], Any]", uow_factory),
         connectors=lambda: registry.get().connectors,
         assessor=TaskRunnerBatchAssessor(runner) if runner else cast("Any", _UnavailableAssessor()),
+        query_planner=TaskRunnerKeywordPlanner(runner) if runner else None,
+        explainer=TaskRunnerRecommendationExplainer(runner) if runner else None,
         policy=FeedPolicy(),
         settings=settings,
     )
@@ -738,10 +750,20 @@ def build_application_container() -> ApplicationContainer:
             TaskRunnerChatResponder(runner) if runner else cast("Any", _UnavailableResponder())
         ),
     )
+
+    def schedule_interval_minutes(job_name: str) -> int:
+        schedules = settings.get().schedules
+        return {
+            "source_sync": schedules.source_sync_interval_minutes,
+            "profile_projection": schedules.profile_projection_interval_minutes,
+            "feed_replenishment": schedules.feed_replenishment_interval_minutes,
+            "cleanup": schedules.cleanup_interval_minutes,
+        }[job_name]
+
     jobs = JobService(
         cast("Callable[[], Any]", uow_factory),
         queue=HueyJobQueue(),
-        source_sync_interval_minutes=lambda: settings.get().schedules.source_sync_interval_minutes,
+        schedule_interval_minutes=cast("Any", schedule_interval_minutes),
     )
     ai_health, health_client = _build_ai_health()
 
@@ -753,7 +775,8 @@ def build_application_container() -> ApplicationContainer:
         registry.install()
         access.reconcile_password_fingerprint()
         _apply_runtime_settings(settings.get())
-        jobs.recover_interrupted()
+        # Running job ownership belongs to the separate worker process. API
+        # startup must never mutate a legitimate in-flight worker lease.
 
     async def shutdown() -> None:
         if resolver is not None:
@@ -833,12 +856,23 @@ def require_access(
         Security(_BEARER_SCHEME),
     ],
     session_cookie: Annotated[str | None, Security(_COOKIE_SCHEME)],
-) -> None:
+) -> str:
     del credentials, session_cookie  # retained for the generated security schemes
     method = request.method.upper()
     access_control = getattr(container.settings.get(), "access_control", None)
     mechanism = container.access.authenticate_request(request, access_control)
     if mechanism == "cookie" and method in {"POST", "PUT", "PATCH", "DELETE"}:
+        _require_cookie_csrf(request)
+    return mechanism
+
+
+def require_cookie_state_change(
+    request: Request,
+    mechanism: Annotated[str, Depends(require_access)],
+) -> None:
+    """Apply CSRF verification to a safe-verb route that mutates server state."""
+
+    if mechanism == "cookie":
         _require_cookie_csrf(request)
 
 
@@ -846,7 +880,7 @@ def require_onboarding_access(
     request: Request,
     container: Container,
 ) -> None:
-    if not container.settings.get().onboarding_complete:
+    if not container.settings.get().onboarding_complete and not container.access.enabled:
         return
     access_control = getattr(container.settings.get(), "access_control", None)
     mechanism = container.access.authenticate_request(request, access_control)
@@ -879,5 +913,6 @@ __all__ = [
     "build_application_container",
     "get_container",
     "require_access",
+    "require_cookie_state_change",
     "require_onboarding_access",
 ]

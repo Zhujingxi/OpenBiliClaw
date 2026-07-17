@@ -31,6 +31,7 @@ from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.ai.tasks import (
     CandidateAssessmentOutput,
     CandidateBatchAssessmentOutput,
+    RecommendationExplanationOutput,
 )
 from openbiliclaw.infrastructure.ai.use_cases import TaskRunnerBatchAssessor
 from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_engine_and_session
@@ -73,8 +74,8 @@ class Queue:
 class CancelBeforePersistenceContext(JobExecutionContext):
     """Deterministically let cancellation win immediately before the UoW guard."""
 
-    def __init__(self, service: JobService, run_id: UUID) -> None:
-        super().__init__(service, run_id)
+    def __init__(self, service: JobService, run_id: UUID, claim_token: str) -> None:
+        super().__init__(service, run_id, claim_token)
         self._job_service = service
         self._cancelled = False
 
@@ -85,10 +86,16 @@ class CancelBeforePersistenceContext(JobExecutionContext):
         super().guard(uow)
 
 
+def _claim(service: JobService, run_id: UUID) -> str:
+    claim_token = service.claim(run_id)
+    assert claim_token is not None
+    return claim_token
+
+
 def _start_running_job(service: JobService, key: str) -> tuple[UUID, JobExecutionContext]:
     run = service.schedule("source_sync", idempotency_key=key)
-    assert service.claim(run.id)
-    return run.id, JobExecutionContext(service, run.id)
+    claim_token = _claim(service, run.id)
+    return run.id, JobExecutionContext(service, run.id, claim_token)
 
 
 def _join(thread: Thread) -> None:
@@ -120,10 +127,11 @@ def test_startup_republishes_dequeued_pending_huey_message_exactly_once(
     @transport.task(name="source_sync")
     def execute_source_sync(run_id: str) -> None:
         resolved = UUID(run_id)
-        if not service.claim(resolved):
+        claim_token = service.claim(resolved)
+        if claim_token is None:
             return
         effects.append(resolved)
-        service.succeed(resolved)
+        service.succeed(resolved, claim_token=claim_token)
 
     service = JobService(
         lambda: UnitOfWork(session_factory),
@@ -313,13 +321,17 @@ def test_atomic_cancel_preserves_idempotent_terminal_and_missing_row_semantics(
     assert service.cancel(pending.id).status is JobRunStatus.CANCELLED
 
     succeeded = service.schedule("cleanup", idempotency_key="cancel-succeeded")
-    assert service.claim(succeeded.id)
-    service.succeed(succeeded.id)
+    succeeded_claim = _claim(service, succeeded.id)
+    service.succeed(succeeded.id, claim_token=succeeded_claim)
     assert service.cancel(succeeded.id).status is JobRunStatus.SUCCEEDED
 
     failed = service.schedule("cleanup", idempotency_key="cancel-failed")
-    assert service.claim(failed.id)
-    service.fail(failed.id, ValueError("classified without message persistence"))
+    failed_claim = _claim(service, failed.id)
+    service.fail(
+        failed.id,
+        ValueError("classified without message persistence"),
+        claim_token=failed_claim,
+    )
     assert service.cancel(failed.id).status is JobRunStatus.FAILED
 
     with pytest.raises(LookupError, match="job run does not exist"):
@@ -351,6 +363,10 @@ class BatchRunner:
         if spec.name == "profile_delta":
             self.profile_calls += 1
             return ProfileDelta(narrative="consumed without facets")
+        if spec.name == "recommendation_explanation":
+            return RecommendationExplanationOutput(
+                explanation=f"{raw_input.content.title} matches the current profile."
+            )
         raise AssertionError(spec.name)
 
 
@@ -441,14 +457,16 @@ async def test_narrative_only_profile_evidence_is_consumed_once_and_rollback_is_
         )
     )
     run = service.schedule("profile_projection", idempotency_key="consume-once")
-    assert service.claim(run.id)
-    await handlers["profile_projection"](run.id, JobExecutionContext(service, run.id))
+    claim_token = _claim(service, run.id)
+    await handlers["profile_projection"](run.id, JobExecutionContext(service, run.id, claim_token))
 
     with UnitOfWork(session_factory) as uow:
         assert uow.profiles.consumed_evidence_ids() == frozenset({event.id})
     other = service.schedule("profile_projection", idempotency_key="consume-twice")
-    assert service.claim(other.id)
-    await handlers["profile_projection"](other.id, JobExecutionContext(service, other.id))
+    other_claim = _claim(service, other.id)
+    await handlers["profile_projection"](
+        other.id, JobExecutionContext(service, other.id, other_claim)
+    )
     assert runner.profile_calls == 1
 
     rolled_back = uuid4()
@@ -544,9 +562,9 @@ async def test_cancel_during_source_boundary_prevents_later_persistence_and_keep
         )
     )
     run = service.schedule("source_sync", idempotency_key="cancel-mid-source")
-    assert service.claim(run.id)
+    claim_token = _claim(service, run.id)
     execution = asyncio.create_task(
-        handlers["source_sync"](run.id, JobExecutionContext(service, run.id))
+        handlers["source_sync"](run.id, JobExecutionContext(service, run.id, claim_token))
     )
     await connector.started.wait()
     assert 0 < service.inspect(run.id).progress < 1
@@ -597,9 +615,9 @@ async def test_cancel_during_model_boundary_prevents_profile_and_ledger_commit(
         )
     )
     run = service.schedule("profile_projection", idempotency_key="cancel-mid-model")
-    assert service.claim(run.id)
+    claim_token = _claim(service, run.id)
     execution = asyncio.create_task(
-        handlers["profile_projection"](run.id, JobExecutionContext(service, run.id))
+        handlers["profile_projection"](run.id, JobExecutionContext(service, run.id, claim_token))
     )
     await runner.started.wait()
     assert 0 < service.inspect(run.id).progress < 1
@@ -660,10 +678,12 @@ async def test_source_cancellation_winning_at_atomic_guard_persists_no_activity(
         )
     )
     run = service.schedule("source_sync", idempotency_key="cancel-at-source-guard")
-    assert service.claim(run.id)
+    claim_token = _claim(service, run.id)
 
     with pytest.raises(JobCancelledError):
-        await handlers["source_sync"](run.id, CancelBeforePersistenceContext(service, run.id))
+        await handlers["source_sync"](
+            run.id, CancelBeforePersistenceContext(service, run.id, claim_token)
+        )
 
     with UnitOfWork(session_factory) as uow:
         assert uow.activities.list_all() == ()
@@ -692,11 +712,11 @@ async def test_profile_cancellation_winning_at_atomic_guard_persists_no_revision
         )
     )
     run = service.schedule("profile_projection", idempotency_key="cancel-at-profile-guard")
-    assert service.claim(run.id)
+    claim_token = _claim(service, run.id)
 
     with pytest.raises(JobCancelledError):
         await handlers["profile_projection"](
-            run.id, CancelBeforePersistenceContext(service, run.id)
+            run.id, CancelBeforePersistenceContext(service, run.id, claim_token)
         )
 
     with session_factory() as session:
@@ -734,11 +754,11 @@ async def test_feed_cancellation_winning_at_atomic_guard_persists_no_feed_graph(
         )
     )
     run = service.schedule("feed_replenishment", idempotency_key="cancel-at-feed-guard")
-    assert service.claim(run.id)
+    claim_token = _claim(service, run.id)
 
     with pytest.raises(JobCancelledError):
         await handlers["feed_replenishment"](
-            run.id, CancelBeforePersistenceContext(service, run.id)
+            run.id, CancelBeforePersistenceContext(service, run.id, claim_token)
         )
 
     with session_factory() as session:
@@ -761,18 +781,21 @@ def test_cleanup_cancellation_winning_at_atomic_guard_preserves_terminal_history
         )
     )
     old = service.schedule("source_sync", idempotency_key="old-terminal")
-    assert service.claim(old.id)
-    service.succeed(old.id)
+    old_claim = _claim(service, old.id)
+    service.succeed(old.id, claim_token=old_claim)
     with session_factory() as session:
         row = session.get(JobRunModel, str(old.id))
         assert row is not None
         row.finished_at = datetime.now(UTC) - timedelta(days=31)
         session.commit()
     cleanup_run = service.schedule("cleanup", idempotency_key="cancel-at-cleanup-guard")
-    assert service.claim(cleanup_run.id)
+    cleanup_claim = _claim(service, cleanup_run.id)
 
     with pytest.raises(JobCancelledError):
-        handlers["cleanup"](cleanup_run.id, CancelBeforePersistenceContext(service, cleanup_run.id))
+        handlers["cleanup"](
+            cleanup_run.id,
+            CancelBeforePersistenceContext(service, cleanup_run.id, cleanup_claim),
+        )
 
     assert service.inspect(old.id).status is JobRunStatus.SUCCEEDED
     assert service.inspect(cleanup_run.id).status is JobRunStatus.CANCELLED

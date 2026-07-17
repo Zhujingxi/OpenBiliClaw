@@ -30,6 +30,18 @@ class DouyinDirectSignatureError(DouyinDirectError):
     """Raised when URL signing fails."""
 
 
+class DouyinDirectTransportError(DouyinDirectError):
+    """Raised when a direct discovery response cannot be consumed safely."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class DouyinDirectRateLimitError(DouyinDirectTransportError):
+    """Raised when Douyin explicitly rate limits direct discovery."""
+
+
 class UrlSigner(Protocol):
     user_agent: str
 
@@ -237,16 +249,27 @@ class DouyinDirectClient:
             )
         except httpx.HTTPError as exc:
             logger.info("douyin direct request failed for %s: %s", path, exc)
-            return {}
+            raise DouyinDirectTransportError("Douyin direct request failed.") from exc
+        if response.status_code in {401, 403}:
+            raise DouyinDirectAuthError("Douyin direct authentication failed.")
+        if response.status_code == 429:
+            raise DouyinDirectRateLimitError(
+                "Douyin direct request was rate limited.", status_code=429
+            )
         if response.status_code != 200:
             logger.info("douyin direct request returned HTTP %s for %s", response.status_code, path)
-            return {}
+            raise DouyinDirectTransportError(
+                "Douyin direct request failed.", status_code=response.status_code
+            )
         try:
             data = response.json()
-        except ValueError:
+        except ValueError as exc:
             logger.info("douyin direct request returned non-JSON body for %s", path)
-            return {}
-        return data if isinstance(data, dict) else {}
+            raise DouyinDirectError("Douyin direct response was malformed.") from exc
+        if not isinstance(data, dict):
+            raise DouyinDirectError("Douyin direct response was malformed.")
+        _validate_application_status(data)
+        return data
 
     def _default_query(self) -> dict[str, Any]:
         return {
@@ -279,6 +302,25 @@ def _first_text(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _validate_application_status(data: dict[str, Any]) -> None:
+    raw_status = data.get("status_code", 0)
+    if isinstance(raw_status, bool):
+        raise DouyinDirectError("Douyin direct response status was malformed.")
+    try:
+        status = int(raw_status)
+    except (TypeError, ValueError) as exc:
+        raise DouyinDirectError("Douyin direct response status was malformed.") from exc
+    if status == 0:
+        return
+    if status in {401, 403}:
+        raise DouyinDirectAuthError("Douyin direct authentication failed.")
+    if status == 429:
+        raise DouyinDirectRateLimitError("Douyin direct request was rate limited.", status_code=429)
+    if status in {408, 409, 425} or 500 <= status <= 599:
+        raise DouyinDirectTransportError("Douyin direct request failed.", status_code=status)
+    raise DouyinDirectError("Douyin direct request was rejected.")
 
 
 def _to_int(value: Any) -> int:

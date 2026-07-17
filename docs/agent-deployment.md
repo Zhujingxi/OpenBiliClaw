@@ -34,10 +34,12 @@ OPENBILICLAW_LITELLM_API_KEY=<user LiteLLM key>
 或由用户在当前 shell 自己设置环境变量。
 
 安装器在 source 与 Docker 路径进入 migration/Compose 前生成独立 random
-`OPENBILICLAW_SESSION_SECRET`，只写 mode-`0600` `.env`，重复执行保留非空原值且不打印。
-其它可选 browser auth 另行安全 provision：password 只保存 scrypt hash，extension 只保存 device key 的
-`key-id:sha256-digest` record 并把完整 key 一次性交付目标 extension。不要在命令参数、
-shell history、状态事件、日志、截图或对话中展开任何值，也不要复用 installer bearer、
+session secret、Web password/hash 与 extension key/digest，只把 signing secret、scrypt hash
+和 `key-id:sha256-digest` records 写入私密 `.env`（POSIX mode `0600`；Windows
+当前用户独占 DACL），重复执行保留非空原值。
+仅在首次创建时，专用 `BOOTSTRAP_STATUS first_run_access` event 一次性交付 password 与完整
+extension key；rerun 不可恢复或重印。除该 event 外，不要在命令参数、shell history、状态事件、
+日志、截图或对话中展开任何值，也不要复用 installer bearer、
 来源 encryption secret 或 LiteLLM master key。可选
 `OPENBILICLAW_LITELLM_ADMIN_URL` 只接受无 credential/query/fragment 的 absolute HTTP(S)
 public navigation URL；不要公开 internal base URL/key。
@@ -45,6 +47,9 @@ public navigation URL；不要公开 internal base URL/key。
 `OPENBILICLAW_SESSION_SECRET`、digest-only `OPENBILICLAW_EXTENSION_ACCESS_KEYS` 与
 `OPENBILICLAW_LITELLM_ADMIN_URL`；worker 不接收 browser-auth material。vNext 不从 legacy config
 补齐这些值。验证时检查 Compose render/key presence，不打印 value。
+Docker 默认 Admin navigation 为 `http://127.0.0.1:4000/ui`。installer 的 `HOST`/`PORT`
+会同步进入 Compose API command、port mapping、healthcheck 与 protected probe。source CLI
+自动读取 checkout `.env`，但不覆盖 agent 已显式设置的 process environment。
 
 ## 3. 判定成功
 

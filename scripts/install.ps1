@@ -5,6 +5,7 @@ param(
     [string] $InstallDir = $env:INSTALL_DIR,
     [string] $Mode = $env:MODE,
     [string] $ApiHost = $env:HOST,
+    [string] $LiteLLMAdminUrl = $env:OPENBILICLAW_LITELLM_ADMIN_URL,
     [int] $Port = 0,
     [switch] $SkipStart
 )
@@ -61,20 +62,11 @@ if ($Mode -eq 'docker') {
     if ($LASTEXITCODE -ne 0) { Fail 'Docker Compose v2 is required' }
 } else {
     $envFile = Join-Path $InstallDir '.env'
-    if (Test-Path $envFile) {
-        foreach ($line in Get-Content -LiteralPath $envFile) {
-            if ($line -match '^([^#=]+)=(.*)$') {
-                $name = $matches[1].Trim(); $value = $matches[2]
-                if (-not [Environment]::GetEnvironmentVariable($name, 'Process')) {
-                    [Environment]::SetEnvironmentVariable($name, $value, 'Process')
-                }
-            }
-        }
-    }
-    if (-not $env:OPENBILICLAW_LITELLM_BASE_URL) {
+    # The Python bootstrap alone validates and reads an existing private .env.
+    if (-not (Test-Path $envFile) -and -not $env:OPENBILICLAW_LITELLM_BASE_URL) {
         $env:OPENBILICLAW_LITELLM_BASE_URL = Read-Host 'LiteLLM base URL'
     }
-    if (-not $env:OPENBILICLAW_LITELLM_API_KEY) {
+    if (-not (Test-Path $envFile) -and -not $env:OPENBILICLAW_LITELLM_API_KEY) {
         $secure = Read-Host 'LiteLLM API key' -AsSecureString
         $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try { $env:OPENBILICLAW_LITELLM_API_KEY = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
@@ -89,7 +81,9 @@ $arguments = @(
     '--host', $ApiHost,
     '--port', $Port
 )
+if ($LiteLLMAdminUrl) { $arguments += @('--litellm-admin-url', $LiteLLMAdminUrl) }
 if ($SkipStart -or $env:SKIP_START -eq '1') { $arguments += '--skip-start' }
+if ($env:ROTATE_ACCESS -eq '1') { $arguments += '--rotate-access' }
 
 if ($SkipStart -or $env:SKIP_START -eq '1') {
     Log "Preparing the $Mode runtime and applying migration (services remain stopped)"
@@ -98,8 +92,9 @@ if ($SkipStart -or $env:SKIP_START -eq '1') {
 }
 & $python.Source @arguments
 if ($LASTEXITCODE -ne 0) { Fail "bootstrap exited with code $LASTEXITCODE" }
-Log "Runtime secrets are stored in $InstallDir\.env with mode 0600 semantics and are reused on rerun."
+Log "Runtime secrets are stored in $InstallDir\.env with an owner-only Windows ACL and are reused on rerun."
+Log 'On first install, save the Web password and extension key from the first_run_access status event; plaintext is not stored and cannot be shown again.'
 if ($Mode -eq 'docker') {
-    Log 'Configure provider credentials and the obc-interactive, obc-analysis, and obc-embedding aliases at http://127.0.0.1:4000/ui'
+    Log 'Open setup to use the persisted LiteLLM Admin URL and configure provider aliases.'
 }
 Log 'Web and extension clients use the generated vNext API contract.'

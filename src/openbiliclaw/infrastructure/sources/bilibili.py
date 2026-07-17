@@ -21,6 +21,7 @@ from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
     activity_event,
     activity_kind,
+    allocate_scope_limits,
     content_item,
     first_text,
     nested,
@@ -72,11 +73,20 @@ class BilibiliDirectTransport:
 
     async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
         if operation == SourceOperation.BOOTSTRAP_IMPORT:
+            allocation = allocate_scope_limits(limit, ("history", "favorites", "following"))
             history = [
                 dict(row, event_type=row.get("event_type") or "view")
-                for row in await self._client.get_user_history(max_items=limit)
+                for row in (
+                    await self._client.get_user_history(max_items=allocation["history"])
+                    if allocation["history"]
+                    else []
+                )
             ]
-            folders = await self._client.get_all_favorites(max_total_items=limit)
+            folders = (
+                await self._client.get_all_favorites(max_total_items=allocation["favorites"])
+                if allocation["favorites"]
+                else []
+            )
             favorites = [
                 dict(row, event_type="favorite")
                 for folder in folders
@@ -90,7 +100,11 @@ class BilibiliDirectTransport:
                     "url": f"https://space.bilibili.com/{getattr(user, 'mid', '')}",
                     "event_type": "follow",
                 }
-                for user in await self._client.get_following(page_size=limit)
+                for user in (
+                    await self._client.get_following(page_size=allocation["following"])
+                    if allocation["following"]
+                    else []
+                )
                 if getattr(user, "mid", None)
             ]
             return (history + favorites + following)[:limit]

@@ -29,11 +29,11 @@
 | `features.chat.domain` | `ChatRole`, `ChatTurn`, `ChatHistoryTurn` |
 | `features.sources.domain` | `SourceId`, `SourceCapability`, `SourceOperation`, `SourceOperationSpec`（primary + optional fallback transport + request/result schema）, `SourceManifest`（settings/credential schema）, `SourceConnector`, seven typed browser request/result variants, source-account status/disconnect, task claim/status/snapshot/completion models |
 
-所有 Pydantic 契约均使用 `frozen=True` 与 `extra="forbid"`，支持 JSON 序列化后由同类型无损还原。`ActivityEvent`、`ContentItem` 与 `Interaction` 的 metadata 只接受 JSON 值，并把对象递归冻结为只读 mapping、数组递归冻结为 tuple；序列化时还原为普通 JSON object/array。`SourceConnector` 是 runtime-checkable Protocol，不是 transport payload 容器，其 normalized result annotations 可在运行时解析。七平台实现、能力矩阵和通用任务安全合同见 [vNext 多来源连接器与通用浏览器任务](vnext-sources.md)。
+所有 Pydantic 契约均使用 `frozen=True` 与 `extra="forbid"`，支持 JSON 序列化后由同类型无损还原。`ActivityEvent`、`ContentItem` 与 `Interaction` 的 metadata 只接受 JSON 值，并把对象递归冻结为只读 mapping、数组递归冻结为 tuple；序列化时还原为普通 JSON object/array。`ActivityEvent.url` 与 `ContentItem.url` 在领域入口统一删除 `xsec_token` 及 token/cookie/session/password/secret/API-key 等 credential-shaped query 参数，同时保留普通查询和 fragment，避免来源 transport 漏清理时把短期凭据写入事件、内容或 Feed。`SourceConnector` 是 runtime-checkable Protocol，不是 transport payload 容器，其 normalized result annotations 可在运行时解析。七平台实现、能力矩阵和通用任务安全合同见 [vNext 多来源连接器与通用浏览器任务](vnext-sources.md)。
 
 ## 确定性策略
 
-`apply_profile_delta()` 以 `(facet name, value.casefold())` 识别同一 facet，按 confidence 加权合并普通 facet 的 weight，并在普通/覆盖合并的两个方向都保留稳定去重后的全部 evidence。用户覆盖自动获得 `confidence=1.0`，其 value、weight 与覆盖语义不被普通 delta 改写或删除。策略保留 snapshot 的稳定 ID 与创建时间，只递增 revision，因此相同输入得到相同输出。
+`apply_profile_delta()` 以 `(facet name, value.casefold())` 识别同一 facet，按 confidence 加权合并普通 facet 的 weight，并在普通/覆盖合并的两个方向都保留稳定去重后的全部 evidence。用户覆盖自动获得 `confidence=1.0`，其 value、weight 与覆盖语义不被普通 delta 改写或删除。策略保留 snapshot 的稳定 ID、递增 revision，并要求调用方提供或生成严格晚于 base revision 的新 `created_at`；测试可注入同一 timestamp 得到确定性输出。
 
 `ProfileEdit` 对 narrative 去首尾空白，对 facet value 折叠空白并按
 `(name, value.casefold())` 稳定去重；weight 必须有限并钳制到 `-1..1`，同一 facet

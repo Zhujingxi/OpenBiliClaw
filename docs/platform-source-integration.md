@@ -76,6 +76,20 @@ For every source:
 7. API/OpenAPI and generated-client determinism checks;
 8. rendered Web/popup smoke for status, configure, bootstrap, and content cards.
 
+The mandatory non-live source gate is:
+
+```bash
+bash scripts/check-source-contracts.sh
+```
+
+It runs the complete shared contract and mocked transport suite and fails below 80% branch
+coverage for the vNext connector core: `_base.py`, `browser_tasks.py`, and all seven source
+adapter modules. Retained direct-client implementations are excluded from this new-core
+percentage because they predate the vNext boundary; they remain mandatory production code and
+are exercised through mocked success, empty, malformed, authentication, timeout, and rate-limit
+tests for every advertised direct capability. `douyin_signing.py` is a retained signing primitive,
+not connector workflow, and is covered by its caller contract rather than this scoped percentage.
+
 Run real source E2E only with explicit authorization and report it separately from mocked coverage. The vNext connector contract is read/import/discovery only; tests must not like, follow, favorite, save, subscribe, or otherwise mutate a platform account.
 
 ## 8. Current capability matrix

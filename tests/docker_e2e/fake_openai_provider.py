@@ -152,6 +152,101 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _stream_chat_completion(
+        self,
+        *,
+        request: dict[str, Any],
+        output: dict[str, Any],
+        tools: list[dict[str, Any]],
+    ) -> None:
+        """Emit the OpenAI SSE shape exercised by PydanticAI's real stream path."""
+
+        completion_id = "chatcmpl-deterministic-e2e"
+        created = int(time.time())
+        model = request.get("model", "fake-chat")
+        chunks: list[dict[str, Any]] = []
+        if tools:
+            function = tools[0]["function"]
+            arguments = json.dumps(output, separators=(",", ":"))
+            split_at = max(1, len(arguments) // 2)
+            call_id = _next_call_id()
+            for index, part in enumerate((arguments[:split_at], arguments[split_at:])):
+                function_delta: dict[str, Any] = {"arguments": part}
+                tool_delta: dict[str, Any] = {"index": 0, "function": function_delta}
+                if index == 0:
+                    tool_delta.update({"id": call_id, "type": "function"})
+                    function_delta["name"] = function["name"]
+                chunks.append(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"tool_calls": [tool_delta]},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+            finish_reason = "tool_calls"
+        else:
+            content = json.dumps(output, separators=(",", ":"))
+            split_at = max(1, len(content) // 2)
+            for part in (content[:split_at], content[split_at:]):
+                chunks.append(
+                    {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": part},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+            finish_reason = "stop"
+        chunks.append(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
+            }
+        )
+        chunks.append(
+            {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 8,
+                    "total_tokens": 20,
+                },
+            }
+        )
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for chunk in chunks:
+            encoded = json.dumps(chunk, separators=(",", ":")).encode()
+            self.wfile.write(b"data: " + encoded + b"\n\n")
+            self.wfile.flush()
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib HTTP handler contract
         if self.path.rstrip("/") in {"/health", "/v1/models"}:
             self._json(
@@ -226,6 +321,9 @@ class Handler(BaseHTTPRequestHandler):
             ),
             flush=True,
         )
+        if request.get("stream") is True:
+            self._stream_chat_completion(request=request, output=output, tools=tools)
+            return
         message: dict[str, Any] = {"role": "assistant", "content": None}
         finish_reason = "stop"
         if tools:

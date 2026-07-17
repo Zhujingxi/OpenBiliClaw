@@ -46,17 +46,9 @@ case "$MODE" in
     docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required"
     ;;
   local)
-    # A source install uses a user-managed LiteLLM proxy. Reuse an existing
-    # private .env automatically; otherwise collect values without echoing the key.
-    if [ -f "$INSTALL_DIR/.env" ]; then
-      if [ -z "${OPENBILICLAW_LITELLM_BASE_URL:-}" ]; then
-        OPENBILICLAW_LITELLM_BASE_URL="$(awk -F= '$1 == "OPENBILICLAW_LITELLM_BASE_URL" {sub(/^[^=]*=/, ""); print; exit}' "$INSTALL_DIR/.env")"
-      fi
-      if [ -z "${OPENBILICLAW_LITELLM_API_KEY:-}" ]; then
-        OPENBILICLAW_LITELLM_API_KEY="$(awk -F= '$1 == "OPENBILICLAW_LITELLM_API_KEY" {sub(/^[^=]*=/, ""); print; exit}' "$INSTALL_DIR/.env")"
-      fi
-    fi
-    if [ -z "${OPENBILICLAW_LITELLM_BASE_URL:-}" ]; then
+    # The Python bootstrap alone validates and reads an existing private .env.
+    # Wrappers only collect values for a genuinely new environment.
+    if [ ! -e "$INSTALL_DIR/.env" ] && [ -z "${OPENBILICLAW_LITELLM_BASE_URL:-}" ]; then
       if [ -r /dev/tty ]; then
         printf 'LiteLLM base URL: ' >/dev/tty
         IFS= read -r OPENBILICLAW_LITELLM_BASE_URL </dev/tty
@@ -64,7 +56,7 @@ case "$MODE" in
         fail "set OPENBILICLAW_LITELLM_BASE_URL for a source install"
       fi
     fi
-    if [ -z "${OPENBILICLAW_LITELLM_API_KEY:-}" ]; then
+    if [ ! -e "$INSTALL_DIR/.env" ] && [ -z "${OPENBILICLAW_LITELLM_API_KEY:-}" ]; then
       if [ -r /dev/tty ]; then
         printf 'LiteLLM API key (input hidden): ' >/dev/tty
         IFS= read -r -s OPENBILICLAW_LITELLM_API_KEY </dev/tty
@@ -84,8 +76,14 @@ arguments=(
   --host "$HOST"
   --port "$PORT"
 )
+if [ -n "${OPENBILICLAW_LITELLM_ADMIN_URL:-}" ]; then
+  arguments+=(--litellm-admin-url "$OPENBILICLAW_LITELLM_ADMIN_URL")
+fi
 if [ "$SKIP_START" = 1 ]; then
   arguments+=(--skip-start)
+fi
+if [ "${ROTATE_ACCESS:-0}" = 1 ]; then
+  arguments+=(--rotate-access)
 fi
 
 if [ "$SKIP_START" = 1 ]; then
@@ -95,7 +93,8 @@ else
 fi
 python3 "$INSTALL_DIR/scripts/runtime_bootstrap.py" "${arguments[@]}"
 log "Runtime secrets are stored in $INSTALL_DIR/.env with mode 0600 and are reused on rerun."
+log "On first install, save the Web password and extension key from the first_run_access status event; plaintext is not stored and cannot be shown again."
 if [ "$MODE" = docker ]; then
-  log "Configure provider credentials and the obc-interactive, obc-analysis, and obc-embedding aliases at http://127.0.0.1:4000/ui"
+  log "Open setup to use the persisted LiteLLM Admin URL and configure provider aliases."
 fi
 log "Web and extension clients use the generated vNext API contract."

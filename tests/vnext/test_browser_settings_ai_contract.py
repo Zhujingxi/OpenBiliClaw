@@ -54,18 +54,21 @@ def test_complete_settings_are_nested_strict_and_secret_free(tmp_path: Path) -> 
         "reddit",
     }
     assert settings.schedules.source_sync_interval_minutes == 30
+    assert settings.schedules.profile_projection_interval_minutes == 10
+    assert settings.schedules.feed_replenishment_interval_minutes == 5
+    assert settings.schedules.cleanup_interval_minutes == 1440
     assert settings.feed.low_watermark == 20
     assert settings.profile.minimum_evidence_confidence == 0
     assert set(settings.tasks) == {
         "profile_delta",
         "keyword_generation",
-        "candidate_assessment",
         "candidate_batch_assessment",
         "chat_response",
         "recommendation_explanation",
     }
     assert settings.network.mode == "direct"
     assert settings.logging.console_level == "INFO"
+    assert settings.access_control.web_password_enabled is True
     assert settings.access_control.extension_session_ttl_hours == 24
     assert settings.jobs.retention_days == 30
 
@@ -177,6 +180,22 @@ def test_nested_settings_patch_recursively_merges_and_rejects_read_only(
             service.update(patch)
 
 
+def test_non_custom_network_patch_clears_existing_proxy_through_api_contract(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    service.update({"network": {"mode": "custom", "proxy_url": "http://proxy.example:8080"}})
+
+    api_patch = UserSettingsPatch.model_validate({"network": {"mode": "system", "proxy_url": ""}})
+    payload = api_patch.model_dump(exclude_unset=True, exclude_none=True)
+
+    assert payload == {"network": {"mode": "system", "proxy_url": ""}}
+    updated = service.update(payload)
+    assert updated.network.mode == "system"
+    assert updated.network.proxy_url == ""
+    assert service.get().network == updated.network
+
+
 @pytest.mark.parametrize(
     "patch",
     [
@@ -257,7 +276,7 @@ async def test_task_runner_consumes_authoritative_alias_and_limits() -> None:
         {
             "tasks": {
                 "chat_response": {
-                    "model_alias": "obc-analysis",
+                    "model_alias": "obc-interactive",
                     "semantic_retry_limit": 0,
                     "timeout_seconds": 12,
                     "request_limit": 1,
@@ -312,5 +331,5 @@ async def test_task_runner_consumes_authoritative_alias_and_limits() -> None:
     )
 
     assert output == Output(value="ok")
-    assert resolved == ["obc-analysis"]
-    assert recorder.started == [("chat_response", "obc-analysis")]
+    assert resolved == ["obc-interactive"]
+    assert recorder.started == [("chat_response", "obc-interactive")]

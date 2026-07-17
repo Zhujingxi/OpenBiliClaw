@@ -77,9 +77,11 @@
             "type": "boolean"
           },
           "web_password_enabled": {
-            "default": false,
+            "default": true,
+            "readOnly": true,
             "title": "Web Password Enabled",
-            "type": "boolean"
+            "type": "boolean",
+            "x-mutability": "deployment"
           }
         },
         "title": "AccessControlSettings",
@@ -135,17 +137,6 @@
               }
             ],
             "title": "Trust Loopback"
-          },
-          "web_password_enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Web Password Enabled"
           }
         },
         "title": "AccessControlSettingsPatch",
@@ -2461,6 +2452,27 @@
         "additionalProperties": false,
         "description": "User-controlled durable job schedules.",
         "properties": {
+          "cleanup_interval_minutes": {
+            "default": 1440,
+            "maximum": 10080.0,
+            "minimum": 1.0,
+            "title": "Cleanup Interval Minutes",
+            "type": "integer"
+          },
+          "feed_replenishment_interval_minutes": {
+            "default": 5,
+            "maximum": 10080.0,
+            "minimum": 1.0,
+            "title": "Feed Replenishment Interval Minutes",
+            "type": "integer"
+          },
+          "profile_projection_interval_minutes": {
+            "default": 10,
+            "maximum": 10080.0,
+            "minimum": 1.0,
+            "title": "Profile Projection Interval Minutes",
+            "type": "integer"
+          },
           "source_sync_interval_minutes": {
             "default": 30,
             "maximum": 10080.0,
@@ -2475,6 +2487,45 @@
       "ScheduleSettingsPatch": {
         "additionalProperties": false,
         "properties": {
+          "cleanup_interval_minutes": {
+            "anyOf": [
+              {
+                "maximum": 10080.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cleanup Interval Minutes"
+          },
+          "feed_replenishment_interval_minutes": {
+            "anyOf": [
+              {
+                "maximum": 10080.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feed Replenishment Interval Minutes"
+          },
+          "profile_projection_interval_minutes": {
+            "anyOf": [
+              {
+                "maximum": 10080.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Projection Interval Minutes"
+          },
           "source_sync_interval_minutes": {
             "anyOf": [
               {
@@ -3159,7 +3210,6 @@
               "enum": [
                 "profile_delta",
                 "keyword_generation",
-                "candidate_assessment",
                 "candidate_batch_assessment",
                 "chat_response",
                 "recommendation_explanation"
@@ -3266,7 +3316,6 @@
                   "enum": [
                     "profile_delta",
                     "keyword_generation",
-                    "candidate_assessment",
                     "candidate_batch_assessment",
                     "chat_response",
                     "recommendation_explanation"

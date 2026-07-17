@@ -38,6 +38,9 @@ class SourceSettingsPatch(_PatchGroup):
 
 class ScheduleSettingsPatch(_PatchGroup):
     source_sync_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
+    profile_projection_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
+    feed_replenishment_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
+    cleanup_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
 
 
 class FeedSettingsPatch(_PatchGroup):
@@ -74,7 +77,6 @@ class LoggingSettingsPatch(_PatchGroup):
 
 
 class AccessControlSettingsPatch(_PatchGroup):
-    web_password_enabled: StrictBool | None = None
     trust_loopback: StrictBool | None = None
     session_ttl_hours: int | None = Field(default=None, ge=0, le=8760)
     extension_access_enabled: StrictBool | None = None

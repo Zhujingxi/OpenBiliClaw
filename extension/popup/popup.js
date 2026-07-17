@@ -8,6 +8,11 @@ import {
   ensurePopupSession,
   pairDeviceKey,
 } from "./popup-device-auth.js";
+import {
+  credentialFieldDefinitions,
+  credentialsFromValues,
+} from "./source-credential-schema.js";
+import { normalizeSettingsPatch } from "./settings-patch.js";
 
 const FACET_NAMES = new Set([
   "interests",
@@ -32,6 +37,11 @@ const READ_ONLY_SETTINGS = new Set([
   "jobs.worker_concurrency",
   "access_control.installer_bearer_configured",
   "access_control.password_configured",
+  "tasks.profile_delta.model_alias",
+  "tasks.keyword_generation.model_alias",
+  "tasks.candidate_batch_assessment.model_alias",
+  "tasks.chat_response.model_alias",
+  "tasks.recommendation_explanation.model_alias",
 ]);
 const LABELS = {
   sources: "来源分配",
@@ -39,6 +49,9 @@ const LABELS = {
   weights: "权重",
   schedules: "计划任务",
   source_sync_interval_minutes: "来源同步间隔（分钟）",
+  profile_projection_interval_minutes: "画像投影间隔（分钟）",
+  feed_replenishment_interval_minutes: "发现流补充间隔（分钟）",
+  cleanup_interval_minutes: "清理间隔（分钟）",
   feed: "发现策略",
   low_watermark: "低水位",
   high_watermark: "高水位",
@@ -697,14 +710,33 @@ async function renderSourceEditor(manifest, status, host) {
       } catch (error) { toast(errorMessage(error), "error"); }
     });
     host.append(node("label", { class: "settings-field", text: "连接器设置（JSON）" }, [settings]), saveSettings);
-    if ((manifest.capabilities || []).includes("authentication")) {
+    const credentialFields = credentialFieldDefinitions(manifest.credential_schema);
+    if (credentialFields.length > 0) {
       const accountKey = node("input", { value: status?.account_key || "default", placeholder: "default" });
-      const cookie = node("textarea", { placeholder: "平台 Cookie，仅加密保存在后端" });
+      const credentialInputs = Object.fromEntries(credentialFields.map((field) => [
+        field.name,
+        node("input", {
+          type: field.secret ? "password" : "text",
+          autocomplete: "off",
+          required: field.required,
+          placeholder: field.secret ? "仅加密保存在后端" : "",
+        }),
+      ]));
       const connect = node("button", { class: "action-button action-primary", text: "保存凭据", type: "button" });
-      connect.addEventListener("click", () => configureSource(manifest.source_id, accountKey.value, cookie.value, connect));
+      connect.addEventListener("click", () => configureSource(
+        manifest.source_id,
+        accountKey.value,
+        credentialFields,
+        credentialInputs,
+        connect,
+      ));
       host.append(
         node("label", { class: "settings-field", text: "账户标识" }, [accountKey]),
-        node("label", { class: "settings-field", text: "Cookie" }, [cookie]),
+        ...credentialFields.map((field) => node(
+          "label",
+          { class: "settings-field", text: field.label },
+          [credentialInputs[field.name]],
+        )),
         connect,
       );
     }
@@ -713,16 +745,20 @@ async function renderSourceEditor(manifest, status, host) {
   }
 }
 
-async function configureSource(sourceId, accountKey, cookie, button) {
-  if (!accountKey.trim() || !cookie.trim()) {
-    toast("账户标识和 Cookie 不能为空", "error");
+async function configureSource(sourceId, accountKey, definitions, inputs, button) {
+  if (!accountKey.trim()) {
+    toast("账户标识不能为空", "error");
     return;
   }
   button.disabled = true;
   try {
+    const credentials = credentialsFromValues(
+      definitions,
+      Object.fromEntries(Object.entries(inputs).map(([name, input]) => [name, input.value])),
+    );
     await requestV1("v1_sources_configure_account", {
       path: { source_id: sourceId },
-      body: { account_key: accountKey.trim(), credentials: { cookie: cookie.trim() } },
+      body: { account_key: accountKey.trim(), credentials },
     });
     toast("来源已连接");
     await loadSources();
@@ -866,7 +902,7 @@ async function saveSettings(event) {
   event.preventDefault();
   const form = event.currentTarget;
   try {
-    const patch = collectSettingsPatch();
+    const patch = normalizeSettingsPatch(collectSettingsPatch());
     setFormBusy(form, true);
     state.settings = await requestV1("v1_settings_patch", { body: patch });
     renderSettings();

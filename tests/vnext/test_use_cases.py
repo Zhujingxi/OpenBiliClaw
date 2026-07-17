@@ -12,10 +12,11 @@ import pytest
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.activity.service import ActivityService, project_activity_event
-from openbiliclaw.features.chat.service import ChatChunkKind, ChatService
+from openbiliclaw.features.chat.service import ChatChunkKind, ChatResponseDelta, ChatService
 from openbiliclaw.features.feed.domain import (
     CandidateAssessment,
     ContentItem,
+    FeedEntry,
     Interaction,
     InteractionKind,
 )
@@ -23,6 +24,7 @@ from openbiliclaw.features.feed.service import (
     FeedbackService,
     FeedPolicy,
     FeedService,
+    StaleFeedProfileRevisionError,
     allocate_source_limits,
 )
 from openbiliclaw.features.library.domain import CollectionKind
@@ -67,7 +69,7 @@ class MemoryRepository:
     def __init__(self, state: MemoryState) -> None:
         self.state = state
 
-    def add(self, value: Any) -> None:
+    def add(self, value: Any) -> Any:
         name = type(value).__name__
         target = {
             "ActivityEvent": self.state.events,
@@ -80,12 +82,20 @@ class MemoryRepository:
             "ChatTurn": self.state.turns,
         }[name]
         target.append(value)
+        return value
 
     def add_if_absent(self, value: ActivityEvent) -> bool:
         if any(event.id == value.id for event in self.state.events):
             return False
         self.state.events.append(value)
         return True
+
+    def get_activity(self, event_id: UUID) -> ActivityEvent | None:
+        return next((event for event in self.state.events if event.id == event_id), None)
+
+    def list_recent_by_conversation(self, conversation_id: UUID, *, limit: int) -> tuple[Any, ...]:
+        matches = [turn for turn in self.state.turns if turn.conversation_id == conversation_id]
+        return tuple(matches[-limit:])
 
     def latest(self) -> ProfileSnapshot | None:
         return self.state.profiles[-1] if self.state.profiles else None
@@ -124,6 +134,19 @@ class MemoryRepository:
     def unseen_count(self) -> int:
         seen = {item.content_id for item in self.state.interactions}
         return sum(entry.content_id not in seen for entry in self.state.feed)
+
+    def unseen_diversity_keys(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        seen = {item.content_id for item in self.state.interactions}
+        content_by_id = {item.id: item for item in self.state.content}
+        assessment_by_id = {item.id: item for item in self.state.assessments}
+        result: list[tuple[str, tuple[str, ...]]] = []
+        for entry in self.state.feed:
+            if entry.content_id in seen:
+                continue
+            content = content_by_id[entry.content_id]
+            assessment = assessment_by_id.get(entry.assessment_id) if entry.assessment_id else None
+            result.append((content.source_id, assessment.topics if assessment else ()))
+        return tuple(result)
 
     def next_position(self) -> int:
         return len(self.state.feed)
@@ -268,6 +291,18 @@ def test_ingestion_persists_event_and_projects_deterministic_evidence() -> None:
     assert signals[0].evidence_ids == (EVENT_ID,)
 
 
+def test_activity_projection_bounds_long_valid_event_values_without_rejecting_event() -> None:
+    event = ActivityEvent(
+        source_id="bilibili",
+        kind=ActivityKind.VIEW,
+        title="界" * 1_000,
+    )
+
+    signal = project_activity_event(event)[0]
+
+    assert signal.value == "界" * 500
+
+
 @pytest.mark.asyncio
 async def test_profile_delta_is_validated_and_appended_atomically() -> None:
     state = MemoryState(events=[ActivityEvent(id=EVENT_ID, source_id="local", kind="feedback")])
@@ -409,6 +444,123 @@ async def test_feed_replenishment_dedupes_batches_and_enforces_diversity() -> No
 
 
 @pytest.mark.asyncio
+async def test_feed_uses_planned_search_query_semantic_novelty_and_generated_explanation() -> None:
+    profile = ProfileSnapshot(id=PROFILE_ID, revision=1, narrative="fallback must not escape")
+    item = ContentItem(
+        source_id="bilibili",
+        external_id="planned",
+        url="https://example.com/planned",
+        title="Planned content",
+    )
+
+    class SearchConnector(Connector):
+        def __init__(self) -> None:
+            super().__init__(SourceId.BILIBILI, (item,))
+            self.manifest = SourceManifest(
+                source_id=SourceId.BILIBILI,
+                display_name="Bilibili",
+                capabilities=frozenset({SourceCapability.SEARCH}),
+                operations=(
+                    SourceOperationSpec(
+                        operation=SourceOperation.SEARCH,
+                        capability=SourceCapability.SEARCH,
+                        result_kind=SourceResultKind.CONTENT,
+                        requires_auth=False,
+                        transport_kind=SourceTransportKind.DIRECT,
+                    ),
+                ),
+            )
+            self.queries: list[str | None] = []
+
+        async def execute(
+            self, operation: SourceOperation, query: str | None = None, limit: int = 20
+        ) -> tuple[ContentItem, ...]:
+            assert operation is SourceOperation.SEARCH
+            self.queries.append(query)
+            return (item,)
+
+    class Planner:
+        async def plan(self, current: ProfileSnapshot, *, limit: int) -> tuple[str, ...]:
+            assert current.revision == 1
+            assert limit == 1
+            return ("AI planned query",)
+
+    class Explainer:
+        async def explain(
+            self,
+            current: ProfileSnapshot,
+            content: ContentItem,
+            assessment: CandidateAssessment,
+        ) -> str:
+            assert current.revision == assessment.profile_revision
+            return f"Because {content.title} matches your profile"
+
+    class Novelty:
+        async def score(self, content: tuple[ContentItem, ...]) -> dict[UUID, float]:
+            return {candidate.id: 1.0 for candidate in content}
+
+    connector = SearchConnector()
+    state = MemoryState(profiles=[profile])
+    entries = await FeedService(
+        lambda: MemoryUow(state),
+        connectors=(connector,),
+        assessor=BatchAssessor(),
+        query_planner=Planner(),
+        explainer=Explainer(),
+        novelty_scorer=Novelty(),
+        policy=FeedPolicy(low_watermark=1, high_watermark=1),
+    ).replenish()
+
+    assert connector.queries == ["AI planned query"]
+    assert entries[0].explanation == "Because Planned content matches your profile"
+
+
+@pytest.mark.asyncio
+async def test_feed_checks_cancellation_between_admitted_explanations() -> None:
+    profile = ProfileSnapshot(id=PROFILE_ID, revision=0, narrative="Python")
+    items = tuple(
+        ContentItem(
+            source_id="bilibili",
+            external_id=f"explain-{index}",
+            url=f"https://example.com/explain/{index}",
+            title=f"Explanation {index}",
+        )
+        for index in range(2)
+    )
+    calls: list[UUID] = []
+
+    class Explainer:
+        async def explain(
+            self,
+            current: ProfileSnapshot,
+            content: ContentItem,
+            assessment: CandidateAssessment,
+        ) -> str:
+            assert current.revision == assessment.profile_revision
+            calls.append(content.id)
+            return content.title
+
+    def cancel_after_first(progress: float) -> None:
+        if progress >= 0.78:
+            raise RuntimeError("cancelled between explanations")
+
+    state = MemoryState(profiles=[profile])
+    service = FeedService(
+        lambda: MemoryUow(state),
+        connectors=(Connector(SourceId.BILIBILI, items),),
+        assessor=BatchAssessor(),
+        explainer=Explainer(),
+        policy=FeedPolicy(low_watermark=1, high_watermark=2),
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled between explanations"):
+        await service.replenish(checkpoint=cancel_after_first)
+
+    assert calls == [items[0].id]
+    assert state.feed == []
+
+
+@pytest.mark.asyncio
 async def test_feed_rejects_multi_topic_candidate_when_any_topic_is_saturated() -> None:
     state = MemoryState(profiles=[ProfileSnapshot(id=PROFILE_ID, revision=0)])
     items = tuple(
@@ -435,6 +587,164 @@ async def test_feed_rejects_multi_topic_candidate_when_any_topic_is_saturated() 
     entries = await service.replenish()
 
     assert [entry.content_id for entry in entries] == [items[0].id, items[2].id]
+
+
+@pytest.mark.asyncio
+async def test_feed_diversity_includes_existing_unseen_entries() -> None:
+    profile = ProfileSnapshot(id=PROFILE_ID, revision=0)
+    existing = ContentItem(
+        source_id="bilibili",
+        external_id="existing",
+        url="https://example.com/existing",
+        title="Existing",
+    )
+    existing_assessment = CandidateAssessment(
+        content_id=existing.id,
+        profile_revision=0,
+        relevance=1,
+        quality=1,
+        novelty=1,
+        risk=0,
+        topics=("saturated",),
+    )
+    existing_entry = FeedEntry(
+        content_id=existing.id,
+        assessment_id=existing_assessment.id,
+        position=0,
+    )
+    blocked_by_source = ContentItem(
+        source_id="bilibili",
+        external_id="same-source",
+        url="https://example.com/same-source",
+        title="Same source",
+    )
+    blocked_by_topic = ContentItem(
+        source_id="youtube",
+        external_id="same-topic",
+        url="https://example.com/same-topic",
+        title="Same topic",
+    )
+    admitted = ContentItem(
+        source_id="youtube",
+        external_id="fresh",
+        url="https://example.com/fresh",
+        title="Fresh",
+    )
+    state = MemoryState(
+        profiles=[profile],
+        content=[existing],
+        assessments=[existing_assessment],
+        feed=[existing_entry],
+    )
+
+    class DiversityAssessor:
+        async def assess_batch(
+            self, candidate_profile: ProfileSnapshot, content: tuple[ContentItem, ...]
+        ) -> tuple[CandidateAssessment, ...]:
+            return tuple(
+                CandidateAssessment(
+                    content_id=item.id,
+                    profile_revision=candidate_profile.revision,
+                    relevance=1,
+                    quality=1,
+                    novelty=1,
+                    risk=0,
+                    topics=("saturated",) if item.external_id == "same-topic" else ("fresh",),
+                )
+                for item in content
+            )
+
+    service = FeedService(
+        lambda: MemoryUow(state),
+        connectors=(
+            Connector(SourceId.BILIBILI, (blocked_by_source,)),
+            Connector(SourceId.YOUTUBE, (blocked_by_topic, admitted)),
+        ),
+        assessor=DiversityAssessor(),
+        policy=FeedPolicy(
+            low_watermark=2,
+            high_watermark=3,
+            max_per_source=1,
+            max_per_topic=1,
+        ),
+    )
+
+    entries = await service.replenish()
+
+    assert [entry.content_id for entry in entries] == [admitted.id]
+
+
+@pytest.mark.asyncio
+async def test_feed_retries_once_when_profile_changes_before_admission() -> None:
+    original = ProfileSnapshot(id=PROFILE_ID, revision=0)
+    state = MemoryState(profiles=[original])
+    item = ContentItem(
+        source_id="bilibili",
+        external_id="retry",
+        url="https://example.com/retry",
+        title="Retry",
+    )
+
+    class RacingAssessor(BatchAssessor):
+        async def assess_batch(
+            self, profile: ProfileSnapshot, content: tuple[ContentItem, ...]
+        ) -> tuple[CandidateAssessment, ...]:
+            result = await super().assess_batch(profile, content)
+            if len(self.calls) == 1:
+                state.profiles.append(original.model_copy(update={"revision": 1}))
+            return result
+
+    assessor = RacingAssessor()
+    service = FeedService(
+        lambda: MemoryUow(state),
+        connectors=(Connector(SourceId.BILIBILI, (item,)),),
+        assessor=assessor,
+        policy=FeedPolicy(low_watermark=1, high_watermark=1),
+    )
+
+    entries = await service.replenish()
+
+    assert len(assessor.calls) == 2
+    assert len(entries) == 1
+    assert len(state.assessments) == 1
+    assert state.assessments[0].profile_revision == 1
+
+
+@pytest.mark.asyncio
+async def test_feed_reports_conflict_after_bounded_profile_revision_retries() -> None:
+    original = ProfileSnapshot(id=PROFILE_ID, revision=0)
+    state = MemoryState(profiles=[original])
+    item = ContentItem(
+        source_id="bilibili",
+        external_id="always-racing",
+        url="https://example.com/always-racing",
+        title="Always racing",
+    )
+
+    class AlwaysRacingAssessor(BatchAssessor):
+        async def assess_batch(
+            self, profile: ProfileSnapshot, content: tuple[ContentItem, ...]
+        ) -> tuple[CandidateAssessment, ...]:
+            result = await super().assess_batch(profile, content)
+            state.profiles.append(
+                original.model_copy(update={"revision": state.profiles[-1].revision + 1})
+            )
+            return result
+
+    assessor = AlwaysRacingAssessor()
+    service = FeedService(
+        lambda: MemoryUow(state),
+        connectors=(Connector(SourceId.BILIBILI, (item,)),),
+        assessor=assessor,
+        policy=FeedPolicy(low_watermark=1, high_watermark=1),
+    )
+
+    with pytest.raises(StaleFeedProfileRevisionError):
+        await service.replenish()
+
+    assert len(assessor.calls) == 2
+    assert state.assessments == []
+    assert state.feed == []
 
 
 def test_feedback_persists_interaction_and_activity_that_changes_later_rank() -> None:
@@ -525,9 +835,16 @@ class ChatResponder:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def respond(self, *, conversation_id: UUID, message: str) -> str:
+    async def stream(
+        self,
+        *,
+        conversation_id: UUID,
+        message: str,
+        history: tuple[Any, ...],
+    ):
+        del conversation_id, history
         self.calls += 1
-        return f"Echo: {message}"
+        yield ChatResponseDelta(content=f"Echo: {message}", ai_run_id=CONVERSATION_ID)
 
 
 @pytest.mark.asyncio

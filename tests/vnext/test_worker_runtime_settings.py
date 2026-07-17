@@ -105,7 +105,15 @@ def _exercise_bounded_resistant_close(result_connection: Connection) -> None:
         raise asyncio.CancelledError
 
     executor = worker.AsyncJobExecutor()
-    caller = Thread(target=executor.run, args=(cancellation_resistant_job(),))
+    caller_errors: list[BaseException] = []
+
+    def invoke() -> None:
+        try:
+            executor.run(cancellation_resistant_job())
+        except BaseException as error:
+            caller_errors.append(error)
+
+    caller = Thread(target=invoke)
     caller.start()
     if not started.wait(timeout=1):
         result_connection.send(("error", "job did not start"))
@@ -118,7 +126,14 @@ def _exercise_bounded_resistant_close(result_connection: Connection) -> None:
         result_connection.send(("error", type(error).__name__))
         return
     caller.join(timeout=1)
-    result_connection.send(("ok", monotonic() - before, caller.is_alive()))
+    result_connection.send(
+        (
+            "ok",
+            monotonic() - before,
+            caller.is_alive(),
+            tuple(type(error).__name__ for error in caller_errors),
+        )
+    )
 
 
 def test_runtime_settings_restore_ca_environment_after_normal_exit(
@@ -361,23 +376,45 @@ def test_sigterm_style_return_lets_active_job_finish_before_runtime_teardown(
     run_id = uuid4()
 
     class ActiveJobService:
+        heartbeat_interval_seconds = 0.01
+
         def recover_interrupted(self) -> None:
             return
 
-        def claim(self, claimed_run_id: object) -> bool:
+        def claim(self, claimed_run_id: object) -> str:
             assert claimed_run_id == run_id
-            return True
+            return "active-claim"
 
-        def checkpoint(self, checkpoint_run_id: object, progress: float) -> None:
+        def checkpoint(
+            self,
+            checkpoint_run_id: object,
+            progress: float,
+            *,
+            claim_token: str,
+        ) -> None:
             assert checkpoint_run_id == run_id
+            assert claim_token == "active-claim"
             assert 0 <= progress <= 1
 
-        def succeed(self, succeeded_run_id: object) -> None:
+        def heartbeat(self, heartbeat_run_id: object, *, claim_token: str) -> bool:
+            assert heartbeat_run_id == run_id
+            assert claim_token == "active-claim"
+            return True
+
+        def succeed(self, succeeded_run_id: object, *, claim_token: str) -> None:
             assert succeeded_run_id == run_id
+            assert claim_token == "active-claim"
             outcomes.append("succeeded")
 
-        def fail(self, failed_run_id: object, _error: BaseException) -> None:
+        def fail(
+            self,
+            failed_run_id: object,
+            _error: BaseException,
+            *,
+            claim_token: str,
+        ) -> None:
             assert failed_run_id == run_id
+            assert claim_token == "active-claim"
             outcomes.append("failed")
 
     async def active_handler(_run_id: object, _context: object) -> None:
@@ -476,7 +513,10 @@ def test_async_executor_close_abandons_cancellation_resistant_tasks_within_bound
     )
     process.start()
     child_connection.close()
-    process.join(timeout=2)
+    # The child asserts the executor's own sub-second bound below. Give the
+    # spawn interpreter enough time to import the application under coverage
+    # and loaded CI hosts without turning process startup into a flaky failure.
+    process.join(timeout=5)
     if process.is_alive():
         process.terminate()
         process.join(timeout=1)
@@ -486,6 +526,7 @@ def test_async_executor_close_abandons_cancellation_resistant_tasks_within_bound
     assert parent_connection.poll(timeout=0.1)
     status, *details = parent_connection.recv()
     assert status == "ok", details
-    elapsed, caller_alive = details
+    elapsed, caller_alive, caller_errors = details
     assert elapsed < 0.5
     assert caller_alive is False
+    assert caller_errors == ("WorkerInterruptedError",)

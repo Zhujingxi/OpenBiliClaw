@@ -90,13 +90,22 @@ Also confirm the same protected request without authorization returns 401 and a 
 
 Open `http://127.0.0.1:8420/setup/`.
 
-1. Confirm readiness and the three alias checks.
-2. Configure an authorized test source or mocked source account. The response must not echo credentials.
-3. Select at least one source and start onboarding.
-4. Observe the authenticated SSE stream from `POST /api/v1/onboarding/start` through `GET /api/v1/onboarding/{run_id}/events`.
-5. Confirm source sync, profile projection, and feed replenishment child stages.
+1. Before any onboarding call, confirm anonymous access returns `401`, then log in with the Web password from the installer's one-time `first_run_access` event. Confirm a second installer run does not emit it again and `.env` contains neither plaintext value.
+2. Confirm readiness, the three alias checks, and the visible `http://127.0.0.1:4000/ui` Admin link.
+3. Select a credential-bearing test source and fill the fields rendered from its manifest. Confirm an empty-schema browser source has no credential input.
+4. Before onboarding, wait through at least one worker periodic tick and confirm `GET /api/v1/jobs` contains no periodic `source_sync`, `profile_projection`, or `feed_replenishment` run. A periodic `cleanup` run is permitted.
+5. Start onboarding and verify account configuration is sent before onboarding. The response must not echo credentials.
+6. Observe the authenticated SSE stream from `POST /api/v1/onboarding/start` through `GET /api/v1/onboarding/{run_id}/events`.
+7. Confirm the explicitly scheduled source sync, profile projection, and feed replenishment child stages still run before onboarding is marked complete.
 
-Pass only when the terminal event is successful and `onboarding_complete` is persisted. Repeat once with a controlled child failure and once with cancellation; UI and SSE must preserve those terminal states.
+Pass only when the terminal event is successful and `onboarding_complete` is persisted. After completion, wait for the next due maintenance bucket and confirm periodic jobs are admitted with scheduled priority. Repeat onboarding once with a controlled child failure and once with cancellation; UI and SSE must preserve those terminal states.
+
+Run two preparation installers concurrently in the disposable checkout and hold the first at the
+Compose step. Confirm the second does not stage access until the first releases the lifecycle
+lock, and that only the successful owner's verifier/disclosure is committed. Set an explicit
+credential-free custom Admin URL, rerun without the option, and confirm setup preserves that URL.
+Attempt to PATCH `web_password_enabled=false` through the logged-in Web contract and require a
+typed `422` with the existing login still usable.
 
 ## 5. Complete the product journey
 

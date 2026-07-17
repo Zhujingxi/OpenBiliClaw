@@ -18,6 +18,8 @@ import {
   dedupeObservedUrls,
   extractNoteMetadataFromAnchor,
   filterSelfAuthoredNotes,
+  releaseObservedUrls,
+  urlsAfterSelfAuthorFilter,
   type AnchorLike,
   type ViewportRect,
   type XhsNoteMetadata,
@@ -102,7 +104,7 @@ function runPassiveCollection(): void {
     baseUrl: window.location.href,
     toleranceBelowPx: PASSIVE_TOLERANCE_BELOW_PX,
   });
-  const fresh = dedupeObservedUrls(visible, reportedUrls);
+  const fresh = dedupeObservedUrls(visible, reportedUrls, PASSIVE_MAX_URLS_PER_BATCH);
   if (fresh.length === 0) return;
 
   const freshSet = new Set(fresh);
@@ -124,15 +126,24 @@ function runPassiveCollection(): void {
   // search/explore feed echoes back to the logged-in author.
   const selfInfo = readPageSelfInfo();
   const filteredNotes = filterSelfAuthoredNotes(notes, selfInfo);
+  const filteredUrls = urlsAfterSelfAuthorFilter(
+    fresh.slice(0, PASSIVE_MAX_URLS_PER_BATCH),
+    notes,
+    filteredNotes,
+  );
 
   const observation: XhsUrlObservation = {
-    urls: fresh.slice(0, PASSIVE_MAX_URLS_PER_BATCH),
+    urls: filteredUrls,
     notes: filteredNotes,
     page_type: classifyXhsPageType(baseUrl),
     observed_at: Date.now(),
     ...(selfInfo ? { self_info: selfInfo } : {}),
   };
-  chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
+  void chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation })
+    .then((response: { accepted?: boolean } | undefined) => {
+      if (response?.accepted !== true) releaseObservedUrls(fresh, reportedUrls);
+    })
+    .catch(() => releaseObservedUrls(fresh, reportedUrls));
 }
 
 let scrollTimer: number | null = null;

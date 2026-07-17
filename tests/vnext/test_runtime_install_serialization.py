@@ -594,6 +594,7 @@ def test_windows_atomic_private_writer_shares_delete_and_replaces_while_held(
     target.write_text("old\n", encoding="utf-8")
     native_calls: list[dict[str, int]] = []
     native_descriptors: list[int] = []
+    acl_calls: list[tuple[str, Path]] = []
     replaced_while_held = False
     original_replace = os.replace
 
@@ -614,12 +615,24 @@ def test_windows_atomic_private_writer_shares_delete_and_replaces_while_held(
     monkeypatch.setattr(bootstrap, "_windows_create_file", create_file)
     monkeypatch.setattr(bootstrap, "_windows_handle_to_fd", lambda handle: handle)
     monkeypatch.setattr(bootstrap.os, "replace", replace_while_open)
+    monkeypatch.setattr(
+        bootstrap,
+        "_apply_windows_private_acl",
+        lambda path: acl_calls.append(("apply", path)),
+    )
+    monkeypatch.setattr(
+        bootstrap,
+        "_verify_windows_private_acl",
+        lambda path: acl_calls.append(("verify", path)),
+    )
 
     bootstrap._atomic_write_private_file(target, "new\n")
 
     assert native_calls, "Windows private temp bypassed native CreateFileW"
     assert native_calls[0]["share"] & 0x00000004, "FILE_SHARE_DELETE was not requested"
     assert replaced_while_held, "os.replace ran after the verified temp handle was closed"
+    assert [mode for mode, _path in acl_calls] == ["apply", "verify"]
+    assert acl_calls[1][1] == target
     assert target.read_text(encoding="utf-8") == "new\n"
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -26,6 +27,7 @@ from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.ai.tasks import (
     CandidateAssessmentOutput,
     CandidateBatchAssessmentOutput,
+    RecommendationExplanationOutput,
 )
 from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_engine_and_session
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
@@ -33,6 +35,7 @@ from openbiliclaw.infrastructure.jobs.orchestration import (
     WorkerDependencies,
     build_worker_runtime,
 )
+from openbiliclaw.infrastructure.jobs.queue import PRIORITY_SCHEDULED, PRIORITY_USER_TRIGGERED
 from openbiliclaw.infrastructure.jobs.tasks import JobExecutionContext
 from openbiliclaw.infrastructure.jobs.worker import (
     MissingSourceConfigurationError,
@@ -121,6 +124,10 @@ class MockTaskRunner:
                     for item in raw_input.content
                 )
             )
+        if spec.name == "recommendation_explanation":
+            return RecommendationExplanationOutput(
+                explanation="Typed Python architecture matches your Python profile."
+            )
         raise AssertionError(f"unexpected task: {spec.name}")
 
 
@@ -170,8 +177,9 @@ async def test_all_four_production_handlers_execute_real_use_cases(
         ("source_sync", "profile_projection", "feed_replenishment", "cleanup")
     ):
         run = service.schedule(name, idempotency_key=f"smoke:{index}")
-        assert service.claim(run.id)
-        result = handlers[name](run.id, JobExecutionContext(service, run.id))
+        claim_token = service.claim(run.id)
+        assert claim_token is not None
+        result = handlers[name](run.id, JobExecutionContext(service, run.id, claim_token))
         if result is not None:
             await result
         assert service.inspect(run.id).progress > 0
@@ -180,6 +188,52 @@ async def test_all_four_production_handlers_execute_real_use_cases(
         assert len(uow.activities.list_all()) == 1
         assert uow.profiles.latest() is not None
         assert uow.feed.unseen_count() == 1
+
+
+def test_long_lived_worker_schedule_reads_current_database_interval(
+    runtime: tuple[Any, Any, Any],
+) -> None:
+    session_factory, service, _handlers = runtime
+    settings = SettingsService(lambda: UnitOfWork(session_factory))
+    settings.complete_onboarding()
+    now = datetime(2026, 7, 17, 1, 0, tzinfo=UTC)
+    minute = int(now.timestamp() // 60)
+
+    first = service.schedule_periodic("feed_replenishment", now=now)
+    settings.update({"schedules": {"feed_replenishment_interval_minutes": 11}})
+    changed = service.schedule_periodic("feed_replenishment", now=now)
+
+    assert first.idempotency_key == f"feed_replenishment:periodic:{minute // 5}"
+    assert changed.idempotency_key == f"feed_replenishment:periodic:{minute // 11}"
+    assert changed.id != first.id
+
+
+def test_worker_periodic_policy_tracks_current_onboarding_state(
+    runtime: tuple[Any, Any, Any],
+) -> None:
+    session_factory, service, _handlers = runtime
+    settings = SettingsService(lambda: UnitOfWork(session_factory))
+    now = datetime(2026, 7, 17, 1, 0, tzinfo=UTC)
+
+    assert service.schedule_periodic("source_sync", now=now) is None
+    assert service.schedule_periodic("profile_projection", now=now) is None
+    assert service.schedule_periodic("feed_replenishment", now=now) is None
+    assert service.list() == ()
+
+    cleanup_run = service.schedule_periodic("cleanup", now=now)
+    assert cleanup_run is not None
+    assert cleanup_run.priority == PRIORITY_SCHEDULED
+
+    explicit_run = service.schedule(
+        "feed_replenishment",
+        idempotency_key="onboarding:continuation",
+    )
+    assert explicit_run.priority == PRIORITY_USER_TRIGGERED
+
+    settings.complete_onboarding()
+    periodic_run = service.schedule_periodic("feed_replenishment", now=now)
+    assert periodic_run is not None
+    assert periodic_run.priority == PRIORITY_SCHEDULED
 
 
 @pytest.mark.asyncio
@@ -241,8 +295,11 @@ async def test_long_lived_worker_resolves_a_fresh_source_registry_for_each_job(
     try:
         for index in range(2):
             run = service.schedule("source_sync", idempotency_key=f"refresh:{index}")
-            assert service.claim(run.id)
-            await handlers["source_sync"](run.id, JobExecutionContext(service, run.id))  # type: ignore[misc]
+            claim_token = service.claim(run.id)
+            assert claim_token is not None
+            await handlers["source_sync"](  # type: ignore[misc]
+                run.id, JobExecutionContext(service, run.id, claim_token)
+            )
 
         with UnitOfWork(session_factory) as uow:
             assert {event.id for event in uow.activities.list_all()} == {
@@ -293,4 +350,45 @@ async def test_default_direct_source_reports_missing_auth_without_network(
 
     with pytest.raises(MissingSourceConfigurationError, match="bilibili"):
         await registry.get("bilibili").execute(SourceOperation.BOOTSTRAP_IMPORT, limit=1)
+    engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_default_bilibili_public_discovery_does_not_require_an_account(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "public-bilibili.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
+    command.upgrade(config, "head")
+    engine, session_factory = create_engine_and_session(
+        DatabaseSettings(url=f"sqlite:///{database}")
+    )
+
+    class PublicBilibiliClient:
+        def __init__(self, cookie: str = "") -> None:
+            assert cookie == ""
+
+        async def search(self, keyword: str, **_: object) -> list[dict[str, object]]:
+            return [{"bvid": "BV-public", "title": keyword}]
+
+        @classmethod
+        def search_cooldown_remaining(cls) -> float:
+            return 0
+
+        @classmethod
+        def search_dom_fallback_remaining(cls) -> float:
+            return 0
+
+    monkeypatch.setattr(
+        "openbiliclaw.infrastructure.jobs.source_composition.BilibiliAPIClient",
+        PublicBilibiliClient,
+    )
+    registry = build_default_source_registry(session_factory)
+
+    result = await registry.get("bilibili").execute(SourceOperation.SEARCH, "public", limit=1)
+
+    assert len(result) == 1
+    assert isinstance(result[0], ContentItem)
+    assert result[0].external_id == "BV-public"
     engine.dispose()

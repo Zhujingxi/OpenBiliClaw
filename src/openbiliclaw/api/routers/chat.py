@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from typing import TYPE_CHECKING
 from uuid import UUID  # noqa: TC003 - Pydantic resolves the field at runtime
 
@@ -17,7 +18,7 @@ from openbiliclaw.api.v1_models import sse_response
 from openbiliclaw.features.chat.service import ChatHistoryPage
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
 
 class ChatRequest(BaseModel):
@@ -74,18 +75,21 @@ async def _chat_events(
     payload: ChatRequest,
     request: Request,
     container: ApplicationContainer,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str]:
     if await request.is_disconnected():
         return
     try:
-        async for chunk in container.chat.stream(
-            conversation_id=payload.conversation_id,
-            message=payload.message,
-            learn=payload.learn,
-        ):
-            if await request.is_disconnected():
-                return
-            yield frame(chunk.kind.value, chunk.model_dump(mode="json"))
+        async with aclosing(
+            container.chat.stream(
+                conversation_id=payload.conversation_id,
+                message=payload.message,
+                learn=payload.learn,
+            )
+        ) as chunks:
+            async for chunk in chunks:
+                if await request.is_disconnected():
+                    return
+                yield frame(chunk.kind.value, chunk.model_dump(mode="json"))
     except asyncio.CancelledError:
         raise
     except Exception:

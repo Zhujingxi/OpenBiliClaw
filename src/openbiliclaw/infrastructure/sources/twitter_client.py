@@ -191,7 +191,10 @@ class XClient:
         from twitter_cli.serialization import tweet_to_dict
 
         capped = tweets[:limit] if limit and limit > 0 else tweets
-        return [tweet_to_dict(t) for t in capped]
+        try:
+            return [tweet_to_dict(t) for t in capped]
+        except Exception as exc:  # noqa: BLE001 - contain third-party model drift
+            raise XClientError("X returned a malformed tweet payload") from exc
 
 
 def _map_exception(exc: Exception) -> XClientError:
@@ -204,13 +207,13 @@ def _map_exception(exc: Exception) -> XClientError:
     if isinstance(exc, TwitterAPIError):
         status = getattr(exc, "status_code", None)
         if status == 401:
-            return XAuthError(str(exc))
+            return XAuthError("X authentication failed")
         if status == 403:
-            return XBlockedError(str(exc))
+            return XBlockedError("X request was blocked")
         if status == 429:
-            return XRateLimitError(str(exc))
-        return XClientError(str(exc))
+            return XRateLimitError("X request was rate limited")
+        return XClientError("X request failed")
     if isinstance(exc, AuthenticationError):
         # No status_code on AuthenticationError; treat as an expired/invalid cookie.
-        return XAuthError(str(exc))
-    return XClientError(str(exc))
+        return XAuthError("X authentication failed")
+    return XClientError("X request failed")

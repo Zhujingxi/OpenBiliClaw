@@ -273,8 +273,6 @@ def test_platform_conditionals_live_only_in_source_packages() -> None:
         for path in _python_files(root):
             if (PACKAGE / "infrastructure" / "sources") in path.parents:
                 continue
-            if path == PACKAGE / "infrastructure" / "jobs" / "source_composition.py":
-                continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 conditions: tuple[ast.AST, ...]

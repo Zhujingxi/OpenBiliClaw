@@ -1,7 +1,7 @@
 // Generated from openapi/openapi.json by openapi/generate-client.mjs. Do not edit.
 export type AIHealthResponse = { "admin_url"?: string | null; "aliases": ReadonlyArray<AliasHealthResponse>; "proxy_reachable": boolean; };
 export type AccessControlSettings = { "extension_access_enabled"?: boolean; "extension_session_ttl_hours"?: number; "installer_bearer_configured"?: boolean; "password_configured"?: boolean; "session_ttl_hours"?: number; "trust_loopback"?: boolean; "web_password_enabled"?: boolean; };
-export type AccessControlSettingsPatch = { "extension_access_enabled"?: boolean | null; "extension_session_ttl_hours"?: number | null; "session_ttl_hours"?: number | null; "trust_loopback"?: boolean | null; "web_password_enabled"?: boolean | null; };
+export type AccessControlSettingsPatch = { "extension_access_enabled"?: boolean | null; "extension_session_ttl_hours"?: number | null; "session_ttl_hours"?: number | null; "trust_loopback"?: boolean | null; };
 export type ActivityEvent = { "account_id"?: string | null; "content_external_id"?: string | null; "duration_seconds"?: number | null; "id"?: string; "kind": ActivityKind; "metadata"?: { [key: string]: unknown; }; "occurred_at"?: string; "source_id": string; "text"?: string | null; "title"?: string | null; "url"?: string | null; };
 export type ActivityKind = "import" | "view" | "dwell" | "like" | "favorite" | "search" | "follow" | "feedback" | "chat_learning" | "profile_override";
 export type AliasHealthResponse = { "alias": "obc-interactive" | "obc-analysis" | "obc-embedding"; "available": boolean; "reason"?: string | null; "state": "healthy" | "degraded" | "unavailable"; };
@@ -70,8 +70,8 @@ export type ProfileSnapshot = { "confidence"?: number; "created_at"?: string; "f
 export type ReadinessResponse = { "ready": boolean; "version": string; };
 export type SaveCollectionItem = { "content_id": string; "note"?: string; };
 export type ScheduleJob = { "idempotency_key": string; "job_name": "source_sync" | "profile_projection" | "feed_replenishment" | "cleanup"; "priority"?: JobPriorityLane | null; };
-export type ScheduleSettings = { "source_sync_interval_minutes"?: number; };
-export type ScheduleSettingsPatch = { "source_sync_interval_minutes"?: number | null; };
+export type ScheduleSettings = { "cleanup_interval_minutes"?: number; "feed_replenishment_interval_minutes"?: number; "profile_projection_interval_minutes"?: number; "source_sync_interval_minutes"?: number; };
+export type ScheduleSettingsPatch = { "cleanup_interval_minutes"?: number | null; "feed_replenishment_interval_minutes"?: number | null; "profile_projection_interval_minutes"?: number | null; "source_sync_interval_minutes"?: number | null; };
 export type SourceAccountDisconnectResult = { "account_key": string; "disconnected"?: true; "idempotent": boolean; "source_id": SourceId; };
 export type SourceAccountStatus = { "account_key": string; "configured"?: boolean; "enabled": boolean; "source_id": SourceId; };
 export type SourceCapability = "authentication" | "bootstrap_import" | "activity_collection" | "search" | "trending_feed" | "related_discovery" | "creator_discovery" | "community_discovery" | "browser_assisted";

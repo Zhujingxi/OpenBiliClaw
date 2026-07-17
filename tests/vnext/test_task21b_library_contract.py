@@ -14,6 +14,7 @@ from pydantic import HttpUrl
 from sqlalchemy import event
 
 from openbiliclaw.api.dependencies import require_access
+from openbiliclaw.api.errors import install_error_handlers
 from openbiliclaw.api.routers.library import router as library_router
 from openbiliclaw.features.feed.domain import ContentItem
 from openbiliclaw.features.library.domain import (
@@ -21,6 +22,7 @@ from openbiliclaw.features.library.domain import (
     CollectionKind,
     LibraryItem,
 )
+from openbiliclaw.features.library.service import LibraryService
 from openbiliclaw.infrastructure.database.base import (
     DatabaseSettings,
     create_engine_and_session,
@@ -154,3 +156,51 @@ def test_library_endpoint_returns_collection_metadata_and_renderable_content() -
     payload = response.json()[0]
     assert payload["collection_item"]["note"] == "render me"
     assert payload["content"] == content.model_dump(mode="json")
+
+
+def test_repeated_library_save_is_idempotent_through_http_and_persistence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "idempotent-library.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", _url(path))
+    command.upgrade(config, "head")
+    engine, session_factory = create_engine_and_session(DatabaseSettings(url=_url(path)))
+    content = ContentItem(
+        id=CONTENT_A,
+        source_id="bilibili",
+        external_id="BV1idempotent",
+        url=HttpUrl("https://www.bilibili.com/video/BV1idempotent"),
+        title="Idempotent save",
+    )
+    with UnitOfWork(session_factory) as uow:
+        uow.content.add(content)
+        uow.commit()
+
+    app = FastAPI()
+    app.state.container = type(
+        "Container",
+        (),
+        {"library": LibraryService(lambda: UnitOfWork(session_factory))},
+    )()
+    app.dependency_overrides[require_access] = lambda: None
+    install_error_handlers(app)
+    app.include_router(library_router, prefix="/api/v1")
+    client = TestClient(app, raise_server_exceptions=False)
+
+    first = client.post(
+        "/api/v1/library/favorites",
+        json={"content_id": str(CONTENT_A), "note": "keep first"},
+    )
+    repeated = client.post(
+        "/api/v1/library/favorites",
+        json={"content_id": str(CONTENT_A), "note": "ignored repeat"},
+    )
+
+    assert first.status_code == repeated.status_code == 201
+    assert repeated.json() == first.json()
+    with UnitOfWork(session_factory) as uow:
+        stored = uow.collections.list_items(CollectionKind.FAVORITES)
+    assert len(stored) == 1
+    assert stored[0].collection_item.note == "keep first"
+    engine.dispose()

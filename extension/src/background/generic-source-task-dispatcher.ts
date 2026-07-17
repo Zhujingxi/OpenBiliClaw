@@ -65,19 +65,24 @@ export function createSourceTaskDispatcher(options: DispatcherOptions): SourceTa
   async function poll(): Promise<boolean> {
     const claimed = await options.transport.claim(options.sourceId);
     if (!claimed) return false;
+    let result: BrowserTaskResult;
     try {
       const task = validateClaimedTask(claimed, options.sourceId, options.operations);
-      const result = normalizeResult(
+      result = normalizeResult(
         task.payload,
         await beforeRequestDeadline(
           task.request_deadline_at,
           (signal) => options.execute(task, signal),
         ),
       );
-      await options.transport.complete(task.id, task.lease_token, result);
     } catch (error) {
       await options.transport.fail(claimed.id, claimed.lease_token, failureFrom(error));
+      return true;
     }
+    // Completion delivery is transport work, not platform execution. If its
+    // response is ambiguous, let the durable completion outbox retry the exact
+    // result instead of reporting execution_failed or relaunching the action.
+    await options.transport.complete(claimed.id, claimed.lease_token, result);
     return true;
   }
 

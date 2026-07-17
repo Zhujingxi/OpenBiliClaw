@@ -12,8 +12,11 @@ from openbiliclaw.features.profile.service import ProfileService, StaleProfileRe
 from openbiliclaw.features.sources.domain import SourceOperation, SourceResultKind
 from openbiliclaw.features.system.service import OnboardingService, SettingsService
 from openbiliclaw.infrastructure.ai.use_cases import (
+    EmbeddingCandidateNoveltyScorer,
     TaskRunnerBatchAssessor,
+    TaskRunnerKeywordPlanner,
     TaskRunnerProfileDeltaAI,
+    TaskRunnerRecommendationExplainer,
 )
 from openbiliclaw.infrastructure.database.repositories import ProfileRevisionConflict
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
@@ -34,7 +37,9 @@ if TYPE_CHECKING:
 
     from openbiliclaw.features.activity.domain import ProfileSignal
     from openbiliclaw.features.sources.registry import SourceRegistry
+    from openbiliclaw.infrastructure.ai.embedding import EmbeddingService
     from openbiliclaw.infrastructure.ai.runner import TaskRunner
+    from openbiliclaw.infrastructure.jobs.tasks import JobName
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +49,7 @@ class WorkerDependencies:
     session_factory: sessionmaker[Session]
     source_registry: SourceRegistry | Callable[[], SourceRegistry]
     task_runner: TaskRunner
+    embedding_service: EmbeddingService | None = None
     job_queue: JobQueue | None = None
 
 
@@ -69,6 +75,13 @@ class WorkerOrchestrator:
             cast("Callable[[], Any]", self._uow_factory),
             connectors=lambda: self._source_registry_provider().connectors,
             assessor=TaskRunnerBatchAssessor(dependencies.task_runner),
+            query_planner=TaskRunnerKeywordPlanner(dependencies.task_runner),
+            explainer=TaskRunnerRecommendationExplainer(dependencies.task_runner),
+            novelty_scorer=(
+                EmbeddingCandidateNoveltyScorer(dependencies.embedding_service)
+                if dependencies.embedding_service is not None
+                else None
+            ),
             settings=self._settings,
         )
         self._jobs = job_service
@@ -186,10 +199,24 @@ def build_worker_runtime(
         return UnitOfWork(dependencies.session_factory)
 
     settings = SettingsService(cast("Callable[[], Any]", uow_factory))
+
+    def schedule_interval_minutes(job_name: JobName) -> int:
+        schedules = settings.get().schedules
+        return {
+            "source_sync": schedules.source_sync_interval_minutes,
+            "profile_projection": schedules.profile_projection_interval_minutes,
+            "feed_replenishment": schedules.feed_replenishment_interval_minutes,
+            "cleanup": schedules.cleanup_interval_minutes,
+        }[job_name]
+
+    def periodic_job_eligible(job_name: JobName) -> bool:
+        return job_name == "cleanup" or settings.get().onboarding_complete
+
     service = JobService(
         cast("Callable[[], Any]", uow_factory),
         queue=dependencies.job_queue or HueyJobQueue(),
-        source_sync_interval_minutes=lambda: settings.get().schedules.source_sync_interval_minutes,
+        schedule_interval_minutes=schedule_interval_minutes,
+        periodic_job_eligible=periodic_job_eligible,
     )
     OnboardingService(settings, service)
     orchestrator = WorkerOrchestrator(dependencies, service)

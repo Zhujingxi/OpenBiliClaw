@@ -1,7 +1,8 @@
 /** Lean vNext extension runtime: passive activity ingestion plus generic browser tasks. */
 
 import { computeActionBadge } from "./badge.ts";
-import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.ts";
+import { deliverActivityEvent } from "./activity-delivery.ts";
+import { shouldFlushImmediately } from "./buffer.ts";
 import {
   browserOperationsFromManifests,
   executeBrowserSourceTask,
@@ -11,6 +12,12 @@ import {
   type SourceTaskDispatcher,
   type SourceTaskTransport,
 } from "./generic-source-task-dispatcher.ts";
+import { createDurableOutbox } from "./durable-outbox.ts";
+import { xhsObservationEvents } from "./xhs-observation-events.ts";
+import {
+  deliverTaskCompletion,
+  type PendingTaskCompletion,
+} from "./task-completion.ts";
 import {
   createApiClient,
   type ActivityEvent,
@@ -18,22 +25,57 @@ import {
   type SourceId,
   type SourceManifest,
 } from "../shared/api-client.ts";
-import { normalizeActivityEvent } from "../shared/activity-event.ts";
+import {
+  normalizeActivityEvent,
+  type IdentifiedActivityEvent,
+} from "../shared/activity-event.ts";
 import { authenticatedFetch, clearSession, ensureSession } from "../shared/auth.ts";
 import { getBackendOrigin, onBackendEndpointChange } from "../shared/backend-endpoint.ts";
 import type { BehaviorEvent } from "../shared/types.ts";
 
-const EVENT_BUFFER_MAX = 50;
 const FLUSH_ALARM = "openbiliclaw-v1-flush";
 const SOURCE_TASK_ALARM = "openbiliclaw-v1-source-tasks";
 const FLUSH_PERIOD_MINUTES = 0.5;
 const SOURCE_TASK_PERIOD_MINUTES = 0.5;
 
-let eventBuffer: BehaviorEvent[] = [];
 let flushInFlight: Promise<void> | null = null;
 let pollInFlight: Promise<void> | null = null;
 let backendReachable: boolean | null = null;
 let nextDispatcherIndex = 0;
+
+const activityOutbox = createDurableOutbox<IdentifiedActivityEvent>({
+  storage: chrome.storage.local,
+  storageKey: "vnext_activity_outbox",
+});
+
+type DeadLetterActivity = {
+  readonly id: string;
+  readonly event: IdentifiedActivityEvent;
+  readonly status: number;
+  readonly deadLetteredAt: string;
+};
+
+const activityDeadLetters = createDurableOutbox<DeadLetterActivity>({
+  storage: chrome.storage.local,
+  storageKey: "vnext_activity_dead_letters",
+});
+
+const taskCompletionOutbox = createDurableOutbox<PendingTaskCompletion>({
+  storage: chrome.storage.local,
+  storageKey: "vnext_source_task_completion_outbox",
+});
+
+type DeadLetterTaskCompletion = {
+  readonly id: string;
+  readonly completion: PendingTaskCompletion;
+  readonly status: number;
+  readonly deadLetteredAt: string;
+};
+
+const taskCompletionDeadLetters = createDurableOutbox<DeadLetterTaskCompletion>({
+  storage: chrome.storage.local,
+  storageKey: "vnext_source_task_completion_dead_letters",
+});
 
 async function getApiClient() {
   return createApiClient({
@@ -49,21 +91,32 @@ const taskTransport: SourceTaskTransport = {
     });
   },
   async complete(taskId, leaseToken, result) {
-    await (await getApiClient()).request("v1_source_tasks_complete", {
-      path: { task_id: taskId },
-      body: {
-        lease_token: leaseToken,
-        result: { operation: result.operation, items: result.items },
-      },
-    });
+    await taskCompletionOutbox.enqueue({ id: taskId, leaseToken, outcome: { result } });
+    await flushTaskCompletions();
   },
   async fail(taskId, leaseToken, failure) {
-    await (await getApiClient()).request("v1_source_tasks_complete", {
-      path: { task_id: taskId },
-      body: { lease_token: leaseToken, failure },
-    });
+    await taskCompletionOutbox.enqueue({ id: taskId, leaseToken, outcome: { failure } });
+    await flushTaskCompletions();
   },
 };
+
+async function flushTaskCompletions(): Promise<void> {
+  await taskCompletionOutbox.flush(async (completion) => {
+    await deliverTaskCompletion(completion, async (body) => {
+      await (await getApiClient()).request("v1_source_tasks_complete", {
+        path: { task_id: completion.id },
+        body,
+      });
+    }, async (terminalCompletion, status) => {
+      await taskCompletionDeadLetters.enqueue({
+        id: terminalCompletion.id,
+        completion: terminalCompletion,
+        status,
+        deadLetteredAt: new Date().toISOString(),
+      });
+    });
+  });
+}
 
 let sourceTaskDispatchers: SourceTaskDispatcher[] = [];
 
@@ -91,21 +144,23 @@ async function ingestActivity(event: ActivityEvent): Promise<void> {
 async function flushEvents(): Promise<void> {
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
-    const pending = eventBuffer;
-    eventBuffer = [];
-    const failed: BehaviorEvent[] = [];
-    for (const behavior of pending) {
-      const event = normalizeActivityEvent(behavior);
-      if (!event) continue;
-      try {
-        await ingestActivity(event);
-        backendReachable = true;
-      } catch {
-        failed.push(behavior);
-        backendReachable = false;
-      }
+    try {
+      await activityOutbox.flush((event) => deliverActivityEvent(
+        event,
+        ingestActivity,
+        async (terminalEvent, status) => {
+          await activityDeadLetters.enqueue({
+            id: terminalEvent.id,
+            event: terminalEvent,
+            status,
+            deadLetteredAt: new Date().toISOString(),
+          });
+        },
+      ));
+      backendReachable = true;
+    } catch {
+      backendReachable = false;
     }
-    if (failed.length > 0) eventBuffer.unshift(...failed);
     renderBadge();
   })().finally(() => {
     flushInFlight = null;
@@ -116,6 +171,13 @@ async function flushEvents(): Promise<void> {
 async function pollSourceTasks(): Promise<void> {
   if (pollInFlight) return pollInFlight;
   pollInFlight = (async () => {
+    try {
+      await flushTaskCompletions();
+    } catch {
+      backendReachable = false;
+      renderBadge();
+      return;
+    }
     try {
       await refreshSourceTaskDispatchers();
       backendReachable = true;
@@ -177,7 +239,7 @@ function ensureAlarms(): void {
 async function startRuntime(): Promise<void> {
   ensureAlarms();
   await ensureSession();
-  await Promise.all([probeBackend(), pollSourceTasks()]);
+  await Promise.all([flushEvents(), probeBackend(), pollSourceTasks()]);
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -193,69 +255,33 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === SOURCE_TASK_ALARM) void pollSourceTasks();
 });
 
-chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
+chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender, sendResponse) => {
   if (message.action === "BEHAVIOR_EVENT") {
     const event = message.data as BehaviorEvent;
-    eventBuffer = enqueueBufferedEvent(eventBuffer, event, EVENT_BUFFER_MAX);
-    if (eventBuffer.length >= EVENT_BUFFER_MAX || shouldFlushImmediately(event)) {
-      void flushEvents();
-    }
-    return false;
+    const normalized = normalizeActivityEvent(event);
+    if (!normalized?.id) return false;
+    void activityOutbox.enqueue(normalized)
+      .then(() => shouldFlushImmediately(event) ? flushEvents() : undefined)
+      .then(() => sendResponse({ accepted: true }))
+      .catch(() => {
+        backendReachable = false;
+        renderBadge();
+        sendResponse({ accepted: false });
+      });
+    return true;
   }
   if (message.action === "XHS_URLS_OBSERVED") {
-    void ingestXhsObservations(message.data);
-    return false;
+    void ingestXhsObservations(message.data)
+      .then(() => sendResponse({ accepted: true }))
+      .catch(() => sendResponse({ accepted: false }));
+    return true;
   }
   return false;
 });
 
 async function ingestXhsObservations(value: unknown): Promise<void> {
-  if (!value || typeof value !== "object") return;
-  const observation = value as Record<string, unknown>;
-  const notes = Array.isArray(observation.notes) ? observation.notes : [];
-  const urls = Array.isArray(observation.urls) ? observation.urls : [];
-  const rows = notes.length > 0 ? notes : urls.map((url) => ({ url }));
-  for (const raw of rows) {
-    const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-    const rawUrl = String(row.url ?? "");
-    const externalId = String(row.note_id ?? noteIdFromUrl(rawUrl) ?? "");
-    if (!rawUrl && !externalId) continue;
-    const event: ActivityEvent = {
-      source_id: "xiaohongshu",
-      kind: "import",
-      occurred_at: new Date(Number(observation.observed_at) || Date.now()).toISOString(),
-      content_external_id: externalId || null,
-      url: safeObservedUrl(rawUrl),
-      title: typeof row.title === "string" ? row.title : null,
-      metadata: { page_type: String(observation.page_type ?? "other") },
-    };
-    try {
-      await ingestActivity(event);
-    } catch {
-      return;
-    }
-  }
-}
-
-function noteIdFromUrl(value: string): string | null {
-  return value.match(/\/(?:explore|discovery\/item)\/([0-9a-z]+)/i)?.[1] ?? null;
-}
-
-function safeObservedUrl(value: string): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" || !isSourceHost(url.hostname, "xiaohongshu.com")) return null;
-    url.searchParams.delete("xsec_token");
-    url.searchParams.delete("xsec_source");
-    return url.href;
-  } catch {
-    return null;
-  }
-}
-
-function isSourceHost(hostname: string, expected: string): boolean {
-  return hostname === expected || hostname.endsWith(`.${expected}`);
+  for (const event of xhsObservationEvents(value)) await activityOutbox.enqueue(event);
+  await flushEvents();
 }
 
 chrome.action.onClicked.addListener((tab) => {

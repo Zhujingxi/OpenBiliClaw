@@ -16,13 +16,16 @@
 #   OPENBILICLAW_SECRET_KEY=<source credential encryption key>
 #   OPENBILICLAW_ACCESS_TOKEN=<installer/API bearer token>
 #   OPENBILICLAW_SESSION_SECRET=<Web session signing secret>
+#   OPENBILICLAW_WEB_PASSWORD_HASH=<installer-generated scrypt hash>
+#   OPENBILICLAW_EXTENSION_ACCESS_KEYS=<installer-generated digest record JSON>
 #   OPENBILICLAW_DATABASE_URL=sqlite:////absolute/path/data/vnext/openbiliclaw.db
 #   OPENBILICLAW_HUEY_PATH=/absolute/path/data/vnext/huey.db
+#   OPENBILICLAW_API_HOST=0.0.0.0
+#   OPENBILICLAW_API_PORT=8420
 #
 # Optional deployment variables:
 #   OPENBILICLAW_LITELLM_ADMIN_URL=https://your-litellm.example/ui
-#   OPENBILICLAW_WEB_PASSWORD_HASH=<scrypt password hash>
-#   OPENBILICLAW_EXTENSION_ACCESS_KEYS=[]
+#     Docker preserves an existing value on rerun unless explicitly replaced.
 #   OPENBILICLAW_PROXY_HOST=127.0.0.1
 #   OPENBILICLAW_PROXY_PORT=7897
 #   OPENBILICLAW_PROXY_TIMEOUT=1.0

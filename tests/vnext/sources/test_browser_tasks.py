@@ -186,7 +186,7 @@ def test_completion_is_idempotent_for_the_same_result(
         )
 
 
-def test_completion_operation_must_match_the_claimed_request(
+def test_completion_operation_mismatch_fails_the_task_before_success(
     task_context: tuple[Any, Any, SourceTaskService],
 ) -> None:
     session_factory, _, service = task_context
@@ -199,17 +199,123 @@ def test_completion_operation_must_match_the_claimed_request(
     claimed = service.claim("zhihu")
     assert claimed is not None
 
-    with pytest.raises(ValueError, match="operation does not match"):
-        service.complete(
-            task_id,
-            claimed.lease_token,
-            _result(SourceOperation.FEED, {"items": []}),
-        )
+    completion = service.complete(
+        task_id,
+        claimed.lease_token,
+        _result(SourceOperation.FEED, {"items": []}),
+    )
 
+    assert completion.idempotent is False
+    snapshot = service.snapshot(task_id)
+    assert snapshot.status is SourceTaskStatus.FAILED
+    assert snapshot.failure is not None
+    assert snapshot.failure.code == "result_mismatch"
+
+
+@pytest.mark.parametrize(
+    "item",
+    (
+        {"garbage": "nonsense"},
+        {
+            "source_id": "youtube",
+            "content_id": "cross-source",
+            "content_type": "answer",
+            "title": "Wrong source",
+        },
+    ),
+)
+def test_completion_rejects_invalid_or_cross_source_items_as_result_mismatch(
+    task_context: tuple[Any, Any, SourceTaskService], item: dict[str, object]
+) -> None:
+    session_factory, _, service = task_context
+    task_id = service.enqueue(
+        _request(
+            source_id="zhihu",
+            operation=SourceOperation.SEARCH,
+            payload={"query": "python", "limit": 5},
+        )
+    )
+    claimed = service.claim("zhihu")
+    assert claimed is not None
+
+    service.complete(
+        task_id,
+        claimed.lease_token,
+        _result(SourceOperation.SEARCH, {"items": [item]}),
+    )
+
+    snapshot = service.snapshot(task_id)
+    assert snapshot.status is SourceTaskStatus.FAILED
+    assert snapshot.failure is not None
+    assert snapshot.failure.code == "result_mismatch"
     with session_factory() as session:
         row = session.get(SourceTaskModel, str(task_id))
         assert row is not None
-        assert row.result_payload is None
+        assert row.status == "failed"
+        assert item["garbage" if "garbage" in item else "title"] not in str(row.result_payload)
+
+
+def test_completion_persists_only_sanitized_public_urls(
+    task_context: tuple[Any, Any, SourceTaskService],
+) -> None:
+    session_factory, _, service = task_context
+    task_id = service.enqueue(
+        _request(
+            source_id="xiaohongshu",
+            operation=SourceOperation.SEARCH,
+            payload={"query": "python", "limit": 5},
+        )
+    )
+    claimed = service.claim("xiaohongshu")
+    assert claimed is not None
+    secret_url = (
+        " \thttps://user:password@www.xiaohongshu.com/explore/note?keep=1"
+        "&xsec_token=must-not-persist&access_token=must-not-persist"
+        "&X-Goog-Signature=must-not-persist"
+        "#section=public&X-Amz-Signature=must-not-persist"
+    )
+
+    service.complete(
+        task_id,
+        claimed.lease_token,
+        _result(
+            SourceOperation.SEARCH,
+            {
+                "items": [
+                    {
+                        "source_id": "xiaohongshu",
+                        "note_id": "note",
+                        "url": secret_url,
+                        "title": "Question?access_token=is-plain-text",
+                    }
+                ]
+            },
+        ),
+    )
+
+    snapshot = service.snapshot(task_id)
+    assert snapshot.result is not None
+    persisted_url = str(snapshot.result.items[0]["url"])
+    assert "keep=1" in persisted_url
+    assert persisted_url.endswith("#section=public")
+    assert "must-not-persist" not in persisted_url
+    assert "user" not in persisted_url
+    assert "password" not in persisted_url
+    assert "signature" not in persisted_url.casefold()
+    assert "xsec_token" not in persisted_url
+    assert "access_token" not in persisted_url
+    assert snapshot.result.items[0]["title"] == "Question?access_token=is-plain-text"
+    with session_factory() as session:
+        row = session.get(SourceTaskModel, str(task_id))
+        assert row is not None
+        assert row.result_payload is not None
+        stored_url = str(row.result_payload["items"][0]["url"])
+        assert "must-not-persist" not in stored_url
+        assert "user" not in stored_url
+        assert "password" not in stored_url
+        assert "signature" not in stored_url.casefold()
+        assert "xsec_token" not in stored_url
+        assert "access_token" not in stored_url
 
 
 def test_failure_completion_is_typed_idempotent_and_secret_free(

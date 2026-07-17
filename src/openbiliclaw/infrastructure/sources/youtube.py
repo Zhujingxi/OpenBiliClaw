@@ -65,7 +65,7 @@ class YouTubeSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.YOUTUBE,
     display_name="YouTube",
-    **source_form_schema_fields(YouTubeSettings),
+    **source_form_schema_fields(YouTubeSettings, accepts_credentials=False),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

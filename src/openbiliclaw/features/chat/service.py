@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from contextlib import aclosing
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
-from uuid import UUID  # noqa: TC003 - Pydantic resolves the field at runtime
+from uuid import UUID, uuid4  # noqa: TC003 - Pydantic resolves the field at runtime
 
 from anyio import CapacityLimiter, to_thread
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,7 +15,7 @@ from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.chat.domain import ChatHistoryTurn, ChatRole, ChatTurn
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncGenerator, Callable
     from types import TracebackType
 
 # Interactive chats should not serialize on SQLite, while a hard bound protects the
@@ -41,10 +42,25 @@ class ChatChunk(BaseModel):
         return f"event: {self.kind.value}\ndata: {data}\n\n"
 
 
+class ChatResponseDelta(BaseModel):
+    """One AI-run-associated delta from the interactive responder."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    content: str = Field(min_length=1)
+    ai_run_id: UUID
+
+
 class ChatResponder(Protocol):
     """Interactive-lane adapter backed by the shared TaskRunner, never Huey."""
 
-    async def respond(self, *, conversation_id: UUID, message: str) -> str: ...
+    def stream(
+        self,
+        *,
+        conversation_id: UUID,
+        message: str,
+        history: tuple[ChatTurn, ...],
+    ) -> AsyncGenerator[ChatResponseDelta]: ...
 
 
 class ChatRepository(Protocol):
@@ -52,6 +68,10 @@ class ChatRepository(Protocol):
 
     def list_by_conversation(
         self, conversation_id: UUID, *, limit: int, offset: int
+    ) -> tuple[ChatTurn, ...]: ...
+
+    def list_recent_by_conversation(
+        self, conversation_id: UUID, *, limit: int
     ) -> tuple[ChatTurn, ...]: ...
 
 
@@ -113,9 +133,13 @@ class ChatService:
         uow_factory: Callable[[], ChatUnitOfWork],
         *,
         responder: ChatResponder,
+        history_limit: int = 30,
     ) -> None:
+        if not 1 <= history_limit <= 100:
+            raise ValueError("chat history limit must be between 1 and 100")
         self._uow_factory = uow_factory
         self._responder = responder
+        self._history_limit = history_limit
 
     async def stream(
         self,
@@ -123,29 +147,48 @@ class ChatService:
         conversation_id: UUID,
         message: str,
         learn: bool = False,
-    ) -> AsyncIterator[ChatChunk]:
+    ) -> AsyncGenerator[ChatChunk]:
         user_turn = ChatTurn(
             conversation_id=conversation_id,
             role=ChatRole.USER,
             content=message,
         )
-        await to_thread.run_sync(
-            self._persist_user_turn,
+        history = await to_thread.run_sync(
+            self._load_history_and_persist_user_turn,
             user_turn,
             abandon_on_cancel=False,
             limiter=_CHAT_PERSISTENCE_LIMITER,
         )
 
-        reply = (
-            await self._responder.respond(
+        reply_parts: list[str] = []
+        assistant_turn_id = uuid4()
+        ai_run_id: UUID | None = None
+        async with aclosing(
+            self._responder.stream(
                 conversation_id=conversation_id,
                 message=message,
+                history=history,
             )
-        ).strip()
+        ) as deltas:
+            async for delta in deltas:
+                if ai_run_id is not None and delta.ai_run_id != ai_run_id:
+                    raise RuntimeError("chat stream changed AI run identity")
+                ai_run_id = delta.ai_run_id
+                reply_parts.append(delta.content)
+                yield ChatChunk(
+                    kind=ChatChunkKind.DELTA,
+                    content=delta.content,
+                    turn_id=assistant_turn_id,
+                )
+        reply = "".join(reply_parts)
+        if not reply.strip():
+            raise ValueError("chat response cannot be empty")
         assistant_turn = ChatTurn(
+            id=assistant_turn_id,
             conversation_id=conversation_id,
             role=ChatRole.ASSISTANT,
             content=reply,
+            ai_run_id=ai_run_id,
         )
         await to_thread.run_sync(
             self._persist_assistant_turn,
@@ -157,11 +200,6 @@ class ChatService:
             limiter=_CHAT_PERSISTENCE_LIMITER,
         )
 
-        yield ChatChunk(
-            kind=ChatChunkKind.DELTA,
-            content=assistant_turn.content,
-            turn_id=assistant_turn.id,
-        )
         yield ChatChunk(kind=ChatChunkKind.DONE, content="", turn_id=assistant_turn.id)
 
     def history(
@@ -183,10 +221,15 @@ class ChatService:
             has_more=len(turns) > limit,
         )
 
-    def _persist_user_turn(self, user_turn: ChatTurn) -> None:
+    def _load_history_and_persist_user_turn(self, user_turn: ChatTurn) -> tuple[ChatTurn, ...]:
         with self._uow_factory() as uow:
+            history = uow.chat.list_recent_by_conversation(
+                user_turn.conversation_id,
+                limit=self._history_limit,
+            )
             uow.chat.add(user_turn)
             uow.commit()
+        return history
 
     def _persist_assistant_turn(
         self,
@@ -213,6 +256,7 @@ __all__ = [
     "ChatChunk",
     "ChatChunkKind",
     "ChatHistoryPage",
+    "ChatResponseDelta",
     "ChatResponder",
     "ChatService",
 ]

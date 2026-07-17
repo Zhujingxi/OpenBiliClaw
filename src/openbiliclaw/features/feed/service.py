@@ -64,6 +64,10 @@ class FeedPolicy:
             raise ValueError("feed diversity bounds must be positive")
 
 
+class StaleFeedProfileRevisionError(RuntimeError):
+    """Raised when assessed candidates no longer match the latest profile revision."""
+
+
 class ContentRepository(Protocol):
     def add(self, item: ContentItem) -> None: ...
 
@@ -86,6 +90,8 @@ class FeedRepository(Protocol):
     def add(self, entry: FeedEntry) -> None: ...
 
     def unseen_count(self) -> int: ...
+
+    def unseen_diversity_keys(self) -> tuple[tuple[str, tuple[str, ...]], ...]: ...
 
     def next_position(self) -> int: ...
 
@@ -136,6 +142,29 @@ class CandidateBatchAssessor(Protocol):
     ) -> tuple[CandidateAssessment, ...]: ...
 
 
+class DiscoveryQueryPlanner(Protocol):
+    """Generate source-neutral queries from the current evidence profile."""
+
+    async def plan(self, profile: ProfileSnapshot, *, limit: int) -> tuple[str, ...]: ...
+
+
+class RecommendationExplainer(Protocol):
+    """Explain an already-admitted item without controlling admission or persistence."""
+
+    async def explain(
+        self,
+        profile: ProfileSnapshot,
+        content: ContentItem,
+        assessment: CandidateAssessment,
+    ) -> str: ...
+
+
+class CandidateNoveltyScorer(Protocol):
+    """Return bounded semantic-diversity scores for one normalized candidate batch."""
+
+    async def score(self, content: tuple[ContentItem, ...]) -> Mapping[UUID, float]: ...
+
+
 class FeedSettings(Protocol):
     """Typed settings read port supplied by SettingsService."""
 
@@ -148,6 +177,7 @@ class _ReplenishmentState:
     current_unseen: int
     excluded_ids: frozenset[UUID]
     excluded_identities: frozenset[tuple[str, str]]
+    diversity_keys: tuple[tuple[str, tuple[str, ...]], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +271,18 @@ def _validate_assessments(
     return by_content
 
 
+def _diversity_counts(
+    keys: Sequence[tuple[str, tuple[str, ...]]],
+) -> tuple[dict[str, int], dict[str, int]]:
+    source_counts: dict[str, int] = {}
+    topic_counts: dict[str, int] = {}
+    for source_id, raw_topics in keys:
+        source_counts[source_id] = source_counts.get(source_id, 0) + 1
+        for topic in dict.fromkeys(value.casefold() for value in raw_topics if value):
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+    return source_counts, topic_counts
+
+
 class FeedService:
     """Replenish a bounded local feed from supported read-only source operations."""
 
@@ -250,14 +292,24 @@ class FeedService:
         *,
         connectors: Sequence[SourceConnector] | Callable[[], Sequence[SourceConnector]],
         assessor: CandidateBatchAssessor,
+        query_planner: DiscoveryQueryPlanner | None = None,
+        explainer: RecommendationExplainer | None = None,
+        novelty_scorer: CandidateNoveltyScorer | None = None,
         policy: FeedPolicy | None = None,
         settings: FeedSettings | None = None,
+        profile_conflict_retries: int = 1,
     ) -> None:
+        if not 0 <= profile_conflict_retries <= 3:
+            raise ValueError("profile conflict retries must be between zero and three")
         self._uow_factory = uow_factory
         self._connector_provider = connectors if callable(connectors) else lambda: tuple(connectors)
         self._assessor = assessor
+        self._query_planner = query_planner
+        self._explainer = explainer
+        self._novelty_scorer = novelty_scorer
         self._policy = policy or FeedPolicy()
         self._settings = settings
+        self._profile_conflict_retries = profile_conflict_retries
 
     def list_entries(self, *, limit: int = 50, offset: int = 0) -> tuple[FeedItem, ...]:
         """Return a bounded ordered feed projection."""
@@ -271,6 +323,7 @@ class FeedService:
         with self._uow_factory() as uow:
             profile = uow.profiles.latest()
             current_unseen = uow.feed.unseen_count()
+            diversity_keys = uow.feed.unseen_diversity_keys()
             excluded_ids = (
                 frozenset()
                 if profile is None
@@ -286,6 +339,7 @@ class FeedService:
             current_unseen=current_unseen,
             excluded_ids=excluded_ids,
             excluded_identities=excluded_identities,
+            diversity_keys=diversity_keys,
         )
 
     def _effective_policy(self, settings: UserSettings | None) -> FeedPolicy:
@@ -329,12 +383,13 @@ class FeedService:
         limit: int,
         state: _ReplenishmentState,
         identities: set[tuple[str, str]],
+        query: str | None,
         checkpoint: Callable[[float], None] | None,
     ) -> tuple[ContentItem, ...]:
         _checkpoint(checkpoint, 0.15)
-        query = _query(profile) if operation.requires_input else None
+        resolved_query = query if operation.requires_input else None
         request_limit = min(100, limit + len(state.excluded_ids))
-        result = await connector.execute(operation, query=query, limit=request_limit)
+        result = await connector.execute(operation, query=resolved_query, limit=request_limit)
         _checkpoint(checkpoint, 0.35)
         accepted: list[ContentItem] = []
         for item in result:
@@ -359,6 +414,7 @@ class FeedService:
         state: _ReplenishmentState,
         eligible: tuple[tuple[SourceConnector, SourceOperation], ...],
         allocations: Mapping[str, int],
+        queries: Mapping[str, str],
         checkpoint: Callable[[float], None] | None,
     ) -> tuple[ContentItem, ...]:
         candidates: list[ContentItem] = []
@@ -377,6 +433,7 @@ class FeedService:
                     limit=limit,
                     state=state,
                     identities=identities,
+                    query=queries.get(connector.manifest.source_id.value, _query(profile)),
                     checkpoint=checkpoint,
                 )
             )
@@ -423,14 +480,17 @@ class FeedService:
         *,
         deficit: int,
         policy: FeedPolicy,
+        semantic_novelty: Mapping[UUID, float],
+        existing_diversity: Sequence[tuple[str, tuple[str, ...]]] = (),
     ) -> tuple[tuple[ContentItem, CandidateAssessment], ...]:
         admitted: list[tuple[ContentItem, CandidateAssessment]] = []
-        source_counts: dict[str, int] = {}
-        topic_counts: dict[str, int] = {}
+        source_counts, topic_counts = _diversity_counts(existing_diversity)
         for item in ranked:
             assessment = assessments[item.id]
             topics = tuple(dict.fromkeys(topic.casefold() for topic in assessment.topics if topic))
-            score = assessment.score + adjustments[item.id]
+            score = (
+                assessment.score + adjustments[item.id] + 0.1 * semantic_novelty.get(item.id, 0.0)
+            )
             if not FeedService._admissible(
                 item, assessment, score, topics, policy, source_counts, topic_counts
             ):
@@ -448,12 +508,19 @@ class FeedService:
         normalized: _NormalizedCandidates,
         assessments: Mapping[UUID, CandidateAssessment],
         admitted: tuple[tuple[ContentItem, CandidateAssessment], ...],
+        explanations: Mapping[UUID, str],
+        expected_profile_revision: int,
         transaction_guard: Callable[[object], None] | None,
     ) -> tuple[FeedEntry, ...]:
         entries: list[FeedEntry] = []
         with self._uow_factory() as uow:
             if transaction_guard is not None:
                 transaction_guard(uow)
+            latest_profile = uow.profiles.latest()
+            if latest_profile is None or latest_profile.revision != expected_profile_revision:
+                raise StaleFeedProfileRevisionError(
+                    "profile changed while feed candidates were being assessed"
+                )
             for item in normalized.new_content:
                 uow.content.add(item)
             uow.content.flush()
@@ -465,7 +532,7 @@ class FeedService:
                     content_id=item.id,
                     assessment_id=assessment.id,
                     position=position + index,
-                    explanation=assessment.explanation,
+                    explanation=explanations[item.id],
                 )
                 uow.feed.add(entry)
                 entries.append(entry)
@@ -478,6 +545,25 @@ class FeedService:
         checkpoint: Callable[[float], None] | None = None,
         transaction_guard: Callable[[object], None] | None = None,
     ) -> tuple[FeedEntry, ...]:
+        """Replenish against one profile, retrying one optimistic conflict by default."""
+
+        for attempt in range(self._profile_conflict_retries + 1):
+            try:
+                return await self._replenish_once(
+                    checkpoint=checkpoint,
+                    transaction_guard=transaction_guard,
+                )
+            except StaleFeedProfileRevisionError:
+                if attempt == self._profile_conflict_retries:
+                    raise
+        raise AssertionError("profile conflict retry loop exhausted without an outcome")
+
+    async def _replenish_once(
+        self,
+        *,
+        checkpoint: Callable[[float], None] | None,
+        transaction_guard: Callable[[object], None] | None,
+    ) -> tuple[FeedEntry, ...]:
         state = self._load_replenishment_state()
         profile = state.profile
         if profile is None:
@@ -489,6 +575,7 @@ class FeedService:
             return ()
 
         eligible = self._eligible_connectors(settings)
+        queries = await self._plan_queries(profile, eligible)
         collection_bound = min(deficit * policy.candidate_multiplier, policy.max_batch_candidates)
         allocations = allocate_source_limits(
             collection_bound,
@@ -496,7 +583,7 @@ class FeedService:
             weights=(cast("Mapping[str, float]", settings.sources.weights) if settings else None),
         )
         candidates = await self._collect_candidates(
-            profile, state, eligible, allocations, checkpoint
+            profile, state, eligible, allocations, queries, checkpoint
         )
         if not candidates:
             return ()
@@ -506,20 +593,96 @@ class FeedService:
         _checkpoint(checkpoint, 0.7)
         assessments = _validate_assessments(profile, normalized.batch, assessment_values)
         adjustments = self._adjustments(normalized.batch)
+        semantic_novelty = (
+            await self._novelty_scorer.score(normalized.batch)
+            if self._novelty_scorer is not None
+            else {}
+        )
+        expected_semantic_ids = (
+            {item.id for item in normalized.batch} if semantic_novelty else set()
+        )
+        if set(semantic_novelty) != expected_semantic_ids:
+            raise ValueError("semantic novelty must cover the complete candidate batch")
+        if any(
+            not math.isfinite(value) or not 0 <= value <= 1 for value in semantic_novelty.values()
+        ):
+            raise ValueError("semantic novelty scores must be finite values between zero and one")
 
         # Threshold seeds were chosen conservatively for the first vNext offline corpus.
         # Re-run feed calibration after a source-normalization or assessment-model swap.
         ranked = sorted(
             normalized.batch,
             key=lambda item: (
-                -(assessments[item.id].score + adjustments[item.id]),
+                -(
+                    assessments[item.id].score
+                    + adjustments[item.id]
+                    + 0.1 * semantic_novelty.get(item.id, 0.0)
+                ),
                 item.source_id,
                 item.external_id,
             ),
         )
-        admitted = self._admit(ranked, assessments, adjustments, deficit=deficit, policy=policy)
+        admitted = self._admit(
+            ranked,
+            assessments,
+            adjustments,
+            deficit=deficit,
+            policy=policy,
+            semantic_novelty=semantic_novelty,
+            existing_diversity=state.diversity_keys,
+        )
+        explanations = await self._explain_admitted(profile, admitted, checkpoint)
         _checkpoint(checkpoint, 0.85)
-        return self._persist_admission(normalized, assessments, admitted, transaction_guard)
+        return self._persist_admission(
+            normalized,
+            assessments,
+            admitted,
+            explanations,
+            profile.revision,
+            transaction_guard,
+        )
+
+    async def _plan_queries(
+        self,
+        profile: ProfileSnapshot,
+        eligible: tuple[tuple[SourceConnector, SourceOperation], ...],
+    ) -> dict[str, str]:
+        requiring = tuple(
+            connector
+            for connector, operation in sorted(
+                eligible, key=lambda pair: pair[0].manifest.source_id.value
+            )
+            if operation.requires_input
+        )
+        if not requiring or self._query_planner is None:
+            return {}
+        planned = tuple(
+            value.strip()
+            for value in await self._query_planner.plan(profile, limit=len(requiring))
+            if value.strip()
+        )
+        if not planned:
+            raise ValueError("discovery query planner returned no usable queries")
+        return {
+            connector.manifest.source_id.value: planned[index % len(planned)]
+            for index, connector in enumerate(requiring)
+        }
+
+    async def _explain_admitted(
+        self,
+        profile: ProfileSnapshot,
+        admitted: tuple[tuple[ContentItem, CandidateAssessment], ...],
+        checkpoint: Callable[[float], None] | None,
+    ) -> dict[UUID, str]:
+        if self._explainer is None:
+            return {item.id: assessment.explanation for item, assessment in admitted}
+        explanations: dict[UUID, str] = {}
+        count = len(admitted)
+        for index, (item, assessment) in enumerate(admitted):
+            _checkpoint(checkpoint, 0.72 + 0.12 * index / max(1, count))
+            explanations[item.id] = await self._explainer.explain(profile, item, assessment)
+            _checkpoint(checkpoint, 0.72 + 0.12 * (index + 1) / max(1, count))
+        return explanations
 
 
 class FeedbackService:

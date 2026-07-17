@@ -7,9 +7,18 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, HttpUrl, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    field_validator,
+    model_validator,
+)
 
 from openbiliclaw.features._metadata import FrozenMetadata, empty_metadata
+from openbiliclaw.features._urls import sanitize_public_url
 
 
 class ActivityKind(StrEnum):
@@ -43,6 +52,11 @@ class ActivityEvent(BaseModel):
     text: str | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
     metadata: FrozenMetadata = Field(default_factory=empty_metadata)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def strip_sensitive_url_query(cls, value: object) -> object:
+        return sanitize_public_url(value)
 
 
 class ProfileSignal(BaseModel):

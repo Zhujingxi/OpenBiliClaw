@@ -67,6 +67,14 @@ class _Settings:
         return self.value
 
 
+class _SourceTasks:
+    def __init__(self) -> None:
+        self.claim_count = 0
+
+    def claim(self, _source_id: str) -> None:
+        self.claim_count += 1
+
+
 class _Container:
     def __init__(
         self,
@@ -81,6 +89,7 @@ class _Container:
             trust_loopback=trust_loopback,
         )
         self.onboarding = SimpleNamespace(status=self.settings.get)
+        self.source_tasks = _SourceTasks()
 
     async def startup(self) -> None:
         return None
@@ -178,6 +187,53 @@ def test_web_cookie_login_csrf_and_logout_contract() -> None:
     assert client.get("/api/v1/auth/status").json()["authenticated"] is False
 
 
+def test_source_task_claim_treats_cookie_get_as_state_changing() -> None:
+    container = _Container(_policy())
+    client = _client(container)
+    _login(client)
+    claim_path = "/api/v1/source-tasks/claim?source_id=bilibili&wait_seconds=0"
+
+    assert client.get(claim_path).status_code == 403
+    assert (
+        client.get(
+            claim_path,
+            headers={"Origin": "https://evil.example", "X-OBC-Auth": "1"},
+        ).status_code
+        == 403
+    )
+    assert container.source_tasks.claim_count == 0
+    assert (
+        client.get(
+            claim_path,
+            headers={"Origin": "https://testserver", "X-OBC-Auth": "1"},
+        ).status_code
+        == 204
+    )
+    assert container.source_tasks.claim_count == 1
+
+
+def test_source_task_claim_allows_extension_bearer_without_cookie_csrf() -> None:
+    _key_id, device_key, record = auth_core.generate_extension_access_key()
+    client = _client(_Container(_policy(extension_records=(record,))))
+    origin = "chrome-extension://source-task-test"
+    exchange = client.post(
+        "/api/v1/auth/extension-token",
+        headers={"Origin": origin},
+        json={"key": device_key},
+    )
+    assert exchange.status_code == 200
+
+    claimed = client.get(
+        "/api/v1/source-tasks/claim?source_id=bilibili&wait_seconds=0",
+        headers={
+            "Origin": origin,
+            "Authorization": f"Bearer {exchange.json()['token']}",
+        },
+    )
+
+    assert claimed.status_code == 204
+
+
 def test_installer_bearer_and_web_session_coexist() -> None:
     client = _client(_Container(_policy()))
 
@@ -191,15 +247,34 @@ def test_installer_bearer_and_web_session_coexist() -> None:
     assert client.get("/api/v1/settings").status_code == 200
 
 
-def test_onboarding_public_window_remains_explicit() -> None:
-    public_container = _Container(_policy(), onboarding_complete=False)
-    public = _client(public_container)
-    assert public.get("/api/v1/onboarding").status_code == 200
+def test_configured_network_onboarding_requires_first_run_login() -> None:
+    container = _Container(_policy(), onboarding_complete=False)
+    client = _peer_client(container, "198.51.100.42")
 
-    public_container.settings.value = public_container.settings.value.model_copy(
-        update={"onboarding_complete": True}
+    assert client.get("/api/v1/onboarding").status_code == 401
+    _login(client)
+    assert client.get("/api/v1/onboarding").status_code == 200
+
+
+def test_unconfigured_onboarding_remains_available_for_manual_recovery() -> None:
+    container = _Container(AccessPolicy(), onboarding_complete=False)
+    client = _peer_client(container, "198.51.100.42")
+
+    assert client.get("/api/v1/onboarding").status_code == 200
+
+
+def test_browser_settings_cannot_disable_its_only_web_login() -> None:
+    client = _client(_Container(_policy()))
+    _login(client)
+
+    response = client.patch(
+        "/api/v1/settings",
+        headers={"Origin": "https://testserver", "X-OBC-Auth": "1"},
+        json={"access_control": {"web_password_enabled": False}},
     )
-    assert public.get("/api/v1/onboarding").status_code == 401
+
+    assert response.status_code == 422
+    assert client.get("/api/v1/settings").json()["access_control"]["web_password_enabled"] is True
 
 
 def test_extension_device_exchange_expiry_and_revocation() -> None:

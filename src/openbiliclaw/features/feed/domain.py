@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from openbiliclaw.features._metadata import FrozenMetadata, empty_metadata
+from openbiliclaw.features._urls import sanitize_public_url
 
 
 class ContentItem(BaseModel):
@@ -34,6 +35,11 @@ class ContentItem(BaseModel):
     published_at: AwareDatetime | None = None
     media_type: str = Field(default="link", min_length=1, max_length=50)
     metadata: FrozenMetadata = Field(default_factory=empty_metadata)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def strip_sensitive_url_query(cls, value: object) -> object:
+        return sanitize_public_url(value)
 
 
 class CandidateAssessment(BaseModel):

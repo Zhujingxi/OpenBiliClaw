@@ -13,11 +13,18 @@
 ## 七平台能力矩阵
 
 manifest 把稳定产品能力与可执行操作分开。每个平台还附由真实 Pydantic model
-导出的 `settings_schema`；需要 backend credential 的平台发布 write-only `credential_schema`，
-extension-only Reddit 明确留空。每个 operation 另带
+导出的 `settings_schema`；只有确有 backend consumer 的 Bilibili、Douyin 与 X 发布 write-only
+`credential_schema`。extension 承担登录态的 Xiaohongshu、YouTube bootstrap、Zhihu 与 Reddit
+明确留空，后端不会保存永远不被消费的 Cookie。每个 operation 另带
 `requires_auth`、`result_kind`、primary `transport_kind=direct|cli|browser`、可选
 `fallback_transport_kind`，以及精确 `request_schema` / `result_schema`。schema 不含
 credential default/example，generic UI 无需 source-specific arbitrary JSON contract。
+
+`/setup` 与桌面账号设置直接按 `credential_schema.properties`、`required` 与 `writeOnly`
+渲染字段；不维护 platform conditionals。setup 先对本次所选、尚未 configured 且 schema
+非空的来源调用 account configuration，再 enqueue onboarding。空 credential schema 的
+extension-owned 来源只显示 browser transport 提示，不伪造 Cookie 表单；默认首选第一个
+credential-bearing manifest，使无 extension 的 Docker 首次运行仍可通过 Bilibili Cookie 完成。
 
 | canonical source ID | 可执行只读操作 | transport 边界 |
 |---|---|---|
@@ -51,9 +58,17 @@ stale/unmigrated schema 会先得到权威 schema-head error，
 不创建 authenticated HTTP/CLI client，也不发起 live call。Bilibili、Douyin 与 X 的第一次
 direct/CLI 调用才从 `source_accounts` 读取稳定排序后的 enabled account，并用
 `CredentialCipher` 解密 Cookie；缺少 account、secret、有效密文或 Cookie 都抛出 typed
-`MissingSourceConfigurationError`。小红书、知乎、YouTube bootstrap 和 Reddit
-使用统一 `QueuedBrowserTransport`；YouTube public discovery 使用 retained scraper。
+`MissingSourceConfigurationError`。Bilibili 的 search/trending/related 使用独立匿名 read client，
+没有 account 时仍保持 public discovery；只有 bootstrap history/favorites/following 才延迟创建
+authenticated client 并要求 Cookie。小红书、知乎、YouTube bootstrap 和 Reddit使用统一
+`QueuedBrowserTransport`；YouTube public discovery 使用 retained scraper。
 `UserSettings.sources.enabled` 默认全部为 false，所以默认 worker 不调用任何来源。
+
+Bilibili 的 history/favorites/following、X 的 likes/bookmarks，以及 extension 中 Douyin 的
+post/collection/like/follow 与 YouTube 的 history/subscriptions/likes 都把一次 bootstrap 的公开
+`limit` 按稳定 scope 顺序均匀分配；不能整除时前序 scope 最多多一个。总预算小于 scope 数时只
+执行获得正预算的前序 scope。这样第一组满结果不会在 connector 最终裁剪时吞掉后续 scope，
+返回顺序仍与各平台原有 scope 语义一致，且总数不超过公开 limit。
 
 `GET/PUT /api/v1/sources/{source_id}/settings` 返回/合并 source package 自己的 strict
 Pydantic settings。更新先以当前 persisted/default model 做 shallow patch、严格验证并执行同一
@@ -68,7 +83,8 @@ settings candidate 会先作为 override 构造完整 registry，失败则 trans
 
 `PUT /api/v1/sources/{source_id}/accounts` 只为 manifest 发布 credential schema 的来源接受
 account key 与 write-only cookie，保存 opaque ciphertext 后只返回 configured/enabled status；
-Reddit 的 extension-only manifest 不发布该 schema，use case 会在持久化前拒绝请求。`DELETE
+Xiaohongshu、YouTube、Zhihu 与 Reddit 的 extension-owned manifest 不发布该 schema，use case
+会在持久化前拒绝请求。`DELETE
 /api/v1/sources/{source_id}/accounts/{account_key}` 删除加密账户 material；不存在时仍返回
 `disconnected=true`，并以 `idempotent=true` 说明未发生第二次删除。GET、manifest、status、
 disconnect 与 error payload 都不会返回 plaintext/ciphertext、credential key 或 form input。
@@ -93,13 +109,19 @@ claim 与 complete 的条件更新都排除它。deadline/lease 条件和新 lea
 均在原子 SQL 中使用 SQLite 数据库时钟求值，不使用进入 UoW 前捕获的 Python 时间，因此
 写锁等待后不会凭陈旧授权领取或完成任务，也不会生成已经过期的 lease。
 
-completion 要求 success `result` 与 `failure` 二选一。success 对相同 lease token + 相同结果是幂等的；failure 只接受闭合 code 与长度受限的异常类型，不接收或持久化页面错误 message。并行相同 completion 得到一次写入和一次 idempotent retry，并行不同结果只保留一个结果且另一方 conflict。payload/result 复用 frozen metadata 的严格 finite-JSON 验证，嵌套 `NaN` / `+Inf` / `-Inf` 在持久化前失败；normalized token classifier 递归拒绝 singular、plural、qualified 或嵌套的 `cookie_jar`、`authorization_header`、password、secret、session、credential、API key 和 token 容器。异常只报告字段路径，不回显字段值；窄 allowlist 中的 `token_count`、`session_duration`、`cookie_policy` 不会误伤。
+completion 要求 success `result` 与 `failure` 二选一。所有 HTTP(S) URL-shaped string 在 validation 和 `source_tasks.result_payload` 写入前递归删除 userinfo、`xsec_token`、signature/credential-shaped query 参数及 credential-bearing fragment 参数；malformed HTTP(S) URL fail closed，非 URL 普通文本保持原样。随后 success 由对应 source connector 的平台 normalizer 校验每一条 item：空 envelope 合法，无法形成声明的 activity/content、显式 `source_id` 跨源或 operation 不一致的结果会直接把任务终结为 secret-free `result_mismatch`，不会先写 success 或保存原始 row。success 对相同 lease token + 相同结果是幂等的；failure 只接受闭合 code 与长度受限的异常类型，不接收或持久化页面错误 message。并行相同 completion 得到一次写入和一次 idempotent retry，并行不同结果只保留一个结果且另一方 conflict。payload/result 复用 frozen metadata 的严格 finite-JSON 验证，嵌套 `NaN` / `+Inf` / `-Inf` 在持久化前失败；normalized token classifier 递归拒绝 singular、plural、qualified 或嵌套的 `cookie_jar`、`authorization_header`、password、secret、session、credential、API key 和 token 容器。异常只报告字段路径，不回显字段值；窄 allowlist 中的 `token_count`、`session_duration`、`cookie_policy` 不会误伤。
 
 `QueuedBrowserTransport` 在进入 enqueue 前预分配 task UUID，并把由 execution timeout 推导出的绝对 `request_deadline_at` 与任务一起持久化。execution timeout 或 asyncio cancellation 后，transport 会抗重复 cancellation 地等待在途 enqueue 得到确定结果；成功落库就同步执行 `cancel()`，瞬时失败会在 `cleanup_timeout_seconds` retry window 与固定 attempt 上限内重试，任一已启动的 `cancel()` thread 都必须完成后调用才可继续。该 window 只约束是否再启动一次重试，不会中断在途 persistence 或承诺到点立即传播原始错误；production enqueue/cancel 的单次数据库等待由与 `SourceTaskService.persistence_timeout_seconds` 对齐的 SQLite busy timeout 有界。enqueue 失败或 terminalization 重试结束时只记录 exception class，再传播原始 timeout/cancellation。调用因此可超过 execution timeout 与 cleanup retry window，但不存在 detached callback/task 或 event-loop shutdown 后才出现的 pending insert。
 
 已持久化 row 按 enqueue-time contract 依据其 source/operation/lease/deadline claim，而不依据后来改变的 transport manifest；所以 extension→direct 切换会阻止新 browser enqueue，同时允许切换前的合法 row 排空。
 
 ## 当前边界
+
+- `bash scripts/check-source-contracts.sh` 是强制 source gate：运行七平台 shared contract 与
+  production transport/client mocked suite，并对 vNext connector core 执行 80% branch coverage
+  下限。retained direct clients 与 Douyin signer 不计入「新 core」百分比，但其所有 advertised
+  direct capability 及 empty/malformed/auth/timeout/rate-limit 行为仍由该 suite 直接执行，禁止用
+  manifest-only fake 代替。
 
 - API 与 worker composition root 已构造七个平台 retained-client/CLI/browser adapter；manifest/status/account configuration 和 generic claim/complete 均为权威 `/api/v1` route。
 - Web/extension generated client 与 generic dispatcher 已接线；扩展每轮从 `/api/v1/sources`

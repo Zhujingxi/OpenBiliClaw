@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import os
 import time
@@ -12,13 +13,15 @@ import urllib.request
 from typing import Any
 from uuid import uuid4
 
-API = f"http://127.0.0.1:{os.environ['OBC_E2E_API_PORT']}/api/v1"
+API_ORIGIN = f"http://127.0.0.1:{os.environ['OBC_E2E_API_PORT']}"
+API = f"{API_ORIGIN}/api/v1"
 LITELLM = f"http://127.0.0.1:{os.environ['OBC_E2E_LITELLM_PORT']}"
-TOKEN = os.environ["OPENBILICLAW_ACCESS_TOKEN"]
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+HEADERS = {"Origin": API_ORIGIN, "X-OBC-Auth": "1"}
 LITELLM_HEADERS = {
     "Authorization": f"Bearer {os.environ['LITELLM_MASTER_KEY']}",
 }
+COOKIE_JAR = http.cookiejar.CookieJar()
+OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(COOKIE_JAR))
 ALIASES = {"obc-interactive", "obc-analysis", "obc-embedding"}
 DISCOVERY_PHASE = "initial"
 
@@ -37,7 +40,7 @@ def request(
         request_headers["Content-Type"] = "application/json"
     target = f"{base}{path}"
     try:
-        with urllib.request.urlopen(
+        with OPENER.open(
             urllib.request.Request(target, data=body, method=method, headers=request_headers),
             timeout=20,
         ) as response:
@@ -66,6 +69,30 @@ def litellm_json_request(method: str, path: str, payload: object | None = None) 
         # failures secret-safe by reporting only the operation and HTTP status.
         raise AssertionError(f"LiteLLM {method} {path} returned {status}")
     return None if not body else json.loads(body)
+
+
+def authenticate_browser_clients() -> None:
+    status = json_request("GET", "/auth/status")
+    assert status["enabled"] is True
+    assert status["password_configured"] is True
+    assert status["authenticated"] is False
+    logged_in = json_request(
+        "POST",
+        "/auth/login",
+        {"password": os.environ["OBC_E2E_WEB_PASSWORD"]},
+    )
+    assert logged_in == {"authenticated": True}
+    assert json_request("GET", "/auth/status")["authenticated"] is True
+
+    extension_status, extension_body = request(
+        "POST",
+        "/auth/extension-token",
+        {"key": os.environ["OBC_E2E_EXTENSION_KEY"]},
+        headers={"Origin": "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    )
+    assert extension_status == 200, extension_body.decode()
+    extension_session = json.loads(extension_body)
+    assert extension_session["token"]
 
 
 def configure_litellm_aliases() -> None:
@@ -113,6 +140,7 @@ def wait_for_alias_health() -> dict[str, Any]:
 
 
 def configure_aliases_phase() -> None:
+    authenticate_browser_clients()
     assert json_request("GET", "/system/readiness")["ready"] is True
     unconfigured = json_request("GET", "/system/ai-health")
     assert unconfigured["proxy_reachable"] is True
@@ -205,6 +233,7 @@ def wait_for_job(run_id: str, *, complete_source_tasks: bool = False) -> dict[st
 def main() -> None:
     global DISCOVERY_PHASE
 
+    authenticate_browser_clients()
     assert json_request("GET", "/system/readiness")["ready"] is True
     aliases = wait_for_alias_health()
     assert aliases["proxy_reachable"] is True
@@ -226,13 +255,6 @@ def main() -> None:
             },
         },
     )
-    connected = json_request(
-        "PUT",
-        "/sources/zhihu/accounts",
-        {"account_key": "e2e", "credentials": {"cookie": "synthetic-e2e-cookie"}},
-    )
-    assert connected["configured"] is True
-
     root = json_request("POST", "/onboarding/start", {"source_ids": ["zhihu"]})
     assert root["job_name"] == "source_sync"
     wait_for_onboarding()
@@ -297,9 +319,18 @@ def main() -> None:
         {"conversation_id": conversation_id, "message": "Explain this feed", "learn": True},
     )
     assert status == 200
-    assert b"Deterministic Docker E2E chat response" in chat_stream
+    chat_events = []
+    for block in chat_stream.decode().strip().split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in block.splitlines())
+        chat_events.append((fields["event"], json.loads(fields["data"])))
+    delta_content = "".join(
+        payload["content"] for event, payload in chat_events if event == "delta"
+    )
+    assert delta_content == "Deterministic Docker E2E chat response."
+    assert chat_events[-1][0] == "done"
     history = json_request("GET", f"/chat/{conversation_id}")
     assert [turn["role"] for turn in history["items"]] == ["user", "assistant"]
+    assert history["items"][-1]["content"] == delta_content
 
     for collection in ("favorites", "watch_later"):
         saved = json_request(

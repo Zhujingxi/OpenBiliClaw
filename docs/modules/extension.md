@@ -32,6 +32,12 @@ dispatcher 在调用 executor 前先验证绝对 request deadline，并预留 fa
 `deadline_exceeded`，任何迟到 result 都不能 success-complete。每条等待路径会清理 timer、
 runtime listener 与临时 tab；Xiaohongshu continuation 仍在同一个 abort/deadline 边界内。
 
+被动活动先按后端 `ActivityEvent` 合同限制 external ID、title 与 URL 长度，再写入 MV3 durable
+FIFO。`400`、`413`、`422` 这类重放也不会改变的 payload 拒绝会连同原事件写入本地 dead-letter
+outbox，并继续排空后续事件；认证、限流、网络与服务端错误仍保留原事件等待重试。Xiaohongshu
+每轮只把实际提交的最多 20 个 URL 标为已报告，溢出 URL 留给后续被动轮次，service worker
+拒绝持久化时则释放整批 reservation。
+
 ## Popup 范围
 
 Popup 使用 `extension/popup/api-client.js`，覆盖来源状态/配置、bootstrap、证据画像、feed、

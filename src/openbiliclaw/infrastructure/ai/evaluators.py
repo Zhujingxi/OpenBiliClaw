@@ -11,8 +11,8 @@ from pydantic_evals.evaluators import Evaluator, EvaluatorContext
 from openbiliclaw.features.profile.domain import ProfileDelta
 from openbiliclaw.infrastructure.ai.grounding import is_grounded_in
 from openbiliclaw.infrastructure.ai.tasks import (
-    CandidateAssessmentInput,
-    CandidateAssessmentOutput,
+    CandidateBatchAssessmentInput,
+    CandidateBatchAssessmentOutput,
     KeywordGenerationInput,
     KeywordGenerationOutput,
     ProfileDeltaInput,
@@ -131,30 +131,37 @@ class KeywordGenerationInvariants(_VersionedEvaluator, Evaluator[EvalData, EvalD
 
 
 @dataclass
-class CandidateAssessmentInvariants(_VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]):
-    """Evaluate copied identity, case-specific score ranges, and expected topics."""
+class CandidateBatchAssessmentInvariants(
+    _VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]
+):
+    """Evaluate batch coverage, case-specific score ranges, and expected topics."""
 
     def evaluate(self, ctx: EvaluatorContext[EvalData, EvalData, EvalData]) -> dict[str, bool]:
-        task_input = CandidateAssessmentInput.model_validate(ctx.inputs)
-        output = CandidateAssessmentOutput.model_validate(ctx.output)
+        task_input = CandidateBatchAssessmentInput.model_validate(ctx.inputs)
+        output = CandidateBatchAssessmentOutput.model_validate(ctx.output)
         metadata = _CandidateMetadata.model_validate(ctx.metadata)
-        scores = {
-            "relevance": output.relevance,
-            "quality": output.quality,
-            "novelty": output.novelty,
-            "risk": output.risk,
-        }
-        score_ranges_valid = set(metadata.score_ranges) == set(scores) and all(
-            lower <= scores[name] <= upper for name, (lower, upper) in metadata.score_ranges.items()
+        expected_ids = {item.id for item in task_input.content}
+        actual_ids = [item.content_id for item in output.assessments]
+        score_ranges_valid = all(
+            set(metadata.score_ranges) == {"relevance", "quality", "novelty", "risk"}
+            and all(
+                lower <= getattr(item, name) <= upper
+                for name, (lower, upper) in metadata.score_ranges.items()
+            )
+            for item in output.assessments
         )
-        topic_text = " ".join(output.topics)
+        topic_text = " ".join(topic for item in output.assessments for topic in item.topics)
         return {
-            "candidate_identity_valid": (
-                output.content_id == task_input.content.id
-                and output.profile_revision == task_input.profile.revision
+            "candidate_batch_identity_valid": (
+                len(actual_ids) == len(set(actual_ids))
+                and set(actual_ids) == expected_ids
+                and all(
+                    item.profile_revision == task_input.profile.revision
+                    for item in output.assessments
+                )
             ),
-            "candidate_score_ranges_valid": score_ranges_valid,
-            "candidate_topics_valid": (
+            "candidate_batch_score_ranges_valid": score_ranges_valid,
+            "candidate_batch_topics_valid": (
                 _count_concepts(topic_text, metadata.required_topics)
                 >= metadata.minimum_topic_matches
             ),
@@ -195,7 +202,7 @@ class RecommendationExplanationInvariants(
 TASK_EVALUATOR_TYPES: tuple[type[Evaluator[EvalData, EvalData, EvalData]], ...] = (
     ProfileDeltaInvariants,
     KeywordGenerationInvariants,
-    CandidateAssessmentInvariants,
+    CandidateBatchAssessmentInvariants,
     RecommendationExplanationInvariants,
 )
 

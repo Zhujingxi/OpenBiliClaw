@@ -26,6 +26,7 @@ class BilibiliAPIError(RuntimeError):
     def __init__(self, message: str, *, code: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.status_code = 429 if code in {-412, -429} else None
 
 
 class BilibiliAuthExpiredError(BilibiliAPIError):
@@ -33,7 +34,7 @@ class BilibiliAuthExpiredError(BilibiliAPIError):
 
 
 def _json_object(value: Any) -> dict[str, Any]:
-    """Coerce a JSON value into an object for strict typing.
+    """Validate an object-shaped JSON value for strict typing.
 
     Returns an empty dict when *value* is ``None`` (common when B站
     returns ``"data": null`` under rate-limiting or for empty ranking
@@ -41,17 +42,21 @@ def _json_object(value: Any) -> dict[str, Any]:
     """
     if value is None:
         return {}
+    if not isinstance(value, dict):
+        raise BilibiliAPIError("Bilibili API returned a malformed object")
     return cast("dict[str, Any]", value)
 
 
 def _json_list(value: Any) -> list[dict[str, Any]]:
-    """Coerce a JSON value into a list of objects for strict typing.
+    """Validate a list-of-objects JSON value for strict typing.
 
     Returns an empty list when *value* is ``None`` (common when B站
     returns ``"result": null`` under rate-limiting).
     """
     if value is None:
         return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise BilibiliAPIError("Bilibili API returned a malformed list")
     return cast("list[dict[str, Any]]", value)
 
 
@@ -192,6 +197,7 @@ class BilibiliAPIClient:
         *,
         min_request_interval: float = 0.2,
         proxy: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._cookie = cookie
         self._min_request_interval = min_request_interval
@@ -199,15 +205,7 @@ class BilibiliAPIClient:
         self._last_request_at = 0.0
         self._cached_wbi_keys: tuple[str, str] | None = None
         self._wbi_keys_fetched_at: float = 0.0
-        self._client = httpx.AsyncClient(
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                "Referer": "https://www.bilibili.com",
-            },
+        self._client = http_client or httpx.AsyncClient(
             timeout=30.0,
             # B站 is a CN domain: direct connection always works, while an
             # inherited proxy (httpx trust_env reads env vars AND the OS
@@ -218,6 +216,15 @@ class BilibiliAPIClient:
             trust_env=False,
             proxy=self._proxy,
         )
+        self._client.headers.setdefault(
+            "User-Agent",
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        self._client.headers.setdefault("Referer", "https://www.bilibili.com")
         if cookie:
             self._client.headers["Cookie"] = cookie
 
@@ -326,7 +333,17 @@ class BilibiliAPIClient:
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Perform a GET request and return the decoded `data` payload."""
+        """Perform a GET request and return an object-valued `data` payload."""
+        return _json_object(await self._get_payload(path, params=params, headers=headers))
+
+    async def _get_payload(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> object:
+        """Perform a GET and return a validated envelope's raw ``data`` value."""
         await self._respect_rate_limit()
         try:
             resp = await self._client.get(
@@ -338,8 +355,17 @@ class BilibiliAPIClient:
         except httpx.HTTPError as exc:
             raise self._sanitized_http_error("GET", path, exc) from exc
 
-        payload = _json_object(resp.json())
-        code = int(payload.get("code", 0))
+        try:
+            payload = _json_object(resp.json())
+        except (ValueError, TypeError) as exc:
+            raise BilibiliAPIError("Bilibili API returned malformed JSON") from exc
+        raw_code = payload.get("code", 0)
+        if isinstance(raw_code, bool):
+            raise BilibiliAPIError("Bilibili API returned a malformed code")
+        try:
+            code = int(raw_code)
+        except (TypeError, ValueError) as exc:
+            raise BilibiliAPIError("Bilibili API returned a malformed code") from exc
         if code == -101:
             detail = (
                 f"Bilibili session expired on {path} (-101). "
@@ -349,9 +375,11 @@ class BilibiliAPIClient:
             logger.warning("%s", detail)
             raise BilibiliAuthExpiredError(detail, code=code)
         if code != 0:
-            message = str(payload.get("message", "Bilibili API request failed"))
-            raise BilibiliAPIError(message, code=code)
-        return _json_object(payload.get("data", {}))
+            raise BilibiliAPIError(
+                f"Bilibili API rejected request on {path} (code {code})",
+                code=code,
+            )
+        return payload.get("data", {})
 
     async def _get_wbi_keys(self) -> tuple[str, str]:
         """Fetch and cache the WBI image/sub keys used for signed search requests.
@@ -366,15 +394,7 @@ class BilibiliAPIClient:
         ):
             return self._cached_wbi_keys
 
-        await self._respect_rate_limit()
-        try:
-            resp = await self._client.get(f"{self._BASE_URL}/x/web-interface/nav")
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise BilibiliAPIError(str(exc)) from exc
-
-        payload = _json_object(resp.json())
-        data = _json_object(payload.get("data", {}))
+        data = await self._get_json("/x/web-interface/nav")
         wbi_img = _json_object(data.get("wbi_img", {}))
         img_key = self._extract_wbi_key_component(str(wbi_img.get("img_url", "")))
         sub_key = self._extract_wbi_key_component(str(wbi_img.get("sub_url", "")))
@@ -724,13 +744,12 @@ class BilibiliAPIClient:
         Returns:
             List of related video dicts.
         """
-        resp = await self._client.get(
-            f"{self._BASE_URL}/x/web-interface/archive/related",
-            params={"bvid": bvid},
+        return _json_list(
+            await self._get_payload(
+                "/x/web-interface/archive/related",
+                params={"bvid": bvid},
+            )
         )
-        resp.raise_for_status()
-        payload = _json_object(resp.json())
-        return _json_list(payload.get("data", []))
 
     async def get_ranking(self, rid: int = 0) -> list[dict[str, Any]]:
         """Get ranking/trending videos.
@@ -741,13 +760,10 @@ class BilibiliAPIClient:
         Returns:
             List of ranking item dicts.
         """
-        resp = await self._client.get(
-            f"{self._BASE_URL}/x/web-interface/ranking/v2",
+        data = await self._get_json(
+            "/x/web-interface/ranking/v2",
             params={"rid": rid, "type": "all"},
         )
-        resp.raise_for_status()
-        payload = _json_object(resp.json())
-        data = _json_object(payload.get("data", {}))
         return _json_list(data.get("list", []))
 
     async def close(self) -> None:

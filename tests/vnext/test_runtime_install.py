@@ -5,7 +5,9 @@ import json
 import os
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, Lock
 
 import pytest
 
@@ -76,9 +78,13 @@ def test_local_environment_is_private_atomic_and_idempotent(tmp_path: Path) -> N
     values = _read_env(env_path)
     assert values["OPENBILICLAW_LITELLM_BASE_URL"] == "https://models.example/v1"
     assert values["OPENBILICLAW_LITELLM_API_KEY"] == "proxy-secret"
+    assert "OPENBILICLAW_LITELLM_ADMIN_URL" not in values
     assert len(values["OPENBILICLAW_ACCESS_TOKEN"]) >= 48
     assert len(values["OPENBILICLAW_SECRET_KEY"]) == 64
     assert len(values["OPENBILICLAW_SESSION_SECRET"]) >= 48
+    assert "OPENBILICLAW_WEB_PASSWORD_HASH" not in values
+    assert "OPENBILICLAW_EXTENSION_ACCESS_KEYS" not in values
+    assert "obc_ext_" not in env_path.read_text(encoding="utf-8")
     assert values["OPENBILICLAW_DATABASE_URL"].endswith("/data/vnext/openbiliclaw.db")
     assert values["OPENBILICLAW_HUEY_PATH"].endswith("/data/vnext/huey.db")
     assert not list(tmp_path.glob(".env.tmp-*"))
@@ -96,6 +102,84 @@ def test_local_environment_requires_user_supplied_litellm(tmp_path: Path) -> Non
     assert not (tmp_path / ".env").exists()
 
 
+def test_source_admin_url_is_persisted_only_when_explicitly_supplied(tmp_path: Path) -> None:
+    values = bootstrap.ensure_local_runtime_environment(
+        tmp_path,
+        litellm_base_url="https://models.example/v1",
+        litellm_api_key="proxy-secret",
+        litellm_admin_url="https://admin.example/proxy/ui",
+    )
+
+    assert values["OPENBILICLAW_LITELLM_ADMIN_URL"] == ("https://admin.example/proxy/ui")
+
+
+def test_docker_admin_url_preserves_existing_value_unless_explicitly_replaced(
+    tmp_path: Path,
+) -> None:
+    first = bootstrap.ensure_docker_infrastructure_secrets(
+        tmp_path,
+        litellm_admin_url="https://admin.example/custom/ui",
+    )
+    rerun = bootstrap.ensure_docker_infrastructure_secrets(tmp_path)
+    replaced = bootstrap.ensure_docker_infrastructure_secrets(
+        tmp_path,
+        litellm_admin_url="https://new-admin.example/ui",
+    )
+
+    assert first["OPENBILICLAW_LITELLM_ADMIN_URL"] == "https://admin.example/custom/ui"
+    assert rerun["OPENBILICLAW_LITELLM_ADMIN_URL"] == "https://admin.example/custom/ui"
+    assert replaced["OPENBILICLAW_LITELLM_ADMIN_URL"] == "https://new-admin.example/ui"
+
+
+def test_docker_cli_forwards_explicit_admin_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def install(project_dir: Path, **kwargs: object) -> object:
+        captured["project_dir"] = project_dir
+        captured.update(kwargs)
+        return bootstrap.InstallResult("prepared", "docker", "http://127.0.0.1:8420")
+
+    monkeypatch.setattr(bootstrap, "_install_docker_runtime", install)
+    args = bootstrap.build_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--mode",
+            "docker",
+            "--skip-start",
+            "--litellm-admin-url",
+            "https://admin.example/custom/ui",
+        ]
+    )
+
+    bootstrap.run(args)
+
+    assert captured["litellm_admin_url"] == "https://admin.example/custom/ui"
+
+
+@pytest.mark.parametrize(
+    "admin_url",
+    (
+        "ftp://admin.example/ui",
+        "https://user:secret@admin.example/ui",
+        "https://admin.example/ui?token=secret",
+        "https://admin.example/ui#fragment",
+    ),
+)
+def test_source_admin_url_rejects_unsafe_or_credential_bearing_values(
+    tmp_path: Path, admin_url: str
+) -> None:
+    with pytest.raises(ValueError, match="credential-free HTTP"):
+        bootstrap.ensure_local_runtime_environment(
+            tmp_path,
+            litellm_base_url="https://models.example/v1",
+            litellm_api_key="proxy-secret",
+            litellm_admin_url=admin_url,
+        )
+
+
 def test_copied_local_environment_rebinds_managed_paths_and_instance(
     tmp_path: Path,
 ) -> None:
@@ -109,6 +193,7 @@ def test_copied_local_environment_rebinds_managed_paths_and_instance(
         litellm_api_key="proxy-secret",
     )
     (copied / ".env").write_bytes((original / ".env").read_bytes())
+    (copied / ".env").chmod(0o600)
 
     rebound = bootstrap.ensure_local_runtime_environment(
         copied,
@@ -143,6 +228,21 @@ def test_local_environment_rejects_symlink(tmp_path: Path) -> None:
             litellm_api_key="proxy-secret",
         )
     assert outside.read_text(encoding="utf-8") == "DO_NOT_TOUCH=1\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode contract")
+def test_local_environment_rejects_public_runtime_file(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("DO_NOT_TRUST=1\n", encoding="utf-8")
+    env_path.chmod(0o644)
+
+    with pytest.raises(RuntimeError, match="mode 0600"):
+        bootstrap.ensure_local_runtime_environment(
+            tmp_path,
+            litellm_base_url="https://models.example/v1",
+            litellm_api_key="proxy-secret",
+        )
+    assert env_path.read_text(encoding="utf-8") == "DO_NOT_TRUST=1\n"
 
 
 def test_public_run_preserves_symlink_path_for_local_lifecycle_rejection(
@@ -217,6 +317,53 @@ def test_local_install_migrates_then_starts_api_and_worker_without_secret_output
     rendered = capsys.readouterr().out
     assert "sentinel-proxy-secret" not in rendered
     assert "https://models.example/v1" not in rendered
+    events = [
+        json.loads(line.removeprefix("BOOTSTRAP_STATUS:"))
+        for line in rendered.splitlines()
+        if line.startswith("BOOTSTRAP_STATUS:")
+    ]
+    credential_events = [event for event in events if event["message"] == "first_run_access"]
+    assert len(credential_events) == 1
+    credentials = credential_events[0]["details"]
+    assert len(credentials["web_password"]) >= 20
+    assert credentials["extension_access_key"].startswith("obc_ext_")
+    persisted = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert credentials["web_password"] not in persisted
+    assert credentials["extension_access_key"] not in persisted
+
+
+def test_local_install_rerun_preserves_access_credentials_without_reexposing_plaintext(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def install() -> None:
+        bootstrap.install_local_runtime(
+            tmp_path,
+            host="127.0.0.1",
+            port=8420,
+            litellm_base_url="https://models.example/v1",
+            litellm_api_key="proxy-secret",
+            install_dependencies=False,
+            start=False,
+            run_command=lambda *_args, **_kwargs: None,
+        )
+
+    install()
+    first_values = _read_env(tmp_path / ".env")
+    first_output = capsys.readouterr().out
+    install()
+    second_values = _read_env(tmp_path / ".env")
+    second_output = capsys.readouterr().out
+
+    assert (
+        second_values["OPENBILICLAW_WEB_PASSWORD_HASH"]
+        == first_values["OPENBILICLAW_WEB_PASSWORD_HASH"]
+    )
+    assert (
+        second_values["OPENBILICLAW_EXTENSION_ACCESS_KEYS"]
+        == first_values["OPENBILICLAW_EXTENSION_ACCESS_KEYS"]
+    )
+    assert first_output.count('"message": "first_run_access"') == 1
+    assert '"message": "first_run_access"' not in second_output
 
 
 def test_local_install_propagates_migration_failure_and_starts_nothing(tmp_path: Path) -> None:
@@ -239,6 +386,29 @@ def test_local_install_propagates_migration_failure_and_starts_nothing(tmp_path:
             queue_probe=lambda *_args, **_kwargs: True,
         )
     assert started == []
+
+
+def test_failed_local_install_never_persists_or_discloses_staged_access(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(RuntimeError, match="migration failed"):
+        bootstrap.install_local_runtime(
+            tmp_path,
+            host="127.0.0.1",
+            port=8420,
+            litellm_base_url="https://models.example/v1",
+            litellm_api_key="proxy-secret",
+            install_dependencies=False,
+            start=False,
+            run_command=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("migration failed")
+            ),
+        )
+
+    values = _read_env(tmp_path / ".env")
+    assert "OPENBILICLAW_WEB_PASSWORD_HASH" not in values
+    assert "OPENBILICLAW_EXTENSION_ACCESS_KEYS" not in values
+    assert "first_run_access" not in capsys.readouterr().out
 
 
 def test_local_install_fails_if_protected_readiness_fails_and_retains_pid_state(
@@ -403,6 +573,183 @@ def test_docker_install_requires_migration_api_and_worker_health(
             "worker",
         ],
     ]
+
+
+def test_failed_docker_install_never_persists_or_discloses_staged_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+
+    def fail(*_args: object, **_kwargs: object) -> object:
+        raise bootstrap.subprocess.CalledProcessError(1, "docker compose up")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fail)
+
+    with pytest.raises(bootstrap.subprocess.CalledProcessError):
+        bootstrap._install_docker_runtime(tmp_path, start=True)
+
+    values = _read_env(tmp_path / ".env")
+    assert "OPENBILICLAW_WEB_PASSWORD_HASH" not in values
+    assert "OPENBILICLAW_EXTENSION_ACCESS_KEYS" not in values
+    assert "first_run_access" not in capsys.readouterr().out
+
+
+def test_concurrent_docker_installs_serialize_stage_start_commit_and_disclosure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+    first_started = Event()
+    release_first = Event()
+    second_staged = Event()
+    stage_lock = Lock()
+    stage_count = 0
+    original_stage = bootstrap._stage_runtime_access
+
+    def stage(values, *, rotate_access=False):  # type: ignore[no-untyped-def]
+        nonlocal stage_count
+        with stage_lock:
+            stage_count += 1
+            if stage_count == 2:
+                second_staged.set()
+        return original_stage(values, rotate_access=rotate_access)
+
+    def run_command(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        if not first_started.is_set():
+            first_started.set()
+            assert release_first.wait(5)
+        return bootstrap.subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(bootstrap, "_stage_runtime_access", stage)
+    monkeypatch.setattr(bootstrap.subprocess, "run", run_command)
+    monkeypatch.setattr(bootstrap, "_emit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_emit_first_run_access", lambda *_args: None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(bootstrap._install_docker_runtime, tmp_path, start=False)
+        assert first_started.wait(5)
+        second = executor.submit(bootstrap._install_docker_runtime, tmp_path, start=False)
+        assert second_staged.wait(0.25) is False
+        release_first.set()
+        assert first.result(timeout=5).status == "prepared"
+        assert second.result(timeout=5).status == "prepared"
+
+    assert stage_count == 2
+
+
+def test_windows_private_acl_uses_current_sid_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    modes: list[str] = []
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "powershell.exe")
+
+    def successful(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(command)
+        modes.append(kwargs["env"]["OPENBILICLAW_PRIVATE_ACL_MODE"])
+        assert kwargs["check"] is False
+        assert kwargs["capture_output"] is True
+        assert kwargs["env"]["OPENBILICLAW_PRIVATE_ACL_MODE"] in {"apply", "verify"}
+        assert kwargs["env"]["OPENBILICLAW_PRIVATE_ACL_TARGET"] == str(tmp_path / ".env")
+        return bootstrap.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", successful)
+    bootstrap._apply_windows_private_acl(tmp_path / ".env")
+    bootstrap._verify_windows_private_acl(tmp_path / ".env")
+
+    assert calls[0] == calls[1]
+    assert modes == ["apply", "verify"]
+    script = next(argument for argument in calls[0] if "WindowsIdentity" in argument)
+    assert "SetAccessRuleProtection($true, $false)" in script
+
+    monkeypatch.setattr(
+        bootstrap.subprocess,
+        "run",
+        lambda *args, **kwargs: bootstrap.subprocess.CompletedProcess(
+            args[0], 19, stdout="", stderr="unsafe ACL"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="private Windows ACL"):
+        bootstrap._verify_windows_private_acl(tmp_path / ".env")
+
+
+def test_explicit_access_recovery_rotates_and_discloses_only_after_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def install(*, rotate_access: bool = False) -> None:
+        bootstrap.install_local_runtime(
+            tmp_path,
+            host="127.0.0.1",
+            port=8420,
+            litellm_base_url="https://models.example/v1",
+            litellm_api_key="proxy-secret",
+            install_dependencies=False,
+            start=False,
+            rotate_access=rotate_access,
+            run_command=lambda *_args, **_kwargs: None,
+        )
+
+    install()
+    first = _read_env(tmp_path / ".env")
+    first_output = capsys.readouterr().out
+    install(rotate_access=True)
+    second = _read_env(tmp_path / ".env")
+    second_output = capsys.readouterr().out
+
+    assert first["OPENBILICLAW_WEB_PASSWORD_HASH"] != second["OPENBILICLAW_WEB_PASSWORD_HASH"]
+    assert (
+        first["OPENBILICLAW_EXTENSION_ACCESS_KEYS"] != second["OPENBILICLAW_EXTENSION_ACCESS_KEYS"]
+    )
+    assert first_output.count('"message": "first_run_access"') == 1
+    assert second_output.count('"message": "first_run_access"') == 1
+
+
+def test_local_completion_url_honors_custom_bind_host(tmp_path: Path) -> None:
+    result = bootstrap.install_local_runtime(
+        tmp_path,
+        host="192.0.2.10",
+        port=9450,
+        litellm_base_url="https://models.example/v1",
+        litellm_api_key="proxy-secret",
+        install_dependencies=False,
+        start=False,
+        run_command=lambda *_args, **_kwargs: None,
+    )
+
+    assert result.health_url == "http://192.0.2.10:9450/api/v1/system/readiness"
+
+
+def test_docker_install_honors_public_host_and_port_in_compose_and_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+    monkeypatch.setenv("LITELLM_PORT", "4500")
+    probes: list[tuple[str, int]] = []
+
+    class Result:
+        returncode = 0
+        stdout = (
+            '[{"Service":"migrate","State":"exited","ExitCode":0},'
+            '{"Service":"api","State":"running","Health":"healthy"},'
+            '{"Service":"worker","State":"running","Health":"healthy"}]'
+        )
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", lambda *_args, **_kwargs: Result())
+    monkeypatch.setattr(
+        bootstrap,
+        "_probe_runtime",
+        lambda host, port, *_args, **_kwargs: probes.append((host, port)) or True,
+    )
+
+    result = bootstrap._install_docker_runtime(tmp_path, start=True, host="127.0.0.1", port=9450)
+
+    values = _read_env(tmp_path / ".env")
+    assert values["OPENBILICLAW_API_HOST"] == "127.0.0.1"
+    assert values["OPENBILICLAW_API_PORT"] == "9450"
+    assert values["OPENBILICLAW_LITELLM_ADMIN_URL"] == "http://127.0.0.1:4500/ui"
+    assert result.health_url == "http://127.0.0.1:9450/api/v1/system/readiness"
+    assert probes == [("127.0.0.1", 9450)]
 
 
 def test_docker_install_rechecks_worker_after_protected_readiness(

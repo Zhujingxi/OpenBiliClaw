@@ -333,6 +333,18 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             assert marker in source, f"missing Task 21b marker in {name}: {marker}"
 
 
+def test_authority_docs_describe_the_onboarding_periodic_gate() -> None:
+    for name in ("docs/architecture.md", "docs/spec.md"):
+        source = _read(name)
+        assert "onboarding" in source
+        assert "source_sync" in source
+        assert "profile_projection" in source
+        assert "feed_replenishment" in source
+        assert "cleanup" in source
+        assert "Explicit onboarding/API scheduling" in source
+        assert "do not create durable buckets" in source
+
+
 def test_deployment_docs_name_compose_browser_auth_forwarding_without_plaintext_keys() -> None:
     for name in (
         "docs/docker-deployment.md",

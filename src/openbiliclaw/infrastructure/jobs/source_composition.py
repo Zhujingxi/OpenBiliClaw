@@ -148,17 +148,20 @@ def _resolved_source_settings(
 
 class _LazyBilibiliClient:
     def __init__(self, credentials: _CredentialProvider) -> None:
-        self._client: _LazyClient[BilibiliAPIClient] = _LazyClient(
+        self._public_client: _LazyClient[BilibiliAPIClient] = _LazyClient(BilibiliAPIClient)
+        self._authenticated_client: _LazyClient[BilibiliAPIClient] = _LazyClient(
             lambda: BilibiliAPIClient(cookie=credentials.cookie("bilibili"))
         )
 
     async def search(
         self, keyword: str, *, page: int = 1, page_size: int = 20, order: str = "totalrank"
     ) -> list[dict[str, Any]]:
-        return await self._client.get().search(keyword, page=page, page_size=page_size, order=order)
+        return await self._public_client.get().search(
+            keyword, page=page, page_size=page_size, order=order
+        )
 
     async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
-        return await self._client.get().get_user_history(max_items=max_items)
+        return await self._authenticated_client.get().get_user_history(max_items=max_items)
 
     async def get_all_favorites(
         self,
@@ -167,20 +170,20 @@ class _LazyBilibiliClient:
         max_items_per_folder: int = 50,
         max_total_items: int | None = None,
     ) -> list[Any]:
-        return await self._client.get().get_all_favorites(
+        return await self._authenticated_client.get().get_all_favorites(
             max_folders=max_folders,
             max_items_per_folder=max_items_per_folder,
             max_total_items=max_total_items,
         )
 
     async def get_following(self, *, page: int = 1, page_size: int = 50) -> list[Any]:
-        return await self._client.get().get_following(page=page, page_size=page_size)
+        return await self._authenticated_client.get().get_following(page=page, page_size=page_size)
 
     async def get_related_videos(self, bvid: str) -> list[dict[str, Any]]:
-        return await self._client.get().get_related_videos(bvid)
+        return await self._public_client.get().get_related_videos(bvid)
 
     async def get_ranking(self, rid: int = 0) -> list[dict[str, Any]]:
-        return await self._client.get().get_ranking(rid)
+        return await self._public_client.get().get_ranking(rid)
 
     @classmethod
     def search_cooldown_remaining(cls) -> float:

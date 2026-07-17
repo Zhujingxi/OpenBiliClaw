@@ -10,7 +10,8 @@ Provision the Web password hash and session signing secret through the deploymen
 2. Verify `GET /api/v1/auth/status` exposes only readiness booleans.
 3. Sign in. Confirm the session cookie is HttpOnly and no token appears in JSON or browser storage.
 4. Send an unsafe request without `X-OBC-Auth`; expect a typed 403.
-5. Sign out and confirm the cookie is cleared.
+5. Before signing in, confirm configured onboarding returns 401; after signing in, confirm setup can read/start onboarding.
+6. Sign out and confirm the cookie is cleared.
 
 ## 2. Setup
 
@@ -32,7 +33,7 @@ Open `http://127.0.0.1:8420/web/` and verify:
 - profile edit includes the expected revision; stale revision returns 409 and does not overwrite newer data;
 - chat uses `POST /api/v1/chat/stream`, renders deltas once, handles failed terminal events, and persists history from `GET /api/v1/chat/{conversation_id}`;
 - favorites and watch later use `/api/v1/library/{collection}` and remain local;
-- all mutable nested settings round-trip; deployment facts remain read-only;
+- all safe mutable nested settings round-trip; `web_password_enabled` and deployment facts remain read-only, and an attempted browser PATCH disabling password login returns typed 422 without invalidating the current login;
 - AI settings show alias health and the safe LiteLLM Admin link, with no provider editor.
 
 For library partial failure, make collection add succeed and interaction fail. The UI must show the item saved and retry only the interaction signal.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import HttpUrl
@@ -50,6 +50,10 @@ if TYPE_CHECKING:
 _SOURCE_ACCOUNT_NAMESPACE = UUID("644b8dba-8301-4e9f-a2d0-b1a54cb854be")
 
 
+class _RowCountResult(Protocol):
+    rowcount: int
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -86,7 +90,12 @@ class SettingsRepository(Protocol):
 
     def get_all(self) -> dict[str, SettingValue]: ...
 
-    def replace(self, values: Mapping[str, SettingValue]) -> None: ...
+    def patch(
+        self,
+        *,
+        defaults: Mapping[str, SettingValue],
+        changes: Mapping[str, SettingValue],
+    ) -> None: ...
 
 
 class AuthStateRepository(Protocol):
@@ -121,6 +130,8 @@ class ActivityRepository(Protocol):
     def add(self, event: ActivityEvent) -> None: ...
 
     def add_if_absent(self, event: ActivityEvent) -> bool: ...
+
+    def get_activity(self, event_id: UUID) -> ActivityEvent | None: ...
 
     def list_all(self) -> tuple[ActivityEvent, ...]: ...
 
@@ -168,6 +179,8 @@ class FeedRepository(Protocol):
 
     def unseen_count(self) -> int: ...
 
+    def unseen_diversity_keys(self) -> tuple[tuple[str, tuple[str, ...]], ...]: ...
+
     def next_position(self) -> int: ...
 
     def list_entries(self, *, limit: int, offset: int) -> tuple[FeedItem, ...]: ...
@@ -186,7 +199,7 @@ class CollectionRepository(Protocol):
 
     def list_predefined(self) -> tuple[CollectionRecord, ...]: ...
 
-    def add(self, item: CollectionItem) -> None: ...
+    def add(self, item: CollectionItem) -> CollectionItem: ...
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
 
@@ -200,6 +213,10 @@ class ChatRepository(Protocol):
 
     def list_by_conversation(
         self, conversation_id: UUID, *, limit: int, offset: int
+    ) -> tuple[ChatTurn, ...]: ...
+
+    def list_recent_by_conversation(
+        self, conversation_id: UUID, *, limit: int
     ) -> tuple[ChatTurn, ...]: ...
 
 
@@ -223,7 +240,13 @@ class AIRunRepository(Protocol):
         usage: dict[str, int],
     ) -> None: ...
 
-    def fail(self, run_id: UUID, *, error_kind: str) -> None: ...
+    def fail(
+        self,
+        run_id: UUID,
+        *,
+        error_kind: str,
+        usage: dict[str, int] | None = None,
+    ) -> None: ...
 
 
 class SQLAlchemySettingsRepository:
@@ -238,23 +261,33 @@ class SQLAlchemySettingsRepository:
         rows = self._session.scalars(select(SettingModel)).all()
         return {row.key: row.value for row in rows if not row.key.startswith(self._SOURCE_PREFIX)}
 
-    def replace(self, values: Mapping[str, SettingValue]) -> None:
+    def patch(
+        self,
+        *,
+        defaults: Mapping[str, SettingValue],
+        changes: Mapping[str, SettingValue],
+    ) -> None:
+        """Seed absent defaults, then upsert only explicitly changed top-level rows."""
+
         now = _utc_now()
-        stored = {
-            row.key: row
-            for row in self._session.scalars(select(SettingModel)).all()
-            if not row.key.startswith(self._SOURCE_PREFIX)
-        }
-        stale_keys = set(stored) - set(values)
-        if stale_keys:
-            self._session.execute(delete(SettingModel).where(SettingModel.key.in_(stale_keys)))
-        for key, value in values.items():
-            row = stored.get(key)
-            if row is None:
-                self._session.add(SettingModel(key=key, value=value, updated_at=now))
-            else:
-                row.value = value
-                row.updated_at = now
+        for key, value in defaults.items():
+            self._session.execute(
+                sqlite_insert(SettingModel)
+                .values(key=key, value=value, updated_at=now)
+                .on_conflict_do_nothing(index_elements=[SettingModel.key])
+            )
+        for key, value in changes.items():
+            statement = sqlite_insert(SettingModel).values(
+                key=key,
+                value=value,
+                updated_at=now,
+            )
+            self._session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[SettingModel.key],
+                    set_={"value": statement.excluded.value, "updated_at": now},
+                )
+            )
 
     def get_source_settings(self, source_id: str) -> Mapping[str, object] | None:
         row = self._session.get(SettingModel, f"{self._SOURCE_PREFIX}{source_id}")
@@ -445,10 +478,29 @@ class SQLAlchemyActivityRepository:
         )
 
     def add_if_absent(self, event: ActivityEvent) -> bool:
-        if self._session.get(ActivityEventModel, str(event.id)) is not None:
-            return False
-        self.add(event)
-        return True
+        statement = (
+            sqlite_insert(ActivityEventModel)
+            .values(
+                id=str(event.id),
+                source_id=event.source_id,
+                account_id=str(event.account_id) if event.account_id else None,
+                kind=event.kind.value,
+                occurred_at=event.occurred_at,
+                content_external_id=event.content_external_id,
+                url=str(event.url) if event.url else None,
+                title=event.title,
+                text=event.text,
+                duration_seconds=event.duration_seconds,
+                event_metadata=_json_metadata(event),
+            )
+            .on_conflict_do_nothing(index_elements=[ActivityEventModel.id])
+        )
+        result = cast("_RowCountResult", self._session.execute(statement))
+        return result.rowcount == 1
+
+    def get_activity(self, event_id: UUID) -> ActivityEvent | None:
+        row = self._session.get(ActivityEventModel, str(event_id))
+        return None if row is None else _activity_from_row(row)
 
     def list_all(self) -> tuple[ActivityEvent, ...]:
         rows = self._session.scalars(
@@ -704,6 +756,25 @@ class SQLAlchemyFeedRepository:
             or 0
         )
 
+    def unseen_diversity_keys(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        """Return source/topic keys for entries that still count toward the watermark."""
+
+        seen = select(InteractionModel.content_id).where(
+            InteractionModel.kind.in_(("impression", "open", "dismiss"))
+        )
+        rows = self._session.execute(
+            select(ContentItemModel.source_id, CandidateAssessmentModel.topics)
+            .select_from(FeedEntryModel)
+            .join(ContentItemModel, ContentItemModel.id == FeedEntryModel.content_id)
+            .outerjoin(
+                CandidateAssessmentModel,
+                CandidateAssessmentModel.id == FeedEntryModel.assessment_id,
+            )
+            .where(FeedEntryModel.content_id.not_in(seen))
+            .order_by(FeedEntryModel.position, FeedEntryModel.id)
+        ).all()
+        return tuple((source_id, tuple(topics or ())) for source_id, topics in rows)
+
     def next_position(self) -> int:
         latest = self._session.scalar(select(func.max(FeedEntryModel.position)))
         return 0 if latest is None else int(latest) + 1
@@ -825,20 +896,39 @@ class SQLAlchemyCollectionRepository:
             for row in rows
         )
 
-    def add(self, item: CollectionItem) -> None:
+    def add(self, item: CollectionItem) -> CollectionItem:
         collection = self._session.scalar(
             select(CollectionModel).where(CollectionModel.slug == item.collection.value)
         )
         if collection is None:
             raise LookupError(f"predefined collection {item.collection.value!r} is missing")
-        self._session.add(
-            CollectionItemModel(
+        self._session.execute(
+            sqlite_insert(CollectionItemModel)
+            .values(
                 id=str(item.id),
                 collection_id=collection.id,
                 content_id=str(item.content_id),
                 added_at=item.added_at,
                 note=item.note,
             )
+            .on_conflict_do_nothing(index_elements=("collection_id", "content_id"))
+        )
+        stored = self._session.scalar(
+            select(CollectionItemModel).where(
+                CollectionItemModel.collection_id == collection.id,
+                CollectionItemModel.content_id == str(item.content_id),
+            )
+        )
+        if stored is None:
+            raise RuntimeError("collection membership was not persisted")
+        added_at = _aware(stored.added_at)
+        assert added_at is not None
+        return CollectionItem(
+            id=UUID(stored.id),
+            collection=item.collection,
+            content_id=UUID(stored.content_id),
+            added_at=added_at,
+            note=stored.note,
         )
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool:
@@ -912,6 +1002,33 @@ class SQLAlchemyChatRepository:
         ).all()
         turns: list[ChatTurn] = []
         for row in rows:
+            created_at = _aware(row.created_at)
+            assert created_at is not None
+            turns.append(
+                ChatTurn(
+                    id=UUID(row.id),
+                    conversation_id=UUID(row.conversation_id),
+                    role=ChatRole(row.role),
+                    content=row.content,
+                    created_at=created_at,
+                    ai_run_id=UUID(row.ai_run_id) if row.ai_run_id else None,
+                )
+            )
+        return tuple(turns)
+
+    def list_recent_by_conversation(
+        self, conversation_id: UUID, *, limit: int
+    ) -> tuple[ChatTurn, ...]:
+        """Return the newest bounded context in chronological order."""
+
+        rows = self._session.scalars(
+            select(ChatTurnModel)
+            .where(ChatTurnModel.conversation_id == str(conversation_id))
+            .order_by(ChatTurnModel.created_at.desc(), ChatTurnModel.id.desc())
+            .limit(limit)
+        ).all()
+        turns: list[ChatTurn] = []
+        for row in reversed(rows):
             created_at = _aware(row.created_at)
             assert created_at is not None
             turns.append(
@@ -1008,22 +1125,49 @@ class SQLAlchemyJobRunRepository:
         return tuple(_job_snapshot(row) for row in rows)
 
     def successful(self) -> tuple[JobRunSnapshot, ...]:
-        """Return every terminal success for idempotent application continuation replay."""
+        """Return terminal successes whose application continuation is not acknowledged."""
 
         rows = self._session.scalars(
             select(JobRunModel)
-            .where(JobRunModel.status == JobRunStatus.SUCCEEDED.value)
+            .where(
+                JobRunModel.status == JobRunStatus.SUCCEEDED.value,
+                JobRunModel.continuation_completed_at.is_(None),
+            )
             .order_by(JobRunModel.created_at, JobRunModel.id)
         ).all()
         return tuple(_job_snapshot(row) for row in rows)
 
-    def claim(self, run_id: UUID) -> bool:
+    def acknowledge_success_continuation(self, run_id: UUID) -> bool:
+        """Durably stop replay after every registered success callback has completed."""
+
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status == JobRunStatus.SUCCEEDED.value,
+                JobRunModel.continuation_completed_at.is_(None),
+            )
+            .values(continuation_completed_at=_utc_now(), updated_at=_utc_now())
+        )
+        return bool(getattr(result, "rowcount", 0))
+
+    def claim(
+        self,
+        run_id: UUID,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+        max_attempts: int,
+    ) -> bool:
         now = _utc_now()
         result = self._session.execute(
             update(JobRunModel)
             .where(
                 JobRunModel.id == str(run_id),
                 JobRunModel.status == JobRunStatus.PENDING.value,
+                JobRunModel.attempts < max_attempts,
+                (JobRunModel.retry_not_before.is_(None) | (JobRunModel.retry_not_before <= now)),
             )
             .values(
                 status=JobRunStatus.RUNNING.value,
@@ -1031,6 +1175,10 @@ class SQLAlchemyJobRunRepository:
                 error=None,
                 started_at=now,
                 updated_at=now,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                lease_expires_at=lease_expires_at,
+                retry_not_before=None,
             )
         )
         return bool(getattr(result, "rowcount", 0))
@@ -1042,6 +1190,10 @@ class SQLAlchemyJobRunRepository:
                 JobRunModel.id == str(run_id),
                 JobRunModel.status == JobRunStatus.PENDING.value,
                 JobRunModel.dispatched_at.is_(None),
+                (
+                    JobRunModel.retry_not_before.is_(None)
+                    | (JobRunModel.retry_not_before <= _utc_now())
+                ),
             )
             .values(dispatched_at=_utc_now(), updated_at=_utc_now())
         )
@@ -1052,6 +1204,10 @@ class SQLAlchemyJobRunRepository:
             .where(
                 JobRunModel.status == JobRunStatus.PENDING.value,
                 JobRunModel.dispatched_at.is_(None),
+                (
+                    JobRunModel.retry_not_before.is_(None)
+                    | (JobRunModel.retry_not_before <= _utc_now())
+                ),
             )
             .order_by(JobRunModel.created_at, JobRunModel.id)
         ).all()
@@ -1060,33 +1216,59 @@ class SQLAlchemyJobRunRepository:
     def pending(self) -> tuple[UUID, ...]:
         rows = self._session.scalars(
             select(JobRunModel)
-            .where(JobRunModel.status == JobRunStatus.PENDING.value)
+            .where(
+                JobRunModel.status == JobRunStatus.PENDING.value,
+                (
+                    JobRunModel.retry_not_before.is_(None)
+                    | (JobRunModel.retry_not_before <= _utc_now())
+                ),
+            )
             .order_by(JobRunModel.created_at, JobRunModel.id)
         ).all()
         return tuple(UUID(row.id) for row in rows)
 
-    def guard_running(self, run_id: UUID) -> bool:
+    def guard_running(
+        self,
+        run_id: UUID,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+    ) -> bool:
         result = self._session.execute(
             update(JobRunModel)
             .where(
                 JobRunModel.id == str(run_id),
                 JobRunModel.status == JobRunStatus.RUNNING.value,
+                JobRunModel.worker_id == worker_id,
+                JobRunModel.claim_token == claim_token,
             )
-            .values(updated_at=JobRunModel.updated_at)
+            .values(updated_at=_utc_now(), lease_expires_at=lease_expires_at)
         )
         return bool(getattr(result, "rowcount", 0))
 
-    def checkpoint(self, run_id: UUID, progress: float) -> bool:
+    def checkpoint(
+        self,
+        run_id: UUID,
+        progress: float,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+    ) -> bool:
         resolved_progress = max(0.0, min(1.0, progress))
         result = self._session.execute(
             update(JobRunModel)
             .where(
                 JobRunModel.id == str(run_id),
                 JobRunModel.status == JobRunStatus.RUNNING.value,
+                JobRunModel.worker_id == worker_id,
+                JobRunModel.claim_token == claim_token,
             )
             .values(
                 progress=func.max(JobRunModel.progress, resolved_progress),
                 updated_at=_utc_now(),
+                lease_expires_at=lease_expires_at,
             )
         )
         if getattr(result, "rowcount", 0):
@@ -1095,6 +1277,26 @@ class SQLAlchemyJobRunRepository:
             raise LookupError(f"job run does not exist: {run_id}")
         return False
 
+    def heartbeat(
+        self,
+        run_id: UUID,
+        *,
+        worker_id: str,
+        claim_token: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status == JobRunStatus.RUNNING.value,
+                JobRunModel.worker_id == worker_id,
+                JobRunModel.claim_token == claim_token,
+            )
+            .values(updated_at=_utc_now(), lease_expires_at=lease_expires_at)
+        )
+        return bool(getattr(result, "rowcount", 0))
+
     def update(
         self,
         run_id: UUID,
@@ -1102,7 +1304,10 @@ class SQLAlchemyJobRunRepository:
         status: JobRunStatus,
         progress: float,
         error: str | None = None,
-    ) -> None:
+        worker_id: str,
+        claim_token: str,
+        retry_not_before: datetime | None = None,
+    ) -> bool:
         now = _utc_now()
         values: dict[str, object] = {
             "status": status.value,
@@ -1114,6 +1319,10 @@ class SQLAlchemyJobRunRepository:
                 if status in {JobRunStatus.SUCCEEDED, JobRunStatus.FAILED, JobRunStatus.CANCELLED}
                 else None
             ),
+            "worker_id": None,
+            "claim_token": None,
+            "lease_expires_at": None,
+            "retry_not_before": retry_not_before,
         }
         if status is JobRunStatus.PENDING:
             values["dispatched_at"] = None
@@ -1121,14 +1330,17 @@ class SQLAlchemyJobRunRepository:
             update(JobRunModel)
             .where(
                 JobRunModel.id == str(run_id),
-                JobRunModel.status != JobRunStatus.CANCELLED.value,
+                JobRunModel.status == JobRunStatus.RUNNING.value,
+                JobRunModel.worker_id == worker_id,
+                JobRunModel.claim_token == claim_token,
             )
             .values(**values)
         )
         if getattr(result, "rowcount", 0):
-            return
+            return True
         if self._fresh_row(run_id) is None:
             raise LookupError(f"job run does not exist: {run_id}")
+        return False
 
     def cancel(self, run_id: UUID) -> bool:
         now = _utc_now()
@@ -1143,6 +1355,10 @@ class SQLAlchemyJobRunRepository:
                 progress=JobRunModel.progress,
                 updated_at=now,
                 finished_at=now,
+                worker_id=None,
+                claim_token=None,
+                lease_expires_at=None,
+                retry_not_before=None,
             )
         )
         if getattr(result, "rowcount", 0):
@@ -1165,11 +1381,16 @@ class SQLAlchemyJobRunRepository:
             .values(
                 status=JobRunStatus.PENDING.value,
                 progress=0.0,
+                attempts=0,
                 error=None,
                 updated_at=now,
                 started_at=None,
                 finished_at=None,
                 dispatched_at=None,
+                worker_id=None,
+                claim_token=None,
+                lease_expires_at=None,
+                retry_not_before=None,
             )
         )
         if getattr(result, "rowcount", 0):
@@ -1178,32 +1399,68 @@ class SQLAlchemyJobRunRepository:
             raise LookupError(f"job run does not exist: {run_id}")
         return False
 
-    def recover_running(self) -> tuple[UUID, ...]:
-        now = _utc_now()
+    def recover_expired(
+        self, *, now: datetime, max_attempts: Mapping[str, int]
+    ) -> tuple[UUID, ...]:
+        max_attempts_for_job = case(
+            *(
+                (JobRunModel.job_name == job_name, attempt_limit)
+                for job_name, attempt_limit in max_attempts.items()
+            ),
+            else_=1,
+        )
+        expired = (
+            JobRunModel.status == JobRunStatus.RUNNING.value,
+            (JobRunModel.lease_expires_at.is_(None) | (JobRunModel.lease_expires_at <= now)),
+        )
+        self._session.execute(
+            update(JobRunModel)
+            .where(*expired, JobRunModel.attempts >= max_attempts_for_job)
+            .values(
+                status=JobRunStatus.FAILED.value,
+                error="WorkerInterrupted",
+                updated_at=now,
+                finished_at=now,
+                worker_id=None,
+                claim_token=None,
+                lease_expires_at=None,
+                retry_not_before=None,
+            )
+        )
         rows = self._session.scalars(
             update(JobRunModel)
-            .where(JobRunModel.status == JobRunStatus.RUNNING.value)
+            .where(
+                *expired,
+                JobRunModel.attempts < max_attempts_for_job,
+            )
             .values(
                 status=JobRunStatus.PENDING.value,
                 error="WorkerInterrupted",
                 updated_at=now,
                 started_at=None,
                 dispatched_at=None,
+                worker_id=None,
+                claim_token=None,
+                lease_expires_at=None,
+                retry_not_before=None,
             )
             .returning(JobRunModel.id)
         ).all()
         return tuple(UUID(row_id) for row_id in sorted(rows))
 
     def cleanup_finished(self, *, older_than: datetime) -> int:
+        deletable_status = JobRunModel.status.in_(
+            (
+                JobRunStatus.FAILED.value,
+                JobRunStatus.CANCELLED.value,
+            )
+        ) | (
+            (JobRunModel.status == JobRunStatus.SUCCEEDED.value)
+            & JobRunModel.continuation_completed_at.is_not(None)
+        )
         result = self._session.execute(
             delete(JobRunModel).where(
-                JobRunModel.status.in_(
-                    (
-                        JobRunStatus.SUCCEEDED.value,
-                        JobRunStatus.FAILED.value,
-                        JobRunStatus.CANCELLED.value,
-                    )
-                ),
+                deletable_status,
                 JobRunModel.finished_at < older_than,
             )
         )
@@ -1274,12 +1531,18 @@ class SQLAlchemyAIRunRepository:
         row.error = None
         row.finished_at = _utc_now()
 
-    def fail(self, run_id: UUID, *, error_kind: str) -> None:
+    def fail(
+        self,
+        run_id: UUID,
+        *,
+        error_kind: str,
+        usage: dict[str, int] | None = None,
+    ) -> None:
         """Finish a run with a classification, never a raw exception message."""
 
         row = self._require_running(run_id)
         row.status = "failed"
-        row.usage = None
+        row.usage = usage
         row.error = (
             error_kind if error_kind.isidentifier() and len(error_kind) <= 100 else "AIError"
         )

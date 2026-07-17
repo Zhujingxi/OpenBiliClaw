@@ -605,11 +605,15 @@ def test_chat_and_job_progress_are_standard_sse(client: TestClient) -> None:
     assert "event: done\n" in progress.text
 
 
-def test_onboarding_public_only_until_completed() -> None:
+def test_onboarding_requires_configured_access_even_before_completion() -> None:
     container = _container()
     client = TestClient(create_app(container=container))
-    assert client.get("/api/v1/onboarding").status_code == 200
-    response = client.post("/api/v1/onboarding/start", json={"source_ids": ["bilibili"]})
+    assert client.get("/api/v1/onboarding").status_code == 401
+    response = client.post(
+        "/api/v1/onboarding/start",
+        headers=_auth(),
+        json={"source_ids": ["bilibili"]},
+    )
     assert response.status_code == 202
     container.settings.value = container.settings.value.model_copy(
         update={"onboarding_complete": True}
@@ -622,7 +626,7 @@ def test_onboarding_rejects_an_empty_source_selection(payload: dict[str, object]
     container = _container()
     client = TestClient(create_app(container=container))
 
-    response = client.post("/api/v1/onboarding/start", json=payload)
+    response = client.post("/api/v1/onboarding/start", headers=_auth(), json=payload)
 
     assert response.status_code == 422
     assert response.json() == {

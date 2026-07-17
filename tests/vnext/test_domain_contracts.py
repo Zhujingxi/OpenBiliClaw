@@ -1,6 +1,6 @@
 """Characterization tests for the frozen vNext domain boundary."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, get_type_hints
 from uuid import UUID
 
@@ -415,12 +415,67 @@ def test_apply_profile_delta_is_deterministic() -> None:
         )
     )
 
-    first = apply_profile_delta(snapshot, delta)
-    second = apply_profile_delta(snapshot, delta)
+    revision_time = NOW + timedelta(seconds=1)
+    first = apply_profile_delta(snapshot, delta, created_at=revision_time)
+    second = apply_profile_delta(snapshot, delta, created_at=revision_time)
 
     assert first == second
     assert first.id == PROFILE_ID
-    assert first.created_at == NOW
+    assert first.created_at == revision_time
+    assert first.created_at > snapshot.created_at
+
+
+@pytest.mark.parametrize("contract_type", [ActivityEvent, ContentItem])
+def test_public_urls_strip_sensitive_query_credentials(contract_type: type[BaseModel]) -> None:
+    url = (
+        "https://www.xiaohongshu.com/explore/note?keep=1&xsec_token=secret"
+        "&access_token=secret&Cookie=secret&session_id=secret#section"
+    )
+    if contract_type is ActivityEvent:
+        contract = ActivityEvent(source_id="xiaohongshu", kind="view", url=url)
+    else:
+        contract = ContentItem(
+            source_id="xiaohongshu",
+            external_id="note",
+            url=url,
+            title="Note",
+        )
+
+    serialized_url = str(contract.url)
+    assert "keep=1" in serialized_url
+    assert serialized_url.endswith("#section")
+    assert "secret" not in serialized_url
+    assert "xsec_token" not in serialized_url
+    assert "access_token" not in serialized_url
+    assert "Cookie" not in serialized_url
+    assert "session_id" not in serialized_url
+
+
+@pytest.mark.parametrize("contract_type", [ActivityEvent, ContentItem])
+def test_public_urls_strip_userinfo_signatures_and_secret_fragments(
+    contract_type: type[BaseModel],
+) -> None:
+    url = (
+        " \thttps://alice:password@example.com/item?keep=1"
+        "&X-Amz-Signature=query-secret"
+        "#section=comments&access_token=fragment-secret"
+    )
+    if contract_type is ActivityEvent:
+        contract = ActivityEvent(source_id="youtube", kind="view", url=url)
+    else:
+        contract = ContentItem(
+            source_id="youtube",
+            external_id="item",
+            url=url,
+            title="Item",
+        )
+
+    serialized_url = str(contract.url)
+    assert serialized_url == "https://example.com/item?keep=1#section=comments"
+    assert "alice" not in serialized_url
+    assert "password" not in serialized_url
+    assert "query-secret" not in serialized_url
+    assert "fragment-secret" not in serialized_url
 
 
 def test_candidate_assessment_scores_clamp_to_unit_interval() -> None:

@@ -10,6 +10,8 @@ extension device-key exchange, and global session revocation. Installer bearer, 
 HttpOnly cookie, and finite extension bearer sessions coexist. Unsafe cookie requests
 require a same-origin `Origin` plus `X-OBC-Auth`; the monotonic database-backed
 `auth_state` epoch revokes Web/extension sessions without changing the installer bearer.
+The lease-mutating `GET /api/v1/source-tasks/claim` is explicitly subject to that same
+cookie-CSRF proof; extension and installer bearer requests do not require a CSRF header.
 No password, hash, device key, cookie, installer/infrastructure/provider bearer, or signing
 secret appears in response models. The deliberate exception is
 `POST /api/v1/auth/extension-token`: after a valid device-key exchange it returns only the

@@ -21,7 +21,17 @@ export OBC_E2E_FAKE_PROVIDER_KEY="sk-$(secret_hex)"
 export OPENBILICLAW_SECRET_KEY="$(secret_hex)"
 export OPENBILICLAW_ACCESS_TOKEN="$(secret_hex)"
 export OPENBILICLAW_SESSION_SECRET="$(secret_hex)"
-export OPENBILICLAW_EXTENSION_ACCESS_KEYS='[]'
+export OBC_E2E_WEB_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(18))')"
+export OPENBILICLAW_WEB_PASSWORD_HASH="$(
+  OBC_E2E_WEB_PASSWORD="$OBC_E2E_WEB_PASSWORD" uv run --frozen python -c \
+    'import os; from openbiliclaw.auth_core import hash_password; print(hash_password(os.environ["OBC_E2E_WEB_PASSWORD"]))'
+)"
+read -r OBC_E2E_EXTENSION_KEY OBC_E2E_EXTENSION_RECORD < <(
+  uv run --frozen python -c \
+    'from openbiliclaw.auth_core import generate_extension_access_key; _, key, record = generate_extension_access_key(); print(key, record)'
+)
+export OBC_E2E_EXTENSION_KEY
+export OPENBILICLAW_EXTENSION_ACCESS_KEYS="[\"${OBC_E2E_EXTENSION_RECORD}\"]"
 export COMPOSE_PROGRESS=plain
 
 compose=(

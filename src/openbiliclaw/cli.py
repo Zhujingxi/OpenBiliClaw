@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 from copy import deepcopy
 from pathlib import Path
 from typing import Annotated
@@ -33,13 +34,87 @@ EVAL_DATASET_ROOT = Path("evals/datasets")
 EVAL_DATASET_NAMES = (
     "profile_delta",
     "keyword_generation",
-    "candidate_assessment",
+    "candidate_batch_assessment",
     "recommendation_explanation",
 )
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="OpenBiliClaw operations")
 db_app = typer.Typer(no_args_is_help=True, add_completion=False, help="vNext database operations")
 app.add_typer(db_app, name="db")
+
+
+def _read_private_environment(path: Path) -> list[str]:
+    """Read one owner-only regular file through a no-follow descriptor."""
+
+    path_metadata = path.lstat()
+    if not stat.S_ISREG(path_metadata.st_mode) or stat.S_ISLNK(path_metadata.st_mode):
+        raise typer.BadParameter("installer .env must be a private regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise typer.BadParameter("installer .env must be a private regular file") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        _validate_private_environment_metadata(path_metadata, metadata)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+            descriptor = -1
+            return stream.read().splitlines()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _validate_private_environment_metadata(
+    path_metadata: os.stat_result, metadata: os.stat_result
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise typer.BadParameter("installer .env must be a private regular file")
+    if (metadata.st_dev, metadata.st_ino) != (
+        path_metadata.st_dev,
+        path_metadata.st_ino,
+    ):
+        raise typer.BadParameter("installer .env changed during secure read")
+    if os.name == "nt":
+        return
+    if metadata.st_uid != os.getuid():
+        raise typer.BadParameter("installer .env must be owned by the current user")
+    if stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise typer.BadParameter("installer .env must have mode 0600")
+
+
+def _load_installer_environment(path: Path | None = None) -> tuple[str, ...]:
+    """Load the installer-owned local `.env` without replacing explicit values."""
+
+    env_path = path or Path.cwd() / ".env"
+    try:
+        lines = _read_private_environment(env_path)
+    except FileNotFoundError:
+        return ()
+    loaded: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, value = stripped.split("=", 1)
+        name = name.strip()
+        if name.startswith("OPENBILICLAW_") and name not in os.environ:
+            os.environ[name] = value
+            loaded.append(name)
+    return tuple(loaded)
+
+
+@app.callback()
+def load_runtime_environment(ctx: typer.Context) -> None:
+    """Load installer configuration for every supported operational command."""
+
+    loaded = _load_installer_environment()
+
+    def restore_process_environment() -> None:
+        for name in loaded:
+            os.environ.pop(name, None)
+
+    ctx.call_on_close(restore_process_environment)
 
 
 def run_server(*, host: str, port: int, reload: bool) -> None:

@@ -7,6 +7,7 @@ import {
   browserOperationsFromManifests,
   executeBrowserSourceTask,
   LOCAL_BROWSER_SOURCE_OPERATIONS,
+  sanitizeOutboundRecord,
 } from "../src/background/browser-source-executor.ts";
 import {
   createSourceTaskDispatcher,
@@ -29,6 +30,19 @@ test("local executors retain all supported browser translations without advertis
     reddit: ["bootstrap_import", "search", "trending", "community", "related"],
   });
   assert.equal(LOCAL_BROWSER_SOURCE_OPERATIONS.twitter, undefined);
+});
+
+test("browser results remove secret fields and secret URL query parameters recursively", () => {
+  assert.deepEqual(sanitizeOutboundRecord({
+    url: "https://www.xiaohongshu.com/explore/n1?xsec_token=secret&source=feed",
+    nested: {
+      external_url: "https://example.com/item?access_token=hidden&page=2",
+      xsec_token: "secret",
+    },
+  }), {
+    url: "https://www.xiaohongshu.com/explore/n1?source=feed",
+    nested: { external_url: "https://example.com/item?page=2" },
+  });
 });
 
 function manifest(
@@ -272,11 +286,11 @@ test("six browser-assisted sources execute typed translations and Twitter remain
   const cases: Array<[ClaimedSourceTask, number]> = [
     [claimedTask("bilibili", { operation: "search", query: "typed", limit: 2 }), 1],
     [claimedTask("xiaohongshu", { operation: "search", query: "typed", limit: 2 }), 1],
-    [claimedTask("douyin", { operation: "bootstrap_import", limit: 2 }), 4],
+    [claimedTask("douyin", { operation: "bootstrap_import", limit: 2 }), 2],
     [claimedTask("douyin", { operation: "search", query: "typed", limit: 2 }), 1],
     [claimedTask("douyin", { operation: "trending", limit: 2 }), 1],
     [claimedTask("douyin", { operation: "feed", limit: 2 }), 1],
-    [claimedTask("youtube", { operation: "bootstrap_import", limit: 2 }), 3],
+    [claimedTask("youtube", { operation: "bootstrap_import", limit: 2 }), 2],
     [claimedTask("zhihu", { operation: "search", query: "typed", limit: 2 }), 1],
     [claimedTask("reddit", { operation: "search", query: "typed", limit: 2 }), 1],
   ];
@@ -290,12 +304,9 @@ test("six browser-assisted sources execute typed translations and Twitter remain
     "XHS_TASK_EXECUTE",
     "DY_SCOPE_EXECUTE",
     "DY_SCOPE_EXECUTE",
-    "DY_SCOPE_EXECUTE",
-    "DY_SCOPE_EXECUTE",
     "DY_SEARCH_EXECUTE",
     "DY_HOT_EXECUTE",
     "DY_FEED_EXECUTE",
-    "YT_SCOPE_EXECUTE",
     "YT_SCOPE_EXECUTE",
     "YT_SCOPE_EXECUTE",
     "ZHIHU_TASK_EXECUTE",
@@ -308,6 +319,44 @@ test("six browser-assisted sources execute typed translations and Twitter remain
     ),
     /does not declare browser-assisted execution/,
   );
+});
+
+test("multi-scope browser bootstraps divide the overall limit fairly in stable scope order", async () => {
+  const observed: Array<{ action: string; scope: string; limit: number }> = [];
+  installChromeTaskHarness((message, emit) => {
+    const action = String(message.action);
+    const data = message.data as Record<string, unknown>;
+    const scope = String(data.scope);
+    const limit = Number(data.max_items_per_scope);
+    observed.push({ action, scope, limit });
+    emit(action === "DY_SCOPE_EXECUTE" ? "DY_SCOPE_RESULT" : "YT_SCOPE_RESULT", {
+      task_id: String(data.task_id),
+      status: "ok",
+      items: Array.from({ length: limit }, (_value, index) => ({
+        scope,
+        id: `${scope}-${index}`,
+      })),
+    });
+  });
+
+  const douyin = await executeBrowserSourceTask(
+    claimedTask("douyin", { operation: "bootstrap_import", limit: 7 }),
+  );
+  const youtube = await executeBrowserSourceTask(
+    claimedTask("youtube", { operation: "bootstrap_import", limit: 5 }),
+  );
+
+  assert.equal(douyin.items.length, 7);
+  assert.equal(youtube.items.length, 5);
+  assert.deepEqual(observed, [
+    { action: "DY_SCOPE_EXECUTE", scope: "dy_post", limit: 2 },
+    { action: "DY_SCOPE_EXECUTE", scope: "dy_collect", limit: 2 },
+    { action: "DY_SCOPE_EXECUTE", scope: "dy_like", limit: 2 },
+    { action: "DY_SCOPE_EXECUTE", scope: "dy_follow", limit: 1 },
+    { action: "YT_SCOPE_EXECUTE", scope: "yt_history", limit: 2 },
+    { action: "YT_SCOPE_EXECUTE", scope: "yt_subscriptions", limit: 2 },
+    { action: "YT_SCOPE_EXECUTE", scope: "yt_likes", limit: 1 },
+  ]);
 });
 
 test("Xiaohongshu bootstrap aggregates partial batches and follows next_url in the same tab", async () => {

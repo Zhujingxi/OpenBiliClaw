@@ -154,6 +154,30 @@
       .init-source-row small {
         color: var(--muted);
       }
+      .init-source-content {
+        flex: 1;
+        min-width: 0;
+      }
+      .source-credentials {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .source-credentials label {
+        display: grid;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .source-credentials input {
+        width: 100%;
+        margin: 0;
+        padding: 9px 10px;
+        color: var(--fg);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
       .alias-list {
         display: grid;
         gap: 9px;
@@ -504,6 +528,8 @@
         "obc-embedding",
       ];
       let aliasesReady = false;
+      let sourceManifests = [];
+      let configuredSources = new Set();
       const panels = [...document.querySelectorAll(".panel")],
         dots = [...document.querySelectorAll(".dot")];
       function step(index) {
@@ -558,11 +584,39 @@
       }
       async function loadSources() {
         try {
-          const sources = await request("v1_sources_list");
+          const [sources, statuses] = await Promise.all([
+            request("v1_sources_list"),
+            request("v1_sources_status"),
+          ]);
+          sourceManifests = sources;
+          configuredSources = new Set(
+            (statuses || [])
+              .filter((status) => status.configured && status.enabled)
+              .map((status) => status.source_id),
+          );
+          const defaultSource =
+            sources.find((source) =>
+              Boolean(Object.keys(source.credential_schema?.properties || {}).length),
+            )?.source_id || sources[0]?.source_id;
           document.getElementById("initSources").innerHTML = sources
             .map(
-              (source, index) =>
-                `<label class="init-source-row"><input type="checkbox" value="${escapeHtml(source.source_id)}" ${index === 0 ? "checked" : ""}><span><strong>${escapeHtml(source.display_name || sourceNames[source.source_id])}</strong><small>${escapeHtml((source.capabilities || []).join(" · "))}</small></span></label>`,
+              (source) => {
+                const properties = source.credential_schema?.properties || {};
+                const required = new Set(source.credential_schema?.required || []);
+                const configured = configuredSources.has(source.source_id);
+                const credentialFields = configured
+                  ? '<small class="ok">后端账号已连接</small>'
+                  : Object.entries(properties)
+                      .map(
+                        ([name, schema]) =>
+                          `<label>${escapeHtml(schema.title || name)}<input data-source-credential="${escapeHtml(source.source_id)}" name="${escapeHtml(name)}" type="${schema.writeOnly ? "password" : "text"}" autocomplete="off" ${required.has(name) ? "required" : ""}></label>`,
+                      )
+                      .join("");
+                const transportHint = Object.keys(properties).length
+                  ? credentialFields
+                  : '<small>此来源通过浏览器扩展执行，不需要后端凭据。</small>';
+                return `<div class="init-source-row"><input type="checkbox" value="${escapeHtml(source.source_id)}" ${source.source_id === defaultSource ? "checked" : ""}><div class="init-source-content"><strong>${escapeHtml(source.display_name || sourceNames[source.source_id])}</strong><small>${escapeHtml((source.capabilities || []).join(" · "))}</small><div class="source-credentials">${transportHint}</div></div></div>`;
+              },
             )
             .join("");
         } catch (error) {
@@ -609,6 +663,35 @@
         document.getElementById("initProgress").hidden = false;
         document.getElementById("startInit").disabled = true;
         try {
+          for (const source_id of source_ids) {
+            const manifest = sourceManifests.find(
+              (source) => source.source_id === source_id,
+            );
+            const properties = manifest?.credential_schema?.properties || {};
+            if (!Object.keys(properties).length || configuredSources.has(source_id))
+              continue;
+            const credentials = {};
+            for (const name of Object.keys(properties)) {
+              const input = document.querySelector(
+                `[data-source-credential="${source_id}"][name="${name}"]`,
+              );
+              const value = input?.value.trim() || "";
+              if (
+                (manifest.credential_schema?.required || []).includes(name) &&
+                !value
+              ) {
+                throw new Error(
+                  `${manifest.display_name || sourceNames[source_id]}：请填写 ${properties[name].title || name}`,
+                );
+              }
+              if (value) credentials[name] = value;
+            }
+            await request("v1_sources_configure_account", {
+              path: { source_id },
+              body: { account_key: "default", credentials },
+            });
+            configuredSources.add(source_id);
+          }
           const run = await request("v1_onboarding_start", {
             body: { source_ids },
           });
