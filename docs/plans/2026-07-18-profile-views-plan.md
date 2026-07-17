@@ -97,13 +97,13 @@ the production injection point is `complete_with_core_memory`.
 
 **Steps:**
 
-- [ ] Write one focused test asserting `_respond_with_tools` builds its prompt without
+- [x] Write one focused test asserting `_respond_with_tools` builds its prompt without
       consulting `_build_core_memory_block` (fake service without the attr → no getattr path).
-- [ ] Run `.venv/bin/python -m pytest tests/test_soul_dialogue.py -q`; confirm the relevant test
+- [x] Run `.venv/bin/python -m pytest tests/test_soul_dialogue.py -q`; confirm the relevant test
       FAILS against the phantom-probe code path (or record that removal is behavior-neutral).
-- [ ] Remove the getattr probe; add the docstring note in `llm/prompts.py:177`; rewrite the
+- [x] Remove the getattr probe; add the docstring note in `llm/prompts.py:177`; rewrite the
       CLAUDE.md exception paragraph to name `complete_with_core_memory`.
-- [ ] Rerun focused tests → PASS; run `.venv/bin/ruff check`, `.venv/bin/mypy src/`.
+- [x] Rerun focused tests → PASS; run `.venv/bin/ruff check`, `.venv/bin/mypy src/`.
 
 **Acceptance:**
 

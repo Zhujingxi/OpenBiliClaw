@@ -192,6 +192,13 @@ def build_socratic_dialogue_prompt(
     dialogue turns. Multi-user deployments would want to refactor this
     further, but for the current single-user model leaving the system
     prompt user-specific is the simpler and equally-effective approach.
+
+    ``core_memory_text`` is a documented injection seam: it lets tests feed
+    a core-memory block directly, but in production the dialogue caller
+    passes ``""`` and the real core-memory injection happens downstream in
+    ``LLMService.complete_with_core_memory`` (and its ``complete_with_tools``
+    sibling), not here. Do not resurrect any per-service core-memory-block
+    getattr probe at the dialogue call site.
     """
     friend_label = _friend_label_from_mix(source_platform_mix)
     system_prompt = "\n\n".join(

@@ -115,6 +115,12 @@ byte-identical across calls**. So:
 label / core memory in system. That's intentional for OpenBiliClaw's
 single-user model — per-user state is stable across that user's calls,
 so cache still fires. Multi-user deployments would refactor it.
+Note the actual core-memory injection point is
+`LLMService.complete_with_core_memory` in `llm/service.py` (and its
+`complete_with_tools` sibling), **not** the builder: the builder's
+`core_memory_text` parameter is a test-only seam and the dialogue caller
+always passes `""`. There is no `_build_core_memory_block` method on any
+service — do not add a getattr probe for one.
 
 **Enforcement**: `tests/test_llm_prompts.py::test_prompt_builder_system_messages_are_call_invariant`
 calls every covered builder with two distinct inputs and asserts the
