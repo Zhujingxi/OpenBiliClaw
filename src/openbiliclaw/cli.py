@@ -827,6 +827,15 @@ def _build_discovery_engine() -> Any:
     from openbiliclaw.config import load_config
 
     cfg = load_config()
+    # Topic-lifecycle serialization switch (spec Phase 4); default off.
+    from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
+
+    set_topic_lifecycle_serialization(
+        str(getattr(getattr(cfg, "soul", None), "topic_lifecycle_serialization", "off"))
+        .strip()
+        .lower()
+        == "on"
+    )
     registry = _build_registry()
     llm_service = LLMService(
         registry=registry,

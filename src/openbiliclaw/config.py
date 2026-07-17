@@ -780,6 +780,7 @@ POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS = 10
 POSTURE_GATE_ENFORCE_RECENT_WINDOW_DAYS = 7
 POSTURE_GATE_ENFORCE_MIN_RECENT_COUNT = 1
 _POSTURE_GATE_MODES = frozenset({"shadow", "enforce", "off"})
+_TOPIC_LIFECYCLE_SERIALIZATION_MODES = frozenset({"off", "on"})
 
 
 @dataclass
@@ -797,6 +798,11 @@ class SoulConfig:
     preference: SoulPreferenceConfig = field(default_factory=SoulPreferenceConfig)
     posture_gate_mode: str = "shadow"
     posture_gate_force_enforce: bool = False
+    # Topic-lifecycle serialization (spec §Phase 4). ``off`` (default) keeps the
+    # LLM-facing profile serialization byte-identical to the pre-lifecycle shape
+    # (回放门); ``on`` excludes archived topics from that serialization. This is
+    # the only "minimal consumption" of the topic state machine in this version.
+    topic_lifecycle_serialization: str = "off"
 
 
 @dataclass
@@ -1239,6 +1245,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
         soul_raw.get("preference", {}) if isinstance(soul_raw.get("preference"), dict) else {}
     )
     raw_gate_mode = str(soul_raw.get("posture_gate_mode", "shadow") or "shadow").strip().lower()
+    raw_lifecycle = (
+        str(soul_raw.get("topic_lifecycle_serialization", "off") or "off").strip().lower()
+    )
     soul = SoulConfig(
         preference=SoulPreferenceConfig(
             satisfaction_filter_enabled=bool(
@@ -1247,6 +1256,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         posture_gate_mode=raw_gate_mode if raw_gate_mode in _POSTURE_GATE_MODES else "shadow",
         posture_gate_force_enforce=bool(soul_raw.get("posture_gate_force_enforce", False)),
+        topic_lifecycle_serialization=(
+            raw_lifecycle if raw_lifecycle in _TOPIC_LIFECYCLE_SERIALIZATION_MODES else "off"
+        ),
     )
 
     api_auth = _build_api_auth(api_raw)
@@ -1945,6 +1957,21 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 message=(
                     f"不支持的 posture_gate_mode: `{config.soul.posture_gate_mode}`。"
                     "仅支持: shadow, enforce, off。"
+                ),
+                severity="blocking",
+            )
+        )
+
+    if (
+        str(config.soul.topic_lifecycle_serialization or "").strip().lower()
+        not in _TOPIC_LIFECYCLE_SERIALIZATION_MODES
+    ):
+        issues.append(
+            ConfigIssue(
+                field="soul.topic_lifecycle_serialization",
+                message=(
+                    "不支持的 topic_lifecycle_serialization: "
+                    f"`{config.soul.topic_lifecycle_serialization}`。仅支持: off, on。"
                 ),
                 severity="blocking",
             )
@@ -2851,6 +2878,10 @@ def _render_config_toml(
             "# Escape hatch: allow saving enforce without the 14-day shadow",
             "# observation gate. Risky — enables gating before it is calibrated.",
             f"posture_gate_force_enforce = {_toml_bool(config.soul.posture_gate_force_enforce)}",
+            "# Topic-lifecycle serialization (spec Phase 4). off (default) keeps",
+            "# the LLM-facing profile byte-identical; on excludes archived topics.",
+            f"topic_lifecycle_serialization = "
+            f"{_toml_string(config.soul.topic_lifecycle_serialization)}",
             "",
             "[soul.preference]",
             "# v0.3.x event-satisfaction signal. When true, preference",

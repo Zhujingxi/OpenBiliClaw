@@ -364,6 +364,10 @@ class SoulEngine:
         # Ledger write point D5 #7: full-preference (re)build from raw events —
         # the init bootstrap and any full-events re-analysis both land here.
         existing_preference = dict(preference_layer.data)
+        # Topic-lifecycle (Phase 4): carry lifecycle metadata forward and count
+        # this analysis as evidence (new topics enter trial; sustained/dormant
+        # topics transition). Best-effort — never breaks the analysis path.
+        self._apply_topic_lifecycle_evidence(existing_preference, updated_preference)
         with self._ledger.action(
             write_point="init_preference_build",
             source="init",
@@ -703,6 +707,70 @@ class SoulEngine:
         except Exception:
             logger.exception("learned-dislike pool purge failed")
 
+    def _apply_topic_lifecycle_evidence(
+        self,
+        existing_preference: dict[str, Any],
+        updated_preference: dict[str, Any],
+    ) -> None:
+        """Overlay topic-lifecycle metadata onto a freshly analysed preference.
+
+        Carries lifecycle fields forward from ``existing_preference`` and counts
+        this analysis as one unit of evidence per surviving/new topic (new →
+        trial; sustained → active; dormant → active). Best-effort: any failure
+        is logged at DEBUG and never breaks the analysis path. Each transition
+        is recorded to the ledger (write point ``topic_lifecycle``).
+        """
+        try:
+            from openbiliclaw.soul.topic_lifecycle import apply_evidence
+
+            existing_interests = [
+                item for item in existing_preference.get("interests", []) if isinstance(item, dict)
+            ]
+            updated_interests = updated_preference.get("interests")
+            if not isinstance(updated_interests, list):
+                return
+            merged, transitions = apply_evidence(existing_interests, updated_interests)
+            updated_preference["interests"] = merged
+            for tr in transitions:
+                self._ledger.record(
+                    write_point="topic_lifecycle",
+                    source="evidence",
+                    before={"topic": tr.name, "state": tr.from_state},
+                    after={"topic": tr.name, "state": tr.to_state},
+                    source_refs=[f"reason:{tr.reason}"],
+                )
+        except Exception:
+            logger.debug("topic lifecycle evidence overlay failed", exc_info=True)
+
+    def _archive_disliked_topics(
+        self,
+        updated_preference: dict[str, Any],
+        disliked_topics: list[str],
+    ) -> None:
+        """Archive interests matching newly disliked topics (归档+避雷).
+
+        The interest is archived, not deleted — it survives for audit/revert but
+        stops competing for prompt slots. Best-effort; ledgers each transition.
+        """
+        try:
+            from openbiliclaw.soul.topic_lifecycle import archive_topics
+
+            interests = updated_preference.get("interests")
+            if not isinstance(interests, list):
+                return
+            archived, transitions = archive_topics(interests, disliked_topics)
+            updated_preference["interests"] = archived
+            for tr in transitions:
+                self._ledger.record(
+                    write_point="topic_lifecycle",
+                    source="dislike",
+                    before={"topic": tr.name, "state": tr.from_state},
+                    after={"topic": tr.name, "state": tr.to_state},
+                    source_refs=[f"reason:{tr.reason}"],
+                )
+        except Exception:
+            logger.debug("topic lifecycle dislike-archive failed", exc_info=True)
+
     def _sync_speculators_for_edit(self, *, target: str, op: str, value: object) -> None:
         """Keep the interest / avoidance speculators consistent with the edit.
 
@@ -1024,6 +1092,12 @@ class SoulEngine:
                     self._confusion_manager.record_held_updates(held_updates)
                 except Exception:
                     logger.debug("Failed to record held confusion updates", exc_info=True)
+        # Topic-lifecycle (Phase 4): count this dialogue as evidence, then
+        # archive any newly disliked topic (归档+避雷). Archive wins over the
+        # evidence promotion for the same topic.
+        self._apply_topic_lifecycle_evidence(existing_preference, updated_preference)
+        if newly_added_dislikes:
+            self._archive_disliked_topics(updated_preference, newly_added_dislikes)
         # Ledger write point D5 #1a: dialogue-driven preference overwrite.
         with self._ledger.action(
             write_point="dialogue_preference_overwrite",
@@ -1188,6 +1262,10 @@ class SoulEngine:
             if str(item).strip()
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
+        # Topic-lifecycle (Phase 4): evidence overlay + dislike archive.
+        self._apply_topic_lifecycle_evidence(existing_preference, updated_preference)
+        if newly_added_dislikes:
+            self._archive_disliked_topics(updated_preference, newly_added_dislikes)
         feedback_refs = [
             f"feedback_event:{self._to_int(event.get('id', 0))}" for event in feedback_events
         ] or ["feedback_batch"]

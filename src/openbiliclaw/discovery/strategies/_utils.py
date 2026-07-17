@@ -217,10 +217,42 @@ def _coerce_profile_str_list(value: object, limit: int = 5) -> list[str]:
     return values
 
 
-def _likes_by_weight(profile: OnionProfile) -> list[InterestDomain]:
-    """Interest domains sorted by weight (desc), blanks dropped."""
+# Topic-lifecycle serialization switch (Phase 4 / Task 8). Off by default so
+# ``build_profile_summary`` stays byte-identical to the pre-lifecycle shape
+# (回放门). When on, archived topics are excluded from the LLM-facing profile.
+# Set from config (``soul.topic_lifecycle_serialization``) at process start.
+_TOPIC_LIFECYCLE_SERIALIZATION_ON = False
+
+
+def set_topic_lifecycle_serialization(enabled: bool) -> None:
+    """Toggle whether archived topics are excluded from profile serialization."""
+    global _TOPIC_LIFECYCLE_SERIALIZATION_ON
+    _TOPIC_LIFECYCLE_SERIALIZATION_ON = bool(enabled)
+
+
+def topic_lifecycle_serialization_enabled() -> bool:
+    """Current process-level state of the archived-exclusion switch."""
+    return _TOPIC_LIFECYCLE_SERIALIZATION_ON
+
+
+def _is_archived_state(value: object) -> bool:
+    return str(value or "").strip().lower() == "archived"
+
+
+def _likes_by_weight(
+    profile: OnionProfile, *, exclude_archived: bool = False
+) -> list[InterestDomain]:
+    """Interest domains sorted by weight (desc), blanks dropped.
+
+    When ``exclude_archived`` is set, domains whose lifecycle state is
+    ``archived`` are dropped so they no longer reach the LLM.
+    """
     return sorted(
-        (dom for dom in profile.interest.likes if dom.domain.strip()),
+        (
+            dom
+            for dom in profile.interest.likes
+            if dom.domain.strip() and not (exclude_archived and _is_archived_state(dom.state))
+        ),
         key=lambda dom: dom.weight,
         reverse=True,
     )
@@ -231,7 +263,9 @@ def _entry_weight(entry: dict[str, object]) -> float:
     return float(weight) if isinstance(weight, (int, float)) else 0.0
 
 
-def _extract_interest_domains(profile: SoulProfile) -> list[dict[str, object]]:
+def _extract_interest_domains(
+    profile: SoulProfile, *, exclude_archived: bool = False
+) -> list[dict[str, object]]:
     """Extract domain-level (一级) interest hierarchy from profile.
 
     Returns a list like:
@@ -253,11 +287,21 @@ def _extract_interest_domains(profile: SoulProfile) -> list[dict[str, object]]:
                 "last_seen": _format_profile_timestamp(dom.last_seen),
                 "source": dom.source,
             }
-            for dom in _likes_by_weight(profile)[:_INTEREST_DOMAIN_CAP]
+            for dom in _likes_by_weight(profile, exclude_archived=exclude_archived)[
+                :_INTEREST_DOMAIN_CAP
+            ]
         ]
 
     # Flat SoulProfile: reconstruct domains from category grouping
-    ranked_tags = sorted(profile.preferences.interests, key=lambda tag: tag.weight, reverse=True)
+    ranked_tags = sorted(
+        (
+            tag
+            for tag in profile.preferences.interests
+            if not (exclude_archived and _is_archived_state(getattr(tag, "state", "active")))
+        ),
+        key=lambda tag: tag.weight,
+        reverse=True,
+    )
     domain_map: dict[str, dict[str, object]] = {}
     for tag in ranked_tags[:_INTEREST_TAG_CAP]:
         key = tag.category or tag.name
@@ -289,12 +333,14 @@ def _extract_interest_domains(profile: SoulProfile) -> list[dict[str, object]]:
     return sorted(domain_map.values(), key=_entry_weight, reverse=True)[:_INTEREST_DOMAIN_CAP]
 
 
-def _extract_interest_tags(profile: SoulProfile) -> list[dict[str, object]]:
+def _extract_interest_tags(
+    profile: SoulProfile, *, exclude_archived: bool = False
+) -> list[dict[str, object]]:
     """Extract flat interest tags with provenance metadata."""
     from openbiliclaw.soul.profile import OnionProfile
 
     if isinstance(profile, OnionProfile):
-        ranked = _likes_by_weight(profile)
+        ranked = _likes_by_weight(profile, exclude_archived=exclude_archived)
         interests: list[dict[str, object]] = []
         seen_names: set[str] = set()
         # Domain tags first: every ranked domain keeps tag-level exposure
@@ -344,7 +390,12 @@ def _extract_interest_tags(profile: SoulProfile) -> list[dict[str, object]]:
         return interests
 
     ranked_flat = sorted(
-        (tag for tag in profile.preferences.interests if tag.name.strip()),
+        (
+            tag
+            for tag in profile.preferences.interests
+            if tag.name.strip()
+            and not (exclude_archived and _is_archived_state(getattr(tag, "state", "active")))
+        ),
         key=lambda tag: tag.weight,
         reverse=True,
     )
@@ -443,6 +494,7 @@ def build_profile_summary(
     profile: SoulProfile,
     *,
     interests: list[dict[str, object]] | None = None,
+    exclude_archived_topics: bool | None = None,
 ) -> dict[str, object]:
     """Build the canonical structured profile input shared by every prompt.
 
@@ -461,7 +513,9 @@ def build_profile_summary(
     Pass ``interests`` to override the default weight-ranked tag list (e.g.
     recommendation's embedding-selected, content-relevant interests).
     """
-    interest_domains = _extract_interest_domains(profile)
+    if exclude_archived_topics is None:
+        exclude_archived_topics = _TOPIC_LIFECYCLE_SERIALIZATION_ON
+    interest_domains = _extract_interest_domains(profile, exclude_archived=exclude_archived_topics)
     summary: dict[str, object] = {
         "core_traits": profile.core_traits[:30],
         "cognitive_style": profile.cognitive_style[:30],
@@ -470,7 +524,9 @@ def build_profile_summary(
         "current_phase": profile.current_phase,
         "life_stage": profile.life_stage,
         "interest_domains": interest_domains,
-        "interests": interests if interests is not None else _extract_interest_tags(profile),
+        "interests": interests
+        if interests is not None
+        else _extract_interest_tags(profile, exclude_archived=exclude_archived_topics),
         # favorite_up_users is intentionally excluded from the LLM-facing
         # profile output: "常看某创作者" ≠ "对该创作者内容类型感兴趣", and it
         # only invited the model to back-derive interests from creator names.

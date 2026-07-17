@@ -1344,6 +1344,17 @@ def create_app(
         mode=getattr(network_config, "mode", "direct") or "direct",
     )
 
+    # Topic-lifecycle serialization switch (spec Phase 4). Off by default keeps
+    # the LLM-facing profile byte-identical; on excludes archived topics.
+    from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
+
+    set_topic_lifecycle_serialization(
+        str(getattr(getattr(config, "soul", None), "topic_lifecycle_serialization", "off"))
+        .strip()
+        .lower()
+        == "on"
+    )
+
     # Auto-generate the session signing secret on first enable so login state
     # survives restarts (see docs/plans/2026-05-30-web-password-auth-design.md).
     from openbiliclaw.api.auth import (

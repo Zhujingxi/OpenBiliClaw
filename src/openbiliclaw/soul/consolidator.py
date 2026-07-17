@@ -360,6 +360,12 @@ class ProfileConsolidator:
             "disliked_topics": list(dislikes_raw),
         }
 
+        # ── Topic lifecycle scan (Phase 4): decay/archive/trial graduation +
+        # subdivision shadow proposals. Folds into the same 12h cadence. ────
+        interests_raw, lifecycle_transitions = self._scan_topic_lifecycle(
+            interests_raw, current, record=not dry_run
+        )
+
         # ── Stage 0: rule layer — same name + same category ───────────────
         interests, rule_merges, homonym_groups = self._rule_merge_exact_names(interests_raw)
         report.rule_merges = rule_merges
@@ -459,7 +465,9 @@ class ProfileConsolidator:
         report.likes_after = len(interests)
         report.dislikes_after = len(dislikes_raw)
 
-        changed = bool(rule_merges or valid_ops or report.archived_interests)
+        changed = bool(
+            rule_merges or valid_ops or report.archived_interests or lifecycle_transitions
+        )
         if dry_run:
             _log_run_summary(report, changed=changed)
             return report
@@ -526,6 +534,51 @@ class ProfileConsolidator:
         self._save_state(state)
         _log_run_summary(report, changed=changed)
         return report
+
+    # -- Topic lifecycle (Phase 4) ---------------------------------------------
+
+    def _scan_topic_lifecycle(
+        self,
+        interests: list[dict[str, Any]],
+        now: datetime,
+        *,
+        record: bool,
+    ) -> tuple[list[dict[str, Any]], list[Any]]:
+        """Apply the 12h lifecycle scan and record transitions/proposals.
+
+        Returns the (possibly mutated) interests and the list of transitions.
+        Ledger writes are suppressed on dry runs (``record=False``). Best-effort
+        — a failure leaves the interests untouched.
+        """
+        try:
+            from openbiliclaw.soul.topic_lifecycle import propose_subdivisions, scan_lifecycle
+
+            scanned, transitions = scan_lifecycle(interests, now=now)
+            proposals = propose_subdivisions(scanned)
+            if record:
+                ledger = self._profile_ledger()
+                for tr in transitions:
+                    ledger.record(
+                        write_point="topic_lifecycle",
+                        source="consolidation",
+                        before={"topic": tr.name, "state": tr.from_state},
+                        after={"topic": tr.name, "state": tr.to_state},
+                        source_refs=[f"reason:{tr.reason}"],
+                    )
+                for proposal in proposals:
+                    # Shadow only: a subdivision proposal is recorded, never
+                    # executed (tree restructuring is out of scope this version).
+                    ledger.record(
+                        write_point="topic_subdivision_proposal",
+                        source="consolidation",
+                        before={"parent": proposal.parent},
+                        after={"child": proposal.child, "ratio": proposal.ratio},
+                        source_refs=[f"child:{proposal.child}", f"parent:{proposal.parent}"],
+                    )
+            return scanned, transitions
+        except Exception:
+            logger.debug("topic lifecycle scan failed", exc_info=True)
+            return interests, []
 
     # -- Stage 0: rule merges ---------------------------------------------------
 
