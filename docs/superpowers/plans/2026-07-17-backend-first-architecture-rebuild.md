@@ -148,11 +148,11 @@
 - Produces generated shared API types/client from `openapi/openapi.json`.
 - All extension source dispatchers claim and complete through `/api/v1/source-tasks`; web uses `/api/v1` and EventSource for progress/chat.
 
-- [ ] Write failing generation checks and web/extension tests for health, onboarding, source status/task claim, profile, feed, interaction, library, chat SSE, alias health, LiteLLM Admin link, and every retained setting.
-- [ ] Rewire existing markup/styles without React or visual redesign; remove dropped controls and duplicated request/state helpers.
-- [ ] Delete native account save and proactive notification code from the extension; preserve passive activity capture and authenticated source execution.
-- [ ] Run client generation diff check, extension typecheck/tests, and web smoke tests.
-- [ ] Commit with `refactor: rewire web and extension to vnext api`.
+- [x] Write failing generation checks and web/extension tests for health, onboarding, source status/task claim, profile, feed, interaction, library, chat SSE, alias health, LiteLLM Admin link, and every retained setting.
+- [x] Rewire existing markup/styles without React or visual redesign; remove dropped controls and duplicated request/state helpers.
+- [x] Delete native account save and proactive notification code from the extension; preserve passive activity capture and authenticated source execution.
+- [x] Run client generation diff check, extension typecheck/tests, and web smoke tests.
+- [x] Commit with `refactor: rewire web and extension to vnext api`.
 
 ### Task 23: Legacy Deletion, Installers, Documentation, and Full Verification
 
