@@ -4,15 +4,22 @@
 
 新来源必须在自己的 `infrastructure.sources.<platform>` package 内实现冻结 Pydantic
 settings、`SourceManifest` 与 `SourceConnector`，只返回规范化 `ActivityEvent` 或
-`ContentItem`。能力和 concrete operation 分开声明，unsupported operation 保持缺席；
+`ContentItem`。manifest 必须从真实 Pydantic model 导出 secret-free `settings_schema`、
+write-only `credential_schema`，并为每个 concrete operation 暴露 exact request/result
+schema。能力和 concrete operation 分开声明，unsupported operation 保持缺席；
 浏览器辅助工作只经 `/api/v1/source-tasks/claim` 与
-`/api/v1/source-tasks/{task_id}/complete`。built-in connector 在 API/worker composition
-root 显式注册，不使用动态 plugin discovery。每个平台必须通过共享 connector contract
-suite、mocked transport tests、无 live-call composition smoke 和 secret-safe payload tests。
+`/api/v1/source-tasks/{task_id}/complete`，payload/result 分别使用 bootstrap、search、
+trending、feed、related、creator、community 的 `operation` discriminated union。built-in
+connector 在 API/worker composition root 显式注册，不使用动态 plugin discovery。
+account credential 只经 `/api/v1/sources/{source_id}/accounts` write-only configure，DELETE
+disconnect 必须幂等并只返回 secret-free status。每个平台必须通过共享 connector contract
+suite、mocked transport tests、无 live-call composition smoke、schema parity、typed operation、
+disconnect 和 credential/non-finite rejection tests。
 
 七个平台当前能力矩阵、deadline/lease/cancel/abandon 语义与公开 Python API 见
 [vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。现有 Web/extension
 dispatcher 的 generated-client 接线由 Task 22 完成；这不恢复旧平台专用 endpoint。
+该前端待办不等于 extension wiring、browser execution 或真实平台 E2E 已完成。
 
 ## Historical v0.3 archive
 

@@ -13,6 +13,7 @@ from openbiliclaw.infrastructure.database.repositories import (
     SQLAlchemyActivityRepository,
     SQLAlchemyAIRunRepository,
     SQLAlchemyAssessmentRepository,
+    SQLAlchemyAuthStateRepository,
     SQLAlchemyChatRepository,
     SQLAlchemyCollectionRepository,
     SQLAlchemyContentRepository,
@@ -32,6 +33,7 @@ class UnitOfWork:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session = session_factory()
         self.settings = SQLAlchemySettingsRepository(self.session)
+        self.auth_state = SQLAlchemyAuthStateRepository(self.session)
         self.source_accounts = SQLAlchemySourceAccountRepository(self.session)
         self.activities = SQLAlchemyActivityRepository(self.session)
         self.profiles = SQLAlchemyProfileRepository(self.session)

@@ -29,7 +29,8 @@ Reddit. Each connector exposes only capabilities it actually supports.
 
 ```mermaid
 flowchart LR
-    UI["Existing Web + Extension<br/>Task 22 wiring pending"] --> API["FastAPI /api/v1 routers"]
+    UI["Existing Web + Extension<br/>Task 22 wiring pending"] --> AUTH["Cookie+CSRF / finite extension bearer"]
+    AUTH --> API["FastAPI /api/v1 routers"]
     API --> UC["Feature use cases"]
     API --> SSE["SSE chat and progress"]
     JOBS["Huey worker + scheduler"] --> UC
@@ -37,7 +38,7 @@ flowchart LR
     UC --> REPOS["SQLAlchemy repositories"]
     UC --> SOURCES["Seven explicit connectors"]
     UC --> AI["Typed TaskRunner"]
-    MIGRATE["One-shot Alembic migration"] --> DB
+    MIGRATE["One-shot Alembic 0001 + 0002"] --> DB
     MIGRATE --> API
     MIGRATE --> JOBS
     AI --> PYD["PydanticAI"]
@@ -53,6 +54,10 @@ budgets, and caching.
 Browser-assisted work uses only the authoritative `/api/v1/source-tasks`
 claim/complete contract; chat streams SSE directly through the shared `TaskRunner`.
 Task 22 only rewires the existing Web/extension clients to these backend boundaries.
+The backend now provides password-to-HttpOnly-cookie plus CSRF, extension device-key-to-finite-
+bearer exchange, session-epoch revocation, joined library reads, explicit profile edits, chat
+history, typed source schemas/disconnect, and one error envelope. This does not claim that the
+existing pages, extension dispatcher, or a real browser have been wired or verified.
 
 ## Installation
 

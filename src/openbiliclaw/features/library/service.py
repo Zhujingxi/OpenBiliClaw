@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
+from openbiliclaw.features.library.domain import CollectionItem, CollectionKind, LibraryItem
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -17,7 +17,7 @@ class CollectionRepository(Protocol):
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
 
-    def list_items(self, collection: CollectionKind) -> tuple[CollectionItem, ...]: ...
+    def list_items(self, collection: CollectionKind) -> tuple[LibraryItem, ...]: ...
 
 
 class LibraryUnitOfWork(Protocol):
@@ -41,7 +41,7 @@ class LibraryService:
     def __init__(self, uow_factory: Callable[[], LibraryUnitOfWork]) -> None:
         self._uow_factory = uow_factory
 
-    def list(self, collection: CollectionKind) -> tuple[CollectionItem, ...]:
+    def list(self, collection: CollectionKind) -> tuple[LibraryItem, ...]:
         """List one predefined local-only collection."""
 
         with self._uow_factory() as uow:

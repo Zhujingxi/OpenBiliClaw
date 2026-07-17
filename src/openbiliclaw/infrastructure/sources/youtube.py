@@ -15,6 +15,7 @@ from openbiliclaw.features.sources.domain import (
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
+    source_form_schema_fields,
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
@@ -71,6 +72,7 @@ class YouTubeSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.YOUTUBE,
     display_name="YouTube",
+    **source_form_schema_fields(YouTubeSettings),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

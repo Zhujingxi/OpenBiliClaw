@@ -16,6 +16,7 @@ from openbiliclaw.features.sources.domain import (
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
+    source_form_schema_fields,
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
@@ -155,6 +156,7 @@ class BilibiliSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.BILIBILI,
     display_name="Bilibili",
+    **source_form_schema_fields(BilibiliSettings),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
-from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
+from openbiliclaw.features.library.domain import CollectionItem, CollectionKind, LibraryItem
 
 
 class SaveCollectionItem(BaseModel):
@@ -22,12 +22,12 @@ router = APIRouter(prefix="/library", tags=["library"], dependencies=[Depends(re
 @router.get(
     "/{collection}",
     operation_id="v1_library_list",
-    response_model=tuple[CollectionItem, ...],
+    response_model=tuple[LibraryItem, ...],
 )
 def list_collection(
     collection: CollectionKind,
     container: Container,
-) -> tuple[CollectionItem, ...]:
+) -> tuple[LibraryItem, ...]:
     return container.library.list(collection)
 
 

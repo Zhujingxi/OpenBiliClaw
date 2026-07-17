@@ -8,10 +8,10 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import UUID  # noqa: TC003 - Pydantic resolves the field at runtime
 
 from anyio import CapacityLimiter, to_thread
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
-from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
+from openbiliclaw.features.chat.domain import ChatHistoryTurn, ChatRole, ChatTurn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -50,6 +50,10 @@ class ChatResponder(Protocol):
 class ChatRepository(Protocol):
     def add(self, turn: ChatTurn) -> None: ...
 
+    def list_by_conversation(
+        self, conversation_id: UUID, *, limit: int, offset: int
+    ) -> tuple[ChatTurn, ...]: ...
+
 
 class ActivityRepository(Protocol):
     def add(self, event: ActivityEvent) -> None: ...
@@ -69,6 +73,36 @@ class ChatUnitOfWork(Protocol):
     ) -> None: ...
 
     def commit(self) -> None: ...
+
+
+class ChatHistoryPage(BaseModel):
+    """Stable bounded page of public turns for one conversation."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    conversation_id: UUID
+    items: tuple[ChatHistoryTurn, ...]
+    limit: int = Field(ge=1, le=100)
+    offset: int = Field(ge=0, le=1_000_000)
+    has_more: bool
+
+    @classmethod
+    def from_turns(
+        cls,
+        *,
+        conversation_id: UUID,
+        turns: tuple[ChatTurn, ...],
+        limit: int,
+        offset: int,
+        has_more: bool,
+    ) -> ChatHistoryPage:
+        return cls(
+            conversation_id=conversation_id,
+            items=tuple(ChatHistoryTurn.from_persisted(turn) for turn in turns),
+            limit=limit,
+            offset=offset,
+            has_more=has_more,
+        )
 
 
 class ChatService:
@@ -130,6 +164,25 @@ class ChatService:
         )
         yield ChatChunk(kind=ChatChunkKind.DONE, content="", turn_id=assistant_turn.id)
 
+    def history(
+        self, *, conversation_id: UUID, limit: int = 50, offset: int = 0
+    ) -> ChatHistoryPage:
+        """Read one deterministic page while keeping persistence metadata private."""
+
+        with self._uow_factory() as uow:
+            turns = uow.chat.list_by_conversation(
+                conversation_id,
+                limit=limit + 1,
+                offset=offset,
+            )
+        return ChatHistoryPage.from_turns(
+            conversation_id=conversation_id,
+            turns=turns[:limit],
+            limit=limit,
+            offset=offset,
+            has_more=len(turns) > limit,
+        )
+
     def _persist_user_turn(self, user_turn: ChatTurn) -> None:
         with self._uow_factory() as uow:
             uow.chat.add(user_turn)
@@ -156,4 +209,10 @@ class ChatService:
             uow.commit()
 
 
-__all__ = ["ChatChunk", "ChatChunkKind", "ChatResponder", "ChatService"]
+__all__ = [
+    "ChatChunk",
+    "ChatChunkKind",
+    "ChatHistoryPage",
+    "ChatResponder",
+    "ChatService",
+]

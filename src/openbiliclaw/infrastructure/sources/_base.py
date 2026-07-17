@@ -19,6 +19,7 @@ from openbiliclaw.features.sources.domain import (
     SourceResultKind,
     SourceTransportKind,
     UnsupportedSourceOperationError,
+    browser_operation_schemas,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +63,7 @@ def operation_spec(
 ) -> SourceOperationSpec:
     """Keep source manifests concise while retaining explicit per-operation metadata."""
 
+    request_schema, result_schema = browser_operation_schemas(operation)
     return SourceOperationSpec(
         operation=operation,
         capability=capability,
@@ -69,6 +71,8 @@ def operation_spec(
         requires_auth=requires_auth,
         transport_kind=transport_kind,
         fallback_transport_kind=fallback_transport_kind,
+        request_schema=request_schema,
+        result_schema=result_schema,
     )
 
 

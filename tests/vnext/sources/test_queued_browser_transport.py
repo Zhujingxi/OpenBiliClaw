@@ -11,7 +11,11 @@ from typing import Any
 import pytest
 from sqlalchemy import select, update
 
-from openbiliclaw.features.sources.domain import SourceOperation, SourceTaskStatus
+from openbiliclaw.features.sources.domain import (
+    BrowserOperationResult,
+    SourceOperation,
+    SourceTaskStatus,
+)
 from openbiliclaw.infrastructure.database.models import SourceTaskModel
 from openbiliclaw.infrastructure.sources import browser_tasks as browser_tasks_module
 from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
@@ -45,9 +49,7 @@ def test_late_enqueue_outcome_callback_contains_fatal_base_exceptions(
         def result() -> None:
             raise failure
 
-    source_logger = logging.getLogger(
-        "openbiliclaw.infrastructure.sources.browser_tasks"
-    )
+    source_logger = logging.getLogger("openbiliclaw.infrastructure.sources.browser_tasks")
     monkeypatch.setattr(source_logger, "disabled", False)
     with caplog.at_level(logging.WARNING):
         browser_tasks_module._consume_late_enqueue_outcome(  # noqa: SLF001
@@ -76,7 +78,12 @@ async def test_queue_transport_awaits_a_completed_typed_result(
         service.complete,
         claim.id,
         claim.lease_token,
-        {"items": [{"content_id": "1", "content_type": "answer"}]},
+        BrowserOperationResult.validate_python(
+            {
+                "operation": claim.operation.value,
+                "items": [{"content_id": "1", "content_type": "answer"}],
+            }
+        ),
     )
     assert await pending == [{"content_id": "1", "content_type": "answer"}]
 
@@ -113,7 +120,12 @@ async def test_queue_transport_has_a_bounded_wait(
         service.complete,
         claim.id,
         claim.lease_token,
-        {"items": [{"content_id": "retry", "content_type": "answer"}]},
+        BrowserOperationResult.validate_python(
+            {
+                "operation": claim.operation.value,
+                "items": [{"content_id": "retry", "content_type": "answer"}],
+            }
+        ),
     )
     assert await retry
     with session_factory() as session:
@@ -162,9 +174,7 @@ async def test_cancellation_during_enqueue_leaves_only_a_terminal_row(
     class DelayedService:
         persistence_timeout_seconds = 0.2
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             started.set()
             release.wait(timeout=1)
             return service.enqueue(
@@ -207,9 +217,7 @@ async def test_enqueue_delay_beyond_operation_timeout_has_bounded_cleanup_and_no
     class DelayedService:
         persistence_timeout_seconds = 0.02
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             started.set()
             release.wait(timeout=1)
             return service.enqueue(
@@ -262,9 +270,7 @@ async def test_second_parent_cancellation_waits_for_blocked_cancel_cleanup(
     class BlockingCancelService:
         persistence_timeout_seconds = 0.2
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             return service.enqueue(
                 request, task_id=task_id, request_deadline_at=request_deadline_at
             )
@@ -315,9 +321,7 @@ async def test_cleanup_failure_preserves_original_timeout_and_deadline_excludes_
     class FailingCancelService:
         persistence_timeout_seconds = 0.02
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             return service.enqueue(
                 request, task_id=task_id, request_deadline_at=request_deadline_at
             )
@@ -362,17 +366,13 @@ async def test_late_enqueue_exception_is_drained_without_secret_or_loop_error(
     loop = asyncio.get_running_loop()
     previous_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
-    source_logger = logging.getLogger(
-        "openbiliclaw.infrastructure.sources.browser_tasks"
-    )
+    source_logger = logging.getLogger("openbiliclaw.infrastructure.sources.browser_tasks")
     monkeypatch.setattr(source_logger, "disabled", False)
 
     class LateFailingService:
         persistence_timeout_seconds = 0.02
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             started.set()
             release.wait(timeout=1)
             finished.set()
@@ -393,9 +393,7 @@ async def test_late_enqueue_exception_is_drained_without_secret_or_loop_error(
     )
     try:
         with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
-            await transport.fetch(
-                operation=SourceOperation.SEARCH.value, query="python", limit=3
-            )
+            await transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
         release.set()
         assert await asyncio.to_thread(finished.wait, 1)
         for _ in range(5):
@@ -425,17 +423,13 @@ async def test_late_enqueue_base_exception_is_drained_without_secret_or_loop_err
     loop = asyncio.get_running_loop()
     previous_handler = loop.get_exception_handler()
     loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
-    source_logger = logging.getLogger(
-        "openbiliclaw.infrastructure.sources.browser_tasks"
-    )
+    source_logger = logging.getLogger("openbiliclaw.infrastructure.sources.browser_tasks")
     monkeypatch.setattr(source_logger, "disabled", False)
 
     class LateFatalService:
         persistence_timeout_seconds = 0.02
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             started.set()
             release.wait(timeout=1)
             finished.set()
@@ -456,9 +450,7 @@ async def test_late_enqueue_base_exception_is_drained_without_secret_or_loop_err
     )
     try:
         with caplog.at_level(logging.WARNING), pytest.raises(TimeoutError):
-            await transport.fetch(
-                operation=SourceOperation.SEARCH.value, query="python", limit=3
-            )
+            await transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
         release.set()
         assert await asyncio.to_thread(finished.wait, 1)
         for _ in range(5):
@@ -484,9 +476,7 @@ async def test_delayed_insert_and_blocked_worker_claim_use_database_deadline(
     class DelayedService:
         persistence_timeout_seconds = 1.0
 
-        def enqueue(
-            self, request: Any, *, task_id: Any, request_deadline_at: Any
-        ) -> Any:
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
             enqueue_started.set()
             release_enqueue.wait(timeout=1)
             return service.enqueue(
@@ -540,9 +530,7 @@ async def test_delayed_insert_and_blocked_worker_claim_use_database_deadline(
             outcome = pool.submit(claim)
             assert await asyncio.to_thread(claim_started.wait, 1)
             assert datetime.now(UTC) < deadline
-            await asyncio.sleep(
-                max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.05
-            )
+            await asyncio.sleep(max(0.0, (deadline - datetime.now(UTC)).total_seconds()) + 0.05)
             assert not outcome.done()
             transaction.commit()
             assert await asyncio.to_thread(outcome.result, 1) is None

@@ -33,6 +33,14 @@ OPENBILICLAW_LITELLM_API_KEY=<user LiteLLM key>
 不要把 key 拼进复制命令或用户可见日志。让用户在 installer 的隐藏输入中填写，
 或由用户在当前 shell 自己设置环境变量。
 
+可选 browser auth 必须另行安全 provision：password 只保存 scrypt hash，session 使用独立
+random `OPENBILICLAW_SESSION_SECRET`，extension 只保存 device key 的
+`key-id:sha256-digest` record 并把完整 key 一次性交付目标 extension。不要在命令参数、
+shell history、状态事件、日志、截图或对话中展开任何值，也不要复用 installer bearer、
+来源 encryption secret 或 LiteLLM master key。可选
+`OPENBILICLAW_LITELLM_ADMIN_URL` 只接受无 credential/query/fragment 的 absolute HTTP(S)
+public navigation URL；不要公开 internal base URL/key。
+
 ## 3. 判定成功
 
 脚本必须完成 migration、API/worker（API 与 worker）启动，并通过 public readiness
@@ -93,7 +101,11 @@ Docker 用户在 `http://127.0.0.1:4000/ui` 的 LiteLLM Admin 配 provider，并
 `obc-interactive`、`obc-analysis`、`obc-embedding`。Source 用户在其外部
 LiteLLM 部署中完成相同配置。
 
-来源连接与首次 bootstrap 通过 `/api/v1/sources` 和 `/api/v1/onboarding`。
+Schema head 包含 `0002_auth_state`；它只保存 session epoch，负责撤销既有 Web/extension
+session，不保存 cookie、bearer 或 device key。installer bearer 继续只供 operation/API client。
+
+来源连接、typed idempotent disconnect 与首次 bootstrap 通过 `/api/v1/sources` 和
+`/api/v1/onboarding`；generic browser task 使用 typed `/api/v1/source-tasks` contract。
 现有 static Web/extension 的新 API wiring 尚待 Task 22，因此当前阶段用 OpenAPI
 或生成 client 验证，不要让用户操作旧页面完成设置。
 

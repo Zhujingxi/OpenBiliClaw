@@ -533,7 +533,7 @@ async def test_cancel_during_source_boundary_prevents_later_persistence_and_keep
     _engine, session_factory = database
     connector = BlockingSource()
     settings = SettingsService(lambda: UnitOfWork(session_factory))
-    settings.update({"source_enabled": {"bilibili": True}})
+    settings.update({"sources": {"enabled": {"bilibili": True}}})
     runner = BatchRunner()
     service, handlers = build_worker_runtime(
         WorkerDependencies(
@@ -649,7 +649,7 @@ async def test_source_cancellation_winning_at_atomic_guard_persists_no_activity(
 ) -> None:
     _engine, session_factory = database
     SettingsService(lambda: UnitOfWork(session_factory)).update(
-        {"source_enabled": {"bilibili": True}}
+        {"sources": {"enabled": {"bilibili": True}}}
     )
     service, handlers = build_worker_runtime(
         WorkerDependencies(
@@ -714,7 +714,10 @@ async def test_feed_cancellation_winning_at_atomic_guard_persists_no_feed_graph(
         uow.profiles.append(ProfileSnapshot(revision=0), expected_revision=None)
         uow.commit()
     SettingsService(lambda: UnitOfWork(session_factory)).update(
-        {"source_enabled": {"bilibili": True}, "feed_low_watermark": 1, "feed_high_watermark": 1}
+        {
+            "sources": {"enabled": {"bilibili": True}},
+            "feed": {"low_watermark": 1, "high_watermark": 1},
+        }
     )
     item = ContentItem(
         source_id="bilibili",

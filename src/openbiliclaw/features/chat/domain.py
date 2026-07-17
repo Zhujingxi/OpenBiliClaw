@@ -1,5 +1,7 @@
 """Persisted chat contracts."""
 
+from __future__ import annotations
+
 from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import UUID, uuid4
@@ -25,3 +27,23 @@ class ChatTurn(BaseModel):
     content: str = Field(min_length=1)
     created_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     ai_run_id: UUID | None = None
+
+
+class ChatHistoryTurn(BaseModel):
+    """Public chat turn projection without AI/provider execution metadata."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: UUID
+    role: ChatRole
+    content: str
+    created_at: AwareDatetime
+
+    @classmethod
+    def from_persisted(cls, turn: ChatTurn) -> ChatHistoryTurn:
+        return cls(
+            id=turn.id,
+            role=turn.role,
+            content=turn.content,
+            created_at=turn.created_at,
+        )

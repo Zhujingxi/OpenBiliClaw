@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openai import AsyncOpenAI
 from pydantic import TypeAdapter
+from pydantic_ai import UsageLimits
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -20,7 +21,12 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
     from pydantic_ai.settings import ModelSettings
 
+    from openbiliclaw.features.system.domain import UserSettings
     from openbiliclaw.infrastructure.ai.spec import GenerativeAlias, InputT, OutputT, TaskSpec
+
+
+class ProductSettingsProvider(Protocol):
+    def get(self) -> UserSettings: ...
 
 
 class AIRunRecorder(Protocol):
@@ -87,9 +93,16 @@ class LiteLLMModelResolver:
 class TaskRunner:
     """Validate, execute, and record typed semantic tasks without provider logic."""
 
-    def __init__(self, *, model_resolver: ModelResolver, recorder: AIRunRecorder) -> None:
+    def __init__(
+        self,
+        *,
+        model_resolver: ModelResolver,
+        recorder: AIRunRecorder,
+        settings: ProductSettingsProvider | None = None,
+    ) -> None:
         self._model_resolver = model_resolver
         self._recorder = recorder
+        self._settings = settings
 
     async def run(
         self,
@@ -99,16 +112,38 @@ class TaskRunner:
         """Run one typed task with bounded semantic retries and wall-clock time."""
 
         validated_input = TypeAdapter(spec.input_type).validate_python(raw_input)
-        model = self._model_resolver(spec.model_alias)
-        run_id = self._recorder.start(task_name=spec.name, model_alias=spec.model_alias)
+        configured = (
+            None
+            if self._settings is None
+            else cast("dict[str, Any]", self._settings.get().tasks).get(spec.name)
+        )
+        model_alias = (
+            spec.model_alias
+            if configured is None
+            else cast("GenerativeAlias", configured.model_alias)
+        )
+        semantic_retry_limit = (
+            spec.semantic_retry_limit if configured is None else configured.semantic_retry_limit
+        )
+        timeout_seconds = spec.timeout_seconds if configured is None else configured.timeout_seconds
+        usage_limits = (
+            spec.usage_limits
+            if configured is None
+            else UsageLimits(
+                request_limit=configured.request_limit,
+                total_tokens_limit=configured.total_tokens_limit,
+            )
+        )
+        model = self._model_resolver(model_alias)
+        run_id = self._recorder.start(task_name=spec.name, model_alias=model_alias)
         try:
-            async with asyncio.timeout(spec.timeout_seconds):
+            async with asyncio.timeout(timeout_seconds):
                 result = await spec.agent.run(
                     validated_input.model_dump_json(),
                     model=model,
                     model_settings=_model_settings(spec.cache_policy),
-                    usage_limits=spec.usage_limits,
-                    retries={"output": spec.semantic_retry_limit},
+                    usage_limits=usage_limits,
+                    retries={"output": semantic_retry_limit},
                 )
             output = TypeAdapter(spec.output_type).validate_python(result.output)
             self._recorder.succeed(

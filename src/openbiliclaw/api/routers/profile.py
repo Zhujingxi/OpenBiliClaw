@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 
 from openbiliclaw.api.dependencies import Container, require_access
-from openbiliclaw.features.profile.domain import ProfileSnapshot
+from openbiliclaw.features.profile.domain import ProfileEdit, ProfileSnapshot
 
 router = APIRouter(prefix="/profile", tags=["profile"], dependencies=[Depends(require_access)])
 
@@ -14,3 +14,10 @@ def current_profile(container: Container) -> ProfileSnapshot:
     if snapshot is None:
         raise HTTPException(status_code=404, detail="profile not projected")
     return snapshot
+
+
+@router.patch("", operation_id="v1_profile_edit", response_model=ProfileSnapshot)
+def edit_profile(payload: ProfileEdit, container: Container) -> ProfileSnapshot:
+    """Apply one explicit user-authored optimistic profile revision."""
+
+    return container.profile.edit(payload)

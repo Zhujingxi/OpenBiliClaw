@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 from uuid import UUID  # noqa: TC003 - FastAPI resolves route fields at runtime
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -13,18 +12,18 @@ from pydantic import BaseModel, ConfigDict, Field
 from openbiliclaw.api.dependencies import Container, require_access
 from openbiliclaw.api.threading import run_sync_port
 from openbiliclaw.features.sources.domain import (
+    BrowserOperationResultValue,
     ClaimedSourceTask,
     SourceId,
     SourceTaskCompletion,
 )
-from openbiliclaw.features.sources.service import validate_source_task_payload
 
 
 class CompleteSourceTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lease_token: str = Field(min_length=20, max_length=100)
-    result: dict[str, Any]
+    result: BrowserOperationResultValue
 
 
 router = APIRouter(
@@ -65,6 +64,5 @@ def complete_source_task(
     payload: CompleteSourceTask,
     container: Container,
 ) -> object:
-    result = validate_source_task_payload(payload.result)
-    completed = container.source_tasks.complete(task_id, payload.lease_token, result)
+    completed = container.source_tasks.complete(task_id, payload.lease_token, payload.result)
     return SourceTaskCompletion.model_validate(jsonable_encoder(completed))

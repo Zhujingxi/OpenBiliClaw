@@ -6,13 +6,15 @@ import asyncio
 from typing import TYPE_CHECKING
 from uuid import UUID  # noqa: TC003 - Pydantic resolves the field at runtime
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse  # noqa: TC002 - FastAPI route response
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import ApplicationContainer, Container, require_access
 from openbiliclaw.api.sse import frame, response
+from openbiliclaw.api.threading import run_sync_port
 from openbiliclaw.api.v1_models import sse_response
+from openbiliclaw.features.chat.service import ChatHistoryPage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -27,6 +29,25 @@ class ChatRequest(BaseModel):
 
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_access)])
+
+
+@router.get(
+    "/{conversation_id}",
+    operation_id="v1_chat_history",
+    response_model=ChatHistoryPage,
+)
+async def chat_history(
+    conversation_id: UUID,
+    container: Container,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+) -> ChatHistoryPage:
+    return await run_sync_port(
+        container.chat.history,
+        conversation_id=conversation_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

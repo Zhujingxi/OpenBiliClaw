@@ -1,6 +1,7 @@
 """Feature-owned v1 HTTP routers."""
 
 from openbiliclaw.api.routers import (
+    auth,
     chat,
     events,
     feed,
@@ -17,6 +18,7 @@ from openbiliclaw.api.routers import (
 
 ROUTERS = (
     system.router,
+    auth.router,
     settings.router,
     onboarding.router,
     sources.router,

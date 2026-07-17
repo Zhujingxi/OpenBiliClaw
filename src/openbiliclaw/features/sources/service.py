@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import Mapping as MappingABC
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid4
@@ -13,14 +11,20 @@ from pydantic import JsonValue, TypeAdapter
 
 from openbiliclaw.features._metadata import freeze_metadata, serialize_metadata
 from openbiliclaw.features.sources.domain import (
+    BrowserOperationResult,
+    BrowserOperationResultValue,
     ClaimedSourceTask,
+    CredentialShapedPayloadError,
+    SourceAccountDisconnectResult,
     SourceAccountStatus,
+    SourceCredentialInput,
     SourceId,
     SourceManifest,
     SourceTaskCompletion,
     SourceTaskRequest,
     SourceTaskSnapshot,
     UnsupportedSourceOperationError,
+    reject_credential_fields,
 )
 from openbiliclaw.features.system.domain import DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS
 
@@ -31,48 +35,6 @@ if TYPE_CHECKING:
     from openbiliclaw.features.sources.registry import SourceRegistry
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
-_CREDENTIAL_TOKENS = frozenset(
-    {
-        "apikey",
-        "apikeys",
-        "authorization",
-        "authorizations",
-        "cookie",
-        "cookies",
-        "credential",
-        "credentials",
-        "password",
-        "passwords",
-        "secret",
-        "secrets",
-        "session",
-        "sessions",
-        "token",
-        "tokens",
-    }
-)
-_CREDENTIAL_FIELD_SUFFIXES = (
-    "apikey",
-    "apikeys",
-    "cookie",
-    "cookies",
-    "credential",
-    "credentials",
-    "password",
-    "passwords",
-    "proxyauthorization",
-    "secret",
-    "secrets",
-    "session",
-    "sessions",
-    "token",
-    "tokens",
-)
-_SAFE_ANALYTICS_FIELDS = frozenset({"cookiepolicy", "sessionduration", "tokencount"})
-
-
-class CredentialShapedPayloadError(ValueError):
-    """Raised before credential-like task data can reach persistence or logs."""
 
 
 class StaleSourceTaskLeaseError(RuntimeError):
@@ -149,6 +111,8 @@ class SourceAccountRepository(Protocol):
 
     def list_statuses(self) -> tuple[SourceAccountStatus, ...]: ...
 
+    def delete(self, *, source_id: str, account_key: str) -> bool: ...
+
 
 class SourceAccountUnitOfWork(Protocol):
     source_accounts: SourceAccountRepository
@@ -200,10 +164,13 @@ class SourceAccountService:
         key = account_key.strip()
         if not key:
             raise ValueError("source account key cannot be empty")
-        validated = _JSON_OBJECT.validate_python(dict(credentials), strict=True)
-        if not validated:
-            raise ValueError("source credentials cannot be empty")
-        plaintext = json.dumps(validated, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        validated = SourceCredentialInput.model_validate(dict(credentials), strict=True)
+        plaintext = json.dumps(
+            {"cookie": validated.cookie.get_secret_value()},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         ciphertext = self._cipher.encrypt(plaintext)
         with self._uow_factory() as uow:
             uow.source_accounts.upsert_credentials(
@@ -213,6 +180,23 @@ class SourceAccountService:
             )
             uow.commit()
         return SourceAccountStatus(source_id=source_id, account_key=key, enabled=True)
+
+    def disconnect(self, source_id: SourceId, account_key: str) -> SourceAccountDisconnectResult:
+        """Delete encrypted account material; repeated calls remain successful and secret-free."""
+
+        self._registry_provider().get(source_id.value)
+        key = account_key.strip()
+        if not key:
+            raise ValueError("source account key cannot be empty")
+        with self._uow_factory() as uow:
+            deleted = uow.source_accounts.delete(source_id=source_id.value, account_key=key)
+            uow.commit()
+        return SourceAccountDisconnectResult(
+            source_id=source_id,
+            account_key=key,
+            disconnected=True,
+            idempotent=not deleted,
+        )
 
 
 class SourceTaskService:
@@ -256,7 +240,7 @@ class SourceTaskService:
             raise UnsupportedSourceOperationError(
                 f"{request.source_id.value} {request.operation.value} is not browser-assisted"
             )
-        _safe_json_object(request.payload)
+        _safe_json_object(request.payload.model_dump(mode="json"))
         now = datetime.now(UTC)
         deadline = request_deadline_at or now + timedelta(seconds=self._lease_seconds)
         if deadline.tzinfo is None or deadline.utcoffset() is None:
@@ -295,16 +279,22 @@ class SourceTaskService:
         self,
         task_id: UUID,
         lease_token: str,
-        result: Mapping[str, object],
+        result: BrowserOperationResultValue,
     ) -> SourceTaskCompletion:
         """Complete once; identical retries succeed without rewriting the result."""
 
-        safe_result = _safe_json_object(result)
         with self._uow_factory() as uow:
+            snapshot = uow.source_tasks.get_snapshot(task_id)
+            raw_result = result.model_dump(mode="json")
+            safe_result = _safe_json_object(raw_result)
+            typed_result = BrowserOperationResult.validate_python(safe_result)
+            serialized_result = typed_result.model_dump(mode="json")
+            if snapshot.operation is not typed_result.operation:
+                raise ValueError("source task completion operation does not match request")
             completion = uow.source_tasks.complete(
                 task_id=task_id,
                 lease_token=lease_token,
-                result=safe_result,
+                result=serialized_result,
             )
             uow.commit()
         return completion
@@ -329,7 +319,7 @@ class SourceTaskService:
 def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     """Validate JSON recursively and reject credential-shaped keys without echoing values."""
 
-    _reject_credential_fields(value)
+    reject_credential_fields(value)
     frozen = freeze_metadata(value)
     result = _JSON_OBJECT.validate_python(serialize_metadata(frozen), strict=True)
     return result
@@ -339,29 +329,6 @@ def validate_source_task_payload(value: Mapping[str, object]) -> dict[str, JsonV
     """Public transport-boundary validation for source-task request/result payloads."""
 
     return _safe_json_object(value)
-
-
-def _reject_credential_fields(value: object, *, path: tuple[str, ...] = ()) -> None:
-    if isinstance(value, MappingABC):
-        for key, child in value.items():
-            key_text = str(key)
-            tokenized_key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key_text).casefold()
-            raw_key = key_text.casefold()
-            normalized = re.sub(r"[^a-z0-9]", "", raw_key)
-            segments = frozenset(part for part in re.split(r"[^a-z0-9]+", tokenized_key) if part)
-            sensitive = normalized not in _SAFE_ANALYTICS_FIELDS and (
-                bool(segments & _CREDENTIAL_TOKENS)
-                or normalized.endswith(_CREDENTIAL_FIELD_SUFFIXES)
-            )
-            if sensitive:
-                safe_path = ".".join((*path, str(key)))
-                raise CredentialShapedPayloadError(
-                    f"credential-shaped field is forbidden in source tasks: {safe_path}"
-                )
-            _reject_credential_fields(child, path=(*path, str(key)))
-    elif isinstance(value, (list, tuple)):
-        for child in value:
-            _reject_credential_fields(child, path=path)
 
 
 # Re-export the request from the service module as the application-facing task API.

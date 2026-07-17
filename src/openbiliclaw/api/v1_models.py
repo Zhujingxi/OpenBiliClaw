@@ -31,6 +31,7 @@ class AIHealthResponse(BaseModel):
 
     proxy_reachable: bool
     aliases: tuple[AliasHealthResponse, ...]
+    admin_url: str | None = None
 
 
 class JobRunResponse(BaseModel):

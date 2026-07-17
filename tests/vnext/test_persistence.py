@@ -31,6 +31,7 @@ NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 EXPECTED_TABLES = {
+    "auth_state",
     "settings",
     "source_accounts",
     "activity_events",

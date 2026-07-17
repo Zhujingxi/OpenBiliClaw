@@ -16,14 +16,15 @@
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | 独立数据库配置 | ✅ | `DatabaseSettings` 默认指向 `sqlite:///data/vnext/openbiliclaw.db`；URL、echo 与有限 SQLite busy timeout 可通过 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS` 覆盖 |
-| SQLAlchemy schema | ✅ | 16 张 vNext 业务表覆盖设置、来源账户、活动、画像与独立 consumed-evidence ledger、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
-| Alembic 基线 | ✅ | `0001_vnext_baseline` 支持从空库 upgrade、downgrade 后重建，并预置 `favorites` / `watch_later` 两个本地集合 |
+| SQLAlchemy schema | ✅ | 17 张 vNext 业务表覆盖设置、非秘密 auth revocation state、来源账户、活动、画像与独立 consumed-evidence ledger、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
+| Alembic revisions | ✅ | `0001_vnext_baseline` 创建业务基线并预置 `favorites` / `watch_later`；`0002_auth_state` 创建 `auth_state` 并 seed `session_epoch=0`，支持逐级 upgrade/downgrade |
 | runtime schema gate | ✅ | installer 或 Compose `migrate` 独占 Alembic 写入；API/worker startup 只读验证当前 revision 精确等于 head |
 | worker runtime health | ✅ | Compose probe 要求 PID 1 为正式 worker、schema 位于 head；独立 Huey SQLite 通过 integrity check，并保持生产 WAL。POSIX 正常 pathname connect 前固定 main 与已存在 WAL/SHM identity；connect 后新增的全部普通 FD 必须属于该集合且包含 main，拒绝并发无关 FD/dup 冒充。Windows 在稳定 root 边界内验证 connection 前后 pathname/held identity。随后执行 `BEGIN IMMEDIATE`、真实 `CREATE`/`INSERT`、`ROLLBACK`，不修改 journal mode 或留下 probe artifact |
 | 安全在线备份 | ✅ | `db backup` 仅在 Linux/macOS 支持：以 no-follow FD 固定 source，并用私有 hard-link set 保留 main/WAL/SHM/journal snapshot 语义。macOS 只在 `.backup-00.tmp` 至 `.backup-31.tmp` 中 O_EXCL 创建，或复用 exclusive nonblocking flock 下的零长度普通单链接且 held/path identity 一致的槽；完整 snapshot 只写 held FD，`fclonefileat` 从该 FD 原子 no-replace 发布，随后要求 final 与 payload 字节完全一致且 SQLite integrity 为 `ok`。完整成功后仅通过仍锁定的 held FD truncate+fsync 为零供复用；失败非零槽有界保留，不执行 pathname cleanup，容量耗尽提示仅在无 backup 运行时清理。Linux 继续使用 unlinked `O_TMPFILE` + `linkat(AT_EMPTY_PATH)`；若 capability policy 拒绝 `AT_EMPTY_PATH`，仅在 `/proc/self/fd` 复核仍绑定 held inode 后使用 `AT_SYMLINK_FOLLOW` fallback。Directory sync 后先重查 parent pathname 与 held dir FD，再核对 held final FD 与 pathname identity。最终名称、main/sidecar error path 和 private staging 均不在 identity check 后 pathname-delete。Windows/其他缺少安全 primitive 的平台在 destination reservation 前失败关闭 |
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |
+| Session revocation | ✅ | `SQLAlchemyAuthStateRepository` 以原子递增的 `auth_state.session_epoch` 使所有旧 Web/extension session 失效；表内不保存 cookie、bearer、device key 或 signing secret |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
 | worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
 | 后端生产切换 | ✅ | `/api/v1`、worker、运维 CLI、安装器 secret 生命周期与 fresh vNext database 已是权威；只剩 Task 22 的现有 Web/extension client 接线 |
@@ -32,13 +33,24 @@
 
 | 数据域 | 表 |
 |--------|----|
-| 系统与来源 | `settings`, `source_accounts` |
+| 系统、鉴权与来源 | `settings`, `auth_state`, `source_accounts` |
 | 活动与画像 | `activity_events`, `profile_revisions`, `profile_evidence`, `profile_consumed_evidence` |
 | 内容与推荐 | `content_items`, `candidate_assessments`, `feed_entries`, `interactions` |
 | 本地集合与聊天 | `collections`, `collection_items`, `chat_turns` |
 | 执行与审计 | `source_tasks`, `job_runs`, `ai_runs` |
 
-内容使用 `(source_id, external_id)` 作为跨源唯一身份；候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger 都以外键关联活动证据，后者不受后续 facet 删除影响。`job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，但不是“消息仍在 queue”的证明：worker startup 会重新发布全部 pending row。progress 只允许单调前进。来源账户凭据列只保存 `encrypted_credentials`。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
+内容使用 `(source_id, external_id)` 作为跨源唯一身份；library adapter 用一次 join
+读取 collection membership 与 normalized content，并按 `added_at,id` 确定性排序，避免
+N+1。chat history 按 `conversation_id` 隔离并按 `created_at,id` 升序分页，公开投影不含
+`ai_run_id`。候选评估绑定 profile revision；画像 facet evidence 与独立 consumed ledger
+都以外键关联活动证据，后者不受后续 facet 删除影响。显式 profile edit 的 override
+event、revision、evidence association 与 consumed ledger 在同一 UoW 提交。
+`job_runs.dispatched_at` 是 DB→Huey 成功 handoff marker，但不是“消息仍在 queue”的证明：
+worker startup 会重新发布全部 pending row。progress 只允许单调前进。来源账户凭据列只
+保存 `encrypted_credentials`；disconnect 物理删除该 account row，重复调用成功且标记
+idempotent。`source_tasks.request_deadline_at` 保存绝对请求截止时间，使过期任务即使清理
+延迟也不可再 claim。SQLite engine 会打开 foreign keys、把 `busy_timeout_seconds` 同时
+配置到 driver timeout 与 `PRAGMA busy_timeout`，并在文件型 URL 下自动创建父目录。
 
 ## 公开 API
 
@@ -54,19 +66,30 @@
 
 `UnitOfWork` 暴露 `settings`、`source_accounts`、`activities`、`profiles`、`content`、`assessments`、`feed`、`interactions`、`collections`、`chat`、`source_tasks`、`job_runs` 和 `ai_runs` repository。`activities` 支持幂等导入，profile repository 提供独立 consumed ledger，assessment adapter 可查询同 revision 已评估与历史 admitted/interacted 内容，`job_runs` 提供幂等 schedule、全部/未发布 pending 查询、dispatch reconciliation、原子 claim、条件 running transaction guard、运行中取消、progress checkpoint、重启恢复和 terminal cleanup。四个 worker handler 在 feature 写事务内先执行 guard；cancel/checkpoint/terminal-or-retry/recovery 也都以条件 UPDATE 开始，不经过 SELECT→ORM flush 的 SQLite lock upgrade。两个竞争事务按 write order 与有限 busy timeout 串行：cancel 先则 feature 无 effect，guard 先则 feature commit 先于 cancelled state；timeout exhaustion 保持显式失败。worker 中的 `TaskRunner` 会写 `ai_runs`，但该表只记录 task、model alias、状态、时间、usage 与错误分类；ORM、Alembic 基线和 repository API 均不含 input/output payload，不依赖启发式脱敏，避免应用数据库成为内容或 provider credential 的旁路持久化通道。`source_tasks` 已由 queued browser transport 使用，但现有浏览器扩展 dispatcher 尚未切到 generic claim/complete。
 
-`UserSettings` 的当前完整契约如下：
+`UserSettings` 的当前完整契约是 nested strict groups，而不是旧 flat keys：
 
-| 字段 | 默认值 | 约束 |
-|------|--------|------|
-| `onboarding_complete` | `false` | 严格 boolean |
-| `feed_low_watermark` | `20` | `0..1000`，且不得高于 high watermark |
-| `feed_high_watermark` | `50` | `1..2000` |
-| `source_sync_interval_minutes` | `30` | `1..10080` |
-| `source_weights` | 七个平台均为 `1.0` | key 必须是 canonical SourceId；值必须有限且非负，零权重不参与 feed 配额 |
-| `source_enabled` | 七个平台均为 `false` | key 必须是 canonical SourceId；只有显式启用的来源会被 worker 调用 |
+| group | persisted mutable state | deployment/read-only projection |
+|---|---|---|
+| `sources` | `enabled`, `weights` | — |
+| `schedules` | `source_sync_interval_minutes` | — |
+| `feed` | watermarks, candidate/batch limits, score/novelty thresholds, per-source/topic caps | — |
+| `profile` | `minimum_evidence_confidence` | — |
+| `tasks` | per-task alias, semantic retries, timeout, request/token limits | — |
+| `network` | direct/system/custom mode and credential-free proxy URL | — |
+| `logging` | console/file levels | `directory` |
+| `access_control` | Web/loopback/extension behavior and TTLs | bearer/password configured booleans |
+| `jobs` | `retention_days` | `worker_concurrency` |
+
+完整字段、默认值和 bounds 见 [vNext 配置](config.md)。repository 按完整 nested JSON value
+replace，service 先递归 merge partial patch、拒绝 read-only path、再校验完整 model；deployment
+facts 在每次 GET overlay，不落入可写 product state。
 
 ## 迁移与安全约束
 
-开发者可在仓库根目录执行 `alembic upgrade head` 创建 vNext 空库；迁移环境会先为 file-backed SQLite URL 创建缺失的父目录。该命令只操作 `alembic.ini` 指向的 vNext URL；不得把 legacy 数据库 URL 传给这套迁移，也不得用 `Base.metadata.create_all()` 代替版本化迁移。
+开发者可在仓库根目录执行 `alembic upgrade head` 创建 vNext 空库并依次应用 `0001`
+与 `0002`；迁移环境会先为 file-backed SQLite URL 创建缺失的父目录。API/worker 要求
+revision 精确位于 head，不能在运行时隐式创建 `auth_state`。该命令只操作 `alembic.ini`
+指向的 vNext URL；不得把 legacy 数据库 URL 传给这套迁移，也不得用
+`Base.metadata.create_all()` 代替版本化迁移。
 
 凭据加解密要求进程提供非空 `OPENBILICLAW_SECRET_KEY`。数据库、日志、设置表和 AI run 均不得写入 plaintext credential 或派生 key；丢失或更换 secret 后，旧密文不可解密。Docker 与 source installer 在私密 `.env` 中生成并幂等复用该 secret，以 mode `0600`、symlink 拒绝、同目录临时文件、`fsync` 和原子替换保护它；安装输出与 OpenAPI 都不暴露值。

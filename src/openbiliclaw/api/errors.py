@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.exc import OperationalError
 
 from openbiliclaw.api.dependencies import DependencyUnavailableError
@@ -31,11 +35,52 @@ _CONFLICTS: tuple[type[Exception], ...] = (
     AbandonedSourceTaskError,
 )
 
+logger = logging.getLogger(__name__)
+
+
+class ErrorDetail(BaseModel):
+    """Stable machine code and safe human-readable summary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    code: str
+    message: str
+
+
+class ErrorEnvelope(BaseModel):
+    """The only JSON error shape exposed by the v1 HTTP boundary."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    error: ErrorDetail
+
+
+_HTTP_ERROR_CONTRACTS: dict[int, tuple[str, str]] = {
+    400: ("bad_request", "request could not be processed"),
+    401: ("unauthorized", "bearer authentication required"),
+    403: ("forbidden", "access denied"),
+    404: ("not_found", "resource not found"),
+    405: ("method_not_allowed", "method is not allowed"),
+    409: ("conflict", "resource state conflict"),
+    422: ("validation_error", "request validation failed"),
+    429: ("rate_limited", "request rate limit exceeded"),
+    500: ("internal_error", "internal server error"),
+    503: ("unavailable", "required service is unavailable"),
+}
+
+_DOCUMENTED_ERROR_STATUSES = (401, 403, 404, 409, 422, 429, 500, 503)
+
 
 def _response(status_code: int, code: str, message: str) -> JSONResponse:
+    envelope = ErrorEnvelope(error=ErrorDetail(code=code, message=message))
     return JSONResponse(
-        status_code=status_code, content={"error": {"code": code, "message": message}}
+        status_code=status_code,
+        content=envelope.model_dump(mode="json"),
     )
+
+
+def _http_contract(status_code: int) -> tuple[str, str]:
+    return _HTTP_ERROR_CONTRACTS.get(status_code, ("request_failed", "request failed"))
 
 
 def install_error_handlers(app: FastAPI) -> None:
@@ -49,8 +94,8 @@ def install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(HTTPException)
     async def http_error(_request: Request, error: HTTPException) -> JSONResponse:
-        message = str(error.detail) if isinstance(error.detail, str) else "request failed"
-        response = _response(error.status_code, "http_error", message)
+        code, message = _http_contract(error.status_code)
+        response = _response(error.status_code, code, message)
         if error.headers:
             response.headers.update(error.headers)
         return response
@@ -86,5 +131,53 @@ def install_error_handlers(app: FastAPI) -> None:
     for unavailable_type in unavailable_errors:
         app.add_exception_handler(unavailable_type, unavailable_error)
 
+    @app.exception_handler(Exception)
+    async def internal_error(_request: Request, error: Exception) -> JSONResponse:
+        logger.error("unhandled API exception type=%s", type(error).__name__)
+        return _response(500, "internal_error", "internal server error")
 
-__all__ = ["install_error_handlers"]
+
+def register_error_contracts(schema: dict[str, Any]) -> None:
+    """Attach the unified envelope without replacing success/auth/SSE metadata."""
+
+    components = schema.setdefault("components", {})
+    assert isinstance(components, dict)
+    schemas = components.setdefault("schemas", {})
+    assert isinstance(schemas, dict)
+    envelope_schema = ErrorEnvelope.model_json_schema(ref_template="#/components/schemas/{model}")
+    definitions = envelope_schema.pop("$defs", {})
+    if isinstance(definitions, dict):
+        schemas.update(definitions)
+    schemas[ErrorEnvelope.__name__] = envelope_schema
+
+    paths = schema.get("paths", {})
+    assert isinstance(paths, dict)
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for method, operation in path_item.items():
+            if method not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            if not isinstance(operation, dict):
+                continue
+            responses = operation.setdefault("responses", {})
+            assert isinstance(responses, dict)
+            for status_code in _DOCUMENTED_ERROR_STATUSES:
+                code, message = _http_contract(status_code)
+                responses[str(status_code)] = {
+                    "description": message,
+                    "content": {
+                        "application/json": {
+                            "schema": {"$ref": "#/components/schemas/ErrorEnvelope"}
+                        }
+                    },
+                    "x-error-code": code,
+                }
+
+
+__all__ = [
+    "ErrorDetail",
+    "ErrorEnvelope",
+    "install_error_handlers",
+    "register_error_contracts",
+]

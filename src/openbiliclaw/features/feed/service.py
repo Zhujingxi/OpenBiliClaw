@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID, uuid5
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind, ProfileSignal
@@ -135,6 +135,25 @@ class FeedSettings(Protocol):
     def get(self) -> UserSettings: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _ReplenishmentState:
+    profile: ProfileSnapshot | None
+    current_unseen: int
+    excluded_ids: frozenset[UUID]
+    excluded_identities: frozenset[tuple[str, str]]
+
+
+@dataclass(frozen=True, slots=True)
+class _NormalizedCandidates:
+    batch: tuple[ContentItem, ...]
+    new_content: tuple[ContentItem, ...]
+
+
+def _checkpoint(callback: Callable[[float], None] | None, progress: float) -> None:
+    if callback is not None:
+        callback(progress)
+
+
 def allocate_source_limits(
     deficit: int,
     source_ids: Sequence[str],
@@ -241,16 +260,11 @@ class FeedService:
         with self._uow_factory() as uow:
             return uow.feed.list_entries(limit=limit, offset=offset)
 
-    async def replenish(
-        self,
-        *,
-        checkpoint: Callable[[float], None] | None = None,
-        transaction_guard: Callable[[object], None] | None = None,
-    ) -> tuple[FeedEntry, ...]:
+    def _load_replenishment_state(self) -> _ReplenishmentState:
         with self._uow_factory() as uow:
             profile = uow.profiles.latest()
             current_unseen = uow.feed.unseen_count()
-            excluded = (
+            excluded_ids = (
                 frozenset()
                 if profile is None
                 else uow.assessments.excluded_content_ids(profile.revision)
@@ -260,35 +274,86 @@ class FeedService:
                 if profile is None
                 else uow.assessments.excluded_content_identities(profile.revision)
             )
-        if profile is None:
-            raise RuntimeError("feed replenishment requires a profile")
-        settings = self._settings.get() if self._settings else None
-        low_watermark = settings.feed_low_watermark if settings else self._policy.low_watermark
-        high_watermark = settings.feed_high_watermark if settings else self._policy.high_watermark
-        deficit = feed_deficit(
-            current_unseen,
-            low_watermark,
-            high_watermark,
+        return _ReplenishmentState(
+            profile=profile,
+            current_unseen=current_unseen,
+            excluded_ids=excluded_ids,
+            excluded_identities=excluded_identities,
         )
-        if not deficit:
-            return ()
 
-        eligible = tuple(
-            (connector, operation)
-            for connector in self._connectors
-            if settings is None
-            or settings.source_enabled.get(connector.manifest.source_id.value, False)
-            if (operation := _operation(connector)) is not None
+    def _effective_policy(self, settings: UserSettings | None) -> FeedPolicy:
+        if settings is None:
+            return self._policy
+        return FeedPolicy(
+            low_watermark=settings.feed.low_watermark,
+            high_watermark=settings.feed.high_watermark,
+            candidate_multiplier=settings.feed.candidate_multiplier,
+            max_batch_candidates=settings.feed.max_batch_candidates,
+            min_score=settings.feed.min_score,
+            min_novelty=settings.feed.min_novelty,
+            max_per_source=settings.feed.max_per_source,
+            max_per_topic=settings.feed.max_per_topic,
         )
-        collection_bound = min(
-            deficit * self._policy.candidate_multiplier,
-            self._policy.max_batch_candidates,
-        )
-        allocations = allocate_source_limits(
-            collection_bound,
-            tuple(connector.manifest.source_id.value for connector, _ in eligible),
-            weights=settings.source_weights if settings else None,
-        )
+
+    def _eligible_connectors(
+        self, settings: UserSettings | None
+    ) -> tuple[tuple[SourceConnector, SourceOperation], ...]:
+        eligible: list[tuple[SourceConnector, SourceOperation]] = []
+        for connector in self._connectors:
+            source_id = connector.manifest.source_id.value
+            enabled = (
+                cast("Mapping[str, bool]", settings.sources.enabled)
+                if settings is not None
+                else None
+            )
+            if enabled is not None and not enabled.get(source_id, False):
+                continue
+            operation = _operation(connector)
+            if operation is not None:
+                eligible.append((connector, operation))
+        return tuple(eligible)
+
+    async def _collect_from_connector(
+        self,
+        connector: SourceConnector,
+        operation: SourceOperation,
+        *,
+        profile: ProfileSnapshot,
+        limit: int,
+        state: _ReplenishmentState,
+        identities: set[tuple[str, str]],
+        checkpoint: Callable[[float], None] | None,
+    ) -> tuple[ContentItem, ...]:
+        _checkpoint(checkpoint, 0.15)
+        query = _query(profile) if operation.requires_input else None
+        request_limit = min(100, limit + len(state.excluded_ids))
+        result = await connector.execute(operation, query=query, limit=request_limit)
+        _checkpoint(checkpoint, 0.35)
+        accepted: list[ContentItem] = []
+        for item in result:
+            if not isinstance(item, ContentItem):
+                raise TypeError("content discovery operation returned activity evidence")
+            identity = (item.source_id, item.external_id)
+            if (
+                identity in identities
+                or identity in state.excluded_identities
+                or item.id in state.excluded_ids
+            ):
+                continue
+            identities.add(identity)
+            accepted.append(item)
+            if len(accepted) == limit:
+                break
+        return tuple(accepted)
+
+    async def _collect_candidates(
+        self,
+        profile: ProfileSnapshot,
+        state: _ReplenishmentState,
+        eligible: tuple[tuple[SourceConnector, SourceOperation], ...],
+        allocations: Mapping[str, int],
+        checkpoint: Callable[[float], None] | None,
+    ) -> tuple[ContentItem, ...]:
         candidates: list[ContentItem] = []
         identities: set[tuple[str, str]] = set()
         for connector, operation in sorted(
@@ -297,31 +362,20 @@ class FeedService:
             limit = allocations.get(connector.manifest.source_id.value, 0)
             if not limit:
                 continue
-            if checkpoint is not None:
-                checkpoint(0.15)
-            query = _query(profile) if operation.requires_input else None
-            request_limit = min(100, limit + len(excluded))
-            result = await connector.execute(operation, query=query, limit=request_limit)
-            if checkpoint is not None:
-                checkpoint(0.35)
-            accepted_from_source = 0
-            for item in result:
-                if not isinstance(item, ContentItem):
-                    raise TypeError("content discovery operation returned activity evidence")
-                identity = (item.source_id, item.external_id)
-                if (
-                    identity not in identities
-                    and identity not in excluded_identities
-                    and item.id not in excluded
-                ):
-                    identities.add(identity)
-                    candidates.append(item)
-                    accepted_from_source += 1
-                    if accepted_from_source == limit:
-                        break
-        if not candidates:
-            return ()
+            candidates.extend(
+                await self._collect_from_connector(
+                    connector,
+                    operation,
+                    profile=profile,
+                    limit=limit,
+                    state=state,
+                    identities=identities,
+                    checkpoint=checkpoint,
+                )
+            )
+        return tuple(candidates)
 
+    def _normalize_candidates(self, candidates: tuple[ContentItem, ...]) -> _NormalizedCandidates:
         normalized: list[ContentItem] = []
         new_content: list[ContentItem] = []
         with self._uow_factory() as uow:
@@ -330,38 +384,48 @@ class FeedService:
                 normalized.append(existing or candidate)
                 if existing is None:
                     new_content.append(candidate)
+        return _NormalizedCandidates(tuple(normalized), tuple(new_content))
 
-        batch = tuple(normalized)
-        assessment_values = await self._assessor.assess_batch(profile, batch)
-        if checkpoint is not None:
-            checkpoint(0.7)
-        assessments = _validate_assessments(profile, batch, assessment_values)
+    def _adjustments(self, batch: tuple[ContentItem, ...]) -> dict[UUID, float]:
         with self._uow_factory() as uow:
-            adjustment = {item.id: uow.interactions.adjustment(item.id) for item in batch}
+            return {item.id: uow.interactions.adjustment(item.id) for item in batch}
 
-        # Threshold seeds were chosen conservatively for the first vNext offline corpus.
-        # Re-run feed calibration after a source-normalization or assessment-model swap.
-        ranked = sorted(
-            batch,
-            key=lambda item: (
-                -(assessments[item.id].score + adjustment[item.id]),
-                item.source_id,
-                item.external_id,
-            ),
+    @staticmethod
+    def _admissible(
+        item: ContentItem,
+        assessment: CandidateAssessment,
+        score: float,
+        topics: tuple[str, ...],
+        policy: FeedPolicy,
+        source_counts: Mapping[str, int],
+        topic_counts: Mapping[str, int],
+    ) -> bool:
+        if score < policy.min_score or assessment.novelty < policy.min_novelty:
+            return False
+        if source_counts.get(item.source_id, 0) >= policy.max_per_source:
+            return False
+        return not topics or all(
+            topic_counts.get(topic, 0) < policy.max_per_topic for topic in topics
         )
+
+    @staticmethod
+    def _admit(
+        ranked: list[ContentItem],
+        assessments: Mapping[UUID, CandidateAssessment],
+        adjustments: Mapping[UUID, float],
+        *,
+        deficit: int,
+        policy: FeedPolicy,
+    ) -> tuple[tuple[ContentItem, CandidateAssessment], ...]:
         admitted: list[tuple[ContentItem, CandidateAssessment]] = []
         source_counts: dict[str, int] = {}
         topic_counts: dict[str, int] = {}
         for item in ranked:
             assessment = assessments[item.id]
-            score = assessment.score + adjustment[item.id]
             topics = tuple(dict.fromkeys(topic.casefold() for topic in assessment.topics if topic))
-            if score < self._policy.min_score or assessment.novelty < self._policy.min_novelty:
-                continue
-            if source_counts.get(item.source_id, 0) >= self._policy.max_per_source:
-                continue
-            if topics and any(
-                topic_counts.get(topic, 0) >= self._policy.max_per_topic for topic in topics
+            score = assessment.score + adjustments[item.id]
+            if not FeedService._admissible(
+                item, assessment, score, topics, policy, source_counts, topic_counts
             ):
                 continue
             admitted.append((item, assessment))
@@ -370,14 +434,20 @@ class FeedService:
                 topic_counts[topic] = topic_counts.get(topic, 0) + 1
             if len(admitted) == deficit:
                 break
+        return tuple(admitted)
 
+    def _persist_admission(
+        self,
+        normalized: _NormalizedCandidates,
+        assessments: Mapping[UUID, CandidateAssessment],
+        admitted: tuple[tuple[ContentItem, CandidateAssessment], ...],
+        transaction_guard: Callable[[object], None] | None,
+    ) -> tuple[FeedEntry, ...]:
         entries: list[FeedEntry] = []
-        if checkpoint is not None:
-            checkpoint(0.85)
         with self._uow_factory() as uow:
             if transaction_guard is not None:
                 transaction_guard(uow)
-            for item in new_content:
+            for item in normalized.new_content:
                 uow.content.add(item)
             uow.content.flush()
             for assessment in assessments.values():
@@ -394,6 +464,55 @@ class FeedService:
                 entries.append(entry)
             uow.commit()
         return tuple(entries)
+
+    async def replenish(
+        self,
+        *,
+        checkpoint: Callable[[float], None] | None = None,
+        transaction_guard: Callable[[object], None] | None = None,
+    ) -> tuple[FeedEntry, ...]:
+        state = self._load_replenishment_state()
+        profile = state.profile
+        if profile is None:
+            raise RuntimeError("feed replenishment requires a profile")
+        settings = self._settings.get() if self._settings else None
+        policy = self._effective_policy(settings)
+        deficit = feed_deficit(state.current_unseen, policy.low_watermark, policy.high_watermark)
+        if not deficit:
+            return ()
+
+        eligible = self._eligible_connectors(settings)
+        collection_bound = min(deficit * policy.candidate_multiplier, policy.max_batch_candidates)
+        allocations = allocate_source_limits(
+            collection_bound,
+            tuple(connector.manifest.source_id.value for connector, _ in eligible),
+            weights=(cast("Mapping[str, float]", settings.sources.weights) if settings else None),
+        )
+        candidates = await self._collect_candidates(
+            profile, state, eligible, allocations, checkpoint
+        )
+        if not candidates:
+            return ()
+
+        normalized = self._normalize_candidates(candidates)
+        assessment_values = await self._assessor.assess_batch(profile, normalized.batch)
+        _checkpoint(checkpoint, 0.7)
+        assessments = _validate_assessments(profile, normalized.batch, assessment_values)
+        adjustments = self._adjustments(normalized.batch)
+
+        # Threshold seeds were chosen conservatively for the first vNext offline corpus.
+        # Re-run feed calibration after a source-normalization or assessment-model swap.
+        ranked = sorted(
+            normalized.batch,
+            key=lambda item: (
+                -(assessments[item.id].score + adjustments[item.id]),
+                item.source_id,
+                item.external_id,
+            ),
+        )
+        admitted = self._admit(ranked, assessments, adjustments, deficit=deficit, policy=policy)
+        _checkpoint(checkpoint, 0.85)
+        return self._persist_admission(normalized, assessments, admitted, transaction_guard)
 
 
 class FeedbackService:

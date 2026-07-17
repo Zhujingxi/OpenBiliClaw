@@ -15,6 +15,7 @@ from openbiliclaw.features.sources.domain import (
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
+    source_form_schema_fields,
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
@@ -47,6 +48,7 @@ class XiaohongshuSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.XIAOHONGSHU,
     display_name="Xiaohongshu",
+    **source_form_schema_fields(XiaohongshuSettings),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

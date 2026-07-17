@@ -16,6 +16,7 @@ from openbiliclaw.features.sources.domain import (
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
+    source_form_schema_fields,
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
@@ -89,6 +90,7 @@ class RedditConnector(NormalizingConnector):
             manifest=SourceManifest(
                 source_id=SourceId.REDDIT,
                 display_name="Reddit",
+                **source_form_schema_fields(RedditSettings),
                 capabilities=frozenset(
                     {
                         SourceCapability.AUTHENTICATION,

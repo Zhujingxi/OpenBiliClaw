@@ -15,6 +15,7 @@ from openbiliclaw.features.sources.domain import (
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
+    source_form_schema_fields,
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
@@ -83,6 +84,7 @@ class TwitterSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.TWITTER,
     display_name="X (Twitter)",
+    **source_form_schema_fields(TwitterSettings),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

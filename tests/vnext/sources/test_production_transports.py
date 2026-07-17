@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from openbiliclaw.bilibili.api import BilibiliAPIError
 from openbiliclaw.features.sources.domain import (
+    BrowserOperationResult,
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
@@ -313,7 +314,9 @@ async def test_real_deferred_composition_executes_every_primary_browser_mapping(
                 service.complete,
                 claim.id,
                 claim.lease_token,
-                {"items": [row]},
+                BrowserOperationResult.validate_python(
+                    {"operation": claim.operation.value, "items": [row]}
+                ),
             )
             assert await pending
 
@@ -354,7 +357,12 @@ async def test_bilibili_expected_direct_failure_uses_browser_fallback(
         service.complete,
         claim.id,
         claim.lease_token,
-        {"items": [{"bvid": "browser", "title": "Browser fallback"}]},
+        BrowserOperationResult.validate_python(
+            {
+                "operation": claim.operation.value,
+                "items": [{"bvid": "browser", "title": "Browser fallback"}],
+            }
+        ),
     )
     assert (await pending)[0].external_id == "browser"
 

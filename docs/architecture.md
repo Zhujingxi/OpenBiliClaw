@@ -20,10 +20,10 @@ features: Activity ──► Profile ─────┐
         ▼
 infrastructure.database
         ├─ SQLAlchemy mappings + repositories + UnitOfWork
-        ├─ installer / Compose one-shot migrate ─► Alembic 0001 ─► data/vnext/openbiliclaw.db
+        ├─ installer / Compose one-shot migrate ─► Alembic 0001 + 0002 ─► data/vnext/openbiliclaw.db
         ├─ API + worker startup ─► read-only schema-head gate
         └─ settings / source_accounts / activity / profile + consumed evidence / content
-           / feed / collections / chat / source_tasks / job_runs / ai_runs
+           / auth_state / feed / collections / chat / source_tasks / job_runs / ai_runs
         │
         └─ infrastructure.security.CredentialCipher
               OPENBILICLAW_SECRET_KEY ──► derived Fernet key ──► opaque ciphertext only
@@ -45,8 +45,9 @@ Huey scheduler/transport (data/vnext/huey.db, result enabled)
               └─► JobService ─► job_runs (all-pending recovery/claim/cancel/txn guard)
 
 Existing Web + Extension (Task 22 rewiring pending)
-        └─► bearer HTTP / EventSource
+        └─► cookie+CSRF / finite extension bearer / fetch-SSE
               └─► FastAPI feature routers (/api/v1 only)
+                    ├─► auth status/login/logout/exchange/revoke
                     ├─► injected application services
                     ├─► SSE chat + onboarding/job progress
                     └─► generic source-task long poll claim/complete
@@ -55,15 +56,31 @@ Implemented: domain contracts/policies; seven source manifests/connectors/settin
              lease-safe generic source tasks; isolated schema/migration; repository/UoW;
              credential cipher; six typed AI tasks/runner/embedding/health; application services;
              explicit seven-source worker composition; four durable jobs; LiteLLM/Huey Compose;
-             thin FastAPI v1 routers, SSE, bearer access, operational CLI, deterministic OpenAPI
+             thin FastAPI v1 routers, cookie/CSRF + bearer auth, SSE, operational CLI,
+             deterministic OpenAPI and unified error envelope
 Deferred: web/extension client rewiring and final legacy deletion; stored legacy data is not migrated
 ```
 
 vNext 数据库默认 URL 是 `sqlite:///data/vnext/openbiliclaw.db`，与 legacy 数据库隔离。`DatabaseSettings` 可读取 `OPENBILICLAW_DATABASE_URL` / `OPENBILICLAW_DATABASE_ECHO` / `OPENBILICLAW_DATABASE_BUSY_TIMEOUT_SECONDS`；SQLite driver timeout 与 `PRAGMA busy_timeout` 使用同一个有限值。`SettingsService` 对完整 `UserSettings` 做严格校验后才在一个事务中替换；来源账户 repository 只接受 `CredentialCipher` 签发的 opaque Fernet ciphertext。
 
+`UserSettings` 以 `sources/schedules/feed/profile/tasks/network/logging/access_control/jobs`
+九个 strict nested group 表达实际运行选择。log directory、worker concurrency、bearer/password
+configured flags 是明确的 deployment/read-only facts，不接受 PATCH。installer bearer、Web password
+hash、session signing secret 与 extension device-key digest records 只来自私密 runtime environment；
+password cookie 与 extension finite bearer 共用签名 session，但 unsafe cookie request 还必须通过
+same-origin + `X-OBC-Auth` CSRF gate。Alembic `0002_auth_state` 的非秘密 epoch 为全局 session
+revocation authority，递增后所有旧 Web/extension session 失效，installer bearer 不受影响。
+
 七个平台 registry 只在 composition time 显式构造，不扫描动态插件。connector manifest 将稳定产品能力与 concrete operation 分开，每个 operation 声明 auth、normalized result kind、primary transport 和可选 fallback transport；B 站 search 是 direct primary + 仅在 retained risk-control signal 下启用的 browser fallback，explore 保留在高层 discovery，不冒充平台原生操作。现有 Bilibili API、Douyin direct、YouTube scraper、X client、Reddit CLI 均有 production adapter，登录态页面操作使用 typed durable queue。generic task 只接受 manifest 中 primary/fallback browser-assisted operation，payload/result 先做 finite JSON 校验，再以 token classifier 拒绝 qualified credential container。enqueue 时持久化绝对 request deadline；claim/complete 在原子 SQL 内以 SQLite 数据库时钟重查 deadline/lease，并从同一时钟生成新 lease，避免写锁等待后使用陈旧 Python 时间；到期 row 由 snapshot/claim 收敛为 `abandoned`。execution timeout / asyncio cancellation 之后运行独立的 cancellation-resistant cleanup，最多等待与 SQLite busy timeout 对齐的有限 persistence window 再传播原异常；因此总返回时间可超过 execution timeout，且 cleanup 超界时不承诺返回前已经写成 `cancelled`，但 durable deadline 保证 row 不再 actionable。超界的 late enqueue 由 done callback 安全取走 outcome，日志只保留异常类名，不泄露异常文本或触发未取回 task exception。并发 claim 只有一个 lease owner；相同 completion 幂等，不同结果冲突。详细矩阵见 [vNext 多来源连接器与通用浏览器任务](modules/vnext-sources.md)。
 
-AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。六个 task 覆盖 profile、keyword、单候选、batch candidate、chat 和 recommendation；profile/feed worker 与 `/api/v1/chat/stream` 已使用共享 runner adapter，chat 直接输出 typed SSE。四份 versioned Pydantic Evals dataset 继续覆盖既有核心任务。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
+AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embedding` 三个稳定别名。`TaskRunner` 仅做输入/输出验证、usage/timeout 限制和 bounded semantic retry；`CachePolicy.BYPASS` 只转发 LiteLLM `cache.no-cache` 请求指令，provider deployment、fallback、网络重试、限流和 cache 实现全部由 LiteLLM 拥有。六个 task 覆盖 profile、keyword、单候选、batch candidate、chat 和 recommendation；profile/feed worker 与 `/api/v1/chat/stream` 已使用共享 runner adapter，chat history 由 `/api/v1/chat/{conversation_id}` 做 bounded public projection。AI health 只从显式 `OPENBILICLAW_LITELLM_ADMIN_URL` 投影可选安全导航 URL，不暴露 internal base/key。四份 versioned Pydantic Evals dataset 继续覆盖既有核心任务。`ai_runs` 结构只含 task/model/status/timing/usage/error class，没有输入或输出 payload。详细契约见 [vNext 类型化 AI 模块](modules/vnext-ai.md)。
+
+Library list 在 repository 以单次 join 返回 collection membership 与 normalized content；profile
+PATCH 把 narrative/facet override evidence、expected-revision check 与一个新 revision 原子提交。
+Source manifest 自描述 safe form schemas 和七类 operation request/result，account disconnect 只删除
+encrypted material 并返回 idempotent status。FastAPI 的 centralized error mapper 与 deterministic
+OpenAPI post-processor统一使用 `{error:{code,message}}`，不覆盖 success/security/SSE metadata，
+也不向客户端泄露 traceback、SQL、credential 或 provider text。
 
 worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。Docker Compose 以唯一一次性 `migrate` 服务串行 Alembic 写入，并以 successful-completion dependency 阻止失败时启动 API/worker；两个 runtime startup 只执行 schema-head 只读 gate。Source installer 也在启动两个进程前独占 migration。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展 dispatcher 到 Task 22 才消费这些 route。下方 v0.3 图只用于最终删除前追踪不可达实现。
 

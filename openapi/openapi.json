@@ -4,6 +4,17 @@
       "AIHealthResponse": {
         "additionalProperties": false,
         "properties": {
+          "admin_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Url"
+          },
           "aliases": {
             "items": {
               "$ref": "#/components/schemas/AliasHealthResponse"
@@ -21,6 +32,123 @@
           "aliases"
         ],
         "title": "AIHealthResponse",
+        "type": "object"
+      },
+      "AccessControlSettings": {
+        "additionalProperties": false,
+        "description": "Mutable access behavior and secret-free deployment readiness flags.",
+        "properties": {
+          "extension_access_enabled": {
+            "default": true,
+            "title": "Extension Access Enabled",
+            "type": "boolean"
+          },
+          "extension_session_ttl_hours": {
+            "default": 24,
+            "maximum": 168.0,
+            "minimum": 1.0,
+            "title": "Extension Session Ttl Hours",
+            "type": "integer"
+          },
+          "installer_bearer_configured": {
+            "default": false,
+            "readOnly": true,
+            "title": "Installer Bearer Configured",
+            "type": "boolean",
+            "x-mutability": "deployment"
+          },
+          "password_configured": {
+            "default": false,
+            "readOnly": true,
+            "title": "Password Configured",
+            "type": "boolean",
+            "x-mutability": "deployment"
+          },
+          "session_ttl_hours": {
+            "default": 24,
+            "maximum": 8760.0,
+            "minimum": 0.0,
+            "title": "Session Ttl Hours",
+            "type": "integer"
+          },
+          "trust_loopback": {
+            "default": false,
+            "title": "Trust Loopback",
+            "type": "boolean"
+          },
+          "web_password_enabled": {
+            "default": false,
+            "title": "Web Password Enabled",
+            "type": "boolean"
+          }
+        },
+        "title": "AccessControlSettings",
+        "type": "object"
+      },
+      "AccessControlSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "extension_access_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension Access Enabled"
+          },
+          "extension_session_ttl_hours": {
+            "anyOf": [
+              {
+                "maximum": 168.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extension Session Ttl Hours"
+          },
+          "session_ttl_hours": {
+            "anyOf": [
+              {
+                "maximum": 8760.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Ttl Hours"
+          },
+          "trust_loopback": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trust Loopback"
+          },
+          "web_password_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Web Password Enabled"
+          }
+        },
+        "title": "AccessControlSettingsPatch",
         "type": "object"
       },
       "ActivityEvent": {
@@ -194,6 +322,410 @@
         "title": "AliasHealthResponse",
         "type": "object"
       },
+      "AuthStatusResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "extension_access_enabled": {
+            "title": "Extension Access Enabled",
+            "type": "boolean"
+          },
+          "installer_bearer_configured": {
+            "title": "Installer Bearer Configured",
+            "type": "boolean"
+          },
+          "password_configured": {
+            "title": "Password Configured",
+            "type": "boolean"
+          },
+          "trust_loopback": {
+            "title": "Trust Loopback",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "authenticated",
+          "enabled",
+          "password_configured",
+          "installer_bearer_configured",
+          "extension_access_enabled",
+          "trust_loopback"
+        ],
+        "title": "AuthStatusResponse",
+        "type": "object"
+      },
+      "AuthenticatedResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "authenticated"
+        ],
+        "title": "AuthenticatedResponse",
+        "type": "object"
+      },
+      "BrowserBootstrapRequest": {
+        "additionalProperties": false,
+        "description": "Request a bounded import of account activity visible to the source package.",
+        "properties": {
+          "limit": {
+            "default": 100,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "bootstrap_import",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserBootstrapRequest",
+        "type": "object"
+      },
+      "BrowserBootstrapResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "bootstrap_import",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserBootstrapResult",
+        "type": "object"
+      },
+      "BrowserCommunityRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "community": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Community",
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "community",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "community"
+        ],
+        "title": "BrowserCommunityRequest",
+        "type": "object"
+      },
+      "BrowserCommunityResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "community",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserCommunityResult",
+        "type": "object"
+      },
+      "BrowserCreatorRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "creator": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Creator",
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "creator",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "creator"
+        ],
+        "title": "BrowserCreatorRequest",
+        "type": "object"
+      },
+      "BrowserCreatorResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "creator",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserCreatorResult",
+        "type": "object"
+      },
+      "BrowserFeedRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "feed",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserFeedRequest",
+        "type": "object"
+      },
+      "BrowserFeedResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "feed",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserFeedResult",
+        "type": "object"
+      },
+      "BrowserRelatedRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "related",
+            "title": "Operation",
+            "type": "string"
+          },
+          "seed": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Seed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "seed"
+        ],
+        "title": "BrowserRelatedRequest",
+        "type": "object"
+      },
+      "BrowserRelatedResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "related",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserRelatedResult",
+        "type": "object"
+      },
+      "BrowserSearchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "search",
+            "title": "Operation",
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation",
+          "query"
+        ],
+        "title": "BrowserSearchRequest",
+        "type": "object"
+      },
+      "BrowserSearchResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "search",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserSearchResult",
+        "type": "object"
+      },
+      "BrowserTrendingRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "default": 20,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "operation": {
+            "const": "trending",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserTrendingRequest",
+        "type": "object"
+      },
+      "BrowserTrendingResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "operation": {
+            "const": "trending",
+            "title": "Operation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "title": "BrowserTrendingResult",
+        "type": "object"
+      },
       "ChatChunk": {
         "additionalProperties": false,
         "description": "Transport-neutral chunk that can be rendered as an SSE event.",
@@ -286,6 +818,80 @@
         "title": "ChatDoneEvent",
         "type": "object"
       },
+      "ChatHistoryPage": {
+        "additionalProperties": false,
+        "description": "Stable bounded page of public turns for one conversation.",
+        "properties": {
+          "conversation_id": {
+            "format": "uuid",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChatHistoryTurn"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "maximum": 1000000.0,
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "items",
+          "limit",
+          "offset",
+          "has_more"
+        ],
+        "title": "ChatHistoryPage",
+        "type": "object"
+      },
+      "ChatHistoryTurn": {
+        "additionalProperties": false,
+        "description": "Public chat turn projection without AI/provider execution metadata.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ChatRole"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "content",
+          "created_at"
+        ],
+        "title": "ChatHistoryTurn",
+        "type": "object"
+      },
       "ChatRequest": {
         "additionalProperties": false,
         "properties": {
@@ -313,6 +919,15 @@
         "title": "ChatRequest",
         "type": "object"
       },
+      "ChatRole": {
+        "description": "Roles persisted in a chat conversation.",
+        "enum": [
+          "user",
+          "assistant"
+        ],
+        "title": "ChatRole",
+        "type": "string"
+      },
       "ClaimedSourceTask": {
         "additionalProperties": false,
         "description": "One durable task leased to exactly one extension worker.",
@@ -333,13 +948,43 @@
             "title": "Lease Token",
             "type": "string"
           },
-          "operation": {
-            "$ref": "#/components/schemas/SourceOperation"
-          },
           "payload": {
-            "additionalProperties": true,
-            "title": "Payload",
-            "type": "object"
+            "discriminator": {
+              "mapping": {
+                "bootstrap_import": "#/components/schemas/BrowserBootstrapRequest",
+                "community": "#/components/schemas/BrowserCommunityRequest",
+                "creator": "#/components/schemas/BrowserCreatorRequest",
+                "feed": "#/components/schemas/BrowserFeedRequest",
+                "related": "#/components/schemas/BrowserRelatedRequest",
+                "search": "#/components/schemas/BrowserSearchRequest",
+                "trending": "#/components/schemas/BrowserTrendingRequest"
+              },
+              "propertyName": "operation"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BrowserBootstrapRequest"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserSearchRequest"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserTrendingRequest"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserFeedRequest"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserRelatedRequest"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserCreatorRequest"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserCommunityRequest"
+              }
+            ],
+            "title": "Payload"
           },
           "request_deadline_at": {
             "format": "date-time",
@@ -353,7 +998,7 @@
         "required": [
           "id",
           "source_id",
-          "operation",
+          "payload",
           "lease_token",
           "lease_expires_at",
           "request_deadline_at"
@@ -416,9 +1061,42 @@
             "type": "string"
           },
           "result": {
-            "additionalProperties": true,
-            "title": "Result",
-            "type": "object"
+            "discriminator": {
+              "mapping": {
+                "bootstrap_import": "#/components/schemas/BrowserBootstrapResult",
+                "community": "#/components/schemas/BrowserCommunityResult",
+                "creator": "#/components/schemas/BrowserCreatorResult",
+                "feed": "#/components/schemas/BrowserFeedResult",
+                "related": "#/components/schemas/BrowserRelatedResult",
+                "search": "#/components/schemas/BrowserSearchResult",
+                "trending": "#/components/schemas/BrowserTrendingResult"
+              },
+              "propertyName": "operation"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BrowserBootstrapResult"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserSearchResult"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserTrendingResult"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserFeedResult"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserRelatedResult"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserCreatorResult"
+              },
+              {
+                "$ref": "#/components/schemas/BrowserCommunityResult"
+              }
+            ],
+            "title": "Result"
           }
         },
         "required": [
@@ -513,6 +1191,40 @@
         "title": "ContentItem",
         "type": "object"
       },
+      "ErrorDetail": {
+        "additionalProperties": false,
+        "description": "Stable machine code and safe human-readable summary.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "description": "The only JSON error shape exposed by the v1 HTTP boundary.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
       "EventIngestResponse": {
         "additionalProperties": false,
         "description": "Accepted event identity and the normalized profile signals it produced.",
@@ -535,6 +1247,41 @@
           "signals"
         ],
         "title": "EventIngestResponse",
+        "type": "object"
+      },
+      "ExtensionTokenRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "ExtensionTokenRequest",
+        "type": "object"
+      },
+      "ExtensionTokenResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "expires_at"
+        ],
+        "title": "ExtensionTokenResponse",
         "type": "object"
       },
       "FeedEntry": {
@@ -602,6 +1349,181 @@
           "content"
         ],
         "title": "FeedItem",
+        "type": "object"
+      },
+      "FeedSettings": {
+        "additionalProperties": false,
+        "description": "Bounded collection and admission policy used by FeedService.",
+        "properties": {
+          "candidate_multiplier": {
+            "default": 3,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Candidate Multiplier",
+            "type": "integer"
+          },
+          "high_watermark": {
+            "default": 50,
+            "maximum": 2000.0,
+            "minimum": 1.0,
+            "title": "High Watermark",
+            "type": "integer"
+          },
+          "low_watermark": {
+            "default": 20,
+            "maximum": 1000.0,
+            "minimum": 0.0,
+            "title": "Low Watermark",
+            "type": "integer"
+          },
+          "max_batch_candidates": {
+            "default": 100,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Batch Candidates",
+            "type": "integer"
+          },
+          "max_per_source": {
+            "default": 4,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Per Source",
+            "type": "integer"
+          },
+          "max_per_topic": {
+            "default": 3,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Max Per Topic",
+            "type": "integer"
+          },
+          "min_novelty": {
+            "default": 0.2,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Novelty",
+            "type": "number"
+          },
+          "min_score": {
+            "default": 0.55,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Score",
+            "type": "number"
+          }
+        },
+        "title": "FeedSettings",
+        "type": "object"
+      },
+      "FeedSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_multiplier": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Multiplier"
+          },
+          "high_watermark": {
+            "anyOf": [
+              {
+                "maximum": 2000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "High Watermark"
+          },
+          "low_watermark": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Low Watermark"
+          },
+          "max_batch_candidates": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Batch Candidates"
+          },
+          "max_per_source": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Per Source"
+          },
+          "max_per_topic": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Per Topic"
+          },
+          "min_novelty": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Novelty"
+          },
+          "min_score": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Score"
+          }
+        },
+        "title": "FeedSettingsPatch",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -811,6 +1733,225 @@
         "title": "JobRunResponse",
         "type": "object"
       },
+      "JobSettings": {
+        "additionalProperties": false,
+        "description": "Mutable cleanup retention and deployment-owned worker concurrency.",
+        "properties": {
+          "retention_days": {
+            "default": 30,
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          },
+          "worker_concurrency": {
+            "default": 4,
+            "maximum": 4.0,
+            "minimum": 1.0,
+            "readOnly": true,
+            "title": "Worker Concurrency",
+            "type": "integer",
+            "x-mutability": "deployment"
+          }
+        },
+        "title": "JobSettings",
+        "type": "object"
+      },
+      "JobSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "retention_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retention Days"
+          }
+        },
+        "title": "JobSettingsPatch",
+        "type": "object"
+      },
+      "LibraryItem": {
+        "additionalProperties": false,
+        "description": "One local collection membership joined to renderable normalized content.",
+        "properties": {
+          "collection_item": {
+            "$ref": "#/components/schemas/CollectionItem"
+          },
+          "content": {
+            "$ref": "#/components/schemas/ContentItem"
+          }
+        },
+        "required": [
+          "collection_item",
+          "content"
+        ],
+        "title": "LibraryItem",
+        "type": "object"
+      },
+      "LoggingSettings": {
+        "additionalProperties": false,
+        "description": "Runtime log thresholds plus the deployment-owned output location.",
+        "properties": {
+          "console_level": {
+            "default": "INFO",
+            "enum": [
+              "DEBUG",
+              "INFO",
+              "WARNING",
+              "ERROR",
+              "CRITICAL"
+            ],
+            "title": "Console Level",
+            "type": "string"
+          },
+          "directory": {
+            "default": "logs",
+            "readOnly": true,
+            "title": "Directory",
+            "type": "string",
+            "x-mutability": "deployment"
+          },
+          "file_level": {
+            "default": "DEBUG",
+            "enum": [
+              "DEBUG",
+              "INFO",
+              "WARNING",
+              "ERROR",
+              "CRITICAL"
+            ],
+            "title": "File Level",
+            "type": "string"
+          }
+        },
+        "title": "LoggingSettings",
+        "type": "object"
+      },
+      "LoggingSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "console_level": {
+            "anyOf": [
+              {
+                "enum": [
+                  "DEBUG",
+                  "INFO",
+                  "WARNING",
+                  "ERROR",
+                  "CRITICAL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Console Level"
+          },
+          "file_level": {
+            "anyOf": [
+              {
+                "enum": [
+                  "DEBUG",
+                  "INFO",
+                  "WARNING",
+                  "ERROR",
+                  "CRITICAL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Level"
+          }
+        },
+        "title": "LoggingSettingsPatch",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "NetworkSettings": {
+        "additionalProperties": false,
+        "description": "Secret-free outbound routing policy for supported overseas clients.",
+        "properties": {
+          "mode": {
+            "default": "direct",
+            "enum": [
+              "direct",
+              "system",
+              "custom"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "proxy_url": {
+            "default": "",
+            "maxLength": 2048,
+            "title": "Proxy Url",
+            "type": "string"
+          }
+        },
+        "title": "NetworkSettings",
+        "type": "object"
+      },
+      "NetworkSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "direct",
+                  "system",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "proxy_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Url"
+          }
+        },
+        "title": "NetworkSettingsPatch",
+        "type": "object"
+      },
       "OnboardingProgressEvent": {
         "additionalProperties": false,
         "description": "Current persisted stage and its concrete child job run.",
@@ -911,6 +2052,57 @@
         "title": "OnboardingTerminalEvent",
         "type": "object"
       },
+      "ProfileEdit": {
+        "additionalProperties": false,
+        "description": "An explicit, optimistic edit that creates exactly one profile revision.",
+        "properties": {
+          "expected_revision": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          },
+          "narrative": {
+            "anyOf": [
+              {
+                "maxLength": 10000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Narrative"
+          },
+          "removals": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProfileFacetReference"
+            },
+            "title": "Removals",
+            "type": "array"
+          },
+          "upserts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProfileFacetEdit"
+            },
+            "title": "Upserts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "ProfileEdit",
+        "type": "object"
+      },
       "ProfileFacet": {
         "additionalProperties": false,
         "description": "One evidence-backed value in the user-controlled profile.",
@@ -967,6 +2159,104 @@
           "evidence_ids"
         ],
         "title": "ProfileFacet",
+        "type": "object"
+      },
+      "ProfileFacetEdit": {
+        "additionalProperties": false,
+        "description": "One explicit user-authored facet override without client-supplied evidence.",
+        "properties": {
+          "name": {
+            "enum": [
+              "interests",
+              "avoidances",
+              "style_preferences",
+              "values",
+              "source_affinities"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          },
+          "weight": {
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "value",
+          "weight"
+        ],
+        "title": "ProfileFacetEdit",
+        "type": "object"
+      },
+      "ProfileFacetReference": {
+        "additionalProperties": false,
+        "description": "A typed case-insensitive facet identity to remove.",
+        "properties": {
+          "name": {
+            "enum": [
+              "interests",
+              "avoidances",
+              "style_preferences",
+              "values",
+              "source_affinities"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "value"
+        ],
+        "title": "ProfileFacetReference",
+        "type": "object"
+      },
+      "ProfileSettings": {
+        "additionalProperties": false,
+        "description": "Evidence admission threshold for scheduled profile projection.",
+        "properties": {
+          "minimum_evidence_confidence": {
+            "default": 0.0,
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Minimum Evidence Confidence",
+            "type": "number"
+          }
+        },
+        "title": "ProfileSettings",
+        "type": "object"
+      },
+      "ProfileSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "minimum_evidence_confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum Evidence Confidence"
+          }
+        },
+        "title": "ProfileSettingsPatch",
         "type": "object"
       },
       "ProfileSignal": {
@@ -1144,6 +2434,73 @@
         "title": "ScheduleJob",
         "type": "object"
       },
+      "ScheduleSettings": {
+        "additionalProperties": false,
+        "description": "User-controlled durable job schedules.",
+        "properties": {
+          "source_sync_interval_minutes": {
+            "default": 30,
+            "maximum": 10080.0,
+            "minimum": 1.0,
+            "title": "Source Sync Interval Minutes",
+            "type": "integer"
+          }
+        },
+        "title": "ScheduleSettings",
+        "type": "object"
+      },
+      "ScheduleSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "source_sync_interval_minutes": {
+            "anyOf": [
+              {
+                "maximum": 10080.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Sync Interval Minutes"
+          }
+        },
+        "title": "ScheduleSettingsPatch",
+        "type": "object"
+      },
+      "SourceAccountDisconnectResult": {
+        "additionalProperties": false,
+        "description": "Secret-free result for an idempotent account credential deletion.",
+        "properties": {
+          "account_key": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Account Key",
+            "type": "string"
+          },
+          "disconnected": {
+            "const": true,
+            "default": true,
+            "title": "Disconnected",
+            "type": "boolean"
+          },
+          "idempotent": {
+            "title": "Idempotent",
+            "type": "boolean"
+          },
+          "source_id": {
+            "$ref": "#/components/schemas/SourceId"
+          }
+        },
+        "required": [
+          "source_id",
+          "account_key",
+          "idempotent"
+        ],
+        "title": "SourceAccountDisconnectResult",
+        "type": "object"
+      },
       "SourceAccountStatus": {
         "additionalProperties": false,
         "description": "Secret-free source-account status exposed to product clients.",
@@ -1201,10 +2558,7 @@
             "type": "string"
           },
           "credentials": {
-            "additionalProperties": true,
-            "minProperties": 1,
-            "title": "Credentials",
-            "type": "object"
+            "$ref": "#/components/schemas/SourceCredentialInput"
           }
         },
         "required": [
@@ -1212,6 +2566,25 @@
           "credentials"
         ],
         "title": "SourceConfiguration",
+        "type": "object"
+      },
+      "SourceCredentialInput": {
+        "additionalProperties": false,
+        "description": "Write-only browser credential accepted by every retained source account form.",
+        "properties": {
+          "cookie": {
+            "format": "password",
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Cookie",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "cookie"
+        ],
+        "title": "SourceCredentialInput",
         "type": "object"
       },
       "SourceId": {
@@ -1241,6 +2614,11 @@
             "type": "array",
             "uniqueItems": true
           },
+          "credential_schema": {
+            "additionalProperties": true,
+            "title": "Credential Schema",
+            "type": "object"
+          },
           "display_name": {
             "maxLength": 100,
             "minLength": 1,
@@ -1254,6 +2632,11 @@
             "minItems": 1,
             "title": "Operations",
             "type": "array"
+          },
+          "settings_schema": {
+            "additionalProperties": true,
+            "title": "Settings Schema",
+            "type": "object"
           },
           "source_id": {
             "$ref": "#/components/schemas/SourceId"
@@ -1302,12 +2685,22 @@
           "operation": {
             "$ref": "#/components/schemas/SourceOperation"
           },
+          "request_schema": {
+            "additionalProperties": true,
+            "title": "Request Schema",
+            "type": "object"
+          },
           "requires_auth": {
             "title": "Requires Auth",
             "type": "boolean"
           },
           "result_kind": {
             "$ref": "#/components/schemas/SourceResultKind"
+          },
+          "result_schema": {
+            "additionalProperties": true,
+            "title": "Result Schema",
+            "type": "object"
           },
           "transport_kind": {
             "$ref": "#/components/schemas/SourceTransportKind"
@@ -1330,6 +2723,111 @@
         ],
         "title": "SourceResultKind",
         "type": "string"
+      },
+      "SourceSettings": {
+        "additionalProperties": false,
+        "description": "Built-in source admission and relative collection allocation.",
+        "properties": {
+          "enabled": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "enum": [
+                "bilibili",
+                "xiaohongshu",
+                "douyin",
+                "youtube",
+                "twitter",
+                "zhihu",
+                "reddit"
+              ]
+            },
+            "title": "Enabled",
+            "type": "object"
+          },
+          "weights": {
+            "additionalProperties": {
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            "propertyNames": {
+              "enum": [
+                "bilibili",
+                "xiaohongshu",
+                "douyin",
+                "youtube",
+                "twitter",
+                "zhihu",
+                "reddit"
+              ]
+            },
+            "title": "Weights",
+            "type": "object"
+          }
+        },
+        "title": "SourceSettings",
+        "type": "object"
+      },
+      "SourceSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "boolean"
+                },
+                "propertyNames": {
+                  "enum": [
+                    "bilibili",
+                    "xiaohongshu",
+                    "douyin",
+                    "youtube",
+                    "twitter",
+                    "zhihu",
+                    "reddit"
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "weights": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "maximum": 100.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                "propertyNames": {
+                  "enum": [
+                    "bilibili",
+                    "xiaohongshu",
+                    "douyin",
+                    "youtube",
+                    "twitter",
+                    "zhihu",
+                    "reddit"
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weights"
+          }
+        },
+        "title": "SourceSettingsPatch",
+        "type": "object"
       },
       "SourceTaskCompletion": {
         "additionalProperties": false,
@@ -1412,48 +2910,176 @@
         "title": "StreamTerminalEvent",
         "type": "object"
       },
-      "UserSettings": {
+      "TaskSettings": {
         "additionalProperties": false,
-        "description": "Settings owned by OpenBiliClaw and configurable through the future UI.",
+        "description": "Product-level semantic task alias and bounded execution limits.",
         "properties": {
-          "feed_high_watermark": {
-            "default": 50,
-            "maximum": 2000.0,
+          "model_alias": {
+            "enum": [
+              "obc-interactive",
+              "obc-analysis"
+            ],
+            "title": "Model Alias",
+            "type": "string"
+          },
+          "request_limit": {
+            "maximum": 20.0,
             "minimum": 1.0,
-            "title": "Feed High Watermark",
+            "title": "Request Limit",
             "type": "integer"
           },
-          "feed_low_watermark": {
-            "default": 20,
-            "maximum": 1000.0,
+          "semantic_retry_limit": {
+            "maximum": 10.0,
             "minimum": 0.0,
-            "title": "Feed Low Watermark",
+            "title": "Semantic Retry Limit",
             "type": "integer"
+          },
+          "timeout_seconds": {
+            "maximum": 600.0,
+            "minimum": 1.0,
+            "title": "Timeout Seconds",
+            "type": "number"
+          },
+          "total_tokens_limit": {
+            "maximum": 1000000.0,
+            "minimum": 1.0,
+            "title": "Total Tokens Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "model_alias",
+          "semantic_retry_limit",
+          "timeout_seconds",
+          "request_limit",
+          "total_tokens_limit"
+        ],
+        "title": "TaskSettings",
+        "type": "object"
+      },
+      "TaskSettingsPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "model_alias": {
+            "anyOf": [
+              {
+                "enum": [
+                  "obc-interactive",
+                  "obc-analysis"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Alias"
+          },
+          "request_limit": {
+            "anyOf": [
+              {
+                "maximum": 20.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Limit"
+          },
+          "semantic_retry_limit": {
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Retry Limit"
+          },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 600.0,
+                "minimum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds"
+          },
+          "total_tokens_limit": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Tokens Limit"
+          }
+        },
+        "title": "TaskSettingsPatch",
+        "type": "object"
+      },
+      "UserSettings": {
+        "additionalProperties": false,
+        "description": "Complete secret-free product settings persisted in the application database.",
+        "properties": {
+          "access_control": {
+            "$ref": "#/components/schemas/AccessControlSettings"
+          },
+          "feed": {
+            "$ref": "#/components/schemas/FeedSettings"
+          },
+          "jobs": {
+            "$ref": "#/components/schemas/JobSettings"
+          },
+          "logging": {
+            "$ref": "#/components/schemas/LoggingSettings"
+          },
+          "network": {
+            "$ref": "#/components/schemas/NetworkSettings"
           },
           "onboarding_complete": {
             "default": false,
+            "readOnly": true,
             "title": "Onboarding Complete",
             "type": "boolean"
           },
-          "source_enabled": {
-            "additionalProperties": {
-              "type": "boolean"
-            },
-            "title": "Source Enabled",
-            "type": "object"
+          "profile": {
+            "$ref": "#/components/schemas/ProfileSettings"
           },
-          "source_sync_interval_minutes": {
-            "default": 30,
-            "maximum": 10080.0,
-            "minimum": 1.0,
-            "title": "Source Sync Interval Minutes",
-            "type": "integer"
+          "schedules": {
+            "$ref": "#/components/schemas/ScheduleSettings"
           },
-          "source_weights": {
+          "sources": {
+            "$ref": "#/components/schemas/SourceSettings"
+          },
+          "tasks": {
             "additionalProperties": {
-              "type": "number"
+              "$ref": "#/components/schemas/TaskSettings"
             },
-            "title": "Source Weights",
+            "propertyNames": {
+              "enum": [
+                "profile_delta",
+                "keyword_generation",
+                "candidate_assessment",
+                "candidate_batch_assessment",
+                "chat_response",
+                "recommendation_explanation"
+              ]
+            },
+            "title": "Tasks",
             "type": "object"
           }
         },
@@ -1462,39 +3088,103 @@
       },
       "UserSettingsPatch": {
         "additionalProperties": false,
-        "description": "Typed partial update; omitted fields retain their current value.",
+        "description": "Strict recursive partial update; deployment-owned fields are intentionally absent.",
         "properties": {
-          "feed_high_watermark": {
+          "access_control": {
             "anyOf": [
               {
-                "maximum": 2000.0,
-                "minimum": 1.0,
-                "type": "integer"
+                "$ref": "#/components/schemas/AccessControlSettingsPatch"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Feed High Watermark"
+            ]
           },
-          "feed_low_watermark": {
+          "feed": {
             "anyOf": [
               {
-                "maximum": 1000.0,
-                "minimum": 0.0,
-                "type": "integer"
+                "$ref": "#/components/schemas/FeedSettingsPatch"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Feed Low Watermark"
+            ]
           },
-          "source_enabled": {
+          "jobs": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "logging": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LoggingSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "network": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetworkSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schedules": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceSettingsPatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tasks": {
             "anyOf": [
               {
                 "additionalProperties": {
-                  "type": "boolean"
+                  "$ref": "#/components/schemas/TaskSettingsPatch"
+                },
+                "propertyNames": {
+                  "enum": [
+                    "profile_delta",
+                    "keyword_generation",
+                    "candidate_assessment",
+                    "candidate_batch_assessment",
+                    "chat_response",
+                    "recommendation_explanation"
+                  ]
                 },
                 "type": "object"
               },
@@ -1502,35 +3192,7 @@
                 "type": "null"
               }
             ],
-            "title": "Source Enabled"
-          },
-          "source_sync_interval_minutes": {
-            "anyOf": [
-              {
-                "maximum": 10080.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Sync Interval Minutes"
-          },
-          "source_weights": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "minimum": 0.0,
-                  "type": "number"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Weights"
+            "title": "Tasks"
           }
         },
         "title": "UserSettingsPatch",
@@ -1581,6 +3243,11 @@
       "BearerAuth": {
         "scheme": "bearer",
         "type": "http"
+      },
+      "SessionCookie": {
+        "in": "cookie",
+        "name": "obc_session",
+        "type": "apiKey"
       }
     }
   },
@@ -1590,6 +3257,580 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/auth/extension-token": {
+      "post": {
+        "operationId": "v1_auth_extension_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExtensionTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExtensionTokenResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "summary": "Extension Token",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "v1_auth_login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthenticatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "summary": "Login",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "operationId": "v1_auth_logout",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthenticatedResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Logout",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/revoke": {
+      "post": {
+        "operationId": "v1_auth_revoke",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Revoke",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/api/v1/auth/status": {
+      "get": {
+        "operationId": "v1_auth_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "summary": "Auth Status",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
     "/api/v1/chat/stream": {
       "post": {
         "operationId": "v1_chat_stream",
@@ -1631,23 +3872,257 @@
             },
             "description": "Interactive chat event stream."
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Stream Chat",
+        "tags": [
+          "chat"
+        ]
+      }
+    },
+    "/api/v1/chat/{conversation_id}": {
+      "get": {
+        "operationId": "v1_chat_history",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatHistoryPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Chat History",
         "tags": [
           "chat"
         ]
@@ -1677,20 +4152,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Ingest Event",
@@ -1742,20 +4298,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "List Feed",
@@ -1788,20 +4425,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Create Interaction",
@@ -1842,20 +4560,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "List Jobs",
@@ -1886,20 +4685,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Schedule Job",
@@ -1934,20 +4814,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Cancel Job",
@@ -1980,20 +4941,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Get Job",
@@ -2045,20 +5087,101 @@
             },
             "description": "Business job progress event stream."
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Job Events",
@@ -2086,7 +5209,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/CollectionItem"
+                    "$ref": "#/components/schemas/LibraryItem"
                   },
                   "title": "Response V1 Library List",
                   "type": "array"
@@ -2095,20 +5218,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "List Collection",
@@ -2149,20 +5353,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Add Collection Item",
@@ -2198,20 +5483,101 @@
           "204": {
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Remove Collection Item",
@@ -2233,12 +5599,103 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {},
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Onboarding Status",
@@ -2271,21 +5728,102 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {},
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Start Onboarding",
@@ -2337,21 +5875,102 @@
             },
             "description": "First-run onboarding progress event stream."
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {},
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Onboarding Events",
@@ -2373,14 +5992,231 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Current Profile",
+        "tags": [
+          "profile"
+        ]
+      },
+      "patch": {
+        "description": "Apply one explicit user-authored optimistic profile revision.",
+        "operationId": "v1_profile_edit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Edit Profile",
         "tags": [
           "profile"
         ]
@@ -2399,11 +6235,102 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Get Settings",
@@ -2434,20 +6361,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Patch Settings",
@@ -2503,20 +6511,101 @@
           "204": {
             "description": "No task available"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Claim Source Task",
@@ -2561,20 +6650,101 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Complete Source Task",
@@ -2600,11 +6770,102 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "List Sources",
@@ -2630,11 +6891,102 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Source Status",
@@ -2677,23 +7029,241 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "$ref": "#/components/schemas/ErrorEnvelope"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Configure Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/api/v1/sources/{source_id}/accounts/{account_key}": {
+      "delete": {
+        "description": "Idempotently delete one source account's encrypted credential material.",
+        "operationId": "v1_sources_disconnect_account",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "source_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/SourceId"
+            }
+          },
+          {
+            "in": "path",
+            "name": "account_key",
+            "required": true,
+            "schema": {
+              "title": "Account Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceAccountDisconnectResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
+          }
+        ],
+        "summary": "Disconnect Source",
         "tags": [
           "sources"
         ]
@@ -2712,11 +7282,102 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "security": [
           {
             "BearerAuth": []
+          },
+          {
+            "SessionCookie": []
           }
         ],
         "summary": "Ai Health",
@@ -2738,6 +7399,94 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "bearer authentication required",
+            "x-error-code": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "access denied",
+            "x-error-code": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource not found",
+            "x-error-code": "not_found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "resource state conflict",
+            "x-error-code": "conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request validation failed",
+            "x-error-code": "validation_error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "request rate limit exceeded",
+            "x-error-code": "rate_limited"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "internal server error",
+            "x-error-code": "internal_error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "required service is unavailable",
+            "x-error-code": "unavailable"
           }
         },
         "summary": "Readiness",

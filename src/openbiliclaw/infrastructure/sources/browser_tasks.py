@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -123,14 +122,15 @@ class SQLAlchemyBrowserTaskRepository:
             if row is not None:
                 if row.lease_expires_at is None:
                     raise RuntimeError("claimed source task has no lease deadline")
-                return ClaimedSourceTask(
-                    id=UUID(row.id),
-                    source_id=SourceId(row.source_id),
-                    operation=SourceOperation(row.operation),
-                    payload=row.request_payload,
-                    lease_token=lease_token,
-                    lease_expires_at=_aware(row.lease_expires_at),
-                    request_deadline_at=_aware(row.request_deadline_at),
+                return ClaimedSourceTask.model_validate(
+                    {
+                        "id": UUID(row.id),
+                        "source_id": SourceId(row.source_id),
+                        "payload": row.request_payload,
+                        "lease_token": lease_token,
+                        "lease_expires_at": _aware(row.lease_expires_at),
+                        "request_deadline_at": _aware(row.request_deadline_at),
+                    }
                 )
             self._session.expire_all()
         return None
@@ -206,11 +206,14 @@ class SQLAlchemyBrowserTaskRepository:
             row = self._session.get(SourceTaskModel, str(task_id))
         if row is None:
             raise LookupError(f"source task does not exist: {task_id}")
-        return SourceTaskSnapshot(
-            id=task_id,
-            status=SourceTaskStatus(row.status),
-            request_deadline_at=_aware(row.request_deadline_at),
-            result=row.result_payload,
+        return SourceTaskSnapshot.model_validate(
+            {
+                "id": task_id,
+                "operation": SourceOperation(row.operation),
+                "status": SourceTaskStatus(row.status),
+                "request_deadline_at": _aware(row.request_deadline_at),
+                "result": row.result_payload,
+            }
         )
 
     def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot:
@@ -219,11 +222,14 @@ class SQLAlchemyBrowserTaskRepository:
         row = self._session.get(SourceTaskModel, str(task_id))
         if row is None:
             raise LookupError(f"source task does not exist: {task_id}")
-        return SourceTaskSnapshot(
-            id=task_id,
-            status=SourceTaskStatus(row.status),
-            request_deadline_at=_aware(row.request_deadline_at),
-            result=row.result_payload,
+        return SourceTaskSnapshot.model_validate(
+            {
+                "id": task_id,
+                "operation": SourceOperation(row.operation),
+                "status": SourceTaskStatus(row.status),
+                "request_deadline_at": _aware(row.request_deadline_at),
+                "result": row.result_payload,
+            }
         )
 
     def _abandon_expired(
@@ -281,14 +287,10 @@ class QueuedBrowserTransport:
         self, *, operation: str, query: str | None, limit: int
     ) -> list[dict[str, object]]:
         typed_operation = SourceOperation(operation)
-        payload: dict[str, JsonValue] = {"limit": limit}
-        if query is not None:
-            payload["query"] = query
+        payload = _browser_request_payload(typed_operation, query=query, limit=limit)
         task_id = uuid4()
-        request = SourceTaskRequest(
-            source_id=self._source_id,
-            operation=typed_operation,
-            payload=payload,
+        request = SourceTaskRequest.model_validate(
+            {"source_id": self._source_id, "payload": payload}
         )
         request_deadline_at = datetime.now(UTC) + timedelta(seconds=self._timeout)
         enqueue_task = asyncio.create_task(
@@ -305,13 +307,10 @@ class QueuedBrowserTransport:
                 while True:
                     snapshot = await asyncio.to_thread(self._service.snapshot, task_id)
                     if snapshot.status is SourceTaskStatus.COMPLETED:
-                        result = snapshot.result or {}
-                        items = result.get("items")
-                        if not isinstance(items, tuple):
-                            raise TypeError("browser source result must contain an items array")
-                        if not all(isinstance(item, Mapping) for item in items):
-                            raise TypeError("browser source result items must be objects")
-                        return [dict(item) for item in items]
+                        result = snapshot.result
+                        if result is None:
+                            raise TypeError("browser source result envelope is missing")
+                        return [dict(item) for item in result.items]
                     if snapshot.status is SourceTaskStatus.CANCELLED:
                         raise CancelledSourceTaskError("browser source task was cancelled")
                     if snapshot.status is SourceTaskStatus.ABANDONED:
@@ -353,6 +352,21 @@ class QueuedBrowserTransport:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _browser_request_payload(
+    operation: SourceOperation, *, query: str | None, limit: int
+) -> dict[str, object]:
+    payload: dict[str, object] = {"operation": operation.value, "limit": limit}
+    if operation is SourceOperation.SEARCH:
+        payload["query"] = query
+    elif operation is SourceOperation.RELATED:
+        payload["seed"] = query
+    elif operation is SourceOperation.CREATOR:
+        payload["creator"] = query
+    elif operation is SourceOperation.COMMUNITY:
+        payload["community"] = query
+    return payload
 
 
 def _database_time() -> Any:

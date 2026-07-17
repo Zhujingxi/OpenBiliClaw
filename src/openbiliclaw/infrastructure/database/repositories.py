@@ -11,13 +11,15 @@ from pydantic import HttpUrl
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
 from openbiliclaw.features.feed.domain import ContentItem, FeedEntry, FeedItem
-from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
+from openbiliclaw.features.library.domain import CollectionItem, CollectionKind, LibraryItem
 from openbiliclaw.features.profile.domain import ProfileFacet, ProfileSnapshot
 from openbiliclaw.features.sources.domain import SourceAccountStatus, SourceId
 from openbiliclaw.infrastructure.database.models import (
     ActivityEventModel,
     AIRunModel,
+    AuthStateModel,
     CandidateAssessmentModel,
     ChatTurnModel,
     CollectionItemModel,
@@ -41,7 +43,6 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from openbiliclaw.features.activity.domain import ActivityEvent
-    from openbiliclaw.features.chat.domain import ChatTurn
     from openbiliclaw.features.feed.domain import CandidateAssessment, Interaction
     from openbiliclaw.features.system.service import SettingValue
 
@@ -87,6 +88,14 @@ class SettingsRepository(Protocol):
     def replace(self, values: Mapping[str, SettingValue]) -> None: ...
 
 
+class AuthStateRepository(Protocol):
+    """Persistence port for the monotonic session revocation epoch."""
+
+    def current_epoch(self) -> int: ...
+
+    def bump_epoch(self) -> int: ...
+
+
 class SourceAccountRepository(Protocol):
     """Persistence port that accepts only already-encrypted credentials."""
 
@@ -99,6 +108,8 @@ class SourceAccountRepository(Protocol):
     ) -> UUID: ...
 
     def list_statuses(self) -> tuple[SourceAccountStatus, ...]: ...
+
+    def delete(self, *, source_id: str, account_key: str) -> bool: ...
 
 
 class ActivityRepository(Protocol):
@@ -174,13 +185,17 @@ class CollectionRepository(Protocol):
 
     def remove(self, collection: CollectionKind, content_id: UUID) -> bool: ...
 
-    def list_items(self, collection: CollectionKind) -> tuple[CollectionItem, ...]: ...
+    def list_items(self, collection: CollectionKind) -> tuple[LibraryItem, ...]: ...
 
 
 class ChatRepository(Protocol):
     """Persistence port for chat turns."""
 
     def add(self, turn: ChatTurn) -> None: ...
+
+    def list_by_conversation(
+        self, conversation_id: UUID, *, limit: int, offset: int
+    ) -> tuple[ChatTurn, ...]: ...
 
 
 class JobRunRepository(Protocol):
@@ -229,6 +244,32 @@ class SQLAlchemySettingsRepository:
             else:
                 row.value = value
                 row.updated_at = now
+
+
+class SQLAlchemyAuthStateRepository:
+    """Read and atomically advance the non-secret revocation epoch."""
+
+    _EPOCH_KEY = "session_epoch"
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def current_epoch(self) -> int:
+        row = self._session.get(AuthStateModel, self._EPOCH_KEY)
+        if row is None or row.value < 0:
+            raise RuntimeError("authentication revocation state is unavailable")
+        return row.value
+
+    def bump_epoch(self) -> int:
+        next_epoch = self._session.scalar(
+            update(AuthStateModel)
+            .where(AuthStateModel.key == self._EPOCH_KEY, AuthStateModel.value >= 0)
+            .values(value=AuthStateModel.value + 1)
+            .returning(AuthStateModel.value)
+        )
+        if next_epoch is None:
+            raise RuntimeError("authentication revocation state is unavailable")
+        return next_epoch
 
 
 class SQLAlchemySourceAccountRepository:
@@ -284,6 +325,20 @@ class SQLAlchemySourceAccountRepository:
             )
             for row in rows
         )
+
+    def delete(self, *, source_id: str, account_key: str) -> bool:
+        """Delete only the exact encrypted account row and report whether it existed."""
+
+        row = self._session.scalar(
+            select(SourceAccountModel).where(
+                SourceAccountModel.source_id == source_id,
+                SourceAccountModel.account_key == account_key,
+            )
+        )
+        if row is None:
+            return False
+        self._session.delete(row)
+        return True
 
 
 class SQLAlchemyActivityRepository:
@@ -672,24 +727,28 @@ class SQLAlchemyCollectionRepository:
         )
         return bool(getattr(result, "rowcount", 0))
 
-    def list_items(self, collection: CollectionKind) -> tuple[CollectionItem, ...]:
-        rows = self._session.scalars(
-            select(CollectionItemModel)
+    def list_items(self, collection: CollectionKind) -> tuple[LibraryItem, ...]:
+        rows = self._session.execute(
+            select(CollectionItemModel, ContentItemModel)
             .join(CollectionModel, CollectionModel.id == CollectionItemModel.collection_id)
+            .join(ContentItemModel, ContentItemModel.id == CollectionItemModel.content_id)
             .where(CollectionModel.slug == collection.value)
             .order_by(CollectionItemModel.added_at, CollectionItemModel.id)
         ).all()
-        result: list[CollectionItem] = []
-        for row in rows:
+        result: list[LibraryItem] = []
+        for row, content in rows:
             added_at = _aware(row.added_at)
             assert added_at is not None
             result.append(
-                CollectionItem(
-                    id=UUID(row.id),
-                    collection=collection,
-                    content_id=UUID(row.content_id),
-                    added_at=added_at,
-                    note=row.note,
+                LibraryItem(
+                    collection_item=CollectionItem(
+                        id=UUID(row.id),
+                        collection=collection,
+                        content_id=UUID(row.content_id),
+                        added_at=added_at,
+                        note=row.note,
+                    ),
+                    content=_content_from_row(content),
                 )
             )
         return tuple(result)
@@ -712,6 +771,32 @@ class SQLAlchemyChatRepository:
                 ai_run_id=str(turn.ai_run_id) if turn.ai_run_id else None,
             )
         )
+
+    def list_by_conversation(
+        self, conversation_id: UUID, *, limit: int, offset: int
+    ) -> tuple[ChatTurn, ...]:
+        rows = self._session.scalars(
+            select(ChatTurnModel)
+            .where(ChatTurnModel.conversation_id == str(conversation_id))
+            .order_by(ChatTurnModel.created_at, ChatTurnModel.id)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        turns: list[ChatTurn] = []
+        for row in rows:
+            created_at = _aware(row.created_at)
+            assert created_at is not None
+            turns.append(
+                ChatTurn(
+                    id=UUID(row.id),
+                    conversation_id=UUID(row.conversation_id),
+                    role=ChatRole(row.role),
+                    content=row.content,
+                    created_at=created_at,
+                    ai_run_id=UUID(row.ai_run_id) if row.ai_run_id else None,
+                )
+            )
+        return tuple(turns)
 
 
 class SQLAlchemyJobRunRepository:

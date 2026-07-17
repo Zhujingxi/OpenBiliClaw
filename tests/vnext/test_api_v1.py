@@ -42,10 +42,20 @@ class _Settings:
 
     def update(self, patch: dict[str, object]) -> UserSettings:
         merged = self.value.model_dump()
-        for field_name in ("source_enabled", "source_weights"):
-            partial = patch.get(field_name)
+        for group_name in ("sources", "schedules", "feed", "tasks", "access_control", "jobs"):
+            partial = patch.get(group_name)
             if isinstance(partial, dict):
-                patch = {**patch, field_name: {**merged[field_name], **partial}}
+                current_group = merged[group_name]
+                assert isinstance(current_group, dict)
+                nested = dict(current_group)
+                for field_name, value in partial.items():
+                    current_value = nested.get(field_name)
+                    nested[field_name] = (
+                        {**current_value, **value}
+                        if isinstance(current_value, dict) and isinstance(value, dict)
+                        else value
+                    )
+                patch = {**patch, group_name: nested}
         self.value = UserSettings.model_validate({**merged, **patch})
         return self.value
 
@@ -282,9 +292,9 @@ def test_readiness_is_public_but_every_other_feature_requires_bearer(client: Tes
 def test_router_groups_and_representative_happy_paths(client: TestClient) -> None:
     headers = _auth()
     assert (
-        client.patch("/api/v1/settings", headers=headers, json={"feed_low_watermark": 5}).json()[
-            "feed_low_watermark"
-        ]
+        client.patch(
+            "/api/v1/settings", headers=headers, json={"feed": {"low_watermark": 5}}
+        ).json()["feed"]["low_watermark"]
         == 5
     )
     assert client.get("/api/v1/sources", headers=headers).status_code == 200
@@ -403,24 +413,26 @@ def test_public_settings_partial_source_maps_merge_and_validate(client: TestClie
         "/api/v1/settings",
         headers=_auth(),
         json={
-            "source_enabled": {"bilibili": True},
-            "source_weights": {"youtube": 2.5},
+            "sources": {
+                "enabled": {"bilibili": True},
+                "weights": {"youtube": 2.5},
+            },
         },
     )
 
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload["source_enabled"]) == 7
-    assert len(payload["source_weights"]) == 7
-    assert payload["source_enabled"]["bilibili"] is True
-    assert payload["source_enabled"]["youtube"] is False
-    assert payload["source_weights"]["youtube"] == 2.5
-    assert payload["source_weights"]["bilibili"] == 1.0
+    assert len(payload["sources"]["enabled"]) == 7
+    assert len(payload["sources"]["weights"]) == 7
+    assert payload["sources"]["enabled"]["bilibili"] is True
+    assert payload["sources"]["enabled"]["youtube"] is False
+    assert payload["sources"]["weights"]["youtube"] == 2.5
+    assert payload["sources"]["weights"]["bilibili"] == 1.0
 
     for invalid in (
-        {"source_enabled": {"unknown": True}},
-        {"source_enabled": {"bilibili": "yes"}},
-        {"source_weights": {"bilibili": -0.1}},
+        {"sources": {"enabled": {"unknown": True}}},
+        {"sources": {"enabled": {"bilibili": "yes"}}},
+        {"sources": {"weights": {"bilibili": -0.1}}},
     ):
         assert client.patch("/api/v1/settings", headers=_auth(), json=invalid).status_code == 422
 
@@ -460,7 +472,10 @@ def test_source_task_long_poll_complete_and_secret_payload_rejection(client: Tes
         client.post(
             f"/api/v1/source-tasks/{task_id}/complete",
             headers=headers,
-            json={"lease_token": "x" * 20, "result": {"items": []}},
+            json={
+                "lease_token": "x" * 20,
+                "result": {"operation": "search", "items": []},
+            },
         ).status_code
         == 200
     )
@@ -523,7 +538,7 @@ def test_onboarding_rejects_an_empty_source_selection(payload: dict[str, object]
 
 def test_domain_errors_map_without_leaking_values(client: TestClient) -> None:
     response = client.patch(
-        "/api/v1/settings", headers=_auth(), json={"feed_low_watermark": 99_999}
+        "/api/v1/settings", headers=_auth(), json={"feed": {"low_watermark": 99_999}}
     )
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"

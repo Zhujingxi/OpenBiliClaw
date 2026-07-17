@@ -2,17 +2,77 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Literal, Protocol, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, Self, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from types import TracebackType
     from uuid import UUID
 
 from openbiliclaw.features.system.domain import UserSettings
 
-SettingValue = bool | int | float | str | dict[str, bool] | dict[str, float] | None
+SettingValue = bool | int | float | str | dict[str, Any] | None
+
+_READ_ONLY_PATHS = frozenset(
+    {
+        "onboarding_complete",
+        "access_control.installer_bearer_configured",
+        "access_control.password_configured",
+        "jobs.worker_concurrency",
+        "logging.directory",
+    }
+)
+
+
+def _deep_merge(current: Mapping[str, object], patch: Mapping[str, object]) -> dict[str, object]:
+    merged = dict(current)
+    for key, value in patch.items():
+        existing = merged.get(key)
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _contains_path(values: Mapping[str, object], path: str) -> bool:
+    current: object = values
+    for segment in path.split("."):
+        if not isinstance(current, Mapping) or segment not in current:
+            return False
+        current = current[segment]
+    return True
+
+
+def _deployment_overlay(
+    settings: UserSettings, facts: Mapping[str, object] | None = None
+) -> UserSettings:
+    """Refresh deployment facts without exposing the underlying secret values."""
+
+    try:
+        worker_concurrency = int(os.getenv("OPENBILICLAW_WORKERS", "4"))
+    except ValueError:
+        worker_concurrency = 4
+    worker_concurrency = max(1, min(4, worker_concurrency))
+    access_control = settings.access_control.model_copy(
+        update={
+            "installer_bearer_configured": bool(
+                (facts or {}).get(
+                    "installer_bearer_configured", os.getenv("OPENBILICLAW_ACCESS_TOKEN")
+                )
+            ),
+            "password_configured": bool(
+                (facts or {}).get(
+                    "password_configured", os.getenv("OPENBILICLAW_WEB_PASSWORD_HASH")
+                )
+            ),
+        }
+    )
+    jobs = settings.jobs.model_copy(update={"worker_concurrency": worker_concurrency})
+    return settings.model_copy(update={"access_control": access_control, "jobs": jobs})
 
 
 class SettingsRepository(Protocol):
@@ -43,42 +103,53 @@ class SettingsUnitOfWork(Protocol):
 class SettingsService:
     """Validate the complete setting set before atomically replacing stored values."""
 
-    def __init__(self, uow_factory: Callable[[], SettingsUnitOfWork]) -> None:
+    def __init__(
+        self,
+        uow_factory: Callable[[], SettingsUnitOfWork],
+        *,
+        on_change: Callable[[UserSettings], None] | None = None,
+        deployment_facts: Callable[[], Mapping[str, object]] | None = None,
+    ) -> None:
         self._uow_factory = uow_factory
+        self._on_change = on_change
+        self._deployment_facts = deployment_facts
+
+    def _overlay(self, settings: UserSettings) -> UserSettings:
+        facts = self._deployment_facts() if self._deployment_facts is not None else None
+        return _deployment_overlay(settings, facts)
 
     def get(self) -> UserSettings:
         """Return validated stored settings overlaid on typed defaults."""
 
         with self._uow_factory() as uow:
             values = uow.settings.get_all()
-        return UserSettings.model_validate(values)
+        return self._overlay(UserSettings.model_validate(values))
 
     def update(self, patch: Mapping[str, object]) -> UserSettings:
         """Validate a partial update and persist the full typed settings atomically."""
 
         if "onboarding_complete" in patch:
-            raise ValueError("onboarding completion is workflow-owned")
+            raise ValueError("onboarding completion is workflow-owned and read-only")
+        for path in _READ_ONLY_PATHS - {"onboarding_complete"}:
+            if _contains_path(patch, path):
+                raise ValueError(f"{path} is deployment-owned and read-only")
 
         with self._uow_factory() as uow:
-            current = UserSettings.model_validate(uow.settings.get_all())
-            merged_patch = dict(patch)
-            for field_name in ("source_enabled", "source_weights"):
-                partial = merged_patch.get(field_name)
-                if isinstance(partial, dict):
-                    merged_patch[field_name] = {
-                        **getattr(current, field_name),
-                        **partial,
-                    }
-            candidate = UserSettings.model_validate({**current.model_dump(), **merged_patch})
+            current = self._overlay(UserSettings.model_validate(uow.settings.get_all()))
+            candidate = self._overlay(
+                UserSettings.model_validate(_deep_merge(current.model_dump(), patch))
+            )
             uow.settings.replace(candidate.model_dump())
             uow.commit()
+        if self._on_change is not None:
+            self._on_change(candidate)
         return candidate
 
     def complete_onboarding(self) -> UserSettings:
         """Monotonically close the first-run access window after feed admission succeeds."""
 
         with self._uow_factory() as uow:
-            current = UserSettings.model_validate(uow.settings.get_all())
+            current = self._overlay(UserSettings.model_validate(uow.settings.get_all()))
             if current.onboarding_complete:
                 return current
             completed = current.model_copy(update={"onboarding_complete": True})
@@ -159,8 +230,8 @@ class OnboardingService(Generic[JobRunT]):
         if not selected:
             raise ValueError("onboarding requires at least one source")
         current = self._settings.get()
-        enabled = {source_id: source_id in selected for source_id in current.source_enabled}
-        self._settings.update({"source_enabled": enabled})
+        enabled = {source_id: source_id in selected for source_id in current.sources.enabled}
+        self._settings.update({"sources": {"enabled": enabled}})
         source_key = ",".join(sorted(selected))
         run = self._jobs.schedule(
             "source_sync",

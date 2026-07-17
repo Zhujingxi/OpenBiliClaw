@@ -5,9 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID, uuid4
 
+from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.profile.domain import (
     FacetName,
     ProfileDelta,
+    ProfileEdit,
     ProfileFacet,
     ProfileSnapshot,
     apply_profile_delta,
@@ -42,8 +44,13 @@ class ProfileRepository(Protocol):
     ) -> None: ...
 
 
+class ActivityRepository(Protocol):
+    def add(self, event: ActivityEvent) -> None: ...
+
+
 class ProfileUnitOfWork(Protocol):
     profiles: ProfileRepository
+    activities: ActivityRepository
 
     def __enter__(self) -> ProfileUnitOfWork: ...
 
@@ -117,6 +124,87 @@ class ProfileService:
 
         with self._uow_factory() as uow:
             return uow.profiles.latest()
+
+    def edit(self, edit: ProfileEdit) -> ProfileSnapshot:
+        """Apply one explicit user edit as authoritative evidence and one revision."""
+
+        with self._uow_factory() as uow:
+            current = uow.profiles.latest()
+            actual_revision = None if current is None else current.revision
+            if actual_revision != edit.expected_revision:
+                raise StaleProfileRevisionError(
+                    f"profile edit targeted revision {edit.expected_revision}, "
+                    f"latest is {actual_revision}"
+                )
+
+            evidence = ActivityEvent(
+                source_id="local",
+                kind=ActivityKind.PROFILE_OVERRIDE,
+                title="Explicit profile edit",
+                metadata={
+                    "narrative_changed": edit.narrative is not None,
+                    "upsert_count": len(edit.upserts),
+                    "removal_count": len(edit.removals),
+                },
+            )
+            uow.activities.add(evidence)
+
+            facets = {
+                (facet.name, facet.value.casefold()): facet
+                for facet in (() if current is None else current.facets)
+            }
+            for removal in edit.removals:
+                facets.pop((removal.name, removal.value.casefold()), None)
+            for upsert in edit.upserts:
+                facets[(upsert.name, upsert.value.casefold())] = ProfileFacet(
+                    name=upsert.name,
+                    value=upsert.value,
+                    weight=upsert.weight,
+                    confidence=1,
+                    evidence_ids=(evidence.id,),
+                    overridden=True,
+                )
+            ordered_facets = tuple(
+                sorted(
+                    facets.values(),
+                    key=lambda facet: (
+                        facet.name,
+                        -facet.weight,
+                        facet.value.casefold(),
+                        facet.value,
+                    ),
+                )
+            )
+            confidence = (
+                sum(facet.confidence for facet in ordered_facets) / len(ordered_facets)
+                if ordered_facets
+                else 0.0
+            )
+            if current is None:
+                snapshot = ProfileSnapshot(
+                    id=uuid4(),
+                    revision=0,
+                    narrative=edit.narrative or "",
+                    facets=ordered_facets,
+                    confidence=confidence,
+                )
+            else:
+                snapshot = current.model_copy(
+                    update={
+                        "revision": current.revision + 1,
+                        "narrative": (
+                            current.narrative if edit.narrative is None else edit.narrative
+                        ),
+                        "facets": ordered_facets,
+                        "confidence": confidence,
+                    }
+                )
+            uow.profiles.append(snapshot, expected_revision=actual_revision)
+            uow.profiles.mark_evidence_consumed(
+                frozenset({evidence.id}), profile_revision=snapshot.revision
+            )
+            uow.commit()
+        return snapshot
 
     def apply_delta(
         self,

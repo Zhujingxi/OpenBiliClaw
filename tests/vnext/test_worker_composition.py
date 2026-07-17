@@ -142,9 +142,10 @@ def runtime(tmp_path: Path) -> tuple[Any, Any, Any]:
     current = settings.get()
     settings.update(
         {
-            "feed_low_watermark": 1,
-            "feed_high_watermark": 1,
-            "source_enabled": {**current.source_enabled, "bilibili": True},
+            "feed": {"low_watermark": 1, "high_watermark": 1},
+            "sources": {
+                "enabled": {**current.sources.enabled, "bilibili": True},
+            },
         }
     )
     service, handlers = build_worker_runtime(

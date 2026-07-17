@@ -26,7 +26,8 @@ API 和运维 CLI；不要依赖静态页面显示的旧设置或旧流程。
 
 ```mermaid
 flowchart LR
-    UI["Existing Web + Extension<br/>Task 22 wiring pending"] --> API["FastAPI /api/v1 routers"]
+    UI["Existing Web + Extension<br/>Task 22 wiring pending"] --> AUTH["Cookie+CSRF / finite extension bearer"]
+    AUTH --> API["FastAPI /api/v1 routers"]
     API --> UC["Feature use cases"]
     API --> SSE["SSE chat and progress"]
     JOBS["Huey worker + scheduler"] --> UC
@@ -34,7 +35,7 @@ flowchart LR
     UC --> REPOS["SQLAlchemy repositories"]
     UC --> SOURCES["Seven explicit connectors"]
     UC --> AI["Typed TaskRunner"]
-    MIGRATE["One-shot Alembic migration"] --> DB
+    MIGRATE["One-shot Alembic 0001 + 0002"] --> DB
     MIGRATE --> API
     MIGRATE --> JOBS
     AI --> PYD["PydanticAI"]
@@ -49,6 +50,9 @@ OpenBiliClaw 只拥有任务语义、输入输出 schema、领域规则和持久
 浏览器辅助工作只经权威 `/api/v1/source-tasks` claim/complete 合同；chat 直接经
 共享 `TaskRunner` 输出 SSE。Task 22 只重接现有 Web/extension client，不替换这些
 后端边界。
+后端已提供 password→HttpOnly cookie + CSRF、extension device-key→finite bearer、session
+epoch revoke、joined library、explicit profile edit、chat history、typed source schemas/disconnect
+和统一 error envelope；这不表示现有页面、扩展 dispatcher 或真实浏览器已完成接线/验证。
 
 ## 安装
 

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from openbiliclaw import __version__
 from openbiliclaw.api.dependencies import ApplicationContainer, build_application_container
-from openbiliclaw.api.errors import install_error_handlers
+from openbiliclaw.api.errors import install_error_handlers, register_error_contracts
 from openbiliclaw.api.routers import ROUTERS
 from openbiliclaw.api.v1_models import SSE_COMPONENT_MODELS
 
@@ -63,7 +63,7 @@ def create_app(*, container: ApplicationContainer | None = None) -> FastAPI:
         allow_origin_regex=r"^(chrome-extension://[^/]+|moz-extension://[^/]+|http://(127\.0\.0\.1|localhost)(:\d+)?)$",
         allow_credentials=False,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", "X-OBC-Auth"],
     )
     install_error_handlers(app)
     for router in ROUTERS:
@@ -89,6 +89,7 @@ def _openapi_factory(app: FastAPI) -> Callable[[], dict[str, Any]]:
         )
         _register_sse_components(schema)
         _finalize_operations(schema)
+        register_error_contracts(schema)
         app.openapi_schema = schema
         return schema
 
@@ -119,7 +120,11 @@ def _finalize_operations(schema: dict[str, Any]) -> None:
                 continue
             operation_id = operation.get("operationId")
             if isinstance(operation_id, str) and operation_id.startswith("v1_onboarding_"):
-                operation["security"] = [{}, {"BearerAuth": []}]
+                operation["security"] = [
+                    {},
+                    {"BearerAuth": []},
+                    {"SessionCookie": []},
+                ]
             responses = operation.get("responses", {})
             if not isinstance(responses, dict):
                 continue

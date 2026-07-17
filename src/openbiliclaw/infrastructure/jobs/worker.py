@@ -6,9 +6,10 @@ import importlib
 import os
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from openbiliclaw.features.system.domain import DatabaseSettings
+from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
 from openbiliclaw.infrastructure.ai.use_cases import TransactionalAIRunRecorder
 from openbiliclaw.infrastructure.database.base import create_engine_and_session
@@ -57,9 +58,13 @@ def database_runtime_factory() -> tuple[JobService, Mapping[str, JobHandler]]:
     api_key = os.getenv("OPENBILICLAW_LITELLM_API_KEY")
     if not api_key:
         raise RuntimeError("OPENBILICLAW_LITELLM_API_KEY is required for the worker")
+    product_settings = SettingsService(
+        cast("Callable[[], Any]", lambda: UnitOfWork(session_factory))
+    )
     runner = TaskRunner(
         model_resolver=LiteLLMModelResolver(base_url=base_url, api_key=api_key),
         recorder=TransactionalAIRunRecorder(lambda: UnitOfWork(session_factory)),
+        settings=product_settings,
     )
     return build_worker_runtime(
         WorkerDependencies(

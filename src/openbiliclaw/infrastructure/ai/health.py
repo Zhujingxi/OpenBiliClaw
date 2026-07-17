@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from typing import Literal
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
@@ -36,6 +38,7 @@ class AIHealthResult(BaseModel):
 
     proxy_reachable: bool
     aliases: tuple[AliasHealth, ...]
+    admin_url: str | None = None
 
 
 class _ProxyHealthResponse(BaseModel):
@@ -53,10 +56,12 @@ class AIHealthService:
         *,
         base_url: str,
         api_key: str,
+        public_admin_url: str | None = None,
         client: httpx.AsyncClient | None = None,
         timeout_seconds: float = 10,
     ) -> None:
         self._api_key = SecretStr(api_key)
+        self._public_admin_url = _safe_public_admin_url(public_admin_url)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"), timeout=timeout_seconds, trust_env=False
@@ -114,7 +119,17 @@ class AIHealthService:
                 statuses.append(_unavailable(alias, "provider_unhealthy"))
             else:
                 statuses.append(_unavailable(alias, "alias_not_configured"))
-        return AIHealthResult(proxy_reachable=reached_proxy, aliases=tuple(statuses))
+        return AIHealthResult(
+            proxy_reachable=reached_proxy,
+            aliases=tuple(statuses),
+            admin_url=self._public_admin_url,
+        )
+
+    @property
+    def public_admin_url(self) -> str | None:
+        """Return only the explicitly configured browser-safe Admin URL."""
+
+        return self._public_admin_url
 
     async def aclose(self) -> None:
         """Close the HTTP client only when this service created it."""
@@ -125,3 +140,32 @@ class AIHealthService:
 
 def _unavailable(alias: ModelAlias, reason: str) -> AliasHealth:
     return AliasHealth(alias=alias, available=False, state="unavailable", reason=reason)
+
+
+def _safe_public_admin_url(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip()
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("LiteLLM public Admin URL must be an absolute HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("LiteLLM public Admin URL cannot contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("LiteLLM public Admin URL cannot contain a query or fragment")
+    return normalized
+
+
+def public_admin_url_from_environment() -> str | None:
+    """Read the explicit browser URL without deriving it from the internal proxy base."""
+
+    return _safe_public_admin_url(os.getenv("OPENBILICLAW_LITELLM_ADMIN_URL"))
+
+
+__all__ = [
+    "AIHealthResult",
+    "AIHealthService",
+    "ALIASES",
+    "AliasHealth",
+    "public_admin_url_from_environment",
+]

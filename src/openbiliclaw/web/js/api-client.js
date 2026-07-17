@@ -1,5 +1,70 @@
 // Generated from openapi/openapi.json by openapi/generate-client.mjs. Do not edit.
 export const API_OPERATIONS = Object.freeze({
+  "v1_auth_extension_token": {
+    "method": "POST",
+    "path": "/api/v1/auth/extension-token",
+    "pathParameters": [],
+    "queryParameters": [],
+    "requestType": "ExtensionTokenRequest",
+    "responseType": "ExtensionTokenResponse",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_auth_login": {
+    "method": "POST",
+    "path": "/api/v1/auth/login",
+    "pathParameters": [],
+    "queryParameters": [],
+    "requestType": "LoginRequest",
+    "responseType": "AuthenticatedResponse",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_auth_logout": {
+    "method": "POST",
+    "path": "/api/v1/auth/logout",
+    "pathParameters": [],
+    "queryParameters": [],
+    "requestType": null,
+    "responseType": "AuthenticatedResponse",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_auth_revoke": {
+    "method": "POST",
+    "path": "/api/v1/auth/revoke",
+    "pathParameters": [],
+    "queryParameters": [],
+    "requestType": null,
+    "responseType": null,
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_auth_status": {
+    "method": "GET",
+    "path": "/api/v1/auth/status",
+    "pathParameters": [],
+    "queryParameters": [],
+    "requestType": null,
+    "responseType": "AuthStatusResponse",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_chat_history": {
+    "method": "GET",
+    "path": "/api/v1/chat/{conversation_id}",
+    "pathParameters": [
+      "conversation_id"
+    ],
+    "queryParameters": [
+      "limit",
+      "offset"
+    ],
+    "requestType": null,
+    "responseType": "ChatHistoryPage",
+    "stream": false,
+    "sseEvents": {}
+  },
   "v1_chat_stream": {
     "method": "POST",
     "path": "/api/v1/chat/stream",
@@ -153,7 +218,7 @@ export const API_OPERATIONS = Object.freeze({
     ],
     "queryParameters": [],
     "requestType": null,
-    "responseType": "CollectionItem",
+    "responseType": "LibraryItem",
     "stream": false,
     "sseEvents": {}
   },
@@ -215,6 +280,16 @@ export const API_OPERATIONS = Object.freeze({
     "queryParameters": [],
     "requestType": "OnboardingStart",
     "responseType": "JobRunResponse",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_profile_edit": {
+    "method": "PATCH",
+    "path": "/api/v1/profile",
+    "pathParameters": [],
+    "queryParameters": [],
+    "requestType": "ProfileEdit",
+    "responseType": "ProfileSnapshot",
     "stream": false,
     "sseEvents": {}
   },
@@ -282,6 +357,19 @@ export const API_OPERATIONS = Object.freeze({
     "queryParameters": [],
     "requestType": "SourceConfiguration",
     "responseType": "SourceAccountStatus",
+    "stream": false,
+    "sseEvents": {}
+  },
+  "v1_sources_disconnect_account": {
+    "method": "DELETE",
+    "path": "/api/v1/sources/{source_id}/accounts/{account_key}",
+    "pathParameters": [
+      "source_id",
+      "account_key"
+    ],
+    "queryParameters": [],
+    "requestType": null,
+    "responseType": "SourceAccountDisconnectResult",
     "stream": false,
     "sseEvents": {}
   },

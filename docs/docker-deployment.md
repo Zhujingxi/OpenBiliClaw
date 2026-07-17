@@ -43,6 +43,21 @@ services in containers.
 Compose；provider credentials 只进入 LiteLLM Admin。`OPENBILICLAW_SECRET_KEY`
 加密来源账户，`OPENBILICLAW_ACCESS_TOKEN` 保护 `/api/v1` 业务接口。
 
+要启用 Web/extension browser auth，另在私密 `.env` 或 deployment secret store 中
+provision：
+
+- `OPENBILICLAW_WEB_PASSWORD_HASH`：只放 scrypt hash，不放明文密码；
+- `OPENBILICLAW_SESSION_SECRET`：独立随机 signing secret；
+- `OPENBILICLAW_EXTENSION_ACCESS_KEYS`：只放 `key-id:sha256-digest` JSON array；完整
+  `obc_ext_...` device key 只在生成时交付给目标 extension；
+- `OPENBILICLAW_LITELLM_ADMIN_URL`：可选 public navigation URL，不是 internal proxy URL/key。
+
+生成/录入过程必须直接写入 mode-`0600` 文件或 secret manager，不能把值放入命令参数、
+shell history、installer status、Compose log、截图或文档。Web password hash、session secret、
+device key/digest 各自独立，不能复用 `OPENBILICLAW_ACCESS_TOKEN`、
+`OPENBILICLAW_SECRET_KEY` 或 `LITELLM_MASTER_KEY`。API settings 只回报 password/bearer 是否
+已配置，不返回任何值。
+
 ## 数据与 queue 一致性
 
 API 与 worker 都挂载：
@@ -85,6 +100,10 @@ Admin 只绑定 `127.0.0.1:${LITELLM_PORT:-4000}`。打开
 
 LiteLLM 负责 provider、fallback、cooldown、网络 retry、rate limit、budget 和
 cache。OpenBiliClaw 不提供重复的 provider editor。
+若要让 Web client 显示这个入口，显式设置
+`OPENBILICLAW_LITELLM_ADMIN_URL=http://127.0.0.1:4000/ui`。API 不会把容器内
+`http://litellm:4000` 或 master key 暴露给浏览器；远程 URL 必须由部署者先提供 TLS、
+访问控制与防火墙。
 
 ## 健康检查
 
@@ -123,8 +142,10 @@ anchor UUID/device/inode；guard 校验全部 complete history，并为每代写
 ## 来源与 onboarding
 
 七个 connector 在 composition 时显式注册，不是动态 plugin。来源默认关闭；
-通过 `/api/v1/sources` 写入账号配置，通过 `/api/v1/onboarding` 启动 bootstrap。
-浏览器辅助任务统一使用 `/api/v1/source-tasks/claim` 与 completion endpoint。
+通过 `/api/v1/sources` 的 write-only credential form 写入账号配置，通过
+`/api/v1/onboarding` 启动 bootstrap。manifest 自描述 safe settings/credential 和每项
+operation schema；断开账号使用 typed idempotent DELETE，只删除 encrypted material。
+浏览器辅助任务统一使用 `/api/v1/source-tasks/claim` 与 typed completion endpoint。
 
 现有 static Web/extension 仍被挂载，但其 vNext API client wiring 在 Task 22；
 在此之前用 OpenAPI/API tests 验证，不要使用旧 UI 配置来源或 AI。

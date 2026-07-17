@@ -68,19 +68,18 @@ def test_settings_service_persists_and_validates_typed_values(tmp_path: Path) ->
 
     updated = service.update(
         {
-            "feed_low_watermark": 12,
-            "feed_high_watermark": 36,
-            "source_sync_interval_minutes": 45,
+            "feed": {"low_watermark": 12, "high_watermark": 36},
+            "schedules": {"source_sync_interval_minutes": 45},
         }
     )
-    assert updated.feed_high_watermark == 36
+    assert updated.feed.high_watermark == 36
     assert updated.onboarding_complete is False
     assert service.get() == updated
 
     with pytest.raises(ValidationError):
-        service.update({"feed_low_watermark": 40, "feed_high_watermark": 20})
+        service.update({"feed": {"low_watermark": 40, "high_watermark": 20}})
     with pytest.raises(ValidationError):
-        service.update({"source_sync_interval_minutes": "45"})
+        service.update({"schedules": {"source_sync_interval_minutes": "45"}})
 
     with session_factory() as session:
         rows = session.scalars(select(SettingModel).order_by(SettingModel.key)).all()
@@ -91,10 +90,10 @@ def test_settings_service_persists_and_validates_typed_values(tmp_path: Path) ->
 def test_settings_update_is_atomic_on_validation_failure(tmp_path: Path) -> None:
     engine, session_factory = _session_factory(tmp_path)
     service = SettingsService(lambda: UnitOfWork(session_factory))
-    original = service.update({"feed_low_watermark": 10, "feed_high_watermark": 30})
+    original = service.update({"feed": {"low_watermark": 10, "high_watermark": 30}})
 
     with pytest.raises(ValidationError):
-        service.update({"feed_low_watermark": 50, "feed_high_watermark": 20})
+        service.update({"feed": {"low_watermark": 50, "high_watermark": 20}})
 
     assert service.get() == original
     engine.dispose()
@@ -106,17 +105,16 @@ def test_settings_partial_source_maps_merge_without_resetting_other_sources(tmp_
 
     updated = service.update(
         {
-            "source_enabled": {"bilibili": True},
-            "source_weights": {"youtube": 2.5},
+            "sources": {"enabled": {"bilibili": True}, "weights": {"youtube": 2.5}},
         }
     )
 
-    assert len(updated.source_enabled) == 7
-    assert len(updated.source_weights) == 7
-    assert updated.source_enabled["bilibili"] is True
-    assert updated.source_enabled["youtube"] is False
-    assert updated.source_weights["youtube"] == 2.5
-    assert updated.source_weights["bilibili"] == 1.0
+    assert len(updated.sources.enabled) == 7
+    assert len(updated.sources.weights) == 7
+    assert updated.sources.enabled["bilibili"] is True
+    assert updated.sources.enabled["youtube"] is False
+    assert updated.sources.weights["youtube"] == 2.5
+    assert updated.sources.weights["bilibili"] == 1.0
     assert service.get() == updated
     engine.dispose()
 
@@ -124,11 +122,11 @@ def test_settings_partial_source_maps_merge_without_resetting_other_sources(tmp_
 @pytest.mark.parametrize(
     "patch",
     [
-        {"source_enabled": {"unknown": True}},
-        {"source_enabled": {"bilibili": "yes"}},
-        {"source_weights": {"bilibili": float("nan")}},
-        {"source_weights": {"bilibili": float("inf")}},
-        {"source_weights": {"bilibili": -0.1}},
+        {"sources": {"enabled": {"unknown": True}}},
+        {"sources": {"enabled": {"bilibili": "yes"}}},
+        {"sources": {"weights": {"bilibili": float("nan")}}},
+        {"sources": {"weights": {"bilibili": float("inf")}}},
+        {"sources": {"weights": {"bilibili": -0.1}}},
     ],
 )
 def test_settings_partial_source_maps_reject_invalid_values_atomically(

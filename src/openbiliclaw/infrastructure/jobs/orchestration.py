@@ -75,8 +75,8 @@ class WorkerOrchestrator:
         settings = self._settings.get()
         enabled_sources = [
             source_id
-            for source_id in sorted(settings.source_enabled)
-            if settings.source_enabled[source_id]
+            for source_id in sorted(settings.sources.enabled)
+            if settings.sources.enabled[source_id]
         ]
         for index, source_id in enumerate(enabled_sources):
             context.checkpoint(0.05 + 0.75 * index / max(1, len(enabled_sources)))
@@ -114,11 +114,16 @@ class WorkerOrchestrator:
         with self._uow_factory() as uow:
             events = uow.activities.list_all()
             consumed = uow.profiles.consumed_evidence_ids()
+        minimum_confidence = self._settings.get().profile.minimum_evidence_confidence
         context.checkpoint(0.15)
         signals: list[ProfileSignal] = []
         for event in events:
             if event.id not in consumed:
-                signals.extend(project_activity_event(event))
+                signals.extend(
+                    signal
+                    for signal in project_activity_event(event)
+                    if signal.confidence >= minimum_confidence
+                )
         if signals:
 
             def before_profile_commit() -> None:
@@ -150,7 +155,10 @@ class WorkerOrchestrator:
         """Delete only terminal business-job history older than retention."""
 
         context.checkpoint(0.5)
-        self._jobs.cleanup_finished(retention_days=30, transaction_guard=context.guard)
+        self._jobs.cleanup_finished(
+            retention_days=self._settings.get().jobs.retention_days,
+            transaction_guard=context.guard,
+        )
         context.checkpoint(0.95)
 
     def handlers(self) -> Mapping[str, JobHandler]:
@@ -176,7 +184,7 @@ def build_worker_runtime(
     service = JobService(
         cast("Callable[[], Any]", uow_factory),
         queue=dependencies.job_queue or HueyJobQueue(),
-        source_sync_interval_minutes=lambda: settings.get().source_sync_interval_minutes,
+        source_sync_interval_minutes=lambda: settings.get().schedules.source_sync_interval_minutes,
     )
     OnboardingService(settings, service)
     orchestrator = WorkerOrchestrator(dependencies, service)

@@ -7,12 +7,15 @@ from openbiliclaw.api.app import create_app, generate_openapi
 from openbiliclaw.features.activity.domain import ActivityEvent
 
 PROTECTED_OPERATION_IDS = {
+    "v1_auth_logout",
+    "v1_auth_revoke",
     "v1_system_ai_health",
     "v1_settings_get",
     "v1_settings_patch",
     "v1_sources_list",
     "v1_sources_status",
     "v1_sources_configure_account",
+    "v1_sources_disconnect_account",
     "v1_source_tasks_claim",
     "v1_source_tasks_complete",
     "v1_events_ingest",
@@ -28,6 +31,13 @@ PROTECTED_OPERATION_IDS = {
     "v1_jobs_get",
     "v1_jobs_cancel",
     "v1_jobs_events",
+}
+
+PUBLIC_OPERATION_IDS = {
+    "v1_auth_extension_token",
+    "v1_auth_login",
+    "v1_auth_status",
+    "v1_system_readiness",
 }
 
 ONBOARDING_OPERATION_IDS = {
@@ -62,17 +72,26 @@ def test_openapi_has_only_v1_paths_and_unique_explicit_operation_ids() -> None:
     assert all(operation_id.startswith("v1_") for operation_id in operation_ids)
 
 
-def test_openapi_advertises_bearer_security_and_public_exceptions() -> None:
+def test_openapi_advertises_session_security_and_public_exceptions() -> None:
     schema = create_app().openapi()
     assert schema["components"]["securitySchemes"] == {
-        "BearerAuth": {"type": "http", "scheme": "bearer"}
+        "BearerAuth": {"type": "http", "scheme": "bearer"},
+        "SessionCookie": {"type": "apiKey", "in": "cookie", "name": "obc_session"},
     }
     by_id = {operation["operationId"]: operation for operation in _operations(schema)}
     for operation_id in PROTECTED_OPERATION_IDS:
-        assert by_id[operation_id]["security"] == [{"BearerAuth": []}], operation_id
-    assert "security" not in by_id["v1_system_readiness"]
+        assert by_id[operation_id]["security"] == [
+            {"BearerAuth": []},
+            {"SessionCookie": []},
+        ], operation_id
+    for operation_id in PUBLIC_OPERATION_IDS:
+        assert "security" not in by_id[operation_id], operation_id
     for operation_id in ONBOARDING_OPERATION_IDS:
-        assert by_id[operation_id]["security"] == [{}, {"BearerAuth": []}], operation_id
+        assert by_id[operation_id]["security"] == [
+            {},
+            {"BearerAuth": []},
+            {"SessionCookie": []},
+        ], operation_id
 
 
 def test_retained_json_success_responses_have_concrete_dtos() -> None:
@@ -92,7 +111,7 @@ def test_retained_json_success_responses_have_concrete_dtos() -> None:
         "v1_interactions_create": {"$ref": "#/components/schemas/InteractionResponse"},
         "v1_library_list": {
             "type": "array",
-            "items": {"$ref": "#/components/schemas/CollectionItem"},
+            "items": {"$ref": "#/components/schemas/LibraryItem"},
         },
         "v1_library_add": {"$ref": "#/components/schemas/CollectionItem"},
     }

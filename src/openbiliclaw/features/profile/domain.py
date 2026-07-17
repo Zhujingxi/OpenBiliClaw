@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 FacetName = Literal[
     "interests",
@@ -38,6 +39,81 @@ class ProfileFacet(BaseModel):
         if isinstance(data, Mapping) and data.get("overridden") is True:
             return {**dict(data), "confidence": 1.0}
         return data
+
+
+class ProfileFacetEdit(BaseModel):
+    """One explicit user-authored facet override without client-supplied evidence."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: FacetName
+    value: str = Field(min_length=1, max_length=500)
+    weight: float
+
+    @field_validator("value")
+    @classmethod
+    def normalize_value(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("profile facet values cannot be empty")
+        return normalized
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def clamp_weight(cls, value: object) -> float:
+        weight = float(value)  # type: ignore[arg-type]
+        if not math.isfinite(weight):
+            raise ValueError("profile facet weights must be finite")
+        return max(-1.0, min(1.0, weight))
+
+
+class ProfileFacetReference(BaseModel):
+    """A typed case-insensitive facet identity to remove."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: FacetName
+    value: str = Field(min_length=1, max_length=500)
+
+    @field_validator("value")
+    @classmethod
+    def normalize_value(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("profile facet values cannot be empty")
+        return normalized
+
+
+class ProfileEdit(BaseModel):
+    """An explicit, optimistic edit that creates exactly one profile revision."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    expected_revision: int | None = Field(ge=0)
+    narrative: str | None = Field(default=None, max_length=10_000)
+    upserts: tuple[ProfileFacetEdit, ...] = ()
+    removals: tuple[ProfileFacetReference, ...] = ()
+
+    @field_validator("narrative")
+    @classmethod
+    def normalize_narrative(cls, value: str | None) -> str | None:
+        return None if value is None else value.strip()
+
+    @model_validator(mode="after")
+    def normalize_actions(self) -> ProfileEdit:
+        unique_upserts: dict[tuple[FacetName, str], ProfileFacetEdit] = {}
+        for upsert in self.upserts:
+            unique_upserts.setdefault((upsert.name, upsert.value.casefold()), upsert)
+        unique_removals: dict[tuple[FacetName, str], ProfileFacetReference] = {}
+        for removal in self.removals:
+            unique_removals.setdefault((removal.name, removal.value.casefold()), removal)
+        if unique_upserts.keys() & unique_removals.keys():
+            raise ValueError("profile edit cannot remove and upsert the same facet")
+        if self.narrative is None and not unique_upserts and not unique_removals:
+            raise ValueError("profile edit must contain at least one change")
+        object.__setattr__(self, "upserts", tuple(unique_upserts.values()))
+        object.__setattr__(self, "removals", tuple(unique_removals.values()))
+        return self
 
 
 class ProfileSnapshot(BaseModel):

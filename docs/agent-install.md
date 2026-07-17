@@ -51,6 +51,20 @@ Docker generates:
 - `OPENBILICLAW_SECRET_KEY`
 - `OPENBILICLAW_ACCESS_TOKEN`
 
+Optional browser access is provisioned as separate secrets:
+
+- `OPENBILICLAW_WEB_PASSWORD_HASH`: scrypt hash only, never a plaintext password;
+- `OPENBILICLAW_SESSION_SECRET`: independent random Web/extension signing secret;
+- `OPENBILICLAW_EXTENSION_ACCESS_KEYS`: JSON array of `key-id:sha256-digest` records;
+- `OPENBILICLAW_LITELLM_ADMIN_URL`: optional credential-free public navigation URL.
+
+The complete extension device key is delivered once to the intended extension and is not
+retained in runtime configuration. Provisioning must write generated values directly to the
+private `.env`/secret store without command-line arguments, shell history, status JSON, logs,
+screenshots, examples, or docs. Do not derive or reuse these values from the installer bearer,
+source-encryption secret, or LiteLLM master key. Existing unrelated `.env` entries are retained
+on installer rerun.
+
 Source installs additionally require user values for:
 
 - `OPENBILICLAW_LITELLM_BASE_URL`
@@ -101,6 +115,11 @@ of the entire root or of every Windows coordination object.
    `openbiliclaw doctor`.
 9. Check public readiness and a bearer-protected settings request, followed by
    another API and worker liveness check.
+
+The installer bearer remains the operational probe credential. Cookie login and extension
+exchange are optional product auth paths; their absence is reported as deployment facts and is
+not replaced with the bearer. Alembic `0002_auth_state` supplies persistent session revocation,
+so API/worker must be at head before any auth route is served.
 
 The installer persists a private UUID in `data/vnext/installer-instance.json` and
 binds process state to that UUID, the canonical checkout root, and a monotonic
@@ -155,6 +174,9 @@ OPENBILICLAW_HUEY_PATH=/app/runtime/data/vnext/huey.db
 Provider credentials are configured only in LiteLLM Admin. Create model groups
 `obc-interactive`, `obc-analysis`, and `obc-embedding`; do not add provider editors
 to OpenBiliClaw.
+Set `OPENBILICLAW_LITELLM_ADMIN_URL` only when clients should receive a safe browser
+navigation target. It must be an absolute HTTP(S) URL without credentials, query, or fragment;
+never derive it from the internal Compose/service URL or expose the LiteLLM key.
 
 ## Machine-readable result
 

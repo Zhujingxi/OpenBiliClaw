@@ -70,7 +70,7 @@ def test_current_docs_name_the_runtime_authorities() -> None:
         "docs/modules/vnext-api.md": ("only public API namespace", "Task 22"),
         "docs/modules/cli.md": ("operations interface only", "openbiliclaw doctor"),
         "docs/modules/config.md": ("GET/PATCH /api/v1/settings", "Task 22"),
-        "docs/modules/api-auth.md": ("authoritative app", "Task 22"),
+        "docs/modules/api-auth.md": ("/api/v1/auth", "Task 22"),
     }
     for name, markers in expected.items():
         source = _read(name)
@@ -168,21 +168,80 @@ def test_historical_v03_material_is_explicitly_archived() -> None:
 
 def test_config_doc_matches_current_strict_user_settings_schema() -> None:
     source = _read("docs/modules/config.md")
+    for group in (
+        "`sources`",
+        "`schedules`",
+        "`feed`",
+        "`profile`",
+        "`tasks.<task-name>`",
+        "`network`",
+        "`logging`",
+        "`access_control`",
+        "`jobs`",
+    ):
+        assert group in source
     for field in (
-        "source_enabled",
-        "source_weights",
+        "enabled",
+        "weights",
         "source_sync_interval_minutes",
-        "feed_low_watermark",
-        "feed_high_watermark",
-        "onboarding completion",
+        "low_watermark",
+        "high_watermark",
+        "minimum_evidence_confidence",
+        "model_alias",
+        "semantic_retry_limit",
+        "timeout_seconds",
+        "request_limit",
+        "total_tokens_limit",
+        "proxy_url",
+        "console_level",
+        "file_level",
+        "web_password_enabled",
+        "trust_loopback",
+        "session_ttl_hours",
+        "extension_access_enabled",
+        "extension_session_ttl_hours",
+        "retention_days",
     ):
         assert field in source
-    for unsupported_claim in (
-        "profile projection thresholds",
-        "typed task alias、timeout、semantic retries",
-        "proxy/network、logging 和 access-control product choices",
+    for read_only_field in (
+        "onboarding_complete",
+        "directory",
+        "worker_concurrency",
+        "installer_bearer_configured",
+        "password_configured",
     ):
-        assert unsupported_claim not in source
+        assert read_only_field in source
+    assert "read-only" in source
+
+
+def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
+    expected = {
+        "docs/modules/api-auth.md": (
+            "HttpOnly",
+            "X-OBC-Auth",
+            "extension-token",
+            "auth_state.session_epoch",
+        ),
+        "docs/modules/vnext-api.md": (
+            "LibraryItem",
+            "ProfileEdit",
+            "ChatHistoryPage",
+            "ErrorEnvelope",
+        ),
+        "docs/modules/vnext-sources.md": (
+            "settings_schema",
+            "credential_schema",
+            "request_schema",
+            "result_schema",
+            "idempotent",
+        ),
+        "docs/modules/vnext-ai.md": ("OPENBILICLAW_LITELLM_ADMIN_URL", "admin_url"),
+        "docs/modules/vnext-persistence.md": ("0002_auth_state", "auth_state"),
+    }
+    for name, markers in expected.items():
+        source = _read(name)
+        for marker in markers:
+            assert marker in source, f"missing Task 21b marker in {name}: {marker}"
 
 
 def test_current_changelog_summary_does_not_repeat_superseded_authority() -> None:

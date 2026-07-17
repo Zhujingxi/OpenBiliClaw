@@ -10,12 +10,14 @@ from typing import TYPE_CHECKING
 from rich.logging import RichHandler
 
 if TYPE_CHECKING:
+    from os import stat_result
     from pathlib import Path
 
     from openbiliclaw.config import Config
 
 logger = logging.getLogger(__name__)
 _NOISY_LOGGERS = ("httpx", "httpcore", "openai", "openai._base_client")
+_OWNED_SINK_ATTRIBUTE = "_openbiliclaw_sink"
 
 
 def _coerce_level(level_name: str) -> int:
@@ -24,6 +26,20 @@ def _coerce_level(level_name: str) -> int:
     if isinstance(level, int):
         return level
     return logging.INFO
+
+
+def apply_owned_handler_levels(*, console_level: str, file_level: str) -> None:
+    """Update only handlers installed by :func:`configure_logging`.
+
+    Embedders, pytest's capture handler, and other host-owned root handlers are
+    intentionally outside the product-settings boundary.
+    """
+
+    levels = {"console": _coerce_level(console_level), "file": _coerce_level(file_level)}
+    for handler in logging.getLogger().handlers:
+        sink = getattr(handler, _OWNED_SINK_ATTRIBUTE, None)
+        if sink in levels:
+            handler.setLevel(levels[sink])
 
 
 def _build_file_handler(
@@ -124,6 +140,93 @@ def _is_managed_log(path: Path, managed_filename: str) -> bool:
     return False
 
 
+def _log_file_entries(log_dir: Path) -> list[tuple[Path, stat_result]] | None:
+    try:
+        return [(path, path.stat()) for path in log_dir.iterdir() if path.is_file()]
+    except OSError:
+        return None
+
+
+def _truncate_unmanaged_logs(
+    entries: list[tuple[Path, stat_result]],
+    *,
+    managed_filename: str,
+    threshold_mb: int,
+) -> None:
+    threshold_bytes = threshold_mb * 1024 * 1024
+    for path, stat in entries:
+        if _is_managed_log(path, managed_filename):
+            continue
+        if threshold_mb <= 0 or stat.st_size < threshold_bytes:
+            continue
+        try:
+            size_mb = stat.st_size / (1024 * 1024)
+            with path.open("w", encoding="utf-8") as stream:
+                stream.write(
+                    f"# truncated {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"— was {size_mb:.0f} MB, threshold {threshold_mb} MB\n"
+                )
+            logger.info("[log-cleanup] truncated %s (was %.0f MB)", path.name, size_mb)
+        except OSError as exc:
+            logger.debug("Failed to truncate %s: %s", path, exc)
+
+
+def _delete_stale_unmanaged_logs(
+    entries: list[tuple[Path, stat_result]],
+    *,
+    managed_filename: str,
+    age_cutoff: float,
+) -> None:
+    if not age_cutoff:
+        return
+    for path, _ in entries:
+        if _is_managed_log(path, managed_filename):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_mtime >= age_cutoff:
+            continue
+        try:
+            path.unlink()
+            logger.info(
+                "[log-cleanup] deleted stale %s (mtime %s)",
+                path.name,
+                time.strftime("%Y-%m-%d", time.localtime(stat.st_mtime)),
+            )
+        except OSError as exc:
+            logger.debug("Failed to unlink %s: %s", path, exc)
+
+
+def _enforce_log_budget(log_dir: Path, *, managed_filename: str, aggregate_budget_mb: int) -> None:
+    if aggregate_budget_mb <= 0:
+        return
+    entries = _log_file_entries(log_dir)
+    if entries is None:
+        return
+    budget_bytes = aggregate_budget_mb * 1024 * 1024
+    total = sum(stat.st_size for _, stat in entries)
+    unmanaged = sorted(
+        ((path, stat) for path, stat in entries if not _is_managed_log(path, managed_filename)),
+        key=lambda item: item[1].st_mtime,
+    )
+    for path, stat in unmanaged:
+        if total <= budget_bytes:
+            break
+        try:
+            path.unlink()
+            total -= stat.st_size
+            logger.info(
+                "[log-cleanup] deleted %s (%.0f MB) to enforce %d MB budget",
+                path.name,
+                stat.st_size / (1024 * 1024),
+                aggregate_budget_mb,
+            )
+        except OSError as exc:
+            logger.debug("Failed to unlink %s: %s", path, exc)
+
+
 def _sweep_unmanaged_logs(
     log_dir: Path,
     *,
@@ -156,86 +259,27 @@ def _sweep_unmanaged_logs(
     if not log_dir.exists() or not log_dir.is_dir():
         return
 
-    try:
-        entries = [(p, p.stat()) for p in log_dir.iterdir() if p.is_file()]
-    except OSError:
+    entries = _log_file_entries(log_dir)
+    if entries is None:
         return
 
     now = time.time()
     age_cutoff = now - unmanaged_max_age_days * 86400 if unmanaged_max_age_days > 0 else 0.0
-
-    # Pass 1: truncate huge unmanaged files
-    truncate_bytes = unmanaged_truncate_mb * 1024 * 1024
-    for path, st in entries:
-        if _is_managed_log(path, managed_filename):
-            continue
-        if unmanaged_truncate_mb > 0 and st.st_size >= truncate_bytes:
-            try:
-                size_mb = st.st_size / (1024 * 1024)
-                with path.open("w", encoding="utf-8") as f:
-                    f.write(
-                        f"# truncated {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                        f"— was {size_mb:.0f} MB, threshold "
-                        f"{unmanaged_truncate_mb} MB\n"
-                    )
-                logger.info(
-                    "[log-cleanup] truncated %s (was %.0f MB)",
-                    path.name,
-                    size_mb,
-                )
-            except OSError as exc:
-                logger.debug("Failed to truncate %s: %s", path, exc)
-
-    # Pass 2: delete stale unmanaged files (re-stat after truncate)
-    if unmanaged_max_age_days > 0:
-        for path in [p for p, _ in entries]:
-            if _is_managed_log(path, managed_filename):
-                continue
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            if st.st_mtime < age_cutoff:
-                try:
-                    path.unlink()
-                    logger.info(
-                        "[log-cleanup] deleted stale %s (mtime %s)",
-                        path.name,
-                        time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)),
-                    )
-                except OSError as exc:
-                    logger.debug("Failed to unlink %s: %s", path, exc)
-
-    # Pass 3: enforce aggregate budget by removing oldest unmanaged files
-    if aggregate_budget_mb <= 0:
-        return
-    budget_bytes = aggregate_budget_mb * 1024 * 1024
-    try:
-        current_entries = [(p, p.stat()) for p in log_dir.iterdir() if p.is_file()]
-    except OSError:
-        return
-    total = sum(st.st_size for _, st in current_entries)
-    if total <= budget_bytes:
-        return
-    # Sort unmanaged by mtime ASC (oldest first) and trim until in budget
-    unmanaged = sorted(
-        [(p, st) for p, st in current_entries if not _is_managed_log(p, managed_filename)],
-        key=lambda item: item[1].st_mtime,
+    _truncate_unmanaged_logs(
+        entries,
+        managed_filename=managed_filename,
+        threshold_mb=unmanaged_truncate_mb,
     )
-    for path, st in unmanaged:
-        if total <= budget_bytes:
-            break
-        try:
-            path.unlink()
-            total -= st.st_size
-            logger.info(
-                "[log-cleanup] deleted %s (%.0f MB) to enforce %d MB budget",
-                path.name,
-                st.st_size / (1024 * 1024),
-                aggregate_budget_mb,
-            )
-        except OSError as exc:
-            logger.debug("Failed to unlink %s: %s", path, exc)
+    _delete_stale_unmanaged_logs(
+        entries,
+        managed_filename=managed_filename,
+        age_cutoff=age_cutoff,
+    )
+    _enforce_log_budget(
+        log_dir,
+        managed_filename=managed_filename,
+        aggregate_budget_mb=aggregate_budget_mb,
+    )
 
 
 def configure_logging(
@@ -262,6 +306,7 @@ def configure_logging(
     file_level = _coerce_level(config.logging.file_level)
 
     console_handler = RichHandler(rich_tracebacks=True, show_path=False)
+    setattr(console_handler, _OWNED_SINK_ATTRIBUTE, "console")
     console_handler.setLevel(console_level)
     console_handler.setFormatter(logging.Formatter("%(message)s"))
 
@@ -286,6 +331,7 @@ def configure_logging(
         backup_count=config.logging.backup_count,
         level=file_level,
     )
+    setattr(file_handler, _OWNED_SINK_ATTRIBUTE, "file")
 
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)

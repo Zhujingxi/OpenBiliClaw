@@ -15,6 +15,7 @@ from openbiliclaw.features.sources.domain import (
     SourceOperation,
     SourceResultKind,
     SourceTransportKind,
+    source_form_schema_fields,
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
@@ -58,6 +59,7 @@ class ZhihuSettings(BaseModel):
 _MANIFEST = SourceManifest(
     source_id=SourceId.ZHIHU,
     display_name="Zhihu",
+    **source_form_schema_fields(ZhihuSettings),
     capabilities=frozenset(
         {
             SourceCapability.AUTHENTICATION,

@@ -35,6 +35,15 @@ class SettingModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class AuthStateModel(Base):
+    """Non-secret monotonic authentication revocation state."""
+
+    __tablename__ = "auth_state"
+
+    key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    value: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class SourceAccountModel(Base):
     """A source account whose opaque credentials are always encrypted."""
 

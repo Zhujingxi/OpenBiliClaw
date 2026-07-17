@@ -139,7 +139,7 @@ def test_onboarding_service_rejects_empty_sources_before_scheduling(tmp_path: Pa
         onboarding.start(())
 
     assert queue.messages == []
-    assert all(enabled is False for enabled in settings.get().source_enabled.values())
+    assert all(enabled is False for enabled in settings.get().sources.enabled.values())
     engine.dispose()
 
 

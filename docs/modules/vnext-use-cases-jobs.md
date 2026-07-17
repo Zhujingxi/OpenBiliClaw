@@ -14,12 +14,12 @@ feature service 只依赖自身声明的 repository、AI、settings 和 source P
 
 | 用例 | 行为 |
 |---|---|
-| activity ingestion | 先幂等持久化不可变 `ActivityEvent`，再产生带原 event UUID 的确定性 `ProfileSignal`；显式画像编辑是 confidence=1 的 override |
-| profile projection | 可通过 analysis lane 生成 typed `ProfileDelta`；proposal 携带应用拥有的 base revision，latest 已变化时拒绝陈旧 delta 并让 job 重算；unknown/duplicate evidence、重复 action 与 AI override 均被拒绝。所有送入投影的 evidence（含 narrative-only、no-op 或日后 facet 被删除）与新 revision 在同一 UoW 写入独立 consumed ledger |
+| activity ingestion | 先幂等持久化不可变 `ActivityEvent`，再产生带原 event UUID 的确定性 `ProfileSignal` |
+| profile projection/edit | analysis lane 生成 typed `ProfileDelta`；proposal 携带应用拥有的 base revision，latest 已变化时拒绝陈旧 delta 并让 job 重算。显式 `ProfileEdit` 创建一条 confidence=1 override evidence，支持 narrative 与五类 facet upsert/removal；expected revision、去重/钳制和同一 UoW 保证一次请求恰生成一个 revision，冲突整体回滚 |
 | feed replenishment | 读取 typed source enable/weight settings，以稳定 SourceId tie-break 的 largest-remainder 算法精确分配有限候选预算；batch 前排除同 revision 已评估及历史 admitted/interacted/dismissed 内容，并有界扩量寻找新候选。所有评估都会持久化；topic hard cap 在任一 declared topic 饱和时拒绝该候选，只对实际 admitted 内容计数 |
 | feedback | 同一事务写 `Interaction` 和确定性 feedback `ActivityEvent`；repository rank adjustment 会让后续排序读取该反馈 |
-| library | 只写本地 `favorites` / `watch_later`，不调用平台账号 mutation |
-| chat | 直接调用共享 `TaskRunner` 的 `obc-interactive` lane，不进入 Huey；持久化 user/assistant 两轮并输出可直接渲染为 SSE 的 typed delta/done chunks；opt-in learning 只写 activity evidence |
+| library | 只写本地 `favorites` / `watch_later`，不调用平台账号 mutation；list 用一次 join 返回 collection metadata + renderable `ContentItem`，按 `added_at,id` 稳定排序 |
+| chat | 直接调用共享 `TaskRunner` 的 `obc-interactive` lane，不进入 Huey；持久化 user/assistant 两轮并输出可直接渲染为 SSE 的 typed delta/done chunks；history 按 conversation 隔离、升序、有界分页且移除 AI run metadata；opt-in learning 只写 activity evidence |
 | background jobs | startup 重发全部 pending row，原子 claim 消解重复 Huey message；四类 feature 写事务内的 running guard 将 cancellation 与业务 effect 原子排序 |
 
 ## 四个任务与权威状态

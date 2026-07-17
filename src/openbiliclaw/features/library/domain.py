@@ -6,6 +6,8 @@ from uuid import UUID, uuid4
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from openbiliclaw.features.feed.domain import ContentItem
+
 
 class CollectionKind(StrEnum):
     """The two predefined local-only collections."""
@@ -24,3 +26,12 @@ class CollectionItem(BaseModel):
     content_id: UUID
     added_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     note: str = Field(default="", max_length=2000)
+
+
+class LibraryItem(BaseModel):
+    """One local collection membership joined to renderable normalized content."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    collection_item: CollectionItem
+    content: ContentItem
