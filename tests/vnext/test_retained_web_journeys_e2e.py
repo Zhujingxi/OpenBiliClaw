@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -144,198 +144,201 @@ def _wait_until(predicate: Any, *, timeout: float = 3.0) -> None:
     assert predicate()
 
 
+_STATIC_ROOTS = {
+    "/m/": WEB,
+    "/web/": WEB / "desktop",
+    "/setup/": WEB / "setup",
+    "/extension/popup/": POPUP,
+}
+_NOT_FOUND = object()
+
+
+def _get_payload(path: str, state: StubState) -> object:
+    if path == "/api/v1/auth/status":
+        return {"enabled": state.auth_enabled, "authenticated": state.authenticated}
+    if path == "/api/v1/system/readiness":
+        return {"ready": True, "version": "test", "checks": []}
+    if path == "/api/v1/settings":
+        return _settings(state.onboarding_complete)
+    if path == "/api/v1/system/ai-health":
+        return {
+            "aliases": [
+                {"alias": alias, "state": "available", "available": True, "reason": None}
+                for alias in ("obc-interactive", "obc-analysis", "obc-embedding")
+            ],
+            "admin_url": None,
+        }
+    if path == "/api/v1/sources":
+        return [
+            {
+                "source_id": "bilibili",
+                "display_name": "Bilibili",
+                "capabilities": ["history"],
+            }
+        ]
+    if path == "/api/v1/sources/status":
+        return []
+    if path == "/api/v1/feed":
+        return [FEED_ITEM]
+    if path.startswith("/api/v1/library/"):
+        collection = path.rsplit("/", 1)[-1]
+        return (
+            [_library_item(collection)]
+            if CONTENT_ID in state.collections.get(collection, set())
+            else []
+        )
+    if path.startswith("/api/v1/chat/"):
+        return {
+            "conversation_id": path.rsplit("/", 1)[-1],
+            "items": [],
+            "limit": 100,
+            "offset": 0,
+            "has_more": False,
+        }
+    return _NOT_FOUND
+
+
+class _RetainedServer(ThreadingHTTPServer):
+    state: StubState
+
+
+class _RetainedHandler(BaseHTTPRequestHandler):
+    @property
+    def state(self) -> StubState:
+        return cast("_RetainedServer", self.server).state
+
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def _static(self, path: str) -> bool:
+        for prefix, root in _STATIC_ROOTS.items():
+            if not path.startswith(prefix):
+                continue
+            relative = path[len(prefix) :] or "index.html"
+            candidate = (root / relative).resolve()
+            if root.resolve() not in candidate.parents and candidate != root.resolve():
+                self.send_error(404)
+                return True
+            if not candidate.is_file():
+                self.send_error(404)
+                return True
+            content = candidate.read_bytes()
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
+            )
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return True
+        return False
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if self._static(path):
+            return
+        payload = _get_payload(path, self.state)
+        if payload is not _NOT_FOUND:
+            _json(self, payload)
+            return
+        if path.startswith("/api/v1/onboarding/") and path.endswith("/events"):
+            self._onboarding_events()
+            return
+        self.send_error(404)
+
+    def _onboarding_events(self) -> None:
+        result = self.state.onboarding_result
+        if result == "succeeded":
+            self.state.onboarding_complete = True
+        frames = (
+            'event: progress\ndata: {"stage":"source_sync","run":'
+            '{"status":"running","progress":0.5}}\n\n'
+            f'event: done\ndata: {{"status":"{result}"}}\n\n'
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(frames)))
+        self.end_headers()
+        self.wfile.write(frames)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        payload = _body(self)
+        self.state.requests.append(
+            {"path": path, "body": payload, "auth": self.headers.get("X-OBC-Auth")}
+        )
+        if path == "/api/v1/interactions":
+            self._interaction(payload)
+            return
+        if path.startswith("/api/v1/library/"):
+            self._library_add(path, payload)
+            return
+        if path == "/api/v1/onboarding/start":
+            _json(self, {"id": "55555555-5555-4555-8555-555555555555"}, 202)
+            return
+        if path == "/api/v1/auth/login":
+            self._login(payload)
+            return
+        self.send_error(404)
+
+    def _interaction(self, payload: dict[str, Any]) -> None:
+        if self.state.fail_interaction:
+            _json(
+                self,
+                {"error": {"code": "interaction_unavailable", "message": "feedback failed"}},
+                503,
+            )
+            return
+        self.state.interactions.append(payload)
+        _json(self, {"signal": {"id": "44444444-4444-4444-8444-444444444444"}}, 201)
+
+    def _library_add(self, path: str, payload: dict[str, Any]) -> None:
+        collection = path.rsplit("/", 1)[-1]
+        if self.state.fail_library_add:
+            _json(
+                self,
+                {"error": {"code": "library_unavailable", "message": "save failed"}},
+                503,
+            )
+            return
+        if payload["content_id"] in self.state.collections[collection]:
+            _json(
+                self,
+                {"error": {"code": "already_saved", "message": "already saved"}},
+                409,
+            )
+            return
+        self.state.collections[collection].add(payload["content_id"])
+        _json(self, _library_item(collection)["collection_item"], 201)
+
+    def _login(self, payload: dict[str, Any]) -> None:
+        if payload.get("password") != "correct horse":
+            _json(
+                self,
+                {"error": {"code": "invalid_password", "message": "密码不正确"}},
+                401,
+            )
+            return
+        self.state.authenticated = True
+        _json(self, {"authenticated": True})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/api/v1/library/"):
+            collection, content_id = path.removeprefix("/api/v1/library/").split("/", 1)
+            self.state.collections[collection].discard(content_id)
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_error(404)
+
+
 @pytest.fixture()
 def retained_server() -> tuple[str, StubState]:
     state = StubState()
-
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
-
-        def _static(self, path: str) -> bool:
-            roots = {
-                "/m/": WEB,
-                "/web/": WEB / "desktop",
-                "/setup/": WEB / "setup",
-                "/extension/popup/": POPUP,
-            }
-            for prefix, root in roots.items():
-                if not path.startswith(prefix):
-                    continue
-                relative = path[len(prefix) :] or "index.html"
-                candidate = (root / relative).resolve()
-                if root.resolve() not in candidate.parents and candidate != root.resolve():
-                    self.send_error(404)
-                    return True
-                if not candidate.is_file():
-                    self.send_error(404)
-                    return True
-                content = candidate.read_bytes()
-                self.send_response(200)
-                self.send_header(
-                    "Content-Type",
-                    mimetypes.guess_type(candidate.name)[0] or "application/octet-stream",
-                )
-                self.send_header("Content-Length", str(len(content)))
-                self.end_headers()
-                self.wfile.write(content)
-                return True
-            return False
-
-        def do_GET(self) -> None:  # noqa: N802
-            path = self.path.split("?", 1)[0]
-            if self._static(path):
-                return
-            if path == "/api/v1/auth/status":
-                return _json(
-                    self,
-                    {
-                        "enabled": state.auth_enabled,
-                        "authenticated": state.authenticated,
-                    },
-                )
-            if path == "/api/v1/system/readiness":
-                return _json(self, {"ready": True, "version": "test", "checks": []})
-            if path == "/api/v1/settings":
-                return _json(self, _settings(state.onboarding_complete))
-            if path == "/api/v1/system/ai-health":
-                return _json(
-                    self,
-                    {
-                        "aliases": [
-                            {
-                                "alias": alias,
-                                "state": "available",
-                                "available": True,
-                                "reason": None,
-                            }
-                            for alias in (
-                                "obc-interactive",
-                                "obc-analysis",
-                                "obc-embedding",
-                            )
-                        ],
-                        "admin_url": None,
-                    },
-                )
-            if path == "/api/v1/sources":
-                return _json(
-                    self,
-                    [
-                        {
-                            "source_id": "bilibili",
-                            "display_name": "Bilibili",
-                            "capabilities": ["history"],
-                        }
-                    ],
-                )
-            if path == "/api/v1/sources/status":
-                return _json(self, [])
-            if path == "/api/v1/feed":
-                return _json(self, [FEED_ITEM])
-            if path.startswith("/api/v1/library/"):
-                collection = path.rsplit("/", 1)[-1]
-                items = (
-                    [_library_item(collection)]
-                    if CONTENT_ID in state.collections.get(collection, set())
-                    else []
-                )
-                return _json(self, items)
-            if path.startswith("/api/v1/chat/"):
-                return _json(
-                    self,
-                    {
-                        "conversation_id": path.rsplit("/", 1)[-1],
-                        "items": [],
-                        "limit": 100,
-                        "offset": 0,
-                        "has_more": False,
-                    },
-                )
-            if path.startswith("/api/v1/onboarding/") and path.endswith("/events"):
-                result = state.onboarding_result
-                if result == "succeeded":
-                    state.onboarding_complete = True
-                frames = (
-                    'event: progress\ndata: {"stage":"source_sync","run":'
-                    '{"status":"running","progress":0.5}}\n\n'
-                    f'event: done\ndata: {{"status":"{result}"}}\n\n'
-                ).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Content-Length", str(len(frames)))
-                self.end_headers()
-                self.wfile.write(frames)
-                return
-            self.send_error(404)
-
-        def do_POST(self) -> None:  # noqa: N802
-            path = self.path.split("?", 1)[0]
-            payload = _body(self)
-            state.requests.append(
-                {"path": path, "body": payload, "auth": self.headers.get("X-OBC-Auth")}
-            )
-            if path == "/api/v1/interactions":
-                if state.fail_interaction:
-                    return _json(
-                        self,
-                        {
-                            "error": {
-                                "code": "interaction_unavailable",
-                                "message": "feedback failed",
-                            }
-                        },
-                        503,
-                    )
-                state.interactions.append(payload)
-                return _json(self, {"signal": {"id": "44444444-4444-4444-8444-444444444444"}}, 201)
-            if path.startswith("/api/v1/library/"):
-                collection = path.rsplit("/", 1)[-1]
-                if state.fail_library_add:
-                    return _json(
-                        self,
-                        {"error": {"code": "library_unavailable", "message": "save failed"}},
-                        503,
-                    )
-                if payload["content_id"] in state.collections[collection]:
-                    return _json(
-                        self,
-                        {"error": {"code": "already_saved", "message": "already saved"}},
-                        409,
-                    )
-                state.collections[collection].add(payload["content_id"])
-                return _json(self, _library_item(collection)["collection_item"], 201)
-            if path == "/api/v1/onboarding/start":
-                return _json(self, {"id": "55555555-5555-4555-8555-555555555555"}, 202)
-            if path == "/api/v1/auth/login":
-                if payload.get("password") != "correct horse":
-                    return _json(
-                        self,
-                        {"error": {"code": "invalid_password", "message": "密码不正确"}},
-                        401,
-                    )
-                state.authenticated = True
-                return _json(self, {"authenticated": True})
-            self.send_error(404)
-
-        def do_DELETE(self) -> None:  # noqa: N802
-            path = self.path.split("?", 1)[0]
-            parts = path.split("/")
-            if len(parts) == 7 and parts[3] == "library":
-                collection, content_id = parts[4], parts[5]
-                state.collections[collection].discard(content_id)
-                self.send_response(204)
-                self.end_headers()
-                return
-            if path.startswith("/api/v1/library/"):
-                collection, content_id = path.removeprefix("/api/v1/library/").split("/", 1)
-                state.collections[collection].discard(content_id)
-                self.send_response(204)
-                self.end_headers()
-                return
-            self.send_error(404)
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = _RetainedServer(("127.0.0.1", 0), _RetainedHandler)
+    server.state = state
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -447,9 +450,10 @@ def test_failed_writes_and_partial_saves_keep_truthful_retryable_state(
     _wait_until(lambda: any(item["kind"] == interaction_kind for item in state.interactions))
     expect(save).not_to_have_attribute("data-interaction-pending", "true")
     expect(save).to_be_disabled()
-    assert sum(
-        request["path"] == f"/api/v1/library/{collection}" for request in state.requests
-    ) == add_count
+    assert (
+        sum(request["path"] == f"/api/v1/library/{collection}" for request in state.requests)
+        == add_count
+    )
     interaction_count = len(state.interactions)
     save.evaluate("button => button.click()")
     browser_page.wait_for_timeout(50)
@@ -490,9 +494,7 @@ def test_library_add_list_and_remove_round_trip(
 
     if url == "/web/":
         browser_page.locator("#sideDrawerBtn").click()
-        expect(browser_page.locator("#sideDrawer")).to_have_attribute(
-            "aria-hidden", "false"
-        )
+        expect(browser_page.locator("#sideDrawer")).to_have_attribute("aria-hidden", "false")
     browser_page.locator(tab_selector).click()
     saved = browser_page.locator(list_selector).locator(card_selector)
     expect(saved).to_have_count(1)
@@ -544,9 +546,10 @@ def test_popup_saved_round_trip_and_retry_after_failed_add(
     _wait_until(lambda: any(item["kind"] == interaction_kind for item in state.interactions))
     expect(save).to_be_disabled()
     interaction_count = len(state.interactions)
-    assert sum(
-        request["path"] == f"/api/v1/library/{collection}" for request in state.requests
-    ) == add_count
+    assert (
+        sum(request["path"] == f"/api/v1/library/{collection}" for request in state.requests)
+        == add_count
+    )
     save.evaluate("button => button.click()")
     browser_page.wait_for_timeout(50)
     assert len(state.interactions) == interaction_count

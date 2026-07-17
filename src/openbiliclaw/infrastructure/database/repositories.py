@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid4, uuid5
 
 from pydantic import HttpUrl
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import case, delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -143,6 +143,8 @@ class ContentRepository(Protocol):
     """Persistence port for normalized content."""
 
     def add(self, item: ContentItem) -> None: ...
+
+    def get(self, content_id: UUID) -> ContentItem | None: ...
 
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None: ...
 
@@ -601,6 +603,10 @@ class SQLAlchemyContentRepository:
     def flush(self) -> None:
         self._session.flush()
 
+    def get(self, content_id: UUID) -> ContentItem | None:
+        row = self._session.get(ContentItemModel, str(content_id))
+        return None if row is None else _content_from_row(row)
+
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None:
         row = self._session.scalar(
             select(ContentItemModel).where(
@@ -703,10 +709,54 @@ class SQLAlchemyFeedRepository:
         return 0 if latest is None else int(latest) + 1
 
     def list_entries(self, *, limit: int, offset: int) -> tuple[FeedItem, ...]:
+        interaction_delta = case(
+            (InteractionModel.kind == "positive", 0.2),
+            (InteractionModel.kind.in_(("negative", "dismiss")), -0.5),
+            else_=0.0,
+        )
+        interaction_totals = (
+            select(
+                InteractionModel.content_id.label("content_id"),
+                func.sum(interaction_delta).label("raw_adjustment"),
+            )
+            .group_by(InteractionModel.content_id)
+            .subquery()
+        )
+        raw_adjustment = func.coalesce(interaction_totals.c.raw_adjustment, 0.0)
+        adjustment = case(
+            (raw_adjustment > 1.0, 1.0),
+            (raw_adjustment < -1.0, -1.0),
+            else_=raw_adjustment,
+        )
+        raw_assessment_score = func.coalesce(
+            CandidateAssessmentModel.relevance * 0.5
+            + CandidateAssessmentModel.quality * 0.25
+            + CandidateAssessmentModel.novelty * 0.25
+            - CandidateAssessmentModel.risk * 0.5,
+            0.0,
+        )
+        assessment_score = case(
+            (raw_assessment_score > 1.0, 1.0),
+            (raw_assessment_score < 0.0, 0.0),
+            else_=raw_assessment_score,
+        )
+        personalized_score = assessment_score + adjustment
         rows = self._session.execute(
             select(FeedEntryModel, ContentItemModel)
             .join(ContentItemModel, ContentItemModel.id == FeedEntryModel.content_id)
-            .order_by(FeedEntryModel.position, FeedEntryModel.id)
+            .outerjoin(
+                CandidateAssessmentModel,
+                CandidateAssessmentModel.id == FeedEntryModel.assessment_id,
+            )
+            .outerjoin(
+                interaction_totals,
+                interaction_totals.c.content_id == FeedEntryModel.content_id,
+            )
+            .order_by(
+                personalized_score.desc(),
+                FeedEntryModel.position,
+                FeedEntryModel.id,
+            )
             .limit(limit)
             .offset(offset)
         ).all()

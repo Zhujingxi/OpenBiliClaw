@@ -800,23 +800,7 @@ def test_password_fingerprint_reconcile_failure_closes_session_auth() -> None:
 def test_vnext_auth_environment_is_authoritative_and_never_accepts_plain_device_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import openbiliclaw.config as legacy_config
-
     _key_id, device_key, record = auth_core.generate_extension_access_key()
-    legacy = SimpleNamespace(
-        api=SimpleNamespace(
-            auth=SimpleNamespace(
-                enabled=True,
-                password_hash="legacy-password-hash",
-                session_secret="legacy-session-secret",
-                session_ttl_hours=99,
-                extension_access_enabled=True,
-                extension_access_keys=[record],
-                extension_token_ttl_hours=99,
-            )
-        )
-    )
-    monkeypatch.setattr(legacy_config, "load_config", lambda: legacy)
     for name in (
         "OPENBILICLAW_ACCESS_TOKEN",
         "OPENBILICLAW_WEB_PASSWORD_HASH",

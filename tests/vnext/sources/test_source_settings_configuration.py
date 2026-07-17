@@ -16,7 +16,7 @@ from openbiliclaw.features.sources.domain import SourceId, SourceOperation, Sour
 from openbiliclaw.features.sources.service import SourceAccountService
 from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_engine_and_session
-from openbiliclaw.infrastructure.database.models import SettingModel
+from openbiliclaw.infrastructure.database.models import SettingModel, SourceAccountModel
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.jobs.source_composition import build_default_source_registry
 
@@ -34,7 +34,7 @@ VALID_PATCHES: dict[SourceId, dict[str, object]] = {
     SourceId.YOUTUBE: {},
     SourceId.TWITTER: {},
     SourceId.ZHIHU: {},
-    SourceId.REDDIT: {"backend": "extension"},
+    SourceId.REDDIT: {},
 }
 
 
@@ -104,7 +104,7 @@ def test_global_settings_replace_preserves_source_configuration_rows(
     settings_context: tuple[Any, Any, SourceAccountService],
 ) -> None:
     session_factory, _, service = settings_context
-    expected = service.update_settings(SourceId.REDDIT, {"backend": "extension"})
+    expected = service.update_settings(SourceId.REDDIT, {})
 
     global_settings = SettingsService(lambda: UnitOfWork(session_factory))
     assert global_settings.update({"feed": {"low_watermark": 7}}).feed.low_watermark == 7
@@ -143,7 +143,7 @@ def test_every_advertised_source_setting_has_a_named_runtime_consumer(
         SourceId.YOUTUBE: set(),
         SourceId.TWITTER: set(),
         SourceId.ZHIHU: set(),
-        SourceId.REDDIT: {"backend"},
+        SourceId.REDDIT: set(),
     }
 
     for manifest in service.manifests():
@@ -156,7 +156,7 @@ def test_source_settings_state_and_manifest_are_credential_free(
     settings_context: tuple[Any, Any, SourceAccountService],
 ) -> None:
     _, _, service = settings_context
-    state = service.update_settings(SourceId.REDDIT, {"backend": "extension"})
+    state = service.update_settings(SourceId.REDDIT, {})
     payload = state.model_dump_json().casefold()
     assert "cookie" not in payload
     assert "credential" not in payload
@@ -178,3 +178,17 @@ def test_source_settings_state_and_manifest_are_credential_free(
     ).casefold()
     assert "credential" not in settings_contracts
     assert "password" not in settings_contracts
+
+
+def test_extension_only_reddit_rejects_unused_account_credentials(
+    settings_context: tuple[Any, Any, SourceAccountService],
+) -> None:
+    session_factory, registry, service = settings_context
+    reddit = registry.get(SourceId.REDDIT.value)
+    assert dict(reddit.manifest.credential_schema) == {}
+
+    with pytest.raises(ValueError, match="does not accept backend credentials"):
+        service.configure(SourceId.REDDIT, "primary", {"cookie": "reddit_session=secret"})
+
+    with session_factory() as session:
+        assert session.execute(select(SourceAccountModel)).scalars().all() == []

@@ -14,10 +14,28 @@ WORKER_MODULE = b"openbiliclaw.worker"
 
 def _is_worker_process(cmdline: bytes) -> bool:
     parts = tuple(part for part in cmdline.split(b"\0") if part)
-    if len(parts) != 3:
+    if len(parts) < 3:
         return False
     executable = Path(os.fsdecode(parts[0])).name
-    return executable.startswith("python") and parts[1:] == (b"-m", WORKER_MODULE)
+    if not executable.startswith("python"):
+        return False
+    if parts[1:] == (b"-m", WORKER_MODULE):
+        return True
+    if Path(os.fsdecode(parts[1])).name != "openbiliclaw" or parts[2] != b"worker":
+        return False
+    if len(parts) == 3:
+        return True
+    return (
+        len(parts) == 5
+        and parts[3] == b"--workers"
+        and parts[4]
+        in {
+            b"1",
+            b"2",
+            b"3",
+            b"4",
+        }
+    )
 
 
 def worker_health_ready(*, process_cmdline: bytes | None = None) -> bool:

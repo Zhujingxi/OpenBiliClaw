@@ -120,7 +120,7 @@ def test_runtime_logging_changes_only_openbiliclaw_owned_handlers() -> None:
 
 
 def test_alembic_upgrade_does_not_disable_existing_named_loggers(tmp_path: Path) -> None:
-    application_logger = logging.getLogger("openbiliclaw.config")
+    application_logger = logging.getLogger("openbiliclaw.features.system")
     original_disabled = application_logger.disabled
     original_level = application_logger.level
     application_logger.disabled = False

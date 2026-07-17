@@ -14,6 +14,9 @@ from openbiliclaw.infrastructure.jobs.queue import build_huey
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKER_CMDLINE = b"python\x00-m\x00openbiliclaw.worker\x00"
+WORKER_CLI_CMDLINE = (
+    b"/usr/local/bin/python3.11\x00/usr/local/bin/openbiliclaw\x00worker\x00--workers\x004\x00"
+)
 
 
 def test_real_huey_wal_queue_health_preserves_journal_mode(tmp_path: Path) -> None:
@@ -84,8 +87,15 @@ def test_worker_health_requires_process_schema_head_and_queue_access(
     monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
 
     assert worker_health_ready(process_cmdline=WORKER_CMDLINE)
+    assert worker_health_ready(process_cmdline=WORKER_CLI_CMDLINE)
     assert not worker_health_ready(process_cmdline=b"python\x00-m\x00http.server\x00")
     assert not worker_health_ready(process_cmdline=b"echo\x00openbiliclaw.worker\x00")
+    assert not worker_health_ready(
+        process_cmdline=(
+            b"/usr/local/bin/python3.11\x00/usr/local/bin/openbiliclaw\x00"
+            b"worker\x00--workers\x0099\x00"
+        )
+    )
     with sqlite3.connect(queue) as connection:
         assert connection.execute("SELECT count(*) FROM queue_probe").fetchone() == (0,)
         assert (

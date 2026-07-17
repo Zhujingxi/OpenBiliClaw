@@ -1,0 +1,36 @@
+services:
+  fake-provider:
+    image: python:3.11-slim
+    pull_policy: always
+    command: ["python", "/e2e/fake_openai_provider.py"]
+    volumes:
+      - ./tests/docker_e2e/fake_openai_provider.py:/e2e/fake_openai_provider.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  litellm-postgres: {}
+
+  litellm:
+    depends_on:
+      fake-provider:
+        condition: service_healthy
+      litellm-postgres:
+        condition: service_healthy
+    volumes: !override
+      - ./tests/docker_e2e/litellm-config.yaml:/app/config.yaml:ro
+    environment:
+      OBC_E2E_FAKE_PROVIDER_KEY: ${OBC_E2E_FAKE_PROVIDER_KEY:?Set an ephemeral fake-provider key}
+    ports: !override
+      - "127.0.0.1:${OBC_E2E_LITELLM_PORT}:4000"
+
+  api:
+    ports: !override
+      - "127.0.0.1:${OBC_E2E_API_PORT}:8420"
+
+  worker:
+    environment:
+      OPENBILICLAW_WORKERS: "1"
+    command: ["openbiliclaw", "worker", "--workers", "1"]

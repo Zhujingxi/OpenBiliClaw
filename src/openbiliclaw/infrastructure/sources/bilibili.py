@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from openbiliclaw.bilibili.api import BilibiliAPIError
 from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
 from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
 from openbiliclaw.features.sources.domain import (
@@ -29,6 +28,7 @@ from openbiliclaw.infrastructure.sources._base import (
     text,
     timestamp,
 )
+from openbiliclaw.infrastructure.sources.bilibili_client import BilibiliAPIError
 from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
 
 if TYPE_CHECKING:

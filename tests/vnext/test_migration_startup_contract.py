@@ -151,7 +151,7 @@ def test_concurrent_source_setting_updates_serialize_registry_rebuilds(
                 pool.submit(
                     container.sources.update_settings,
                     SourceId.REDDIT,
-                    {"backend": "rdt"},
+                    {},
                 ),
             )
             for future in futures:
@@ -160,16 +160,12 @@ def test_concurrent_source_setting_updates_serialize_registry_rebuilds(
         assert max_active_builds == 1
         manifests = {manifest.source_id: manifest for manifest in container.sources.manifests()}
         assert (
-            manifests[SourceId.DOUYIN]
-            .operation_spec(SourceOperation.SEARCH)
-            .transport_kind.value
+            manifests[SourceId.DOUYIN].operation_spec(SourceOperation.SEARCH).transport_kind.value
             == "browser"
         )
         assert (
-            manifests[SourceId.REDDIT]
-            .operation_spec(SourceOperation.SEARCH)
-            .transport_kind.value
-            == "cli"
+            manifests[SourceId.REDDIT].operation_spec(SourceOperation.SEARCH).transport_kind.value
+            == "browser"
         )
     finally:
         asyncio.run(container.shutdown())
@@ -188,12 +184,10 @@ def test_independent_api_containers_read_the_same_persisted_source_registry(
         asyncio.run(first.startup())
         asyncio.run(second.startup())
         first.sources.update_settings(SourceId.DOUYIN, {"mode": "extension"})
-        second.sources.update_settings(SourceId.REDDIT, {"backend": "rdt"})
+        second.sources.update_settings(SourceId.REDDIT, {})
 
         for container in (first, second):
-            manifests = {
-                manifest.source_id: manifest for manifest in container.sources.manifests()
-            }
+            manifests = {manifest.source_id: manifest for manifest in container.sources.manifests()}
             assert (
                 manifests[SourceId.DOUYIN]
                 .operation_spec(SourceOperation.SEARCH)
@@ -204,7 +198,7 @@ def test_independent_api_containers_read_the_same_persisted_source_registry(
                 manifests[SourceId.REDDIT]
                 .operation_spec(SourceOperation.SEARCH)
                 .transport_kind.value
-                == "cli"
+                == "browser"
             )
     finally:
         asyncio.run(first.shutdown())
@@ -254,9 +248,7 @@ def test_browser_row_enqueued_before_mode_switch_remains_claimable(
         container.sources.update_settings(SourceId.DOUYIN, {"mode": "extension"})
         engine, session_factory = create_engine_and_session(DatabaseSettings(url=url))
         extension_registry = build_default_source_registry(session_factory)
-        worker_tasks = SourceTaskService(
-            lambda: UnitOfWork(session_factory), extension_registry
-        )
+        worker_tasks = SourceTaskService(lambda: UnitOfWork(session_factory), extension_registry)
         task_id = worker_tasks.enqueue(
             SourceTaskRequest.model_validate(
                 {

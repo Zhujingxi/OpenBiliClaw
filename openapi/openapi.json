@@ -1606,13 +1606,20 @@
       },
       "InteractionResponse": {
         "additionalProperties": false,
-        "description": "Persisted interaction and its deterministic profile signal.",
+        "description": "Persisted interaction and any explicit-feedback profile signal.",
         "properties": {
           "interaction": {
             "$ref": "#/components/schemas/Interaction"
           },
           "signal": {
-            "$ref": "#/components/schemas/ProfileSignal"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileSignal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2586,7 +2593,7 @@
       },
       "SourceCredentialInput": {
         "additionalProperties": false,
-        "description": "Write-only browser credential accepted by every retained source account form.",
+        "description": "Write-only credential accepted when a source has a backend consumer.",
         "properties": {
           "cookie": {
             "format": "password",

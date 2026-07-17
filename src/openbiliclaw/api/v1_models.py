@@ -62,12 +62,12 @@ class EventIngestResponse(BaseModel):
 
 
 class InteractionResponse(BaseModel):
-    """Persisted interaction and its deterministic profile signal."""
+    """Persisted interaction and any explicit-feedback profile signal."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     interaction: Interaction
-    signal: ProfileSignal
+    signal: ProfileSignal | None
 
 
 class EventIngestResult(TypedDict):
@@ -81,7 +81,7 @@ class InteractionResult(TypedDict):
     """Typed handler value validated against :class:`InteractionResponse`."""
 
     interaction: Interaction
-    signal: ProfileSignal
+    signal: ProfileSignal | None
 
 
 class StreamErrorEvent(BaseModel):

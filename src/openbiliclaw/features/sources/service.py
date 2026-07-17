@@ -233,7 +233,9 @@ class SourceAccountService:
         account_key: str,
         credentials: Mapping[str, object],
     ) -> SourceAccountStatus:
-        self._registry_provider().get(source_id.value)
+        manifest = self._registry_provider().get(source_id.value).manifest
+        if not manifest.credential_schema:
+            raise ValueError(f"{source_id.value} does not accept backend credentials")
         key = account_key.strip()
         if not key:
             raise ValueError("source account key cannot be empty")

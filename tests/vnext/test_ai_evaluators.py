@@ -333,9 +333,7 @@ async def test_offline_recommendation_grounding_uses_meaningful_chinese_coverage
             Case(
                 name="reviewed_chinese_facts",
                 inputs=_chinese_recommendation_input(),
-                expected_output={
-                    "explanation": "这个视频很符合你对实用建模教程的兴趣。"
-                },
+                expected_output={"explanation": "这个视频很符合你对实用建模教程的兴趣。"},
                 metadata={
                     "rubric": "解释必须基于输入事实，长度适中，并提及建模。",
                     "min_characters": 10,

@@ -117,10 +117,13 @@ def test_staging_slot_reservations_are_cross_process_atomic(tmp_path: Path) -> N
     processes = [context.Process(target=reserve) for _ in range(33)]
     for process in processes:
         process.start()
+    # Drain the pipe while child Queue feeder threads are still active. Joining
+    # first can fill the small macOS pipe buffer and deadlock otherwise healthy
+    # children while they wait for their queued result to flush.
+    values = [results.get(timeout=5) for _ in processes]
     for process in processes:
         process.join(timeout=5)
         assert process.exitcode == 0
-    values = [results.get(timeout=1) for _ in processes]
     slots = [value for value in values if value.startswith(".obc-backup-source-")]
     errors = [value for value in values if not value.startswith(".obc-backup-source-")]
     assert len(set(slots)) == 32

@@ -38,7 +38,41 @@ def test_both_compose_paths_mount_the_same_policy_and_bind_admin_to_loopback() -
     assert policy["model_list"] == []
     assert policy["litellm_settings"]["num_retries"] == 2
     assert policy["litellm_settings"]["cache"] is True
+    assert policy["litellm_settings"]["cache_params"] == {"type": "local"}
     assert policy["litellm_settings"]["turn_off_message_logging"] is True
+
+
+def test_docker_product_e2e_configures_db_backed_aliases_after_proxy_startup() -> None:
+    policy = yaml.safe_load(
+        (ROOT / "tests/docker_e2e/litellm-config.yaml").read_text(encoding="utf-8")
+    )
+    driver = (ROOT / "tests/docker_e2e/run_product_e2e.py").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    overlay = (ROOT / "tests/docker_e2e/docker-compose.e2e.yml").read_text(encoding="utf-8")
+    harness = (ROOT / "scripts/test-docker-e2e.sh").read_text(encoding="utf-8")
+
+    assert policy["model_list"] == []
+    assert 'STORE_MODEL_IN_DB: "True"' in compose
+    assert "OBC_E2E_FAKE_PROVIDER_KEY" in overlay
+    assert "pull_policy: always" in overlay
+    assert '"/model/new"' in driver
+    assert "configure_litellm_aliases()" in driver
+    assert "os.environ/OBC_E2E_FAKE_PROVIDER_KEY" in driver
+    assert "os.environ['OBC_E2E_FAKE_PROVIDER_KEY']" not in driver
+    for alias in ("obc-interactive", "obc-analysis", "obc-embedding"):
+        assert alias in driver
+
+    initial_health = driver.index('unconfigured = json_request("GET", "/system/ai-health")')
+    configure = driver.index("configure_litellm_aliases()", initial_health)
+    verified_health = driver.index("wait_for_alias_health()", configure)
+    assert initial_health < configure < verified_health
+
+    configure_phase = harness.index("--configure-litellm")
+    restart = harness.index("restart --timeout 10 litellm", configure_phase)
+    bounded_wait = harness.index("--wait-timeout 120 litellm", restart)
+    product_phase = harness.index("run_product_e2e.py", bounded_wait)
+    assert configure_phase < restart < bounded_wait < product_phase
+    assert "restart --timeout 10 litellm-postgres" not in harness
 
 
 def test_prebuilt_download_and_release_instructions_include_policy_file() -> None:

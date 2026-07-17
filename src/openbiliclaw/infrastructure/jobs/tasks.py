@@ -408,21 +408,29 @@ class JobExecutionContext:
 
 
 JobHandler = Callable[[UUID, JobExecutionContext], None | Awaitable[None]]
+AsyncJobRunner = Callable[[Awaitable[None]], None]
 _runtime_lock = Lock()
 _service: JobService | None = None
 _handlers: dict[str, JobHandler] = {}
+_async_job_runner: AsyncJobRunner | None = None
 
 
-def configure_job_runtime(service: JobService, handlers: Mapping[str, JobHandler]) -> None:
+def configure_job_runtime(
+    service: JobService,
+    handlers: Mapping[str, JobHandler],
+    *,
+    async_job_runner: AsyncJobRunner | None = None,
+) -> None:
     """Inject application orchestration into the worker process at composition time."""
 
     unknown = set(handlers) - set(JOB_NAMES)
     if unknown:
         raise ValueError(f"unknown job handlers: {sorted(unknown)}")
     with _runtime_lock:
-        global _service, _handlers  # noqa: PLW0603 - explicit worker composition seam
+        global _service, _handlers, _async_job_runner  # noqa: PLW0603
         _service = service
         _handlers = dict(handlers)
+        _async_job_runner = async_job_runner
 
 
 def _run_job(job_name: str, run_id: str | None, task: Any | None) -> None:
@@ -445,7 +453,11 @@ def _run_job(job_name: str, run_id: str | None, task: Any | None) -> None:
         context.checkpoint(0.01)
         result = handler(resolved_id, context)
         if inspect.isawaitable(result):
-            asyncio.run(_await_handler(result))
+            runner = _async_job_runner
+            if runner is None:
+                asyncio.run(_await_handler(result))
+            else:
+                runner(result)
         context.checkpoint(0.99)
         service.succeed(resolved_id)
     except JobCancelledError as error:

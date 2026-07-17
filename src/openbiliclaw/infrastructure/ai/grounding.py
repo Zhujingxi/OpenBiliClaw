@@ -101,14 +101,10 @@ def is_grounded_in(facts: Iterable[str], candidate: str) -> bool:
 
     overlap = grounding_overlap(facts, candidate)
     cjk_units = {
-        token
-        for token in overlap
-        if re.fullmatch(r"[\u3400-\u4dbf\u4e00-\u9fff]+", token)
+        token for token in overlap if re.fullmatch(r"[\u3400-\u4dbf\u4e00-\u9fff]+", token)
     }
     if overlap - cjk_units:
         return True
     if any(len(unit) >= 3 for unit in cjk_units):
         return True
-    return any(
-        set(left).isdisjoint(right) for left, right in combinations(cjk_units, 2)
-    )
+    return any(set(left).isdisjoint(right) for left, right in combinations(cjk_units, 2))

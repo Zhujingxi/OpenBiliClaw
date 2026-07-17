@@ -15,9 +15,10 @@ def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
-def _section(name: str, start: str, end: str) -> str:
-    source = _read(name)
-    return source.split(start, 1)[1].split(end, 1)[0]
+def _current_spec() -> str:
+    """Return the current-only specification shipped after legacy deletion."""
+
+    return _read("docs/spec.md")
 
 
 @pytest.mark.parametrize("name", VNEXT_MODULE_DOCS)
@@ -41,14 +42,8 @@ def test_vnext_module_docs_do_not_describe_task21_as_future(name: str) -> None:
 
 
 def test_current_architecture_and_spec_do_not_defer_authoritative_backend() -> None:
-    current_architecture = _read("docs/architecture.md").split("## 已停止作为入口的 v0.3 实现", 1)[
-        0
-    ]
-    current_spec = _section(
-        "docs/spec.md",
-        "### 3.1 vNext",
-        "### 3.2",
-    )
+    current_architecture = _read("docs/architecture.md")
+    current_spec = _current_spec()
     stale_claims = (
         "chat adapter 等待 HTTP 接线",
         "v0.3 API、legacy runtime、扩展 dispatcher 和四端客户端尚未切换",
@@ -115,10 +110,8 @@ def test_task22_references_are_only_historical_or_client_scoped() -> None:
             *VNEXT_MODULE_DOCS,
         )
     }
-    active_surfaces["docs/architecture.md"] = _read("docs/architecture.md").split(
-        "## 已停止作为入口的 v0.3 实现", 1
-    )[0]
-    active_surfaces["docs/spec.md"] = _section("docs/spec.md", "### 3.1 vNext", "### 3.2")
+    active_surfaces["docs/architecture.md"] = _read("docs/architecture.md")
+    active_surfaces["docs/spec.md"] = _current_spec()
     active_surfaces["docs/changelog.md"] = _read("docs/changelog.md").split(
         "### Historical delivery sequence", 1
     )[0]
@@ -139,10 +132,8 @@ def test_synchronized_current_docs_keep_core_authority_markers() -> None:
     current = {
         "README.md": _read("README.md"),
         "README_EN.md": _read("README_EN.md"),
-        "docs/architecture.md": _read("docs/architecture.md").split(
-            "## 已停止作为入口的 v0.3 实现", 1
-        )[0],
-        "docs/spec.md": _section("docs/spec.md", "### 3.1 vNext", "### 3.2"),
+        "docs/architecture.md": _read("docs/architecture.md"),
+        "docs/spec.md": _current_spec(),
         "docs/changelog.md": _read("docs/changelog.md").split(
             "### Historical delivery sequence", 1
         )[0],
@@ -153,25 +144,23 @@ def test_synchronized_current_docs_keep_core_authority_markers() -> None:
         assert re.search(r"secret|密钥|凭据", source, re.IGNORECASE), name
 
 
-def test_historical_v03_material_is_explicitly_archived() -> None:
+def test_historical_v03_material_is_removed_from_active_docs() -> None:
     spec = _read("docs/spec.md")
     architecture = _read("docs/architecture.md")
     changelog = _read("docs/changelog.md")
 
-    assert "Historical v0.3 archive" in spec
-    assert "已停止作为入口的 v0.3 实现" in architecture
-    assert "Historical delivery sequence" in changelog
+    for source in (spec, architecture):
+        assert "Git history" in source or "Git 历史" in source
+    assert "历史记录" in changelog or "Historical" in changelog
     source_guide = _read("docs/platform-source-integration.md")
-    assert "当前权威合同" in source_guide
-    assert "Historical v0.3 archive" in source_guide
+    assert "only supported way" in source_guide
+    assert "platform-specific claim/result endpoints" in source_guide
 
 
 def test_mobile_docs_match_the_current_reduced_surface() -> None:
     mobile = _read("docs/mobile-web-spec.md")
     web = _read("docs/modules/web.md")
-    current_changelog = _read("docs/changelog.md").split(
-        "### Historical delivery sequence", 1
-    )[0]
+    current_changelog = _read("docs/changelog.md").split("### Historical delivery sequence", 1)[0]
 
     for source in (mobile, web):
         assert "feed replenishment" in source
@@ -183,34 +172,13 @@ def test_mobile_docs_match_the_current_reduced_surface() -> None:
     assert "`/m` 保留" in current_changelog
 
 
-@pytest.mark.parametrize(
-    "name",
-    ("docs/native-save-e2e.md", "docs/testing/six-platform-native-save-e2e.md"),
-)
-def test_native_save_runbooks_are_non_executable_archives(name: str) -> None:
-    source = _read(name)
-    assert "Historical v0.3" in source
-    assert "Non-executable archive" in source
-    assert "Git history" in source
-    assert "/api/v1/library/{collection}" in source
-    for removed_instruction in (
-        "curl ",
-        "allow_state_changing=true",
-        "auto_sync_enabled = false",
-        "POST /api/saved",
-        "GET /api/saved-sync",
-        "PUT /api/config",
-        "/api/extension/e2e/run",
-    ):
-        assert removed_instruction not in source
+def test_native_save_runbooks_are_not_shipped_as_executable_docs() -> None:
+    for name in ("docs/native-save-e2e.md", "docs/testing/six-platform-native-save-e2e.md"):
+        assert not (ROOT / name).exists()
 
 
-def test_architecture_archive_does_not_restate_removed_runtime_as_current() -> None:
+def test_architecture_does_not_restate_removed_runtime_as_current() -> None:
     architecture = _read("docs/architecture.md")
-    archive = architecture.split("## 已停止作为入口的 v0.3 实现", 1)[1]
-
-    assert "不再是当前架构" in archive
-    assert "Git 历史" in archive
     for removed_runtime in (
         "/api/saved",
         "ExtensionNativeSaveBroker",
@@ -226,25 +194,18 @@ def test_architecture_archive_does_not_restate_removed_runtime_as_current() -> N
     ):
         assert removed_runtime not in architecture, removed_runtime
 
-    # Architecture is an authority document, not an embedded copy of the old design.
-    assert len(archive.splitlines()) <= 12
 
-
-def test_spec_archives_v03_without_republishing_removed_runtime_contracts() -> None:
+def test_spec_is_current_only_without_republishing_removed_runtime_contracts() -> None:
     spec = _read("docs/spec.md")
-    current = _section("docs/spec.md", "### 3.1 vNext", "### 3.2")
-    archive = spec.split("### 3.2 Historical v0.3 archive", 1)[1].split(
-        "## Historical v0.3 archive — 4.", 1
-    )[0]
 
     for marker in (
-        "authenticated fetch stream",
-        "LibraryItem (CollectionItem + ContentItem)",
-        "alias-only redacted status",
-        "Web 使用 same-origin password→HttpOnly cookie",
-        "Extension origin 即使来自 loopback",
+        "authenticated fetch stream over SSE",
+        "CollectionItem",
+        "LiteLLM",
+        "same-origin password→HttpOnly cookie",
+        "finite bearer",
     ):
-        assert marker in current
+        assert marker in spec
 
     for removed_contract in (
         "runtime-stream",
@@ -259,9 +220,7 @@ def test_spec_archives_v03_without_republishing_removed_runtime_contracts() -> N
     ):
         assert removed_contract not in spec, removed_contract
 
-    assert "不再是当前规格" in archive
-    assert "Git 历史" in archive
-    assert len(archive.splitlines()) <= 12
+    assert "available through Git history" in spec
 
 
 def test_config_doc_matches_current_strict_user_settings_schema() -> None:
@@ -348,7 +307,7 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             "require_schema_at_head()",
             "`x-consumer`",
             "Douyin 仅保留 `mode=direct|extension`",
-            "Reddit 仅保留 `backend=rdt|extension`",
+            "Reddit 全部 retained operation 使用 extension browser transport",
         ),
         "docs/modules/vnext-ai.md": ("OPENBILICLAW_LITELLM_ADMIN_URL", "admin_url"),
         "docs/modules/vnext-persistence.md": (
@@ -393,7 +352,7 @@ def test_deployment_docs_name_compose_browser_auth_forwarding_without_plaintext_
         assert re.search(r"obc_ext_[A-Za-z0-9._-]{16,}", source) is None
     assert "create the session secret" in _read("docs/agent-install.md")
     assert "生成独立 random" in _read("docs/agent-deployment.md")
-    assert "Compose render" in _read("docs/docker-deployment.md")
+    assert "docker compose config" in _read("docs/docker-deployment.md")
 
 
 def test_active_docs_use_nested_settings_names_and_only_consumed_source_fields() -> None:
@@ -401,10 +360,8 @@ def test_active_docs_use_nested_settings_names_and_only_consumed_source_fields()
         "docs/modules/vnext-sources.md": _read("docs/modules/vnext-sources.md"),
         "docs/modules/vnext-use-cases-jobs.md": _read("docs/modules/vnext-use-cases-jobs.md"),
         "docs/modules/config.md": _read("docs/modules/config.md"),
-        "docs/architecture.md": _read("docs/architecture.md").split(
-            "## 已停止作为入口的 v0.3 实现", 1
-        )[0],
-        "docs/spec.md": _section("docs/spec.md", "### 3.1 vNext", "### 3.2"),
+        "docs/architecture.md": _read("docs/architecture.md"),
+        "docs/spec.md": _current_spec(),
     }
     stale_patterns = (
         r"UserSettings\.source_enabled\b",

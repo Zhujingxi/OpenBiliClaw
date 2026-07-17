@@ -93,7 +93,7 @@ if [ "$SKIP_START" = 1 ]; then
 else
   log "Starting the $MODE runtime and verifying migration, API, worker, and protected access"
 fi
-python3 "$INSTALL_DIR/scripts/agent_bootstrap.py" "${arguments[@]}"
+python3 "$INSTALL_DIR/scripts/runtime_bootstrap.py" "${arguments[@]}"
 log "Runtime secrets are stored in $INSTALL_DIR/.env with mode 0600 and are reused on rerun."
 if [ "$MODE" = docker ]; then
   log "Configure provider credentials and the obc-interactive, obc-analysis, and obc-embedding aliases at http://127.0.0.1:4000/ui"

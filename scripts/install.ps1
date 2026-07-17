@@ -83,7 +83,7 @@ if ($Mode -eq 'docker') {
 }
 
 $arguments = @(
-    (Join-Path $InstallDir 'scripts\agent_bootstrap.py'),
+    (Join-Path $InstallDir 'scripts\runtime_bootstrap.py'),
     '--project-dir', $InstallDir,
     '--mode', $Mode,
     '--host', $ApiHost,

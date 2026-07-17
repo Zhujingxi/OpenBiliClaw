@@ -40,7 +40,6 @@
 services:
   litellm-postgres:
     image: postgres:16-alpine
-    container_name: openbiliclaw-litellm-postgres
     environment:
       POSTGRES_DB: litellm
       POSTGRES_USER: litellm
@@ -58,7 +57,6 @@ services:
     # The official image can boot from DATABASE_URL/LITELLM_MASTER_KEY alone;
     # STORE_MODEL_IN_DB makes provider setup persistent through /ui.
     image: ghcr.io/berriai/litellm:v1.92.0
-    container_name: openbiliclaw-litellm
     depends_on:
       litellm-postgres:
         condition: service_healthy
@@ -91,9 +89,8 @@ services:
   api:
     # Multi-arch image (linux/amd64 + linux/arm64) published by
     # .github/workflows/release-docker.yml on every backend release.
-    # Pin a specific version by replacing `latest` with e.g. `0.3.152`.
+    # Pin a specific version by replacing `latest` with the desired release.
     image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
-    container_name: openbiliclaw-api
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -101,10 +98,6 @@ services:
         condition: service_healthy
     environment:
       OPENBILICLAW_PROJECT_ROOT: /app/runtime
-      OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
-      OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
-      OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
-      OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       OPENBILICLAW_LITELLM_ADMIN_URL: ${OPENBILICLAW_LITELLM_ADMIN_URL:-}
@@ -123,7 +116,6 @@ services:
     ports:
       - "8420:8420"
     volumes:
-      - openbiliclaw_config:/app/runtime
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
     healthcheck:
@@ -136,7 +128,6 @@ services:
 
   worker:
     image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
-    container_name: openbiliclaw-worker
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -150,7 +141,7 @@ services:
       OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_WORKERS: "4"
       OPENBILICLAW_WORKER_RUNTIME_FACTORY: openbiliclaw.infrastructure.jobs.worker:database_runtime_factory
-    command: ["python", "-m", "openbiliclaw.worker"]
+    command: ["openbiliclaw", "worker", "--workers", "4"]
     volumes:
       - openbiliclaw_data:/app/runtime/data
     # Running PID 1 is necessary but insufficient: the probe also requires the
@@ -164,7 +155,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  openbiliclaw_config:
   openbiliclaw_data:
   openbiliclaw_logs:
   openbiliclaw_litellm_postgres:

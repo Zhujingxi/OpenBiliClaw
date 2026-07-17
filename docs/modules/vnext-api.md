@@ -33,6 +33,11 @@ at least one explicit source because all source defaults are disabled.
 Library reads return `LibraryItem`, joining local collection membership to the normalized
 `ContentItem` in one deterministic repository query. `PATCH /profile` applies one optimistic
 `ProfileEdit`, records one `profile_override` evidence event, and commits exactly one revision.
+Interaction writes always persist the immutable action. Only explicit `positive`, `negative`,
+and `dismiss` feedback creates an activity-evidence row and returns a `ProfileSignal`; passive
+`impression`/`open` and local-save telemetry return `signal: null`. The former still drive
+seen-state/watermarks and all interactions remain available for their applicable deduplication,
+without becoming inferred preferences.
 `GET /chat/{conversation_id}` returns a bounded ascending `ChatHistoryPage` with `limit`, `offset`, and
 `has_more`, excluding `ai_run_id` and provider internals; send remains authenticated fetch-SSE
 `POST /chat/stream`.

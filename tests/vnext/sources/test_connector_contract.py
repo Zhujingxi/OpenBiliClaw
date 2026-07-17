@@ -167,7 +167,7 @@ def test_all_settings_are_closed_and_reject_arbitrary_modes() -> None:
     with pytest.raises(ValidationError):
         ZhihuSettings(source_modes=("whatever",))  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
-        RedditSettings(source_modes=("whatever",))  # type: ignore[arg-type]
+        RedditSettings(backend="rdt")  # type: ignore[call-arg]
 
 
 def test_connectors_expose_no_account_mutations(registry: Any) -> None:

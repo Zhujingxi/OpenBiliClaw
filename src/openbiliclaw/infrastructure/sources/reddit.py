@@ -1,11 +1,10 @@
-"""Read-only Reddit connector around retained rdt-cli or extension transports."""
+"""Read-only Reddit connector using the authenticated browser extension."""
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
 from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
@@ -20,7 +19,6 @@ from openbiliclaw.features.sources.domain import (
 )
 from openbiliclaw.infrastructure.sources._base import (
     NormalizingConnector,
-    RoutedTransport,
     activity_event,
     activity_kind,
     content_item,
@@ -29,11 +27,6 @@ from openbiliclaw.infrastructure.sources._base import (
     timestamp,
 )
 from openbiliclaw.infrastructure.sources.browser_tasks import QueuedBrowserTransport
-from openbiliclaw.sources.reddit_tasks import (
-    CommandRunner,
-    build_reddit_command,
-    run_reddit_command,
-)
 
 
 class RedditTransport(Protocol):
@@ -42,45 +35,18 @@ class RedditTransport(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
-class RedditCliTransport:
-    def __init__(self, runner: CommandRunner | None = None) -> None:
-        self._runner = runner
-
-    async def fetch(self, *, operation: str, query: str | None, limit: int) -> list[dict[str, Any]]:
-        modes = {
-            SourceOperation.SEARCH.value: "search",
-            SourceOperation.TRENDING.value: "hot",
-            SourceOperation.COMMUNITY.value: "subreddit",
-            SourceOperation.RELATED.value: "related",
-        }
-        try:
-            mode = modes[operation]
-        except KeyError as exc:
-            raise ValueError(f"unsupported Reddit CLI operation: {operation}") from exc
-        args = build_reddit_command("rdt", mode=mode, query=query or "", limit=limit)
-        return await asyncio.to_thread(run_reddit_command, args, runner=self._runner)
-
-
 class RedditSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    backend: Literal["rdt", "extension"] = Field(
-        default="rdt",
-        json_schema_extra={"x-consumer": "RedditConnector transport selection"},
-    )
 
 
 class RedditConnector(NormalizingConnector):
     def __init__(self, transport: RedditTransport, settings: RedditSettings | None = None) -> None:
         resolved = settings or RedditSettings()
-        discovery_kind = (
-            SourceTransportKind.CLI if resolved.backend == "rdt" else SourceTransportKind.BROWSER
-        )
         super().__init__(
             manifest=SourceManifest(
                 source_id=SourceId.REDDIT,
                 display_name="Reddit",
-                **source_form_schema_fields(RedditSettings),
+                **source_form_schema_fields(RedditSettings, accepts_credentials=False),
                 capabilities=frozenset(
                     {
                         SourceCapability.AUTHENTICATION,
@@ -105,25 +71,25 @@ class RedditConnector(NormalizingConnector):
                         SourceOperation.SEARCH,
                         SourceCapability.SEARCH,
                         requires_auth=True,
-                        transport_kind=discovery_kind,
+                        transport_kind=SourceTransportKind.BROWSER,
                     ),
                     operation_spec(
                         SourceOperation.TRENDING,
                         SourceCapability.TRENDING_FEED,
                         requires_auth=True,
-                        transport_kind=discovery_kind,
+                        transport_kind=SourceTransportKind.BROWSER,
                     ),
                     operation_spec(
                         SourceOperation.COMMUNITY,
                         SourceCapability.COMMUNITY_DISCOVERY,
                         requires_auth=True,
-                        transport_kind=discovery_kind,
+                        transport_kind=SourceTransportKind.BROWSER,
                     ),
                     operation_spec(
                         SourceOperation.RELATED,
                         SourceCapability.RELATED_DISCOVERY,
                         requires_auth=True,
-                        transport_kind=discovery_kind,
+                        transport_kind=SourceTransportKind.BROWSER,
                     ),
                 ),
             ),
@@ -137,26 +103,11 @@ class RedditConnector(NormalizingConnector):
 def build_reddit_connector(
     *,
     task_service: object,
-    runner: CommandRunner | None = None,
     settings: RedditSettings | None = None,
 ) -> RedditConnector:
     resolved = settings or RedditSettings()
     browser = QueuedBrowserTransport(task_service, SourceId.REDDIT)  # type: ignore[arg-type]
-    discovery: RedditTransport = (
-        RedditCliTransport(runner) if resolved.backend == "rdt" else browser
-    )
-    return RedditConnector(
-        RoutedTransport(
-            {
-                SourceOperation.BOOTSTRAP_IMPORT.value: browser,
-                SourceOperation.SEARCH.value: discovery,
-                SourceOperation.TRENDING.value: discovery,
-                SourceOperation.COMMUNITY.value: discovery,
-                SourceOperation.RELATED.value: discovery,
-            }
-        ),
-        resolved,
-    )
+    return RedditConnector(browser, resolved)
 
 
 def _external_id(row: dict[str, Any]) -> str:

@@ -79,7 +79,7 @@
 - [ ] Run focused tests and capture RED output.
 - [ ] Implement the boundary so no feature imports provider SDKs and the runner does not implement provider routing, HTTP retry, JSON repair, or fallback.
 - [ ] Add runnable Compose services `litellm` and `litellm-postgres`, configure `/ui`, health checks, and persistent volumes. Preserve the existing backend service until the vNext API/worker entrypoints exist; Tasks 20-21 rename it to `api` and add the runnable `worker` so Compose is never knowingly left with dead commands.
-- [ ] Add PydanticAI/Pydantic Evals and update the lock. Keep legacy provider dependencies only while the legacy runtime still imports them; Task 23 removes those dependencies together with their now-orphaned stack. Run focused tests and configuration validation.
+- [x] Add PydanticAI/Pydantic Evals and update the lock. Keep legacy provider dependencies only while the legacy runtime still imports them; Task 23 removes those dependencies together with their now-orphaned stack. Run focused tests and configuration validation.
 - [ ] Commit with `feat: route typed ai tasks through litellm`.
 
 ### Task 19: Seven Capability-Based Source Connectors and Generic Source Tasks
@@ -163,9 +163,9 @@
 **Interfaces:**
 - Leaves one authoritative backend and a fresh `data/vnext/openbiliclaw.db`; old data paths are read-only/manual archive with no import logic.
 
-- [ ] Add failing repository policy tests for forbidden provider SDK imports, platform conditionals outside source adapters, profile JSON writes, raw SQL outside persistence/migrations, app-factory workflows, obsolete endpoints/commands, and desktop artifacts.
-- [ ] Delete all unreachable legacy code/tests and simplify dependencies/config/installers around Docker-primary and source-plus-external-LiteLLM modes.
-- [ ] Update every mandatory document and Mermaid diagram to match shipped code; add first-run and manual Docker/web/extension E2E runbooks.
-- [ ] Run `ruff format --check`, `ruff check`, strict MyPy, import-linter, non-live pytest with coverage, extension typecheck/tests, OpenAPI client generation check, Alembic tests, Compose config, and image builds where locally available.
-- [ ] Record any environment-blocked live E2E separately; do not claim it ran.
-- [ ] Commit with `refactor: remove legacy architecture and document vnext`.
+- [x] Add failing repository policy tests for forbidden provider SDK imports, platform conditionals outside source adapters, profile JSON writes, raw SQL outside persistence/migrations, app-factory workflows, obsolete endpoints/commands, and desktop artifacts.
+- [x] Delete all unreachable legacy code/tests and simplify dependencies/config/installers around Docker-primary and source-plus-external-LiteLLM modes.
+- [x] Update every mandatory document and Mermaid diagram to match shipped code; add first-run and manual Docker/web/extension E2E runbooks.
+- [x] Run `ruff format --check`, `ruff check`, strict MyPy, import-linter, non-live pytest with coverage, extension typecheck/tests, OpenAPI client generation check, Alembic tests, Compose config, and image builds where locally available.
+- [x] Record any environment-blocked live E2E separately; do not claim it ran.
+- [x] Commit with `refactor: remove legacy architecture and document vnext`.

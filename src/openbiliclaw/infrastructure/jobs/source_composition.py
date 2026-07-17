@@ -10,7 +10,6 @@ from cryptography.fernet import InvalidToken
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.features.sources.registry import SourceRegistry, build_source_registry
 from openbiliclaw.features.sources.service import SourceTaskService
 from openbiliclaw.infrastructure.database.models import SettingModel, SourceAccountModel
@@ -21,18 +20,19 @@ from openbiliclaw.infrastructure.security.credentials import (
     MissingCredentialKeyError,
 )
 from openbiliclaw.infrastructure.sources.bilibili import BilibiliSettings, build_bilibili_connector
+from openbiliclaw.infrastructure.sources.bilibili_client import BilibiliAPIClient
 from openbiliclaw.infrastructure.sources.douyin import DouyinSettings, build_douyin_connector
+from openbiliclaw.infrastructure.sources.douyin_client import DouyinDirectClient
 from openbiliclaw.infrastructure.sources.reddit import RedditSettings, build_reddit_connector
 from openbiliclaw.infrastructure.sources.twitter import TwitterSettings, build_twitter_connector
+from openbiliclaw.infrastructure.sources.twitter_client import XClient
 from openbiliclaw.infrastructure.sources.xiaohongshu import (
     XiaohongshuSettings,
     build_xiaohongshu_connector,
 )
 from openbiliclaw.infrastructure.sources.youtube import YouTubeSettings, build_youtube_connector
+from openbiliclaw.infrastructure.sources.youtube_client import YtScraperClient
 from openbiliclaw.infrastructure.sources.zhihu import ZhihuSettings, build_zhihu_connector
-from openbiliclaw.sources.douyin_direct import DouyinDirectClient
-from openbiliclaw.sources.x_client import XClient
-from openbiliclaw.youtube.client import YtScraperClient
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -259,15 +259,12 @@ def build_default_source_registry(
     twitter_settings = _resolved_source_settings(
         session_factory, "twitter", TwitterSettings, overrides
     )
-    zhihu_settings = _resolved_source_settings(
-        session_factory, "zhihu", ZhihuSettings, overrides
-    )
+    zhihu_settings = _resolved_source_settings(session_factory, "zhihu", ZhihuSettings, overrides)
     reddit_settings = _resolved_source_settings(
         session_factory,
         "reddit",
         RedditSettings,
         overrides,
-        default=RedditSettings(backend="extension"),
     )
     registry = build_source_registry(
         bilibili=build_bilibili_connector(

@@ -115,6 +115,9 @@ class MemoryRepository:
             None,
         )
 
+    def get(self, content_id: UUID) -> ContentItem | None:
+        return next((item for item in self.state.content if item.id == content_id), None)
+
     def flush(self) -> None:
         return None
 
@@ -435,7 +438,15 @@ async def test_feed_rejects_multi_topic_candidate_when_any_topic_is_saturated() 
 
 
 def test_feedback_persists_interaction_and_activity_that_changes_later_rank() -> None:
-    state = MemoryState()
+    content = ContentItem(
+        id=CONTENT_A,
+        source_id="bilibili",
+        external_id="feedback-content",
+        url="https://example.com/feedback-content",
+        title="Graph database internals",
+        summary="Storage engines and traversal",
+    )
+    state = MemoryState(content=[content])
     interaction = Interaction(content_id=CONTENT_A, kind=InteractionKind.NEGATIVE)
 
     signal = FeedbackService(lambda: MemoryUow(state)).record(interaction)
@@ -443,7 +454,60 @@ def test_feedback_persists_interaction_and_activity_that_changes_later_rank() ->
     assert state.interactions == [interaction]
     assert len(state.events) == 1
     assert signal.evidence_ids == (state.events[0].id,)
+    assert signal.value == "Graph database internals | Storage engines and traversal"
     assert MemoryRepository(state).adjustment(CONTENT_A) < 0
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        InteractionKind.IMPRESSION,
+        InteractionKind.OPEN,
+        InteractionKind.SAVE_FAVORITE,
+        InteractionKind.SAVE_WATCH_LATER,
+    ),
+)
+def test_non_feedback_interaction_persists_without_profile_evidence(
+    kind: InteractionKind,
+) -> None:
+    content = ContentItem(
+        id=CONTENT_A,
+        source_id="bilibili",
+        external_id="passive-content",
+        url="https://example.com/passive-content",
+        title="A viewed item is not a preference",
+    )
+    state = MemoryState(content=[content])
+    interaction = Interaction(content_id=CONTENT_A, kind=kind)
+
+    signal = FeedbackService(lambda: MemoryUow(state)).record(interaction)
+
+    assert signal is None
+    assert state.interactions == [interaction]
+    assert state.events == []
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (InteractionKind.POSITIVE, InteractionKind.NEGATIVE, InteractionKind.DISMISS),
+)
+def test_explicit_feedback_persists_profile_evidence(kind: InteractionKind) -> None:
+    content = ContentItem(
+        id=CONTENT_A,
+        source_id="bilibili",
+        external_id="explicit-feedback",
+        url="https://example.com/explicit-feedback",
+        title="Explicit preference",
+    )
+    state = MemoryState(content=[content])
+
+    signal = FeedbackService(lambda: MemoryUow(state)).record(
+        Interaction(content_id=CONTENT_A, kind=kind)
+    )
+
+    assert signal is not None
+    assert signal.evidence_ids == (state.events[0].id,)
+    assert len(state.interactions) == len(state.events) == 1
 
 
 def test_library_mutation_is_local_and_limited_to_two_collections() -> None:

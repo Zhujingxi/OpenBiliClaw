@@ -164,7 +164,7 @@ class FeedPort(Protocol):
 
 
 class FeedbackPort(Protocol):
-    def record(self, interaction: Interaction) -> ProfileSignal: ...
+    def record(self, interaction: Interaction) -> ProfileSignal | None: ...
 
 
 class LibraryPort(Protocol):
@@ -699,9 +699,7 @@ def build_application_container() -> ApplicationContainer:
 
     registry = _DeferredSourceRegistry(lambda: build_default_source_registry(session_factory))
 
-    def validate_source_settings_change(
-        source_id: str, candidate: Mapping[str, object]
-    ) -> None:
+    def validate_source_settings_change(source_id: str, candidate: Mapping[str, object]) -> None:
         build_default_source_registry(
             session_factory,
             settings_overrides={source_id: candidate},

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -10,7 +9,6 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import select
 
-from openbiliclaw.bilibili.api import BilibiliAPIError
 from openbiliclaw.features.sources.domain import (
     BrowserOperationResult,
     SourceOperation,
@@ -23,16 +21,13 @@ from openbiliclaw.infrastructure.database.base import DatabaseSettings, create_e
 from openbiliclaw.infrastructure.database.models import SourceTaskModel
 from openbiliclaw.infrastructure.database.uow import UnitOfWork
 from openbiliclaw.infrastructure.sources.bilibili import build_bilibili_connector
+from openbiliclaw.infrastructure.sources.bilibili_client import BilibiliAPIError
 from openbiliclaw.infrastructure.sources.douyin import (
     DouyinDirectTransport,
     DouyinSettings,
     build_douyin_connector,
 )
-from openbiliclaw.infrastructure.sources.reddit import (
-    RedditCliTransport,
-    RedditSettings,
-    build_reddit_connector,
-)
+from openbiliclaw.infrastructure.sources.reddit import build_reddit_connector
 from openbiliclaw.infrastructure.sources.twitter import build_twitter_connector
 from openbiliclaw.infrastructure.sources.xiaohongshu import build_xiaohongshu_connector
 from openbiliclaw.infrastructure.sources.youtube import (
@@ -207,31 +202,6 @@ async def test_direct_transports_call_retained_douyin_and_youtube_clients() -> N
     assert youtube_client.calls == ["search", "trending", "creator"]
 
 
-async def test_reddit_cli_transport_maps_every_retained_operation() -> None:
-    calls: list[list[str]] = []
-
-    def runner(args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
-        del timeout
-        calls.append(args)
-        return subprocess.CompletedProcess(
-            args,
-            0,
-            stdout='[{"name":"t3_result","title":"Result"}]',
-            stderr="",
-        )
-
-    transport = RedditCliTransport(runner)
-    await transport.fetch(operation="search", query="python", limit=3)
-    await transport.fetch(operation="trending", query=None, limit=3)
-    await transport.fetch(operation="community", query="python", limit=3)
-    await transport.fetch(
-        operation="related",
-        query="https://www.reddit.com/r/python/comments/abc/example/",
-        limit=3,
-    )
-    assert [call[1] for call in calls] == ["search", "all", "sub", "read"]
-
-
 def test_every_source_has_a_production_composition_builder(
     task_context: tuple[Any, Any, Any],  # noqa: F811
 ) -> None:
@@ -280,10 +250,7 @@ def production_context(tmp_path: Path):  # type: ignore[no-untyped-def]
         youtube=build_youtube_connector(YouTubeClient(), service),
         twitter=build_twitter_connector(TwitterClient()),
         zhihu=build_zhihu_connector(service),
-        reddit=build_reddit_connector(
-            task_service=service,
-            settings=RedditSettings(backend="extension"),
-        ),
+        reddit=build_reddit_connector(task_service=service),
     )
     registry_holder["registry"] = registry
     yield session_factory, service, registry

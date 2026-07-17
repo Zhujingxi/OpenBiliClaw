@@ -62,9 +62,7 @@ class _VersionedEvaluator:
 
 
 @dataclass
-class ProfileDeltaInvariants(
-    _VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]
-):
+class ProfileDeltaInvariants(_VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]):
     """Evaluate evidence provenance, admissible changes, and required concepts."""
 
     def evaluate(self, ctx: EvaluatorContext[EvalData, EvalData, EvalData]) -> dict[str, bool]:
@@ -72,9 +70,7 @@ class ProfileDeltaInvariants(
         output = ProfileDelta.model_validate(ctx.output)
         metadata = _ProfileMetadata.model_validate(ctx.metadata)
         supplied_ids = {evidence.id for evidence in task_input.evidence}
-        evidence_valid = all(
-            set(facet.evidence_ids) <= supplied_ids for facet in output.upserts
-        )
+        evidence_valid = all(set(facet.evidence_ids) <= supplied_ids for facet in output.upserts)
         current = {
             (facet.name, facet.value.casefold()): facet for facet in task_input.profile.facets
         }
@@ -101,17 +97,13 @@ class ProfileDeltaInvariants(
         return {
             "profile_evidence_valid": evidence_valid,
             "profile_change_valid": change_valid,
-            "profile_concepts_present": _count_concepts(
-                output_text, metadata.required_concepts
-            )
+            "profile_concepts_present": _count_concepts(output_text, metadata.required_concepts)
             > 0,
         }
 
 
 @dataclass
-class KeywordGenerationInvariants(
-    _VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]
-):
+class KeywordGenerationInvariants(_VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]):
     """Evaluate query bounds, uniqueness, profile relevance, and source neutrality."""
 
     def evaluate(self, ctx: EvaluatorContext[EvalData, EvalData, EvalData]) -> dict[str, bool]:
@@ -126,8 +118,7 @@ class KeywordGenerationInvariants(
             and all(normalized)
         )
         relevant_count = sum(
-            _count_concepts(keyword, metadata.required_concepts) > 0
-            for keyword in output.keywords
+            _count_concepts(keyword, metadata.required_concepts) > 0 for keyword in output.keywords
         )
         forbidden = tuple(_normalize(term) for term in metadata.forbidden_source_terms)
         return {
@@ -140,9 +131,7 @@ class KeywordGenerationInvariants(
 
 
 @dataclass
-class CandidateAssessmentInvariants(
-    _VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]
-):
+class CandidateAssessmentInvariants(_VersionedEvaluator, Evaluator[EvalData, EvalData, EvalData]):
     """Evaluate copied identity, case-specific score ranges, and expected topics."""
 
     def evaluate(self, ctx: EvaluatorContext[EvalData, EvalData, EvalData]) -> dict[str, bool]:
@@ -156,8 +145,7 @@ class CandidateAssessmentInvariants(
             "risk": output.risk,
         }
         score_ranges_valid = set(metadata.score_ranges) == set(scores) and all(
-            lower <= scores[name] <= upper
-            for name, (lower, upper) in metadata.score_ranges.items()
+            lower <= scores[name] <= upper for name, (lower, upper) in metadata.score_ranges.items()
         )
         topic_text = " ".join(output.topics)
         return {

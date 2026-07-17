@@ -32,6 +32,11 @@ if TYPE_CHECKING:
     from openbiliclaw.features.system.domain import UserSettings
 
 _FEEDBACK_EVENT_NAMESPACE = UUID("613c8260-0658-4e94-8730-83b5627f1077")
+_PROFILE_FEEDBACK_SENTIMENT = {
+    InteractionKind.POSITIVE: "positive",
+    InteractionKind.NEGATIVE: "negative",
+    InteractionKind.DISMISS: "negative",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,8 @@ class FeedPolicy:
 
 class ContentRepository(Protocol):
     def add(self, item: ContentItem) -> None: ...
+
+    def get(self, content_id: UUID) -> ContentItem | None: ...
 
     def get_by_identity(self, source_id: str, external_id: str) -> ContentItem | None: ...
 
@@ -516,37 +523,54 @@ class FeedService:
 
 
 class FeedbackService:
-    """Persist an interaction and its profile evidence in one transaction."""
+    """Persist interactions, projecting only explicit feedback into profile evidence."""
 
     def __init__(self, uow_factory: Callable[[], FeedUnitOfWork]) -> None:
         self._uow_factory = uow_factory
 
-    def record(self, interaction: Interaction) -> ProfileSignal:
-        sentiment = (
-            "negative"
-            if interaction.kind in {InteractionKind.NEGATIVE, InteractionKind.DISMISS}
-            else "positive"
-        )
-        event = ActivityEvent(
-            id=uuid5(_FEEDBACK_EVENT_NAMESPACE, str(interaction.id)),
-            source_id="openbiliclaw",
-            kind=ActivityKind.FEEDBACK,
-            content_external_id=str(interaction.content_id),
-            text=f"content:{interaction.content_id}",
-            metadata={
-                "interaction_id": str(interaction.id),
-                "sentiment": sentiment,
-                "value": f"content:{interaction.content_id}",
-            },
-        )
+    def record(self, interaction: Interaction) -> ProfileSignal | None:
+        sentiment = _PROFILE_FEEDBACK_SENTIMENT.get(interaction.kind)
         with self._uow_factory() as uow:
+            content = uow.content.get(interaction.content_id)
+            if content is None:
+                raise LookupError("interaction content does not exist")
             uow.interactions.add(interaction)
+            if sentiment is None:
+                uow.commit()
+                return None
+            event = ActivityEvent(
+                id=uuid5(_FEEDBACK_EVENT_NAMESPACE, str(interaction.id)),
+                source_id="openbiliclaw",
+                kind=ActivityKind.FEEDBACK,
+                content_external_id=content.external_id,
+                url=content.url,
+                title=content.title,
+                text=content.summary or None,
+                metadata={
+                    "interaction_id": str(interaction.id),
+                    "sentiment": sentiment,
+                    "value": _feedback_evidence_value(content),
+                },
+            )
             uow.activities.add(event)
             uow.commit()
         signals = project_activity_event(event)
         if not signals:
             raise RuntimeError("feedback event did not produce evidence")
         return signals[0]
+
+
+def _feedback_evidence_value(content: ContentItem) -> str:
+    """Build bounded semantic evidence from normalized content, never an opaque row ID."""
+
+    values = [content.title, content.summary]
+    for key in ("topic", "topics", "tag", "tags"):
+        value = content.metadata.get(key)
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, tuple):
+            values.extend(item for item in value if isinstance(item, str))
+    return " | ".join(value.strip() for value in values if value.strip())[:500]
 
 
 __all__ = [

@@ -152,7 +152,7 @@ SourceResult: TypeAlias = tuple[ActivityEvent, ...] | tuple[ContentItem, ...]
 
 
 class SourceCredentialInput(BaseModel):
-    """Write-only browser credential accepted by every retained source account form."""
+    """Write-only credential accepted when a source has a backend consumer."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
@@ -179,11 +179,16 @@ class SourceFormSchemaFields(TypedDict):
     credential_schema: FrozenMetadata
 
 
-def source_form_schema_fields(settings_model: type[BaseModel]) -> SourceFormSchemaFields:
-    """Return keyword fields for concise source-package manifest construction."""
+def source_form_schema_fields(
+    settings_model: type[BaseModel], *, accepts_credentials: bool = True
+) -> SourceFormSchemaFields:
+    """Return safe form fields, omitting credentials without a backend consumer."""
 
     settings_schema, credential_schema = source_form_schemas(settings_model)
-    return {"settings_schema": settings_schema, "credential_schema": credential_schema}
+    return {
+        "settings_schema": settings_schema,
+        "credential_schema": credential_schema if accepts_credentials else empty_metadata(),
+    }
 
 
 @runtime_checkable

@@ -25,6 +25,7 @@ from openbiliclaw.api.routers.onboarding import _progress_events
 from openbiliclaw.api.routers.source_tasks import claim_source_task
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind, ProfileSignal
 from openbiliclaw.features.chat.service import ChatChunk, ChatChunkKind
+from openbiliclaw.features.feed.domain import Interaction, InteractionKind
 from openbiliclaw.features.library.domain import CollectionKind  # noqa: TC001
 from openbiliclaw.features.profile.domain import ProfileSnapshot
 from openbiliclaw.features.sources.domain import SourceId, SourceTaskCompletion
@@ -86,13 +87,19 @@ class _Feed:
 
 
 class _Feedback:
-    def record(self, interaction: object) -> ProfileSignal:
+    def record(self, interaction: Interaction) -> ProfileSignal | None:
+        if interaction.kind not in {
+            InteractionKind.POSITIVE,
+            InteractionKind.NEGATIVE,
+            InteractionKind.DISMISS,
+        }:
+            return None
         return ProfileSignal(
             facet="interests",
             value="positive feedback",
             weight=0.5,
             confidence=0.8,
-            evidence_ids=(interaction.id,),  # type: ignore[attr-defined]
+            evidence_ids=(interaction.id,),
         )
 
 
@@ -371,6 +378,28 @@ def test_router_groups_and_representative_happy_paths(client: TestClient) -> Non
         "obc-analysis",
         "obc-embedding",
     ]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    (
+        InteractionKind.IMPRESSION,
+        InteractionKind.OPEN,
+        InteractionKind.SAVE_FAVORITE,
+        InteractionKind.SAVE_WATCH_LATER,
+    ),
+)
+def test_non_feedback_interaction_response_truthfully_has_no_profile_signal(
+    client: TestClient, kind: InteractionKind
+) -> None:
+    response = client.post(
+        "/api/v1/interactions",
+        headers=_auth(),
+        json={"content_id": str(uuid4()), "kind": kind.value},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["signal"] is None
 
 
 @pytest.mark.parametrize(

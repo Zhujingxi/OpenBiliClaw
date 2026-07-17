@@ -50,11 +50,14 @@ def test_all_manifests_expose_pydantic_derived_safe_form_and_operation_schemas(
 ) -> None:
     for manifest in registry.manifests.values():
         assert manifest.settings_schema["type"] == "object"
-        assert manifest.credential_schema["type"] == "object"
-        credential_properties = manifest.credential_schema["properties"]
-        assert credential_properties
-        assert all(field.get("writeOnly") is True for field in credential_properties.values())
-        _assert_schema_is_secret_safe(manifest.credential_schema)
+        if manifest.source_id is SourceId.REDDIT:
+            assert dict(manifest.credential_schema) == {}
+        else:
+            assert manifest.credential_schema["type"] == "object"
+            credential_properties = manifest.credential_schema["properties"]
+            assert credential_properties
+            assert all(field.get("writeOnly") is True for field in credential_properties.values())
+            _assert_schema_is_secret_safe(manifest.credential_schema)
         for operation in manifest.operations:
             assert operation.request_schema["type"] == "object"
             assert operation.result_schema["type"] == "object"

@@ -12,7 +12,7 @@ import pytest
 
 def _load_bootstrap_module():
     root = Path(__file__).resolve().parents[2]
-    path = root / "scripts" / "agent_bootstrap.py"
+    path = root / "scripts" / "runtime_bootstrap.py"
     spec = importlib.util.spec_from_file_location("vnext_agent_bootstrap", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)

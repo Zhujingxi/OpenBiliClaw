@@ -68,7 +68,7 @@ Compose 启动后可在 loopback Admin 中添加 provider deployments，并把 m
 - `LITELLM_POSTGRES_PASSWORD`：64 位 hex 本地基础设施密码；
 - `LITELLM_MASTER_KEY`：`sk-` 开头的本地管理密钥。
 
-一行 Docker installer / `agent_bootstrap.py --mode docker` 会在跨进程锁内补齐 `.env`，拒绝 symlink，保留无关条目，用同目录 mode-`0600` 临时文件写入、flush/`fsync` 后原子替换，并在支持时同步目录。手动 Compose 用户必须先生成 `.env`。不要提交该文件。私有 Compose 网络中的 API 与 worker 使用 installer 生成的 proxy key；provider credentials、key rotation 和可选的最小权限 virtual key 均由 LiteLLM Admin 管理，不是 OpenBiliClaw 的 provider 配置面。
+一行 Docker installer / `scripts/runtime_bootstrap.py --mode docker` 会在跨进程锁内补齐 `.env`，拒绝 symlink，保留无关条目，用同目录 mode-`0600` 临时文件写入、flush/`fsync` 后原子替换，并在支持时同步目录。手动 Compose 用户必须先生成 `.env`。不要提交该文件。私有 Compose 网络中的 API 与 worker 使用 installer 生成的 proxy key；provider credentials、key rotation 和可选的最小权限 virtual key 均由 LiteLLM Admin 管理，不是 OpenBiliClaw 的 provider 配置面。
 
 `OPENBILICLAW_LITELLM_ADMIN_URL` 不是 credential。Docker/source 部署可在私密 runtime
 environment 中设置同一个安全 public URL，使 API/system health 和 Web/extension client 得到一致
@@ -78,6 +78,6 @@ environment 中设置同一个安全 public URL，使 API/system health 和 Web/
 
 ## 验证边界
 
-本模块用 PydanticAI `TestModel` / `FunctionModel`、HTTP mock transport、SQLite repository 和带 evaluator 的 typed Pydantic Evals dataset 做离线测试。测试禁止 live model request，且不使用真实 provider 凭据。`/health?model=...` 在真实 LiteLLM 上可能发起 provider 调用，只应用于显式诊断。Compose 只验证渲染、policy parity、loopback Admin、必填密钥 fail-closed 和镜像 manifest；本阶段没有启动容器或声明 provider E2E 成功。
+本模块用 PydanticAI `TestModel` / `FunctionModel`、HTTP mock transport、SQLite repository 和带 evaluator 的 typed Pydantic Evals dataset 做离线测试。默认测试禁止 live model request，且不使用真实 provider 凭据。`/health?model=...` 在真实 LiteLLM 上可能发起 provider 调用，只应用于显式诊断。Compose policy、alias 健康和完整保留 journey 的部署验证分别遵循 [Docker 部署](../docker-deployment.md) 与 [Docker 首次运行 E2E](../e2e/docker-first-run.md)；runbook 是验收步骤，不代表任意环境已经取得 live provider 结果。
 
 LiteLLM per-request cache bypass 依据官方 [Dynamic Cache Controls](https://docs.litellm.ai/docs/proxy/caching#no-cache)，转发 `extra_body={"cache": {"no-cache": true}}`；cache 的实现与所有权仍完全在 proxy。
