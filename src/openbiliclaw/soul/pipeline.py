@@ -1128,6 +1128,26 @@ class ProfileUpdatePipeline:
             except TypeError:
                 tick_result = await tick(profile)
 
+        # Speculation stalemate → confusion (Phase 2): a partially-confirmed
+        # expiry is an unresolved "看不懂", not a clean rejection. Best-effort —
+        # never breaks the speculator tick.
+        stalemate = getattr(tick_result, "stalemate", None)
+        if stalemate:
+            try:
+                from openbiliclaw.soul.confusion import ConfusionManager
+                from openbiliclaw.soul.ledger import ProfileLedger
+
+                database = getattr(self._memory, "_database", None)
+                manager = ConfusionManager(database, ledger=ProfileLedger(database))
+                for spec in stalemate:
+                    manager.create_from_speculation_stalemate(
+                        domain=str(getattr(spec, "domain", "")),
+                        confirmation_count=int(getattr(spec, "confirmation_count", 0)),
+                        confirmation_threshold=int(getattr(spec, "confirmation_threshold", 3)),
+                    )
+            except Exception:
+                logger.debug("Failed to raise stalemate confusions", exc_info=True)
+
         # Promote confirmed speculations into the interest layer
         if tick_result.promoted:
             for spec in tick_result.promoted:

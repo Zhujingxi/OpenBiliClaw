@@ -228,7 +228,25 @@ class SpeculatorTickResult:
     promoted: list[SpeculativeInterest] = field(default_factory=list)
     rejected: list[SpeculativeInterest] = field(default_factory=list)
     revived: list[SpeculativeInterest] = field(default_factory=list)
+    # Speculations that expired in a *stalemate* — partially confirmed but never
+    # reaching the threshold (0 < confirmation_count < confirmation_threshold).
+    # The ambiguity is a confusion candidate (Phase 2); the caller turns each
+    # into a confusion object. Subset of ``rejected`` (they still expire).
+    stalemate: list[SpeculativeInterest] = field(default_factory=list)
     observed_matches: int = 0
+
+
+def _stalemate_from_rejected(
+    rejected: list[SpeculativeInterest],
+) -> list[SpeculativeInterest]:
+    """Filter expired speculations that were *partially* confirmed.
+
+    Decidable-stalemate judgement (spec §Phase 2): uses only existing stored
+    fields — ``0 < confirmation_count < confirmation_threshold``. A zero-count
+    expiry is a clean "no interest" (no confusion); a threshold-reaching one
+    would have promoted, not expired.
+    """
+    return [spec for spec in rejected if 0 < spec.confirmation_count < spec.confirmation_threshold]
 
 
 @dataclass
@@ -959,6 +977,7 @@ class InterestSpeculator:
         def _prepare(state: SpeculativeState) -> SpeculativeState:
             rejected, next_state = expire_stale(state, now, self._cooldown_days)
             result.rejected = rejected
+            result.stalemate = _stalemate_from_rejected(rejected)
             promoted, next_state = promote_ready(next_state)
             result.promoted = promoted
             # Revive LAST (after promote) so a revived probe is never promoted
@@ -1033,6 +1052,7 @@ class InterestSpeculator:
         def _prepare(state: SpeculativeState) -> SpeculativeState:
             rejected, next_state = expire_stale(state, now, self._cooldown_days)
             result.rejected = rejected
+            result.stalemate = _stalemate_from_rejected(rejected)
             promoted, next_state = promote_ready(next_state)
             result.promoted = promoted
             # Revive LAST (after promote) so a revived probe is never promoted

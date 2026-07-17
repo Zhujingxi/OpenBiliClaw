@@ -419,3 +419,82 @@ def test_recent_event_urls_exclude_source_drops_matching_rows(tmp_path: Path) ->
     urls = db.recent_event_urls(["view"], within_hours=48, exclude_source="account_sync")
 
     assert urls == {extension_url}
+
+
+# --------------------------------------------------------------------------
+# Confusion objects (Phase 2)
+# --------------------------------------------------------------------------
+
+
+def test_insert_and_get_confusion_roundtrips(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    cid = db.insert_confusion(
+        source="awareness",
+        topic="解压视频",
+        observation="连续看解压视频但停留很短",
+        interpretation="可能是背景音而非兴趣",
+        interpretation_confidence=0.4,
+        evidence_refs=["note-1", "note-2"],
+    )
+    assert cid > 0
+    row = db.get_confusion(cid)
+    assert row is not None
+    assert row["status"] == "open"
+    assert row["topic"] == "解压视频"
+    assert row["evidence_refs"] == ["note-1", "note-2"]
+    assert row["held_updates"] == []
+
+
+def test_list_confusions_filters_by_status(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    a = db.insert_confusion(topic="a")
+    db.insert_confusion(topic="b")
+    db.update_confusion(a, status="resolved", resolution="real_interest")
+    assert {r["topic"] for r in db.list_confusions(statuses=["open"])} == {"b"}
+    assert {r["topic"] for r in db.list_confusions(statuses=["resolved"])} == {"a"}
+
+
+def test_claim_confusion_clarifying_atomic_single_winner(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    a = db.insert_confusion(topic="a")
+    b = db.insert_confusion(topic="b")
+    assert db.claim_confusion_clarifying(a, ask_turn_id="t1") is True
+    # Second claim (different row) violates the partial unique index → False.
+    assert db.claim_confusion_clarifying(b, ask_turn_id="t2") is False
+    assert db.get_confusion(a)["status"] == "clarifying"
+    assert db.get_confusion(b)["status"] == "open"
+    # Re-claiming an already-clarifying row is a no-op False (not 'open').
+    assert db.claim_confusion_clarifying(a, ask_turn_id="t3") is False
+
+
+def test_claim_confusion_clarifying_cross_connection(tmp_path: Path) -> None:
+    path = tmp_path / "confusion_race.db"
+    db0 = Database(path)
+    db0.initialize()
+    a = db0.insert_confusion(topic="a")
+    b = db0.insert_confusion(topic="b")
+
+    def _claim(cid: int, turn: str) -> bool:
+        db = Database(path)
+        db.initialize()
+        try:
+            return db.claim_confusion_clarifying(cid, ask_turn_id=turn)
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(_claim, a, "t1")
+        f2 = pool.submit(_claim, b, "t2")
+        results = [f1.result(), f2.result()]
+
+    # Exactly one connection wins the single clarifying slot.
+    assert results.count(True) == 1
+    clarifying = db0.list_confusions(statuses=["clarifying"])
+    assert len(clarifying) == 1
+
+
+def test_update_confusion_rejects_unknown_column(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    cid = db.insert_confusion(topic="a")
+    with pytest.raises(ValueError, match="Unknown confusion column"):
+        db.update_confusion(cid, bogus="x")

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.soul.awareness_analyzer import AwarenessGenerationError
+from openbiliclaw.soul.confusion import ConfusionManager
 from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
@@ -139,6 +140,13 @@ class CognitionCycle:
         """Best-effort audit ledger over the memory manager's database."""
         return ProfileLedger(getattr(self._memory, "_database", None))
 
+    def _confusion_manager(self) -> ConfusionManager:
+        """Confusion state machine over the memory manager's database."""
+        return ConfusionManager(
+            getattr(self._memory, "_database", None),
+            ledger=self._profile_ledger(),
+        )
+
     # -- Public API -----------------------------------------------------------
 
     async def run_if_due(self, *, now: datetime | None = None) -> CognitionCycleResult:
@@ -216,6 +224,13 @@ class CognitionCycle:
         except Exception:
             logger.exception("Failed to sync cognition cycle output into profile")
 
+        # 4. Confusion TTL maintenance (Phase 2): expire wait-parked confusions
+        # past their TTL. Best-effort — never breaks the cognition cycle.
+        try:
+            self._confusion_manager().expire_due(now=current_time)
+        except Exception:
+            logger.debug("Confusion TTL sweep failed", exc_info=True)
+
         self._save_state(state)
         return result
 
@@ -274,7 +289,7 @@ class CognitionCycle:
             # events (the batch), not the read-only lookback context.
             batch_event_ids = [_coerce_int(item.get("id", 0)) for item in batch]
             batch_event_ids = [eid for eid in batch_event_ids if eid > 0]
-            new_notes = await self._awareness_with_retry(
+            new_notes, confusion_candidates = await self._awareness_with_retry(
                 events_for_call, preference, soul_profile_data, batch_event_ids
             )
             if new_notes:
@@ -282,6 +297,11 @@ class CognitionCycle:
                 merged = self._awareness_analyzer.merge_notes(existing, new_notes)
                 total_added += max(0, len(merged) - len(existing))
                 self._save_awareness_notes(merged)
+            if confusion_candidates:
+                try:
+                    self._confusion_manager().create_from_awareness_candidates(confusion_candidates)
+                except Exception:
+                    logger.debug("Failed to persist confusion candidates", exc_info=True)
             # Advance the watermark past this chunk and persist immediately so a
             # failure in a later chunk doesn't reprocess this one next tick.
             batch_max_id = max(_coerce_int(item.get("id", 0)) for item in batch)
@@ -296,10 +316,15 @@ class CognitionCycle:
         preference: dict[str, Any],
         soul_profile_data: dict[str, Any],
         source_event_ids: list[int],
-    ) -> list[AwarenessNote]:
-        """One awareness analyze call with a single retry on structured failure."""
+    ) -> tuple[list[AwarenessNote], list[dict[str, Any]]]:
+        """One awareness+confusions call with a single retry on structured failure.
+
+        Switching to ``analyze_with_confusions`` (new independent builder) is an
+        intentional behaviour change vs the legacy ``analyze()`` path — recorded
+        via A/B in the PR (quality guardrail). Returns ``(notes, confusions)``.
+        """
         try:
-            return await self._awareness_analyzer.analyze(
+            return await self._awareness_analyzer.analyze_with_confusions(
                 events=events,
                 preference=preference,
                 soul_profile=soul_profile_data,
@@ -308,7 +333,7 @@ class CognitionCycle:
             )
         except AwarenessGenerationError:
             await asyncio.sleep(_AWARENESS_RETRY_BACKOFF_SECONDS)
-            return await self._awareness_analyzer.analyze(
+            return await self._awareness_analyzer.analyze_with_confusions(
                 events=events,
                 preference=preference,
                 soul_profile=soul_profile_data,

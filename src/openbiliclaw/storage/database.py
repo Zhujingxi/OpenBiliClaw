@@ -924,6 +924,40 @@ CREATE INDEX IF NOT EXISTS idx_profile_ledger_timestamp
     ON profile_update_ledger(timestamp);
 CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
     ON profile_update_ledger(write_point, timestamp);
+
+-- v0.3.175+ (cognitive profile pipeline Phase 2): "看不懂" (confusion) objects.
+-- A confusion is raised when a behaviour cannot be cleanly read (awareness
+-- source) or when a speculation expires in a stalemate (partial confirmation).
+-- It never writes the profile directly; it only drives downstream ask/probe/wait
+-- clarification and a topic-freeze reflex. The partial unique index enforces —
+-- across ALL connections — that at most ONE confusion is in the ``clarifying``
+-- state at any time (the durable ask budget), so the atomic claim is a single
+-- ``UPDATE ... WHERE status='open'`` that the index rejects if another row
+-- already holds the clarifying slot.
+CREATE TABLE IF NOT EXISTS confusions (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status                    TEXT NOT NULL DEFAULT 'open',
+    source                    TEXT NOT NULL DEFAULT '',
+    topic                     TEXT NOT NULL DEFAULT '',
+    observation               TEXT NOT NULL DEFAULT '',
+    interpretation            TEXT NOT NULL DEFAULT '',
+    interpretation_confidence REAL NOT NULL DEFAULT 0.0,
+    evidence_refs             TEXT NOT NULL DEFAULT '[]',
+    resolution                TEXT NOT NULL DEFAULT '',
+    resolution_note           TEXT NOT NULL DEFAULT '',
+    asked_at                  TIMESTAMP,
+    ask_turn_id               TEXT NOT NULL DEFAULT '',
+    defer_count               INTEGER NOT NULL DEFAULT 0,
+    expires_at                TIMESTAMP,
+    held_updates              TEXT NOT NULL DEFAULT '[]',
+    resolved_at               TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_confusions_clarifying_unique
+    ON confusions(status) WHERE status = 'clarifying';
+CREATE INDEX IF NOT EXISTS idx_confusions_status
+    ON confusions(status, updated_at);
 """
 
 
@@ -1190,6 +1224,7 @@ class Database:
         self._ensure_llm_usage_cache_columns()
         self._ensure_chat_turns_table()
         self._ensure_profile_update_ledger_table()
+        self._ensure_confusions_table()
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
@@ -1947,6 +1982,151 @@ class Database:
             record["source_refs"] = decoded if isinstance(decoded, list) else []
             rows.append(record)
         return rows
+
+    # ------------------------------------------------------------------
+    # Confusion objects (Phase 2)
+    # ------------------------------------------------------------------
+
+    def insert_confusion(
+        self,
+        *,
+        source: str = "",
+        topic: str = "",
+        observation: str = "",
+        interpretation: str = "",
+        interpretation_confidence: float = 0.0,
+        evidence_refs: Sequence[str] | None = None,
+        status: str = "open",
+        expires_at: str = "",
+    ) -> int:
+        """Insert a new confusion row (defaults to ``open``). Returns its id."""
+        refs_json = json.dumps(list(evidence_refs or []), ensure_ascii=False, sort_keys=True)
+        cursor = self._execute_write(
+            """INSERT INTO confusions
+               (status, source, topic, observation, interpretation,
+                interpretation_confidence, evidence_refs, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(status or "open"),
+                str(source or ""),
+                str(topic or ""),
+                str(observation or ""),
+                str(interpretation or ""),
+                float(interpretation_confidence or 0.0),
+                refs_json,
+                str(expires_at or "") or None,
+            ),
+        )
+        return cursor.lastrowid or 0
+
+    def get_confusion(self, confusion_id: int) -> dict[str, Any] | None:
+        """Return one confusion row by id (or ``None``)."""
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            "SELECT * FROM confusions WHERE id = ?",
+            (int(confusion_id),),
+        )
+        row = cursor.fetchone()
+        return self._decode_confusion_row(dict(row)) if row is not None else None
+
+    def list_confusions(
+        self,
+        *,
+        statuses: Sequence[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return confusions filtered by ``statuses`` (newest-first)."""
+        self._ensure_fresh_read()
+        params: list[Any] = []
+        clause = ""
+        status_list = [str(s) for s in (statuses or []) if str(s)]
+        if status_list:
+            placeholders = ", ".join("?" for _ in status_list)
+            clause = f"WHERE status IN ({placeholders})"
+            params.extend(status_list)
+        params.append(max(1, int(limit)))
+        cursor = self.conn.execute(
+            f"SELECT * FROM confusions {clause} ORDER BY id DESC LIMIT ?",
+            params,
+        )
+        return [self._decode_confusion_row(dict(row)) for row in cursor.fetchall()]
+
+    def claim_confusion_clarifying(
+        self,
+        confusion_id: int,
+        *,
+        ask_turn_id: str = "",
+        asked_at: str = "",
+    ) -> bool:
+        """Atomically move an ``open`` confusion into ``clarifying``.
+
+        The partial unique index ``idx_confusions_clarifying_unique`` allows at
+        most one ``clarifying`` row across ALL connections, so a concurrent
+        claim by another connection raises ``IntegrityError`` here and we return
+        ``False`` (lost the race). A ``False`` also results when the row is not
+        ``open`` (already claimed / resolved) — rowcount 0.
+        """
+        try:
+            cursor = self._execute_write(
+                """UPDATE confusions
+                   SET status = 'clarifying',
+                       ask_turn_id = ?,
+                       asked_at = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND status = 'open'""",
+                (str(ask_turn_id or ""), str(asked_at or "") or None, int(confusion_id)),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        return cursor.rowcount > 0
+
+    def update_confusion(self, confusion_id: int, **fields: Any) -> None:
+        """Update mutable confusion columns (whitelist-guarded)."""
+        allowed = {
+            "status",
+            "topic",
+            "interpretation",
+            "interpretation_confidence",
+            "resolution",
+            "resolution_note",
+            "asked_at",
+            "ask_turn_id",
+            "defer_count",
+            "expires_at",
+            "held_updates",
+            "resolved_at",
+        }
+        assignments: list[str] = []
+        params: list[Any] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"Unknown confusion column: {key}")
+            assignments.append(f"{key} = ?")
+            if key == "held_updates" and not isinstance(value, str):
+                params.append(json.dumps(value, ensure_ascii=False, sort_keys=True))
+            else:
+                params.append(value)
+        if not assignments:
+            return
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(int(confusion_id))
+        self._execute_write(
+            f"UPDATE confusions SET {', '.join(assignments)} WHERE id = ?",
+            params,
+        )
+
+    @staticmethod
+    def _decode_confusion_row(record: dict[str, Any]) -> dict[str, Any]:
+        for json_key in ("evidence_refs", "held_updates"):
+            raw = record.get(json_key)
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    record[json_key] = json.loads(raw)
+                except (TypeError, ValueError):
+                    record[json_key] = []
+            elif not isinstance(raw, list):
+                record[json_key] = []
+        return record
 
     # ------------------------------------------------------------------
     # LLM usage ledger
@@ -7329,6 +7509,35 @@ class Database:
                 ON profile_update_ledger(timestamp);
             CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
                 ON profile_update_ledger(write_point, timestamp);
+        """)
+
+    def _ensure_confusions_table(self) -> None:
+        """Create the confusion-object table (Phase 2) for existing databases."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS confusions (
+                id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status                    TEXT NOT NULL DEFAULT 'open',
+                source                    TEXT NOT NULL DEFAULT '',
+                topic                     TEXT NOT NULL DEFAULT '',
+                observation               TEXT NOT NULL DEFAULT '',
+                interpretation            TEXT NOT NULL DEFAULT '',
+                interpretation_confidence REAL NOT NULL DEFAULT 0.0,
+                evidence_refs             TEXT NOT NULL DEFAULT '[]',
+                resolution                TEXT NOT NULL DEFAULT '',
+                resolution_note           TEXT NOT NULL DEFAULT '',
+                asked_at                  TIMESTAMP,
+                ask_turn_id               TEXT NOT NULL DEFAULT '',
+                defer_count               INTEGER NOT NULL DEFAULT 0,
+                expires_at                TIMESTAMP,
+                held_updates              TEXT NOT NULL DEFAULT '[]',
+                resolved_at               TIMESTAMP
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_confusions_clarifying_unique
+                ON confusions(status) WHERE status = 'clarifying';
+            CREATE INDEX IF NOT EXISTS idx_confusions_status
+                ON confusions(status, updated_at);
         """)
 
     def _ensure_watch_later_table(self) -> None:

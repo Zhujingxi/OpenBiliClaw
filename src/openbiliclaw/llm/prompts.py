@@ -747,6 +747,92 @@ def build_awareness_prompt(
     ]
 
 
+_AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
+<task>
+你要基于近期用户行为，做两件事：
+1. 生成少量谨慎的近期观察笔记（notes）。
+2. 标记出你「看不懂」的行为——那些证据不足、无法干净解读、可能存在多种矛盾解释的观察，作为疑惑（confusions）。
+</task>
+
+<rules>
+1. 输出必须是严格 JSON 对象：{"notes": [...], "confusions": [...]}，不要附带解释。
+2. notes 的每条字段与老版本一致：date / observation / trend / emotion_guess；措辞保守，不下人格定论。
+3. confusions 只在你「真的不确定该怎么解读」时才产出，宁缺毋滥，最多 2 条。每条包含：
+   - topic：这个疑惑关联的话题/领域（简短，可为空）。
+   - observation：看到的、说不清的行为现象。
+   - interpretation：你此刻最可能但不确定的解读。
+   - interpretation_confidence：0~1，对上面解读的把握（低置信才该成为疑惑）。
+   - evidence_refs：相关的事件线索（可为空数组）。
+4. 每条事件自带 `context` 字段（跨源统一中文摘要），优先据此理解事件，配合 metadata.source_platform 区分平台；所有平台信号一视同仁。
+5. 如果没有真正看不懂的地方，confusions 返回空数组——不要为凑数制造疑惑。
+6. 详细输入（画像 / 偏好摘要 / 近期事件）见 user message 的 X / Y / Z 各段。
+</rules>
+
+<output_schema>
+{
+  "notes": [
+    {
+      "date": "2026-03-08",
+      "observation": "最近连续浏览高信息密度内容。",
+      "trend": "更偏向深度解释而非轻量消遣。",
+      "emotion_guess": "可能处于主动吸收和整理信息的阶段。"
+    }
+  ],
+  "confusions": [
+    {
+      "topic": "解压视频",
+      "observation": "连续点开解压视频但每条停留都很短。",
+      "interpretation": "可能只是当背景音，而不是真的对这个题材感兴趣。",
+      "interpretation_confidence": 0.35,
+      "evidence_refs": []
+    }
+  ]
+}
+</output_schema>
+""".strip()
+
+
+def build_awareness_with_confusions_prompt(
+    *,
+    events: list[dict[str, object]],
+    preference_summary: dict[str, object],
+    soul_profile: dict[str, object],
+) -> list[dict[str, str]]:
+    """Build the awareness+confusions prompt (Phase 2).
+
+    A NEW, independent builder — the legacy :func:`build_awareness_prompt`
+    stays byte-identical (its replay path is the one guarded by the invariance
+    test). ``cognition_cycle`` switches to this builder as an intentional
+    behaviour change (A/B recorded in the PR). System is a module-level
+    constant; per-call variables live in the user message with deterministic
+    ``sort_keys=True`` JSON so prompt-cache prefixes stay stable.
+    """
+    from openbiliclaw.sources.event_format import render_retraction_marked_events
+
+    user_prompt = "\n\n".join(
+        [
+            "<soul_profile>",
+            json.dumps(soul_profile, ensure_ascii=False, indent=2, sort_keys=True),
+            "</soul_profile>",
+            "<preference_summary>",
+            json.dumps(preference_summary, ensure_ascii=False, indent=2, sort_keys=True),
+            "</preference_summary>",
+            "<recent_events>",
+            json.dumps(
+                render_retraction_marked_events(events),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</recent_events>",
+        ]
+    )
+    return [
+        {"role": "system", "content": _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 def build_insight_prompt(
     *,
     awareness_notes: list[dict[str, object]],

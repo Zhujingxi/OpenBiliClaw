@@ -700,6 +700,19 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             ),
         ),
         (
+            "build_awareness_with_confusions_prompt",
+            dict(
+                events=[{"event_type": "view", "title": "A"}],
+                preference_summary={"a": 1},
+                soul_profile={"x": 1},
+            ),
+            dict(
+                events=[{"event_type": "like", "title": "B"}],
+                preference_summary={"a": 2},
+                soul_profile={"x": 2},
+            ),
+        ),
+        (
             "build_dialogue_insight_prompt",
             dict(
                 user_message="我最近在玩桌游",
