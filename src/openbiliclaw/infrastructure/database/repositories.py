@@ -788,6 +788,16 @@ class SQLAlchemyJobRunRepository:
         ).all()
         return tuple(_job_snapshot(row) for row in rows)
 
+    def successful(self) -> tuple[JobRunSnapshot, ...]:
+        """Return every terminal success for idempotent application continuation replay."""
+
+        rows = self._session.scalars(
+            select(JobRunModel)
+            .where(JobRunModel.status == JobRunStatus.SUCCEEDED.value)
+            .order_by(JobRunModel.created_at, JobRunModel.id)
+        ).all()
+        return tuple(_job_snapshot(row) for row in rows)
+
     def claim(self, run_id: UUID) -> bool:
         now = _utc_now()
         result = self._session.execute(
@@ -922,6 +932,32 @@ class SQLAlchemyJobRunRepository:
         if row is None:
             raise LookupError(f"job run does not exist: {run_id}")
         return row.status == JobRunStatus.CANCELLED.value
+
+    def restart_terminal(self, run_id: UUID) -> bool:
+        """Resume only an explicitly retried failed/cancelled run."""
+
+        now = _utc_now()
+        result = self._session.execute(
+            update(JobRunModel)
+            .where(
+                JobRunModel.id == str(run_id),
+                JobRunModel.status.in_((JobRunStatus.FAILED.value, JobRunStatus.CANCELLED.value)),
+            )
+            .values(
+                status=JobRunStatus.PENDING.value,
+                progress=0.0,
+                error=None,
+                updated_at=now,
+                started_at=None,
+                finished_at=None,
+                dispatched_at=None,
+            )
+        )
+        if getattr(result, "rowcount", 0):
+            return True
+        if self._fresh_row(run_id) is None:
+            raise LookupError(f"job run does not exist: {run_id}")
+        return False
 
     def recover_running(self) -> tuple[UUID, ...]:
         now = _utc_now()

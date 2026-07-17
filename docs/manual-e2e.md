@@ -1,123 +1,83 @@
-# 手动端到端联调
+# vNext 手动端到端联调
 
-> 用于验证 CLI 首跑、插件采集、持续补货和浏览器通知是否在真实环境中串通。
+本 runbook 只覆盖新的 `/api/v1`、独立 worker 和 LiteLLM。现有 static
+Web/extension 的 API wiring 等待 Task 22，不在当前通过矩阵中。
 
-## 前置条件
+## 1. 启动基础设施
 
-1. 本地已配置有效的 LLM Provider 和 B 站 Cookie
-2. 已在项目根目录创建本地 `config.toml`
-3. Chrome 已允许加载 unpacked extension
-
-## CLI 首跑
+推荐：
 
 ```bash
-PYTHONPATH=src .venv/bin/openbiliclaw auth status
-PYTHONPATH=src .venv/bin/openbiliclaw init
-PYTHONPATH=src .venv/bin/openbiliclaw recommend
+MODE=docker bash scripts/install.sh
+docker compose ps
 ```
 
-验收：
+在 LiteLLM Admin 配置 `obc-interactive`、`obc-analysis`、`obc-embedding`。
+不要在记录或截图中包含 `.env`、bearer token 或 provider key。
 
-- `init` 输出历史条数、画像状态和发现内容数
-- `recommend` 能输出朋友式推荐文案
-
-## 启动本地后端
+## 2. 系统检查
 
 ```bash
-PYTHONPATH=src .venv/bin/openbiliclaw start
+curl -fsS http://127.0.0.1:8420/api/v1/system/readiness
+docker compose logs worker
 ```
 
-校验接口：
+从 `.env` 在本地读取 `OPENBILICLAW_ACCESS_TOKEN`，在 API client 中作为 bearer
+使用；不要把它贴进 runbook。确认：
 
-```bash
-curl http://127.0.0.1:8420/api/health
-curl http://127.0.0.1:8420/api/runtime-status
-curl http://127.0.0.1:8420/api/recommendations
-```
+- `/api/v1/settings` 返回 200；
+- `/api/v1/system/ai-health` 显示三个 alias 的脱敏状态；
+- 不带 bearer 的受保护请求返回 401；
+- 错误响应不含 secret、traceback 或 provider payload。
 
-## 加载插件
+## 3. 来源连接与 bootstrap
 
-```bash
-cd extension && npm install && npm run build
-```
+按 source manifest 逐个验证 Bilibili、小红书、抖音、YouTube、X、知乎和
+Reddit：
 
-1. 进入 Chrome 扩展管理页
-2. 打开”开发者模式”
-3. 加载 `extension/` 目录
-4. 固定侧边栏图标
+1. `GET /api/v1/sources` 检查 capability set。
+2. 对有凭据来源调用 configure；response 不应回显 credential。
+3. 调用 `/api/v1/onboarding` 启动 retained bootstrap。
+4. 浏览器辅助来源通过 generic claim/complete 处理，不调用平台专属 task API。
+5. 确认 normalized `ActivityEvent` 已入库。
 
-## 插件采集与持续补货
+只测试 manifest 声明支持的 capability；unsupported operation 应不存在，而不是
+由 fallback 模拟。
 
-1. 打开 B 站首页、搜索页、视频页
-2. 执行搜索、点击、播放、暂停、滚动等行为
-3. 等待 1 到 2 个 flush 周期
+## 4. Evidence profile
 
-校验：
+等待 `profile_projection` job 完成，确认：
 
-```bash
-sqlite3 data/openbiliclaw.db "select count(*) from events;"
-sqlite3 data/openbiliclaw.db "select event_type, count(*) from events group by event_type order by event_type;"
-curl http://127.0.0.1:8420/api/runtime-status
-```
+- profile revision 增加；
+- facet 包含 `weight`、`confidence`、`evidence_ids`；
+- AI proposal 经过 deterministic clamp/dedup/evidence rules；
+- user edit 形成 high-confidence override signal；
+- 没有 profile JSON 写入。
 
-重点看：
+## 5. Feed 与 feedback
 
-- `events` 数量增长
-- `runtime-status.pending_signal_events` 会先升高，再在自动刷新后归零
-- `runtime-status.last_refresh_at` 发生变化
+触发 `feed_replenishment`，确认 deficit、source allocation、normalize、dedup、batch
+assessment、diversity/novelty admission 均可从记录解释。提交 like/dislike 后再次
+补货，确认后续排名变化且原 interaction 保留。
 
-## 侧边栏验证
+## 6. Library 与 chat
 
-### 推荐 tab
+把同一 content 分别加入 favorites 与 watch-later，确认它们是 predefined
+collection 上的 `CollectionItem`，没有 native platform mutation。通过 chat SSE
+发送消息，确认 chunk、usage、terminal event 与可选 learning signal 正常。
 
-- 能显示连接状态
-- 未初始化时提示先跑 `openbiliclaw init`
-- 有候选但正在补货时提示“正在根据你最近的新行为补货”
-- 有推荐时能展示推荐卡片
+## 7. Worker recovery
 
-### 我的画像 tab
+在隔离测试环境验证：
 
-- 能显示画像摘要、核心特质、深层需求和当前偏好
+- duplicate schedule 保持 idempotent；
+- worker restart 恢复 pending run；
+- retry 和 cancel 更新应用库 `job_runs`；
+- interactive、user-triggered、scheduled priority 顺序正确；
+- Huey result 不是 user-visible job status authority。
 
-### 和阿B聊聊 tab
+## 8. 完成条件
 
-- 能发送消息并收到回复
-- 聊天后数据库中应新增 `dialogue` 事件
-
-## 推荐反馈
-
-在侧边栏中分别测试：
-
-- `喜欢`
-- `不喜欢`
-- `写一句`
-
-校验：
-
-```bash
-sqlite3 data/openbiliclaw.db "select id,bvid,feedback_type,feedback_note,feedback_at from recommendations order by id desc limit 10;"
-sqlite3 data/openbiliclaw.db "select id,event_type,title,metadata from events where event_type='feedback' order by id desc limit 10;"
-```
-
-## 浏览器通知
-
-1. 让系统产生一条高置信、未展示、未通知过的推荐
-2. 等待 `service worker` alarm 或新事件 flush 成功
-3. 观察是否弹出浏览器通知
-4. 点击通知，确认跳转到目标 B 站视频页
-
-校验：
-
-```bash
-curl http://127.0.0.1:8420/api/notifications/pending
-sqlite3 data/openbiliclaw.db "select bvid,notification_sent,notified_at from content_cache where notification_sent=1 order by notified_at desc limit 10;"
-```
-
-## 期望结果
-
-- CLI 能完成首跑初始化
-- 插件能持续上报行为
-- 后端能自动补货候选池
-- 侧边栏能读到运行状态与新推荐
-- 高置信推荐会触发浏览器通知
-- 反馈和聊天都会继续推动系统理解用户
+完整旅程为：first-run → LiteLLM aliases → source connection → bootstrap → evidence
+profile → feed → feedback changes later ranking → chat → local save。Task 22 完成后，
+同一旅程再加入 Web/extension generated-client smoke；不恢复 legacy API。

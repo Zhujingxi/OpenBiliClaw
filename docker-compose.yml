@@ -116,6 +116,7 @@ services:
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
+      OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
       OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
       # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM

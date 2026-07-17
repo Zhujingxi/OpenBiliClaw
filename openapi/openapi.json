@@ -194,6 +194,98 @@
         "title": "AliasHealthResponse",
         "type": "object"
       },
+      "ChatChunk": {
+        "additionalProperties": false,
+        "description": "Transport-neutral chunk that can be rendered as an SSE event.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ChatChunkKind"
+          },
+          "turn_id": {
+            "format": "uuid",
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "content",
+          "turn_id"
+        ],
+        "title": "ChatChunk",
+        "type": "object"
+      },
+      "ChatChunkKind": {
+        "enum": [
+          "delta",
+          "done"
+        ],
+        "title": "ChatChunkKind",
+        "type": "string"
+      },
+      "ChatDoneEvent": {
+        "additionalProperties": false,
+        "description": "Union-shaped payload accepted for normal and failed chat terminals.",
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Content"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "const": "done",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kind"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "const": "failed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Turn Id"
+          }
+        },
+        "title": "ChatDoneEvent",
+        "type": "object"
+      },
       "ChatRequest": {
         "additionalProperties": false,
         "properties": {
@@ -269,6 +361,42 @@
         "title": "ClaimedSourceTask",
         "type": "object"
       },
+      "CollectionItem": {
+        "additionalProperties": false,
+        "description": "A local collection membership for one normalized content item.",
+        "properties": {
+          "added_at": {
+            "format": "date-time",
+            "title": "Added At",
+            "type": "string"
+          },
+          "collection": {
+            "$ref": "#/components/schemas/CollectionKind"
+          },
+          "content_id": {
+            "format": "uuid",
+            "title": "Content Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "note": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Note",
+            "type": "string"
+          }
+        },
+        "required": [
+          "collection",
+          "content_id"
+        ],
+        "title": "CollectionItem",
+        "type": "object"
+      },
       "CollectionKind": {
         "description": "The two predefined local-only collections.",
         "enum": [
@@ -298,6 +426,182 @@
           "result"
         ],
         "title": "CompleteSourceTask",
+        "type": "object"
+      },
+      "ContentItem": {
+        "additionalProperties": false,
+        "description": "Normalized content identity and display metadata from any source.",
+        "properties": {
+          "creator": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creator"
+          },
+          "external_id": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "External Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "media_type": {
+            "default": "link",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Media Type",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "source_id": {
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Source Id",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "format": "uri",
+            "maxLength": 2083,
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "external_id",
+          "url",
+          "title"
+        ],
+        "title": "ContentItem",
+        "type": "object"
+      },
+      "EventIngestResponse": {
+        "additionalProperties": false,
+        "description": "Accepted event identity and the normalized profile signals it produced.",
+        "properties": {
+          "event_id": {
+            "format": "uuid",
+            "title": "Event Id",
+            "type": "string"
+          },
+          "signals": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileSignal"
+            },
+            "title": "Signals",
+            "type": "array"
+          }
+        },
+        "required": [
+          "event_id",
+          "signals"
+        ],
+        "title": "EventIngestResponse",
+        "type": "object"
+      },
+      "FeedEntry": {
+        "additionalProperties": false,
+        "description": "One admitted candidate in the user's ordered feed.",
+        "properties": {
+          "admitted_at": {
+            "format": "date-time",
+            "title": "Admitted At",
+            "type": "string"
+          },
+          "assessment_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assessment Id"
+          },
+          "content_id": {
+            "format": "uuid",
+            "title": "Content Id",
+            "type": "string"
+          },
+          "explanation": {
+            "default": "",
+            "title": "Explanation",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "position": {
+            "minimum": 0.0,
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "content_id",
+          "position"
+        ],
+        "title": "FeedEntry",
+        "type": "object"
+      },
+      "FeedItem": {
+        "additionalProperties": false,
+        "description": "One feed entry joined to its normalized display content.",
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/ContentItem"
+          },
+          "entry": {
+            "$ref": "#/components/schemas/FeedEntry"
+          }
+        },
+        "required": [
+          "entry",
+          "content"
+        ],
+        "title": "FeedItem",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -362,10 +666,38 @@
         "title": "InteractionKind",
         "type": "string"
       },
+      "InteractionResponse": {
+        "additionalProperties": false,
+        "description": "Persisted interaction and its deterministic profile signal.",
+        "properties": {
+          "interaction": {
+            "$ref": "#/components/schemas/Interaction"
+          },
+          "signal": {
+            "$ref": "#/components/schemas/ProfileSignal"
+          }
+        },
+        "required": [
+          "interaction",
+          "signal"
+        ],
+        "title": "InteractionResponse",
+        "type": "object"
+      },
+      "JobPriorityLane": {
+        "description": "Closed user-facing names for the three queue priorities.",
+        "enum": [
+          "interactive",
+          "user-triggered",
+          "scheduled"
+        ],
+        "title": "JobPriorityLane",
+        "type": "string"
+      },
       "JobRunResponse": {
         "properties": {
           "attempts": {
-            "minimum": 0.0,
+            "minimum": 0,
             "title": "Attempts",
             "type": "integer"
           },
@@ -384,6 +716,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Dispatched At"
           },
           "error": {
@@ -395,6 +728,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Error"
           },
           "finished_at": {
@@ -407,6 +741,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Finished At"
           },
           "id": {
@@ -427,8 +762,8 @@
             "type": "integer"
           },
           "progress": {
-            "maximum": 1.0,
-            "minimum": 0.0,
+            "maximum": 1,
+            "minimum": 0,
             "title": "Progress",
             "type": "number"
           },
@@ -442,6 +777,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Started At"
           },
           "status": {
@@ -545,6 +881,59 @@
           "evidence_ids"
         ],
         "title": "ProfileFacet",
+        "type": "object"
+      },
+      "ProfileSignal": {
+        "additionalProperties": false,
+        "description": "A profile observation that always identifies its supporting evidence.",
+        "properties": {
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "evidence_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "facet": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Facet",
+            "type": "string"
+          },
+          "override": {
+            "default": false,
+            "title": "Override",
+            "type": "boolean"
+          },
+          "value": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          },
+          "weight": {
+            "maximum": 1.0,
+            "minimum": -1.0,
+            "title": "Weight",
+            "type": "number"
+          }
+        },
+        "required": [
+          "facet",
+          "value",
+          "weight",
+          "confidence",
+          "evidence_ids"
+        ],
+        "title": "ProfileSignal",
         "type": "object"
       },
       "ProfileSnapshot": {
@@ -654,13 +1043,12 @@
           "priority": {
             "anyOf": [
               {
-                "type": "integer"
+                "$ref": "#/components/schemas/JobPriorityLane"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Priority"
+            ]
           }
         },
         "required": [
@@ -701,6 +1089,22 @@
         "title": "SourceAccountStatus",
         "type": "object"
       },
+      "SourceCapability": {
+        "description": "Stable product capabilities, independent of a provider's operation names.",
+        "enum": [
+          "authentication",
+          "bootstrap_import",
+          "activity_collection",
+          "search",
+          "trending_feed",
+          "related_discovery",
+          "creator_discovery",
+          "community_discovery",
+          "browser_assisted"
+        ],
+        "title": "SourceCapability",
+        "type": "string"
+      },
       "SourceConfiguration": {
         "additionalProperties": false,
         "properties": {
@@ -738,6 +1142,46 @@
         "title": "SourceId",
         "type": "string"
       },
+      "SourceManifest": {
+        "additionalProperties": false,
+        "description": "Immutable source identity with separate capability and operation declarations.",
+        "properties": {
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCapability"
+            },
+            "minItems": 1,
+            "title": "Capabilities",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "display_name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/SourceOperationSpec"
+            },
+            "minItems": 1,
+            "title": "Operations",
+            "type": "array"
+          },
+          "source_id": {
+            "$ref": "#/components/schemas/SourceId"
+          }
+        },
+        "required": [
+          "source_id",
+          "display_name",
+          "capabilities",
+          "operations"
+        ],
+        "title": "SourceManifest",
+        "type": "object"
+      },
       "SourceOperation": {
         "description": "Concrete read-only operations executable by source connectors.",
         "enum": [
@@ -750,6 +1194,55 @@
           "community"
         ],
         "title": "SourceOperation",
+        "type": "string"
+      },
+      "SourceOperationSpec": {
+        "additionalProperties": false,
+        "description": "Execution metadata for one concrete operation.",
+        "properties": {
+          "capability": {
+            "$ref": "#/components/schemas/SourceCapability"
+          },
+          "fallback_transport_kind": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceTransportKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation": {
+            "$ref": "#/components/schemas/SourceOperation"
+          },
+          "requires_auth": {
+            "title": "Requires Auth",
+            "type": "boolean"
+          },
+          "result_kind": {
+            "$ref": "#/components/schemas/SourceResultKind"
+          },
+          "transport_kind": {
+            "$ref": "#/components/schemas/SourceTransportKind"
+          }
+        },
+        "required": [
+          "operation",
+          "capability",
+          "result_kind",
+          "requires_auth",
+          "transport_kind"
+        ],
+        "title": "SourceOperationSpec",
+        "type": "object"
+      },
+      "SourceResultKind": {
+        "enum": [
+          "activity",
+          "content"
+        ],
+        "title": "SourceResultKind",
         "type": "string"
       },
       "SourceTaskCompletion": {
@@ -776,6 +1269,61 @@
           "idempotent"
         ],
         "title": "SourceTaskCompletion",
+        "type": "object"
+      },
+      "SourceTransportKind": {
+        "enum": [
+          "direct",
+          "cli",
+          "browser"
+        ],
+        "title": "SourceTransportKind",
+        "type": "string"
+      },
+      "StreamErrorEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "StreamErrorEvent",
+        "type": "object"
+      },
+      "StreamTerminalEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
+          "status": {
+            "enum": [
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "StreamTerminalEvent",
         "type": "object"
       },
       "UserSettings": {
@@ -856,17 +1404,6 @@
             ],
             "title": "Feed Low Watermark"
           },
-          "onboarding_complete": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Onboarding Complete"
-          },
           "source_enabled": {
             "anyOf": [
               {
@@ -898,6 +1435,7 @@
             "anyOf": [
               {
                 "additionalProperties": {
+                  "minimum": 0.0,
                   "type": "number"
                 },
                 "type": "object"
@@ -952,6 +1490,12 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -976,11 +1520,30 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-sse-events": {
+                  "delta": {
+                    "schema": {
+                      "$ref": "#/components/schemas/ChatChunk"
+                    }
+                  },
+                  "done": {
+                    "schema": {
+                      "$ref": "#/components/schemas/ChatDoneEvent"
+                    }
+                  },
+                  "error": {
+                    "schema": {
+                      "$ref": "#/components/schemas/StreamErrorEvent"
+                    }
+                  }
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "Interactive chat event stream."
           },
           "422": {
             "content": {
@@ -993,6 +1556,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Stream Chat",
         "tags": [
           "chat"
@@ -1017,7 +1585,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Events Ingest"
+                  "$ref": "#/components/schemas/EventIngestResponse"
                 }
               }
             },
@@ -1034,6 +1602,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Ingest Event",
         "tags": [
           "events"
@@ -1073,7 +1646,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Feed List"
+                  "items": {
+                    "$ref": "#/components/schemas/FeedItem"
+                  },
+                  "title": "Response 200 V1 Feed List",
+                  "type": "array"
                 }
               }
             },
@@ -1090,6 +1667,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Feed",
         "tags": [
           "feed"
@@ -1114,7 +1696,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Interactions Create"
+                  "$ref": "#/components/schemas/InteractionResponse"
                 }
               }
             },
@@ -1131,6 +1713,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Create Interaction",
         "tags": [
           "interactions"
@@ -1180,6 +1767,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Jobs",
         "tags": [
           "jobs"
@@ -1219,6 +1811,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Schedule Job",
         "tags": [
           "jobs"
@@ -1262,6 +1859,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Cancel Job",
         "tags": [
           "jobs"
@@ -1303,6 +1905,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Job",
         "tags": [
           "jobs"
@@ -1327,11 +1934,30 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-sse-events": {
+                  "done": {
+                    "schema": {
+                      "$ref": "#/components/schemas/StreamTerminalEvent"
+                    }
+                  },
+                  "error": {
+                    "schema": {
+                      "$ref": "#/components/schemas/StreamErrorEvent"
+                    }
+                  },
+                  "progress": {
+                    "schema": {
+                      "$ref": "#/components/schemas/JobRunResponse"
+                    }
+                  }
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "Business job progress event stream."
           },
           "422": {
             "content": {
@@ -1344,6 +1970,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Job Events",
         "tags": [
           "jobs"
@@ -1368,7 +1999,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Library List"
+                  "items": {
+                    "$ref": "#/components/schemas/CollectionItem"
+                  },
+                  "title": "Response 200 V1 Library List",
+                  "type": "array"
                 }
               }
             },
@@ -1385,6 +2020,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Collection",
         "tags": [
           "library"
@@ -1417,7 +2057,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Library Add"
+                  "$ref": "#/components/schemas/CollectionItem"
                 }
               }
             },
@@ -1434,6 +2074,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Add Collection Item",
         "tags": [
           "library"
@@ -1478,6 +2123,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Remove Collection Item",
         "tags": [
           "library"
@@ -1499,6 +2149,12 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {},
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Onboarding Status",
         "tags": [
           "onboarding"
@@ -1540,6 +2196,12 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {},
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Start Onboarding",
         "tags": [
           "onboarding"
@@ -1564,11 +2226,30 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-sse-events": {
+                  "done": {
+                    "schema": {
+                      "$ref": "#/components/schemas/StreamTerminalEvent"
+                    }
+                  },
+                  "error": {
+                    "schema": {
+                      "$ref": "#/components/schemas/StreamErrorEvent"
+                    }
+                  },
+                  "progress": {
+                    "schema": {
+                      "$ref": "#/components/schemas/JobRunResponse"
+                    }
+                  }
+                }
               }
             },
-            "description": "Successful Response"
+            "description": "First-run onboarding progress event stream."
           },
           "422": {
             "content": {
@@ -1581,6 +2262,12 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {},
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Onboarding Events",
         "tags": [
           "onboarding"
@@ -1602,6 +2289,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Current Profile",
         "tags": [
           "profile"
@@ -1623,6 +2315,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Get Settings",
         "tags": [
           "settings"
@@ -1662,6 +2359,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Patch Settings",
         "tags": [
           "settings"
@@ -1726,6 +2428,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Claim Source Task",
         "tags": [
           "source-tasks"
@@ -1779,6 +2486,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Complete Source Task",
         "tags": [
           "source-tasks"
@@ -1793,13 +2505,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Sources List"
+                  "items": {
+                    "$ref": "#/components/schemas/SourceManifest"
+                  },
+                  "title": "Response 200 V1 Sources List",
+                  "type": "array"
                 }
               }
             },
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "List Sources",
         "tags": [
           "sources"
@@ -1814,13 +2535,22 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "title": "Response V1 Sources Status"
+                  "items": {
+                    "$ref": "#/components/schemas/SourceAccountStatus"
+                  },
+                  "title": "Response 200 V1 Sources Status",
+                  "type": "array"
                 }
               }
             },
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Source Status",
         "tags": [
           "sources"
@@ -1872,6 +2602,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Configure Source",
         "tags": [
           "sources"
@@ -1893,6 +2628,11 @@
             "description": "Successful Response"
           }
         },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
         "summary": "Ai Health",
         "tags": [
           "system"

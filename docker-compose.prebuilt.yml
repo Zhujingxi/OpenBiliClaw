@@ -12,9 +12,8 @@
 #   docker compose -f docker-compose.prebuilt.yml up -d
 #   # configure obc-interactive, obc-analysis, and obc-embedding at
 #   # http://127.0.0.1:4000/ui
-#   # then open http://127.0.0.1:8420/setup/ for AI config + prereq checks,
-#   # and run the (container-required) init step from the host:
-#   #   docker exec -it openbiliclaw-backend openbiliclaw init
+#   # then configure sources through /api/v1/onboarding. The packaged static
+#   # UI remains mounted but is not authoritative until Task 22 rewires it.
 #
 # Upgrade to the newest release:
 #
@@ -125,6 +124,7 @@ services:
       OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
       OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
       OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
+      OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
       OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
       OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
     command: ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "8420"]

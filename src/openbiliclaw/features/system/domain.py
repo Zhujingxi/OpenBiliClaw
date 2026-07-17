@@ -64,9 +64,12 @@ class UserSettings(BaseModel):
 
         if self.feed_low_watermark > self.feed_high_watermark:
             raise ValueError("feed low watermark cannot exceed high watermark")
-        unknown = (set(self.source_weights) | set(self.source_enabled)) - set(_SOURCE_IDS)
-        if unknown:
+        source_ids = set(_SOURCE_IDS)
+        configured = set(self.source_weights) | set(self.source_enabled)
+        if configured - source_ids:
             raise ValueError("source settings contain an unknown source ID")
+        if set(self.source_weights) != source_ids or set(self.source_enabled) != source_ids:
+            raise ValueError("source settings must contain every built-in source ID")
         if any(not math.isfinite(weight) or weight < 0 for weight in self.source_weights.values()):
             raise ValueError("source weights must be finite and non-negative")
         return self

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Event, Thread
 from typing import Any
 from uuid import UUID
 
+import anyio
 import pytest
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
@@ -484,3 +486,55 @@ async def test_chat_persists_both_turns_and_emits_sse_compatible_chunks() -> Non
     assert [chunk.kind for chunk in chunks] == [ChatChunkKind.DELTA, ChatChunkKind.DONE]
     assert all(chunk.to_sse().endswith("\n\n") for chunk in chunks)
     assert state.events[-1].kind is ActivityKind.CHAT_LEARNING
+
+
+@pytest.mark.asyncio
+async def test_chat_sync_persistence_does_not_block_the_event_loop() -> None:
+    state = MemoryState()
+    responder = ChatResponder()
+    started = Event()
+    progressed = Event()
+    release = Event()
+    observed: list[bool] = []
+    first_enter = True
+
+    class BlockingMemoryUow(MemoryUow):
+        def __enter__(self) -> BlockingMemoryUow:
+            nonlocal first_enter
+            if first_enter:
+                first_enter = False
+                started.set()
+                assert release.wait(2)
+            return super().__enter__()
+
+    service = ChatService(lambda: BlockingMemoryUow(state), responder=responder)
+
+    def watch() -> None:
+        assert started.wait(1)
+        observed.append(progressed.wait(0.5))
+        release.set()
+
+    watcher = Thread(target=watch, daemon=True)
+    watcher.start()
+
+    async def consume() -> None:
+        chunks = [
+            chunk
+            async for chunk in service.stream(
+                conversation_id=CONVERSATION_ID,
+                message="keep the loop responsive",
+            )
+        ]
+        assert chunks
+
+    async def mark_progress() -> None:
+        while not started.is_set():
+            await anyio.sleep(0)
+        progressed.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(consume)
+        tasks.start_soon(mark_progress)
+
+    watcher.join(timeout=1)
+    assert observed == [True]

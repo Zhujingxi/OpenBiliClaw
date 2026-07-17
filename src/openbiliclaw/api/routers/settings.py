@@ -1,7 +1,9 @@
 """Typed mutable product settings routes."""
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
 from openbiliclaw.api.dependencies import Container, require_access
 from openbiliclaw.features.system.domain import UserSettings
@@ -14,11 +16,10 @@ class UserSettingsPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    onboarding_complete: bool | None = None
     feed_low_watermark: int | None = Field(default=None, ge=0, le=1000)
     feed_high_watermark: int | None = Field(default=None, ge=1, le=2000)
     source_sync_interval_minutes: int | None = Field(default=None, ge=1, le=10080)
-    source_weights: dict[str, float] | None = None
+    source_weights: dict[str, Annotated[FiniteFloat, Field(ge=0)]] | None = None
     source_enabled: dict[str, bool] | None = None
 
 

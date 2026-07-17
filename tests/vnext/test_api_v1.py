@@ -3,9 +3,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator  # noqa: TC003 - async fake protocol clarity
 from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 - pytest resolves fixture annotations
+from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
@@ -16,6 +18,9 @@ from openbiliclaw.api.dependencies import (
     DependencyUnavailableError,
 )
 from openbiliclaw.api.routers.chat import ChatRequest, _chat_events
+from openbiliclaw.api.routers.jobs import _job_events
+from openbiliclaw.api.routers.onboarding import _progress_events
+from openbiliclaw.api.routers.source_tasks import claim_source_task
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
 from openbiliclaw.features.chat.service import ChatChunk, ChatChunkKind
 from openbiliclaw.features.library.domain import CollectionKind  # noqa: TC001
@@ -33,7 +38,12 @@ class _Settings:
         return self.value
 
     def update(self, patch: dict[str, object]) -> UserSettings:
-        self.value = UserSettings.model_validate({**self.value.model_dump(), **patch})
+        merged = self.value.model_dump()
+        for field_name in ("source_enabled", "source_weights"):
+            partial = patch.get(field_name)
+            if isinstance(partial, dict):
+                patch = {**patch, field_name: {**merged[field_name], **partial}}
+        self.value = UserSettings.model_validate({**merged, **patch})
         return self.value
 
 
@@ -88,6 +98,7 @@ class _Chat:
 
 class _Jobs:
     def __init__(self) -> None:
+        self.last_priority: int | None = None
         self.run = JobRunSnapshot(
             id=uuid4(),
             job_name="source_sync",
@@ -98,6 +109,7 @@ class _Jobs:
         )
 
     def schedule(self, job_name: str, *, idempotency_key: str, priority: int | None = None):
+        self.last_priority = priority
         return self.run.model_copy(update={"job_name": job_name})
 
     def inspect(self, run_id: UUID):
@@ -140,14 +152,20 @@ class _SourceTasks:
 class _Sources:
     def manifests(self):
         return (
-            SimpleNamespace(
-                model_dump=lambda mode=None: {
-                    "source_id": "bilibili",
-                    "display_name": "Bilibili",
-                    "capabilities": ["bootstrap_import"],
-                    "operations": [],
-                }
-            ),
+            {
+                "source_id": "bilibili",
+                "display_name": "Bilibili",
+                "capabilities": ["bootstrap_import"],
+                "operations": [
+                    {
+                        "operation": "bootstrap_import",
+                        "capability": "bootstrap_import",
+                        "result_kind": "activity",
+                        "requires_auth": False,
+                        "transport_kind": "direct",
+                    }
+                ],
+            },
         )
 
     def statuses(self):
@@ -213,6 +231,13 @@ def test_readiness_is_public_but_every_other_feature_requires_bearer(client: Tes
         client.get("/api/v1/settings", headers={"Authorization": "Bearer wrong-token"}).status_code
         == 403
     )
+    assert (
+        client.get(
+            "/api/v1/settings",
+            headers={"Authorization": "bearer test-only-access-token"},
+        ).status_code
+        == 200
+    )
     assert client.get("/api/v1/settings", headers=_auth()).status_code == 200
 
 
@@ -262,6 +287,68 @@ def test_router_groups_and_representative_happy_paths(client: TestClient) -> Non
         "obc-analysis",
         "obc-embedding",
     ]
+
+
+def test_public_settings_patch_cannot_complete_onboarding(client: TestClient) -> None:
+    response = client.patch(
+        "/api/v1/settings",
+        headers=_auth(),
+        json={"onboarding_complete": True},
+    )
+
+    assert response.status_code == 422
+    assert client.get("/api/v1/settings", headers=_auth()).json()["onboarding_complete"] is False
+
+
+def test_public_settings_partial_source_maps_merge_and_validate(client: TestClient) -> None:
+    response = client.patch(
+        "/api/v1/settings",
+        headers=_auth(),
+        json={
+            "source_enabled": {"bilibili": True},
+            "source_weights": {"youtube": 2.5},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["source_enabled"]) == 7
+    assert len(payload["source_weights"]) == 7
+    assert payload["source_enabled"]["bilibili"] is True
+    assert payload["source_enabled"]["youtube"] is False
+    assert payload["source_weights"]["youtube"] == 2.5
+    assert payload["source_weights"]["bilibili"] == 1.0
+
+    for invalid in (
+        {"source_enabled": {"unknown": True}},
+        {"source_enabled": {"bilibili": "yes"}},
+        {"source_weights": {"bilibili": -0.1}},
+    ):
+        assert client.patch("/api/v1/settings", headers=_auth(), json=invalid).status_code == 422
+
+
+def test_public_job_priority_is_a_bounded_lane_not_an_arbitrary_integer() -> None:
+    container = _container()
+    client = TestClient(create_app(container=container))
+
+    accepted = client.post(
+        "/api/v1/jobs",
+        headers=_auth(),
+        json={
+            "job_name": "source_sync",
+            "idempotency_key": "manual",
+            "priority": "user-triggered",
+        },
+    )
+    rejected = client.post(
+        "/api/v1/jobs",
+        headers=_auth(),
+        json={"job_name": "source_sync", "idempotency_key": "starve", "priority": 999999},
+    )
+
+    assert accepted.status_code == 202
+    assert container.jobs.last_priority == 50  # type: ignore[attr-defined]
+    assert rejected.status_code == 422
 
 
 def test_source_task_long_poll_complete_and_secret_payload_rejection(client: TestClient) -> None:
@@ -368,6 +455,131 @@ async def test_chat_disconnect_stops_before_calling_service() -> None:
     )
     assert [event async for event in iterator] == []
     assert not called
+
+
+class _ConnectedRequest:
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+def _release_after_event_loop_progress(
+    started: Event,
+    progressed: Event,
+    release: Event,
+    observed: list[bool],
+) -> Thread:
+    def watch() -> None:
+        assert started.wait(1)
+        observed.append(progressed.wait(0.5))
+        release.set()
+
+    thread = Thread(target=watch, daemon=True)
+    thread.start()
+    return thread
+
+
+@pytest.mark.asyncio
+async def test_source_claim_sync_port_does_not_block_the_event_loop() -> None:
+    started = Event()
+    progressed = Event()
+    release = Event()
+    observed: list[bool] = []
+
+    class BlockingSourceTasks(_SourceTasks):
+        def claim(self, source_id: str):
+            del source_id
+            started.set()
+            assert release.wait(2)
+            return None
+
+    container = _container()
+    container.source_tasks = BlockingSourceTasks()
+    watcher = _release_after_event_loop_progress(started, progressed, release, observed)
+
+    async def claim() -> None:
+        await claim_source_task(
+            _ConnectedRequest(),  # type: ignore[arg-type]
+            SourceId.BILIBILI,
+            container,
+            wait_seconds=0,
+        )
+
+    async def mark_progress() -> None:
+        while not started.is_set():
+            await anyio.sleep(0)
+        progressed.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(claim)
+        tasks.start_soon(mark_progress)
+
+    watcher.join(timeout=1)
+    assert observed == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_stream", [_job_events, _progress_events])
+async def test_job_progress_sync_port_does_not_block_the_event_loop(event_stream) -> None:  # type: ignore[no-untyped-def]
+    started = Event()
+    progressed = Event()
+    release = Event()
+    observed: list[bool] = []
+    container = _container()
+    original = container.jobs.inspect
+
+    def blocking_inspect(run_id: UUID):  # type: ignore[no-untyped-def]
+        started.set()
+        assert release.wait(2)
+        return original(run_id)
+
+    container.jobs.inspect = blocking_inspect  # type: ignore[method-assign]
+    watcher = _release_after_event_loop_progress(started, progressed, release, observed)
+
+    async def consume() -> None:
+        events = [
+            event
+            async for event in event_stream(
+                container.jobs.run.id,
+                _ConnectedRequest(),  # type: ignore[arg-type]
+                container,
+            )
+        ]
+        assert events
+
+    async def mark_progress() -> None:
+        while not started.is_set():
+            await anyio.sleep(0)
+        progressed.set()
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(consume)
+        tasks.start_soon(mark_progress)
+
+    watcher.join(timeout=1)
+    assert observed == [True]
+
+
+def test_startup_failure_still_runs_shutdown_cleanup() -> None:
+    lifecycle: list[str] = []
+
+    def startup() -> None:
+        lifecycle.append("startup")
+        raise RuntimeError("startup failed")
+
+    def shutdown() -> None:
+        lifecycle.append("shutdown")
+
+    container = _container()
+    container.startup_hook = startup
+    container.shutdown_hook = shutdown
+
+    with (
+        pytest.raises(RuntimeError, match="startup failed"),
+        TestClient(create_app(container=container)),
+    ):
+        pass
+
+    assert lifecycle == ["startup", "shutdown"]
 
 
 def test_missing_runtime_access_token_fails_closed() -> None:

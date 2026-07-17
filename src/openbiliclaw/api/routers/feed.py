@@ -4,11 +4,17 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.encoders import jsonable_encoder
 
 from openbiliclaw.api.dependencies import Container, require_access
+from openbiliclaw.features.feed.domain import FeedItem
 
 router = APIRouter(prefix="/feed", tags=["feed"], dependencies=[Depends(require_access)])
 
 
-@router.get("", operation_id="v1_feed_list")
+@router.get(
+    "",
+    operation_id="v1_feed_list",
+    response_model=None,
+    responses={200: {"model": tuple[FeedItem, ...]}},
+)
 def list_feed(
     container: Container,
     limit: int = Query(default=50, ge=1, le=200),

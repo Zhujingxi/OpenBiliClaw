@@ -209,6 +209,15 @@ def test_schedule_is_idempotent_and_suppresses_duplicate_transport_messages() ->
     assert service.inspect(first.id).status is JobRunStatus.PENDING
 
 
+@pytest.mark.parametrize("priority", [-1, 0, 11, 49, 51, 99, 101, 999999])
+def test_schedule_rejects_priorities_outside_the_three_declared_lanes(priority: int) -> None:
+    jobs = MemoryJobs()
+    service = JobService(lambda: JobUow(jobs), queue=Queue())
+
+    with pytest.raises(ValueError, match="priority"):
+        service.schedule("source_sync", idempotency_key="bounded", priority=priority)
+
+
 def test_queue_failure_leaves_recoverable_dispatch_and_duplicate_schedule_retries() -> None:
     jobs = MemoryJobs()
     queue = Queue(fail=True)

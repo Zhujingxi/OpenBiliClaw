@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
-from openbiliclaw.features.library.domain import CollectionKind
+from openbiliclaw.features.library.domain import CollectionItem, CollectionKind
 
 
 class SaveCollectionItem(BaseModel):
@@ -20,7 +20,12 @@ class SaveCollectionItem(BaseModel):
 router = APIRouter(prefix="/library", tags=["library"], dependencies=[Depends(require_access)])
 
 
-@router.get("/{collection}", operation_id="v1_library_list")
+@router.get(
+    "/{collection}",
+    operation_id="v1_library_list",
+    response_model=None,
+    responses={200: {"model": tuple[CollectionItem, ...]}},
+)
 def list_collection(
     collection: CollectionKind,
     container: Container,
@@ -31,6 +36,8 @@ def list_collection(
 @router.post(
     "/{collection}",
     operation_id="v1_library_add",
+    response_model=None,
+    responses={status.HTTP_201_CREATED: {"model": CollectionItem}},
     status_code=status.HTTP_201_CREATED,
 )
 def add_collection_item(

@@ -27,6 +27,7 @@ cases:
       min_changes: 1
       max_changes: 3
       required_concepts:
+        - "procedural 3D modeling"
         - "procedural modeling"
 evaluators:
   - ProfileDeltaInvariants

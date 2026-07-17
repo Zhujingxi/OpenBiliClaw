@@ -16,7 +16,8 @@ from openbiliclaw.api.dependencies import (
     require_onboarding_access,
 )
 from openbiliclaw.api.sse import disconnected, frame, response
-from openbiliclaw.api.v1_models import JobRunResponse, job_response, terminal_job
+from openbiliclaw.api.threading import run_sync_port
+from openbiliclaw.api.v1_models import JobRunResponse, job_response, sse_response, terminal_job
 from openbiliclaw.features.sources.domain import SourceId  # noqa: TC001
 from openbiliclaw.features.system.domain import UserSettings
 
@@ -59,7 +60,18 @@ def start_onboarding(
     )
 
 
-@router.get("/{run_id}/events", operation_id="v1_onboarding_events")
+@router.get(
+    "/{run_id}/events",
+    operation_id="v1_onboarding_events",
+    responses=sse_response(
+        {
+            "progress": "JobRunResponse",
+            "done": "StreamTerminalEvent",
+            "error": "StreamErrorEvent",
+        },
+        description="First-run onboarding progress event stream.",
+    ),
+)
 def onboarding_events(
     run_id: UUID,
     request: Request,
@@ -73,7 +85,7 @@ async def _progress_events(
 ) -> AsyncIterator[str]:
     try:
         while not await disconnected(request):
-            snapshot = container.jobs.inspect(run_id)
+            snapshot = await run_sync_port(container.jobs.inspect, run_id)
             yield frame("progress", snapshot.model_dump(mode="json"))
             if terminal_job(snapshot.status):
                 yield frame("done", {"id": str(snapshot.id), "status": snapshot.status.value})

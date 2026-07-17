@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -16,6 +17,7 @@ from huey.exceptions import CancelExecution
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from openbiliclaw.infrastructure.jobs.queue import (
+    PRIORITY_INTERACTIVE,
     PRIORITY_SCHEDULED,
     PRIORITY_USER_TRIGGERED,
     huey,
@@ -26,6 +28,7 @@ if TYPE_CHECKING:
 
 JOB_NAMES = ("source_sync", "profile_projection", "feed_replenishment", "cleanup")
 JobName = str
+logger = logging.getLogger(__name__)
 
 
 class JobRunStatus(StrEnum):
@@ -98,11 +101,15 @@ class JobRunRepository(Protocol):
 
     def cancel(self, run_id: UUID) -> bool: ...
 
+    def restart_terminal(self, run_id: UUID) -> bool: ...
+
     def recover_running(self) -> tuple[UUID, ...]: ...
 
     def cleanup_finished(self, *, older_than: datetime) -> int: ...
 
     def list(self, *, limit: int) -> tuple[JobRunSnapshot, ...]: ...
+
+    def successful(self) -> tuple[JobRunSnapshot, ...]: ...
 
 
 class JobUnitOfWork(Protocol):
@@ -148,6 +155,11 @@ _DEFAULT_PRIORITY = {
     "feed_replenishment": PRIORITY_USER_TRIGGERED,
     "cleanup": PRIORITY_SCHEDULED,
 }
+_DECLARED_PRIORITIES = {
+    PRIORITY_INTERACTIVE,
+    PRIORITY_SCHEDULED,
+    PRIORITY_USER_TRIGGERED,
+}
 
 
 class JobService:
@@ -163,6 +175,12 @@ class JobService:
         self._uow_factory = uow_factory
         self._queue = queue
         self._source_sync_interval_minutes = source_sync_interval_minutes or (lambda: 30)
+        self._success_callbacks: list[Callable[[JobRunSnapshot], None]] = []
+
+    def register_success_callback(self, callback: Callable[[JobRunSnapshot], None]) -> None:
+        """Register an idempotent application continuation for terminal success."""
+
+        self._success_callbacks.append(callback)
 
     def schedule(
         self,
@@ -176,6 +194,8 @@ class JobService:
         if not idempotency_key.strip():
             raise ValueError("job idempotency key cannot be empty")
         resolved_priority = _DEFAULT_PRIORITY[job_name] if priority is None else priority
+        if resolved_priority not in _DECLARED_PRIORITIES:
+            raise ValueError("job priority must use a declared execution lane")
         durable_key = f"{job_name}:{idempotency_key}"
         with self._uow_factory() as uow:
             run_id, _created = uow.job_runs.create_or_get(
@@ -243,6 +263,19 @@ class JobService:
             uow.commit()
         return self.inspect(run_id)
 
+    def restart_terminal(self, run_id: object) -> JobRunSnapshot:
+        """Explicitly resume a failed/cancelled durable run without duplicating its identity."""
+
+        if not isinstance(run_id, UUID):
+            raise TypeError("job run ID must be a UUID")
+        with self._uow_factory() as uow:
+            restarted = uow.job_runs.restart_terminal(run_id)
+            uow.commit()
+        snapshot = self.inspect(run_id)
+        if restarted:
+            self._dispatch(snapshot)
+        return self.inspect(run_id)
+
     def claim(self, run_id: UUID) -> bool:
         with self._uow_factory() as uow:
             claimed = uow.job_runs.claim(run_id)
@@ -264,6 +297,12 @@ class JobService:
 
     def succeed(self, run_id: UUID) -> None:
         self._update(run_id, status=JobRunStatus.SUCCEEDED, progress=1.0)
+        snapshot = self.inspect(run_id)
+        for callback in self._success_callbacks:
+            try:
+                callback(snapshot)
+            except Exception as error:  # continuation is repaired by startup reconciliation
+                logger.warning("job success continuation deferred (%s)", type(error).__name__)
 
     def fail(self, run_id: UUID, error: BaseException) -> None:
         self._update(
@@ -303,7 +342,22 @@ class JobService:
             recovered = uow.job_runs.recover_running()
             uow.commit()
         self.reconcile_pending_dispatches(include_dispatched=True)
+        self.reconcile_successful()
         return recovered
+
+    def reconcile_successful(self) -> None:
+        """Replay terminal-success continuations after any process crash window."""
+
+        if not self._success_callbacks:
+            return
+        with self._uow_factory() as uow:
+            successful = uow.job_runs.successful()
+        for snapshot in successful:
+            for callback in self._success_callbacks:
+                try:
+                    callback(snapshot)
+                except Exception as error:
+                    logger.warning("job success reconciliation deferred (%s)", type(error).__name__)
 
     def cleanup_finished(
         self,

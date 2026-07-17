@@ -53,9 +53,7 @@ def test_database_settings_read_environment(
 
 def test_sqlite_busy_timeout_is_explicit_and_configurable(tmp_path: Path) -> None:
     url = f"sqlite:///{tmp_path / 'busy-timeout.db'}"
-    engine, _ = create_engine_and_session(
-        DatabaseSettings(url=url, busy_timeout_seconds=0.123)
-    )
+    engine, _ = create_engine_and_session(DatabaseSettings(url=url, busy_timeout_seconds=0.123))
     with engine.connect() as connection:
         assert connection.scalar(text("PRAGMA busy_timeout")) == 123
     engine.dispose()
@@ -70,13 +68,13 @@ def test_settings_service_persists_and_validates_typed_values(tmp_path: Path) ->
 
     updated = service.update(
         {
-            "onboarding_complete": True,
             "feed_low_watermark": 12,
             "feed_high_watermark": 36,
             "source_sync_interval_minutes": 45,
         }
     )
     assert updated.feed_high_watermark == 36
+    assert updated.onboarding_complete is False
     assert service.get() == updated
 
     with pytest.raises(ValidationError):
@@ -97,6 +95,51 @@ def test_settings_update_is_atomic_on_validation_failure(tmp_path: Path) -> None
 
     with pytest.raises(ValidationError):
         service.update({"feed_low_watermark": 50, "feed_high_watermark": 20})
+
+    assert service.get() == original
+    engine.dispose()
+
+
+def test_settings_partial_source_maps_merge_without_resetting_other_sources(tmp_path: Path) -> None:
+    engine, session_factory = _session_factory(tmp_path)
+    service = SettingsService(lambda: UnitOfWork(session_factory))
+
+    updated = service.update(
+        {
+            "source_enabled": {"bilibili": True},
+            "source_weights": {"youtube": 2.5},
+        }
+    )
+
+    assert len(updated.source_enabled) == 7
+    assert len(updated.source_weights) == 7
+    assert updated.source_enabled["bilibili"] is True
+    assert updated.source_enabled["youtube"] is False
+    assert updated.source_weights["youtube"] == 2.5
+    assert updated.source_weights["bilibili"] == 1.0
+    assert service.get() == updated
+    engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"source_enabled": {"unknown": True}},
+        {"source_enabled": {"bilibili": "yes"}},
+        {"source_weights": {"bilibili": float("nan")}},
+        {"source_weights": {"bilibili": float("inf")}},
+        {"source_weights": {"bilibili": -0.1}},
+    ],
+)
+def test_settings_partial_source_maps_reject_invalid_values_atomically(
+    tmp_path: Path, patch: dict[str, object]
+) -> None:
+    engine, session_factory = _session_factory(tmp_path)
+    service = SettingsService(lambda: UnitOfWork(session_factory))
+    original = service.get()
+
+    with pytest.raises(ValidationError):
+        service.update(patch)
 
     assert service.get() == original
     engine.dispose()

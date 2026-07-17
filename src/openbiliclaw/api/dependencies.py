@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, Annotated, Any, Protocol, cast
 
 from alembic import command
 from alembic.config import Config
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Security, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from openbiliclaw.api.threading import run_sync_port
 from openbiliclaw.features.activity.service import ActivityService
 from openbiliclaw.features.chat.service import ChatService
 from openbiliclaw.features.feed.service import FeedbackService, FeedPolicy, FeedService
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
     from openbiliclaw.infrastructure.jobs.tasks import JobRunSnapshot
 
 ACCESS_TOKEN_ENV = "OPENBILICLAW_ACCESS_TOKEN"
+_BEARER_SCHEME = HTTPBearer(auto_error=False, scheme_name="BearerAuth")
 
 
 class DependencyUnavailableError(RuntimeError):
@@ -230,7 +233,8 @@ class ApplicationContainer:
 async def _maybe_await(callback: Callable[[], object] | None) -> None:
     if callback is None:
         return
-    result = callback()
+    async_call = inspect.iscoroutinefunction(callback)
+    result = callback() if async_call else await run_sync_port(callback)
     if inspect.isawaitable(result):
         await cast("Awaitable[object]", result)
 
@@ -342,10 +346,16 @@ Container = Annotated[ApplicationContainer, Depends(get_container)]
 
 
 def require_access(
-    request: Request,
     container: Container,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Security(_BEARER_SCHEME),
+    ],
 ) -> None:
-    container.access.authorize(request.headers.get("Authorization"))
+    authorization = None
+    if credentials is not None:
+        authorization = f"Bearer {credentials.credentials}"
+    container.access.authorize(authorization)
 
 
 def require_onboarding_access(

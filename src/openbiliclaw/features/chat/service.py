@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID  # noqa: TC003 - Pydantic resolves the field at runtime
 
+from anyio import CapacityLimiter, to_thread
 from pydantic import BaseModel, ConfigDict
 
 from openbiliclaw.features.activity.domain import ActivityEvent, ActivityKind
@@ -15,6 +16,10 @@ from openbiliclaw.features.chat.domain import ChatRole, ChatTurn
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
     from types import TracebackType
+
+# Interactive chats should not serialize on SQLite, while a hard bound protects the
+# process if clients disconnect during non-cancellable transaction cleanup.
+_CHAT_PERSISTENCE_LIMITER = CapacityLimiter(8)
 
 
 class ChatChunkKind(StrEnum):
@@ -90,9 +95,12 @@ class ChatService:
             role=ChatRole.USER,
             content=message,
         )
-        with self._uow_factory() as uow:
-            uow.chat.add(user_turn)
-            uow.commit()
+        await to_thread.run_sync(
+            self._persist_user_turn,
+            user_turn,
+            abandon_on_cancel=False,
+            limiter=_CHAT_PERSISTENCE_LIMITER,
+        )
 
         reply = (
             await self._responder.respond(
@@ -105,6 +113,35 @@ class ChatService:
             role=ChatRole.ASSISTANT,
             content=reply,
         )
+        await to_thread.run_sync(
+            self._persist_assistant_turn,
+            assistant_turn,
+            learn,
+            message,
+            conversation_id,
+            abandon_on_cancel=False,
+            limiter=_CHAT_PERSISTENCE_LIMITER,
+        )
+
+        yield ChatChunk(
+            kind=ChatChunkKind.DELTA,
+            content=assistant_turn.content,
+            turn_id=assistant_turn.id,
+        )
+        yield ChatChunk(kind=ChatChunkKind.DONE, content="", turn_id=assistant_turn.id)
+
+    def _persist_user_turn(self, user_turn: ChatTurn) -> None:
+        with self._uow_factory() as uow:
+            uow.chat.add(user_turn)
+            uow.commit()
+
+    def _persist_assistant_turn(
+        self,
+        assistant_turn: ChatTurn,
+        learn: bool,
+        message: str,
+        conversation_id: UUID,
+    ) -> None:
         with self._uow_factory() as uow:
             uow.chat.add(assistant_turn)
             if learn:
@@ -117,13 +154,6 @@ class ChatService:
                     )
                 )
             uow.commit()
-
-        yield ChatChunk(
-            kind=ChatChunkKind.DELTA,
-            content=assistant_turn.content,
-            turn_id=assistant_turn.id,
-        )
-        yield ChatChunk(kind=ChatChunkKind.DONE, content="", turn_id=assistant_turn.id)
 
 
 __all__ = ["ChatChunk", "ChatChunkKind", "ChatResponder", "ChatService"]

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import ApplicationContainer, Container, require_access
 from openbiliclaw.api.sse import frame, response
+from openbiliclaw.api.v1_models import sse_response
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -28,7 +29,18 @@ class ChatRequest(BaseModel):
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_access)])
 
 
-@router.post("/stream", operation_id="v1_chat_stream")
+@router.post(
+    "/stream",
+    operation_id="v1_chat_stream",
+    responses=sse_response(
+        {
+            "delta": "ChatChunk",
+            "done": "ChatDoneEvent",
+            "error": "StreamErrorEvent",
+        },
+        description="Interactive chat event stream.",
+    ),
+)
 def stream_chat(
     payload: ChatRequest,
     request: Request,

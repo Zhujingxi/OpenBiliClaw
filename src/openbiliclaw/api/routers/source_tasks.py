@@ -11,6 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
+from openbiliclaw.api.threading import run_sync_port
 from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
     SourceId,
@@ -46,7 +47,7 @@ async def claim_source_task(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait_seconds
     while True:
-        task = container.source_tasks.claim(source_id.value)
+        task = await run_sync_port(container.source_tasks.claim, source_id.value)
         if task is not None:
             return task
         if loop.time() >= deadline or await request.is_disconnected():

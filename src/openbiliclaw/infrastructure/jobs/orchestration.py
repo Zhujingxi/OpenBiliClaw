@@ -10,7 +10,7 @@ from openbiliclaw.features.activity.service import ActivityService, project_acti
 from openbiliclaw.features.feed.service import FeedService
 from openbiliclaw.features.profile.service import ProfileService, StaleProfileRevisionError
 from openbiliclaw.features.sources.domain import SourceOperation, SourceResultKind
-from openbiliclaw.features.system.service import SettingsService
+from openbiliclaw.features.system.service import OnboardingService, SettingsService
 from openbiliclaw.infrastructure.ai.use_cases import (
     TaskRunnerBatchAssessor,
     TaskRunnerProfileDeltaAI,
@@ -178,6 +178,7 @@ def build_worker_runtime(
         queue=dependencies.job_queue or HueyJobQueue(),
         source_sync_interval_minutes=lambda: settings.get().source_sync_interval_minutes,
     )
+    OnboardingService(settings, service)
     orchestrator = WorkerOrchestrator(dependencies, service)
     return service, orchestrator.handlers()
 

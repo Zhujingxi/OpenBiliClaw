@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw.api.dependencies import Container, require_access
-from openbiliclaw.features.sources.domain import SourceAccountStatus, SourceId
+from openbiliclaw.features.sources.domain import SourceAccountStatus, SourceId, SourceManifest
 
 
 class SourceConfiguration(BaseModel):
@@ -20,12 +20,22 @@ class SourceConfiguration(BaseModel):
 router = APIRouter(prefix="/sources", tags=["sources"], dependencies=[Depends(require_access)])
 
 
-@router.get("", operation_id="v1_sources_list")
+@router.get(
+    "",
+    operation_id="v1_sources_list",
+    response_model=None,
+    responses={200: {"model": tuple[SourceManifest, ...]}},
+)
 def list_sources(container: Container) -> object:
     return jsonable_encoder(container.sources.manifests())
 
 
-@router.get("/status", operation_id="v1_sources_status")
+@router.get(
+    "/status",
+    operation_id="v1_sources_status",
+    response_model=None,
+    responses={200: {"model": tuple[SourceAccountStatus, ...]}},
+)
 def source_status(container: Container) -> object:
     return jsonable_encoder(container.sources.statuses())
 
