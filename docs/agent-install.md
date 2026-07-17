@@ -66,11 +66,15 @@ The order is intentionally fixed and failures propagate. A dedicated bounded
 cross-process lifecycle lock serializes the complete sequence; it is separate from
 the short `.env` writer lock, so concurrent prepare/start invocations cannot overlap
 migrations or publish competing process pairs. Installer metadata persistently binds
-the one lock UUID/device/inode before the first lifecycle proceeds. POSIX checks that
-identity through a held parent-directory FD; native Windows uses a direct-path branch
-without `dir_fd`. Both verify the metadata and pathname before and after the lifecycle.
-Once bound, an absent or replaced lock path fails closed instead of creating a second
-lock domain. Copied lock inodes and symlink/junction project ancestors are also refused:
+the one lock UUID/device/inode before the first lifecycle proceeds. Concurrent first
+callers open and wait on the same O_EXCL-created anchor. If initialization crashes before
+metadata publication, recovery only sanitizes and rebinds the held inode after regular-file,
+single-link, owner, private-mode, and pathname-identity checks; it never pathname-unlinks
+the orphan. POSIX checks the bound identity through a held
+parent-directory FD; native Windows uses a direct-path branch without `dir_fd` plus
+Python 3.11-compatible reparse metadata. Both reread metadata after acquisition and
+before release. Once bound, an absent or replaced lock path fails closed instead of
+creating a second lock domain. Copied lock inodes and symlink/junction ancestors are refused:
 
 1. Install dependencies with `uv sync --frozen`, or a Python editable fallback.
 2. Persist stable access/encryption secrets and the supplied LiteLLM connection.

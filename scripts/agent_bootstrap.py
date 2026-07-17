@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid4
@@ -295,6 +296,12 @@ def _canonical_project_root(project_dir: Path) -> Path:
 def _path_is_link_or_junction(path: Path) -> bool:
     if path.is_symlink():
         return True
+    try:
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        attributes = 0
+    if isinstance(attributes, int) and attributes & 0x400:
+        return True
     is_junction = getattr(path, "is_junction", None)
     return bool(is_junction is not None and is_junction())
 
@@ -359,13 +366,44 @@ def _read_installation_record(
 
 
 def _persist_initial_installation(root: Path, anchor: LifecycleAnchorIdentity) -> None:
-    if (root / INSTALLATION_STATE).exists():
-        raise RuntimeError("installer ownership metadata changed during lock creation")
     installation = InstallationState(str(root), str(uuid4()), 0)
-    _atomic_write_private_file(
+    _atomic_create_private_file(
         root / INSTALLATION_STATE,
         json.dumps(_installation_payload(installation, anchor), sort_keys=True) + "\n",
     )
+
+
+def _require_bound_installation(root: Path, expected: LifecycleAnchorIdentity) -> InstallationState:
+    record = _read_installation_record(root)
+    if record is None or record[1] != expected:
+        raise RuntimeError("lifecycle lock identity changed")
+    return record[0]
+
+
+def _atomic_create_private_file(path: Path, content: str) -> None:
+    """Publish a fully synced private file without replacing an existing name."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.tmp-{secrets.token_hex(16)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise RuntimeError("installer ownership metadata already exists") from exc
+        os.chmod(path, 0o600)
+        if os.name != "nt":
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _lifecycle_uses_dir_fd() -> bool:
@@ -434,6 +472,23 @@ def _require_lifecycle_anchor_direct(
         raise RuntimeError("lifecycle lock identity changed")
 
 
+def _require_anchor_path_binding(root: Path, expected: LifecycleAnchorIdentity) -> None:
+    path = root / LIFECYCLE_LOCK
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise RuntimeError("lifecycle lock identity changed") from exc
+    try:
+        _require_lifecycle_anchor_direct(
+            root=root,
+            path=path,
+            descriptor=descriptor,
+            expected=expected,
+        )
+    finally:
+        os.close(descriptor)
+
+
 def _write_lifecycle_anchor(root: Path, descriptor: int, identity: LifecycleAnchorIdentity) -> None:
     payload = _lifecycle_anchor_payload(root, descriptor, identity)
     os.ftruncate(descriptor, 0)
@@ -464,6 +519,127 @@ def _prepare_anchor_parent(root: Path, *, create: bool) -> Path:
     return parent
 
 
+def _open_anchor_dir_fd(parent_descriptor: int, *, allow_create: bool) -> tuple[int, bool]:
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    if not allow_create:
+        try:
+            return os.open(LIFECYCLE_LOCK.name, flags, dir_fd=parent_descriptor), False
+        except OSError as exc:
+            raise RuntimeError("lifecycle lock identity changed") from exc
+    try:
+        return (
+            os.open(
+                LIFECYCLE_LOCK.name,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            ),
+            True,
+        )
+    except FileExistsError:
+        try:
+            return os.open(LIFECYCLE_LOCK.name, flags, dir_fd=parent_descriptor), False
+        except OSError as exc:
+            raise RuntimeError("lifecycle lock identity changed") from exc
+
+
+def _open_anchor_direct(path: Path, *, allow_create: bool) -> tuple[int, bool]:
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    if not allow_create:
+        try:
+            return os.open(path, flags), False
+        except OSError as exc:
+            raise RuntimeError("lifecycle lock identity changed") from exc
+    try:
+        return os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600), True
+    except FileExistsError:
+        try:
+            return os.open(path, flags), False
+        except OSError as exc:
+            raise RuntimeError("lifecycle lock identity changed") from exc
+
+
+def _require_recoverable_unbound_anchor(held: os.stat_result, current: os.stat_result) -> None:
+    owner_matches = not hasattr(os, "getuid") or held.st_uid == os.getuid()
+    private_mode = os.name == "nt" or stat.S_IMODE(held.st_mode) == 0o600
+    if (
+        not stat.S_ISREG(held.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+        or held.st_nlink != 1
+        or not owner_matches
+        or not private_mode
+    ):
+        raise RuntimeError("lifecycle lock identity changed")
+
+
+def _sanitize_unbound_anchor_dir_fd(parent_descriptor: int, descriptor: int) -> None:
+    held = os.fstat(descriptor)
+    try:
+        current = os.stat(
+            LIFECYCLE_LOCK.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise RuntimeError("lifecycle lock identity changed") from exc
+    _require_recoverable_unbound_anchor(held, current)
+    os.fchmod(descriptor, 0o600)
+
+
+def _sanitize_unbound_anchor_direct(path: Path, descriptor: int) -> None:
+    held = os.fstat(descriptor)
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("lifecycle lock identity changed") from exc
+    _require_recoverable_unbound_anchor(held, current)
+    os.fchmod(descriptor, 0o600)
+
+
+def _anchor_name_rebound_dir_fd(parent_descriptor: int, descriptor: int) -> bool:
+    try:
+        held = os.fstat(descriptor)
+        current = os.stat(
+            LIFECYCLE_LOCK.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+
+
+def _anchor_name_rebound_direct(path: Path, descriptor: int) -> bool:
+    try:
+        held = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+
+
+@contextmanager
+def _bound_lifecycle(
+    *,
+    root: Path,
+    descriptor: int,
+    identity: LifecycleAnchorIdentity,
+    initialize: bool,
+    validate: Callable[[], None],
+) -> Iterator[None]:
+    if initialize:
+        _write_lifecycle_anchor(root, descriptor, identity)
+        _persist_initial_installation(root, identity)
+    validate()
+    _require_bound_installation(root, identity)
+    try:
+        yield
+    finally:
+        validate()
+        _require_bound_installation(root, identity)
+
+
 @contextmanager
 def _lifecycle_lock_dir_fd(
     root: Path, expected: LifecycleAnchorIdentity | None, *, timeout: float
@@ -473,39 +649,69 @@ def _lifecycle_lock_dir_fd(
         parent,
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
-    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     try:
-        try:
-            descriptor = os.open(
-                LIFECYCLE_LOCK.name,
-                flags | (os.O_CREAT | os.O_EXCL if expected is None else 0),
-                0o600,
-                dir_fd=parent_descriptor,
+        while True:
+            descriptor, created = _open_anchor_dir_fd(
+                parent_descriptor, allow_create=expected is None
             )
-        except OSError as exc:
-            raise RuntimeError("lifecycle lock identity changed") from exc
-        with _locked_anchor_descriptor(
-            descriptor, path=root / LIFECYCLE_LOCK, timeout=timeout
-        ) as held:
-            identity = expected or _anchor_identity(held)
-            if expected is None:
-                _write_lifecycle_anchor(root, held, identity)
-                _persist_initial_installation(root, identity)
-            _require_lifecycle_anchor(
-                root=root,
-                parent_descriptor=parent_descriptor,
-                descriptor=held,
-                expected=identity,
-            )
-            try:
-                yield
-            finally:
-                _require_lifecycle_anchor(
+            with _locked_anchor_descriptor(
+                descriptor, path=root / LIFECYCLE_LOCK, timeout=timeout
+            ) as held:
+                record = _read_installation_record(root)
+                if record is not None:
+                    identity = record[1]
+                    if expected is not None and identity != expected:
+                        raise RuntimeError("lifecycle lock identity changed")
+                    try:
+                        _require_lifecycle_anchor(
+                            root=root,
+                            parent_descriptor=parent_descriptor,
+                            descriptor=held,
+                            expected=identity,
+                        )
+                    except RuntimeError:
+                        if (
+                            expected is None
+                            and not created
+                            and _anchor_name_rebound_dir_fd(parent_descriptor, held)
+                        ):
+                            continue
+                        raise
+                    with _bound_lifecycle(
+                        root=root,
+                        descriptor=held,
+                        identity=identity,
+                        initialize=False,
+                        validate=partial(
+                            _require_lifecycle_anchor,
+                            root=root,
+                            parent_descriptor=parent_descriptor,
+                            descriptor=held,
+                            expected=identity,
+                        ),
+                    ):
+                        yield
+                    return
+                if expected is not None:
+                    raise RuntimeError("lifecycle lock identity changed")
+                if not created:
+                    _sanitize_unbound_anchor_dir_fd(parent_descriptor, held)
+                identity = _anchor_identity(held)
+                with _bound_lifecycle(
                     root=root,
-                    parent_descriptor=parent_descriptor,
                     descriptor=held,
-                    expected=identity,
-                )
+                    identity=identity,
+                    initialize=True,
+                    validate=partial(
+                        _require_lifecycle_anchor,
+                        root=root,
+                        parent_descriptor=parent_descriptor,
+                        descriptor=held,
+                        expected=identity,
+                    ),
+                ):
+                    yield
+                return
     finally:
         os.close(parent_descriptor)
 
@@ -516,27 +722,57 @@ def _lifecycle_lock_direct(
 ) -> Iterator[None]:
     _prepare_anchor_parent(root, create=expected is None)
     path = root / LIFECYCLE_LOCK
-    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(
-            path,
-            flags | (os.O_CREAT | os.O_EXCL if expected is None else 0),
-            0o600,
-        )
-    except OSError as exc:
-        raise RuntimeError("lifecycle lock identity changed") from exc
-    with _locked_anchor_descriptor(descriptor, path=path, timeout=timeout) as held:
-        identity = expected or _anchor_identity(held)
-        if expected is None:
-            _write_lifecycle_anchor(root, held, identity)
-            _persist_initial_installation(root, identity)
-        _require_lifecycle_anchor_direct(root=root, path=path, descriptor=held, expected=identity)
-        try:
-            yield
-        finally:
-            _require_lifecycle_anchor_direct(
-                root=root, path=path, descriptor=held, expected=identity
-            )
+    while True:
+        descriptor, created = _open_anchor_direct(path, allow_create=expected is None)
+        with _locked_anchor_descriptor(descriptor, path=path, timeout=timeout) as held:
+            record = _read_installation_record(root)
+            if record is not None:
+                identity = record[1]
+                if expected is not None and identity != expected:
+                    raise RuntimeError("lifecycle lock identity changed")
+                try:
+                    _require_lifecycle_anchor_direct(
+                        root=root, path=path, descriptor=held, expected=identity
+                    )
+                except RuntimeError:
+                    if expected is None and not created and _anchor_name_rebound_direct(path, held):
+                        continue
+                    raise
+                with _bound_lifecycle(
+                    root=root,
+                    descriptor=held,
+                    identity=identity,
+                    initialize=False,
+                    validate=partial(
+                        _require_lifecycle_anchor_direct,
+                        root=root,
+                        path=path,
+                        descriptor=held,
+                        expected=identity,
+                    ),
+                ):
+                    yield
+                return
+            if expected is not None:
+                raise RuntimeError("lifecycle lock identity changed")
+            if not created:
+                _sanitize_unbound_anchor_direct(path, held)
+            identity = _anchor_identity(held)
+            with _bound_lifecycle(
+                root=root,
+                descriptor=held,
+                identity=identity,
+                initialize=True,
+                validate=partial(
+                    _require_lifecycle_anchor_direct,
+                    root=root,
+                    path=path,
+                    descriptor=held,
+                    expected=identity,
+                ),
+            ):
+                yield
+            return
 
 
 @contextmanager
@@ -629,6 +865,7 @@ def _advance_installation_generation(
     observed, anchor = record
     if observed != current:
         raise RuntimeError("installer ownership metadata changed during installation")
+    _require_anchor_path_binding(root, anchor)
     advanced = InstallationState(
         current.project_root,
         current.instance_id,

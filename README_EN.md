@@ -99,10 +99,14 @@ verified stop of the previous managed pair → Alembic migration → API + worke
 lock serializes that entire source-install transaction. Private installer UUID,
 canonical-root, and monotonic-generation bindings prevent concurrent installs,
 copied state, or stale failure cleanup from taking ownership of a newer runtime.
-The lock UUID/device/inode is persisted in installer metadata. POSIX also validates
-through a held parent-directory FD; Windows uses the equivalent direct-path branch
-without `dir_fd`. A missing/replaced bound lock path, or a symlink/junction ancestor,
-fails closed. A
+The lock UUID/device/inode is persisted in installer metadata. Concurrent first calls
+wait on the same O_EXCL-created anchor. A crash-orphaned anchor is sanitized and rebound
+in place only when its held FD proves a private, owner-matching, single-link regular file
+with the same pathname identity; recovery never pathname-unlinks it. POSIX also validates through a held
+parent-directory FD; Windows uses the equivalent direct-path branch without `dir_fd`
+and Python 3.11-compatible reparse-point detection. The binding is reread after lock
+acquisition and before release. A missing/replaced bound lock path, or a
+symlink/junction ancestor, fails closed. A
 copied `.env` rebinds managed root/DB/Huey/instance fields while preserving secrets
 and the external LiteLLM connection.
 Stop/failure cleanup retains the ownership-bound dead state until the next

@@ -91,9 +91,12 @@ MODE=local bash scripts/install.sh
 `doctor` → public 和 bearer-protected readiness。源码安装用独立的跨进程 lifecycle
 lock 串行整段流程，并用私密 installer UUID、canonical root 和单调 generation 绑定
 process state，避免并发安装、复制目录或旧失败清理覆盖新运行实例。
-Lock 的 UUID/device/inode 会持久绑定到 installer metadata；POSIX 同时通过 held
-parent-directory FD 校验，Windows 使用不带 `dir_fd` 的 direct-path 校验。已绑定的 lock
-pathname 缺失或换 inode，以及 symlink/junction ancestor，都会失败关闭；复制 `.env` 后，managed root/DB/Huey/instance 字段会
+Lock 的 UUID/device/inode 会持久绑定到 installer metadata；首次并发调用会等待同一
+O_EXCL anchor；崩溃留下的未绑定 anchor 只有在 held FD 同时通过普通文件、单链接、owner、
+私密 mode 与 pathname identity 检查后才会原位清空并重新绑定，恢复过程不按 pathname 删除。
+POSIX 同时通过 held parent-directory FD 校验，Windows 使用不带 `dir_fd` 的
+direct-path 校验和 Python 3.11 可用的 reparse-point 检测。持锁后及退出前都会重读绑定；
+已绑定 pathname 缺失或换 inode，以及 symlink/junction ancestor，都会失败关闭；复制 `.env` 后，managed root/DB/Huey/instance 字段会
 重绑定当前 checkout，而已有 secret 与外部 LiteLLM connection 保持不变。
 停止/失败清理保留 ownership-bound dead state，直到下次 ownership-checked publication；
 directory/FIFO 等非普通 state 会失败关闭。Docker 在受保护 readiness 后再次检查 API

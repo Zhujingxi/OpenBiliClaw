@@ -10,6 +10,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -206,6 +207,206 @@ def test_project_root_rejects_windows_junction_contract(
 
     with pytest.raises(RuntimeError, match="symlinked project path"):
         bootstrap._canonical_project_root(tmp_path)
+
+
+def test_python311_windows_reparse_metadata_is_rejected_without_is_junction() -> None:
+    class Python311ReparsePath:
+        def is_symlink(self) -> bool:
+            return False
+
+        def lstat(self) -> object:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR,
+                st_file_attributes=0x400,
+            )
+
+    assert bootstrap._path_is_link_or_junction(Python311ReparsePath())
+
+
+@pytest.mark.parametrize("direct_path", (False, True), ids=("dir-fd", "direct-path"))
+def test_simultaneous_first_install_waits_through_anchor_publication(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, direct_path: bool
+) -> None:
+    before_publication = threading.Event()
+    release_publication = threading.Event()
+    second_started = threading.Event()
+    timeline: list[str] = []
+    original = bootstrap._persist_initial_installation
+    if direct_path:
+        monkeypatch.setattr(bootstrap, "_lifecycle_uses_dir_fd", lambda: False)
+
+    def delayed_publication(root: Path, anchor: object) -> None:
+        before_publication.set()
+        assert release_publication.wait(2.0)
+        original(root, anchor)
+
+    def enter(name: str) -> None:
+        if name == "second":
+            second_started.set()
+        with bootstrap._lifecycle_lock(tmp_path, timeout=2.0):
+            timeline.append(f"{name}-entered")
+
+    monkeypatch.setattr(bootstrap, "_persist_initial_installation", delayed_publication)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(enter, "first")
+        assert before_publication.wait(2.0)
+        second = pool.submit(enter, "second")
+        assert second_started.wait(2.0)
+        assert not second.done()
+        release_publication.set()
+        first.result(timeout=2.0)
+        second.result(timeout=2.0)
+
+    assert timeline == ["first-entered", "second-entered"]
+
+
+@pytest.mark.parametrize("direct_path", (False, True), ids=("dir-fd", "direct-path"))
+def test_first_install_recovers_crash_after_anchor_write_before_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, direct_path: bool
+) -> None:
+    original = bootstrap._persist_initial_installation
+    crashed = False
+    if direct_path:
+        monkeypatch.setattr(bootstrap, "_lifecycle_uses_dir_fd", lambda: False)
+
+    def crash_once(root: Path, anchor: object) -> None:
+        nonlocal crashed
+        if not crashed:
+            crashed = True
+            raise RuntimeError("simulated initialization crash")
+        original(root, anchor)
+
+    monkeypatch.setattr(bootstrap, "_persist_initial_installation", crash_once)
+    with (
+        pytest.raises(RuntimeError, match="simulated initialization crash"),
+        bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+    ):
+        pytest.fail("crashed initialization entered lifecycle work")
+
+    anchor_path = tmp_path / bootstrap.LIFECYCLE_LOCK
+    orphan = anchor_path.stat()
+    orphan_payload = json.loads(anchor_path.read_text())
+    anchor_unlinked = False
+    original_unlink = bootstrap.os.unlink
+
+    def observed_unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal anchor_unlinked
+        if Path(os.fsdecode(path)).name == bootstrap.LIFECYCLE_LOCK.name:
+            anchor_unlinked = True
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(bootstrap.os, "unlink", observed_unlink)
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        bootstrap._load_or_create_installation_state(tmp_path)
+    recovered = anchor_path.stat()
+    recovered_payload = json.loads(anchor_path.read_text())
+
+    assert not anchor_unlinked
+    assert (orphan.st_dev, orphan.st_ino) == (recovered.st_dev, recovered.st_ino)
+    assert orphan_payload["anchor_id"] != recovered_payload["anchor_id"]
+
+
+def test_initial_installer_record_publication_never_replaces_a_racing_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_path = tmp_path / bootstrap.INSTALLATION_STATE
+    collision_attempted = False
+    original_link = bootstrap.os.link
+
+    def collide_before_link(source: object, destination: object, **kwargs: object) -> None:
+        nonlocal collision_attempted
+        collision_attempted = True
+        state_path.write_text("attacker-owned\n", encoding="utf-8")
+        original_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(bootstrap.os, "link", collide_before_link)
+
+    with (
+        pytest.raises(RuntimeError, match="ownership metadata"),
+        bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+    ):
+        pytest.fail("racing installer record was overwritten")
+
+    assert collision_attempted
+    assert state_path.read_text(encoding="utf-8") == "attacker-owned\n"
+
+
+def test_unbound_hardlinked_anchor_is_never_sanitized_or_adopted(tmp_path: Path) -> None:
+    anchor_path = tmp_path / bootstrap.LIFECYCLE_LOCK
+    anchor_path.parent.mkdir(parents=True)
+    anchor_path.write_text("untrusted\n", encoding="utf-8")
+    anchor_path.chmod(0o600)
+    os.link(anchor_path, anchor_path.with_suffix(".external-link"))
+
+    with (
+        pytest.raises(RuntimeError, match="lock identity changed"),
+        bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+    ):
+        pytest.fail("hardlinked unbound anchor entered lifecycle work")
+
+    assert anchor_path.read_text(encoding="utf-8") == "untrusted\n"
+
+
+def test_waiter_revalidates_persistent_anchor_fields_before_yield(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        bootstrap._load_or_create_installation_state(tmp_path)
+
+    holder_entered = threading.Event()
+    release_holder = threading.Event()
+    waiter_blocked = threading.Event()
+    waiter_entered = False
+    original_acquire = bootstrap._acquire_lock_before
+
+    def observed_acquire(descriptor: int, *, path: Path, timeout: float | None) -> None:
+        if threading.current_thread().name == "anchor-waiter":
+            waiter_blocked.set()
+        original_acquire(descriptor, path=path, timeout=timeout)
+
+    def hold() -> None:
+        with bootstrap._lifecycle_lock(tmp_path, timeout=2.0):
+            holder_entered.set()
+            assert release_holder.wait(2.0)
+
+    def wait() -> None:
+        nonlocal waiter_entered
+        threading.current_thread().name = "anchor-waiter"
+        with bootstrap._lifecycle_lock(tmp_path, timeout=2.0):
+            waiter_entered = True
+
+    monkeypatch.setattr(bootstrap, "_acquire_lock_before", observed_acquire)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(hold)
+        assert holder_entered.wait(2.0)
+        waiter = pool.submit(wait)
+        assert waiter_blocked.wait(2.0)
+        path = tmp_path / bootstrap.INSTALLATION_STATE
+        payload = json.loads(path.read_text())
+        payload["lifecycle_anchor_id"] = "00000000-0000-4000-8000-000000000000"
+        bootstrap._atomic_write_private_file(path, json.dumps(payload, sort_keys=True) + "\n")
+        release_holder.set()
+        with pytest.raises(RuntimeError, match="lock identity changed"):
+            holder.result(timeout=2.0)
+        with pytest.raises(RuntimeError, match="lock identity changed"):
+            waiter.result(timeout=2.0)
+
+    assert not waiter_entered
+
+
+def test_generation_advance_refuses_to_preserve_tampered_anchor_fields(tmp_path: Path) -> None:
+    with (
+        pytest.raises(RuntimeError, match="lock identity changed"),
+        bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+    ):
+        current = bootstrap._load_or_create_installation_state(tmp_path)
+        path = tmp_path / bootstrap.INSTALLATION_STATE
+        payload = json.loads(path.read_text())
+        payload["lifecycle_anchor_id"] = "00000000-0000-4000-8000-000000000000"
+        bootstrap._atomic_write_private_file(path, json.dumps(payload, sort_keys=True) + "\n")
+        bootstrap._advance_installation_generation(tmp_path, current)
+
+    assert json.loads(path.read_text())["generation"] == 0
 
 
 def test_lifecycle_lock_rejects_symlinked_project_ancestor(tmp_path: Path) -> None:

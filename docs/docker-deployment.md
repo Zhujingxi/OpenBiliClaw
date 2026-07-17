@@ -108,8 +108,11 @@ Queue writable probe 会在 `BEGIN IMMEDIATE` 中执行真实 `CREATE`/`INSERT` 
 在 migration 后启动 API/worker、等待 queue
 文件就绪，再运行 `openbiliclaw doctor` 检查应用数据库、access token 和 LiteLLM
 配置；任一步失败都会停止这两个新进程并非零退出。其 lifecycle lock UUID/device/inode
-持久绑定到 installer metadata；POSIX 使用 held parent dir FD，native Windows 使用 direct-path
-校验，已绑定 lock pathname 缺失/替换或 symlink/junction ancestor 都会失败关闭。
+持久绑定到 installer metadata；首次并发调用等待同一 O_EXCL anchor，崩溃遗留的未绑定
+anchor 经 held FD 普通文件、单链接、owner、私密 mode 与 pathname identity 检查后原位
+清空并重新绑定，不执行 pathname unlink。POSIX 使用 held parent dir FD，native Windows 使用
+direct-path 与 Python 3.11 reparse metadata 校验；持锁后会重读绑定，已绑定 pathname
+缺失/替换或 symlink/junction ancestor 都会失败关闭。
 
 ## 来源与 onboarding
 
