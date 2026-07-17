@@ -212,6 +212,44 @@ def test_completion_operation_must_match_the_claimed_request(
         assert row.result_payload is None
 
 
+def test_failure_completion_is_typed_idempotent_and_secret_free(
+    task_context: tuple[Any, Any, SourceTaskService],
+) -> None:
+    _, _, service = task_context
+    task_id = service.enqueue(
+        _request(
+            source_id="xiaohongshu",
+            operation=SourceOperation.SEARCH,
+            payload={"query": "python", "limit": 5},
+        )
+    )
+    claimed = service.claim("xiaohongshu")
+    assert claimed is not None
+
+    first = service.fail(
+        task_id,
+        claimed.lease_token,
+        code="execution_failed",
+        error_type="PageSecretError",
+    )
+    second = service.fail(
+        task_id,
+        claimed.lease_token,
+        code="execution_failed",
+        error_type="PageSecretError",
+    )
+    snapshot = service.snapshot(task_id)
+
+    assert first.idempotent is False
+    assert second.idempotent is True
+    assert snapshot.status is SourceTaskStatus.FAILED
+    assert snapshot.result is None
+    assert snapshot.failure is not None
+    assert snapshot.failure.code == "execution_failed"
+    assert snapshot.failure.error_type == "PageSecretError"
+    assert "secret detail" not in snapshot.model_dump_json()
+
+
 @pytest.mark.parametrize(
     "payload",
     [

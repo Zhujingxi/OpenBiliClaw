@@ -51,9 +51,12 @@ export function normalizeActivityEvent(event: BehaviorEvent): ActivityEvent | nu
   const metadata = sanitizeMetadata(event.metadata);
   const externalId = CONTENT_ID_FIELDS.map((field) => metadata[field])
     .find((value) => typeof value === "string" && value.trim()) as string | undefined;
-  const duration = numberValue(metadata.watch_seconds) ?? numberValue(metadata.duration_seconds);
+  const duration = numberValue(metadata.watch_seconds)
+    ?? (event.type.toLowerCase() === "pause" ? numberValue(metadata.currentTime) : null)
+    ?? numberValue(metadata.duration_seconds);
   delete metadata.watch_seconds;
   delete metadata.duration_seconds;
+  if (event.type.toLowerCase() === "pause") delete metadata.currentTime;
   metadata.page_type = event.context.pageType;
   metadata.scroll_position = event.context.scrollPosition;
   metadata.viewport = {

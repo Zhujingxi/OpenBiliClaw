@@ -27,6 +27,9 @@ test("a source dispatcher claims and completes one generic typed task", async ()
     async complete(taskId, leaseToken, result) {
       calls.push(["complete", { taskId, leaseToken, result }]);
     },
+    async fail() {
+      assert.fail("successful execution must not report failure");
+    },
   };
   const dispatcher = createSourceTaskDispatcher({
     sourceId: "bilibili",
@@ -62,8 +65,8 @@ test("a source dispatcher rejects an undeclared operation before execution", () 
   );
 });
 
-test("execution failures leave the lease uncompleted for durable retry", async () => {
-  let completionCount = 0;
+test("execution failures are reported without secret-bearing error text", async () => {
+  const failures: unknown[] = [];
   const dispatcher = createSourceTaskDispatcher({
     sourceId: "bilibili",
     operations: ["search"],
@@ -73,14 +76,74 @@ test("execution failures leave the lease uncompleted for durable retry", async (
       },
       async complete(_taskId, _leaseToken, result) {
         void result;
-        completionCount += 1;
+        assert.fail("failed execution must not report success");
+      },
+      async fail(taskId, leaseToken, failure) {
+        failures.push({ taskId, leaseToken, failure });
       },
     },
     execute: async () => {
-      throw new Error("page unavailable");
+      throw new Error("page unavailable with secret=do-not-send");
     },
   });
 
-  await assert.rejects(() => dispatcher.pollOnce(), /page unavailable/);
-  assert.equal(completionCount, 0);
+  assert.equal(await dispatcher.pollOnce(), true);
+  assert.deepEqual(failures, [{
+    taskId: claim.id,
+    leaseToken: claim.lease_token,
+    failure: { code: "execution_failed", error_type: "Error" },
+  }]);
+  assert.equal(JSON.stringify(failures).includes("do-not-send"), false);
+});
+
+test("a claimed source mismatch is reported through the failure completion", async () => {
+  const failures: unknown[] = [];
+  const dispatcher = createSourceTaskDispatcher({
+    sourceId: "bilibili",
+    operations: ["search"],
+    transport: {
+      async claim() {
+        return { ...claim, source_id: "reddit" };
+      },
+      async complete() {
+        assert.fail("mismatched claim must not report success");
+      },
+      async fail(_taskId, _leaseToken, failure) {
+        failures.push(failure);
+      },
+    },
+    execute: async () => assert.fail("mismatched claim must not execute"),
+  });
+
+  assert.equal(await dispatcher.pollOnce(), true);
+  assert.deepEqual(failures, [{ code: "claim_mismatch", error_type: "TaskContractError" }]);
+});
+
+test("execution stops at the request deadline and reports a typed failure", async () => {
+  const failures: unknown[] = [];
+  const deadlineClaim = {
+    ...claim,
+    request_deadline_at: new Date(Date.now() + 20).toISOString(),
+  };
+  const startedAt = Date.now();
+  const dispatcher = createSourceTaskDispatcher({
+    sourceId: "bilibili",
+    operations: ["search"],
+    transport: {
+      async claim() {
+        return deadlineClaim;
+      },
+      async complete() {
+        assert.fail("deadline must not report success");
+      },
+      async fail(_taskId, _leaseToken, failure) {
+        failures.push(failure);
+      },
+    },
+    execute: async () => new Promise(() => undefined),
+  });
+
+  assert.equal(await dispatcher.pollOnce(), true);
+  assert.ok(Date.now() - startedAt < 250, "dispatcher must not wait past the request deadline");
+  assert.deepEqual(failures, [{ code: "deadline_exceeded", error_type: "TaskDeadlineError" }]);
 });

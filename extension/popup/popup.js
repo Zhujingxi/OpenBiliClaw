@@ -9,7 +9,6 @@ import {
   pairDeviceKey,
 } from "./popup-device-auth.js";
 
-const COLLECTIONS = new Set(["favorites", "watch_later"]);
 const FACET_NAMES = new Set([
   "interests",
   "avoidances",
@@ -74,7 +73,7 @@ const LABELS = {
 };
 
 const state = {
-  activeView: "feed",
+  activeView: "recommend",
   activeCollection: "favorites",
   manifests: [],
   sourceStatuses: [],
@@ -111,7 +110,7 @@ let toastTimer = 0;
 function toast(message, kind = "") {
   const target = $("#toast");
   target.textContent = message;
-  target.style.background = kind === "error" ? "var(--danger)" : "var(--text)";
+  target.style.background = kind === "error" ? "var(--danger)" : "var(--text-main)";
   target.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { target.hidden = true; }, 3200);
@@ -119,7 +118,9 @@ function toast(message, kind = "") {
 
 function setStatus(label, status = "loading") {
   $("#statusLabel").textContent = label;
-  $("#statusBadge").dataset.state = status;
+  $("#statusBadge").dataset.tone = status === "ready"
+    ? "online"
+    : status === "error" ? "offline" : "reconnecting";
 }
 
 function setFormBusy(form, busy) {
@@ -174,20 +175,24 @@ function activateView(view) {
   state.activeView = view;
   for (const tab of $$("[data-view]")) {
     tab.setAttribute("aria-selected", String(tab.dataset.view === view));
+    tab.classList.toggle("is-active", tab.dataset.view === view);
   }
   for (const panel of $$("[data-view-panel]")) {
     panel.hidden = panel.dataset.viewPanel !== view;
   }
-  if (view === "feed") loadFeed();
-  if (view === "library") loadLibrary();
+  if (view === "recommend") loadFeed();
+  if (view === "watch_later" || view === "favorites") {
+    state.activeCollection = view;
+    loadLibrary();
+  }
   if (view === "profile") loadProfile();
   if (view === "chat") loadChatHistory();
-  if (view === "sources") loadSources();
-  if (view === "settings") loadSettingsView();
 }
 
 async function showPairing() {
-  $(".tabs").hidden = true;
+  $(".tabs-shell").hidden = true;
+  $("#settingsOverlay").hidden = true;
+  $("#mobileQrOverlay").hidden = true;
   $("#pairingPanel").hidden = false;
   $("#onboardingPanel").hidden = true;
   for (const panel of $$("[data-view-panel]")) panel.hidden = true;
@@ -199,7 +204,7 @@ async function showPairing() {
 }
 
 function showProduct() {
-  $(".tabs").hidden = false;
+  $(".tabs-shell").hidden = false;
   $("#pairingPanel").hidden = true;
   $("#onboardingPanel").hidden = true;
   activateView(state.activeView);
@@ -253,7 +258,7 @@ function sourceStatus(sourceId) {
 }
 
 function showOnboarding() {
-  $(".tabs").hidden = true;
+  $(".tabs-shell").hidden = true;
   $("#pairingPanel").hidden = true;
   $("#onboardingPanel").hidden = false;
   for (const panel of $$("[data-view-panel]")) panel.hidden = true;
@@ -349,7 +354,7 @@ function contentCard(feedItem, collection = "") {
 }
 
 async function loadFeed() {
-  const host = $("#feedList");
+  const host = $("#recommendationList");
   host.replaceChildren(emptyState("正在读取发现结果", "请稍候"));
   try {
     const items = await requestV1("v1_feed_list", { query: { limit: 50, offset: 0 } });
@@ -390,7 +395,9 @@ async function saveLibraryItem(collection, contentId, button) {
 }
 
 async function loadLibrary() {
-  const host = $("#libraryList");
+  const host = state.activeCollection === "watch_later"
+    ? $("#watchLaterList")
+    : $("#favoritesList");
   host.replaceChildren(emptyState("正在读取资料库", "请稍候"));
   try {
     const items = await requestV1("v1_library_list", { path: { collection: state.activeCollection } });
@@ -479,7 +486,7 @@ async function saveProfile(event) {
 }
 
 function renderChatMessages(items) {
-  const host = $("#chatLog");
+  const host = $("#chatMessages");
   host.replaceChildren(...items.map((item) => node("div", {
     class: `message ${item.role === "user" ? "user" : ""}`,
     text: item.content,
@@ -496,7 +503,7 @@ async function loadChatHistory() {
     });
     renderChatMessages(page.items || []);
   } catch (error) {
-    $("#chatLog").replaceChildren(emptyState("对话历史读取失败", errorMessage(error)));
+    $("#chatMessages").replaceChildren(emptyState("对话历史读取失败", errorMessage(error)));
   }
 }
 
@@ -506,7 +513,7 @@ async function sendChat(event) {
   const input = $("#chatInput");
   const message = input.value.trim();
   if (!message) return;
-  const host = $("#chatLog");
+  const host = $("#chatMessages");
   const userBubble = node("div", { class: "message user", text: message });
   const answerBubble = node("div", { class: "message pending", text: "" });
   host.append(userBubble, answerBubble);
@@ -706,23 +713,38 @@ function flattenSettingControls(value, pathParts, controls) {
 }
 
 function renderSettings() {
-  const host = $("#settingsFields");
+  const hosts = {
+    ai: $("#settingsAiFields"),
+    sources: $("#settingsSourceFields"),
+    scheduler: $("#settingsSchedulerFields"),
+    general: $("#settingsGeneralFields"),
+    logging: $("#settingsLoggingFields"),
+  };
+  for (const host of Object.values(hosts)) host.replaceChildren();
   if (!state.settings) {
-    host.replaceChildren(emptyState("设置不可用", "无法读取后端设置。"));
+    hosts.general.replaceChildren(emptyState("设置不可用", "无法读取后端设置。"));
     return;
   }
-  const groups = [];
   for (const groupName of SETTING_GROUPS) {
     const value = state.settings[groupName];
     if (!value || typeof value !== "object") continue;
     const controls = [];
     flattenSettingControls(value, [groupName], controls);
-    groups.push(node("fieldset", { class: "settings-group" }, [
+    const group = node("fieldset", { class: "settings-group" }, [
       node("legend", { text: labelFor(groupName) }),
       node("div", { class: "settings-fields" }, controls),
-    ]));
+    ]);
+    const destination = groupName === "sources"
+      ? hosts.sources
+      : groupName === "tasks"
+        ? hosts.ai
+        : groupName === "logging"
+          ? hosts.logging
+          : ["schedules", "feed", "jobs"].includes(groupName)
+            ? hosts.scheduler
+            : hosts.general;
+    destination.append(group);
   }
-  host.replaceChildren(...groups);
 }
 
 function setNested(target, path, value) {
@@ -733,7 +755,7 @@ function setNested(target, path, value) {
 
 function collectSettingsPatch() {
   const patch = {};
-  for (const input of $$("[data-setting-path]", $("#settingsFields"))) {
+  for (const input of $$("[data-setting-path]", $("#settingsForm"))) {
     const path = JSON.parse(input.dataset.settingPath);
     let value;
     if (input.dataset.valueType === "boolean") value = input.checked;
@@ -771,6 +793,48 @@ async function loadSettingsView() {
   } catch (error) { toast(errorMessage(error), "error"); }
 }
 
+function activateSettingsPanel(panelName) {
+  for (const tab of $$("[data-settings-tab]")) {
+    const active = tab.dataset.settingsTab === panelName;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", String(active));
+  }
+  for (const panel of $$("[data-settings-panel]")) {
+    panel.hidden = panel.dataset.settingsPanel !== panelName;
+  }
+}
+
+async function showSettings() {
+  $("#settingsOverlay").hidden = false;
+  activateSettingsPanel("models");
+  await loadSettingsView();
+}
+
+function hideSettings() {
+  $("#settingsOverlay").hidden = true;
+}
+
+function extensionPage(pathname) {
+  return getBackendEndpointConfig().then(({ scheme, host, port }) => (
+    `${scheme}://${host}:${port}${pathname}`
+  ));
+}
+
+async function openExternal(url) {
+  const tabs = globalThis.chrome?.tabs;
+  if (tabs?.create) {
+    await tabs.create({ url });
+    return;
+  }
+  globalThis.open?.(url, "_blank", "noopener");
+}
+
+async function showMobileEntry() {
+  const url = await extensionPage("/m");
+  $("#mobileQrUrl").textContent = url;
+  $("#mobileQrOverlay").hidden = false;
+}
+
 async function pair(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -800,14 +864,18 @@ async function saveEndpoint(event) {
 }
 
 function bindEvents() {
-  for (const tab of $$("[data-view]")) tab.addEventListener("click", () => activateView(tab.dataset.view));
-  for (const button of $$("[data-collection]")) {
-    button.addEventListener("click", () => {
-      if (!COLLECTIONS.has(button.dataset.collection)) return;
-      state.activeCollection = button.dataset.collection;
-      for (const sibling of $$("[data-collection]")) sibling.classList.toggle("primary", sibling === button);
-      loadLibrary();
-    });
+  const primaryTabs = {
+    tabRecommend: "recommend",
+    tabWatchLater: "watch_later",
+    tabFavorites: "favorites",
+    tabProfile: "profile",
+    tabChat: "chat",
+  };
+  for (const [tabId, view] of Object.entries(primaryTabs)) {
+    $(`#${tabId}`).addEventListener("click", () => activateView(view));
+  }
+  for (const tab of $$("[data-settings-tab]")) {
+    tab.addEventListener("click", () => activateSettingsPanel(tab.dataset.settingsTab));
   }
   $("#pairingForm").addEventListener("submit", pair);
   $("#endpointForm").addEventListener("submit", saveEndpoint);
@@ -815,10 +883,29 @@ function bindEvents() {
   $("#profileForm").addEventListener("submit", saveProfile);
   $("#chatForm").addEventListener("submit", sendChat);
   $("#settingsForm").addEventListener("submit", saveSettings);
-  $("#refreshFeed").addEventListener("click", loadFeed);
+  $("#refreshRecommendationsButton").addEventListener("click", loadFeed);
   $("#reloadChat").addEventListener("click", loadChatHistory);
   $("#refreshSources").addEventListener("click", loadSources);
   $("#reconnect").addEventListener("click", boot);
+  $("#settingsGear").addEventListener("click", showSettings);
+  $("#settingsBack").addEventListener("click", hideSettings);
+  $("#openWebButton").addEventListener("click", async () => openExternal(await extensionPage("/web")));
+  $("#mobileQrButton").addEventListener("click", showMobileEntry);
+  $("#mobileQrBack").addEventListener("click", () => { $("#mobileQrOverlay").hidden = true; });
+  $("#mobileQrOpen").addEventListener("click", () => openExternal($("#mobileQrUrl").textContent));
+  $("#mobileQrCopy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#mobileQrUrl").textContent);
+      toast("移动端链接已复制");
+    } catch {
+      toast("无法复制，请手动选择链接", "error");
+    }
+  });
+  $("#profileEditToggle").addEventListener("click", () => {
+    const panel = $("#profileEditPanel");
+    panel.hidden = !panel.hidden;
+    $("#profileEditToggle").setAttribute("aria-expanded", String(!panel.hidden));
+  });
   $("#chatInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();

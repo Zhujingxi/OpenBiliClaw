@@ -39,3 +39,15 @@ test("legacy source aliases and action names map to closed vNext values", () => 
   assert.equal(normalizeActivityEvent({ ...event("like"), source_platform: "xhs" })?.source_id, "xiaohongshu");
   assert.equal(normalizeActivityEvent({ ...event("share"), source_platform: "dy" }), null);
 });
+
+test("pause currentTime becomes consumed watch duration instead of video length", () => {
+  const pause = event("pause");
+  pause.metadata = { bvid: "BV1abc", currentTime: 15.5, duration: 600 };
+
+  const normalized = normalizeActivityEvent(pause);
+
+  assert.equal(normalized?.kind, "dwell");
+  assert.equal(normalized?.duration_seconds, 15.5);
+  assert.equal("currentTime" in (normalized?.metadata ?? {}), false);
+  assert.equal(normalized?.metadata.duration, 600);
+});

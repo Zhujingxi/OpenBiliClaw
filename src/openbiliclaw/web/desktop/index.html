@@ -8,18 +8,7 @@
     <link rel="stylesheet" href="/web/assets/css/app.css" />
     <link rel="modulepreload" href="/m/js/api-client.js" />
     <style>
-      .vnext-shell {
-        max-width: 1440px;
-        margin: auto;
-      }
-      .vnext-nav {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-        padding: 14px 24px;
-        border-bottom: 1px solid var(--line);
-      }
-      .vnext-nav button[aria-current="page"] {
+      .side-drawer-nav button[aria-current="page"] {
         background: var(--pink-soft);
         color: var(--pink);
       }
@@ -161,8 +150,9 @@
     </style>
   </head>
   <body>
-    <div class="app-shell vnext-shell">
+    <div class="app-shell">
       <header class="topbar">
+        <button id="sideDrawerBtn" class="side-drawer-btn" type="button" aria-label="切换侧栏">☰</button>
         <a class="brand" href="#feed"
           ><span class="brand-mark">B</span
           ><span class="brand-copy"
@@ -184,17 +174,27 @@
           ><a class="top-mobile-btn" href="/m/">手机版</a>
         </div>
       </header>
-      <nav class="vnext-nav" aria-label="主要功能">
-        <button class="pill-btn" data-page="feed">发现</button
-        ><button class="pill-btn" data-page="watch_later">稍后再看</button
-        ><button class="pill-btn" data-page="favorites">收藏</button
-        ><button class="pill-btn" data-page="profile">画像</button
-        ><button class="pill-btn" data-page="chat">对话</button
-        ><button class="pill-btn" data-page="jobs">任务</button
-        ><button class="pill-btn" data-page="settings">设置</button>
-      </nav>
-      <main>
-        <section class="vnext-page" data-page-panel="feed">
+      <div id="fatalBanner" class="fatal-banner" hidden></div>
+      <div class="app-body">
+        <aside id="sideDrawer" class="side-drawer is-open">
+          <div id="sideDrawerScrim" class="side-drawer-scrim"></div>
+          <div class="side-drawer-panel">
+            <nav class="side-drawer-nav" aria-label="主要功能">
+              <button id="homeBtn" class="nav-action" data-page="feed">首页</button>
+              <button id="watchLaterBtn" class="nav-action" data-page="watch_later">稍后再看</button>
+              <button id="favoritesBtn" class="nav-action" data-page="favorites">我的收藏</button>
+              <button id="profileBtn" class="nav-action" data-page="profile">我的画像</button>
+              <button id="chatBtn" class="nav-action" data-page="chat">聊聊口味</button>
+              <button id="jobsBtn" class="nav-action" data-page="jobs">后台任务</button>
+              <button id="settingsBtn" class="nav-action" data-page="settings">设置</button>
+            </nav>
+            <section class="hero-status-grid" aria-label="运行状态">
+              <span>后端</span><strong id="runtimeSummary">连接中</strong>
+            </section>
+          </div>
+        </aside>
+        <main id="home" class="layout">
+        <section id="homePage" class="main-col vnext-page" data-page-panel="feed">
           <div class="section-head">
             <div>
               <p class="eyebrow">Discovery feed</p>
@@ -208,14 +208,15 @@
               </button>
             </div>
           </div>
-          <div class="filter-row" id="sourceFilters"></div>
-          <div class="card-grid" id="feedGrid"></div>
+          <div class="filter-row" id="filterRow"></div>
+          <div class="card-grid" id="videoGrid"></div>
           <div class="load-row">
-            <button class="pill-btn dark" id="loadMoreFeed">加载更多</button>
+            <button class="pill-btn dark" id="loadMoreBtn">加载更多</button>
           </div>
         </section>
         <section
-          class="vnext-page watch-later"
+          id="watchLaterPage"
+          class="saved-page content-page vnext-page watch-later"
           data-page-panel="watch_later"
           hidden
         >
@@ -226,9 +227,9 @@
               <p>只保存在 OpenBiliClaw 本地。</p>
             </div>
           </div>
-          <div class="saved-grid" id="watchLaterGrid"></div>
+          <div class="saved-grid" id="watchLaterList"></div>
         </section>
-        <section class="vnext-page" data-page-panel="favorites" hidden>
+        <section id="favoritesPage" class="saved-page content-page vnext-page" data-page-panel="favorites" hidden>
           <div class="section-head">
             <div>
               <p class="eyebrow">Favorites</p>
@@ -236,9 +237,9 @@
               <p>跨平台的统一本地收藏。</p>
             </div>
           </div>
-          <div class="saved-grid" id="favoritesGrid"></div>
+          <div class="saved-grid" id="favoritesList"></div>
         </section>
-        <section class="vnext-page" data-page-panel="profile" hidden>
+        <section id="profilePage" class="profile-page vnext-page" data-page-panel="profile" hidden>
           <div class="section-head">
             <div>
               <p class="eyebrow">Evidence profile</p>
@@ -246,7 +247,7 @@
               <p id="profileMeta"></p>
             </div>
           </div>
-          <form id="profileForm" class="vnext-settings">
+          <form id="profileForm" class="profile-page-list vnext-settings">
             <section>
               <label
                 >画像叙述<textarea id="profileNarrative" rows="6"></textarea>
@@ -284,7 +285,7 @@
             </div>
           </form>
         </section>
-        <section class="vnext-page" data-page-panel="chat" hidden>
+        <section id="chatPage" class="chat-page content-page vnext-page" data-page-panel="chat" hidden>
           <div class="section-head">
             <div>
               <p class="eyebrow">Taste dialogue</p>
@@ -303,7 +304,7 @@
             ><button class="pill-btn primary">发送</button>
           </form>
         </section>
-        <section class="vnext-page" data-page-panel="jobs" hidden>
+        <section id="jobsPage" class="content-page vnext-page" data-page-panel="jobs" hidden>
           <div class="section-head">
             <div>
               <p class="eyebrow">Background jobs</p>
@@ -322,7 +323,7 @@
           </form>
           <div id="jobList"></div>
         </section>
-        <section class="vnext-page" data-page-panel="settings" hidden>
+        <section id="settingsPage" class="settings-page content-page vnext-page" data-page-panel="settings" hidden>
           <div class="section-head">
             <div>
               <p class="eyebrow">Settings</p>
@@ -373,7 +374,8 @@
             </div>
           </form>
         </section>
-      </main>
+        </main>
+      </div>
     </div>
     <div class="vnext-login" id="loginGate" hidden>
       <form id="loginForm">

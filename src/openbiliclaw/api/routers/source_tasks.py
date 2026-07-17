@@ -7,7 +7,7 @@ from uuid import UUID  # noqa: TC003 - FastAPI resolves route fields at runtime
 
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openbiliclaw.api.dependencies import Container, require_access
 from openbiliclaw.api.threading import run_sync_port
@@ -16,6 +16,7 @@ from openbiliclaw.features.sources.domain import (
     ClaimedSourceTask,
     SourceId,
     SourceTaskCompletion,
+    SourceTaskFailure,
 )
 
 
@@ -23,7 +24,14 @@ class CompleteSourceTask(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     lease_token: str = Field(min_length=20, max_length=100)
-    result: BrowserOperationResultValue
+    result: BrowserOperationResultValue | None = Field(default=None, discriminator="operation")
+    failure: SourceTaskFailure | None = None
+
+    @model_validator(mode="after")
+    def exactly_one_outcome(self) -> CompleteSourceTask:
+        if (self.result is None) == (self.failure is None):
+            raise ValueError("exactly one source task result or failure is required")
+        return self
 
 
 router = APIRouter(
@@ -64,5 +72,14 @@ def complete_source_task(
     payload: CompleteSourceTask,
     container: Container,
 ) -> object:
-    completed = container.source_tasks.complete(task_id, payload.lease_token, payload.result)
+    if payload.failure is not None:
+        completed = container.source_tasks.fail(
+            task_id,
+            payload.lease_token,
+            code=payload.failure.code,
+            error_type=payload.failure.error_type,
+        )
+    else:
+        assert payload.result is not None
+        completed = container.source_tasks.complete(task_id, payload.lease_token, payload.result)
     return SourceTaskCompletion.model_validate(jsonable_encoder(completed))

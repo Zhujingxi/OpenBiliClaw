@@ -221,7 +221,7 @@
         border-radius: 10px;
         padding: 11px 13px;
       }
-      @media (max-width: 620px) {
+      @media (max-width: 680px) {
         .grid {
           grid-template-columns: 1fr;
         }
@@ -236,16 +236,18 @@
     </style>
   </head>
   <body>
-    <main class="card">
-      <header class="head">
+    <div class="card">
+      <div class="head">
         <div class="brand"><span class="mark">B</span>OpenBiliClaw</div>
         <div class="steps">
-          <span class="dot active"></span><span class="dot"></span
-          ><span class="dot"></span>
+          <span class="dot active" data-dot="0"></span
+          ><span class="dot" data-dot="1"></span
+          ><span class="dot" data-dot="2"></span
+          ><span class="dot" data-dot="3"></span>
         </div>
-      </header>
+      </div>
       <div class="body">
-        <section class="panel active" data-step="0">
+        <section class="panel active" data-panel="0">
           <h2>连接 AI 服务</h2>
           <p class="sub">
             模型、凭据、路由和预算统一在 LiteLLM Admin 管理。这里确认
@@ -284,35 +286,65 @@
             </button>
           </div>
         </section>
-        <section class="panel" data-step="1">
-          <h2>选择内容源</h2>
+        <section class="panel" data-panel="1">
+          <h2>连接浏览器扩展和平台账号</h2>
           <p class="sub">
-            保留你真正使用的平台。浏览器扩展会承担需要浏览器登录态的采集任务。
+            保留原有的扩展连接步骤。需要浏览器登录态的平台会通过扩展执行采集任务；账号也可以稍后在设置中连接。
           </p>
-          <div id="sourceList" class="grid"></div>
-          <div id="sourceMessage" class="msg"></div>
+          <div id="biliStatus" class="msg show info" role="status">
+            浏览器扩展可以在当前已登录的平台页面执行来源任务。
+          </div>
+          <p class="hint">没装扩展也可以先继续，之后在主界面随时连接。</p>
           <div class="row">
-            <button class="ghost" data-back>← 上一步</button
-            ><button id="start" class="primary">开始初始化 →</button>
+            <button class="ghost" id="back1">← 上一步</button
+            ><button id="next1" class="primary">先跳过 / 已连接 →</button>
           </div>
         </section>
-        <section class="panel" data-step="2">
-          <h2>正在建立你的推荐体验</h2>
+        <section class="panel" data-panel="2">
+          <h2>初始化画像和推荐池</h2>
           <p class="sub">
-            依次同步来源、投影证据画像并补齐发现流。关闭页面不会中断后台任务。
+            选择要同步的来源，随后依次投影证据画像并补齐首轮发现流。
           </p>
-          <div class="progress"><span id="progressBar"></span></div>
-          <p id="progressLabel" class="hint" role="status">等待开始</p>
-          <div id="runMessage" class="msg"></div>
+          <div id="initSources" class="grid"></div>
+          <ul id="initChecklist">
+            <li>检查所需 AI 别名和来源能力</li>
+            <li>同步来源活动并建立证据画像</li>
+            <li>补齐首轮发现流</li>
+          </ul>
+          <div id="sourceMessage" class="msg"></div>
+          <div id="initProgress" class="progress" hidden>
+            <span id="initProgressBar"></span>
+          </div>
+          <p id="initProgressLabel" class="hint" role="status">等待开始</p>
+          <p id="initStallHint" class="hint" hidden></p>
+          <div id="initReason" class="msg" role="status"></div>
+          <div id="initEscape" class="msg info">
+            后台会继续处理；你可以<a href="/web/">先进入应用 →</a>
+          </div>
           <div class="row">
-            <a class="button ghost" href="/web/">先进入应用</a
-            ><a id="finish" class="button primary" href="/web/" hidden
-              >开始使用 OpenBiliClaw →</a
-            >
+            <button class="ghost" id="backInit">← 上一步</button
+            ><button id="startInit" class="primary">开始初始化</button>
+          </div>
+        </section>
+        <section class="panel" data-panel="3">
+          <h2>就绪 🎉</h2>
+          <p class="sub">
+            基础配置和首轮初始化已经完成，可以开始使用。
+          </p>
+          <ul>
+            <li><strong>AI 大脑</strong> · <span id="doneLlm">三个稳定别名已连接</span></li>
+            <li><strong>平台账号</strong> · <span id="doneBili">所选来源已完成首轮同步</span></li>
+            <li><strong>证据画像与发现流</strong> · 已就绪</li>
+          </ul>
+          <div id="biliDone"></div>
+          <div id="runMessage" class="msg ok">初始化完成。之后的同步和补货会由后台任务自动维护。</div>
+          <div class="row">
+            <button class="ghost" id="back2">← 上一步</button
+            ><a id="finish" class="button primary" href="/web/">开始使用 OpenBiliClaw →</a>
           </div>
         </section>
       </div>
-    </main>
+    </div>
     <script type="module">
       import {
         request,
@@ -330,6 +362,12 @@
         zhihu: "知乎",
         reddit: "Reddit",
       };
+      const requiredAliases = [
+        "obc-interactive",
+        "obc-analysis",
+        "obc-embedding",
+      ];
+      let aliasesReady = false;
       const panels = [...document.querySelectorAll(".panel")],
         dots = [...document.querySelectorAll(".dot")];
       function step(index) {
@@ -355,11 +393,10 @@
           const aliases = new Map(
             (health.aliases || []).map((item) => [item.alias, item]),
           );
-          document.getElementById("aliasList").innerHTML = [
-            "obc-interactive",
-            "obc-analysis",
-            "obc-embedding",
-          ]
+          aliasesReady = requiredAliases.every(
+            (alias) => aliases.get(alias)?.available === true,
+          );
+          document.getElementById("aliasList").innerHTML = requiredAliases
             .map((alias) => {
               const item = aliases.get(alias);
               const ready = Boolean(item?.available);
@@ -372,11 +409,11 @@
             link.href = adminUrl;
             link.hidden = false;
           }
-          document.getElementById("nextAi").disabled = !health.proxy_reachable;
-          if (!health.proxy_reachable)
+          document.getElementById("nextAi").disabled = !aliasesReady;
+          if (!aliasesReady)
             message(
               "aiMessage",
-              "LiteLLM Proxy 暂不可达，请在 Admin 中完成模型配置后重试。",
+              "三个必需别名均可用后才能继续，请在 LiteLLM Admin 完成配置。",
               "err",
             );
         } catch (error) {
@@ -386,7 +423,7 @@
       async function loadSources() {
         try {
           const sources = await request("v1_sources_list");
-          document.getElementById("sourceList").innerHTML = sources
+          document.getElementById("initSources").innerHTML = sources
             .map(
               (source, index) =>
                 `<label class="source"><input type="checkbox" value="${escapeHtml(source.source_id)}" ${index === 0 ? "checked" : ""}><span><strong>${escapeHtml(source.display_name || sourceNames[source.source_id])}</strong><small>${escapeHtml((source.capabilities || []).join(" · "))}</small></span></label>`,
@@ -411,21 +448,30 @@
           }
         });
       document.getElementById("nextAi").addEventListener("click", async () => {
+        if (!aliasesReady) return;
         step(1);
+      });
+      document.getElementById("back1").addEventListener("click", () => step(0));
+      document.getElementById("next1").addEventListener("click", async () => {
+        step(2);
         await loadSources();
       });
-      document
-        .querySelector("[data-back]")
-        .addEventListener("click", () => step(0));
-      document.getElementById("start").addEventListener("click", async () => {
+      document.getElementById("backInit").addEventListener("click", () => step(1));
+      document.getElementById("back2").addEventListener("click", () => step(2));
+      document.getElementById("startInit").addEventListener("click", async () => {
         const source_ids = [
-          ...document.querySelectorAll("#sourceList input:checked"),
+          ...document.querySelectorAll("#initSources input:checked"),
         ].map((el) => el.value);
         if (!source_ids.length) {
           message("sourceMessage", "至少选择一个内容源。", "err");
           return;
         }
-        step(2);
+        if (!aliasesReady) {
+          message("initReason", "必需 AI 别名不可用，请返回第一步检查。", "err");
+          return;
+        }
+        document.getElementById("initProgress").hidden = false;
+        document.getElementById("startInit").disabled = true;
         try {
           const run = await request("v1_onboarding_start", {
             body: { source_ids },
@@ -436,29 +482,37 @@
             ({ event, data }) => {
               if (event === "progress") {
                 const pct = Math.round((data.run?.progress || 0) * 100);
-                document.getElementById("progressBar").style.width = `${pct}%`;
-                document.getElementById("progressLabel").textContent =
+                document.getElementById("initProgressBar").style.width = `${pct}%`;
+                document.getElementById("initProgressLabel").textContent =
                   `${data.stage} · ${data.run?.status || "pending"} · ${pct}%`;
               } else if (event === "done") {
-                document.getElementById("progressBar").style.width = "100%";
-                document.getElementById("progressLabel").textContent =
-                  "画像与发现流已准备好";
-                message(
-                  "runMessage",
-                  "初始化完成。之后的同步和补货会由后台任务自动维护。",
-                  "ok",
-                );
-                document.getElementById("finish").hidden = false;
+                if (data.status === "failed" || data.status === "cancelled") {
+                  document.getElementById("startInit").disabled = false;
+                  document.getElementById("initProgressLabel").textContent =
+                    data.status === "cancelled" ? "初始化已取消" : "初始化失败";
+                  message(
+                    "initReason",
+                    data.status === "cancelled"
+                      ? "初始化已取消，可以重新开始。"
+                      : "初始化失败，请检查任务状态后重试。",
+                    "err",
+                  );
+                  return;
+                }
+                document.getElementById("initProgressBar").style.width = "100%";
+                document.getElementById("initProgressLabel").textContent = "画像与发现流已准备好";
+                step(3);
               } else if (event === "error")
                 message(
-                  "runMessage",
+                  "initReason",
                   data.message || "初始化失败，请稍后重试。",
                   "err",
                 );
             },
           );
         } catch (error) {
-          message("runMessage", errorMessage(error), "err");
+          document.getElementById("startInit").disabled = false;
+          message("initReason", errorMessage(error), "err");
         }
       });
       loadAi();

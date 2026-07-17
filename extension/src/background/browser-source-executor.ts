@@ -26,7 +26,7 @@ export const BROWSER_SOURCE_OPERATIONS: Readonly<
 > = Object.freeze({
   bilibili: ["search"],
   xiaohongshu: ["bootstrap_import", "search", "creator"],
-  douyin: ["bootstrap_import", "search", "trending", "feed"],
+  douyin: ["bootstrap_import"],
   youtube: ["bootstrap_import"],
   zhihu: ["bootstrap_import", "search", "trending", "feed", "creator", "related"],
   reddit: ["bootstrap_import", "search", "trending", "community", "related"],
@@ -88,7 +88,7 @@ function xiaohongshuExecution(taskId: string, payload: TaskPayload): LegacyExecu
     url = `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(payload.query)}`;
     type = "search";
   } else if (payload.operation === "creator") {
-    url = requireSourceUrl(payload.creator, "creator", "xiaohongshu.com");
+    url = xiaohongshuCreatorUrl(payload.creator);
     type = "creator";
   } else {
     assertOperation(payload, "bootstrap_import");
@@ -126,27 +126,7 @@ function douyinExecutions(taskId: string, payload: TaskPayload): LegacyExecution
       items: (result: RuntimeMessage) => recordArray(result.items),
     }));
   }
-  if (payload.operation === "search") {
-    return [{
-      url: "https://www.douyin.com/",
-      action: "DY_SEARCH_EXECUTE",
-      resultAction: "DY_SEARCH_RESULT",
-      data: { task_id: taskId, keyword: payload.query, max_items: payload.limit },
-      active: false,
-      items: (result) => recordArray(result.items),
-    }];
-  }
-  if (payload.operation !== "trending" && payload.operation !== "feed") {
-    throw new Error(`douyin does not execute ${payload.operation} in the browser`);
-  }
-  return [{
-    url: "https://www.douyin.com/",
-    action: "DY_FEED_EXECUTE",
-    resultAction: "DY_FEED_RESULT",
-    data: { task_id: taskId, max_items: payload.limit },
-    active: false,
-    items: (result) => recordArray(result.items),
-  }];
+  throw new Error(`douyin does not execute ${payload.operation} in the browser`);
 }
 
 function youtubeExecutions(taskId: string, payload: TaskPayload): LegacyExecution[] {
@@ -234,7 +214,12 @@ async function executeInTemporaryTab(
         await chrome.tabs.update(tabId, { url: execution.url, active: execution.active });
       }
       await waitForTabReady(tabId);
-      const resultPromise = waitForResult(taskId, execution.resultAction, requestDeadlineAt);
+      const resultPromise = waitForResult(
+        tabId,
+        taskId,
+        execution,
+        requestDeadlineAt,
+      );
       await sendWhenContentReady(tabId, { action: execution.action, data: execution.data });
       results.push(await resultPromise);
     }
@@ -278,24 +263,49 @@ async function sendWhenContentReady(tabId: number, message: RuntimeMessage): Pro
   }
 }
 
-function waitForResult(taskId: string, action: string, requestDeadlineAt: string): Promise<RuntimeMessage> {
+function waitForResult(
+  tabId: number,
+  taskId: string,
+  execution: LegacyExecution,
+  requestDeadlineAt: string,
+): Promise<RuntimeMessage> {
   return new Promise((resolve, reject) => {
+    let aggregate: RuntimeMessage = {};
+    let continuing = false;
     const listener = (message: RuntimeMessage): boolean => {
-      if (message.action !== action) return false;
+      if (message.action !== execution.resultAction) return false;
       const data = asRecord(message.data);
       if (String(data.task_id ?? "") !== taskId) return false;
-      cleanup();
+      aggregate = mergeRuntimeResults(aggregate, data);
       if (data.status === "failed" || data.status === "error") {
-        reject(new Error(String(data.error ?? `${action} failed`)));
-      } else {
-        resolve(data);
+        cleanup();
+        reject(new Error(String(data.error ?? `${execution.resultAction} failed`)));
+        return false;
       }
+      if (data.status === "partial") return false;
+      if (execution.resultAction === "XHS_TASK_RESULT" && typeof data.next_url === "string") {
+        if (continuing) return false;
+        continuing = true;
+        void continueXiaohongshuTask(tabId, execution, data.next_url).then(
+          () => {
+            continuing = false;
+          },
+          (error: unknown) => {
+            cleanup();
+            reject(error);
+          },
+        );
+        return false;
+      }
+      if (data.status !== "ok" && data.status !== "empty") return false;
+      cleanup();
+      resolve(aggregate);
       return false;
     };
     const deadlineBudget = Date.parse(requestDeadlineAt) - Date.now() - 1_000;
     const timeout = setTimeout(() => {
       cleanup();
-      reject(new Error(`${action} timed out`));
+      reject(new Error(`${execution.resultAction} timed out`));
     }, Math.max(1, Math.min(RESULT_TIMEOUT_MS, deadlineBudget)));
     const cleanup = (): void => {
       clearTimeout(timeout);
@@ -303,6 +313,63 @@ function waitForResult(taskId: string, action: string, requestDeadlineAt: string
     };
     chrome.runtime.onMessage.addListener(listener);
   });
+}
+
+async function continueXiaohongshuTask(
+  tabId: number,
+  execution: LegacyExecution,
+  nextUrl: string,
+): Promise<void> {
+  const url = requireSourceUrl(nextUrl, "next_url", "xiaohongshu.com");
+  await chrome.tabs.update(tabId, { url, active: execution.active });
+  await waitForTabReady(tabId);
+  await sendWhenContentReady(tabId, { action: execution.action, data: execution.data });
+}
+
+function mergeRuntimeResults(
+  previous: RuntimeMessage,
+  current: RuntimeMessage,
+): RuntimeMessage {
+  const merged: RuntimeMessage = { ...previous, ...current };
+  for (const field of ["items", "notes", "videos", "urls"] as const) {
+    const combined = [...arrayValue(previous[field]), ...arrayValue(current[field])];
+    if (combined.length > 0) merged[field] = uniqueValues(combined);
+  }
+  return merged;
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function uniqueValues(values: unknown[]): unknown[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const key = typeof value === "string" ? `string:${value}` : `json:${safeStableJson(value)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function safeStableJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, Object.keys(asRecord(value)).sort());
+  } catch {
+    return String(value);
+  }
+}
+
+function xiaohongshuCreatorUrl(value: string): string {
+  const creator = value.trim();
+  if (!creator) throw new Error("creator identifier cannot be empty");
+  if (/^https?:\/\//i.test(creator)) {
+    return requireSourceUrl(creator, "creator", "xiaohongshu.com");
+  }
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(creator)) {
+    throw new Error("creator identifier contains unsupported characters");
+  }
+  return `https://www.xiaohongshu.com/user/profile/${encodeURIComponent(creator)}`;
 }
 
 function assertOperation<T extends SourceOperation>(

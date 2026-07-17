@@ -186,6 +186,63 @@ class SQLAlchemyBrowserTaskRepository:
             )
         raise StaleSourceTaskLeaseError("source task completion lease is stale")
 
+    def fail(
+        self,
+        *,
+        task_id: UUID,
+        lease_token: str,
+        failure: dict[str, JsonValue],
+    ) -> SourceTaskCompletion:
+        row = self._session.scalar(
+            update(SourceTaskModel)
+            .where(
+                SourceTaskModel.id == str(task_id),
+                SourceTaskModel.status == SourceTaskStatus.IN_PROGRESS.value,
+                SourceTaskModel.lease_token == lease_token,
+                _database_time_is_before(SourceTaskModel.lease_expires_at),
+                _database_time_is_before(SourceTaskModel.request_deadline_at),
+            )
+            .values(
+                status=SourceTaskStatus.FAILED.value,
+                result_payload=failure,
+                lease_expires_at=None,
+                updated_at=_database_time(),
+            )
+            .returning(SourceTaskModel)
+        )
+        if row is not None:
+            return SourceTaskCompletion(
+                id=task_id,
+                completed_at=_aware(row.updated_at),
+                idempotent=False,
+            )
+        self._abandon_expired(task_id=task_id)
+        self._session.expire_all()
+        row = self._session.get(SourceTaskModel, str(task_id))
+        if row is None:
+            raise LookupError(f"source task does not exist: {task_id}")
+        if row.status == SourceTaskStatus.CANCELLED.value:
+            raise CancelledSourceTaskError("source task was cancelled")
+        if row.status == SourceTaskStatus.ABANDONED.value:
+            raise AbandonedSourceTaskError("source task request deadline expired")
+        if row.status == SourceTaskStatus.FAILED.value:
+            if row.lease_token != lease_token:
+                raise StaleSourceTaskLeaseError("source task completion lease is stale")
+            if row.result_payload != failure:
+                raise SourceTaskCompletionConflictError(
+                    "source task was already failed with a different classification"
+                )
+            return SourceTaskCompletion(
+                id=task_id,
+                completed_at=_aware(row.updated_at),
+                idempotent=True,
+            )
+        if row.status == SourceTaskStatus.COMPLETED.value:
+            raise SourceTaskCompletionConflictError(
+                "source task was already completed successfully"
+            )
+        raise StaleSourceTaskLeaseError("source task completion lease is stale")
+
     def cancel(self, task_id: UUID) -> SourceTaskSnapshot:
         row = self._session.scalar(
             update(SourceTaskModel)
@@ -212,7 +269,12 @@ class SQLAlchemyBrowserTaskRepository:
                 "operation": SourceOperation(row.operation),
                 "status": SourceTaskStatus(row.status),
                 "request_deadline_at": _aware(row.request_deadline_at),
-                "result": row.result_payload,
+                "result": row.result_payload
+                if row.status == SourceTaskStatus.COMPLETED.value
+                else None,
+                "failure": row.result_payload
+                if row.status == SourceTaskStatus.FAILED.value
+                else None,
             }
         )
 
@@ -228,7 +290,12 @@ class SQLAlchemyBrowserTaskRepository:
                 "operation": SourceOperation(row.operation),
                 "status": SourceTaskStatus(row.status),
                 "request_deadline_at": _aware(row.request_deadline_at),
-                "result": row.result_payload,
+                "result": row.result_payload
+                if row.status == SourceTaskStatus.COMPLETED.value
+                else None,
+                "failure": row.result_payload
+                if row.status == SourceTaskStatus.FAILED.value
+                else None,
             }
         )
 
@@ -315,6 +382,13 @@ class QueuedBrowserTransport:
                         raise CancelledSourceTaskError("browser source task was cancelled")
                     if snapshot.status is SourceTaskStatus.ABANDONED:
                         raise TimeoutError("browser source task request deadline expired")
+                    if snapshot.status is SourceTaskStatus.FAILED:
+                        failure = snapshot.failure
+                        if failure is None:
+                            raise RuntimeError("browser source task failed without classification")
+                        raise RuntimeError(
+                            f"browser source task failed: {failure.code} ({failure.error_type})"
+                        )
                     await asyncio.sleep(self._poll_interval)
         except BaseException as original_error:
             cleanup_task = asyncio.create_task(self._compensate(enqueue_task, task_id))

@@ -22,6 +22,7 @@ from openbiliclaw.features.sources.domain import (
     SourceManifest,
     SourceSettingsState,
     SourceTaskCompletion,
+    SourceTaskFailure,
     SourceTaskRequest,
     SourceTaskSnapshot,
     UnsupportedSourceOperationError,
@@ -81,6 +82,14 @@ class SourceTaskRepository(Protocol):
         task_id: UUID,
         lease_token: str,
         result: dict[str, JsonValue],
+    ) -> SourceTaskCompletion: ...
+
+    def fail(
+        self,
+        *,
+        task_id: UUID,
+        lease_token: str,
+        failure: dict[str, JsonValue],
     ) -> SourceTaskCompletion: ...
 
     def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
@@ -350,6 +359,29 @@ class SourceTaskService:
                 task_id=task_id,
                 lease_token=lease_token,
                 result=serialized_result,
+            )
+            uow.commit()
+        return completion
+
+    def fail(
+        self,
+        task_id: UUID,
+        lease_token: str,
+        *,
+        code: str,
+        error_type: str,
+    ) -> SourceTaskCompletion:
+        """Finish browser work with a bounded classification and no page error text."""
+
+        failure = SourceTaskFailure.model_validate(
+            {"code": code, "error_type": error_type}, strict=True
+        )
+        safe_failure = _safe_json_object(failure.model_dump(mode="json"))
+        with self._uow_factory() as uow:
+            completion = uow.source_tasks.fail(
+                task_id=task_id,
+                lease_token=lease_token,
+                failure=safe_failure,
             )
             uow.commit()
         return completion

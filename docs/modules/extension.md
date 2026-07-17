@@ -10,7 +10,7 @@ popup 产品界面。
 content adapters (Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit)
   ├─ passive behavior ─► ActivityEvent normalization ─► POST /api/v1/events
   └─ browser operation ◄─ generic claim loop ◄──────── GET /api/v1/source-tasks/claim
-                         └─ typed result ──────────────► POST /api/v1/source-tasks/{id}/complete
+                         └─ typed result/failure ───────► POST /api/v1/source-tasks/{id}/complete
 
 popup ─► generated API client ─► device-key exchange ─► finite bearer
                               └─► authenticated fetch-SSE / JSON APIs
@@ -19,7 +19,7 @@ popup ─► generated API client ─► device-key exchange ─► finite beare
 来源别名只允许出现在各平台 adapter 内；transport 使用 `bilibili`、`xiaohongshu`、
 `douyin`、`youtube`、`twitter`、`zhihu`、`reddit`。任务 operation 与 manifest 声明一致，
 不支持的 operation 不模拟。claim payload/result 先经过生成类型与运行时校验，credential-shaped
-字段不会回传。
+字段不会回传。失败回写只携带闭合 code 和经校验的异常类型，不携带页面错误文本。
 
 ## Popup 范围
 

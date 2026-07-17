@@ -143,6 +143,10 @@ class SourceTasksPort(Protocol):
         self, task_id: UUID, lease_token: str, result: BrowserOperationResultValue
     ) -> SourceTaskCompletion: ...
 
+    def fail(
+        self, task_id: UUID, lease_token: str, *, code: str, error_type: str
+    ) -> SourceTaskCompletion: ...
+
 
 class ActivityPort(Protocol):
     def ingest(self, event: ActivityEvent) -> tuple[ProfileSignal, ...]: ...

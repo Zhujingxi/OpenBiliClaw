@@ -417,8 +417,24 @@ class SourceTaskStatus(StrEnum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
+    FAILED = "failed"
     CANCELLED = "cancelled"
     ABANDONED = "abandoned"
+
+
+class SourceTaskFailure(BaseModel):
+    """Secret-free browser execution failure classification."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    code: Literal[
+        "claim_mismatch",
+        "operation_mismatch",
+        "result_mismatch",
+        "deadline_exceeded",
+        "execution_failed",
+    ]
+    error_type: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,79}$")
 
 
 class SourceTaskSnapshot(BaseModel):
@@ -431,6 +447,7 @@ class SourceTaskSnapshot(BaseModel):
     status: SourceTaskStatus
     request_deadline_at: AwareDatetime
     result: BrowserOperationResultValue | None = Field(default=None, discriminator="operation")
+    failure: SourceTaskFailure | None = None
 
 
 class SourceTaskCompletion(BaseModel):

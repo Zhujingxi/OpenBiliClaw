@@ -12,9 +12,15 @@ export type BrowserTaskResult = {
   readonly items: ReadonlyArray<Record<string, unknown>>;
 };
 
+export type SourceTaskFailure = {
+  readonly code: "claim_mismatch" | "operation_mismatch" | "result_mismatch" | "deadline_exceeded" | "execution_failed";
+  readonly error_type: "TaskContractError" | "TaskDeadlineError" | string;
+};
+
 export interface SourceTaskTransport {
   claim(sourceId: SourceId): Promise<ClaimedSourceTask | null>;
   complete(taskId: string, leaseToken: string, result: BrowserTaskResult): Promise<void>;
+  fail(taskId: string, leaseToken: string, failure: SourceTaskFailure): Promise<void>;
 }
 
 export interface SourceTaskDispatcher {
@@ -35,11 +41,17 @@ export function validateClaimedTask(
   operations: ReadonlyArray<SourceOperation>,
 ): ClaimedSourceTask {
   if (task.source_id !== sourceId) {
-    throw new Error(`source mismatch: expected ${sourceId}, got ${task.source_id}`);
+    throw new TaskContractError(
+      "claim_mismatch",
+      `source mismatch: expected ${sourceId}, got ${task.source_id}`,
+    );
   }
   const operation = task.payload.operation;
   if (!operations.includes(operation)) {
-    throw new Error(`operation mismatch: ${sourceId} does not dispatch ${operation}`);
+    throw new TaskContractError(
+      "operation_mismatch",
+      `operation mismatch: ${sourceId} does not dispatch ${operation}`,
+    );
   }
   return task;
 }
@@ -50,9 +62,16 @@ export function createSourceTaskDispatcher(options: DispatcherOptions): SourceTa
   async function poll(): Promise<boolean> {
     const claimed = await options.transport.claim(options.sourceId);
     if (!claimed) return false;
-    const task = validateClaimedTask(claimed, options.sourceId, options.operations);
-    const result = normalizeResult(task.payload, await options.execute(task));
-    await options.transport.complete(task.id, task.lease_token, result);
+    try {
+      const task = validateClaimedTask(claimed, options.sourceId, options.operations);
+      const result = normalizeResult(
+        task.payload,
+        await beforeRequestDeadline(task.request_deadline_at, options.execute(task)),
+      );
+      await options.transport.complete(task.id, task.lease_token, result);
+    } catch (error) {
+      await options.transport.fail(claimed.id, claimed.lease_token, failureFrom(error));
+    }
     return true;
   }
 
@@ -73,7 +92,10 @@ function normalizeResult(
   result: BrowserTaskResult,
 ): BrowserTaskResult {
   if (result.operation !== request.operation) {
-    throw new Error(`result operation mismatch: expected ${request.operation}`);
+    throw new TaskContractError(
+      "result_mismatch",
+      `result operation mismatch: expected ${request.operation}`,
+    );
   }
   if (!Array.isArray(result.items)) throw new Error("source task result items must be an array");
   rejectCredentialFields(result.items);
@@ -108,5 +130,76 @@ export function createSourceTaskTransport(apiClient: ApiClient): SourceTaskTrans
         body: { lease_token: leaseToken, result },
       });
     },
+    async fail(taskId, leaseToken, failure) {
+      await apiClient.request("v1_source_tasks_complete", {
+        path: { task_id: taskId },
+        body: { lease_token: leaseToken, failure },
+      });
+    },
   };
+}
+
+class TaskContractError extends Error {
+  readonly code: SourceTaskFailure["code"];
+
+  constructor(
+    code: SourceTaskFailure["code"],
+    message: string,
+  ) {
+    super(message);
+    this.name = "TaskContractError";
+    this.code = code;
+  }
+}
+
+class TaskDeadlineError extends Error {
+  constructor() {
+    super("source task request deadline reached");
+    this.name = "TaskDeadlineError";
+  }
+}
+
+function beforeRequestDeadline<T>(deadlineAt: string, work: Promise<T>): Promise<T> {
+  // Reserve enough time for the authenticated failure POST to arrive before
+  // the backend's durable request deadline closes the lease.
+  const reserveForFailureMs = 2_000;
+  const budgetMs = Date.parse(deadlineAt) - Date.now() - reserveForFailureMs;
+  if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
+    void work.catch(() => undefined);
+    return Promise.reject(new TaskDeadlineError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new TaskDeadlineError()),
+      Math.min(budgetMs, 2_147_483_647),
+    );
+    work.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
+function failureFrom(error: unknown): SourceTaskFailure {
+  if (error instanceof TaskContractError) {
+    return { code: error.code, error_type: "TaskContractError" };
+  }
+  if (error instanceof TaskDeadlineError) {
+    return { code: "deadline_exceeded", error_type: "TaskDeadlineError" };
+  }
+  return {
+    code: "execution_failed",
+    error_type: safeErrorType(error),
+  };
+}
+
+function safeErrorType(error: unknown): string {
+  const value = error instanceof Error ? error.name : "UnknownError";
+  return /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(value) ? value : "UnknownError";
 }

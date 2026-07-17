@@ -1054,6 +1054,16 @@
       "CompleteSourceTask": {
         "additionalProperties": false,
         "properties": {
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceTaskFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "lease_token": {
             "maxLength": 100,
             "minLength": 20,
@@ -1061,47 +1071,53 @@
             "type": "string"
           },
           "result": {
-            "discriminator": {
-              "mapping": {
-                "bootstrap_import": "#/components/schemas/BrowserBootstrapResult",
-                "community": "#/components/schemas/BrowserCommunityResult",
-                "creator": "#/components/schemas/BrowserCreatorResult",
-                "feed": "#/components/schemas/BrowserFeedResult",
-                "related": "#/components/schemas/BrowserRelatedResult",
-                "search": "#/components/schemas/BrowserSearchResult",
-                "trending": "#/components/schemas/BrowserTrendingResult"
-              },
-              "propertyName": "operation"
-            },
-            "oneOf": [
+            "anyOf": [
               {
-                "$ref": "#/components/schemas/BrowserBootstrapResult"
+                "discriminator": {
+                  "mapping": {
+                    "bootstrap_import": "#/components/schemas/BrowserBootstrapResult",
+                    "community": "#/components/schemas/BrowserCommunityResult",
+                    "creator": "#/components/schemas/BrowserCreatorResult",
+                    "feed": "#/components/schemas/BrowserFeedResult",
+                    "related": "#/components/schemas/BrowserRelatedResult",
+                    "search": "#/components/schemas/BrowserSearchResult",
+                    "trending": "#/components/schemas/BrowserTrendingResult"
+                  },
+                  "propertyName": "operation"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/BrowserBootstrapResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BrowserSearchResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BrowserTrendingResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BrowserFeedResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BrowserRelatedResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BrowserCreatorResult"
+                  },
+                  {
+                    "$ref": "#/components/schemas/BrowserCommunityResult"
+                  }
+                ]
               },
               {
-                "$ref": "#/components/schemas/BrowserSearchResult"
-              },
-              {
-                "$ref": "#/components/schemas/BrowserTrendingResult"
-              },
-              {
-                "$ref": "#/components/schemas/BrowserFeedResult"
-              },
-              {
-                "$ref": "#/components/schemas/BrowserRelatedResult"
-              },
-              {
-                "$ref": "#/components/schemas/BrowserCreatorResult"
-              },
-              {
-                "$ref": "#/components/schemas/BrowserCommunityResult"
+                "type": "null"
               }
             ],
             "title": "Result"
           }
         },
         "required": [
-          "lease_token",
-          "result"
+          "lease_token"
         ],
         "title": "CompleteSourceTask",
         "type": "object"
@@ -2888,6 +2904,34 @@
           "idempotent"
         ],
         "title": "SourceTaskCompletion",
+        "type": "object"
+      },
+      "SourceTaskFailure": {
+        "additionalProperties": false,
+        "description": "Secret-free browser execution failure classification.",
+        "properties": {
+          "code": {
+            "enum": [
+              "claim_mismatch",
+              "operation_mismatch",
+              "result_mismatch",
+              "deadline_exceeded",
+              "execution_failed"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "error_type": {
+            "pattern": "^[A-Za-z][A-Za-z0-9_.-]{0,79}$",
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "error_type"
+        ],
+        "title": "SourceTaskFailure",
         "type": "object"
       },
       "SourceTransportKind": {

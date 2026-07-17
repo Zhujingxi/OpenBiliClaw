@@ -69,6 +69,7 @@ function navigate(page) {
     "settings",
   ]);
   if (!allowed.has(page)) page = "feed";
+  state.page = page;
   document.querySelectorAll("[data-page-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.pagePanel !== page;
   });
@@ -162,13 +163,13 @@ async function saveItem(collection, contentId) {
 }
 
 function renderFeed() {
-  const grid = $("#feedGrid");
+  const grid = $("#videoGrid");
   grid.innerHTML = "";
   const query = state.query.toLowerCase();
   const sourceIds = [
     ...new Set(state.feed.map(({ content }) => content.source_id)),
   ];
-  $("#sourceFilters").innerHTML = ["", ...sourceIds]
+  $("#filterRow").innerHTML = ["", ...sourceIds]
     .map(
       (source) =>
         `<button class="pill-btn" data-source-filter="${escapeHtml(source)}" aria-pressed="${source === state.sourceFilter}">${escapeHtml(source ? SOURCE_LABELS[source] || source : "全部来源")}</button>`,
@@ -209,16 +210,16 @@ async function loadFeed({ append = false } = {}) {
     state.feed = append ? [...state.feed, ...items] : items;
     state.offset = offset + items.length;
     renderFeed();
-    $("#loadMoreFeed").hidden = items.length < 24;
+    $("#loadMoreBtn").hidden = items.length < 24;
   } catch (error) {
-    $("#feedGrid").innerHTML =
+    $("#videoGrid").innerHTML =
       `<div class="vnext-empty">${escapeHtml(errorMessage(error))}</div>`;
   }
 }
 
 async function loadLibrary(collection) {
   const grid =
-    collection === "favorites" ? $("#favoritesGrid") : $("#watchLaterGrid");
+    collection === "favorites" ? $("#favoritesList") : $("#watchLaterList");
   grid.innerHTML = '<div class="vnext-empty">正在读取…</div>';
   try {
     const items = await request("v1_library_list", { path: { collection } });
@@ -321,9 +322,17 @@ async function watchJob(run) {
     await readSse(
       "v1_jobs_events",
       { path: { run_id: run.id } },
-      async ({ event }) => {
+      async ({ event, data }) => {
         if (state.page === "jobs") await loadJobs();
         if (event === "done") {
+          if (data.status === "failed" || data.status === "cancelled") {
+            toast(
+              data.status === "cancelled"
+                ? `${run.job_name} 已取消`
+                : `${run.job_name} 失败`,
+            );
+            return;
+          }
           toast(`${run.job_name} 已完成`);
           if (run.job_name === "feed_replenishment") await loadFeed();
         }
@@ -606,10 +615,12 @@ async function start() {
     $("#statusLabel").textContent = ready.ready
       ? `v${ready.version} 已就绪`
       : `v${ready.version} 启动中`;
+    $("#runtimeSummary").textContent = ready.ready ? "运行正常" : "启动中";
     await loadFeed();
     navigate(location.hash.slice(1) || "feed");
   } catch (error) {
     $("#statusLabel").textContent = "后端不可用";
+    $("#runtimeSummary").textContent = "不可用";
     toast(errorMessage(error));
   }
 }
@@ -619,13 +630,16 @@ document
   .forEach((button) =>
     button.addEventListener("click", () => navigate(button.dataset.page)),
   );
+$("#sideDrawerBtn").addEventListener("click", () => {
+  $("#sideDrawer").classList.toggle("is-open");
+});
 $("#searchForm").addEventListener("submit", (event) => {
   event.preventDefault();
   state.query = $("#searchInput").value.trim();
   renderFeed();
 });
 $("#refreshFeed").addEventListener("click", () => void loadFeed());
-$("#loadMoreFeed").addEventListener(
+$("#loadMoreBtn").addEventListener(
   "click",
   () => void loadFeed({ append: true }),
 );

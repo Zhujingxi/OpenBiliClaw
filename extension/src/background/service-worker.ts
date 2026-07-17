@@ -56,6 +56,12 @@ const taskTransport: SourceTaskTransport = {
       },
     });
   },
+  async fail(taskId, leaseToken, failure) {
+    await (await getApiClient()).request("v1_source_tasks_complete", {
+      path: { task_id: taskId },
+      body: { lease_token: leaseToken, failure },
+    });
+  },
 };
 
 const sourceTaskDispatchers: SourceTaskDispatcher[] = Object.entries(BROWSER_SOURCE_OPERATIONS)

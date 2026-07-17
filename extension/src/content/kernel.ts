@@ -50,7 +50,7 @@ export function startCollector(adapter: PlatformAdapter): void {
     now: () => performance.now(),
     emit: (event) => sendEvent(event),
     buildEvent: (previousUrl, metadata) => ({
-      type: "click",
+      type: "dwell",
       url: previousUrl,
       title: document.title || "",
       timestamp: Date.now(),

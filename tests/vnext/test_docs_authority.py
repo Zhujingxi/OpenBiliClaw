@@ -166,6 +166,31 @@ def test_historical_v03_material_is_explicitly_archived() -> None:
     assert "Historical v0.3 archive" in source_guide
 
 
+def test_architecture_archive_does_not_restate_removed_runtime_as_current() -> None:
+    architecture = _read("docs/architecture.md")
+    archive = architecture.split("## 已停止作为入口的 v0.3 实现", 1)[1]
+
+    assert "不再是当前架构" in archive
+    assert "Git 历史" in archive
+    for removed_runtime in (
+        "/api/saved",
+        "ExtensionNativeSaveBroker",
+        "SavedSyncService",
+        "AutoUpdateService",
+        "runtime-stream",
+        "WebSocket",
+        "API Auth Gateway",
+        "OrderedLLMRoute",
+        "RuntimeModelBundle",
+        "/api/sources/zhihu/task-result",
+        "/api/sources/reddit/task-result",
+    ):
+        assert removed_runtime not in architecture, removed_runtime
+
+    # Architecture is an authority document, not an embedded copy of the old design.
+    assert len(archive.splitlines()) <= 12
+
+
 def test_config_doc_matches_current_strict_user_settings_schema() -> None:
     source = _read("docs/modules/config.md")
     for group in (

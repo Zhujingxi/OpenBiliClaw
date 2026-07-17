@@ -189,6 +189,13 @@ class _SourceTasks:
             idempotent=False,
         )
 
+    def fail(self, task_id: UUID, lease_token: str, *, code: str, error_type: str):
+        return SourceTaskCompletion(
+            id=task_id,
+            completed_at=datetime(2026, 7, 17, tzinfo=UTC),
+            idempotent=False,
+        )
+
 
 class _Sources:
     def __init__(self) -> None:
@@ -515,6 +522,35 @@ def test_source_task_long_poll_complete_and_secret_payload_rejection(client: Tes
     )
     assert rejected.status_code == 422
     assert "must-not-echo" not in rejected.text
+
+
+def test_source_task_failure_completion_accepts_only_safe_classification(
+    client: TestClient,
+) -> None:
+    task_id = uuid4()
+    accepted = client.post(
+        f"/api/v1/source-tasks/{task_id}/complete",
+        headers=_auth(),
+        json={
+            "lease_token": "x" * 20,
+            "failure": {"code": "execution_failed", "error_type": "PageLoadError"},
+        },
+    )
+    rejected = client.post(
+        f"/api/v1/source-tasks/{task_id}/complete",
+        headers=_auth(),
+        json={
+            "lease_token": "x" * 20,
+            "failure": {
+                "code": "execution_failed",
+                "error_type": "Error: cookie=do-not-send",
+            },
+        },
+    )
+
+    assert accepted.status_code == 200
+    assert rejected.status_code == 422
+    assert "do-not-send" not in rejected.text
 
 
 def test_chat_and_job_progress_are_standard_sse(client: TestClient) -> None:

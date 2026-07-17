@@ -11,13 +11,33 @@ const $app = document.getElementById("app"),
   $status = document.getElementById("status-bar"),
   $tabs = document.getElementById("tab-bar");
 const tabs = [
-  { id: "feed", icon: "✨", label: "推荐" },
-  { id: "watch_later", icon: "🕐", label: "稍后" },
+  { id: "recommend", icon: "✨", label: "推荐" },
+  { id: "watchLater", icon: "🕐", label: "稍后" },
   { id: "favorites", icon: "⭐", label: "收藏" },
   { id: "profile", icon: "🧠", label: "画像" },
   { id: "chat", icon: "💬", label: "对话" },
 ];
-const state = { page: "feed", feed: [], profile: null, settings: null };
+const state = { page: "recommend", feed: [], profile: null, settings: null };
+
+function ensureViews() {
+  for (const tab of tabs) {
+    if (document.getElementById(`view-${tab.id}`)) continue;
+    const view = document.createElement("section");
+    view.id = `view-${tab.id}`;
+    view.className = "view";
+    $app.appendChild(view);
+  }
+}
+
+function showView(id, markup) {
+  ensureViews();
+  const active = document.getElementById(`view-${id}`);
+  if (markup !== undefined) active.innerHTML = markup;
+  $app.querySelectorAll(".view").forEach((view) => {
+    view.classList.toggle("active", view === active);
+  });
+  return active;
+}
 
 function shell() {
   $status.innerHTML =
@@ -28,28 +48,44 @@ function shell() {
         `<button class="tab-item${state.page === tab.id ? " active" : ""}" data-tab="${tab.id}" role="tab" aria-selected="${state.page === tab.id}"><span class="tab-icon">${tab.icon}</span><span class="tab-label">${tab.label}</span></button>`,
     )
     .join("");
-  $tabs
-    .querySelectorAll("[data-tab]")
-    .forEach((button) =>
-      button.addEventListener("click", () => navigate(button.dataset.tab)),
-    );
+  $tabs.setAttribute("role", "tablist");
+  $tabs.querySelectorAll("[data-tab]").forEach((button, index) => {
+    button.tabIndex = button.dataset.tab === state.page ? 0 : -1;
+    button.addEventListener("click", () => navigate(button.dataset.tab));
+    button.addEventListener("keydown", (e) => {
+      let next = null;
+      if (e.key === "ArrowRight") next = tabs[(index + 1) % tabs.length];
+      if (e.key === "ArrowLeft")
+        next = tabs[(index - 1 + tabs.length) % tabs.length];
+      if (!next) return;
+      e.preventDefault();
+      navigate(next.id);
+      $tabs.querySelector('[aria-selected="true"]')?.focus();
+    });
+  });
   document
     .getElementById("mobileSettings")
     .addEventListener("click", () => void renderSettings());
 }
 
 function navigate(page) {
-  state.page = tabs.some((tab) => tab.id === page) ? page : "feed";
+  state.page = tabs.some((tab) => tab.id === page) ? page : "recommend";
   location.hash = `#/${state.page}`;
   shell();
-  if (state.page === "feed") renderFeed();
-  else if (state.page === "watch_later" || state.page === "favorites")
-    void renderLibrary(state.page);
+  showView(state.page);
+  if (state.page === "recommend") renderFeed();
+  else if (state.page === "watchLater" || state.page === "favorites")
+    void renderLibrary(
+      state.page === "watchLater" ? "watch_later" : "favorites",
+    );
   else if (state.page === "profile") void renderProfile();
   else void renderChat();
 }
 function empty(text) {
-  $app.innerHTML = `<section class="view active"><div class="empty-state"><p>${escapeHtml(text)}</p></div></section>`;
+  showView(
+    state.page,
+    `<div class="empty-state"><p>${escapeHtml(text)}</p></div>`,
+  );
 }
 function imageOf(content) {
   return (
@@ -114,8 +150,10 @@ function card(content, entry, collection = "") {
   return el;
 }
 function renderFeed() {
-  $app.innerHTML =
-    '<section class="view active"><div class="view-header"><div><p class="eyebrow">Discovery feed</p><h1>为你推荐</h1></div><button id="mobileReplenish" class="btn btn-brand">补齐</button></div><div id="mobileFeed" class="rec-list"></div></section>';
+  showView(
+    "recommend",
+    '<div class="view-header"><div><p class="eyebrow">Discovery feed</p><h1>为你推荐</h1></div><button id="mobileReplenish" class="btn btn-brand">补齐</button></div><div id="mobileFeed" class="rec-list"></div>',
+  );
   const host = document.getElementById("mobileFeed");
   if (!state.feed.length)
     host.innerHTML =
@@ -140,8 +178,14 @@ function renderFeed() {
         await readSse(
           "v1_jobs_events",
           { path: { run_id: run.id } },
-          async ({ event }) => {
+          async ({ event, data }) => {
             if (event === "done") {
+              if (data.status === "failed" || data.status === "cancelled") {
+                button.textContent =
+                  data.status === "cancelled" ? "已取消" : "任务失败";
+                button.disabled = false;
+                return;
+              }
               await loadFeed();
               button.textContent = "已完成";
             }
@@ -167,7 +211,10 @@ async function renderLibrary(collection) {
   empty("正在读取本地列表…");
   try {
     const items = await request("v1_library_list", { path: { collection } });
-    $app.innerHTML = `<section class="view active"><div class="view-header"><div><p class="eyebrow">${collection === "favorites" ? "Favorites" : "Watch later"}</p><h1>${collection === "favorites" ? "我的收藏" : "稍后再看"}</h1></div></div><div id="mobileLibrary" class="rec-list"></div></section>`;
+    showView(
+      collection === "favorites" ? "favorites" : "watchLater",
+      `<div class="view-header"><div><p class="eyebrow">${collection === "favorites" ? "Favorites" : "Watch later"}</p><h1>${collection === "favorites" ? "我的收藏" : "稍后再看"}</h1></div></div><div id="mobileLibrary" class="rec-list"></div>`,
+    );
     const host = document.getElementById("mobileLibrary");
     if (!items.length)
       host.innerHTML = '<div class="empty-state"><p>这里还没有内容。</p></div>';
@@ -183,7 +230,10 @@ async function renderProfile() {
   try {
     state.profile = await request("v1_profile_get");
     const p = state.profile;
-    $app.innerHTML = `<section class="view active"><div class="view-header"><div><p class="eyebrow">Evidence profile</p><h1>我的画像</h1><p>版本 ${p.revision} · 置信度 ${Math.round((p.confidence || 0) * 100)}%</p></div></div><form id="mobileProfile"><textarea id="mobileNarrative" rows="6" placeholder="画像叙述">${escapeHtml(p.narrative || "")}</textarea><div class="chip-list">${(p.facets || []).map((f) => `<span class="chip">${escapeHtml(f.name)} · ${escapeHtml(f.value)}</span>`).join("")}</div><button class="btn btn-brand">保存叙述</button></form></section>`;
+    showView(
+      "profile",
+      `<div class="view-header"><div><p class="eyebrow">Evidence profile</p><h1>我的画像</h1><p>版本 ${p.revision} · 置信度 ${Math.round((p.confidence || 0) * 100)}%</p></div></div><form id="mobileProfile"><textarea id="mobileNarrative" rows="6" placeholder="画像叙述">${escapeHtml(p.narrative || "")}</textarea><div class="chip-list">${(p.facets || []).map((f) => `<span class="chip">${escapeHtml(f.name)} · ${escapeHtml(f.value)}</span>`).join("")}</div><button class="btn btn-brand">保存叙述</button></form>`,
+    );
     document
       .getElementById("mobileProfile")
       .addEventListener("submit", async (event) => {
@@ -207,8 +257,10 @@ async function renderProfile() {
   }
 }
 async function renderChat() {
-  $app.innerHTML =
-    '<section class="view active"><div class="view-header"><div><p class="eyebrow">Taste dialogue</p><h1>聊聊你的口味</h1></div></div><div id="mobileChatLog" class="chat-messages"></div><form id="mobileChatForm" class="chat-composer"><textarea id="mobileChatInput" maxlength="20000" required placeholder="说说你最近喜欢或不喜欢的内容"></textarea><label><input id="mobileChatLearn" type="checkbox"> 学习本轮</label><button class="btn btn-brand">发送</button></form></section>';
+  showView(
+    "chat",
+    '<div class="view-header"><div><p class="eyebrow">Taste dialogue</p><h1>聊聊你的口味</h1></div></div><div id="mobileChatLog" class="chat-messages"></div><form id="mobileChatForm" class="chat-composer"><textarea id="mobileChatInput" maxlength="20000" required placeholder="说说你最近喜欢或不喜欢的内容"></textarea><label><input id="mobileChatLearn" type="checkbox"> 学习本轮</label><button class="btn btn-brand">发送</button></form>',
+  );
   const id = newConversationId();
   const log = document.getElementById("mobileChatLog");
   try {
@@ -345,7 +397,7 @@ async function boot() {
     document.getElementById("mobileStatus").textContent = ready.ready
       ? "在线"
       : "启动中";
-    state.page = location.hash.replace("#/", "") || "feed";
+    state.page = location.hash.replace("#/", "") || "recommend";
     await loadFeed();
     navigate(state.page);
   } catch (error) {
