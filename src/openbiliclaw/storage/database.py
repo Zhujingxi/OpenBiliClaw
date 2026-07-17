@@ -1724,6 +1724,54 @@ class Database:
         finally:
             conn.close()
 
+    def discount_events_by_confusion(self, evidence_refs: Sequence[str]) -> int:
+        """Discount events a proxy-resolved confusion pointed at (Phase 2 exit).
+
+        When a confusion resolves as ``proxy_behavior`` / misread, the behaviours
+        it was raised over should stop driving preference weight. For every
+        ``evidence_ref`` that parses to a stored event id, mark
+        ``metadata.discounted_by_confusion=true`` and cap ``signal_strength``
+        (same ``apply_confusion_discount`` patch the offline rereads honour).
+        Non-integer refs (topics / note ids) are skipped. Rows are never
+        deleted and non-metadata columns are never rewritten. Returns the count
+        of rows patched.
+        """
+        from openbiliclaw.sources.event_format import apply_confusion_discount
+
+        event_ids: list[int] = []
+        for ref in evidence_refs:
+            try:
+                event_ids.append(int(str(ref).strip()))
+            except (TypeError, ValueError):
+                continue
+        if not event_ids:
+            return 0
+        conn = self.open_connection()
+        try:
+            placeholders = ", ".join("?" for _ in event_ids)
+            rows = conn.execute(
+                f"SELECT id, metadata FROM events WHERE id IN ({placeholders})",
+                event_ids,
+            ).fetchall()
+            marked = 0
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                patched = apply_confusion_discount(metadata)
+                conn.execute(
+                    "UPDATE events SET metadata = ? WHERE id = ?",
+                    (json.dumps(patched, ensure_ascii=False), row["id"]),
+                )
+                marked += 1
+            conn.commit()
+            return marked
+        finally:
+            conn.close()
+
     def latest_retraction_time_for(self, url: str, action: str) -> datetime | None:
         """Return the newest stored retraction time for this identity + action.
 
