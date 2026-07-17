@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from openbiliclaw.api import dependencies as dependencies_module
 from openbiliclaw.api.dependencies import build_application_container
-from openbiliclaw.features.sources.domain import SourceId
+from openbiliclaw.features.sources.domain import SourceId, SourceOperation
 from openbiliclaw.infrastructure.database.models import SettingModel
 from openbiliclaw.infrastructure.database.operations import (
     SchemaNotReadyError,
@@ -79,6 +79,30 @@ def test_api_defers_source_settings_and_registry_until_after_schema_guard(
         asyncio.run(container.startup())
         assert calls == 1
         assert container.sources.settings(SourceId.DOUYIN).settings["mode"] == "extension"
+        assert (
+            next(
+                manifest
+                for manifest in container.sources.manifests()
+                if manifest.source_id is SourceId.DOUYIN
+            )
+            .operation_spec(SourceOperation.SEARCH)
+            .transport_kind.value
+            == "browser"
+        )
+
+        container.sources.update_settings(SourceId.DOUYIN, {"mode": "direct"})
+
+        assert calls == 2
+        assert (
+            next(
+                manifest
+                for manifest in container.sources.manifests()
+                if manifest.source_id is SourceId.DOUYIN
+            )
+            .operation_spec(SourceOperation.SEARCH)
+            .transport_kind.value
+            == "direct"
+        )
     finally:
         asyncio.run(container.shutdown())
 

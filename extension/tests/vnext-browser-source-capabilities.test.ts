@@ -4,21 +4,121 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 import {
-  BROWSER_SOURCE_OPERATIONS,
+  browserOperationsFromManifests,
   executeBrowserSourceTask,
+  LOCAL_BROWSER_SOURCE_OPERATIONS,
 } from "../src/background/browser-source-executor.ts";
 import type { ClaimedSourceTask } from "../src/background/generic-source-task-dispatcher.ts";
+import type {
+  SourceId,
+  SourceManifest,
+  SourceOperation,
+  SourceTransportKind,
+} from "../src/shared/api-client.ts";
 
-test("generic dispatcher retains the declared seven-source browser capability matrix", () => {
-  assert.deepEqual(BROWSER_SOURCE_OPERATIONS, {
+test("local executors retain all supported browser translations without advertising backend routes", () => {
+  assert.deepEqual(LOCAL_BROWSER_SOURCE_OPERATIONS, {
     bilibili: ["search"],
     xiaohongshu: ["bootstrap_import", "search", "creator"],
-    douyin: ["bootstrap_import"],
+    douyin: ["bootstrap_import", "search", "trending", "feed"],
     youtube: ["bootstrap_import"],
     zhihu: ["bootstrap_import", "search", "trending", "feed", "creator", "related"],
     reddit: ["bootstrap_import", "search", "trending", "community", "related"],
   });
-  assert.equal(BROWSER_SOURCE_OPERATIONS.twitter, undefined);
+  assert.equal(LOCAL_BROWSER_SOURCE_OPERATIONS.twitter, undefined);
+});
+
+function manifest(
+  sourceId: SourceId,
+  operations: ReadonlyArray<[
+    SourceOperation,
+    SourceTransportKind,
+    (SourceTransportKind | null)?,
+  ]>,
+): SourceManifest {
+  return {
+    source_id: sourceId,
+    display_name: sourceId,
+    capabilities: [],
+    operations: operations.map(([operation, transport_kind, fallback_transport_kind]) => ({
+      operation,
+      capability: operation === "search" ? "search" : "browser_assisted",
+      requires_auth: false,
+      result_kind: operation === "bootstrap_import" ? "activity" : "content",
+      transport_kind,
+      fallback_transport_kind,
+    })),
+  };
+}
+
+const retainedSourceManifests: SourceManifest[] = [
+  manifest("bilibili", [
+    ["bootstrap_import", "direct"],
+    ["search", "direct", "browser"],
+    ["trending", "direct"],
+  ]),
+  manifest("xiaohongshu", [
+    ["bootstrap_import", "browser"],
+    ["search", "browser"],
+    ["creator", "browser"],
+  ]),
+  manifest("youtube", [
+    ["bootstrap_import", "browser"],
+    ["search", "direct"],
+  ]),
+  manifest("twitter", [["search", "cli"]]),
+  manifest("zhihu", [
+    ["bootstrap_import", "browser"],
+    ["search", "browser"],
+    ["trending", "browser"],
+    ["feed", "browser"],
+    ["creator", "browser"],
+    ["related", "browser"],
+  ]),
+  manifest("reddit", [
+    ["bootstrap_import", "browser"],
+    ["search", "browser"],
+    ["trending", "browser"],
+    ["community", "browser"],
+    ["related", "browser"],
+  ]),
+];
+
+test("dispatcher operations follow all seven backend manifests and browser fallbacks", () => {
+  assert.deepEqual(
+    browserOperationsFromManifests([
+      ...retainedSourceManifests,
+      manifest("douyin", [
+        ["bootstrap_import", "browser"],
+        ["search", "direct"],
+        ["trending", "direct"],
+        ["feed", "direct"],
+      ]),
+    ]),
+    {
+      bilibili: ["search"],
+      xiaohongshu: ["bootstrap_import", "search", "creator"],
+      douyin: ["bootstrap_import"],
+      youtube: ["bootstrap_import"],
+      zhihu: ["bootstrap_import", "search", "trending", "feed", "creator", "related"],
+      reddit: ["bootstrap_import", "search", "trending", "community", "related"],
+    },
+  );
+});
+
+test("persisted Douyin extension mode dynamically exposes its browser discovery operations", () => {
+  const operations = browserOperationsFromManifests([
+    manifest("douyin", [
+      ["bootstrap_import", "browser"],
+      ["search", "browser"],
+      ["trending", "browser"],
+      ["feed", "browser"],
+    ]),
+  ]);
+
+  assert.deepEqual(operations, {
+    douyin: ["bootstrap_import", "search", "trending", "feed"],
+  });
 });
 
 type RuntimeListener = (message: Record<string, unknown>) => boolean;
@@ -28,10 +128,18 @@ function installChromeTaskHarness(
     message: Record<string, unknown>,
     emit: (action: string, data: Record<string, unknown>) => void,
   ) => void,
-): { createdUrls: string[]; updatedUrls: string[]; sent: Record<string, unknown>[] } {
+  options: { failSend?: boolean } = {},
+): {
+  createdUrls: string[];
+  updatedUrls: string[];
+  removedTabIds: number[];
+  sent: Record<string, unknown>[];
+  listenerCount(): number;
+} {
   const listeners = new Set<RuntimeListener>();
   const createdUrls: string[] = [];
   const updatedUrls: string[] = [];
+  const removedTabIds: number[] = [];
   const sent: Record<string, unknown>[] = [];
   const emit = (action: string, data: Record<string, unknown>): void => {
     for (const listener of listeners) listener({ action, data });
@@ -47,10 +155,13 @@ function installChromeTaskHarness(
           updatedUrls.push(url);
           return { id: 17, status: "complete" };
         },
-        remove: async () => undefined,
+        remove: async (tabId: number) => {
+          removedTabIds.push(tabId);
+        },
         get: async () => ({ id: 17, status: "complete" }),
         sendMessage: async (_tabId: number, message: Record<string, unknown>) => {
           sent.push(message);
+          if (options.failSend) throw new Error("content script unavailable");
           queueMicrotask(() => onSend(message, emit));
           return undefined;
         },
@@ -67,7 +178,13 @@ function installChromeTaskHarness(
       },
     },
   });
-  return { createdUrls, updatedUrls, sent };
+  return {
+    createdUrls,
+    updatedUrls,
+    removedTabIds,
+    sent,
+    listenerCount: () => listeners.size,
+  };
 }
 
 function xhsTask(payload: ClaimedSourceTask["payload"]): ClaimedSourceTask {
@@ -93,6 +210,9 @@ test("six browser-assisted sources execute typed translations and Twitter remain
     BILI_TASK_EXECUTE: ["BILI_TASK_RESULT", "videos"],
     XHS_TASK_EXECUTE: ["XHS_TASK_RESULT", "notes"],
     DY_SCOPE_EXECUTE: ["DY_SCOPE_RESULT", "items"],
+    DY_SEARCH_EXECUTE: ["DY_SEARCH_RESULT", "items"],
+    DY_HOT_EXECUTE: ["DY_HOT_RESULT", "items"],
+    DY_FEED_EXECUTE: ["DY_FEED_RESULT", "items"],
     YT_SCOPE_EXECUTE: ["YT_SCOPE_RESULT", "items"],
     ZHIHU_TASK_EXECUTE: ["ZHIHU_TASK_RESULT", "items"],
     REDDIT_TASK_EXECUTE: ["REDDIT_TASK_RESULT", "items"],
@@ -114,6 +234,9 @@ test("six browser-assisted sources execute typed translations and Twitter remain
     [claimedTask("bilibili", { operation: "search", query: "typed", limit: 2 }), 1],
     [claimedTask("xiaohongshu", { operation: "search", query: "typed", limit: 2 }), 1],
     [claimedTask("douyin", { operation: "bootstrap_import", limit: 2 }), 4],
+    [claimedTask("douyin", { operation: "search", query: "typed", limit: 2 }), 1],
+    [claimedTask("douyin", { operation: "trending", limit: 2 }), 1],
+    [claimedTask("douyin", { operation: "feed", limit: 2 }), 1],
     [claimedTask("youtube", { operation: "bootstrap_import", limit: 2 }), 3],
     [claimedTask("zhihu", { operation: "search", query: "typed", limit: 2 }), 1],
     [claimedTask("reddit", { operation: "search", query: "typed", limit: 2 }), 1],
@@ -130,6 +253,9 @@ test("six browser-assisted sources execute typed translations and Twitter remain
     "DY_SCOPE_EXECUTE",
     "DY_SCOPE_EXECUTE",
     "DY_SCOPE_EXECUTE",
+    "DY_SEARCH_EXECUTE",
+    "DY_HOT_EXECUTE",
+    "DY_FEED_EXECUTE",
     "YT_SCOPE_EXECUTE",
     "YT_SCOPE_EXECUTE",
     "YT_SCOPE_EXECUTE",
@@ -215,6 +341,31 @@ test("Xiaohongshu creator accepts valid source profile URLs without changing the
   assert.deepEqual(harness.createdUrls, [profileUrl]);
 });
 
+test("content delivery failure immediately removes the pending result listener", async () => {
+  const controller = new AbortController();
+  const harness = installChromeTaskHarness(() => undefined, { failSend: true });
+  const realNow = Date.now;
+  let fakeNow = realNow();
+  Date.now = () => {
+    fakeNow += 9_000;
+    return fakeNow;
+  };
+  try {
+    await assert.rejects(
+      () => executeBrowserSourceTask(
+        claimedTask("bilibili", { operation: "search", query: "typed", limit: 2 }),
+        controller.signal,
+      ),
+      /content script unavailable/,
+    );
+    assert.equal(harness.listenerCount(), 0);
+    assert.deepEqual(harness.removedTabIds, [17]);
+  } finally {
+    Date.now = realNow;
+    controller.abort();
+  }
+});
+
 test("every retained executor and Twitter passive collector remains in the build graph", () => {
   const contentContracts = {
     bilibili: "installBiliMessageListener",
@@ -230,6 +381,11 @@ test("every retained executor and Twitter passive collector remains in the build
   const worker = readFileSync(resolve("src/background/service-worker.ts"), "utf8");
   assert.match(worker, /createSourceTaskDispatcher/);
   assert.match(worker, /executeBrowserSourceTask/);
+  assert.match(
+    worker,
+    /catch \{\s+sourceTaskDispatchers = \[\];\s+backendReachable = false;\s+return;/,
+    "a failed manifest refresh must not claim through stale dispatchers",
+  );
   for (const [source, marker] of Object.entries(contentContracts)) {
     const sourceText = readFileSync(resolve(`src/content/${source}.ts`), "utf8");
     assert.match(sourceText, new RegExp(marker.replace(/[()]/g, "\\$&")));

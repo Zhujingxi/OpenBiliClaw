@@ -32,7 +32,10 @@ interface DispatcherOptions {
   readonly sourceId: SourceId;
   readonly operations: ReadonlyArray<SourceOperation>;
   readonly transport: SourceTaskTransport;
-  readonly execute: (task: ClaimedSourceTask) => Promise<BrowserTaskResult>;
+  readonly execute: (
+    task: ClaimedSourceTask,
+    signal: AbortSignal,
+  ) => Promise<BrowserTaskResult>;
 }
 
 export function validateClaimedTask(
@@ -66,7 +69,10 @@ export function createSourceTaskDispatcher(options: DispatcherOptions): SourceTa
       const task = validateClaimedTask(claimed, options.sourceId, options.operations);
       const result = normalizeResult(
         task.payload,
-        await beforeRequestDeadline(task.request_deadline_at, options.execute(task)),
+        await beforeRequestDeadline(
+          task.request_deadline_at,
+          (signal) => options.execute(task, signal),
+        ),
       );
       await options.transport.complete(task.id, task.lease_token, result);
     } catch (error) {
@@ -159,26 +165,48 @@ class TaskDeadlineError extends Error {
   }
 }
 
-function beforeRequestDeadline<T>(deadlineAt: string, work: Promise<T>): Promise<T> {
+function beforeRequestDeadline<T>(
+  deadlineAt: string,
+  startWork: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
   // Reserve enough time for the authenticated failure POST to arrive before
   // the backend's durable request deadline closes the lease.
   const reserveForFailureMs = 2_000;
   const budgetMs = Date.parse(deadlineAt) - Date.now() - reserveForFailureMs;
   if (!Number.isFinite(budgetMs) || budgetMs <= 0) {
-    void work.catch(() => undefined);
     return Promise.reject(new TaskDeadlineError());
   }
+  const controller = new AbortController();
   return new Promise<T>((resolve, reject) => {
+    let settled = false;
     const timeout = setTimeout(
-      () => reject(new TaskDeadlineError()),
+      () => {
+        if (settled) return;
+        settled = true;
+        controller.abort();
+        reject(new TaskDeadlineError());
+      },
       Math.min(budgetMs, 2_147_483_647),
     );
+    let work: Promise<T>;
+    try {
+      work = startWork(controller.signal);
+    } catch (error) {
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+      return;
+    }
     work.then(
       (value) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
         resolve(value);
       },
       (error: unknown) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
         reject(error);
       },

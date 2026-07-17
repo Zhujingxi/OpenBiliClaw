@@ -57,7 +57,7 @@
         font-weight: 700;
         font-size: 17px;
       }
-      .mark {
+      .brand .mark {
         width: 30px;
         height: 30px;
         border-radius: 9px;
@@ -87,27 +87,51 @@
       }
       .panel {
         display: none;
+        animation: fade 0.25s ease;
       }
       .panel.active {
         display: block;
       }
       h2 {
         margin: 0 0 6px;
+        font-size: 20px;
       }
-      .sub,
+      .sub {
+        margin: 0 0 20px;
+        color: var(--muted);
+        font-size: 14px;
+      }
       .hint {
         color: var(--muted);
-      }
-      .hint {
         font-size: 12.5px;
+        margin-top: 6px;
       }
-      .grid {
+      .alias-setup-layout {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-        margin: 18px 0;
+        grid-template-columns: minmax(0, 1.6fr) minmax(220px, 0.8fr);
+        gap: 18px;
+        align-items: start;
       }
-      .source {
+      .alias-admin-pane {
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(32, 36, 46, 0.45);
+      }
+      .alias-admin-pane h3 {
+        margin: 0 0 6px;
+        font-size: 15px;
+      }
+      .alias-admin-pane .button {
+        display: inline-flex;
+        margin-top: 10px;
+      }
+      .init-sources {
+        display: grid;
+        gap: 8px;
+        margin: 16px 0;
+      }
+      .init-source-row {
         padding: 12px;
         border: 1px solid var(--line);
         border-radius: 12px;
@@ -116,15 +140,15 @@
         gap: 10px;
         align-items: flex-start;
       }
-      .source input {
+      .init-source-row input {
         margin-top: 5px;
         accent-color: var(--accent);
       }
-      .source strong,
-      .source small {
+      .init-source-row strong,
+      .init-source-row small {
         display: block;
       }
-      .source small {
+      .init-source-row small {
         color: var(--muted);
       }
       .alias-list {
@@ -147,7 +171,7 @@
       .bad {
         color: var(--err);
       }
-      .row {
+      .row-actions {
         display: flex;
         justify-content: space-between;
         gap: 10px;
@@ -195,19 +219,114 @@
         color: var(--ok);
         background: #36c46f1f;
       }
+      .msg.warn {
+        color: var(--warn);
+        background: rgba(244, 185, 66, 0.12);
+      }
+      .init-checks {
+        list-style: none;
+        padding: 0;
+        margin: 16px 0;
+        display: grid;
+        gap: 9px;
+      }
+      .init-checks li {
+        padding: 11px 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
       .progress {
+        margin-top: 18px;
+        padding: 13px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .progress-track {
         height: 8px;
-        border-radius: 99px;
+        border-radius: 999px;
         background: #10131a;
         overflow: hidden;
-        margin: 18px 0;
       }
-      .progress span {
-        display: block;
+      .progress-fill {
         height: 100%;
         width: 0;
+        border-radius: inherit;
         background: linear-gradient(90deg, var(--accent), #2bb3a3);
         transition: width 0.25s;
+      }
+      .progress-label {
+        margin: 9px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .ext-steps {
+        counter-reset: step;
+        padding: 0;
+        margin: 16px 0;
+        list-style: none;
+      }
+      .ext-steps li {
+        counter-increment: step;
+        position: relative;
+        padding: 8px 0 8px 34px;
+      }
+      .ext-steps li::before {
+        content: counter(step);
+        position: absolute;
+        left: 0;
+        top: 7px;
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--accent);
+        color: #fff;
+        font-size: 12px;
+        font-weight: 800;
+      }
+      .check-list {
+        list-style: none;
+        padding: 0;
+        margin: 18px 0;
+      }
+      .check-list li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .check-list .tick {
+        width: 24px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        flex: none;
+        border-radius: 50%;
+        background: rgba(54, 196, 111, 0.15);
+        color: var(--ok);
+        font-weight: 800;
+      }
+      .check-list .pending .tick {
+        background: rgba(153, 162, 178, 0.15);
+        color: var(--muted);
+      }
+      .spin {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        margin-right: 6px;
+        vertical-align: -2px;
+        border: 2px solid rgba(255, 255, 255, 0.3);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: rot 0.7s linear infinite;
       }
       .login {
         display: flex;
@@ -221,15 +340,30 @@
         border-radius: 10px;
         padding: 11px 13px;
       }
+      @keyframes fade {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes rot {
+        to {
+          transform: rotate(360deg);
+        }
+      }
       @media (max-width: 680px) {
-        .grid {
+        .alias-setup-layout {
           grid-template-columns: 1fr;
         }
         .body,
         .head {
           padding: 22px 18px;
         }
-        .row {
+        .row-actions {
           flex-wrap: wrap;
         }
       }
@@ -238,12 +372,12 @@
   <body>
     <div class="card">
       <div class="head">
-        <div class="brand"><span class="mark">B</span>OpenBiliClaw</div>
+        <div class="brand"><span class="mark">B</span><span>OpenBiliClaw</span></div>
         <div class="steps">
-          <span class="dot active" data-dot="0"></span
-          ><span class="dot" data-dot="1"></span
-          ><span class="dot" data-dot="2"></span
-          ><span class="dot" data-dot="3"></span>
+          <div class="dot active" data-dot="0"></div>
+          <div class="dot" data-dot="1"></div>
+          <div class="dot" data-dot="2"></div>
+          <div class="dot" data-dot="3"></div>
         </div>
       </div>
       <div class="body">
@@ -253,33 +387,27 @@
             模型、凭据、路由和预算统一在 LiteLLM Admin 管理。这里确认
             OpenBiliClaw 的三个稳定别名可用。
           </p>
-          <div id="loginBox" hidden>
-            <p class="hint">后端启用了访问密码，请先登录。</p>
-            <form id="loginForm" class="login">
-              <input
-                id="password"
-                type="password"
-                autocomplete="current-password"
-                required
-                placeholder="访问密码"
-              /><button class="primary">登录</button>
-            </form>
-          </div>
-          <div id="aliasList" class="alias-list" aria-live="polite">
-            <div class="alias">
-              <span>正在检查 /api/v1/system/ai-health…</span>
+          <div id="aliasSetupLayout" class="alias-setup-layout">
+            <div class="alias-health-pane">
+              <div id="loginBox" hidden>
+                <p class="hint">后端启用了访问密码，请先登录。</p>
+                <form id="loginForm" class="login">
+                  <input id="password" type="password" autocomplete="current-password" required placeholder="访问密码">
+                  <button class="primary">登录</button>
+                </form>
+              </div>
+              <div id="aliasList" class="alias-list" aria-live="polite">
+                <div class="alias"><span>正在检查 /api/v1/system/ai-health…</span></div>
+              </div>
+              <div id="aiMessage" class="msg"></div>
+            </div>
+            <div class="alias-admin-pane">
+              <h3>模型服务管理</h3>
+              <p class="hint">供应商、凭据、路由、回退、预算和缓存都在 LiteLLM Admin 中统一配置。</p>
+              <a id="adminLink" class="button ghost" target="_blank" rel="noreferrer" hidden>打开 LiteLLM Admin ↗</a>
             </div>
           </div>
-          <a
-            id="adminLink"
-            class="button ghost"
-            target="_blank"
-            rel="noreferrer"
-            hidden
-            >打开 LiteLLM Admin ↗</a
-          >
-          <div id="aiMessage" class="msg"></div>
-          <div class="row">
+          <div class="row-actions">
             <span></span
             ><button id="nextAi" class="primary" disabled>
               继续选择内容源 →
@@ -291,11 +419,16 @@
           <p class="sub">
             保留原有的扩展连接步骤。需要浏览器登录态的平台会通过扩展执行采集任务；账号也可以稍后在设置中连接。
           </p>
+          <ol class="ext-steps">
+            <li>安装 OpenBiliClaw 浏览器扩展（Chrome / Edge / Firefox）</li>
+            <li>在浏览器里登录要接入的平台账号</li>
+            <li>继续后选择本次需要初始化的内容来源</li>
+          </ol>
           <div id="biliStatus" class="msg show info" role="status">
             浏览器扩展可以在当前已登录的平台页面执行来源任务。
           </div>
           <p class="hint">没装扩展也可以先继续，之后在主界面随时连接。</p>
-          <div class="row">
+          <div class="row-actions">
             <button class="ghost" id="back1">← 上一步</button
             ><button id="next1" class="primary">先跳过 / 已连接 →</button>
           </div>
@@ -305,23 +438,23 @@
           <p class="sub">
             选择要同步的来源，随后依次投影证据画像并补齐首轮发现流。
           </p>
-          <div id="initSources" class="grid"></div>
-          <ul id="initChecklist">
+          <div id="initSources" class="init-sources"></div>
+          <ul id="initChecklist" class="init-checks">
             <li>检查所需 AI 别名和来源能力</li>
             <li>同步来源活动并建立证据画像</li>
             <li>补齐首轮发现流</li>
           </ul>
           <div id="sourceMessage" class="msg"></div>
           <div id="initProgress" class="progress" hidden>
-            <span id="initProgressBar"></span>
+            <div class="progress-track"><div class="progress-fill" id="initProgressBar"></div></div>
+            <p id="initProgressLabel" class="progress-label" role="status" aria-live="polite" aria-atomic="true">等待开始</p>
+            <p id="initStallHint" class="progress-label" hidden></p>
           </div>
-          <p id="initProgressLabel" class="hint" role="status">等待开始</p>
-          <p id="initStallHint" class="hint" hidden></p>
           <div id="initReason" class="msg" role="status"></div>
           <div id="initEscape" class="msg info">
             后台会继续处理；你可以<a href="/web/">先进入应用 →</a>
           </div>
-          <div class="row">
+          <div class="row-actions">
             <button class="ghost" id="backInit">← 上一步</button
             ><button id="startInit" class="primary">开始初始化</button>
           </div>
@@ -331,14 +464,14 @@
           <p class="sub">
             基础配置和首轮初始化已经完成，可以开始使用。
           </p>
-          <ul>
-            <li><strong>AI 大脑</strong> · <span id="doneLlm">三个稳定别名已连接</span></li>
-            <li><strong>平台账号</strong> · <span id="doneBili">所选来源已完成首轮同步</span></li>
-            <li><strong>证据画像与发现流</strong> · 已就绪</li>
+          <ul class="check-list">
+            <li><span class="tick">✓</span><div><strong>AI 大脑</strong><br><span id="doneLlm" class="hint">三个稳定别名已连接</span></div></li>
+            <li id="biliDone" class="pending"><span class="tick">…</span><div><strong>平台账号</strong><br><span id="doneBili" class="hint">所选来源已完成首轮同步</span></div></li>
+            <li><span class="tick">✓</span><div><strong>证据画像</strong><br><span class="hint">活动已经归一化为可追溯证据</span></div></li>
+            <li><span class="tick">✓</span><div><strong>首轮发现流</strong><br><span class="hint">候选内容已经去重、评估并入选</span></div></li>
           </ul>
-          <div id="biliDone"></div>
           <div id="runMessage" class="msg ok">初始化完成。之后的同步和补货会由后台任务自动维护。</div>
-          <div class="row">
+          <div class="row-actions">
             <button class="ghost" id="back2">← 上一步</button
             ><a id="finish" class="button primary" href="/web/">开始使用 OpenBiliClaw →</a>
           </div>
@@ -426,7 +559,7 @@
           document.getElementById("initSources").innerHTML = sources
             .map(
               (source, index) =>
-                `<label class="source"><input type="checkbox" value="${escapeHtml(source.source_id)}" ${index === 0 ? "checked" : ""}><span><strong>${escapeHtml(source.display_name || sourceNames[source.source_id])}</strong><small>${escapeHtml((source.capabilities || []).join(" · "))}</small></span></label>`,
+                `<label class="init-source-row"><input type="checkbox" value="${escapeHtml(source.source_id)}" ${index === 0 ? "checked" : ""}><span><strong>${escapeHtml(source.display_name || sourceNames[source.source_id])}</strong><small>${escapeHtml((source.capabilities || []).join(" · "))}</small></span></label>`,
             )
             .join("");
         } catch (error) {

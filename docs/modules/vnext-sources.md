@@ -98,6 +98,10 @@ completion 要求 success `result` 与 `failure` 二选一。success 对相同 l
 ## 当前边界
 
 - API 与 worker composition root 已构造七个平台 retained-client/CLI/browser adapter；manifest/status/account configuration 和 generic claim/complete 均为权威 `/api/v1` route。
-- Web/extension generated client 与 generic dispatcher 已接线；登录 tab 只执行 manifest 声明的 browser-assisted operation。
+- Web/extension generated client 与 generic dispatcher 已接线；扩展每轮从 `/api/v1/sources`
+  刷新 manifest，把 primary/fallback browser operation 与本地 executor 取交集后才 claim。
+  per-source transport settings 提交后立即重建 API registry；因此 Douyin direct 模式只领取
+  bootstrap，extension 模式才动态加入 search/trending/feed。deadline 在 executor 调用前
+  校验，执行中到期会 abort 并清理 timer/listener/tab，迟到结果不能 success-complete。
 - 旧平台 task endpoint、v0.3 producer、native account save 与动态插件发现不属于 vNext 公开合同。
 - 历史数据库保持只读手工 archive，不导入 vNext；这不是待完成的数据迁移承诺。

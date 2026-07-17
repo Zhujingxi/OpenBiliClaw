@@ -3,6 +3,7 @@ import type {
   BrowserTaskResult,
 } from "./generic-source-task-dispatcher.ts";
 import type { SourceId, SourceOperation } from "../shared/api-client.ts";
+import type { SourceManifest } from "../shared/api-client.ts";
 
 const TAB_READY_TIMEOUT_MS = 12_000;
 const CONTENT_READY_TIMEOUT_MS = 8_000;
@@ -21,27 +22,53 @@ interface LegacyExecution {
   readonly items: (result: RuntimeMessage) => ReadonlyArray<Record<string, unknown>>;
 }
 
-export const BROWSER_SOURCE_OPERATIONS: Readonly<
+export const LOCAL_BROWSER_SOURCE_OPERATIONS: Readonly<
   Partial<Record<SourceId, ReadonlyArray<SourceOperation>>>
 > = Object.freeze({
   bilibili: ["search"],
   xiaohongshu: ["bootstrap_import", "search", "creator"],
-  douyin: ["bootstrap_import"],
+  douyin: ["bootstrap_import", "search", "trending", "feed"],
   youtube: ["bootstrap_import"],
   zhihu: ["bootstrap_import", "search", "trending", "feed", "creator", "related"],
   reddit: ["bootstrap_import", "search", "trending", "community", "related"],
 });
 
+export function browserOperationsFromManifests(
+  manifests: ReadonlyArray<SourceManifest>,
+): Partial<Record<SourceId, ReadonlyArray<SourceOperation>>> {
+  const selected: Partial<Record<SourceId, ReadonlyArray<SourceOperation>>> = {};
+  for (const manifest of manifests) {
+    const local = LOCAL_BROWSER_SOURCE_OPERATIONS[manifest.source_id];
+    if (!local) continue;
+    const supported = new Set(local);
+    const operations = manifest.operations
+      .filter((spec) => (
+        spec.transport_kind === "browser" || spec.fallback_transport_kind === "browser"
+      ))
+      .map((spec) => spec.operation)
+      .filter((operation) => supported.has(operation));
+    if (operations.length > 0) selected[manifest.source_id] = Object.freeze(operations);
+  }
+  return selected;
+}
+
 export async function executeBrowserSourceTask(
   task: ClaimedSourceTask,
+  signal?: AbortSignal,
 ): Promise<BrowserTaskResult> {
+  throwIfAborted(signal);
   if (task.source_id === "twitter") {
     throw new Error("twitter does not declare browser-assisted execution");
   }
 
   const executions = buildExecutions(task);
   const items: Record<string, unknown>[] = [];
-  const results = await executeInTemporaryTab(task.id, task.request_deadline_at, executions);
+  const results = await executeInTemporaryTab(
+    task.id,
+    task.request_deadline_at,
+    executions,
+    signal,
+  );
   for (let index = 0; index < executions.length; index += 1) {
     const execution = executions[index]!;
     const result = results[index]!;
@@ -126,6 +153,41 @@ function douyinExecutions(taskId: string, payload: TaskPayload): LegacyExecution
       items: (result: RuntimeMessage) => recordArray(result.items),
     }));
   }
+  if (payload.operation === "search") {
+    return [{
+      url: `https://www.douyin.com/search/${encodeURIComponent(payload.query)}`,
+      action: "DY_SEARCH_EXECUTE",
+      resultAction: "DY_SEARCH_RESULT",
+      data: { task_id: taskId, keyword: payload.query, max_items: payload.limit },
+      active: true,
+      items: (result) => recordArray(result.items),
+    }];
+  }
+  if (payload.operation === "trending") {
+    return [{
+      url: "https://www.douyin.com/hot",
+      action: "DY_HOT_EXECUTE",
+      resultAction: "DY_HOT_RESULT",
+      data: {
+        task_id: taskId,
+        sentence_id: "openbiliclaw-trending",
+        word: "热门",
+        max_items: payload.limit,
+      },
+      active: true,
+      items: (result) => recordArray(result.items),
+    }];
+  }
+  if (payload.operation === "feed") {
+    return [{
+      url: "https://www.douyin.com/",
+      action: "DY_FEED_EXECUTE",
+      resultAction: "DY_FEED_RESULT",
+      data: { task_id: taskId, max_items: payload.limit },
+      active: true,
+      items: (result) => recordArray(result.items),
+    }];
+  }
   throw new Error(`douyin does not execute ${payload.operation} in the browser`);
 }
 
@@ -200,28 +262,49 @@ async function executeInTemporaryTab(
   taskId: string,
   requestDeadlineAt: string,
   executions: ReadonlyArray<LegacyExecution>,
+  signal?: AbortSignal,
 ): Promise<RuntimeMessage[]> {
   const first = executions[0];
   if (!first) return [];
+  throwIfAborted(signal);
   const tab = await chrome.tabs.create({ url: first.url, active: first.active });
   if (typeof tab.id !== "number") throw new Error("browser task tab has no id");
   const tabId = tab.id;
   const results: RuntimeMessage[] = [];
   try {
+    throwIfAborted(signal);
     for (let index = 0; index < executions.length; index += 1) {
       const execution = executions[index]!;
       if (index > 0) {
         await chrome.tabs.update(tabId, { url: execution.url, active: execution.active });
       }
-      await waitForTabReady(tabId);
+      await waitForTabReady(tabId, signal);
+      const executionController = new AbortController();
+      const abortExecution = (): void => executionController.abort();
+      signal?.addEventListener("abort", abortExecution, { once: true });
+      if (signal?.aborted) executionController.abort();
       const resultPromise = waitForResult(
         tabId,
         taskId,
         execution,
         requestDeadlineAt,
+        executionController.signal,
       );
-      await sendWhenContentReady(tabId, { action: execution.action, data: execution.data });
-      results.push(await resultPromise);
+      try {
+        await sendWhenContentReady(
+          tabId,
+          { action: execution.action, data: execution.data },
+          executionController.signal,
+        );
+        results.push(await resultPromise);
+      } catch (error) {
+        executionController.abort();
+        await resultPromise.catch(() => undefined);
+        throw error;
+      } finally {
+        executionController.abort();
+        signal?.removeEventListener("abort", abortExecution);
+      }
     }
     return results;
   } finally {
@@ -229,36 +312,49 @@ async function executeInTemporaryTab(
   }
 }
 
-function waitForTabReady(tabId: number): Promise<void> {
-  return new Promise((resolve) => {
+function waitForTabReady(tabId: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
     let settled = false;
-    const finish = (): void => {
+    const finish = (error?: Error): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       chrome.tabs.onUpdated.removeListener(onUpdated);
-      resolve();
+      signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
     };
+    const onAbort = (): void => finish(abortError());
     const onUpdated = (updatedId: number, info: { status?: string }): void => {
       if (updatedId === tabId && info.status === "complete") finish();
     };
     const timeout = setTimeout(finish, TAB_READY_TIMEOUT_MS);
     chrome.tabs.onUpdated.addListener(onUpdated);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      finish(abortError());
+      return;
+    }
     void chrome.tabs.get(tabId).then((current) => {
       if (current.status === "complete") finish();
     }).catch(finish);
   });
 }
 
-async function sendWhenContentReady(tabId: number, message: RuntimeMessage): Promise<void> {
+async function sendWhenContentReady(
+  tabId: number,
+  message: RuntimeMessage,
+  signal?: AbortSignal,
+): Promise<void> {
   const deadline = Date.now() + CONTENT_READY_TIMEOUT_MS;
   while (true) {
+    throwIfAborted(signal);
     try {
       await chrome.tabs.sendMessage(tabId, message);
       return;
     } catch (error) {
       if (Date.now() >= deadline) throw error;
-      await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_MS));
+      await abortableDelay(SEND_RETRY_MS, signal);
     }
   }
 }
@@ -268,8 +364,10 @@ function waitForResult(
   taskId: string,
   execution: LegacyExecution,
   requestDeadlineAt: string,
+  signal?: AbortSignal,
 ): Promise<RuntimeMessage> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     let aggregate: RuntimeMessage = {};
     let continuing = false;
     const listener = (message: RuntimeMessage): boolean => {
@@ -278,40 +376,47 @@ function waitForResult(
       if (String(data.task_id ?? "") !== taskId) return false;
       aggregate = mergeRuntimeResults(aggregate, data);
       if (data.status === "failed" || data.status === "error") {
-        cleanup();
-        reject(new Error(String(data.error ?? `${execution.resultAction} failed`)));
+        finish(new Error(String(data.error ?? `${execution.resultAction} failed`)));
         return false;
       }
       if (data.status === "partial") return false;
       if (execution.resultAction === "XHS_TASK_RESULT" && typeof data.next_url === "string") {
         if (continuing) return false;
         continuing = true;
-        void continueXiaohongshuTask(tabId, execution, data.next_url).then(
+        void continueXiaohongshuTask(tabId, execution, data.next_url, signal).then(
           () => {
             continuing = false;
           },
           (error: unknown) => {
-            cleanup();
-            reject(error);
+            finish(error instanceof Error ? error : new Error("Xiaohongshu continuation failed"));
           },
         );
         return false;
       }
       if (data.status !== "ok" && data.status !== "empty") return false;
-      cleanup();
-      resolve(aggregate);
+      finish(undefined, aggregate);
       return false;
     };
     const deadlineBudget = Date.parse(requestDeadlineAt) - Date.now() - 1_000;
     const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`${execution.resultAction} timed out`));
+      finish(new Error(`${execution.resultAction} timed out`));
     }, Math.max(1, Math.min(RESULT_TIMEOUT_MS, deadlineBudget)));
+    const onAbort = (): void => finish(abortError());
     const cleanup = (): void => {
       clearTimeout(timeout);
       chrome.runtime.onMessage.removeListener(listener);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (error?: Error, value?: RuntimeMessage): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(value ?? aggregate);
     };
     chrome.runtime.onMessage.addListener(listener);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) finish(abortError());
   });
 }
 
@@ -319,11 +424,39 @@ async function continueXiaohongshuTask(
   tabId: number,
   execution: LegacyExecution,
   nextUrl: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const url = requireSourceUrl(nextUrl, "next_url", "xiaohongshu.com");
   await chrome.tabs.update(tabId, { url, active: execution.active });
-  await waitForTabReady(tabId);
-  await sendWhenContentReady(tabId, { action: execution.action, data: execution.data });
+  await waitForTabReady(tabId, signal);
+  await sendWhenContentReady(tabId, { action: execution.action, data: execution.data }, signal);
+}
+
+function abortError(): Error {
+  const error = new Error("browser source task aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 function mergeRuntimeResults(

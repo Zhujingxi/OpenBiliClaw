@@ -122,9 +122,9 @@ async function save(collection, content_id, button) {
 }
 function card(content, entry, collection = "") {
   const el = document.createElement("article");
-  el.className = "rec-card";
+  el.className = "card rec-card";
   const image = imageOf(content);
-  el.innerHTML = `<a href="${escapeHtml(content.url)}" target="_blank" rel="noreferrer" data-open><div class="rec-thumb">${image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy">` : ""}</div><div class="rec-body"><h3>${escapeHtml(content.title)}</h3><p class="rec-meta">${escapeHtml(content.source_id)}${content.creator ? ` · ${escapeHtml(content.creator)}` : ""}</p>${entry?.explanation ? `<p class="rec-reason">${escapeHtml(entry.explanation)}</p>` : ""}</div></a><div class="rec-actions">${collection ? `<button data-remove class="btn btn-ghost">移除</button>` : `<button data-kind="positive" class="btn btn-ghost">喜欢</button><button data-kind="negative" class="btn btn-ghost">不感兴趣</button><button data-save="watch_later" class="btn btn-ghost">稍后</button><button data-save="favorites" class="btn btn-ghost">收藏</button>`}</div>`;
+  el.innerHTML = `<a class="card-open" href="${escapeHtml(content.url)}" target="_blank" rel="noreferrer" data-open><div class="card-cover-frame rec-thumb">${image ? `<img class="card-cover" src="${escapeHtml(image)}" alt="" loading="lazy">` : ""}</div><div class="card-body rec-body"><h3 class="card-title">${escapeHtml(content.title)}</h3><p class="card-meta rec-meta"><span class="card-source" data-source="${escapeHtml(content.source_id)}">${escapeHtml(content.source_id)}</span>${content.creator ? ` · ${escapeHtml(content.creator)}` : ""}</p>${entry?.explanation ? `<p class="card-expression rec-reason">${escapeHtml(entry.explanation)}</p>` : ""}</div></a><div class="card-actions rec-actions">${collection ? `<button data-remove class="card-action-btn btn btn-outline">移除</button>` : `<button data-kind="positive" class="card-action-btn btn btn-outline">喜欢</button><button data-kind="negative" class="card-action-btn btn btn-outline">不感兴趣</button><button data-save="watch_later" class="card-action-btn btn btn-outline">稍后</button><button data-save="favorites" class="card-action-btn btn btn-outline">收藏</button>`}</div>`;
   el.querySelector("[data-open]").addEventListener(
     "click",
     () => void interaction(content.id, "open"),
@@ -152,7 +152,7 @@ function card(content, entry, collection = "") {
 function renderFeed() {
   showView(
     "recommend",
-    '<div class="view-header"><div><p class="eyebrow">Discovery feed</p><h1>为你推荐</h1></div><button id="mobileReplenish" class="btn btn-brand">补齐</button></div><div id="mobileFeed" class="rec-list"></div>',
+    '<section class="recommend-header-card"><div class="recommend-header-top"><div class="recommend-header-copy"><p class="recommend-kicker">Discovery feed</p><h1 class="recommend-title">为你推荐</h1><p>基于证据画像、来源多样性和新鲜度生成。</p></div><button id="mobileReplenish" class="btn btn-outline recommend-refresh-btn">补齐发现流</button></div></section><div id="mobileFeed" class="rec-list"></div>',
   );
   const host = document.getElementById("mobileFeed");
   if (!state.feed.length)
@@ -213,7 +213,7 @@ async function renderLibrary(collection) {
     const items = await request("v1_library_list", { path: { collection } });
     showView(
       collection === "favorites" ? "favorites" : "watchLater",
-      `<div class="view-header"><div><p class="eyebrow">${collection === "favorites" ? "Favorites" : "Watch later"}</p><h1>${collection === "favorites" ? "我的收藏" : "稍后再看"}</h1></div></div><div id="mobileLibrary" class="rec-list"></div>`,
+      `<div class="saved-view"><div class="saved-head"><span class="saved-head-icon" aria-hidden="true">${collection === "favorites" ? "☆" : "◷"}</span><h1 class="saved-head-title">${collection === "favorites" ? "我的收藏" : "稍后再看"}</h1><span class="saved-head-count">${items.length || ""}</span></div><div class="saved-body"><div id="mobileLibrary" class="rec-list"></div></div></div>`,
     );
     const host = document.getElementById("mobileLibrary");
     if (!items.length)
@@ -232,7 +232,7 @@ async function renderProfile() {
     const p = state.profile;
     showView(
       "profile",
-      `<div class="view-header"><div><p class="eyebrow">Evidence profile</p><h1>我的画像</h1><p>版本 ${p.revision} · 置信度 ${Math.round((p.confidence || 0) * 100)}%</p></div></div><form id="mobileProfile"><textarea id="mobileNarrative" rows="6" placeholder="画像叙述">${escapeHtml(p.narrative || "")}</textarea><div class="chip-list">${(p.facets || []).map((f) => `<span class="chip">${escapeHtml(f.name)} · ${escapeHtml(f.value)}</span>`).join("")}</div><button class="btn btn-brand">保存叙述</button></form>`,
+      `<div class="profile-section"><div class="profile-section-title">证据画像</div><div class="profile-portrait">版本 ${p.revision} · 置信度 ${Math.round((p.confidence || 0) * 100)}%</div></div><form id="mobileProfile"><div class="profile-section"><label class="profile-section-title" for="mobileNarrative">画像叙述</label><textarea id="mobileNarrative" class="edit-text-input" rows="6" placeholder="画像叙述">${escapeHtml(p.narrative || "")}</textarea></div><div class="profile-section"><div class="profile-section-title">证据维度</div><div class="chip-list">${(p.facets || []).map((f) => `<span class="chip">${escapeHtml(f.name)} · ${escapeHtml(f.value)}</span>`).join("")}</div></div><button class="btn btn-brand">保存叙述</button></form>`,
     );
     document
       .getElementById("mobileProfile")
@@ -259,7 +259,7 @@ async function renderProfile() {
 async function renderChat() {
   showView(
     "chat",
-    '<div class="view-header"><div><p class="eyebrow">Taste dialogue</p><h1>聊聊你的口味</h1></div></div><div id="mobileChatLog" class="chat-messages"></div><form id="mobileChatForm" class="chat-composer"><textarea id="mobileChatInput" maxlength="20000" required placeholder="说说你最近喜欢或不喜欢的内容"></textarea><label><input id="mobileChatLearn" type="checkbox"> 学习本轮</label><button class="btn btn-brand">发送</button></form>',
+    '<section class="chat-shell"><div class="view-header"><div><p class="eyebrow">Taste dialogue</p><h1>聊聊你的口味</h1></div></div><div id="mobileChatLog" class="chat-messages"></div><form id="mobileChatForm" class="chat-input-row"><textarea id="mobileChatInput" class="chat-input" maxlength="20000" required placeholder="说说你最近喜欢或不喜欢的内容"></textarea><label><input id="mobileChatLearn" type="checkbox"> 学习本轮</label><button class="chat-send-btn" aria-label="发送">发送</button></form></section>',
   );
   const id = newConversationId();
   const log = document.getElementById("mobileChatLog");

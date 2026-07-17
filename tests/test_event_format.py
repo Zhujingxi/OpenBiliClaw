@@ -9,7 +9,6 @@ contract so future regressions don't silently re-fragment it.
 
 from __future__ import annotations
 
-from openbiliclaw.cli import _history_item_to_event
 from openbiliclaw.sources.event_format import (
     SOURCE_BILIBILI,
     SOURCE_XIAOHONGSHU,
@@ -176,25 +175,6 @@ def _has_unified_shape(event: dict) -> bool:
     return isinstance(event["context"], str) and bool(event["context"])
 
 
-def test_bilibili_history_event_has_unified_shape() -> None:
-    """v0.3.22+: B站 history events must carry context + source_platform
-    just like 小红书 events did from day one."""
-    item = {
-        "history": {"bvid": "BV1A", "view_at": 1710000000},
-        "title": "讲透历史叙事",
-        "author_name": "历史实验室",
-    }
-    event = _history_item_to_event(item)
-    assert _has_unified_shape(event)
-    assert event["metadata"]["source_platform"] == SOURCE_BILIBILI
-    assert event["event_type"] == "view"
-    assert "历史实验室" in event["context"]
-    assert "讲透历史叙事" in event["context"]
-    assert event["url"].endswith("/BV1A")
-    # Author canonical-name field is consistent with xhs events
-    assert event["metadata"]["author"] == "历史实验室"
-
-
 def test_xiaohongshu_bootstrap_events_have_unified_shape() -> None:
     notes = [
         {
@@ -228,12 +208,11 @@ def test_bilibili_and_xiaohongshu_events_share_consumer_contract() -> None:
     """A consumer reading {event_type, title, context, metadata.source_platform,
     metadata.author} should not need to special-case which source produced the
     event. This is the core unification invariant."""
-    bili = _history_item_to_event(
-        {
-            "history": {"bvid": "BV1", "view_at": 1},
-            "title": "B站标题",
-            "author_name": "B站作者",
-        }
+    bili = build_event(
+        event_type="view",
+        source_platform=SOURCE_BILIBILI,
+        title="B站标题",
+        author="B站作者",
     )
     xhs = xhs_bootstrap_notes_to_events(
         [{"scope": "saved", "title": "小红书标题", "author": "小红书作者"}]

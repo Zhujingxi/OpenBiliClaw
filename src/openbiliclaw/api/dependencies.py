@@ -96,6 +96,13 @@ class _DeferredSourceRegistry:
         if self._registry is None:
             self._registry = registry
 
+    def replace(self, registry: SourceRegistry) -> None:
+        """Atomically publish a registry rebuilt from persisted source settings."""
+
+        if self._registry is None:
+            raise DependencyUnavailableError("source registry is not initialized")
+        self._registry = registry
+
     def get(self) -> SourceRegistry:
         if self._registry is None:
             raise DependencyUnavailableError("source registry is not initialized")
@@ -710,6 +717,7 @@ def build_application_container() -> ApplicationContainer:
         cast("Callable[[], Any]", uow_factory),
         cipher=_DeferredCredentialCipher(),
         registry=registry.get,
+        on_settings_change=lambda: registry.replace(build_default_source_registry(session_factory)),
     )
     runner, resolver = _build_task_runner(uow_factory, settings)
     profile = ProfileService(

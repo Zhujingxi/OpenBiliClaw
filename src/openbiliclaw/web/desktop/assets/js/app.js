@@ -47,6 +47,38 @@ const state = {
   removals: [],
 };
 const $ = (selector) => document.querySelector(selector);
+const THEME_ORDER = ["auto", "light", "dark"];
+
+function applyTheme(theme) {
+  const normalized = THEME_ORDER.includes(theme) ? theme : "auto";
+  if (normalized === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = normalized;
+  const labels = { auto: "跟随系统", light: "浅色", dark: "深色" };
+  const glyphs = { auto: "◐", light: "☀", dark: "☾" };
+  $("#themeToggleBtn").title = `主题：${labels[normalized]}`;
+  $("#themeToggleBtn").setAttribute("aria-label", `主题：${labels[normalized]}`);
+  $("#themeToggleGlyph").textContent = glyphs[normalized];
+  return normalized;
+}
+
+function setMobileMenu(open) {
+  $("#mobileMenu").classList.toggle("is-open", open);
+  $("#mobileMenu").setAttribute("aria-hidden", String(!open));
+  document.body.classList.toggle("mobile-menu-open", open);
+}
+
+function selectSettingsTab(name) {
+  document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+    const active = button.dataset.settingsTab === name;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document
+    .querySelectorAll("#settingsForm [data-settings-panel]")
+    .forEach((panel) => {
+      panel.hidden = panel.dataset.settingsPanel !== name;
+    });
+}
 
 function toast(message) {
   const element = $("#toast");
@@ -82,6 +114,7 @@ function navigate(page) {
       ),
     );
   history.replaceState(null, "", `#${page}`);
+  setMobileMenu(false);
   if (page === "watch_later" || page === "favorites") void loadLibrary(page);
   if (page === "profile") void loadProfile();
   if (page === "chat") void loadChat();
@@ -240,6 +273,7 @@ function renderProfile() {
   $("#profileNarrative").value = profile.narrative || "";
   $("#profileMeta").textContent =
     `版本 ${profile.revision} · 置信度 ${Math.round((profile.confidence || 0) * 100)}%`;
+  $("#profileSummary").textContent = `v${profile.revision}`;
   const host = $("#profileFacets");
   host.innerHTML = "";
   [
@@ -616,11 +650,17 @@ async function start() {
       ? `v${ready.version} 已就绪`
       : `v${ready.version} 启动中`;
     $("#runtimeSummary").textContent = ready.ready ? "运行正常" : "启动中";
+    $("#healthState").textContent = ready.ready ? "已就绪" : "启动中";
+    $("#mobileRuntimeSummary").textContent = ready.ready
+      ? `v${ready.version} 已就绪`
+      : `v${ready.version} 启动中`;
     await loadFeed();
     navigate(location.hash.slice(1) || "feed");
   } catch (error) {
     $("#statusLabel").textContent = "后端不可用";
     $("#runtimeSummary").textContent = "不可用";
+    $("#healthState").textContent = "不可用";
+    $("#mobileRuntimeSummary").textContent = "后端不可用";
     toast(errorMessage(error));
   }
 }
@@ -632,6 +672,36 @@ document
   );
 $("#sideDrawerBtn").addEventListener("click", () => {
   $("#sideDrawer").classList.toggle("is-open");
+  $("#sideDrawer").setAttribute(
+    "aria-hidden",
+    String(!$("#sideDrawer").classList.contains("is-open")),
+  );
+});
+$("#sideDrawerScrim").addEventListener("click", () => {
+  $("#sideDrawer").classList.remove("is-open");
+  $("#sideDrawer").setAttribute("aria-hidden", "true");
+});
+$("#mobileMenuBtn").addEventListener("click", () => setMobileMenu(true));
+$("#mobileMenuClose").addEventListener("click", () => setMobileMenu(false));
+document.querySelectorAll("[data-mobile-page]").forEach((button) =>
+  button.addEventListener("click", () => navigate(button.dataset.mobilePage)),
+);
+document.querySelectorAll("[data-settings-tab]").forEach((button) =>
+  button.addEventListener("click", () => selectSettingsTab(button.dataset.settingsTab)),
+);
+$("#mobileSearchForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  state.query = $("#mobileSearchInput").value.trim();
+  $("#searchInput").value = state.query;
+  navigate("feed");
+  renderFeed();
+});
+$("#openSettingsHero").addEventListener("click", () => navigate("settings"));
+$("#themeToggleBtn").addEventListener("click", () => {
+  const current = localStorage.getItem("obc.theme") || "auto";
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
+  localStorage.setItem("obc.theme", next);
+  applyTheme(next);
 });
 $("#searchForm").addEventListener("submit", (event) => {
   event.preventDefault();
@@ -775,4 +845,6 @@ window.addEventListener("obc:auth-required", () => {
   $("#loginGate").hidden = false;
 });
 window.addEventListener("hashchange", () => navigate(location.hash.slice(1)));
+applyTheme(localStorage.getItem("obc.theme") || "auto");
+selectSettingsTab("sources");
 start();

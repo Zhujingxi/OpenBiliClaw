@@ -191,6 +191,40 @@ def test_architecture_archive_does_not_restate_removed_runtime_as_current() -> N
     assert len(archive.splitlines()) <= 12
 
 
+def test_spec_archives_v03_without_republishing_removed_runtime_contracts() -> None:
+    spec = _read("docs/spec.md")
+    current = _section("docs/spec.md", "### 3.1 vNext", "### 3.2")
+    archive = spec.split("### 3.2 Historical v0.3 archive", 1)[1].split(
+        "## Historical v0.3 archive — 4.", 1
+    )[0]
+
+    for marker in (
+        "authenticated fetch stream",
+        "LibraryItem (CollectionItem + ContentItem)",
+        "alias-only redacted status",
+        "Web 使用 same-origin password→HttpOnly cookie",
+        "Extension origin 即使来自 loopback",
+    ):
+        assert marker in current
+
+    for removed_contract in (
+        "runtime-stream",
+        "WebSocket",
+        "Cookie 同步",
+        "saved_items/memberships/native_save_states",
+        "GET/PUT model-config",
+        "OrderedLLMRoute",
+        "RuntimeModelBundle",
+        "短会话 query",
+        "模型配置只有一条生产数据流",
+    ):
+        assert removed_contract not in spec, removed_contract
+
+    assert "不再是当前规格" in archive
+    assert "Git 历史" in archive
+    assert len(archive.splitlines()) <= 12
+
+
 def test_config_doc_matches_current_strict_user_settings_schema() -> None:
     source = _read("docs/modules/config.md")
     for group in (

@@ -110,7 +110,7 @@ let toastTimer = 0;
 function toast(message, kind = "") {
   const target = $("#toast");
   target.textContent = message;
-  target.style.background = kind === "error" ? "var(--danger)" : "var(--text-main)";
+  target.dataset.tone = kind === "error" ? "error" : "success";
   target.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { target.hidden = true; }, 3200);
@@ -118,9 +118,11 @@ function toast(message, kind = "") {
 
 function setStatus(label, status = "loading") {
   $("#statusLabel").textContent = label;
-  $("#statusBadge").dataset.tone = status === "ready"
+  const tone = status === "ready"
     ? "online"
     : status === "error" ? "offline" : "reconnecting";
+  $("#statusBadge").dataset.tone = tone;
+  $("#statusDot").className = `status-dot ${tone}`;
 }
 
 function setFormBusy(form, busy) {
@@ -128,9 +130,9 @@ function setFormBusy(form, busy) {
 }
 
 function emptyState(title, description) {
-  return node("div", { class: "card empty" }, [
-    node("strong", { text: title }),
-    node("span", { text: description }),
+  return node("div", { class: "empty-state" }, [
+    node("h3", { text: title }),
+    node("p", { text: description }),
   ]);
 }
 
@@ -266,10 +268,10 @@ function showOnboarding() {
   host.replaceChildren(...state.manifests.map((manifest) => {
     const status = sourceStatus(manifest.source_id);
     const checked = Boolean(status?.configured || state.settings?.sources?.enabled?.[manifest.source_id]);
-    return node("label", { class: "source-card check" }, [
+    return node("label", { class: "settings-section settings-source-card settings-field-row" }, [
       node("input", { type: "checkbox", value: manifest.source_id, checked }),
       node("span", { text: manifest.display_name }),
-      node("span", { class: `pill ${status?.configured ? "ok" : ""}`, text: status?.configured ? "已连接" : "可选" }),
+      node("span", { class: "recommendation-state", text: status?.configured ? "已连接" : "可选" }),
     ]);
   }));
 }
@@ -308,28 +310,30 @@ async function startOnboarding(event) {
 
 function contentCard(feedItem, collection = "") {
   const content = feedItem.content || {};
-  const article = node("article", { class: "card content-card" });
+  const article = node("article", { class: "recommendation-card" });
+  const preview = node("div", { class: "recommendation-preview" });
   const title = node("a", {
-    class: "content-title",
+    class: "recommendation-title",
     text: content.title || "未命名内容",
     href: content.url || "#",
     target: "_blank",
     rel: "noreferrer",
   });
   title.addEventListener("click", () => recordInteraction(content.id, "open"));
-  article.append(
+  const copy = node("div", { class: "recommendation-content" }, [
     title,
-    node("div", { class: "content-meta" }, [
+    node("div", { class: "recommendation-meta-line" }, [
       node("span", { text: content.source_id || "unknown" }),
       node("span", { text: content.creator || "" }),
       node("span", { text: content.media_type || "" }),
     ]),
-  );
-  if (content.summary) article.append(node("p", { class: "content-summary", text: content.summary }));
-  if (feedItem.entry?.explanation) article.append(node("div", { class: "notice", text: feedItem.entry.explanation }));
-  const actions = node("div", { class: "button-row" });
+  ]);
+  if (content.summary) copy.append(node("p", { class: "recommendation-expression", text: content.summary }));
+  if (feedItem.entry?.explanation) copy.append(node("p", { class: "feedback-status", text: feedItem.entry.explanation }));
+  preview.append(copy);
+  const actions = node("div", { class: "recommendation-actions" });
   if (collection) {
-    const remove = node("button", { class: "button small danger", text: "移除", type: "button" });
+    const remove = node("button", { class: "action-button action-secondary", text: "移除", type: "button" });
     remove.addEventListener("click", () => removeLibraryItem(collection, content.id));
     actions.append(remove);
   } else {
@@ -339,31 +343,37 @@ function contentCard(feedItem, collection = "") {
       ["忽略", "dismiss"],
     ];
     for (const [label, kind] of actionSpecs) {
-      const button = node("button", { class: "button small", text: label, type: "button" });
+      const button = node("button", { class: "action-button action-secondary", text: label, type: "button" });
       button.addEventListener("click", () => recordInteraction(content.id, kind, button));
       actions.append(button);
     }
     for (const [label, kind] of [["收藏", "favorites"], ["稍后看", "watch_later"]]) {
-      const button = node("button", { class: "button small soft", text: label, type: "button" });
+      const button = node("button", { class: "action-button action-secondary", text: label, type: "button" });
       button.addEventListener("click", () => saveLibraryItem(kind, content.id, button));
       actions.append(button);
     }
   }
-  article.append(actions);
+  article.append(preview, actions);
   return article;
 }
 
 async function loadFeed() {
   const host = $("#recommendationList");
-  host.replaceChildren(emptyState("正在读取发现结果", "请稍候"));
+  $("#emptyState").hidden = true;
+  const empty = $("#emptyState");
+  host.replaceChildren();
   try {
     const items = await requestV1("v1_feed_list", { query: { limit: 50, offset: 0 } });
-    host.replaceChildren(...(items.length
-      ? items.map((item) => contentCard(item))
-      : [emptyState("还没有发现结果", "完成初始化或等待后台补充内容。")]
-    ));
+    empty.hidden = items.length > 0;
+    if (items.length) host.replaceChildren(...items.map((item) => contentCard(item)));
+    else {
+      $("#emptyTitle").textContent = "还没有发现结果";
+      $("#emptyText").textContent = "完成初始化或等待后台补充内容。";
+    }
   } catch (error) {
-    host.replaceChildren(emptyState("发现结果读取失败", errorMessage(error)));
+    empty.hidden = false;
+    $("#emptyTitle").textContent = "发现结果读取失败";
+    $("#emptyText").textContent = errorMessage(error);
   }
 }
 
@@ -398,15 +408,21 @@ async function loadLibrary() {
   const host = state.activeCollection === "watch_later"
     ? $("#watchLaterList")
     : $("#favoritesList");
-  host.replaceChildren(emptyState("正在读取资料库", "请稍候"));
+  $("#watchLaterEmpty").hidden = true;
+  $("#favoritesEmpty").hidden = true;
+  const empty = state.activeCollection === "watch_later"
+    ? $("#watchLaterEmpty")
+    : $("#favoritesEmpty");
+  empty.hidden = true;
+  host.replaceChildren();
   try {
     const items = await requestV1("v1_library_list", { path: { collection: state.activeCollection } });
-    host.replaceChildren(...(items.length
-      ? items.map((item) => contentCard(item, state.activeCollection))
-      : [emptyState("这里还是空的", "从发现页保存内容后，会出现在这里。")]
-    ));
+    empty.hidden = items.length > 0;
+    if (items.length) host.replaceChildren(...items.map((item) => contentCard(item, state.activeCollection)));
   } catch (error) {
-    host.replaceChildren(emptyState("资料库读取失败", errorMessage(error)));
+    empty.hidden = false;
+    empty.querySelector("h3").textContent = "资料库读取失败";
+    empty.querySelector("p").textContent = errorMessage(error);
   }
 }
 
@@ -420,24 +436,29 @@ async function removeLibraryItem(collection, contentId) {
 
 function renderProfile() {
   const card = $("#profileCard");
+  const empty = $("#profileEmpty");
+  const editBar = $("#profileEditBar");
   if (!state.profile) {
-    card.replaceChildren(...emptyState("画像尚未生成", "完成初始化后会建立证据画像。").childNodes);
+    card.hidden = true;
+    empty.hidden = false;
+    editBar.hidden = true;
     $("#profileNarrative").value = "";
     $("#profileFacets").value = "[]";
     return;
   }
   const facets = state.profile.facets || [];
-  card.replaceChildren(
-    node("div", { class: "section-head" }, [
-      node("div", {}, [node("h2", { text: `证据画像 · r${state.profile.revision}` }), node("p", { text: `整体置信度 ${Math.round((state.profile.confidence || 0) * 100)}%` })]),
-    ]),
-    node("p", { text: state.profile.narrative || "还没有叙述。" }),
-    node("div", { class: "profile-facets" }, facets.map((facet) => node("span", {
-      class: "facet",
+  card.hidden = false;
+  empty.hidden = true;
+  editBar.hidden = false;
+  $("#profilePortrait").replaceChildren(
+    node("p", { class: "profile-portrait-paragraph", text: state.profile.narrative || "还没有叙述。" }),
+    node("p", { class: "profile-phase-copy", text: `证据画像 · r${state.profile.revision} · 整体置信度 ${Math.round((state.profile.confidence || 0) * 100)}%` }),
+  );
+  $("#profileFacetsView").replaceChildren(...facets.map((facet) => node("span", {
+      class: "chip",
       text: `${LABELS[facet.name] || facet.name} · ${facet.value} (${Number(facet.weight).toFixed(2)})`,
       title: `置信度 ${Math.round(Number(facet.confidence) * 100)}%`,
-    }))),
-  );
+    })));
   $("#profileNarrative").value = state.profile.narrative || "";
   $("#profileFacets").value = JSON.stringify(facets.map(({ name, value, weight }) => ({ name, value, weight })), null, 2);
 }
@@ -485,12 +506,16 @@ async function saveProfile(event) {
   } finally { setFormBusy(form, false); }
 }
 
+function chatBubble(role, content = "", pending = false) {
+  return node("div", { class: `chat-message ${role === "user" ? "user" : ""}${pending ? " pending" : ""}` }, [
+    node("span", { class: "chat-role", text: role === "user" ? "你" : "阿B" }),
+    node("div", { class: "chat-content", text: content }),
+  ]);
+}
+
 function renderChatMessages(items) {
   const host = $("#chatMessages");
-  host.replaceChildren(...items.map((item) => node("div", {
-    class: `message ${item.role === "user" ? "user" : ""}`,
-    text: item.content,
-  })));
+  host.replaceChildren(...items.map((item) => chatBubble(item.role, item.content)));
   host.scrollTop = host.scrollHeight;
 }
 
@@ -514,8 +539,9 @@ async function sendChat(event) {
   const message = input.value.trim();
   if (!message) return;
   const host = $("#chatMessages");
-  const userBubble = node("div", { class: "message user", text: message });
-  const answerBubble = node("div", { class: "message pending", text: "" });
+  const userBubble = chatBubble("user", message);
+  const answerBubble = chatBubble("assistant", "", true);
+  const answerContent = $(".chat-content", answerBubble);
   host.append(userBubble, answerBubble);
   host.scrollTop = host.scrollHeight;
   input.value = "";
@@ -525,7 +551,7 @@ async function sendChat(event) {
       body: { conversation_id: state.conversationId, message, learn: $("#chatLearn").checked },
     }, (streamEvent) => {
       if (streamEvent.event === "delta") {
-        answerBubble.textContent += streamEvent.data?.content || "";
+        answerContent.textContent += streamEvent.data?.content || "";
         host.scrollTop = host.scrollHeight;
       }
       if (streamEvent.event === "error") throw new Error(streamEvent.data?.code || "对话失败");
@@ -534,7 +560,7 @@ async function sendChat(event) {
     answerBubble.classList.remove("pending");
   } catch (error) {
     answerBubble.classList.remove("pending");
-    answerBubble.textContent = answerBubble.textContent || `发送失败：${errorMessage(error)}`;
+    answerContent.textContent = answerContent.textContent || `发送失败：${errorMessage(error)}`;
     toast(errorMessage(error), "error");
   } finally {
     setFormBusy(form, false);
@@ -561,26 +587,26 @@ function renderSources() {
   host.replaceChildren(...state.manifests.map((manifest) => {
     const status = sourceStatus(manifest.source_id);
     const configured = Boolean(status?.configured);
-    const card = node("div", { class: "source-card" });
-    const controls = node("div", { class: "button-row" });
-    const configure = node("button", { class: "button small soft", text: "配置", type: "button" });
-    const detail = node("div", { class: "fields", hidden: true });
+    const card = node("section", { class: "settings-section settings-source-card" });
+    const controls = node("div", { class: "settings-actions" });
+    const configure = node("button", { class: "settings-secondary-btn", text: "配置", type: "button" });
+    const detail = node("div", { class: "settings-section", hidden: true });
     configure.addEventListener("click", async () => {
       detail.hidden = !detail.hidden;
       if (!detail.hidden && !detail.dataset.loaded) await renderSourceEditor(manifest, status, detail);
     });
     controls.append(configure);
     if (configured) {
-      const disconnect = node("button", { class: "button small danger", text: "断开", type: "button" });
+      const disconnect = node("button", { class: "settings-secondary-btn", text: "断开", type: "button" });
       disconnect.addEventListener("click", () => disconnectSource(manifest.source_id, status.account_key));
       controls.append(disconnect);
     }
     card.append(
-      node("div", { class: "source-title" }, [
+      node("div", { class: "settings-status-cell" }, [
         node("span", { text: manifest.display_name }),
-        node("span", { class: `pill ${configured ? "ok" : ""}`, text: configured ? "已连接" : "未连接" }),
+        node("strong", { text: configured ? "已连接" : "未连接" }),
       ]),
-      node("div", { class: "capabilities" }, (manifest.capabilities || []).map((capability) => node("span", { class: "pill", text: capabilityLabel(capability) }))),
+      node("div", { class: "recommendation-meta-line" }, (manifest.capabilities || []).map((capability) => node("span", { class: "recommendation-state", text: capabilityLabel(capability) }))),
       controls,
       detail,
     );
@@ -594,7 +620,7 @@ async function renderSourceEditor(manifest, status, host) {
   try {
     const sourceSettings = await requestV1("v1_sources_get_settings", { path: { source_id: manifest.source_id } });
     const settings = node("textarea", { value: JSON.stringify(sourceSettings.settings || {}, null, 2), spellcheck: false });
-    const saveSettings = node("button", { class: "button small", text: "保存来源设置", type: "button" });
+    const saveSettings = node("button", { class: "settings-secondary-btn", text: "保存来源设置", type: "button" });
     saveSettings.addEventListener("click", async () => {
       try {
         const payload = JSON.parse(settings.value || "{}");
@@ -602,15 +628,15 @@ async function renderSourceEditor(manifest, status, host) {
         toast("来源设置已保存");
       } catch (error) { toast(errorMessage(error), "error"); }
     });
-    host.append(node("label", { class: "field", text: "连接器设置（JSON）" }, [settings]), saveSettings);
+    host.append(node("label", { class: "settings-field", text: "连接器设置（JSON）" }, [settings]), saveSettings);
     if ((manifest.capabilities || []).includes("authentication")) {
       const accountKey = node("input", { value: status?.account_key || "default", placeholder: "default" });
       const cookie = node("textarea", { placeholder: "平台 Cookie，仅加密保存在后端" });
-      const connect = node("button", { class: "button small primary", text: "保存凭据", type: "button" });
+      const connect = node("button", { class: "action-button action-primary", text: "保存凭据", type: "button" });
       connect.addEventListener("click", () => configureSource(manifest.source_id, accountKey.value, cookie.value, connect));
       host.append(
-        node("label", { class: "field", text: "账户标识" }, [accountKey]),
-        node("label", { class: "field", text: "Cookie" }, [cookie]),
+        node("label", { class: "settings-field", text: "账户标识" }, [accountKey]),
+        node("label", { class: "settings-field", text: "Cookie" }, [cookie]),
         connect,
       );
     }
@@ -658,12 +684,12 @@ async function loadSources() {
 
 function renderAiHealth(health) {
   const host = $("#aliasHealth");
-  host.replaceChildren(...(health?.aliases || []).map((alias) => node("div", { class: "alias-card" }, [
-    node("div", { class: "alias-title" }, [
+  host.replaceChildren(...(health?.aliases || []).map((alias) => node("section", { class: "settings-section alias-card" }, [
+    node("div", { class: "settings-status-cell" }, [
       node("span", { text: alias.alias }),
-      node("span", { class: `pill ${alias.available ? "ok" : "bad"}`, text: alias.state }),
+      node("strong", { text: alias.state }),
     ]),
-    node("div", { class: "muted", text: alias.reason || "可用" }),
+    node("div", { class: "settings-hint", text: alias.reason || "可用" }),
   ])));
   if (!(health?.aliases || []).length) host.replaceChildren(emptyState("没有别名状态", "LiteLLM 尚未返回健康信息。"));
   const admin = $("#litellmAdmin");
@@ -682,7 +708,7 @@ function selectOptions(path, value) {
 
 function settingControl(pathParts, value) {
   const path = pathParts.join(".");
-  const label = node("label", { class: typeof value === "boolean" ? "check" : "field" });
+  const label = node("label", { class: typeof value === "boolean" ? "settings-field-row" : "settings-field" });
   let input;
   const options = selectOptions(path, value);
   if (options) {
@@ -730,9 +756,9 @@ function renderSettings() {
     if (!value || typeof value !== "object") continue;
     const controls = [];
     flattenSettingControls(value, [groupName], controls);
-    const group = node("fieldset", { class: "settings-group" }, [
+    const group = node("fieldset", { class: "settings-section settings-group" }, [
       node("legend", { text: labelFor(groupName) }),
-      node("div", { class: "settings-fields" }, controls),
+      node("div", { class: "settings-panel" }, controls),
     ]);
     const destination = groupName === "sources"
       ? hosts.sources
@@ -832,6 +858,14 @@ async function openExternal(url) {
 async function showMobileEntry() {
   const url = await extensionPage("/m");
   $("#mobileQrUrl").textContent = url;
+  $("#mobileQrCode").replaceChildren(node("a", {
+    class: "mobile-qr-link",
+    text: "打开手机版",
+    href: url,
+    target: "_blank",
+    rel: "noreferrer",
+    title: "在浏览器中打开移动版",
+  }));
   $("#mobileQrOverlay").hidden = false;
 }
 
@@ -890,6 +924,7 @@ function bindEvents() {
   $("#settingsGear").addEventListener("click", showSettings);
   $("#settingsBack").addEventListener("click", hideSettings);
   $("#openWebButton").addEventListener("click", async () => openExternal(await extensionPage("/web")));
+  $("#starButton").addEventListener("click", () => openExternal("https://github.com/whiteguo233/OpenBiliClaw"));
   $("#mobileQrButton").addEventListener("click", showMobileEntry);
   $("#mobileQrBack").addEventListener("click", () => { $("#mobileQrOverlay").hidden = true; });
   $("#mobileQrOpen").addEventListener("click", () => openExternal($("#mobileQrUrl").textContent));
@@ -905,6 +940,7 @@ function bindEvents() {
     const panel = $("#profileEditPanel");
     panel.hidden = !panel.hidden;
     $("#profileEditToggle").setAttribute("aria-expanded", String(!panel.hidden));
+    $("#profileEditHint").hidden = panel.hidden;
   });
   $("#chatInput").addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {

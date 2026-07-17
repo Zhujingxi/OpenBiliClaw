@@ -49,11 +49,13 @@
         height: 100%;
         object-fit: cover;
       }
-      .vnext-settings {
+      .vnext-settings,
+      #profileForm {
         display: grid;
         gap: 20px;
       }
-      .vnext-settings section {
+      .vnext-settings section,
+      #profileForm section {
         border: 1px solid var(--line);
         border-radius: 16px;
         padding: 18px;
@@ -152,49 +154,61 @@
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <button id="sideDrawerBtn" class="side-drawer-btn" type="button" aria-label="切换侧栏">☰</button>
-        <a class="brand" href="#feed"
-          ><span class="brand-mark">B</span
-          ><span class="brand-copy"
-            ><span class="brand-title">OpenBiliClaw</span
-            ><span class="brand-sub">你的全网发现入口</span></span
-          ></a
-        >
-        <form class="search" id="searchForm">
-          <input
-            id="searchInput"
-            type="search"
-            placeholder="筛选当前发现流"
-          /><button>搜索</button>
-        </form>
-        <div class="top-actions">
-          <span class="backend-status-pill"
-            ><span class="badge-dot"></span
-            ><span id="statusLabel">连接中</span></span
-          ><a class="top-mobile-btn" href="/m/">手机版</a>
+        <div class="top-left">
+          <button id="sideDrawerBtn" class="icon-btn side-drawer-btn" type="button" aria-label="打开侧边菜单">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round" /></svg>
+          </button>
+          <a class="brand" href="#feed" aria-label="OpenBiliClaw 首页">
+            <span class="brand-mark">B</span>
+            <span class="brand-copy"><span class="brand-title">OpenBiliClaw</span><span class="brand-sub">你的本地全网推荐入口</span></span>
+          </a>
         </div>
+        <form class="search" id="searchForm">
+          <input id="searchInput" type="search" placeholder="搜索推荐、创作者、兴趣方向或解释文本" />
+          <button type="submit">搜索</button>
+        </form>
+        <div class="top-actions" aria-label="状态与入口">
+          <button class="backend-status-pill" id="openSettingsHero" type="button">
+            <span class="badge-dot"></span><span id="statusLabel">连接中</span>
+          </button>
+          <button class="top-theme-btn icon-btn" id="themeToggleBtn" type="button" title="主题：跟随系统" aria-label="主题：跟随系统">
+            <span id="themeToggleGlyph" aria-hidden="true">◐</span>
+          </button>
+          <a class="top-mobile-btn" href="/m/">手机版</a>
+        </div>
+        <button class="icon-btn mobile-menu-btn" id="mobileMenuBtn" type="button" aria-label="打开手机菜单">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke-linecap="round" /></svg>
+        </button>
       </header>
       <div id="fatalBanner" class="fatal-banner" hidden></div>
       <div class="app-body">
-        <aside id="sideDrawer" class="side-drawer is-open">
+        <aside id="sideDrawer" class="side-drawer" aria-label="侧边菜单" aria-hidden="true">
           <div id="sideDrawerScrim" class="side-drawer-scrim"></div>
-          <div class="side-drawer-panel">
-            <nav class="side-drawer-nav" aria-label="主要功能">
-              <button id="homeBtn" class="nav-action" data-page="feed">首页</button>
-              <button id="watchLaterBtn" class="nav-action" data-page="watch_later">稍后再看</button>
-              <button id="favoritesBtn" class="nav-action" data-page="favorites">我的收藏</button>
-              <button id="profileBtn" class="nav-action" data-page="profile">我的画像</button>
-              <button id="chatBtn" class="nav-action" data-page="chat">聊聊口味</button>
-              <button id="jobsBtn" class="nav-action" data-page="jobs">后台任务</button>
-              <button id="settingsBtn" class="nav-action" data-page="settings">设置</button>
+          <div class="side-drawer-panel" aria-label="侧边菜单">
+            <nav class="side-drawer-nav" aria-label="全局功能">
+              <button id="homeBtn" class="nav-action" data-page="feed" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M3 9l9-7 9 7v11H3z" /><path d="M9 20v-8h6v8" /></svg></span><span>首页</span></button>
+              <button id="watchLaterBtn" class="nav-action" data-page="watch_later" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></span><span>稍后再看</span><span class="nav-count-badge" id="watchLaterCountBadge" hidden></span></button>
+              <button id="favoritesBtn" class="nav-action" data-page="favorites" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" /></svg></span><span>我的收藏</span><span class="nav-count-badge" id="favoritesCountBadge" hidden></span></button>
+              <button id="profileBtn" class="nav-action" data-page="profile" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0" /></svg></span><span>我的画像</span></button>
+              <button id="chatBtn" class="nav-action" data-page="chat" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg></span><span>聊聊口味</span></button>
+              <button id="jobsBtn" class="nav-action" data-page="jobs" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><rect x="3" y="5" width="18" height="15" rx="2" /><path d="M8 5V3m8 2V3M7 10h10M8 15h3" /></svg></span><span>后台任务</span></button>
+              <button id="settingsBtn" class="nav-action" data-page="settings" type="button"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1A8 8 0 0 0 15 6l-.3-2.6h-4L10.4 6a8 8 0 0 0-1.5.9l-2.4-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a8 8 0 0 0 1.5.9l.3 2.6h4l.3-2.6a8 8 0 0 0 1.5-.9l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1z" /></svg></span><span>设置</span></button>
             </nav>
-            <section class="hero-status-grid" aria-label="运行状态">
-              <span>后端</span><strong id="runtimeSummary">连接中</strong>
+            <section class="side-section side-runtime-panel" aria-label="实时运行摘要">
+              <p class="eyebrow">Runtime</p>
+              <h3>本地运行状态</h3>
+              <p id="runtimeSummary">正在连接 FastAPI 与后台 Worker。</p>
+              <div class="hero-status-grid" aria-label="运行状态">
+                <div><span>后端</span><strong id="healthState">连接中</strong></div>
+                <div><span>画像版本</span><strong id="profileSummary">—</strong></div>
+                <div><span>发现流</span><strong>本地优先</strong></div>
+              </div>
             </section>
           </div>
         </aside>
         <main id="home" class="layout">
-        <section id="homePage" class="main-col vnext-page" data-page-panel="feed">
+        <section id="homePage" class="main-col vnext-page" data-page-panel="feed" aria-label="推荐首页" data-od-id="recommendation-home">
+          <section data-od-id="recommendations">
           <div class="section-head">
             <div>
               <p class="eyebrow">Discovery feed</p>
@@ -213,6 +227,7 @@
           <div class="load-row">
             <button class="pill-btn dark" id="loadMoreBtn">加载更多</button>
           </div>
+          </section>
         </section>
         <section
           id="watchLaterPage"
@@ -220,34 +235,34 @@
           data-page-panel="watch_later"
           hidden
         >
-          <div class="section-head">
+          <div class="content-page-head">
             <div>
               <p class="eyebrow">Watch later</p>
-              <h1>稍后再看</h1>
-              <p>只保存在 OpenBiliClaw 本地。</p>
+              <h2 data-saved-heading tabindex="-1">稍后再看</h2>
+              <p class="video-meta">只保存在 OpenBiliClaw 本地，随时可以移除。</p>
             </div>
           </div>
           <div class="saved-grid" id="watchLaterList"></div>
         </section>
         <section id="favoritesPage" class="saved-page content-page vnext-page" data-page-panel="favorites" hidden>
-          <div class="section-head">
+          <div class="content-page-head">
             <div>
               <p class="eyebrow">Favorites</p>
-              <h1>我的收藏</h1>
-              <p>跨平台的统一本地收藏。</p>
+              <h2 data-saved-heading tabindex="-1">我的收藏</h2>
+              <p class="video-meta">跨平台的统一本地收藏，与稍后再看互相独立。</p>
             </div>
           </div>
           <div class="saved-grid" id="favoritesList"></div>
         </section>
         <section id="profilePage" class="profile-page vnext-page" data-page-panel="profile" hidden>
-          <div class="section-head">
+          <div class="profile-page-head">
             <div>
               <p class="eyebrow">Evidence profile</p>
-              <h1>我的画像</h1>
+              <h2>我的画像</h2>
               <p id="profileMeta"></p>
             </div>
           </div>
-          <form id="profileForm" class="profile-page-list vnext-settings">
+          <form id="profileForm" class="profile-list profile-page-list">
             <section>
               <label
                 >画像叙述<textarea id="profileNarrative" rows="6"></textarea>
@@ -286,14 +301,14 @@
           </form>
         </section>
         <section id="chatPage" class="chat-page content-page vnext-page" data-page-panel="chat" hidden>
-          <div class="section-head">
+          <div class="content-page-head">
             <div>
               <p class="eyebrow">Taste dialogue</p>
-              <h1>聊聊你的口味</h1>
-              <p>可选择让本轮对话成为新的画像证据。</p>
+              <h2>聊聊你的口味</h2>
+              <p class="video-meta">可选择让本轮对话成为新的画像证据。</p>
             </div>
           </div>
-          <div class="chat-log vnext-chat-log" id="chatLog"></div>
+          <div class="chat-log" id="chatLog"></div>
           <form class="chat-input" id="chatForm">
             <input
               id="chatInput"
@@ -305,7 +320,7 @@
           </form>
         </section>
         <section id="jobsPage" class="content-page vnext-page" data-page-panel="jobs" hidden>
-          <div class="section-head">
+          <div class="content-page-head">
             <div>
               <p class="eyebrow">Background jobs</p>
               <h1>后台任务</h1>
@@ -324,15 +339,23 @@
           <div id="jobList"></div>
         </section>
         <section id="settingsPage" class="settings-page content-page vnext-page" data-page-panel="settings" hidden>
-          <div class="section-head">
+          <div class="content-page-head">
             <div>
               <p class="eyebrow">Settings</p>
-              <h1>产品设置</h1>
-              <p>所有用户可调整项统一保存在 vNext 数据库中。</p>
+              <h2>产品设置</h2>
+              <p class="video-meta">所有用户可调整项统一保存在 vNext 数据库中。</p>
             </div>
           </div>
-          <form id="settingsForm" class="vnext-settings">
-            <section>
+          <form id="settingsForm" class="settings-grid vnext-settings">
+            <div class="settings-tabs" role="tablist" aria-label="设置分类">
+              <button class="settings-tab is-active" type="button" data-settings-tab="sources">来源</button>
+              <button class="settings-tab" type="button" data-settings-tab="feed">发现流</button>
+              <button class="settings-tab" type="button" data-settings-tab="profile">画像</button>
+              <button class="settings-tab" type="button" data-settings-tab="tasks">AI 任务</button>
+              <button class="settings-tab" type="button" data-settings-tab="scheduler">调度</button>
+              <button class="settings-tab" type="button" data-settings-tab="runtime">运行</button>
+            </div>
+            <section class="settings-panel" data-settings-panel="sources">
               <h2>AI 别名</h2>
               <p>凭据、供应商、回退、预算和缓存由 LiteLLM 管理。</p>
               <div id="aliasHealth"></div>
@@ -344,28 +367,29 @@
                 hidden
                 >打开 LiteLLM Admin ↗</a
               >
-            </section>
-            <section>
               <h2>内容源与权重</h2>
               <div id="sourceSettings"></div>
               <div id="sourceModuleSettings"></div>
               <h3>账号连接</h3>
               <div id="sourceAccounts"></div>
             </section>
-            <section>
+            <section class="settings-panel" data-settings-panel="feed" hidden>
               <h2>发现流</h2>
               <div class="vnext-fields" id="feedSettings"></div>
             </section>
-            <section>
-              <h2>画像与任务</h2>
+            <section class="settings-panel" data-settings-panel="profile" hidden>
+              <h2>画像</h2>
               <div class="vnext-fields" id="profileSettings"></div>
+            </section>
+            <section class="settings-panel" data-settings-panel="tasks" hidden>
+              <h2>AI 任务</h2>
               <div id="taskSettings"></div>
             </section>
-            <section>
+            <section class="settings-panel" data-settings-panel="scheduler" hidden>
               <h2>计划任务与保留</h2>
               <div class="vnext-fields" id="scheduleSettings"></div>
             </section>
-            <section>
+            <section class="settings-panel" data-settings-panel="runtime" hidden>
               <h2>网络、日志与访问控制</h2>
               <div class="vnext-fields" id="runtimeSettings"></div>
             </section>
@@ -377,6 +401,32 @@
         </main>
       </div>
     </div>
+    <section class="mobile-menu" id="mobileMenu" aria-label="手机菜单" aria-hidden="true">
+      <div class="mobile-menu-panel">
+        <div class="mobile-menu-head">
+          <div><p class="eyebrow">OpenBiliClaw</p><h2>菜单</h2></div>
+          <button class="icon-btn" id="mobileMenuClose" type="button" aria-label="关闭手机菜单">×</button>
+        </div>
+        <form class="mobile-search" id="mobileSearchForm">
+          <input id="mobileSearchInput" type="search" placeholder="搜索当前发现流" />
+          <button class="pill-btn dark" type="submit">搜索</button>
+        </form>
+        <div class="mobile-menu-list" aria-label="手机功能入口">
+          <button class="mobile-menu-item" data-mobile-page="feed" type="button"><span>发现首页</span><small>浏览、筛选和补齐推荐</small></button>
+          <button class="mobile-menu-item" data-mobile-page="watch_later" type="button"><span>稍后再看</span><small>查看本地稍后列表</small></button>
+          <button class="mobile-menu-item" data-mobile-page="favorites" type="button"><span>我的收藏</span><small>查看跨平台本地收藏</small></button>
+          <button class="mobile-menu-item" data-mobile-page="profile" type="button"><span>我的画像</span><small>查看并编辑证据画像</small></button>
+          <button class="mobile-menu-item" data-mobile-page="chat" type="button"><span>聊聊口味</span><small>告诉阿B你的偏好和边界</small></button>
+          <button class="mobile-menu-item" data-mobile-page="jobs" type="button"><span>后台任务</span><small>启动任务并查看进度</small></button>
+          <button class="mobile-menu-item" data-mobile-page="settings" type="button"><span>设置</span><small>来源、画像、任务和运行配置</small></button>
+        </div>
+        <section class="mobile-summary-card" aria-label="运行摘要">
+          <div class="mobile-summary-head"><p class="eyebrow">Runtime</p><a class="small-btn" href="/m/">打开手机版</a></div>
+          <h3>本地后端状态</h3>
+          <p id="mobileRuntimeSummary">连接中</p>
+        </section>
+      </div>
+    </section>
     <div class="vnext-login" id="loginGate" hidden>
       <form id="loginForm">
         <h2>登录 OpenBiliClaw</h2>
@@ -393,7 +443,7 @@
         <p id="loginError" class="status-line"></p>
       </form>
     </div>
-    <div class="vnext-toast" id="toast" hidden></div>
+    <div class="toast-container"><div class="vnext-toast" id="toast" hidden></div></div>
     <script type="module" src="/web/assets/js/app.js"></script>
   </body>
 </html>

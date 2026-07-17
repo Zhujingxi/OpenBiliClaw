@@ -147,3 +147,69 @@ test("execution stops at the request deadline and reports a typed failure", asyn
   assert.ok(Date.now() - startedAt < 250, "dispatcher must not wait past the request deadline");
   assert.deepEqual(failures, [{ code: "deadline_exceeded", error_type: "TaskDeadlineError" }]);
 });
+
+test("an expired claim is failed without invoking its executor", async () => {
+  const failures: unknown[] = [];
+  let executions = 0;
+  const dispatcher = createSourceTaskDispatcher({
+    sourceId: "bilibili",
+    operations: ["search"],
+    transport: {
+      async claim() {
+        return { ...claim, request_deadline_at: new Date(Date.now() - 1_000).toISOString() };
+      },
+      async complete() {
+        assert.fail("expired claim must not report success");
+      },
+      async fail(_taskId, _leaseToken, failure) {
+        failures.push(failure);
+      },
+    },
+    execute: async () => {
+      executions += 1;
+      return { operation: "search", items: [] };
+    },
+  });
+
+  assert.equal(await dispatcher.pollOnce(), true);
+  assert.equal(executions, 0);
+  assert.deepEqual(failures, [{ code: "deadline_exceeded", error_type: "TaskDeadlineError" }]);
+});
+
+test("deadline aborts in-flight execution and ignores a late successful result", async () => {
+  const failures: unknown[] = [];
+  const completions: unknown[] = [];
+  let receivedSignal: AbortSignal | undefined;
+  let resolveExecution: ((value: { operation: "search"; items: [] }) => void) | undefined;
+  const dispatcher = createSourceTaskDispatcher({
+    sourceId: "bilibili",
+    operations: ["search"],
+    transport: {
+      async claim() {
+        return {
+          ...claim,
+          request_deadline_at: new Date(Date.now() + 2_020).toISOString(),
+        };
+      },
+      async complete(_taskId, _leaseToken, result) {
+        completions.push(result);
+      },
+      async fail(_taskId, _leaseToken, failure) {
+        failures.push(failure);
+      },
+    },
+    execute: async (_task, signal) => {
+      receivedSignal = signal;
+      return new Promise((resolve) => {
+        resolveExecution = resolve;
+      });
+    },
+  });
+
+  assert.equal(await dispatcher.pollOnce(), true);
+  assert.equal(receivedSignal?.aborted, true);
+  assert.deepEqual(failures, [{ code: "deadline_exceeded", error_type: "TaskDeadlineError" }]);
+  resolveExecution?.({ operation: "search", items: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(completions, []);
+});

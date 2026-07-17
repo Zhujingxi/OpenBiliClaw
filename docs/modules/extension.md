@@ -21,6 +21,17 @@ popup ─► generated API client ─► device-key exchange ─► finite beare
 不支持的 operation 不模拟。claim payload/result 先经过生成类型与运行时校验，credential-shaped
 字段不会回传。失败回写只携带闭合 code 和经校验的异常类型，不携带页面错误文本。
 
+每轮 generic claim 前，service worker 通过 generated client 读取 `/api/v1/sources`，只为
+manifest 中 primary 或 fallback transport 为 `browser`、且本地存在 executor 的 operation
+构造 dispatcher。per-source settings 写入会立即重建后端 registry，因此 Douyin 默认
+`mode=direct` 时扩展只领取 browser bootstrap；切换 `mode=extension` 后才动态领取
+search/trending/feed。Twitter 没有 browser operation，保持 passive-only。
+
+dispatcher 在调用 executor 前先验证绝对 request deadline，并预留 failure completion 时间；
+已过期 claim 不打开平台 tab。执行中到期会 abort tab/message/listener 等待、回写 typed
+`deadline_exceeded`，任何迟到 result 都不能 success-complete。每条等待路径会清理 timer、
+runtime listener 与临时 tab；Xiaohongshu continuation 仍在同一个 abort/deadline 边界内。
+
 ## Popup 范围
 
 Popup 使用 `extension/popup/api-client.js`，覆盖来源状态/配置、bootstrap、证据画像、feed、

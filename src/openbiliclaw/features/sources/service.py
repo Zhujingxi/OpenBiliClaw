@@ -168,10 +168,12 @@ class SourceAccountService:
         *,
         cipher: CredentialCipherPort,
         registry: SourceRegistry | Callable[[], SourceRegistry],
+        on_settings_change: Callable[[], None] | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._cipher = cipher
         self._registry_provider = registry if callable(registry) else lambda: registry
+        self._on_settings_change = on_settings_change
 
     def manifests(self) -> tuple[SourceManifest, ...]:
         return tuple(self._registry_provider().manifests.values())
@@ -216,6 +218,8 @@ class SourceAccountService:
             validate_source_task_payload(safe_settings)
             uow.settings.replace_source_settings(source_id.value, safe_settings)
             uow.commit()
+        if self._on_settings_change is not None:
+            self._on_settings_change()
         return SourceSettingsState(source_id=source_id, settings=safe_settings)
 
     def configure(

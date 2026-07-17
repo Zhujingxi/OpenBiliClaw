@@ -3,7 +3,7 @@
 import { computeActionBadge } from "./badge.ts";
 import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.ts";
 import {
-  BROWSER_SOURCE_OPERATIONS,
+  browserOperationsFromManifests,
   executeBrowserSourceTask,
 } from "./browser-source-executor.ts";
 import {
@@ -16,6 +16,7 @@ import {
   type ActivityEvent,
   type ReadinessResponse,
   type SourceId,
+  type SourceManifest,
 } from "../shared/api-client.ts";
 import { normalizeActivityEvent } from "../shared/activity-event.ts";
 import { authenticatedFetch, clearSession, ensureSession } from "../shared/auth.ts";
@@ -64,14 +65,24 @@ const taskTransport: SourceTaskTransport = {
   },
 };
 
-const sourceTaskDispatchers: SourceTaskDispatcher[] = Object.entries(BROWSER_SOURCE_OPERATIONS)
-  .filter((entry): entry is [SourceId, NonNullable<(typeof entry)[1]>] => Boolean(entry[1]))
-  .map(([sourceId, operations]) => createSourceTaskDispatcher({
+let sourceTaskDispatchers: SourceTaskDispatcher[] = [];
+
+async function refreshSourceTaskDispatchers(): Promise<void> {
+  const manifests = await (await getApiClient()).request<ReadonlyArray<SourceManifest>>(
+    "v1_sources_list",
+  );
+  const operationsBySource = browserOperationsFromManifests(manifests);
+  sourceTaskDispatchers = Object.entries(operationsBySource)
+    .filter((entry): entry is [SourceId, NonNullable<(typeof entry)[1]>] => Boolean(entry[1]))
+    .map(([sourceId, operations]) => createSourceTaskDispatcher({
     sourceId,
     operations,
     transport: taskTransport,
     execute: executeBrowserSourceTask,
-  }));
+    }));
+  if (sourceTaskDispatchers.length === 0) nextDispatcherIndex = 0;
+  else nextDispatcherIndex %= sourceTaskDispatchers.length;
+}
 
 async function ingestActivity(event: ActivityEvent): Promise<void> {
   await (await getApiClient()).request("v1_events_ingest", { body: event });
@@ -105,6 +116,14 @@ async function flushEvents(): Promise<void> {
 async function pollSourceTasks(): Promise<void> {
   if (pollInFlight) return pollInFlight;
   pollInFlight = (async () => {
+    try {
+      await refreshSourceTaskDispatchers();
+      backendReachable = true;
+    } catch {
+      sourceTaskDispatchers = [];
+      backendReachable = false;
+      return;
+    }
     for (let offset = 0; offset < sourceTaskDispatchers.length; offset += 1) {
       const index = (nextDispatcherIndex + offset) % sourceTaskDispatchers.length;
       const dispatcher = sourceTaskDispatchers[index]!;
