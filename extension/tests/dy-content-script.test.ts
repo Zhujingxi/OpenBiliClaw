@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createScrollRoundController,
   douyinDiscoveryExecutionPolicy,
   filterDiscoveryItemsForScope,
   isDouyinSearchResultUrl,
@@ -176,4 +177,70 @@ test("filterDiscoveryItemsForScope merges duplicate hot metadata", () => {
   assert.equal(items[0]!.sentence_id, "2495363");
   assert.equal(items[0]!.seed_aweme_id, "7652229189183427849");
   assert.equal(items[0]!.like_count, 10);
+});
+
+test("createScrollRoundController continues while the item count grows", () => {
+  const controller = createScrollRoundController({
+    roundCap: 10,
+    stagnantLimit: 2,
+    maxItems: 100,
+  });
+
+  assert.equal(controller.shouldContinue(0), true);
+  assert.equal(controller.shouldContinue(5), true);
+  assert.equal(controller.shouldContinue(9), true);
+  assert.equal(controller.roundsExecuted(), 3);
+});
+
+test("createScrollRoundController stops after two consecutive stagnant rounds", () => {
+  const controller = createScrollRoundController({
+    roundCap: 10,
+    stagnantLimit: 2,
+    maxItems: 100,
+  });
+
+  assert.equal(controller.shouldContinue(3), true);
+  assert.equal(controller.shouldContinue(3), true); // 1st stagnant round
+  assert.equal(controller.shouldContinue(3), false); // 2nd stagnant round → stop
+  assert.equal(controller.roundsExecuted(), 2);
+});
+
+test("createScrollRoundController resets the stagnant streak on growth", () => {
+  const controller = createScrollRoundController({
+    roundCap: 10,
+    stagnantLimit: 2,
+    maxItems: 100,
+  });
+
+  assert.equal(controller.shouldContinue(3), true);
+  assert.equal(controller.shouldContinue(3), true); // stagnant once
+  assert.equal(controller.shouldContinue(7), true); // growth resets streak
+  assert.equal(controller.shouldContinue(7), true); // stagnant once again
+  assert.equal(controller.shouldContinue(7), false); // stagnant twice → stop
+});
+
+test("createScrollRoundController stops at the round cap", () => {
+  const controller = createScrollRoundController({
+    roundCap: 3,
+    stagnantLimit: 2,
+    maxItems: 100,
+  });
+
+  assert.equal(controller.shouldContinue(1), true);
+  assert.equal(controller.shouldContinue(2), true);
+  assert.equal(controller.shouldContinue(3), true);
+  assert.equal(controller.shouldContinue(4), false); // cap reached
+  assert.equal(controller.roundsExecuted(), 3);
+});
+
+test("createScrollRoundController stops once maxItems is reached", () => {
+  const controller = createScrollRoundController({
+    roundCap: 10,
+    stagnantLimit: 2,
+    maxItems: 5,
+  });
+
+  assert.equal(controller.shouldContinue(2), true);
+  assert.equal(controller.shouldContinue(5), false);
+  assert.equal(controller.roundsExecuted(), 1);
 });

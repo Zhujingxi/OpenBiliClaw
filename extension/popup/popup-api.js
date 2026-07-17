@@ -462,6 +462,14 @@ export async function submitFeedback(payload) {
   });
 }
 
+export async function sendBehaviorEvents(events) {
+  return requestJson("/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ events }),
+  });
+}
+
 /**
  * Confirm or reject a specific insight hypothesis. confirm → the hypothesis is
  * validated + its confidence raised; reject → unvalidated + confidence capped

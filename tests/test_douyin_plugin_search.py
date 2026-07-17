@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+import openbiliclaw.sources.douyin_plugin_search as dy_plugin_search
 from openbiliclaw.sources.douyin_plugin_search import (
     DouyinPluginSearchClient,
+    _hot_term_sentence_id,
     plugin_search_item_to_aweme,
 )
 from openbiliclaw.sources.dy_tasks import DyTaskQueue
@@ -470,6 +472,62 @@ async def test_search_aweme_raises_budget_sentinel_when_armed(database: Database
         await client.search_aweme("猫", limit=5)
     # Budget-rejected path must NOT fall back to direct-cookie search.
     assert fallback.keywords == []
+
+
+# ── hot-seed rotation ────────────────────────────────────────────────────
+
+
+def _rotation_client(database: Database) -> DouyinPluginSearchClient:
+    return DouyinPluginSearchClient(
+        database=database,
+        direct_client=_FallbackClient(),
+        kick=lambda: None,
+    )
+
+
+def test_rotate_hot_terms_filters_recent_sentence_ids(database: Database) -> None:
+    client = _rotation_client(database)
+    terms = [{"sentence_id": "1"}, {"sentence_id": "2"}, {"sentence_id": "3"}]
+
+    first = client._rotate_hot_terms(terms, seed_count=2)
+    assert [_hot_term_sentence_id(t) for t in first] == ["1", "2"]
+
+    # Second call within TTL: 1 & 2 are recent → the fresh term (3) comes first,
+    # then a stale term tops up the tail to keep seed_count.
+    second = client._rotate_hot_terms(terms, seed_count=2)
+    assert _hot_term_sentence_id(second[0]) == "3"
+    assert len(second) == 2
+
+
+def test_rotate_hot_terms_falls_back_when_all_recent(database: Database) -> None:
+    client = _rotation_client(database)
+    terms = [{"sentence_id": "1"}, {"sentence_id": "2"}]
+
+    client._rotate_hot_terms(terms, seed_count=2)  # marks both recent
+    again = client._rotate_hot_terms(terms, seed_count=2)
+    # Prefer stale over nothing: still return both rather than starving the source.
+    assert sorted(_hot_term_sentence_id(t) for t in again) == ["1", "2"]
+
+
+def test_rotate_hot_terms_reuses_after_ttl_expiry(
+    database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(dy_plugin_search.time, "monotonic", lambda: now[0])
+    client = _rotation_client(database)
+    terms = [{"sentence_id": "1"}, {"sentence_id": "2"}]
+
+    assert _hot_term_sentence_id(client._rotate_hot_terms(terms, seed_count=1)[0]) == "1"
+    now[0] += 60
+    # "1" still recent → the fresh term "2" is picked.
+    assert _hot_term_sentence_id(client._rotate_hot_terms(terms, seed_count=1)[0]) == "2"
+
+    # Advance past the TTL — both prior uses expire and are pruned, so "1" is
+    # eligible (and first in the list) again.
+    now[0] += dy_plugin_search._HOT_SEED_REUSE_TTL_SECONDS + 1
+    picked = client._rotate_hot_terms(terms, seed_count=1)
+    assert _hot_term_sentence_id(picked[0]) == "1"
+    assert client._recent_hot_sentence_ids == {"1": now[0]}
 
 
 async def test_search_aweme_budget_falls_back_to_direct_when_not_armed(database: Database) -> None:

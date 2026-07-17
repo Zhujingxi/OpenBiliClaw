@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { extractDouyinSearchItemsFromDocument } from "../src/content/dy/dom-extractor.ts";
+import {
+  extractDouyinSearchItemsFromDocument,
+  pickSearchScrollTarget,
+} from "../src/content/dy/dom-extractor.ts";
 
 class FakeElement {
   readonly textContent: string;
@@ -107,4 +110,65 @@ test("extractDouyinSearchItemsFromDocument reads visible metric chips", () => {
       share_count: 9,
     },
   ]);
+});
+
+// ── pickSearchScrollTarget (inner scrollable container discovery) ────────
+
+interface FakeScrollNode {
+  overflowY: string;
+  scrollHeight: number;
+  clientHeight: number;
+  parentElement: FakeScrollNode | null;
+}
+
+function makeScrollNode(opts: {
+  overflowY?: string;
+  scrollHeight?: number;
+  clientHeight?: number;
+  parent?: FakeScrollNode | null;
+}): FakeScrollNode {
+  return {
+    overflowY: opts.overflowY ?? "visible",
+    scrollHeight: opts.scrollHeight ?? 0,
+    clientHeight: opts.clientHeight ?? 0,
+    parentElement: opts.parent ?? null,
+  };
+}
+
+function makeScrollDoc(anchor: FakeScrollNode | null): Document {
+  return {
+    querySelector: () => anchor,
+    defaultView: {
+      getComputedStyle: (el: FakeScrollNode) => ({ overflowY: el.overflowY }),
+    },
+  } as unknown as Document;
+}
+
+test("pickSearchScrollTarget finds the nearest scrollable ancestor", () => {
+  const scrollable = makeScrollNode({
+    overflowY: "auto",
+    scrollHeight: 2_000,
+    clientHeight: 800,
+  });
+  const wrapper = makeScrollNode({ overflowY: "visible", parent: scrollable });
+  const anchor = makeScrollNode({ parent: wrapper });
+
+  const target = pickSearchScrollTarget(makeScrollDoc(anchor));
+  assert.equal(target, scrollable as unknown as Element);
+});
+
+test("pickSearchScrollTarget skips overflow containers with no real overflow", () => {
+  // overflow-y auto but scrollHeight ~= clientHeight → not scrollable.
+  const flat = makeScrollNode({
+    overflowY: "auto",
+    scrollHeight: 802,
+    clientHeight: 800,
+  });
+  const anchor = makeScrollNode({ parent: flat });
+
+  assert.equal(pickSearchScrollTarget(makeScrollDoc(anchor)), null);
+});
+
+test("pickSearchScrollTarget returns null without a video anchor", () => {
+  assert.equal(pickSearchScrollTarget(makeScrollDoc(null)), null);
 });
