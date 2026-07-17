@@ -103,17 +103,19 @@ healthcheck 不只检查文件存在，而是验证容器 PID 1 是正式 worker
 Alembic head、Huey SQLite 完整且能取得可回滚的写事务。`restarting`、`exited` 或
 `unhealthy` worker 都会使安装非零失败，不能被 API readiness 掩盖。受保护 API probe
 完成后 installer 会再次读取相同 Compose 状态，probe 期间转为 crash-loop 也会失败。
-Queue writable probe 通过 `/proc/self/fd` 或 `/dev/fd` 连接 held inode，在内存 journal 的
-`BEGIN IMMEDIATE` 中执行真实 `CREATE`/`INSERT` 后 rollback，不留下 durable artifact，并在
-SQLite connection 前后确认 pathname 仍指向 held inode。Source installer
+Queue writable probe 使用正常 queue pathname，保留 Huey 的 WAL 与 parent journal 语义；
+POSIX 在 connection 前后枚举 process FD，并要求 SQLite 新打开的 main DB FD 与预先 held
+inode 一致，再以 `BEGIN IMMEDIATE` 执行真实 `CREATE`/`INSERT` 后 rollback。Windows 在稳定
+checkout-root 边界内执行 connection 前后 pathname/held identity 校验。Source installer
 在 migration 后启动 API/worker、等待 queue
 文件就绪，再运行 `openbiliclaw doctor` 检查应用数据库、access token 和 LiteLLM
 配置；任一步失败都会停止这两个新进程并非零退出。POSIX held checkout-root lock、稳定
 root guard 与内层 lifecycle anchor 共同串行，并持久化完整 installer state、generation 和
 anchor UUID/device/inode；取得锁、进入业务、generation 更新及退出时均精确复核，并共享一个
 截止时间。POSIX 逐级 held-FD 遍历 `data/vnext`，仅在普通文件、单链接、owner、私密 mode
-与 pathname identity 成立时原位重绑崩溃遗留的未绑定 anchor；native Windows 对此恢复
-失败关闭。持锁后会重读绑定，已绑定 pathname
+与 pathname identity 成立时原位重绑崩溃遗留的未绑定 anchor；native Windows 在 root guard
+内仅恢复 non-reparse、普通文件、单链接且 held/path identity 一致的 orphan，不声称等价 ACL
+保证。持锁后会重读绑定，已绑定 pathname
 缺失/替换或 symlink/junction ancestor 都会失败关闭。
 
 ## 来源与 onboarding

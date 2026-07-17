@@ -235,10 +235,10 @@ def test_simultaneous_first_install_waits_through_anchor_publication(
     if direct_path:
         monkeypatch.setattr(bootstrap, "_lifecycle_uses_dir_fd", lambda: False)
 
-    def delayed_publication(root: Path, anchor: object) -> None:
+    def delayed_publication(root: Path, anchor: object, installation: object) -> None:
         before_publication.set()
         assert release_publication.wait(2.0)
-        original(root, anchor)
+        original(root, anchor, installation)
 
     def enter(name: str) -> None:
         if name == "second":
@@ -269,12 +269,12 @@ def test_first_install_recovers_crash_after_anchor_write_before_record(
     if direct_path:
         monkeypatch.setattr(bootstrap, "_lifecycle_uses_dir_fd", lambda: False)
 
-    def crash_once(root: Path, anchor: object) -> None:
+    def crash_once(root: Path, anchor: object, installation: object) -> None:
         nonlocal crashed
         if not crashed:
             crashed = True
             raise RuntimeError("simulated initialization crash")
-        original(root, anchor)
+        original(root, anchor, installation)
 
     monkeypatch.setattr(bootstrap, "_persist_initial_installation", crash_once)
     with (
@@ -303,7 +303,7 @@ def test_first_install_recovers_crash_after_anchor_write_before_record(
 
     assert not anchor_unlinked
     assert (orphan.st_dev, orphan.st_ino) == (recovered.st_dev, recovered.st_ino)
-    assert orphan_payload["anchor_id"] != recovered_payload["anchor_id"]
+    assert orphan_payload["anchor_id"] == recovered_payload["anchor_id"]
 
 
 def test_initial_installer_record_publication_never_replaces_a_racing_path(
@@ -455,12 +455,102 @@ def test_windows_unbound_recovery_never_calls_unix_fchmod(
     monkeypatch.setattr(bootstrap.os, "name", "nt")
     monkeypatch.setattr(bootstrap.os, "fchmod", reject_fchmod)
     try:
-        with pytest.raises(RuntimeError, match="unsupported"):
-            bootstrap._sanitize_unbound_anchor_direct(anchor, descriptor)
+        bootstrap._sanitize_unbound_anchor_direct(anchor, descriptor)
     finally:
         os.close(descriptor)
 
     assert not fchmod_called
+
+
+def test_generation_guard_first_crash_recovers_exactly_one_generation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        current = bootstrap._load_or_create_installation_state(tmp_path)
+        original_write = bootstrap._atomic_write_private_file
+        failed = False
+
+        def crash_record(path: Path, content: str) -> None:
+            nonlocal failed
+            if path == tmp_path / bootstrap.INSTALLATION_STATE and not failed:
+                failed = True
+                raise OSError("crash after guard lease")
+            original_write(path, content)
+
+        monkeypatch.setattr(bootstrap, "_atomic_write_private_file", crash_record)
+        with pytest.raises(OSError, match="crash after guard lease"):
+            bootstrap._advance_installation_generation(tmp_path, current)
+
+    monkeypatch.setattr(bootstrap, "_atomic_write_private_file", original_write)
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        recovered = bootstrap._load_or_create_installation_state(tmp_path)
+    assert recovered.generation == current.generation + 1
+
+
+def test_guard_append_trims_incomplete_tail_and_preserves_last_complete_lease(
+    tmp_path: Path,
+) -> None:
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        current = bootstrap._load_or_create_installation_state(tmp_path)
+
+    guard_path = tmp_path / bootstrap.ROOT_LIFECYCLE_GUARD
+    with guard_path.open("ab") as stream:
+        stream.write(b'{"generation":')
+        stream.flush()
+        os.fsync(stream.fileno())
+
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        recovered = bootstrap._load_or_create_installation_state(tmp_path)
+        advanced = bootstrap._advance_installation_generation(tmp_path, recovered)
+
+    assert recovered == current
+    assert advanced.generation == current.generation + 1
+    assert guard_path.read_bytes().endswith(b"\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink contract")
+def test_runtime_log_open_rejects_logs_symlink_and_final_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "logs").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="runtime log"):
+        bootstrap._open_runtime_log(tmp_path, tmp_path / "logs/api.log")
+
+    (tmp_path / "logs").unlink()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs/api.log").symlink_to(outside / "captured.log")
+    with pytest.raises(RuntimeError, match="runtime log"):
+        bootstrap._open_runtime_log(tmp_path, tmp_path / "logs/api.log")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hard-link contract")
+def test_runtime_log_open_rejects_hardlinked_final(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = logs / "api.log"
+    log.touch()
+    os.link(log, logs / "api.external")
+    with pytest.raises(RuntimeError, match="private regular file"):
+        bootstrap._open_runtime_log(tmp_path, log)
+
+
+def test_windows_runtime_log_rejects_junction_component(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(bootstrap, "_lifecycle_uses_dir_fd", lambda: False)
+    monkeypatch.setattr(bootstrap, "_path_is_link_or_junction", lambda path: path == logs)
+    with pytest.raises(RuntimeError, match="runtime log"):
+        bootstrap._open_runtime_log(tmp_path, logs / "worker.log")
+
+
+def test_gitignore_covers_installer_coordination_and_retained_artifacts() -> None:
+    root = Path(__file__).resolve().parents[2]
+    ignored = (root / ".gitignore").read_text(encoding="utf-8")
+    assert ".openbiliclaw-install-root.lock" in ignored
+    assert ".obc-backup-source-*/" in ignored
+    assert "installer-instance.json.tmp-*" in ignored
 
 
 def test_initial_record_rejects_temporary_path_inode_swap(
@@ -481,6 +571,9 @@ def test_initial_record_rejects_temporary_path_inode_swap(
         bootstrap._atomic_create_private_file(target, "trusted-record\n")
 
     assert target.read_text(encoding="utf-8") == "replacement-temp\n"
+    temporary_replacements = list(tmp_path.glob("installer.json.tmp-*"))
+    assert len(temporary_replacements) == 1
+    assert temporary_replacements[0].read_text(encoding="utf-8") == "replacement-temp\n"
 
 
 def test_initial_record_never_path_chmods_a_published_replacement(

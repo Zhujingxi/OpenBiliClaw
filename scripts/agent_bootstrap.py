@@ -27,6 +27,7 @@ from uuid import UUID, uuid4
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
+    from typing import BinaryIO
 
 
 DEFAULT_HOST = "0.0.0.0"
@@ -381,8 +382,11 @@ def _read_installation_record(
     return installation, anchor
 
 
-def _persist_initial_installation(root: Path, anchor: LifecycleAnchorIdentity) -> None:
-    installation = InstallationState(str(root), str(uuid4()), 0)
+def _persist_initial_installation(
+    root: Path,
+    anchor: LifecycleAnchorIdentity,
+    installation: InstallationState,
+) -> None:
     _atomic_create_private_file(
         root / INSTALLATION_STATE,
         json.dumps(_installation_payload(installation, anchor), sort_keys=True) + "\n",
@@ -403,11 +407,24 @@ def _read_guard_lease(
     descriptor: int,
 ) -> tuple[InstallationState, LifecycleAnchorIdentity] | None:
     os.lseek(descriptor, 0, os.SEEK_SET)
-    raw = os.read(descriptor, max(1, os.fstat(descriptor).st_size))
+    remaining = os.fstat(descriptor).st_size
+    chunks: list[bytes] = []
+    while remaining > 0:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
     if raw in {b"", b"0"}:
         return None
+    complete = [line for line in raw.splitlines(keepends=True) if line.endswith(b"\n")]
+    if not complete:
+        raise RuntimeError("invalid root lifecycle guard metadata")
+    if complete == [b"0\n"]:
+        return None
     try:
-        value = json.loads(raw)
+        value = json.loads(complete[-1])
     except ValueError as exc:
         raise RuntimeError("invalid root lifecycle guard metadata") from exc
     installation = InstallationState.from_dict(value)
@@ -423,10 +440,63 @@ def _write_guard_lease(
     anchor: LifecycleAnchorIdentity,
 ) -> None:
     content = json.dumps(_installation_payload(installation, anchor), sort_keys=True) + "\n"
-    os.ftruncate(descriptor, 0)
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    os.write(descriptor, content.encode())
+    size = os.fstat(descriptor).st_size
+    if size:
+        os.lseek(descriptor, -1, os.SEEK_END)
+        if os.read(descriptor, 1) != b"\n":
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            raw = os.read(descriptor, size)
+            last_complete = raw.rfind(b"\n") + 1
+            if raw == b"0":
+                last_complete = 0
+            os.ftruncate(descriptor, last_complete)
+            os.fsync(descriptor)
+    os.lseek(descriptor, 0, os.SEEK_END)
+    _write_all(descriptor, content.encode())
     os.fsync(descriptor)
+
+
+def _write_all(descriptor: int, content: bytes) -> None:
+    view = memoryview(content)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short write while persisting lifecycle guard")
+        view = view[written:]
+
+
+def _reconcile_guard_lease(
+    root: Path,
+    guard: tuple[InstallationState, LifecycleAnchorIdentity] | None,
+    record: tuple[InstallationState, LifecycleAnchorIdentity] | None,
+) -> tuple[InstallationState, LifecycleAnchorIdentity] | None:
+    if guard is None:
+        return record
+    if record == guard:
+        return guard
+    guard_installation, guard_anchor = guard
+    if record is None:
+        _require_anchor_path_binding(root, guard_anchor)
+        _atomic_create_private_file(
+            root / INSTALLATION_STATE,
+            json.dumps(_installation_payload(guard_installation, guard_anchor), sort_keys=True)
+            + "\n",
+        )
+        return guard
+    record_installation, record_anchor = record
+    if (
+        guard_anchor == record_anchor
+        and guard_installation.project_root == record_installation.project_root
+        and guard_installation.instance_id == record_installation.instance_id
+        and guard_installation.generation == record_installation.generation + 1
+    ):
+        _atomic_write_private_file(
+            root / INSTALLATION_STATE,
+            json.dumps(_installation_payload(guard_installation, guard_anchor), sort_keys=True)
+            + "\n",
+        )
+        return guard
+    raise RuntimeError("lifecycle lock identity changed: root guard lease")
 
 
 def _remaining_timeout(deadline: float) -> float:
@@ -771,6 +841,16 @@ def _sanitize_unbound_anchor_direct(path: Path, descriptor: int) -> None:
         current = path.lstat()
     except OSError as exc:
         raise RuntimeError("lifecycle lock identity changed") from exc
+    if os.name == "nt":
+        if (
+            _path_is_link_or_junction(path)
+            or not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or held.st_nlink != 1
+            or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise RuntimeError("lifecycle lock identity changed")
+        return
     _require_recoverable_unbound_anchor(held, current)
     os.fchmod(descriptor, 0o600)
 
@@ -788,7 +868,10 @@ def _bound_lifecycle(
 ) -> Iterator[None]:
     if initialize:
         _write_lifecycle_anchor(root, descriptor, identity)
-        _persist_initial_installation(root, identity)
+        installation = InstallationState(str(root), str(uuid4()), 0)
+        if guard_descriptor is not None:
+            _write_guard_lease(guard_descriptor, installation, identity)
+        _persist_initial_installation(root, identity, installation)
         record = _read_installation_record(root)
         if record is None or record[1] != identity:
             raise RuntimeError("lifecycle lock identity changed")
@@ -810,12 +893,17 @@ def _bound_lifecycle(
     finally:
         try:
             validate()
-            _require_bound_installation(root, lease.installation, lease.anchor)
-            if guard_descriptor is not None and _read_guard_lease(guard_descriptor) != (
-                lease.installation,
-                lease.anchor,
-            ):
-                raise RuntimeError("root lifecycle guard lease changed")
+            if guard_descriptor is None:
+                _require_bound_installation(root, lease.installation, lease.anchor)
+            else:
+                reconciled = _reconcile_guard_lease(
+                    root,
+                    _read_guard_lease(guard_descriptor),
+                    _read_installation_record(root),
+                )
+                if reconciled is None or reconciled[1] != lease.anchor:
+                    raise RuntimeError("root lifecycle guard lease changed")
+                lease.installation = reconciled[0]
         finally:
             _ACTIVE_LIFECYCLE_LEASE.reset(token)
 
@@ -982,11 +1070,11 @@ def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
         raise ValueError("lock timeout must not be negative")
     deadline = time.monotonic() + timeout
     with _root_lifecycle_guard(root, deadline=deadline) as (root_descriptor, guard_descriptor):
-        guard_lease = _read_guard_lease(guard_descriptor)
-        record = _read_installation_record(root)
-        if guard_lease is not None and record != guard_lease:
-            raise RuntimeError("lifecycle lock identity changed: root guard lease")
-        lease = guard_lease or record
+        lease = _reconcile_guard_lease(
+            root,
+            _read_guard_lease(guard_descriptor),
+            _read_installation_record(root),
+        )
         expected_installation = None if lease is None else lease[0]
         expected_anchor = None if lease is None else lease[1]
         remaining = _remaining_timeout(deadline)
@@ -1103,12 +1191,12 @@ def _advance_installation_generation(
         current.instance_id,
         current.generation + 1,
     )
+    if lease.guard_descriptor is not None:
+        _write_guard_lease(lease.guard_descriptor, advanced, anchor)
     _atomic_write_private_file(
         root / INSTALLATION_STATE,
         json.dumps(_installation_payload(advanced, anchor), sort_keys=True) + "\n",
     )
-    if lease.guard_descriptor is not None:
-        _write_guard_lease(lease.guard_descriptor, advanced, anchor)
     lease.installation = advanced
     return advanced
 
@@ -1243,11 +1331,78 @@ def _run_checked(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)  # noqa: S603
 
 
+def _open_runtime_log(project_dir: Path, log_path: Path) -> BinaryIO:
+    root = _canonical_project_root(project_dir)
+    expected_parent = root / "logs"
+    if log_path.parent != expected_parent or log_path.name not in {"api.log", "worker.log"}:
+        raise RuntimeError("runtime log path escapes the managed logs directory")
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    if _lifecycle_uses_dir_fd():
+        root_descriptor = os.open(
+            root,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        logs_descriptor = -1
+        descriptor = -1
+        try:
+            with suppress(FileExistsError):
+                os.mkdir("logs", 0o700, dir_fd=root_descriptor)
+            logs_descriptor = os.open(
+                "logs",
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=root_descriptor,
+            )
+            descriptor = os.open(log_path.name, flags, 0o600, dir_fd=logs_descriptor)
+            held = os.fstat(descriptor)
+            current = os.stat(log_path.name, dir_fd=logs_descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(held.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or held.st_nlink != 1
+                or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise RuntimeError("runtime log is not a private regular file")
+            stream = os.fdopen(descriptor, "ab")
+            descriptor = -1
+            return stream
+        except OSError as exc:
+            raise RuntimeError("runtime log path is not a contained directory") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if logs_descriptor >= 0:
+                os.close(logs_descriptor)
+            os.close(root_descriptor)
+    if expected_parent.exists():
+        if _path_is_link_or_junction(expected_parent) or not expected_parent.is_dir():
+            raise RuntimeError("runtime log path is not a contained directory")
+    else:
+        expected_parent.mkdir(mode=0o700)
+    if log_path.exists() and (_path_is_link_or_junction(log_path) or not log_path.is_file()):
+        raise RuntimeError("runtime log is not a private regular file")
+    descriptor = os.open(log_path, flags, 0o600)
+    try:
+        held = os.fstat(descriptor)
+        current = log_path.lstat()
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or held.st_nlink != 1
+            or (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise RuntimeError("runtime log is not a private regular file")
+        stream = os.fdopen(descriptor, "ab")
+        descriptor = -1
+        return stream
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _start_detached(
     command: list[str], *, cwd: Path, env: dict[str, str], log_path: Path
 ) -> subprocess.Popen[bytes]:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    stream = log_path.open("ab")
+    stream = _open_runtime_log(cwd, log_path)
     try:
         if os.name == "nt":
             return subprocess.Popen(  # noqa: S603

@@ -104,9 +104,10 @@ under one non-resettable deadline. Initial metadata is synced through a held tem
 FD, `fchmod`ed on that FD on POSIX, and published with a no-replace hard link; the
 published pathname is never chmoded. POSIX opens `data/vnext` one held component at a
 time and rejects symlinks, junctions, inode replacement, and multiply linked anchors.
-Crash-orphan recovery is allowed only on POSIX after private regular-file, owner, mode,
-single-link, and pathname checks; native Windows fails closed because it lacks an
-equivalent ACL/descriptor recovery proof. The binding is reread after lock
+Crash-orphan recovery on POSIX requires private regular-file, owner, mode, single-link,
+and pathname checks. Under the stable root guard, native Windows accepts only a
+non-reparse, regular, single-link orphan whose held and pathname identities match; it
+does not use Unix `fchmod` or claim equivalent ACL assurance. The binding is reread after lock
 acquisition and before release. A missing/replaced bound lock path, or a
 symlink/junction ancestor, fails closed. A
 copied `.env` rebinds managed root/DB/Huey/instance fields while preserving secrets
@@ -114,6 +115,11 @@ and the external LiteLLM connection.
 Stop/failure cleanup retains the ownership-bound dead state until the next
 ownership-checked publication, and non-regular state such as a directory or FIFO
 fails closed. Docker rechecks API and worker Compose health after protected readiness.
+
+The trust boundary is the canonical checkout root resolved and held at startup. It covers
+normal concurrency, crash recovery, managed-leaf replacement, and symlink/junction
+redirection. It does not claim to resist a malicious same-UID process replacing the whole
+checkout root, or all Windows coordination objects together.
 
 The installer does not implement a provider editor or run product initialization.
 Use `/api/v1/sources` and `/api/v1/onboarding` for source connection and bootstrap.

@@ -73,9 +73,14 @@ All lock waits consume one absolute deadline. Initial metadata is synced and per
 through its retained temporary FD before hard-link no-replace publication. POSIX opens each
 `data/vnext` component through held directory FDs. If initialization crashes before metadata
 publication, POSIX recovery only rebinds the held inode after regular-file, single-link,
-owner, private-mode, and pathname-identity checks; native Windows fails closed because no
-equivalent ACL/descriptor recovery proof is implemented. Once bound, an absent or replaced lock path fails closed instead of
+owner, private-mode, and pathname-identity checks. Under the stable root guard, native
+Windows accepts only a non-reparse, regular, single-link orphan whose held/path identities
+match; this is not an equivalent ACL assurance claim. Once bound, an absent or replaced lock path fails closed instead of
 creating a second lock domain. Copied lock inodes and symlink/junction ancestors are refused:
+
+The canonical checkout root is the trust boundary. These checks cover ordinary concurrency,
+crashes, managed-leaf tampering, and link redirection, not a malicious same-UID replacement
+of the entire root or of every Windows coordination object.
 
 1. Install dependencies with `uv sync --frozen`, or a Python editable fallback.
 2. Persist stable access/encryption secrets and the supplied LiteLLM connection.

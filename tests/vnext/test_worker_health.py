@@ -10,9 +10,34 @@ from alembic.config import Config
 
 from openbiliclaw.infrastructure.database import operations
 from openbiliclaw.infrastructure.jobs.health import worker_health_ready
+from openbiliclaw.infrastructure.jobs.queue import build_huey
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKER_CMDLINE = b"python\x00-m\x00openbiliclaw.worker\x00"
+
+
+def test_real_huey_wal_queue_health_preserves_journal_mode(tmp_path: Path) -> None:
+    queue = tmp_path / "huey.db"
+    build_huey(queue)
+
+    with sqlite3.connect(queue) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+
+def test_windows_queue_health_uses_normal_path_and_remains_functional(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    queue = tmp_path / "huey.db"
+    build_huey(queue)
+    monkeypatch.setattr(operations.os, "name", "nt")
+
+    assert operations._write_transaction_available(queue)
+    with sqlite3.connect(queue) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+    assert operations._write_transaction_available(queue)
+    with sqlite3.connect(queue) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
 
 
 def _database_url(path: Path) -> str:
@@ -175,9 +200,9 @@ def test_queue_writability_rejects_swap_and_restore_during_sqlite_connect(
 
     monkeypatch.setattr(operations.sqlite3, "connect", connect_swapped_inode)
 
-    assert operations._write_transaction_available(queue)
+    assert not operations._write_transaction_available(queue)
     assert swapped
-    assert connected_identity == "original"
+    assert connected_identity == "replacement"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes required")

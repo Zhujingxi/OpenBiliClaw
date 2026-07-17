@@ -31,6 +31,102 @@ def _healthy_aliases() -> AIHealthResult:
     )
 
 
+def test_backup_link_error_never_deletes_main_or_sidecar_replacement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    source.write_bytes(b"main")
+    descriptor = os.open(source, os.O_RDONLY)
+    identity = (source.stat().st_dev, source.stat().st_ino)
+    main_link = tmp_path / "source.db"
+    original_require = operations._require_source_identity
+
+    def replace_then_fail(path: Path, expected: tuple[int, int]) -> None:
+        main_link.unlink()
+        main_link.write_text("replacement", encoding="utf-8")
+        raise DatabaseBackupError("database source changed during backup")
+
+    monkeypatch.setattr(operations, "_require_source_identity", replace_then_fail)
+    try:
+        with pytest.raises(DatabaseBackupError):
+            operations._link_verified_file(
+                source=source,
+                source_descriptor=descriptor,
+                source_identity=identity,
+                destination=main_link,
+            )
+    finally:
+        os.close(descriptor)
+        monkeypatch.setattr(operations, "_require_source_identity", original_require)
+    assert main_link.read_text(encoding="utf-8") == "replacement"
+
+    sidecar = tmp_path / "app.db-wal"
+    sidecar.write_bytes(b"wal")
+    sidecar_link = tmp_path / "source.db-wal"
+    original_link = operations.os.link
+
+    def replace_sidecar_after_link(source_path: Path, destination: Path, **kwargs: object) -> None:
+        original_link(source_path, destination, **kwargs)
+        sidecar_link.unlink()
+        sidecar_link.write_text("sidecar-replacement", encoding="utf-8")
+
+    monkeypatch.setattr(operations.os, "link", replace_sidecar_after_link)
+    with pytest.raises(DatabaseBackupError, match="sidecar changed"):
+        operations._link_optional_sidecar(source=sidecar, destination=sidecar_link)
+    assert sidecar_link.read_text(encoding="utf-8") == "sidecar-replacement"
+
+
+def test_staging_slot_reservations_are_atomic_and_capped(tmp_path: Path) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    def reserve() -> Path | str:
+        try:
+            return operations._reserve_staging_slot(tmp_path)
+        except DatabaseBackupError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=33) as pool:
+        results = list(pool.map(lambda _index: reserve(), range(33)))
+
+    slots = [result for result in results if isinstance(result, Path)]
+    errors = [result for result in results if isinstance(result, str)]
+    assert len(slots) == 32
+    assert len({slot.name for slot in slots}) == 32
+    assert len(errors) == 1
+    assert "no backup is running" in errors[0]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fork-based cross-process reservation contract")
+def test_staging_slot_reservations_are_cross_process_atomic(tmp_path: Path) -> None:
+    import multiprocessing
+
+    context = multiprocessing.get_context("fork")
+    results = context.Queue()
+
+    def reserve() -> None:
+        from openbiliclaw.infrastructure.database import operations
+
+        try:
+            results.put(operations._reserve_staging_slot(tmp_path).name)
+        except DatabaseBackupError as exc:
+            results.put(str(exc))
+
+    processes = [context.Process(target=reserve) for _ in range(33)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=5)
+        assert process.exitcode == 0
+    values = [results.get(timeout=1) for _ in processes]
+    slots = [value for value in values if value.startswith(".obc-backup-source-")]
+    errors = [value for value in values if not value.startswith(".obc-backup-source-")]
+    assert len(set(slots)) == 32
+    assert len(errors) == 1
+    assert "no backup is running" in errors[0]
+
+
 def test_doctor_checks_database_migration_queue_and_all_aliases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

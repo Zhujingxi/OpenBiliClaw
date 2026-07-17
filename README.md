@@ -96,13 +96,18 @@ MODE=local bash scripts/install.sh
 上对该 FD 执行 `fchmod`，再 hard-link no-replace 发布；不会按发布后的 pathname chmod。
 POSIX 以 held root/parent FD 逐级打开 `data/vnext`，拒绝 symlink、junction、换 inode 或
 多 hard-link anchor。崩溃遗留的未绑定 anchor 仅在 POSIX 上通过普通文件、单链接、owner、
-私密 mode 与 pathname identity 检查后原位重绑；native Windows 因无等价 ACL/descriptor
-恢复证明而失败关闭。持锁后及退出前都会重读绑定；
+私密 mode 与 pathname identity 检查后原位重绑；native Windows 则在稳定 root guard 内仅
+接受 non-reparse、普通文件、单链接且 pathname/held identity 一致的 orphan，不使用 Unix
+`fchmod`，也不声称提供 POSIX mode/owner 等价的 ACL 证明。持锁后及退出前都会重读绑定；
 已绑定 pathname 缺失或换 inode，以及 symlink/junction ancestor，都会失败关闭；复制 `.env` 后，managed root/DB/Huey/instance 字段会
 重绑定当前 checkout，而已有 secret 与外部 LiteLLM connection 保持不变。
 停止/失败清理保留 ownership-bound dead state，直到下次 ownership-checked publication；
 directory/FIFO 等非普通 state 会失败关闭。Docker 在受保护 readiness 后再次检查 API
 与 worker Compose health，避免 probe 期间的 crash-loop 被误报成功。
+
+安全边界是启动时解析并持有的 canonical checkout root。该边界覆盖正常并发、崩溃恢复、
+managed leaf 替换和 symlink/junction 重定向；不声称抵御恶意 same-UID 进程替换整个 checkout
+root，或在 Windows 上同时替换全部 coordination objects。
 
 安装器不会配置 provider 表单，也不会执行产品初始化；来源连接和 onboarding
 使用 `/api/v1/sources` 与 `/api/v1/onboarding`。

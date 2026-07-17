@@ -13,7 +13,6 @@ import secrets
 import sqlite3
 import stat
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -385,12 +384,14 @@ def _write_transaction_available(path: Path) -> bool:
         descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
         if not _descriptor_matches_regular_path(path, descriptor):
             return False
-        uri = _held_sqlite_uri(descriptor)
-        if uri is None:
-            return False
+        before_fds = _process_file_descriptors() if os.name != "nt" else None
+        uri = f"file:{quote(str(path), safe='/')}?mode=rw"
         probe_table = f"__openbiliclaw_write_probe_{secrets.token_hex(8)}"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
-            connection.execute("PRAGMA journal_mode=MEMORY")
+            if before_fds is not None and not _connection_opened_held_inode(descriptor, before_fds):
+                return False
+            if not _descriptor_matches_regular_path(path, descriptor):
+                return False
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(f'CREATE TABLE "{probe_table}" (value INTEGER NOT NULL)')
             connection.execute(f'INSERT INTO "{probe_table}" (value) VALUES (1)')
@@ -403,23 +404,41 @@ def _write_transaction_available(path: Path) -> bool:
             os.close(descriptor)
 
 
-def _held_sqlite_uri(descriptor: int) -> str | None:
-    if os.name == "nt":
-        return None
-    held = os.fstat(descriptor)
-    for candidate in (f"/proc/self/fd/{descriptor}", f"/dev/fd/{descriptor}"):
-        candidate_descriptor = -1
+def _process_file_descriptors() -> frozenset[int] | None:
+    for directory in ("/proc/self/fd", "/dev/fd"):
         try:
-            candidate_descriptor = os.open(candidate, os.O_RDWR)
-            resolved = os.fstat(candidate_descriptor)
+            candidates = (int(name) for name in os.listdir(directory) if name.isdigit())
+            opened: set[int] = set()
+            for descriptor in candidates:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    continue
+                opened.add(descriptor)
+            return frozenset(opened)
         except OSError:
             continue
-        finally:
-            if candidate_descriptor >= 0:
-                os.close(candidate_descriptor)
-        if (resolved.st_dev, resolved.st_ino) == (held.st_dev, held.st_ino):
-            return f"file:{quote(candidate, safe='/')}?mode=rw"
     return None
+
+
+def _connection_opened_held_inode(descriptor: int, before: frozenset[int] | None) -> bool:
+    if before is None:
+        return False
+    held = os.fstat(descriptor)
+    after = _process_file_descriptors()
+    if after is None:
+        return False
+    for candidate in after - before:
+        try:
+            opened = os.fstat(candidate)
+        except OSError:
+            continue
+        if stat.S_ISREG(opened.st_mode) and (opened.st_dev, opened.st_ino) == (
+            held.st_dev,
+            held.st_ino,
+        ):
+            return True
+    return False
 
 
 def _descriptor_matches_regular_path(path: Path, descriptor: int) -> bool:
@@ -514,19 +533,12 @@ def _create_stable_source(
 ) -> _StableSQLiteSource:
     """Create private hard links for the database and its live sidecars."""
 
-    last_error: OSError | None = None
+    last_error: BaseException | None = None
     parents = tuple(dict.fromkeys((source.parent, snapshot_parent)))
     for parent in parents:
-        retained = sum(
-            1
-            for candidate in parent.glob(".obc-backup-source-*")
-            if _directory_without_symlink(candidate)
-        )
-        if retained >= _MAX_RETAINED_STAGING_DIRECTORIES:
-            continue
         try:
-            directory = Path(tempfile.mkdtemp(prefix=".obc-backup-source-", dir=parent))
-        except OSError as exc:
+            directory = _reserve_staging_slot(parent)
+        except DatabaseBackupError as exc:
             last_error = exc
             continue
         try:
@@ -538,7 +550,25 @@ def _create_stable_source(
             )
         except OSError as exc:
             last_error = exc
+    if isinstance(last_error, DatabaseBackupError):
+        raise last_error
     raise DatabaseBackupError("could not create a stable database backup source") from last_error
+
+
+def _reserve_staging_slot(parent: Path) -> Path:
+    for slot in range(_MAX_RETAINED_STAGING_DIRECTORIES):
+        directory = parent / f".obc-backup-source-{slot:02d}"
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise DatabaseBackupError("could not reserve database backup staging slot") from exc
+        return directory
+    raise DatabaseBackupError(
+        "database backup staging capacity reached; remove .obc-backup-source-00 through "
+        ".obc-backup-source-31 only while no backup is running"
+    )
 
 
 def _populate_stable_source(
@@ -645,7 +675,6 @@ def _link_verified_file(
             raise DatabaseBackupError("database source changed during backup")
         _require_source_identity(source, source_identity)
     except BaseException:
-        _unlink_owned_inode(destination, source_identity)
         raise
 
 
@@ -660,7 +689,6 @@ def _link_optional_sidecar(
         raise DatabaseBackupError("database sidecar changed during backup")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(source, flags)
-    linked_created = False
     try:
         opened = os.fstat(descriptor)
         identity = (opened.st_dev, opened.st_ino)
@@ -670,7 +698,6 @@ def _link_optional_sidecar(
         ):
             raise DatabaseBackupError("database sidecar changed during backup")
         os.link(source, destination, follow_symlinks=False)
-        linked_created = True
         linked_metadata = destination.lstat()
         current = source.lstat()
         if (
@@ -683,8 +710,6 @@ def _link_optional_sidecar(
         return descriptor, identity
     except BaseException:
         os.close(descriptor)
-        if linked_created:
-            _unlink_owned_inode(destination, identity)
         raise
 
 
@@ -832,14 +857,6 @@ def _cleanup_staging_directory(
     # POSIX and macOS do not provide compare-and-unlink-by-inode. Retain this
     # bounded, private hard-link set for explicit maintenance rather than risk
     # deleting a pathname replacement after the identity check above.
-
-
-def _directory_without_symlink(path: Path) -> bool:
-    try:
-        metadata = path.lstat()
-    except OSError:
-        return False
-    return stat.S_ISDIR(metadata.st_mode)
 
 
 def _staging_entry_identity(
@@ -1127,15 +1144,6 @@ def _prepare_destination(destination: Path) -> Path:
     except OSError as exc:
         raise DatabaseBackupError("backup destination cannot be inspected") from exc
     raise DatabaseBackupError("backup destination already exists")
-
-
-def _unlink_owned_inode(path: Path, identity: tuple[int, int]) -> None:
-    try:
-        metadata = path.lstat()
-        if not stat.S_ISLNK(metadata.st_mode) and (metadata.st_dev, metadata.st_ino) == identity:
-            path.unlink()
-    except FileNotFoundError:
-        return
 
 
 def _sync_descriptor(descriptor: int, identity: tuple[int, int]) -> None:
