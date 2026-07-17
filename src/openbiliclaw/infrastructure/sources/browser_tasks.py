@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _CLEANUP_SCHEDULING_GRACE_SECONDS = 0.25
+_MAX_CANCELLATION_ATTEMPTS = 3
 _ACTIONABLE_STATUSES = (SourceTaskStatus.PENDING.value, SourceTaskStatus.IN_PROGRESS.value)
 
 
@@ -398,11 +399,28 @@ class QueuedBrowserTransport:
         except BaseException as error:
             logger.warning("source task enqueue cleanup failed (%s)", type(error).__name__)
             return
-        cancel_task = asyncio.create_task(asyncio.to_thread(self._service.cancel, task_id))
-        try:
-            await _await_task_resistant(cancel_task)
-        except BaseException as error:
-            logger.warning("source task cleanup failed (%s)", type(error).__name__)
+        await self._cancel_with_retries(task_id)
+
+    async def _cancel_with_retries(self, task_id: UUID) -> None:
+        """Retry transient terminalization failures without detaching owned thread work."""
+
+        loop = asyncio.get_running_loop()
+        retry_deadline = loop.time() + self._cleanup_timeout
+        for attempt in range(_MAX_CANCELLATION_ATTEMPTS):
+            cancel_task = asyncio.create_task(asyncio.to_thread(self._service.cancel, task_id))
+            try:
+                await _await_task_resistant(cancel_task)
+                return
+            except BaseException as error:
+                logger.warning("source task cleanup failed (%s)", type(error).__name__)
+            if attempt + 1 == _MAX_CANCELLATION_ATTEMPTS:
+                return
+            remaining = retry_deadline - loop.time()
+            if remaining <= 0:
+                return
+            retry_delay = min(self._poll_interval, remaining)
+            delay_task = asyncio.create_task(asyncio.sleep(retry_delay))
+            await _await_task_resistant(delay_task)
 
 
 def _aware(value: datetime) -> datetime:

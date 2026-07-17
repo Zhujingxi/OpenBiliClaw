@@ -177,7 +177,9 @@ function contentCard(content, explanation = "", collection = "") {
           delete button.dataset.interactionPending;
         }
       } finally {
-        button.disabled = false;
+        button.disabled =
+          button.dataset.libraryPersisted === "true" &&
+          button.dataset.interactionPending !== "true";
       }
     }),
   );

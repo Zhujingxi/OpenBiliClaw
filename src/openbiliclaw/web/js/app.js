@@ -122,7 +122,9 @@ async function save(collection, content_id, button) {
   } catch (error) {
     button.textContent = "重试";
   } finally {
-    button.disabled = false;
+    button.disabled =
+      button.dataset.libraryPersisted === "true" &&
+      button.dataset.interactionPending !== "true";
   }
 }
 function card(content, entry, collection = "") {

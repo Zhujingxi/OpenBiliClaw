@@ -417,7 +417,7 @@ async function recordInteraction(contentId, kind, button = null) {
   if (!contentId) return;
   if (button) button.disabled = true;
   try {
-    await requestV1("v1_interactions_create", { body: { content_id: contentId, kind, metadata: {} } });
+    await sendInteraction(contentId, kind);
     if (kind !== "open") toast("反馈已记录");
   } catch (error) {
     if (kind !== "open") toast(errorMessage(error), "error");
@@ -426,17 +426,49 @@ async function recordInteraction(contentId, kind, button = null) {
   }
 }
 
+function sendInteraction(contentId, kind) {
+  return requestV1("v1_interactions_create", {
+    body: { content_id: contentId, kind, metadata: {} },
+  });
+}
+
 async function saveLibraryItem(collection, contentId, button) {
   button.disabled = true;
+  let libraryPersisted = button.dataset.libraryPersisted === "true";
   try {
-    await requestV1("v1_library_add", { path: { collection }, body: { content_id: contentId, note: "" } });
+    if (!libraryPersisted) {
+      try {
+        await requestV1("v1_library_add", {
+          path: { collection },
+          body: { content_id: contentId, note: "" },
+        });
+      } catch (error) {
+        if (error?.status !== 409) throw error;
+        libraryPersisted = true;
+        button.dataset.libraryPersisted = "true";
+        button.setAttribute("aria-pressed", "true");
+        delete button.dataset.interactionPending;
+        toast("已经保存过了");
+        return;
+      }
+      libraryPersisted = true;
+      button.dataset.libraryPersisted = "true";
+      button.setAttribute("aria-pressed", "true");
+    }
     const interactionKind = collection === "favorites" ? "save_favorite" : "save_watch_later";
-    await recordInteraction(contentId, interactionKind);
-    toast(collection === "favorites" ? "已收藏" : "已加入稍后看");
+    try {
+      await sendInteraction(contentId, interactionKind);
+      delete button.dataset.interactionPending;
+      toast(collection === "favorites" ? "已收藏" : "已加入稍后看");
+    } catch {
+      button.dataset.interactionPending = "true";
+      toast("已保存；行为记录失败，点击可重试", "error");
+    }
   } catch (error) {
-    toast(error?.status === 409 ? "已经保存过了" : errorMessage(error), error?.status === 409 ? "" : "error");
+    toast(errorMessage(error), "error");
   } finally {
-    button.disabled = false;
+    button.disabled =
+      libraryPersisted && button.dataset.interactionPending !== "true";
   }
 }
 

@@ -156,6 +156,7 @@ def retained_server() -> tuple[str, StubState]:
             roots = {
                 "/m/": WEB,
                 "/web/": WEB / "desktop",
+                "/setup/": WEB / "setup",
                 "/extension/popup/": POPUP,
             }
             for prefix, root in roots.items():
@@ -198,9 +199,36 @@ def retained_server() -> tuple[str, StubState]:
             if path == "/api/v1/settings":
                 return _json(self, _settings(state.onboarding_complete))
             if path == "/api/v1/system/ai-health":
-                return _json(self, {"aliases": [], "admin_url": None})
+                return _json(
+                    self,
+                    {
+                        "aliases": [
+                            {
+                                "alias": alias,
+                                "state": "available",
+                                "available": True,
+                                "reason": None,
+                            }
+                            for alias in (
+                                "obc-interactive",
+                                "obc-analysis",
+                                "obc-embedding",
+                            )
+                        ],
+                        "admin_url": None,
+                    },
+                )
             if path == "/api/v1/sources":
-                return _json(self, [])
+                return _json(
+                    self,
+                    [
+                        {
+                            "source_id": "bilibili",
+                            "display_name": "Bilibili",
+                            "capabilities": ["history"],
+                        }
+                    ],
+                )
             if path == "/api/v1/sources/status":
                 return _json(self, [])
             if path == "/api/v1/feed":
@@ -268,6 +296,12 @@ def retained_server() -> tuple[str, StubState]:
                         self,
                         {"error": {"code": "library_unavailable", "message": "save failed"}},
                         503,
+                    )
+                if payload["content_id"] in state.collections[collection]:
+                    return _json(
+                        self,
+                        {"error": {"code": "already_saved", "message": "already saved"}},
+                        409,
                     )
                 state.collections[collection].add(payload["content_id"])
                 return _json(self, _library_item(collection)["collection_item"], 201)
@@ -361,10 +395,12 @@ def _install_popup_chrome(page: Page, base_url: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("surface", "url", "feedback_selector", "save_selector"),
+    ("surface", "url", "feedback_selector", "collection"),
     [
-        ("desktop", "/web/", '[data-feedback="positive"]', '[data-save="favorites"]'),
-        ("mobile", "/m/#/recommend", '[data-kind="positive"]', '[data-save="favorites"]'),
+        ("desktop", "/web/", '[data-feedback="positive"]', "favorites"),
+        ("desktop", "/web/", '[data-feedback="positive"]', "watch_later"),
+        ("mobile", "/m/#/recommend", '[data-kind="positive"]', "favorites"),
+        ("mobile", "/m/#/recommend", '[data-kind="positive"]', "watch_later"),
     ],
 )
 def test_failed_writes_and_partial_saves_keep_truthful_retryable_state(
@@ -373,7 +409,7 @@ def test_failed_writes_and_partial_saves_keep_truthful_retryable_state(
     surface: str,
     url: str,
     feedback_selector: str,
-    save_selector: str,
+    collection: str,
 ) -> None:
     base_url, state = retained_server
     state.fail_interaction = True
@@ -388,51 +424,69 @@ def test_failed_writes_and_partial_saves_keep_truthful_retryable_state(
     expect(feedback).not_to_have_attribute("aria-pressed", "true")
     assert feedback.evaluate("button => !button.classList.contains('active')")
 
-    save = card.locator(save_selector)
+    save = card.locator(f'[data-save="{collection}"]')
     save.click()
     expect(save).to_be_enabled()
     expect(save).not_to_have_attribute("aria-pressed", "true")
     assert save.evaluate("button => !button.classList.contains('active')")
-    assert state.collections["favorites"] == set()
+    assert state.collections[collection] == set()
 
     state.fail_library_add = False
     save.click()
-    _wait_until(lambda: CONTENT_ID in state.collections["favorites"])
+    _wait_until(lambda: CONTENT_ID in state.collections[collection])
     expect(save).to_have_attribute("aria-pressed", "true")
     expect(save).to_have_attribute("data-library-persisted", "true")
     expect(save).to_have_attribute("data-interaction-pending", "true")
     add_count = sum(
-        request["path"] == "/api/v1/library/favorites" for request in state.requests
+        request["path"] == f"/api/v1/library/{collection}" for request in state.requests
     )
 
     state.fail_interaction = False
     save.click()
-    _wait_until(lambda: any(item["kind"] == "save_favorite" for item in state.interactions))
+    interaction_kind = "save_favorite" if collection == "favorites" else "save_watch_later"
+    _wait_until(lambda: any(item["kind"] == interaction_kind for item in state.interactions))
     expect(save).not_to_have_attribute("data-interaction-pending", "true")
+    expect(save).to_be_disabled()
     assert sum(
-        request["path"] == "/api/v1/library/favorites" for request in state.requests
+        request["path"] == f"/api/v1/library/{collection}" for request in state.requests
     ) == add_count
+    interaction_count = len(state.interactions)
+    save.evaluate("button => button.click()")
+    browser_page.wait_for_timeout(50)
+    assert len(state.interactions) == interaction_count
+
+    browser_page.reload()
+    rerendered = browser_page.locator(
+        ".video-card" if surface == "desktop" else ".rec-card"
+    ).locator(f'[data-save="{collection}"]')
+    rerendered.click()
+    expect(rerendered).to_have_attribute("aria-pressed", "true")
+    expect(rerendered).to_be_disabled()
+    assert len(state.interactions) == interaction_count
 
 
 @pytest.mark.parametrize(
-    ("url", "card_selector", "tab_selector", "list_selector"),
+    ("url", "card_selector", "collection", "tab_selector", "list_selector"),
     [
-        ("/web/", ".video-card", "#favoritesBtn", "#favoritesList"),
-        ("/m/#/recommend", ".rec-card", '[data-tab="favorites"]', "#mobileLibrary"),
+        ("/web/", ".video-card", "favorites", "#favoritesBtn", "#favoritesList"),
+        ("/web/", ".video-card", "watch_later", "#watchLaterBtn", "#watchLaterList"),
+        ("/m/#/recommend", ".rec-card", "favorites", '[data-tab="favorites"]', "#mobileLibrary"),
+        ("/m/#/recommend", ".rec-card", "watch_later", '[data-tab="watchLater"]', "#mobileLibrary"),
     ],
 )
-def test_favorites_add_list_and_remove_round_trip(
+def test_library_add_list_and_remove_round_trip(
     retained_server: tuple[str, StubState],
     browser_page: Page,
     url: str,
     card_selector: str,
+    collection: str,
     tab_selector: str,
     list_selector: str,
 ) -> None:
     base_url, state = retained_server
     browser_page.goto(base_url + url)
-    browser_page.locator(card_selector).locator('[data-save="favorites"]').click()
-    _wait_until(lambda: CONTENT_ID in state.collections["favorites"])
+    browser_page.locator(card_selector).locator(f'[data-save="{collection}"]').click()
+    _wait_until(lambda: CONTENT_ID in state.collections[collection])
 
     if url == "/web/":
         browser_page.locator("#sideDrawerBtn").click()
@@ -444,11 +498,24 @@ def test_favorites_add_list_and_remove_round_trip(
     expect(saved).to_have_count(1)
     expect(saved).to_contain_text(CONTENT["title"])
     saved.locator("[data-remove]").click()
-    _wait_until(lambda: CONTENT_ID not in state.collections["favorites"])
+    _wait_until(lambda: CONTENT_ID not in state.collections[collection])
 
 
+@pytest.mark.parametrize(
+    ("collection", "button_name", "tab_selector", "list_selector", "interaction_kind"),
+    [
+        ("favorites", "收藏", "#tabFavorites", "#favoritesList", "save_favorite"),
+        ("watch_later", "稍后看", "#tabWatchLater", "#watchLaterList", "save_watch_later"),
+    ],
+)
 def test_popup_saved_round_trip_and_retry_after_failed_add(
-    retained_server: tuple[str, StubState], browser_page: Page
+    retained_server: tuple[str, StubState],
+    browser_page: Page,
+    collection: str,
+    button_name: str,
+    tab_selector: str,
+    list_selector: str,
+    interaction_kind: str,
 ) -> None:
     base_url, state = retained_server
     _install_popup_chrome(browser_page, base_url)
@@ -457,19 +524,70 @@ def test_popup_saved_round_trip_and_retry_after_failed_add(
     expect(card).to_have_count(1)
 
     state.fail_library_add = True
-    favorite = card.get_by_role("button", name="收藏")
-    favorite.click()
-    expect(favorite).to_be_enabled()
-    assert state.collections["favorites"] == set()
+    save = card.get_by_role("button", name=button_name)
+    save.click()
+    expect(save).to_be_enabled()
+    assert state.collections[collection] == set()
 
     state.fail_library_add = False
-    favorite.click()
-    _wait_until(lambda: CONTENT_ID in state.collections["favorites"])
-    browser_page.locator("#tabFavorites").click()
-    saved = browser_page.locator("#favoritesList .recommendation-card")
+    state.fail_interaction = True
+    save.click()
+    _wait_until(lambda: CONTENT_ID in state.collections[collection])
+    expect(save).to_have_attribute("aria-pressed", "true")
+    expect(save).to_have_attribute("data-interaction-pending", "true")
+    add_count = sum(
+        request["path"] == f"/api/v1/library/{collection}" for request in state.requests
+    )
+
+    state.fail_interaction = False
+    save.click()
+    _wait_until(lambda: any(item["kind"] == interaction_kind for item in state.interactions))
+    expect(save).to_be_disabled()
+    interaction_count = len(state.interactions)
+    assert sum(
+        request["path"] == f"/api/v1/library/{collection}" for request in state.requests
+    ) == add_count
+    save.evaluate("button => button.click()")
+    browser_page.wait_for_timeout(50)
+    assert len(state.interactions) == interaction_count
+
+    browser_page.locator("#refreshRecommendationsButton").click()
+    rerendered = browser_page.locator("#recommendationList .recommendation-card").get_by_role(
+        "button", name=button_name
+    )
+    rerendered.click()
+    expect(rerendered).to_be_disabled()
+    assert len(state.interactions) == interaction_count
+
+    browser_page.locator(tab_selector).click()
+    saved = browser_page.locator(f"{list_selector} .recommendation-card")
     expect(saved).to_have_count(1)
     saved.get_by_role("button", name="移除").click()
-    _wait_until(lambda: CONTENT_ID not in state.collections["favorites"])
+    _wait_until(lambda: CONTENT_ID not in state.collections[collection])
+
+
+def test_setup_onboarding_error_is_retryable_and_success_reaches_ready_step(
+    retained_server: tuple[str, StubState], browser_page: Page
+) -> None:
+    base_url, state = retained_server
+    state.onboarding_complete = False
+    state.onboarding_result = "failed"
+    browser_page.goto(base_url + "/setup/")
+    next_ai = browser_page.locator("#nextAi")
+    expect(next_ai).to_be_enabled()
+    next_ai.click()
+    browser_page.locator("#next1").click()
+    expect(browser_page.locator("#initSources input:checked")).to_have_count(1)
+
+    start = browser_page.locator("#startInit")
+    start.click()
+    expect(start).to_be_enabled()
+    expect(browser_page.locator("#initProgressLabel")).to_have_text("初始化失败")
+
+    state.onboarding_result = "succeeded"
+    start.click()
+    expect(browser_page.locator('[data-panel="3"]')).to_have_class("panel active")
+    expect(browser_page.locator("#runMessage")).to_contain_text("初始化完成")
 
 
 def test_popup_onboarding_error_is_retryable_and_success_enters_product(

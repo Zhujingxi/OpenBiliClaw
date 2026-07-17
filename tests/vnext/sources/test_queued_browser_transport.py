@@ -129,6 +129,59 @@ async def test_explicit_async_cancellation_compensates_the_durable_task(
     assert service.claim("zhihu") is None
 
 
+async def test_transient_cancel_failure_is_retried_until_durable_row_is_terminal(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+) -> None:
+    session_factory, _, service = task_context
+    cancel_attempts = 0
+
+    class FlakyCancelService:
+        persistence_timeout_seconds = 0.02
+
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
+            return service.enqueue(
+                request, task_id=task_id, request_deadline_at=request_deadline_at
+            )
+
+        def cancel(self, task_id: Any) -> Any:
+            nonlocal cancel_attempts
+            cancel_attempts += 1
+            if cancel_attempts == 1:
+                raise RuntimeError("transient cancellation failure")
+            return service.cancel(task_id)
+
+        def snapshot(self, task_id: Any) -> Any:
+            return service.snapshot(task_id)
+
+    transport = QueuedBrowserTransport(
+        FlakyCancelService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=1,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.2,
+    )
+    pending = asyncio.create_task(
+        transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+    )
+    while True:
+        with session_factory() as session:
+            row = session.scalar(select(SourceTaskModel))
+        if row is not None:
+            break
+        await asyncio.sleep(0)
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert cancel_attempts == 2
+    with session_factory() as session:
+        row = session.scalar(select(SourceTaskModel))
+    assert row is not None
+    assert row.status == SourceTaskStatus.CANCELLED.value
+    assert service.claim("zhihu") is None
+
+
 async def test_cancellation_during_enqueue_leaves_only_a_terminal_row(
     task_context: tuple[Any, Any, Any],  # noqa: F811
 ) -> None:

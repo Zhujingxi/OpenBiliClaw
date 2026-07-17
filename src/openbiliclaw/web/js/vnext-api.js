@@ -56,7 +56,10 @@ export async function saveContentToLibrary(
         body: { content_id: contentId, note: "" },
       });
     } catch (error) {
-      if (error?.status !== 409) throw error;
+      if (error?.status === 409) {
+        return { libraryPersisted: true, interactionPending: false };
+      }
+      throw error;
     }
   }
 

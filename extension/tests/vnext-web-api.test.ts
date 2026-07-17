@@ -191,3 +191,32 @@ test("partial saves retry only the interaction after library persistence", async
     (globalThis as { window?: unknown }).window = originalWindow;
   }
 });
+
+test("an already-persisted library item does not emit a new interaction", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  const originalWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = { dispatchEvent() {} };
+  globalThis.fetch = (async (input) => {
+    calls.push(String(input));
+    return Response.json(
+      { error: { code: "already_saved", message: "already saved" } },
+      { status: 409 },
+    );
+  }) as typeof fetch;
+  try {
+    const { saveContentToLibrary } = await import(
+      "../../src/openbiliclaw/web/js/vnext-api.js?existing-save-contract"
+    );
+    const result = await saveContentToLibrary(
+      "watch_later",
+      "11111111-1111-4111-8111-111111111111",
+      "mobile_web",
+    );
+    assert.deepEqual(result, { libraryPersisted: true, interactionPending: false });
+    assert.deepEqual(calls, ["/api/v1/library/watch_later"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    (globalThis as { window?: unknown }).window = originalWindow;
+  }
+});
