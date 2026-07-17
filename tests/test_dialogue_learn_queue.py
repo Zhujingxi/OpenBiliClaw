@@ -257,3 +257,47 @@ async def test_reload_failure_resumes_old_queue() -> None:
 
     assert processed == ["before", "after"]
     assert old.worker_alive is False
+
+
+def test_start_without_loop_emits_no_unawaited_coroutine_warning() -> None:
+    """Synchronous ``start()`` (no running loop) must not build an orphaned coroutine.
+
+    Regression for the startup ``RuntimeWarning: coroutine 'DialogueLearnQueue._run'
+    was never awaited`` — ``start`` used to call ``self._run()`` before
+    ``create_task`` raised, leaving the coroutine un-awaited.
+    """
+    import gc
+    import warnings
+
+    async def _handler(**kwargs: object) -> None:  # pragma: no cover - never runs
+        return None
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        queue = DialogueLearnQueue(_handler)
+        queue.start()  # no running loop here (sync test)
+        assert queue.worker_alive is False
+        gc.collect()  # RuntimeWarning fires at coroutine GC time
+
+    runtime_warnings = [
+        w
+        for w in caught
+        if issubclass(w.category, RuntimeWarning) and "never awaited" in str(w.message)
+    ]
+    assert runtime_warnings == []
+
+
+async def test_start_without_loop_still_lazy_starts_on_first_submit() -> None:
+    """The deferred-start behaviour is preserved: first submit spawns the worker."""
+    done = asyncio.Event()
+
+    async def _handler(**kwargs: object) -> None:
+        done.set()
+
+    queue = DialogueLearnQueue(_handler)
+    # Simulate the sync-startup state: no worker yet.
+    assert queue.worker_alive is False
+    await queue.submit({"user_message": "hi", "assistant_reply": "yo", "session": "s"})
+    assert queue.worker_alive is True
+    await asyncio.wait_for(done.wait(), timeout=2)
+    await queue.shutdown(timeout=2)

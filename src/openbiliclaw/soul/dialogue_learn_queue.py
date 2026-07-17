@@ -69,11 +69,17 @@ class DialogueLearnQueue:
         if self._closed:
             raise RuntimeError("DialogueLearnQueue is closed")
         if self._worker is None or self._worker.done():
+            # Probe for a running loop BEFORE building the coroutine: calling
+            # ``self._run()`` first and letting ``create_task`` raise leaves an
+            # orphaned never-awaited coroutine ("coroutine ... was never
+            # awaited" RuntimeWarning at synchronous startup).
             try:
-                self._worker = asyncio.create_task(self._run(), name=self._name)
+                asyncio.get_running_loop()
             except RuntimeError:
                 # No running loop yet; the worker will start on first submit.
                 self._worker = None
+                return
+            self._worker = asyncio.create_task(self._run(), name=self._name)
 
     @property
     def worker_alive(self) -> bool:
