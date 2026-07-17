@@ -4544,6 +4544,7 @@
     /* ── Favorites view (收藏夹) ───────────────────────────── */
     .saved-card {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       gap: 10px;
       padding: 8px 10px;
@@ -4630,6 +4631,47 @@
       gap: 4px;
       flex-shrink: 0;
     }
+    .saved-card-feedback {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex: 1 0 100%;
+    }
+    .saved-card-feedback button {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      min-width: 36px;
+      min-height: 36px;
+      padding: 7px;
+      border: 0;
+      border-radius: 9px;
+      background: transparent;
+      color: var(--text-muted, #888);
+      box-shadow: none;
+      cursor: pointer;
+      transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+    }
+    .saved-card-feedback button svg {
+      width: 18px;
+      height: 18px;
+    }
+    .saved-card-feedback button[aria-pressed="true"] {
+      background: transparent;
+      color: var(--brand, #c8553d);
+      box-shadow: none;
+    }
+    .saved-card-feedback button:hover { background: var(--brand-soft, rgba(200,85,61,0.1)); color: var(--brand, #c8553d); }
+    .saved-card-feedback button:active { background: var(--brand-soft, rgba(200,85,61,0.1)); color: var(--brand, #c8553d); transform: scale(0.94); }
+    .saved-card-feedback button:disabled { opacity: 0.45; cursor: default; }
+    .saved-card-feedback button:focus-visible { outline: 2px solid var(--brand, #c8553d); outline-offset: 2px; }
+    .saved-card-feedback .cross-toggle { margin-left: auto; }
+    .saved-card-feedback .saved-toggle.watch-later-btn[aria-pressed="true"] { background: transparent; color: var(--brand, #c8553d); }
+    .saved-card-feedback .saved-toggle.favorite-btn[aria-pressed="true"] { background: transparent; color: #e8a33d; }
+    .saved-card-feedback .saved-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
     .saved-card-sync,
     .saved-card-remove {
       min-height: 36px;
@@ -4677,6 +4719,7 @@
       .delight-save-toggle { min-width: 44px; min-height: 44px; }
       .saved-card-sync,
       .saved-card-remove,
+      .saved-card-feedback button,
       .saved-sync-toolbar button,
       .saved-load-retry { min-width: 44px; min-height: 44px; }
     }

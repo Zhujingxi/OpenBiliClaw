@@ -1345,6 +1345,17 @@
 .saved-sync-status { min-height: 20px; margin: 0 0 var(--space-3); color: var(--fg-2); font-size: 12px; }
 #watchLaterSyncAll, #favoritesSyncAll { min-inline-size: 190px; }
 .saved-card-actions { display: flex; justify-content: flex-end; gap: var(--space-2); flex-wrap: wrap; }
+/* Saved-card feedback stays a light icon row; the current list is managed by
+   移除, so the lone save control on the right is always the cross-list toggle. */
+.saved-page .saved-card .saved-feedback-bar { display: flex; align-items: center; justify-content: flex-start; gap: 2px; border: 0; padding: 0; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn { flex: 0 0 auto; width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 7px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); box-shadow: none; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn svg { width: 18px; height: 18px; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn[aria-pressed="true"] { background: transparent; color: var(--accent); box-shadow: none; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn:hover { background: var(--accent-subtle); color: var(--accent); box-shadow: none; }
+.saved-page .saved-card .saved-feedback-bar .feedback-icon-btn:active { background: var(--accent-subtle); color: var(--accent); transform: scale(0.94); box-shadow: none; }
+.saved-page .saved-card .saved-feedback-bar .cross-toggle { margin-left: auto; margin-right: 0; }
+.saved-page .saved-card .saved-feedback-bar .cross-toggle.favorite-btn[aria-pressed="true"] { color: #e8a33d; }
+.saved-page .saved-card .saved-feedback-bar .cross-toggle.favorite-btn[aria-pressed="true"] svg { fill: currentColor; }
 .saved-page .saved-sync-one { min-inline-size: 76px; }
 .saved-sync-line { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-2); font-size: 11px; }
 .saved-sync-line > :last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

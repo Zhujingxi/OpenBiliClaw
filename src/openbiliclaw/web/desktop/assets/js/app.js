@@ -19,6 +19,7 @@
       delightRespond: "/delight/respond",
       profile: "/profile-summary",
       feedback: "/feedback",
+      events: "/events",
       click: "/recommendation-click",
       chatTurns: "/chat/turns",
       interestProbeRespond: "/interest-probes/respond",
@@ -2155,6 +2156,7 @@
             <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
             <p class="saved-sync-line"><span class="saved-sync-chip" data-tone="${escapeHtml(syncPresentation.tone)}">${escapeHtml(syncPresentation.label)}</span><span>${escapeHtml(syncPresentation.detail)}</span></p>
           </div>
+${savedCardFeedbackBarHtml(listKind)}
           <div class="card-actions saved-card-actions">
             ${syncPresentation.actionable || syncPresentation.busy ? `<button class="small-btn saved-sync-one" data-saved-action="sync" type="button" aria-disabled="${syncPresentation.busy}" aria-label="${escapeHtml(syncPresentation.busy ? `${syncPresentation.label}，请稍候` : syncPresentation.actionLabel)}" ${syncPresentation.busy ? "disabled" : ""}>${escapeHtml(syncPresentation.actionLabel)}</button>` : ""}
             <button class="small-btn saved-remove" data-saved-action="remove" type="button" title="只从 OpenBiliClaw 本地移除">移除</button>
@@ -2183,6 +2185,7 @@
             if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地移除失败，请重试。"; }
           }
         });
+        wireSavedCardFeedback(card, item, listKind);
         return card;
       }));
       if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
@@ -2959,6 +2962,215 @@
       grid.querySelectorAll(".video-card.is-skeleton").forEach((el) => el.remove());
     }
 
+    // ---- issue #111: recommendation-style feedback actions on saved cards ----
+    const SAVED_FEEDBACK_COPY = {
+      like: { saving: "正在记录喜欢…", done: "已记录喜欢，会用于优化画像。", toast: "已记录喜欢" },
+      dislike: { saving: "正在记录不感兴趣…", done: "已记录不感兴趣，会用于优化画像。", toast: "已记录不感兴趣" },
+      dismiss: { saving: "正在记录忽略…", done: "已记录忽略，会用于优化画像。", toast: "已记录忽略" },
+      comment: { saving: "正在提交聊天线索…", done: "已提交聊天线索。", toast: "已提交聊天线索" }
+    };
+
+    // Shared recommendation-card feedback action bar markup.
+    function cardFeedbackBarHtml() {
+      return `          <div class="card-actions" aria-label="推荐反馈操作">
+            <div class="card-feedback-icons" aria-label="喜欢或不感兴趣">
+              <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn" data-action="dismiss" type="button" aria-label="忽略" title="忽略">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn watch-later-btn" data-action="watch-later" type="button" aria-label="稍后再看" title="稍后再看" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>
+              </button>
+              <span class="feedback-separator" aria-hidden="true">/</span>
+              <button class="feedback-icon-btn favorite-btn" data-action="favorite" type="button" aria-label="收藏" title="收藏" aria-pressed="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>
+              </button>
+            </div>
+            <div class="comment-field"><input placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
+            <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
+            <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
+          </div>
+          <p class="status-line" aria-live="polite"></p>`;
+    }
+
+    function savedCardFeedbackBarHtml(listKind) {
+      const crossIsFavorite = listKind === "watch_later";
+      const crossAction = crossIsFavorite ? "favorite" : "watch-later";
+      const crossClass = crossIsFavorite ? "favorite-btn" : "watch-later-btn";
+      const crossLabel = crossIsFavorite ? "收藏" : "稍后再看";
+      const crossIcon = crossIsFavorite
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
+      return `          <div class="card-actions saved-feedback-bar" aria-label="反馈与保存操作">
+            <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
+            </button>
+            <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣" aria-pressed="false">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
+            </button>
+            <button class="feedback-icon-btn" data-action="saved-comment" type="button" aria-label="聊一聊" title="聊一聊">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>
+            </button>
+            <button class="feedback-icon-btn cross-toggle ${crossClass}" data-action="${crossAction}" type="button" aria-label="${crossLabel}" title="${crossLabel}" aria-pressed="false">
+              ${crossIcon}
+            </button>
+          </div>
+          <p class="status-line" aria-live="polite"></p>`;
+    }
+
+    // Saved-list items carry no recommendation_id, so the recommendation-scoped
+    // /api/feedback (which 404s without one) cannot record like/dislike/dismiss/
+    // comment for them. Mirror the extension's content-based signal path instead:
+    // post a feedback behavior event to /api/events keyed on content_id, shaped
+    // exactly like the recommendation feedback event (event_type=feedback +
+    // metadata.feedback_type + metadata.bvid) so the soul engine treats it the same.
+    function postSavedContentFeedback(item, feedbackType, note = "") {
+      const saved = desktopSavedItem(item);
+      const contentId = saved.content_id || item.bvid || "";
+      return requestJsonStrict(ENDPOINTS.events, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          events: [{
+            type: "feedback",
+            source_platform: saved.source_platform || "bilibili",
+            title: saved.title || "",
+            url: saved.content_url || "",
+            timestamp: Date.now(),
+            metadata: {
+              feedback_type: feedbackType,
+              bvid: contentId,
+              content_id: contentId,
+              feedback_note: note,
+              saved_feedback: true
+            }
+          }]
+        }),
+        timeoutMs: 30000
+      }).then((res) => {
+        if (!res || res.accepted < 1) {
+          const reason = res && res.rejected && res.rejected[0] && res.rejected[0].reason;
+          throw new Error(reason === "not_initialized"
+            ? "画像尚未就绪，暂时无法记录反馈。"
+            : "反馈未被接受，请稍后重试。");
+        }
+        return res;
+      });
+    }
+
+    async function handleSavedCardFeedback(action, item, card) {
+      const status = card.querySelector(".status-line");
+      const copy = SAVED_FEEDBACK_COPY[action];
+      const buttons = [...card.querySelectorAll('[data-action="like"], [data-action="dislike"], [data-action="dismiss"]')];
+      const clicked = card.querySelector(`[data-action="${action}"]`);
+      const snapshot = buttons.map((b) => ({ b, pressed: b.getAttribute("aria-pressed"), active: b.classList.contains("is-active") }));
+      buttons.forEach((b) => { b.setAttribute("aria-pressed", "false"); b.classList.remove("is-active"); });
+      if (clicked) { clicked.setAttribute("aria-pressed", "true"); clicked.classList.add("is-active"); }
+      if (status) { status.removeAttribute("role"); status.textContent = copy.saving; }
+      try {
+        await postSavedContentFeedback(item, action, "");
+        if (status) status.textContent = copy.done;
+        showToast(copy.toast);
+      } catch (error) {
+        snapshot.forEach(({ b, pressed, active }) => {
+          if (pressed == null) b.removeAttribute("aria-pressed"); else b.setAttribute("aria-pressed", pressed);
+          b.classList.toggle("is-active", active);
+        });
+        if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "反馈提交失败，请稍后重试。"; }
+        showToast("反馈提交失败");
+      }
+    }
+
+    // Saved cards expose content feedback plus only the other list's save toggle;
+    // membership in the list currently being viewed is managed by 移除.
+    function wireSavedCardFeedback(card, item, listKind) {
+      const savedItem = desktopSavedItem(item);
+      const status = card.querySelector(".status-line");
+      const crossKind = listKind === "watch_later" ? "favorite" : "watch_later";
+
+      card.querySelectorAll('[data-action="like"], [data-action="dislike"]').forEach((btn) => {
+        btn.addEventListener("click", () => handleSavedCardFeedback(btn.dataset.action, item, card));
+      });
+
+      const commentBtn = card.querySelector('[data-action="saved-comment"]');
+      commentBtn?.addEventListener("click", async () => {
+        const draft = window.prompt("想围绕这条聊什么？");
+        if (draft === null) return;
+        const note = String(draft).trim();
+        if (!note) {
+          if (status) { status.removeAttribute("role"); status.textContent = "先写一句想聊的内容，再提交这条反馈。"; }
+          return;
+        }
+        commentBtn.disabled = true;
+        if (status) { status.removeAttribute("role"); status.textContent = SAVED_FEEDBACK_COPY.comment.saving; }
+        try {
+          await postSavedContentFeedback(item, "comment", note);
+          if (status) status.textContent = SAVED_FEEDBACK_COPY.comment.done;
+          showToast(SAVED_FEEDBACK_COPY.comment.toast);
+        } catch (error) {
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "反馈提交失败，请稍后重试。"; }
+          showToast("反馈提交失败");
+        } finally {
+          commentBtn.disabled = false;
+        }
+      });
+
+      const crossBtn = card.querySelector(".cross-toggle");
+      if (!crossBtn) return;
+      const crossIsFavorite = crossKind === "favorite";
+      const setCrossState = (saved) => {
+        const label = crossIsFavorite
+          ? (saved ? "取消收藏" : "收藏")
+          : (saved ? "取消稍后再看" : "稍后再看");
+        crossBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+        crossBtn.setAttribute("aria-label", label);
+        crossBtn.title = label;
+      };
+      crossBtn.addEventListener("click", async () => {
+        if (crossBtn.disabled || desktopSavedMutations.isBusy(crossKind, savedItem.item_key)) return;
+        const wasSaved = desktopSavedMutations.isSaved(crossKind, savedItem.item_key);
+        crossBtn.disabled = true;
+        setCrossState(!wasSaved);
+        if (status) {
+          status.removeAttribute("role");
+          status.textContent = crossIsFavorite
+            ? (wasSaved ? "正在从本地收藏移除…" : "正在保存到本地收藏…")
+            : (wasSaved ? "正在从本地稍后再看移除…" : "正在保存到本地稍后再看…");
+        }
+        try {
+          await desktopSavedMutations.toggle(crossKind, savedItem.item_key, {
+            add: () => saveDesktopItem(crossKind, item),
+            remove: () => removeDesktopSavedItem(crossKind, savedItem.item_key)
+          });
+          const saved = desktopSavedMutations.isSaved(crossKind, savedItem.item_key);
+          setCrossState(saved);
+          if (status) {
+            status.textContent = crossIsFavorite
+              ? (saved ? "已加入本地收藏。" : "已从本地收藏移除；平台记录不变。")
+              : (saved ? "已加入本地稍后再看。" : "已从本地稍后再看移除；平台记录不变。");
+          }
+        } catch (error) {
+          setCrossState(wasSaved);
+          if (status) { status.setAttribute("role", "alert"); status.textContent = error?.message || "本地保存操作失败，请重试。"; }
+        } finally {
+          crossBtn.disabled = false;
+        }
+      });
+      void desktopSavedMutations.hydrate(
+        crossKind,
+        savedItem.item_key,
+        () => savedStatus(crossKind, savedItem)
+      ).then(() => setCrossState(desktopSavedMutations.isSaved(crossKind, savedItem.item_key)));
+    }
+
     function renderVideos() {
       if (shouldShowInitOnboarding(state.runtimeStatus)) {
         renderInitOnboarding();
@@ -3011,33 +3223,7 @@
             ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
           </div>
           <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
-          <div class="card-actions" aria-label="推荐反馈操作">
-            <div class="card-feedback-icons" aria-label="喜欢或不感兴趣">
-              <button class="feedback-icon-btn" data-action="like" type="button" aria-label="喜欢" title="喜欢">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn" data-action="dislike" type="button" aria-label="不感兴趣" title="不感兴趣">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn" data-action="dismiss" type="button" aria-label="忽略" title="忽略">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3l18 18M9.84 9.91A3 3 0 0 0 12 15c.82 0 1.57-.33 2.11-.87M6.5 6.65A10.45 10.45 0 0 0 2.46 12C3.73 16.06 7.52 19 12 19c1.99 0 3.84-.58 5.4-1.58M11 5.05c.33-.03.66-.05 1-.05 4.48 0 8.27 2.94 9.54 7a10.5 10.5 0 0 1-1.19 2.5"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn watch-later-btn" data-action="watch-later" type="button" aria-label="稍后再看" title="稍后再看" aria-pressed="false">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>
-              </button>
-              <span class="feedback-separator" aria-hidden="true">/</span>
-              <button class="feedback-icon-btn favorite-btn" data-action="favorite" type="button" aria-label="收藏" title="收藏" aria-pressed="false">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>
-              </button>
-            </div>
-            <div class="comment-field"><input placeholder="想围绕这条聊什么？" aria-label="想围绕这条聊什么？"></div>
-            <button class="small-btn composer-cancel" data-action="cancel-comment" type="button" aria-label="返回" title="返回">‹</button>
-            <button class="small-btn chat-action" data-action="comment" type="button">聊一聊</button>
-          </div>
-          <p class="status-line" aria-live="polite"></p>`;
+${cardFeedbackBarHtml()}`;
         const reason = card.querySelector(".reason");
         const toggleReason = () => {
           const expanded = reason.classList.toggle("is-expanded");

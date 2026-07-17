@@ -138,6 +138,7 @@ import {
   removeSavedItem,
   saveItem,
   savedItemStatus,
+  sendBehaviorEvents,
   syncSavedItems,
 } from "./popup-api.js";
 
@@ -391,6 +392,12 @@ const WATCH_LATER_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 1.9"/></svg>';
 const FAVORITE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.6l2.65 5.37 5.93.86-4.29 4.18 1.01 5.9L12 17.1l-5.31 2.8 1.01-5.9L3.41 9.83l5.93-.86z"/></svg>';
+const THUMBS_UP_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10v10"/><path d="M15 5.2 14 10h5.4a1.8 1.8 0 0 1 1.7 2.2l-1.5 6A2.4 2.4 0 0 1 17.3 20H7"/><path d="M7 10l4.5-5.3A2 2 0 0 1 15 6v4"/></svg>';
+const THUMBS_DOWN_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
+const MESSAGE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
 
 const CHAT_PLACEHOLDERS = [
   // 想法与内容判断类
@@ -884,6 +891,63 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
   });
 }
 
+async function postSavedFeedback(item, feedbackType, note = "") {
+  const contentId = item.content_id || item.bvid || "";
+  const res = await sendBehaviorEvents([{
+    type: "feedback",
+    source_platform: item.source_platform || "bilibili",
+    title: item.title || "",
+    url: buildContentUrl(item) || item.content_url || "",
+    timestamp: Date.now(),
+    metadata: {
+      feedback_type: feedbackType,
+      bvid: contentId,
+      content_id: contentId,
+      feedback_note: note,
+      saved_feedback: true,
+    },
+  }]);
+  if (!res || !(res.accepted >= 1)) {
+    const reason = res?.rejected?.[0]?.reason;
+    throw new Error(reason === "not_initialized"
+      ? "画像尚未就绪，暂时无法记录反馈。"
+      : "反馈未被接受，请稍后重试。");
+  }
+  return res;
+}
+
+async function handleSavedCardFeedback(item, feedbackType, clicked, other) {
+  if (clicked.disabled || other.disabled) return;
+  const previousPressed = [clicked, other].map((button) => (
+    button.getAttribute("aria-pressed")
+  ));
+  clicked.setAttribute("aria-pressed", "true");
+  other.setAttribute("aria-pressed", "false");
+  clicked.disabled = true;
+  other.disabled = true;
+  setHint(
+    feedbackType === "like" ? "正在记录喜欢…" : "正在记录不感兴趣…",
+    "info",
+  );
+  try {
+    await postSavedFeedback(item, feedbackType);
+    setHint(
+      feedbackType === "like" ? "记下了，这类多来点。" : "记下了，这类先少来点。",
+      "success",
+    );
+  } catch (error) {
+    [clicked, other].forEach((button, index) => {
+      const pressed = previousPressed[index];
+      if (pressed === null) button.removeAttribute("aria-pressed");
+      else button.setAttribute("aria-pressed", pressed);
+    });
+    setHint(error?.message || "反馈提交失败，请稍后重试。", "error");
+  } finally {
+    clicked.disabled = false;
+    other.disabled = false;
+  }
+}
+
 function buildSavedCard(listKind, item, { list, empty, toggles }) {
   if (savedTaskRuntimes[listKind].submissions.has(item.item_key)
     || savedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
@@ -937,6 +1001,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   remove.dataset.savedAction = "remove";
   remove.textContent = "移除";
   remove.title = listKind === "watch_later" ? "移出本地稍后再看" : "从本地收藏移除";
+  const onRemoved = listKind === "watch_later" ? loadWatchLater : loadFavorites;
   bindSavedCardRemove(card, remove, {
     listKind,
     itemKey: item.item_key,
@@ -944,7 +1009,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
     toggles,
     list,
     empty,
-    onRemoved: listKind === "watch_later" ? loadWatchLater : loadFavorites,
+    onRemoved,
   });
 
   const actions = document.createElement("span");
@@ -970,7 +1035,85 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
     actions.append(sync);
   }
   actions.append(remove);
-  card.append(body, actions);
+
+  const feedbackActions = document.createElement("div");
+  feedbackActions.className = "saved-card-feedback";
+  feedbackActions.setAttribute("aria-label", "反馈与保存操作");
+
+  const like = document.createElement("button");
+  like.type = "button";
+  like.className = "feedback-icon-btn";
+  like.dataset.savedAction = "like";
+  like.setAttribute("aria-label", "喜欢");
+  like.title = "喜欢";
+  like.setAttribute("aria-pressed", "false");
+  like.innerHTML = THUMBS_UP_ICON_SVG;
+
+  const dislike = document.createElement("button");
+  dislike.type = "button";
+  dislike.className = "feedback-icon-btn";
+  dislike.dataset.savedAction = "dislike";
+  dislike.setAttribute("aria-label", "不感兴趣");
+  dislike.title = "不感兴趣";
+  dislike.setAttribute("aria-pressed", "false");
+  dislike.innerHTML = THUMBS_DOWN_ICON_SVG;
+
+  like.addEventListener("click", () => {
+    void handleSavedCardFeedback(item, "like", like, dislike);
+  });
+  dislike.addEventListener("click", () => {
+    void handleSavedCardFeedback(item, "dislike", dislike, like);
+  });
+
+  const comment = document.createElement("button");
+  comment.type = "button";
+  comment.className = "feedback-icon-btn";
+  comment.dataset.savedAction = "comment";
+  comment.setAttribute("aria-label", "聊一聊");
+  comment.title = "聊一聊";
+  comment.innerHTML = MESSAGE_ICON_SVG;
+  comment.addEventListener("click", async () => {
+    const draft = window.prompt("想围绕这条聊什么？");
+    if (draft === null) return;
+    const note = draft.trim();
+    if (!note) {
+      setHint("先写一句想聊的内容，再提交这条反馈。", "warning");
+      return;
+    }
+    comment.disabled = true;
+    setHint("正在提交聊天线索…", "info");
+    try {
+      await postSavedFeedback(item, "comment", note);
+      setHint("已提交聊天线索。", "success");
+    } catch (error) {
+      setHint(error?.message || "反馈提交失败，请稍后重试。", "error");
+    } finally {
+      comment.disabled = false;
+    }
+  });
+
+  // The card already belongs to listKind (managed by 移除), so show only the
+  // other list's toggle: watch_later → 收藏; favorite → 稍后再看.
+  const crossIsFavorite = listKind === "watch_later";
+  const toggleCross = () => {
+    if (crossIsFavorite) return toggleSavedWithFeedback("收藏", item, favoriteToggles, toggleFavoriteSaved);
+    return toggleSavedWithFeedback("稍后再看", item, watchLaterToggles, toggleWatchLaterSaved);
+  };
+  const crossToggle = createActionButton(
+    "",
+    `feedback-icon-btn saved-toggle cross-toggle ${crossIsFavorite ? "favorite-btn" : "watch-later-btn"}`,
+    toggleCross,
+  );
+  crossToggle.dataset.savedAction = crossIsFavorite ? "favorite" : "watch-later";
+  crossToggle.innerHTML = crossIsFavorite ? FAVORITE_ICON_SVG : WATCH_LATER_ICON_SVG;
+  if (crossIsFavorite) {
+    bindFavoriteToggle(crossToggle, item);
+  } else {
+    bindWatchLaterToggle(crossToggle, item);
+  }
+
+  feedbackActions.append(like, dislike, comment, crossToggle);
+  card.append(body, actions, feedbackActions);
   return card;
 }
 

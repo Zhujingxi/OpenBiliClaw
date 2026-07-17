@@ -269,6 +269,11 @@ export async function submitFeedback(payload) {
   return requestJson("/feedback", json(payload));
 }
 
+// ── Content-based feedback (saved lists have no recommendation_id) ──
+export async function sendBehaviorEvents(events) {
+  return requestJson("/events", json({ events }));
+}
+
 // ── Delight Ack ────────────────────────────────────────────
 export async function markDelightSent(bvid) {
   return requestJson("/delight/sent", json({ bvid }));
@@ -337,7 +342,7 @@ export function normalizeSavedItemInput(item = {}) {
     ).trim(),
     title: String(item.title || "").trim(),
     author_name: String(item.author_name || item.up_name || item.author || "").trim(),
-    cover_url: String(item.cover_url || "").trim(),
+    cover_url: String(item.cover_url || item.cover || item.pic || item.thumbnail_url || item.thumbnail || item.image_url || "").trim(),
     note: String(item.note || "").trim(),
   };
 }
