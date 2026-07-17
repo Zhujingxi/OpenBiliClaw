@@ -11,6 +11,7 @@ import os
 import shutil
 import tomllib
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -769,11 +770,33 @@ class SoulPreferenceConfig:
     satisfaction_filter_enabled: bool = True
 
 
+# Posture-gate save-time enforce readiness thresholds (spec §Phase 3, r4/R3-3).
+# Calibrated to the single-user shadow cadence (~1-3 gate calls/day): 14 days of
+# observation, ≥10 valid judgements, and recent coverage in the last 7 days.
+# Revisit after any provider/model swap (pitfall #3).
+POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS = 14
+POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS = 10
+# Recent-coverage gate: ≥1 valid judgement within the last 7 days.
+POSTURE_GATE_ENFORCE_RECENT_WINDOW_DAYS = 7
+POSTURE_GATE_ENFORCE_MIN_RECENT_COUNT = 1
+_POSTURE_GATE_MODES = frozenset({"shadow", "enforce", "off"})
+
+
 @dataclass
 class SoulConfig:
-    """Soul engine knobs. Currently only the preference sub-section."""
+    """Soul engine knobs.
+
+    ``posture_gate_mode``: deep-write consistency gate (spec §Phase 3).
+    ``shadow`` (default) judges deep writes on an async side-channel without
+    blocking; ``enforce`` gates synchronously; ``off`` is a full bypass whose
+    behaviour is byte-identical to the pre-gate pipeline. ``enforce`` is only
+    savable once shadow data proves ≥14 days of observation (save-time guard),
+    unless ``posture_gate_force_enforce`` overrides it (documented risk).
+    """
 
     preference: SoulPreferenceConfig = field(default_factory=SoulPreferenceConfig)
+    posture_gate_mode: str = "shadow"
+    posture_gate_force_enforce: bool = False
 
 
 @dataclass
@@ -1215,12 +1238,15 @@ def _build_config(raw: dict[str, Any]) -> Config:
     soul_preference_raw = (
         soul_raw.get("preference", {}) if isinstance(soul_raw.get("preference"), dict) else {}
     )
+    raw_gate_mode = str(soul_raw.get("posture_gate_mode", "shadow") or "shadow").strip().lower()
     soul = SoulConfig(
         preference=SoulPreferenceConfig(
             satisfaction_filter_enabled=bool(
                 soul_preference_raw.get("satisfaction_filter_enabled", True)
             ),
         ),
+        posture_gate_mode=raw_gate_mode if raw_gate_mode in _POSTURE_GATE_MODES else "shadow",
+        posture_gate_force_enforce=bool(soul_raw.get("posture_gate_force_enforce", False)),
     )
 
     api_auth = _build_api_auth(api_raw)
@@ -1912,6 +1938,18 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    if str(config.soul.posture_gate_mode or "").strip().lower() not in _POSTURE_GATE_MODES:
+        issues.append(
+            ConfigIssue(
+                field="soul.posture_gate_mode",
+                message=(
+                    f"不支持的 posture_gate_mode: `{config.soul.posture_gate_mode}`。"
+                    "仅支持: shadow, enforce, off。"
+                ),
+                severity="blocking",
+            )
+        )
+
     # Before the default-provider early return: embedding validation must run
     # even when default_provider itself is broken.
     for emb_field, emb_value in (
@@ -2163,6 +2201,64 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
         )
 
     return issues
+
+
+def posture_gate_enforce_readiness_issue(
+    config: Config,
+    *,
+    earliest_valid_at: str,
+    valid_count_14d: int,
+    valid_count_7d: int,
+) -> ConfigIssue | None:
+    """Blocking save-time guard for switching ``posture_gate_mode`` to enforce.
+
+    Requires DB-side shadow statistics (computed by
+    ``Database.posture_gate_shadow_stats``) — hence it lives outside
+    :func:`_collect_config_issues` (which is DB-free) and is invoked by the
+    config PUT handler where a database handle is available.
+
+    Three conditions must ALL hold (spec §Phase 3, r4/R3-3): the earliest valid
+    shadow judgement is ≥14 days old, ≥10 valid judgements landed in the last 14
+    days, and ≥1 in the last 7. ``posture_gate_force_enforce`` bypasses the
+    guard (documented risk). Returns a blocking :class:`ConfigIssue` on failure,
+    else ``None``.
+    """
+    if str(config.soul.posture_gate_mode or "").strip().lower() != "enforce":
+        return None
+    if config.soul.posture_gate_force_enforce:
+        return None
+    now = datetime.now()
+    earliest = None
+    if earliest_valid_at.strip():
+        try:
+            earliest = datetime.fromisoformat(earliest_valid_at)
+        except ValueError:
+            earliest = None
+    observation_days = (now - earliest).days if earliest is not None else -1
+    reasons: list[str] = []
+    if observation_days < POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS:
+        reasons.append(
+            f"shadow 观察不足 {POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS} 天"
+            f"（当前 {max(0, observation_days)} 天）"
+        )
+    if valid_count_14d < POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS:
+        reasons.append(
+            f"近 14 天有效判定不足 {POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS} 条"
+            f"（当前 {valid_count_14d} 条）"
+        )
+    if valid_count_7d < POSTURE_GATE_ENFORCE_MIN_RECENT_COUNT:
+        reasons.append("近 7 天没有有效判定")
+    if not reasons:
+        return None
+    return ConfigIssue(
+        field="soul.posture_gate_mode",
+        message=(
+            "态势门控尚未积累足够的 shadow 观察数据，无法切换到 enforce："
+            + "；".join(reasons)
+            + "。请继续以 shadow 运行，或（有风险地）开启 posture_gate_force_enforce。"
+        ),
+        severity="blocking",
+    )
 
 
 def _is_openai_official_base_url(base_url: str) -> bool:
@@ -2745,6 +2841,16 @@ def _render_config_toml(
             f"aggregate_budget_mb = {config.logging.aggregate_budget_mb}",
             f"unmanaged_truncate_mb = {config.logging.unmanaged_truncate_mb}",
             f"unmanaged_max_age_days = {config.logging.unmanaged_max_age_days}",
+            "",
+            "[soul]",
+            "# Deep-write consistency gate (spec Phase 3). shadow = async",
+            "# side-channel judging without blocking writes (default);",
+            "# enforce = synchronous gate (savable only after >=14 days of",
+            "# shadow data, unless force flag set); off = full bypass.",
+            f"posture_gate_mode = {_toml_string(config.soul.posture_gate_mode)}",
+            "# Escape hatch: allow saving enforce without the 14-day shadow",
+            "# observation gate. Risky — enables gating before it is calibrated.",
+            f"posture_gate_force_enforce = {_toml_bool(config.soul.posture_gate_force_enforce)}",
             "",
             "[soul.preference]",
             "# v0.3.x event-satisfaction signal. When true, preference",

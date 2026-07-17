@@ -1103,6 +1103,72 @@ def build_dialogue_insight_prompt(
     ]
 
 
+# 100% static system prompt for the posture gate (Phase 3). All per-call data
+# (the proposed deep-write change, core memory, and the 30-day ledger digest)
+# lives in the user message — see ``build_posture_gate_prompt``.
+_POSTURE_GATE_SYSTEM_PROMPT = """
+<task>
+你是画像深层写入的「态势门控」。系统准备把一条深层理解（目标 / 价值观 / 核心状态，
+或一次整份画像重建）写进长期画像。你要判断：以当前对这个人的既有理解为基准，这条改动
+是否站得住脚。深层理解稳定、代价高，不该被一两条噪声行为轻易改写。
+待判定的改动、core_memory、以及最近 30 天的画像写入台账摘要都在 user 消息里。
+</task>
+
+<judgement>
+只能返回三种判定之一：
+- accept：改动与既有理解一致、或有足够证据支撑，放行。
+- downgrade：改动方向可能成立但证据不足、或与既有理解有张力——不直接写深层，降级为
+  一个「待验证的假设」。这不是拒绝，而是把它放进假设池等更多证据。
+- reject：改动明显是噪声、自相矛盾、或与大量既有证据冲突，且没有新意，丢弃。
+</judgement>
+
+<principles>
+1. 冲突不是错误，而是一个新假设。当改动与既有画像冲突时，默认倾向 downgrade（生成假设）
+   而非 accept 或 reject——除非冲突方已有压倒性证据。
+2. 保守优先：把握不足时选 downgrade，而不是 accept。
+3. 参考台账：若最近同一方向已反复写入并稳定，可以更放心 accept；若台账显示这个方向近期
+   反复横跳，倾向 downgrade。
+4. 详细输入见 user 消息的 <proposed_change> / <core_memory> / <ledger_digest> 各段。
+</principles>
+
+<output_schema>
+{"verdict": "downgrade", "reason": "与既有的稳定价值观有张力，证据仅一轮对话，先作为假设观察。"}
+</output_schema>
+""".strip()
+
+
+def build_posture_gate_prompt(
+    *,
+    change: dict[str, object],
+    core_memory: dict[str, object],
+    ledger_digest: list[dict[str, object]] | None = None,
+) -> list[dict[str, str]]:
+    """Build the posture-gate judgement prompt (Phase 3).
+
+    The system prompt is a module-level constant (prompt-cache convention); all
+    per-call variables live in the user message ordered most-stable-first
+    (persona/core memory → this change → the recent ledger digest), each
+    serialized with deterministic ``sort_keys=True`` JSON.
+    """
+    user_prompt = "\n\n".join(
+        [
+            "<core_memory>",
+            json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
+            "</core_memory>",
+            "<proposed_change>",
+            json.dumps(change, ensure_ascii=False, indent=2, sort_keys=True),
+            "</proposed_change>",
+            "<ledger_digest>",
+            json.dumps(ledger_digest or [], ensure_ascii=False, indent=2, sort_keys=True),
+            "</ledger_digest>",
+        ]
+    )
+    return [
+        {"role": "system", "content": _POSTURE_GATE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 # 100% static system prompt for single-item content evaluation.
 # All variables (source_context, source_platform, profile, content)
 # go in user_prompt — see ``build_content_evaluation_prompt``.

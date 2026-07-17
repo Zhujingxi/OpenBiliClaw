@@ -1983,6 +1983,40 @@ class Database:
             rows.append(record)
         return rows
 
+    def posture_gate_shadow_stats(self) -> dict[str, Any]:
+        """Shadow-judgement statistics for the enforce save-time guard (Phase 3).
+
+        A *valid* shadow judgement is a ledger row whose ``gate_verdict`` is one
+        of ``shadow_accept`` / ``shadow_downgrade`` / ``shadow_reject`` (a
+        ``shadow_error`` row is a provider failure, not a judgement, and does
+        not count). Returns the earliest valid judgement timestamp plus valid
+        counts within the last 14 and 7 days.
+        """
+        self._ensure_fresh_read()
+        valid = ("shadow_accept", "shadow_downgrade", "shadow_reject")
+        placeholders = ", ".join("?" for _ in valid)
+        earliest_row = self.conn.execute(
+            f"""SELECT MIN(timestamp) AS earliest FROM profile_update_ledger
+                WHERE gate_verdict IN ({placeholders})""",
+            valid,
+        ).fetchone()
+        earliest = (earliest_row["earliest"] if earliest_row else None) or ""
+
+        def _count(days: int) -> int:
+            row = self.conn.execute(
+                f"""SELECT COUNT(*) AS c FROM profile_update_ledger
+                    WHERE gate_verdict IN ({placeholders})
+                      AND timestamp >= datetime('now', '-' || ? || ' day', 'localtime')""",
+                (*valid, int(days)),
+            ).fetchone()
+            return int(row["c"]) if row else 0
+
+        return {
+            "earliest_valid_at": str(earliest),
+            "valid_count_14d": _count(14),
+            "valid_count_7d": _count(7),
+        }
+
     # ------------------------------------------------------------------
     # Confusion objects (Phase 2)
     # ------------------------------------------------------------------

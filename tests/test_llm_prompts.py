@@ -713,6 +713,19 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             ),
         ),
         (
+            "build_posture_gate_prompt",
+            dict(
+                change={"kind": "value", "content": "追求效率"},
+                core_memory={"a": 1},
+                ledger_digest=[{"write_point": "values", "outcome": "success"}],
+            ),
+            dict(
+                change={"kind": "goal", "content": "想转行"},
+                core_memory={"a": 2},
+                ledger_digest=[{"write_point": "core", "outcome": "failed"}],
+            ),
+        ),
+        (
             "build_dialogue_insight_prompt",
             dict(
                 user_message="我最近在玩桌游",

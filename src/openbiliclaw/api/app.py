@@ -635,6 +635,35 @@ def _validate_llm_buildable(cfg: Any, base_issues: list[Any]) -> list[Any]:
     return issues
 
 
+def _posture_gate_enforce_issue(cfg: Any, database: Any | None) -> Any | None:
+    """DB-backed save-time guard for ``soul.posture_gate_mode = enforce``.
+
+    Reads shadow-judgement statistics from the ledger and defers to the pure
+    :func:`posture_gate_enforce_readiness_issue` evaluator. A missing database
+    (or a stats read failure) is conservatively treated as "no shadow data" so
+    a premature enforce is rejected rather than silently accepted.
+    """
+    from openbiliclaw.config import posture_gate_enforce_readiness_issue
+
+    if str(getattr(cfg.soul, "posture_gate_mode", "")).strip().lower() != "enforce":
+        return None
+    stats = {"earliest_valid_at": "", "valid_count_14d": 0, "valid_count_7d": 0}
+    getter = getattr(database, "posture_gate_shadow_stats", None) if database is not None else None
+    if callable(getter):
+        try:
+            fetched = getter()
+            if isinstance(fetched, dict):
+                stats = fetched
+        except Exception:
+            logger.warning("posture_gate_shadow_stats read failed; treating as no data")
+    return posture_gate_enforce_readiness_issue(
+        cfg,
+        earliest_valid_at=str(stats.get("earliest_valid_at", "")),
+        valid_count_14d=int(stats.get("valid_count_14d", 0)),
+        valid_count_7d=int(stats.get("valid_count_7d", 0)),
+    )
+
+
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
     """Count stored behavior events by normalized source platform."""
 
@@ -11477,6 +11506,16 @@ def create_app(
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 
+        # Apply soul posture-gate updates (Phase 3). Mode validity is checked by
+        # _collect_config_issues; enforce readiness is a DB-backed save-time
+        # guard applied just below.
+        if "soul" in update and isinstance(update["soul"], dict):
+            sdata = update["soul"]
+            if "posture_gate_mode" in sdata:
+                cfg.soul.posture_gate_mode = str(sdata["posture_gate_mode"]).strip().lower()
+            if "posture_gate_force_enforce" in sdata:
+                cfg.soul.posture_gate_force_enforce = bool(sdata["posture_gate_force_enforce"])
+
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
             section = getattr(cfg, target[0])
@@ -11484,6 +11523,9 @@ def create_app(
             setattr(subsection, target[2], "")
 
         issues = _validate_llm_buildable(cfg, _collect_config_issues(cfg))
+        posture_issue = _posture_gate_enforce_issue(cfg, getattr(ctx, "database", None))
+        if posture_issue is not None:
+            issues.append(posture_issue)
         if any(getattr(issue, "severity", "warning") == "blocking" for issue in issues):
             response = ConfigUpdateResponse(
                 ok=False,
