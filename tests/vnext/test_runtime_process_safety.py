@@ -122,7 +122,7 @@ def test_rerun_never_signals_reused_or_mismatched_pid(tmp_path: Path) -> None:
     )
 
     assert signals == []
-    assert not (tmp_path / bootstrap.PROCESS_STATE).exists()
+    assert (tmp_path / bootstrap.PROCESS_STATE).exists()
 
 
 def test_rerun_signals_verified_identity_then_waits_before_escalating(tmp_path: Path) -> None:
@@ -227,7 +227,7 @@ def test_http_readiness_cannot_mask_worker_exit(tmp_path: Path) -> None:
         )
 
     assert api.signals == ["terminate"]
-    assert not (tmp_path / bootstrap.PROCESS_STATE).exists()
+    assert (tmp_path / bootstrap.PROCESS_STATE).exists()
 
 
 def test_state_write_failure_terminates_and_reaps_both_children(tmp_path: Path) -> None:

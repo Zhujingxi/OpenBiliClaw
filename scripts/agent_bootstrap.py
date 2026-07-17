@@ -249,12 +249,124 @@ def _exclusive_lock(path: Path, *, timeout: float | None = None) -> Iterator[Non
         os.close(descriptor)
 
 
+def _canonical_project_root(project_dir: Path) -> Path:
+    """Resolve a project root only after rejecting symlinks in its path."""
+
+    absolute = Path(os.path.abspath(project_dir.expanduser()))
+    for candidate in (absolute, *absolute.parents):
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeError(f"refusing symlinked project path: {candidate}")
+    return absolute.resolve(strict=True)
+
+
+def _read_locked_json(descriptor: int, *, description: str) -> object:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+        try:
+            return json.load(stream)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid {description}") from exc
+
+
+def _lifecycle_anchor_payload(root: Path, descriptor: int) -> dict[str, object]:
+    metadata = os.fstat(descriptor)
+    return {
+        "version": 1,
+        "project_root": str(root),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "anchor_id": str(uuid4()),
+    }
+
+
+def _require_lifecycle_anchor(*, root: Path, parent_descriptor: int, descriptor: int) -> None:
+    value = _read_locked_json(descriptor, description="lifecycle lock metadata")
+    metadata = os.fstat(descriptor)
+    parent_path = root / LIFECYCLE_LOCK.parent
+    try:
+        held_parent = os.fstat(parent_descriptor)
+        path_parent = parent_path.lstat()
+        path_metadata = os.stat(
+            LIFECYCLE_LOCK.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise RuntimeError("lifecycle lock identity changed") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 1
+        or value.get("project_root") != str(root)
+        or value.get("device") != metadata.st_dev
+        or value.get("inode") != metadata.st_ino
+        or not _is_canonical_uuid(value.get("anchor_id"))
+        or not stat.S_ISDIR(held_parent.st_mode)
+        or not stat.S_ISDIR(path_parent.st_mode)
+        or (path_parent.st_dev, path_parent.st_ino) != (held_parent.st_dev, held_parent.st_ino)
+        or not stat.S_ISREG(metadata.st_mode)
+        or not stat.S_ISREG(path_metadata.st_mode)
+        or (path_metadata.st_dev, path_metadata.st_ino) != (metadata.st_dev, metadata.st_ino)
+    ):
+        raise RuntimeError("lifecycle lock identity changed")
+
+
 @contextmanager
 def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
-    """Serialize a complete source-install lifecycle across processes."""
+    """Serialize lifecycle work on a self-identifying, inode-bound lock FD."""
 
-    with _exclusive_lock(project_dir.resolve() / LIFECYCLE_LOCK, timeout=timeout):
-        yield
+    root = _canonical_project_root(project_dir)
+    parent = root / LIFECYCLE_LOCK.parent
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent_descriptor = os.open(
+        parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                LIFECYCLE_LOCK.name,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(LIFECYCLE_LOCK.name, flags, dir_fd=parent_descriptor)
+        acquired = False
+        try:
+            _acquire_lock_before(descriptor, path=root / LIFECYCLE_LOCK, timeout=timeout)
+            acquired = True
+            if created:
+                payload = _lifecycle_anchor_payload(root, descriptor)
+                os.ftruncate(descriptor, 0)
+                os.write(descriptor, (json.dumps(payload, sort_keys=True) + "\n").encode())
+                os.fsync(descriptor)
+            _require_lifecycle_anchor(
+                root=root,
+                parent_descriptor=parent_descriptor,
+                descriptor=descriptor,
+            )
+            try:
+                yield
+            finally:
+                _require_lifecycle_anchor(
+                    root=root,
+                    parent_descriptor=parent_descriptor,
+                    descriptor=descriptor,
+                )
+        finally:
+            if acquired:
+                with suppress(OSError):
+                    _unlock_descriptor(descriptor)
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
 
 
 def _atomic_write_private_file(path: Path, content: str) -> None:
@@ -316,7 +428,7 @@ def _read_private_json(path: Path, *, description: str) -> object:
 def _load_or_create_installation_state(project_dir: Path) -> InstallationState:
     """Load a root-bound installer identity while the lifecycle lock is held."""
 
-    project_dir = project_dir.resolve()
+    project_dir = _canonical_project_root(project_dir)
     path = project_dir / INSTALLATION_STATE
     try:
         value = _read_private_json(path, description="installer ownership metadata")
@@ -352,14 +464,19 @@ def _advance_installation_generation(
     return advanced
 
 
-def _merge_environment(path: Path, required: Mapping[str, str]) -> dict[str, str]:
+def _merge_environment(
+    path: Path,
+    required: Mapping[str, str],
+    *,
+    managed: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     """Fill missing values while preserving stable, non-empty existing values."""
 
     with _exclusive_lock(path.with_name(f"{path.name}.lock")):
         lines, existing = _read_env(path)
         merged = dict(existing)
         for key, value in required.items():
-            if not merged.get(key, "").strip():
+            if key in managed or not merged.get(key, "").strip():
                 merged[key] = _validate_env_value(key, value)
 
         emitted: set[str] = set()
@@ -390,10 +507,22 @@ def ensure_local_runtime_environment(
     *,
     litellm_base_url: str,
     litellm_api_key: str,
+    installation: InstallationState | None = None,
 ) -> dict[str, str]:
     """Persist stable source-install runtime settings in a mode-0600 env file."""
 
-    project_dir = project_dir.resolve()
+    project_dir = _canonical_project_root(project_dir)
+    if installation is None:
+        with _lifecycle_lock(project_dir, timeout=LIFECYCLE_LOCK_TIMEOUT):
+            current = _load_or_create_installation_state(project_dir)
+            return ensure_local_runtime_environment(
+                project_dir,
+                litellm_base_url=litellm_base_url,
+                litellm_api_key=litellm_api_key,
+                installation=current,
+            )
+    if installation.project_root != str(project_dir):
+        raise RuntimeError("runtime environment ownership does not match project root")
     env_path = project_dir / RUNTIME_ENV_NAME
     _lines, existing = _read_env(env_path)
     base_url = existing.get("OPENBILICLAW_LITELLM_BASE_URL", "") or litellm_base_url
@@ -407,10 +536,20 @@ def ensure_local_runtime_environment(
         "OPENBILICLAW_ACCESS_TOKEN": secrets.token_urlsafe(48),
         "OPENBILICLAW_LITELLM_BASE_URL": base_url,
         "OPENBILICLAW_LITELLM_API_KEY": api_key,
+        "OPENBILICLAW_PROJECT_ROOT": installation.project_root,
+        "OPENBILICLAW_INSTALLER_INSTANCE_ID": installation.instance_id,
         "OPENBILICLAW_DATABASE_URL": _sqlite_url(data_dir / "openbiliclaw.db"),
         "OPENBILICLAW_HUEY_PATH": str((data_dir / "huey.db").resolve()),
     }
-    return _merge_environment(env_path, required)
+    managed = frozenset(
+        {
+            "OPENBILICLAW_PROJECT_ROOT",
+            "OPENBILICLAW_INSTALLER_INSTANCE_ID",
+            "OPENBILICLAW_DATABASE_URL",
+            "OPENBILICLAW_HUEY_PATH",
+        }
+    )
+    return _merge_environment(env_path, required, managed=managed)
 
 
 def ensure_docker_infrastructure_secrets(project_dir: Path) -> dict[str, str]:
@@ -703,22 +842,6 @@ def _read_process_state(
     return ownership, api, worker
 
 
-def _remove_process_state_if_owned(project_dir: Path, ownership: InstallationState) -> bool:
-    """Remove state only when it still belongs to the calling generation."""
-
-    path = project_dir.resolve() / PROCESS_STATE
-    if not path.exists() or path.is_symlink():
-        return False
-    try:
-        value = _read_private_json(path, description="runtime process state")
-    except (FileNotFoundError, RuntimeError):
-        return False
-    if _process_state_ownership(value) != ownership:
-        return False
-    path.unlink(missing_ok=True)
-    return True
-
-
 def _signal_process(pid: int, signum: int) -> None:
     if os.name == "nt":
         command = ["taskkill", "/PID", str(pid), "/T"]
@@ -775,12 +898,18 @@ def _stop_managed_processes(
     signal_process: Callable[[int, int], None] = _signal_process,
     wait_for_exit: Callable[[ProcessIdentity, float], bool] = _wait_for_identity_exit,
 ) -> None:
-    project_dir = project_dir.resolve()
+    project_dir = _canonical_project_root(project_dir)
     path = project_dir / PROCESS_STATE
-    if path.is_symlink():
-        raise RuntimeError(f"refusing to use symlink: {path}")
-    if not path.is_file():
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
         return
+    except OSError as exc:
+        raise RuntimeError(f"unable to inspect runtime process state: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RuntimeError(f"refusing to use symlink: {path}")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"runtime process state must be a regular file: {path}")
     current = installation or _load_or_create_installation_state(project_dir)
     ownership, api, worker = _read_process_state(path)
     if ownership != current:
@@ -797,8 +926,6 @@ def _stop_managed_processes(
     if survivors:
         joined = ", ".join(survivors)
         raise RuntimeError(f"managed processes did not stop: {joined}")
-    if not _remove_process_state_if_owned(project_dir, ownership):
-        raise RuntimeError("runtime process state ownership changed while stopping")
 
 
 def _signal_started_process(process: ProcessLike, signum: int) -> None:
@@ -882,10 +1009,10 @@ def _cleanup_failed_launch(
     ownership: InstallationState,
     started: list[ProcessLike],
 ) -> None:
-    try:
-        _terminate_started_processes(started)
-    finally:
-        _remove_process_state_if_owned(project_dir, ownership)
+    """Reap this launch while retaining its ownership-bound dead record."""
+
+    del project_dir, ownership
+    _terminate_started_processes(started)
 
 
 def _launch_local_runtime(
@@ -1002,7 +1129,7 @@ def install_local_runtime(
 ) -> InstallResult:
     """Prepare, migrate, and manage the source-install API and worker."""
 
-    project_dir = project_dir.resolve()
+    project_dir = _canonical_project_root(project_dir)
     health_url = f"http://127.0.0.1:{port}{DEFAULT_HEALTH_PATH}"
     with _lifecycle_lock(project_dir, timeout=lifecycle_timeout):
         installation = _load_or_create_installation_state(project_dir)
@@ -1012,6 +1139,7 @@ def install_local_runtime(
             project_dir,
             litellm_base_url=litellm_base_url,
             litellm_api_key=litellm_api_key,
+            installation=installation,
         )
         environment = _runtime_env(values)
         prefix = _command_prefix(project_dir)
@@ -1158,6 +1286,7 @@ def _install_docker_runtime(project_dir: Path, *, start: bool) -> InstallResult:
         "127.0.0.1", DEFAULT_PORT, values["OPENBILICLAW_ACCESS_TOKEN"], timeout=90
     ):
         raise RuntimeError("protected readiness check failed")
+    _wait_for_docker_runtime(project_dir, compose)
     _emit("complete", "docker_runtime_ready", mode="docker", health_url=health_url)
     return InstallResult(status="complete", mode="docker", health_url=health_url)
 

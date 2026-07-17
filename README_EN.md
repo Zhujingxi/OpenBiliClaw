@@ -99,6 +99,13 @@ verified stop of the previous managed pair → Alembic migration → API + worke
 lock serializes that entire source-install transaction. Private installer UUID,
 canonical-root, and monotonic-generation bindings prevent concurrent installs,
 copied state, or stale failure cleanup from taking ownership of a newer runtime.
+The lock inode is bound through a held parent-directory FD and embedded
+root/device/inode identity; replacement or a symlinked ancestor fails closed. A
+copied `.env` rebinds managed root/DB/Huey/instance fields while preserving secrets
+and the external LiteLLM connection.
+Stop/failure cleanup retains the ownership-bound dead state until the next
+ownership-checked publication, and non-regular state such as a directory or FIFO
+fails closed. Docker rechecks API and worker Compose health after protected readiness.
 
 The installer does not implement a provider editor or run product initialization.
 Use `/api/v1/sources` and `/api/v1/onboarding` for source connection and bootstrap.
@@ -113,6 +120,10 @@ openbiliclaw eval
 openbiliclaw db migrate
 openbiliclaw db backup <destination>
 ```
+
+`db backup` fully syncs a held/unlinked payload before macOS `fclonefileat` or Linux
+`O_TMPFILE` + `linkat(AT_EMPTY_PATH)` atomically creates the no-replace destination.
+Windows or a platform without that primitive fails before destination reservation.
 
 API readiness is `GET /api/v1/system/readiness`. Except for the first-run onboarding
 exception, business endpoints require a bearer token matching

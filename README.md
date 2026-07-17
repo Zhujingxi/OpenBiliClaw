@@ -91,6 +91,12 @@ MODE=local bash scripts/install.sh
 `doctor` → public 和 bearer-protected readiness。源码安装用独立的跨进程 lifecycle
 lock 串行整段流程，并用私密 installer UUID、canonical root 和单调 generation 绑定
 process state，避免并发安装、复制目录或旧失败清理覆盖新运行实例。
+Lock 本身由 held parent-directory FD 与内嵌 root/device/inode 绑定，替换 lock inode 或
+symlinked ancestor 会失败关闭；复制 `.env` 后，managed root/DB/Huey/instance 字段会
+重绑定当前 checkout，而已有 secret 与外部 LiteLLM connection 保持不变。
+停止/失败清理保留 ownership-bound dead state，直到下次 ownership-checked publication；
+directory/FIFO 等非普通 state 会失败关闭。Docker 在受保护 readiness 后再次检查 API
+与 worker Compose health，避免 probe 期间的 crash-loop 被误报成功。
 
 安装器不会配置 provider 表单，也不会执行产品初始化；来源连接和 onboarding
 使用 `/api/v1/sources` 与 `/api/v1/onboarding`。
@@ -105,6 +111,10 @@ openbiliclaw eval
 openbiliclaw db migrate
 openbiliclaw db backup <destination>
 ```
+
+`db backup` 先完成并同步 held/unlinked payload，之后才通过 macOS `fclonefileat` 或
+Linux `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` 原子 no-replace 创建目标名；Windows 或缺少
+该安全 primitive 的平台会在创建或预留目标前失败关闭。
 
 API readiness：`GET /api/v1/system/readiness`。除 first-run onboarding 例外外，
 业务端点需要 `.env` 中 `OPENBILICLAW_ACCESS_TOKEN` 对应的 bearer token。不要把

@@ -95,6 +95,40 @@ def test_local_environment_requires_user_supplied_litellm(tmp_path: Path) -> Non
     assert not (tmp_path / ".env").exists()
 
 
+def test_copied_local_environment_rebinds_managed_paths_and_instance(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original"
+    copied = tmp_path / "copied"
+    original.mkdir()
+    copied.mkdir()
+    first = bootstrap.ensure_local_runtime_environment(
+        original,
+        litellm_base_url="https://models.example/v1",
+        litellm_api_key="proxy-secret",
+    )
+    (copied / ".env").write_bytes((original / ".env").read_bytes())
+
+    rebound = bootstrap.ensure_local_runtime_environment(
+        copied,
+        litellm_base_url="https://ignored.example/v1",
+        litellm_api_key="ignored-secret",
+    )
+
+    assert rebound["OPENBILICLAW_SECRET_KEY"] == first["OPENBILICLAW_SECRET_KEY"]
+    assert rebound["OPENBILICLAW_ACCESS_TOKEN"] == first["OPENBILICLAW_ACCESS_TOKEN"]
+    assert rebound["OPENBILICLAW_LITELLM_BASE_URL"] == first["OPENBILICLAW_LITELLM_BASE_URL"]
+    assert rebound["OPENBILICLAW_LITELLM_API_KEY"] == first["OPENBILICLAW_LITELLM_API_KEY"]
+    assert rebound["OPENBILICLAW_PROJECT_ROOT"] == str(copied.resolve())
+    assert (
+        rebound["OPENBILICLAW_INSTALLER_INSTANCE_ID"] != first["OPENBILICLAW_INSTALLER_INSTANCE_ID"]
+    )
+    assert rebound["OPENBILICLAW_DATABASE_URL"] == bootstrap._sqlite_url(
+        copied / "data/vnext/openbiliclaw.db"
+    )
+    assert rebound["OPENBILICLAW_HUEY_PATH"] == str((copied / "data/vnext/huey.db").resolve())
+
+
 def test_local_environment_rejects_symlink(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.write_text("DO_NOT_TOUCH=1\n", encoding="utf-8")
@@ -184,7 +218,7 @@ def test_local_install_propagates_migration_failure_and_starts_nothing(tmp_path:
     assert started == []
 
 
-def test_local_install_fails_if_protected_readiness_fails_and_cleans_pid_state(
+def test_local_install_fails_if_protected_readiness_fails_and_retains_pid_state(
     tmp_path: Path,
 ) -> None:
     commands: list[list[str]] = []
@@ -207,10 +241,12 @@ def test_local_install_fails_if_protected_readiness_fails_and_cleans_pid_state(
             identity_probe=lambda pid: _identity(pid),
         )
     assert any(command[-1] == "doctor" for command in commands)
-    assert not (tmp_path / "data/vnext/runtime-processes.json").exists()
+    assert (tmp_path / "data/vnext/runtime-processes.json").exists()
 
 
-def test_local_install_propagates_doctor_failure_and_cleans_processes(tmp_path: Path) -> None:
+def test_local_install_propagates_doctor_failure_and_retains_process_state(
+    tmp_path: Path,
+) -> None:
     commands: list[list[str]] = []
 
     def run_command(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
@@ -234,10 +270,10 @@ def test_local_install_propagates_doctor_failure_and_cleans_processes(tmp_path: 
         )
     assert commands[0][-1] == "migrate"
     assert commands[1][-1] == "doctor"
-    assert not (tmp_path / "data/vnext/runtime-processes.json").exists()
+    assert (tmp_path / "data/vnext/runtime-processes.json").exists()
 
 
-def test_local_install_cleans_processes_when_worker_queue_never_opens(tmp_path: Path) -> None:
+def test_local_install_retains_process_state_when_worker_queue_never_opens(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="worker queue did not initialize"):
         bootstrap.install_local_runtime(
             tmp_path,
@@ -252,7 +288,7 @@ def test_local_install_cleans_processes_when_worker_queue_never_opens(tmp_path: 
             queue_probe=lambda *_args, **_kwargs: False,
             identity_probe=lambda pid: _identity(pid),
         )
-    assert not (tmp_path / "data/vnext/runtime-processes.json").exists()
+    assert (tmp_path / "data/vnext/runtime-processes.json").exists()
 
 
 def test_compose_prefix_supports_source_and_prebuilt_distributions(tmp_path: Path) -> None:
@@ -328,7 +364,57 @@ def test_docker_install_requires_migration_api_and_worker_health(
             "api",
             "worker",
         ],
+        [
+            "docker",
+            "compose",
+            "ps",
+            "--all",
+            "--format",
+            "json",
+            "migrate",
+            "api",
+            "worker",
+        ],
     ]
+
+
+def test_docker_install_rechecks_worker_after_protected_readiness(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "docker-compose.yml").touch()
+    status_calls = 0
+
+    def run(command: list[str], **_kwargs: object) -> object:
+        nonlocal status_calls
+
+        class Result:
+            returncode = 0
+            stdout = ""
+
+        result = Result()
+        if "ps" in command:
+            status_calls += 1
+            worker = (
+                {"Service": "worker", "State": "running", "Health": "healthy"}
+                if status_calls == 1
+                else {"Service": "worker", "State": "restarting", "Health": "unhealthy"}
+            )
+            result.stdout = json.dumps(
+                [
+                    {"Service": "migrate", "State": "exited", "ExitCode": 0},
+                    {"Service": "api", "State": "running", "Health": "healthy"},
+                    worker,
+                ]
+            )
+        return result
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", run)
+    monkeypatch.setattr(bootstrap, "_probe_runtime", lambda *_args, **_kwargs: True)
+
+    with pytest.raises(RuntimeError, match="worker failed before becoming healthy"):
+        bootstrap._install_docker_runtime(tmp_path, start=True)
+
+    assert status_calls == 2
 
 
 @pytest.mark.parametrize(

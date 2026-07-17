@@ -6,10 +6,13 @@ startup gates. Product features continue to use repositories and units of work.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import secrets
 import sqlite3
 import stat
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,6 +171,8 @@ class SQLiteOperationalStore:
             raise DatabaseBackupError("database backup failed") from exc
 
     def _backup(self, *, source: Path, destination: Path) -> Path:
+        if not _secure_backup_platform_supported():
+            raise DatabaseBackupError("secure database backup is not supported on Windows")
         source_path = source.expanduser().absolute()
         target = _prepare_destination(destination)
         if source_path == target:
@@ -209,58 +214,39 @@ class SQLiteOperationalStore:
                 descriptor=temp.descriptor,
             )
             _require_source_identity(source, source_identity)
-            _require_owned_entry(directory, temp)
             _sync_descriptor(temp.descriptor, temp.identity)
-            final = _reserve_destination(directory=directory, target=target)
+            final = _atomic_publish_no_replace(
+                directory=directory,
+                payload=temp,
+                target=target,
+            )
             try:
-                _require_source_identity(source, source_identity)
-                _copy_descriptor(source=temp.descriptor, destination=final.descriptor)
-                _sync_descriptor(final.descriptor, final.identity)
-                _require_owned_entry(directory, final)
-                _require_destination_directory(directory)
                 _sync_directory(directory)
+                _require_owned_entry(directory, final)
                 _require_source_identity(source, source_identity)
                 return target
-            except BaseException:
-                _unlink_owned_entry(directory, final)
-                raise
             finally:
                 os.close(final.descriptor)
         finally:
-            try:
-                os.close(temp.descriptor)
-            finally:
-                _unlink_owned_entry(directory, temp)
+            os.close(temp.descriptor)
 
     def _create_temp(self, directory: _DestinationDirectory) -> tuple[Path, int, tuple[int, int]]:
-        """Create and retain a private temporary inode in the destination filesystem."""
+        """Create an unlinked private payload inode in the destination filesystem."""
 
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        for _attempt in range(32):
-            temp = directory.path / f".backup-{secrets.token_hex(12)}.tmp"
-            try:
-                descriptor = (
-                    os.open(temp, flags, 0o600)
-                    if directory.descriptor is None
-                    else os.open(temp.name, flags, 0o600, dir_fd=directory.descriptor)
-                )
-            except FileExistsError:
-                continue
+        if directory.descriptor is None:
+            raise DatabaseBackupError("secure backup publication is unavailable")
+        descriptor = _create_anonymous_payload(directory)
+        try:
             metadata = os.fstat(descriptor)
             identity = (metadata.st_dev, metadata.st_ino)
-            owned = _OwnedFile(temp, descriptor, identity)
-            try:
-                os.fchmod(descriptor, 0o600)
-                os.fsync(descriptor)
-                return temp, descriptor, identity
-            except BaseException:
-                try:
-                    os.close(descriptor)
-                finally:
-                    _unlink_owned_entry(directory, owned)
-                raise
-        raise DatabaseBackupError("could not reserve a backup temporary file")
+            if not stat.S_ISREG(metadata.st_mode):
+                raise DatabaseBackupError("backup payload is not a regular file")
+            os.fchmod(descriptor, 0o600)
+            os.fsync(descriptor)
+            return directory.path / ".anonymous-backup-payload", descriptor, identity
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     def _backup_into_descriptor(
         self,
@@ -390,15 +376,49 @@ def _write_transaction_available(path: Path) -> bool:
     descriptor = -1
     try:
         descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        if not _descriptor_matches_regular_path(path, descriptor):
+            return False
+        probe_table = f"__openbiliclaw_write_probe_{secrets.token_hex(8)}"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(f'CREATE TABLE "{probe_table}" (value INTEGER NOT NULL)')
+            connection.execute(f'INSERT INTO "{probe_table}" (value) VALUES (1)')
             connection.execute("ROLLBACK")
-        return True
+        return _descriptor_matches_regular_path(path, descriptor)
     except (OSError, sqlite3.Error):
         return False
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _descriptor_matches_regular_path(path: Path, descriptor: int) -> bool:
+    """Return whether a pathname still names the held regular-file inode."""
+
+    try:
+        path_metadata = path.lstat()
+        held_metadata = os.fstat(descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(path_metadata.st_mode)
+        and stat.S_ISREG(held_metadata.st_mode)
+        and (path_metadata.st_dev, path_metadata.st_ino)
+        == (held_metadata.st_dev, held_metadata.st_ino)
+    )
+
+
+def _secure_backup_platform_supported() -> bool:
+    """Return whether handle-relative, no-follow backup operations are available."""
+
+    if os.name == "nt":
+        return False
+    libc = ctypes.CDLL(None)
+    if sys.platform == "darwin":
+        return hasattr(libc, "fclonefileat")
+    if sys.platform.startswith("linux"):
+        return hasattr(os, "O_TMPFILE") and hasattr(libc, "linkat")
+    return False
 
 
 def _migration_at_head(*, database_path: Path, database_url: str, alembic_ini: Path) -> bool:
@@ -847,6 +867,145 @@ def _open_destination_directory(path: Path) -> _DestinationDirectory:
     return directory
 
 
+def _create_anonymous_payload(directory: _DestinationDirectory) -> int:
+    descriptor = directory.descriptor
+    if descriptor is None:
+        raise DatabaseBackupError("secure backup publication is unavailable")
+    if sys.platform.startswith("linux") and hasattr(os, "O_TMPFILE"):
+        try:
+            return os.open(
+                ".",
+                os.O_RDWR | os.O_TMPFILE,
+                0o600,
+                dir_fd=descriptor,
+            )
+        except OSError as exc:
+            raise DatabaseBackupError("secure backup publication is unavailable") from exc
+    if sys.platform == "darwin":
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        for _attempt in range(32):
+            name = f".backup-{secrets.token_hex(12)}.tmp"
+            try:
+                payload = os.open(name, flags, 0o600, dir_fd=descriptor)
+            except FileExistsError:
+                continue
+            identity = _descriptor_identity(payload)
+            try:
+                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if (metadata.st_dev, metadata.st_ino) != identity:
+                    raise DatabaseBackupError("backup temporary file changed")
+                os.unlink(name, dir_fd=descriptor)
+                return payload
+            except BaseException:
+                os.close(payload)
+                raise
+        raise DatabaseBackupError("could not reserve a private backup payload")
+    raise DatabaseBackupError("secure backup publication is unavailable")
+
+
+def _descriptor_identity(descriptor: int) -> tuple[int, int]:
+    metadata = os.fstat(descriptor)
+    return metadata.st_dev, metadata.st_ino
+
+
+def _atomic_publish_no_replace(
+    *, directory: _DestinationDirectory, payload: _OwnedFile, target: Path
+) -> _OwnedFile:
+    return _atomic_publish_no_replace_impl(
+        directory=directory,
+        payload=payload,
+        target=target,
+    )
+
+
+def _atomic_publish_no_replace_impl(
+    *, directory: _DestinationDirectory, payload: _OwnedFile, target: Path
+) -> _OwnedFile:
+    """Publish a held anonymous payload atomically without replacing a name."""
+
+    descriptor = directory.descriptor
+    if descriptor is None or _descriptor_identity(payload.descriptor) != payload.identity:
+        raise DatabaseBackupError("backup payload changed before publication")
+    _require_destination_directory(directory)
+    if sys.platform.startswith("linux"):
+        _link_anonymous_linux(payload.descriptor, descriptor, target.name)
+        same_inode_required = True
+    elif sys.platform == "darwin":
+        _clone_anonymous_macos(payload.descriptor, descriptor, target.name)
+        same_inode_required = False
+    else:
+        raise DatabaseBackupError("secure backup publication is unavailable")
+    final_descriptor = -1
+    try:
+        final_descriptor = os.open(
+            target.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=descriptor,
+        )
+        final_identity = _descriptor_identity(final_descriptor)
+        if same_inode_required and final_identity != payload.identity:
+            raise DatabaseBackupError("backup destination changed during publication")
+        if not same_inode_required and not _descriptors_equal(payload.descriptor, final_descriptor):
+            raise DatabaseBackupError("backup destination changed during publication")
+        final = _OwnedFile(target, final_descriptor, final_identity)
+        _require_owned_entry(directory, final)
+        os.fchmod(final_descriptor, 0o600)
+        os.fsync(final_descriptor)
+        return final
+    except BaseException:
+        if final_descriptor >= 0:
+            os.close(final_descriptor)
+        raise
+
+
+def _link_anonymous_linux(source: int, destination_directory: int, name: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.linkat(
+        ctypes.c_int(source),
+        ctypes.c_char_p(b""),
+        ctypes.c_int(destination_directory),
+        ctypes.c_char_p(os.fsencode(name)),
+        ctypes.c_int(0x1000),
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise DatabaseBackupError("backup destination already exists")
+    cause = OSError(error, os.strerror(error))
+    raise DatabaseBackupError("secure backup publication failed") from cause
+
+
+def _clone_anonymous_macos(source: int, destination_directory: int, name: str) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.fclonefileat(
+        ctypes.c_int(source),
+        ctypes.c_int(destination_directory),
+        ctypes.c_char_p(os.fsencode(name)),
+        ctypes.c_int(0),
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise DatabaseBackupError("backup destination already exists")
+    cause = OSError(error, os.strerror(error))
+    raise DatabaseBackupError("secure backup publication failed") from cause
+
+
+def _descriptors_equal(first: int, second: int) -> bool:
+    first_size = os.fstat(first).st_size
+    if os.fstat(second).st_size != first_size:
+        return False
+    offset = 0
+    while offset < first_size:
+        size = min(_COPY_BUFFER_SIZE, first_size - offset)
+        if os.pread(first, size, offset) != os.pread(second, size, offset):
+            return False
+        offset += size
+    return True
+
+
 def _close_destination_directory(directory: _DestinationDirectory) -> None:
     if directory.descriptor is not None:
         os.close(directory.descriptor)
@@ -863,42 +1022,6 @@ def _require_destination_directory(directory: _DestinationDirectory) -> None:
         or (metadata.st_dev, metadata.st_ino) != directory.identity
     ):
         raise DatabaseBackupError("backup destination directory changed")
-
-
-def _reserve_destination(*, directory: _DestinationDirectory, target: Path) -> _OwnedFile:
-    _require_destination_directory(directory)
-    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = (
-            os.open(target, flags, 0o600)
-            if directory.descriptor is None
-            else os.open(target.name, flags, 0o600, dir_fd=directory.descriptor)
-        )
-    except FileExistsError as exc:
-        raise DatabaseBackupError("backup destination already exists") from exc
-    metadata = os.fstat(descriptor)
-    owned = _OwnedFile(target, descriptor, (metadata.st_dev, metadata.st_ino))
-    try:
-        _require_owned_entry(directory, owned)
-        return owned
-    except BaseException:
-        try:
-            os.close(descriptor)
-        finally:
-            _unlink_owned_entry(directory, owned)
-        raise
-
-
-def _copy_descriptor(*, source: int, destination: int) -> None:
-    os.lseek(source, 0, os.SEEK_SET)
-    os.ftruncate(destination, 0)
-    while chunk := os.read(source, _COPY_BUFFER_SIZE):
-        view = memoryview(chunk)
-        while view:
-            written = os.write(destination, view)
-            if written <= 0:
-                raise DatabaseBackupError("database backup failed while publishing snapshot")
-            view = view[written:]
 
 
 def _entry_metadata(directory: _DestinationDirectory, path: Path) -> os.stat_result:
@@ -923,17 +1046,6 @@ def _require_owned_entry(directory: _DestinationDirectory, owned: _OwnedFile) ->
         or (metadata.st_dev, metadata.st_ino) != owned.identity
     ):
         raise DatabaseBackupError(message)
-
-
-def _unlink_owned_entry(directory: _DestinationDirectory, owned: _OwnedFile) -> None:
-    _require_owned_entry(directory, owned)
-    try:
-        if directory.descriptor is None:
-            owned.path.unlink()
-        else:
-            os.unlink(owned.path.name, dir_fd=directory.descriptor)
-    except FileNotFoundError:
-        return
 
 
 def _prepare_destination(destination: Path) -> Path:

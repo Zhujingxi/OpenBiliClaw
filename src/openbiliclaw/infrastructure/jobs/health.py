@@ -1,4 +1,4 @@
-"""Read-only health probe for the durable vNext worker container."""
+"""Rollback-only write diagnostic for the durable vNext worker container."""
 
 from __future__ import annotations
 

@@ -101,7 +101,10 @@ API public readiness 只表示进程可服务。Installer 还使用生成的 bea
 json`，要求 `migrate` 已成功退出且 API、worker 都是 `running/healthy`；worker
 healthcheck 不只检查文件存在，而是验证容器 PID 1 是正式 worker、应用 schema 位于
 Alembic head、Huey SQLite 完整且能取得可回滚的写事务。`restarting`、`exited` 或
-`unhealthy` worker 都会使安装非零失败，不能被 API readiness 掩盖。Source installer
+`unhealthy` worker 都会使安装非零失败，不能被 API readiness 掩盖。受保护 API probe
+完成后 installer 会再次读取相同 Compose 状态，probe 期间转为 crash-loop 也会失败。
+Queue writable probe 会在 `BEGIN IMMEDIATE` 中执行真实 `CREATE`/`INSERT` 后 rollback，
+不留下 durable artifact，并在 SQLite connection 前后确认 pathname 仍指向 held inode。Source installer
 在 migration 后启动 API/worker、等待 queue
 文件就绪，再运行 `openbiliclaw doctor` 检查应用数据库、access token 和 LiteLLM
 配置；任一步失败都会停止这两个新进程并非零退出。

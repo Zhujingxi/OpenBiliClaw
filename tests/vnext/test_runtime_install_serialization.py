@@ -86,8 +86,8 @@ def test_installer_identity_is_private_stable_and_canonical_root_bound(tmp_path:
     copied = tmp_path.parent / f"{tmp_path.name}-copied"
     shutil.copytree(tmp_path, copied)
     with (
+        pytest.raises(RuntimeError, match="lifecycle lock identity changed"),
         bootstrap._lifecycle_lock(copied, timeout=1.0),
-        pytest.raises(RuntimeError, match="different project root"),
     ):
         bootstrap._load_or_create_installation_state(copied)
 
@@ -102,10 +102,57 @@ def test_moved_installation_state_is_refused(tmp_path: Path) -> None:
     original.rename(moved)
 
     with (
+        pytest.raises(RuntimeError, match="lifecycle lock identity changed"),
         bootstrap._lifecycle_lock(moved, timeout=1.0),
-        pytest.raises(RuntimeError, match="different project root"),
     ):
         bootstrap._load_or_create_installation_state(moved)
+
+
+def test_lifecycle_lock_replacement_cannot_create_a_second_holder(tmp_path: Path) -> None:
+    first_entered = threading.Event()
+    replaced = threading.Event()
+    release_first = threading.Event()
+    second_entered = False
+
+    def hold_first() -> None:
+        with (
+            pytest.raises(RuntimeError, match="lock identity changed"),
+            bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+        ):
+            first_entered.set()
+            lock_path = tmp_path / bootstrap.LIFECYCLE_LOCK
+            displaced = lock_path.with_suffix(".displaced")
+            lock_path.rename(displaced)
+            lock_path.write_bytes(displaced.read_bytes())
+            replaced.set()
+            assert release_first.wait(2.0)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(hold_first)
+        assert first_entered.wait(2.0)
+        assert replaced.wait(2.0)
+        with (
+            pytest.raises(RuntimeError, match="lock identity"),
+            bootstrap._lifecycle_lock(tmp_path, timeout=0.1),
+        ):
+            second_entered = True
+        release_first.set()
+        first.result(timeout=2.0)
+
+    assert not second_entered
+
+
+def test_lifecycle_lock_rejects_symlinked_project_ancestor(tmp_path: Path) -> None:
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+
+    with (
+        pytest.raises(RuntimeError, match="symlinked project path"),
+        bootstrap._lifecycle_lock(linked, timeout=1.0),
+    ):
+        pytest.fail("symlinked project path acquired lifecycle lock")
 
 
 @pytest.mark.parametrize("field", ("project_root", "instance_id", "generation"))
@@ -139,28 +186,37 @@ def test_stop_refuses_tampered_runtime_ownership(tmp_path: Path, field: str) -> 
     assert (tmp_path / bootstrap.PROCESS_STATE).exists()
 
 
-def test_cleanup_compare_and_swap_cannot_unlink_newer_runtime_state(tmp_path: Path) -> None:
+def test_failed_cleanup_retains_ownership_bound_runtime_state(tmp_path: Path) -> None:
     with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
         installation = bootstrap._load_or_create_installation_state(tmp_path)
-        old = bootstrap._advance_installation_generation(tmp_path, installation)
-        newer_payload = _runtime_payload(
-            bootstrap.InstallationState(
-                project_root=old.project_root,
-                instance_id=old.instance_id,
-                generation=old.generation + 1,
-            ),
-            api_pid=2001,
-            worker_pid=2002,
-        )
+        ownership = bootstrap._advance_installation_generation(tmp_path, installation)
+        payload = _runtime_payload(ownership)
         bootstrap._atomic_write_private_file(
             tmp_path / bootstrap.PROCESS_STATE,
-            json.dumps(newer_payload, sort_keys=True) + "\n",
+            json.dumps(payload, sort_keys=True) + "\n",
+        )
+        bootstrap._cleanup_failed_launch(
+            tmp_path,
+            ownership,
+            [FakeProcess(1001), FakeProcess(1002)],
         )
 
-        removed = bootstrap._remove_process_state_if_owned(tmp_path, old)
+    assert json.loads((tmp_path / bootstrap.PROCESS_STATE).read_text()) == payload
 
-    assert removed is False
-    assert json.loads((tmp_path / bootstrap.PROCESS_STATE).read_text()) == newer_payload
+
+@pytest.mark.parametrize("kind", ("directory", "fifo"))
+def test_stop_rejects_non_regular_runtime_state(tmp_path: Path, kind: str) -> None:
+    state_path = tmp_path / bootstrap.PROCESS_STATE
+    state_path.parent.mkdir(parents=True)
+    if kind == "directory":
+        state_path.mkdir()
+    elif hasattr(os, "mkfifo"):
+        os.mkfifo(state_path)
+    else:
+        pytest.skip("FIFO creation is unavailable")
+
+    with pytest.raises(RuntimeError, match="regular file"):
+        bootstrap._stop_managed_processes(tmp_path)
 
 
 def test_concurrent_prepare_serializes_migrations(tmp_path: Path) -> None:
@@ -253,7 +309,7 @@ def test_prepare_verifiably_stops_managed_pair_before_migration(tmp_path: Path) 
 
     assert result.status == "prepared"
     assert timeline == ["stop-1001", "stop-1002", "migrate"]
-    assert not (tmp_path / bootstrap.PROCESS_STATE).exists()
+    assert (tmp_path / bootstrap.PROCESS_STATE).exists()
     persisted = json.loads((tmp_path / bootstrap.INSTALLATION_STATE).read_text())
     assert persisted["generation"] == 1
 

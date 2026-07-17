@@ -19,8 +19,8 @@
 | SQLAlchemy schema | ✅ | 16 张 vNext 业务表覆盖设置、来源账户、活动、画像与独立 consumed-evidence ledger、内容、Feed、集合、聊天、来源任务、后台任务和 AI run |
 | Alembic 基线 | ✅ | `0001_vnext_baseline` 支持从空库 upgrade、downgrade 后重建，并预置 `favorites` / `watch_later` 两个本地集合 |
 | runtime schema gate | ✅ | installer 或 Compose `migrate` 独占 Alembic 写入；API/worker startup 只读验证当前 revision 精确等于 head |
-| worker runtime health | ✅ | Compose probe 要求 PID 1 为正式 worker、schema 位于 head，并对独立 Huey SQLite 执行 integrity check 和 `BEGIN IMMEDIATE`/`ROLLBACK` 可写性验证 |
-| 安全在线备份 | ✅ | `db backup` 先以 no-follow FD 固定并验证 source inode，再在 `0700` 私有目录中 hard-link main 与当时存在的 WAL/SHM/journal；SQLite 从该稳定 link set 生成内存快照，前后校验 source/sidecar 集合与 inode，并以 `0600`、no-overwrite hard-link 原子发布目标 |
+| worker runtime health | ✅ | Compose probe 要求 PID 1 为正式 worker、schema 位于 head；独立 Huey SQLite 通过 integrity check，并在 pathname 与 held descriptor 前后同 inode 的前提下执行 `BEGIN IMMEDIATE`、真实 `CREATE`/`INSERT`、`ROLLBACK`，不留下 probe artifact |
+| 安全在线备份 | ✅ | `db backup` 以 no-follow FD 固定 source，并用私有 hard-link set 保留 main/WAL/SHM/journal snapshot 语义；完整 SQLite snapshot 先写入 held、已 unlink 的 `0600` payload FD，目标名称在 payload 完整同步前始终不存在。macOS 用 `fclonefileat(payload_fd, dirfd, target)`、Linux 用 `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` 原子 no-replace 发布；directory sync 后、返回前再次核对 held final FD 与 pathname identity。发布后异常不 pathname-unlink final，避免删除并发替换。Windows/缺少安全 primitive 的平台在 destination reservation 前失败关闭 |
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |

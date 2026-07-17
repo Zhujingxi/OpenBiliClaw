@@ -39,7 +39,10 @@ is rejected.
 The authoritative runtime file is `<checkout>/.env`. It is ignored by Git, written
 through a same-directory temporary file and atomic replace, and uses mode `0600` on
 POSIX. `.env` and its lock must be regular files; symlinks are rejected. Existing
-non-empty values are reused on every rerun.
+non-empty secrets and the external LiteLLM connection are reused on every rerun.
+Installer-owned `OPENBILICLAW_PROJECT_ROOT`, installer instance ID, application DB,
+and Huey paths are always rebound to the current canonical checkout and private
+instance metadata, so copying `.env` cannot keep writing to the original checkout.
 
 Docker generates:
 
@@ -62,7 +65,11 @@ URL; they never contain secret values or the LiteLLM URL.
 The order is intentionally fixed and failures propagate. A dedicated bounded
 cross-process lifecycle lock serializes the complete sequence; it is separate from
 the short `.env` writer lock, so concurrent prepare/start invocations cannot overlap
-migrations or publish competing process pairs:
+migrations or publish competing process pairs. Its stable private metadata file is
+itself the locked inode: the held parent-directory FD, embedded root/device/inode,
+and pathname identity are checked before and after the lifecycle. Replaced/copied
+lock inodes and symlinked project ancestors fail closed instead of creating a second
+lock domain:
 
 1. Install dependencies with `uv sync --frozen`, or a Python editable fallback.
 2. Persist stable access/encryption secrets and the supplied LiteLLM connection.
@@ -83,9 +90,11 @@ generation. Verified identities are stored privately in
 `data/vnext/runtime-processes.json`; bare or stale PIDs are never signalled. Copied,
 moved, malformed, or ownership-mismatched state is refused instead of managed.
 Managed shutdown sends TERM, waits for a bounded interval, and escalates only while
-the same identity is still present. Failure cleanup removes process state only when
-its root, instance, and generation still belong to that invocation, so an older
-cleanup cannot delete newer state.
+the same identity is still present. A present state path must be a regular file;
+directories, FIFOs, symlinks, and other objects fail closed. Stop and failure cleanup
+never pathname-unlink process state. The ownership-bound dead record remains until
+the next ownership-checked process-state publication, so stale cleanup cannot delete
+a newer generation.
 Logs are separate at `logs/api.log` and `logs/worker.log`. A failed migration starts
 nothing. A partial launch, state-write failure, dead worker, or failed protected
 check terminates and reaps every newly started child and returns non-zero.
@@ -103,10 +112,13 @@ one-shot `migrate` service applies Alembic first; `api` and `worker` both requir
 successful completion and only perform a read-only schema-head startup check. A
 migration failure therefore blocks both long-running processes. The installer then
 requires Compose to report `migrate` exited with code zero and both API and worker as
-`running/healthy`, then verifies public and bearer-protected API access. A restarting,
+`running/healthy`, then verifies public and bearer-protected API access and rechecks
+the same Compose status before success. A restarting,
 exited, or unhealthy worker fails the install even if API readiness succeeds. The
 worker healthcheck validates the PID 1 worker command, schema head, queue integrity,
-and a read/write SQLite transaction that is rolled back. The three application services mount
+and real schema/data mutation inside a `BEGIN IMMEDIATE` transaction that is rolled
+back without leaving a probe artifact. The queue pathname must still match the held
+descriptor before and after SQLite access. The three application services mount
 `openbiliclaw_data:/app/runtime/data`; API and worker use exactly:
 
 ```text
