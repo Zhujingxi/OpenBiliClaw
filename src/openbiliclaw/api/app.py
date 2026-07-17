@@ -4023,6 +4023,13 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
+        # Phase 1: drain the dialogue learn queue so in-flight / queued learns
+        # complete before the process exits (self-owned worker; not covered by
+        # the background-task cancellation above).
+        learn_queue = getattr(ctx, "dialogue_learn_queue", None)
+        if learn_queue is not None:
+            with suppress(Exception):
+                await learn_queue.shutdown(timeout=30)
 
     @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
     async def profile_summary(
@@ -6473,7 +6480,11 @@ def create_app(
         try:
             async with chat_turn_lock:
                 reply = await asyncio.wait_for(
-                    ctx.dialogue.respond(_contextual_chat_message(turn)),
+                    ctx.dialogue.respond(
+                        _contextual_chat_message(turn),
+                        scope=turn.scope or "chat",
+                        turn_id=turn.turn_id,
+                    ),
                     timeout=120,
                 )
                 reply = str(reply)

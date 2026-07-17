@@ -57,6 +57,7 @@ class SocraticDialogue:
         tools: list[dict[str, Any]] | None = None,
         tool_dispatcher: Any | None = None,
         module_overrides: Mapping[str, ModuleOverride] | None = None,
+        learn_queue: Any | None = None,
     ) -> None:
         self._llm = llm
         self._soul_engine = soul_engine
@@ -67,8 +68,19 @@ class SocraticDialogue:
         self._tools = tools or []
         self._tool_dispatcher = tool_dispatcher
         self._module_overrides = dict(module_overrides) if module_overrides is not None else None
+        # Phase 1: when provided, background learning is serialized through this
+        # single-worker queue instead of a per-turn ``asyncio.create_task``. CLI
+        # / OpenClaw sessions inject no queue and keep the detached-task path
+        # (process-internal, not durable — no popup regurgitation).
+        self._learn_queue = learn_queue
 
-    async def respond(self, user_message: str) -> str:
+    async def respond(
+        self,
+        user_message: str,
+        *,
+        scope: str = "chat",
+        turn_id: str = "",
+    ) -> str:
         """Generate a Socratic response to a user message.
 
         The response should:
@@ -80,6 +92,10 @@ class SocraticDialogue:
 
         Args:
             user_message: The user's message.
+            scope: Chat scope threaded to ``learn_from_dialogue`` — only
+                ``"chat"`` runs settles; probe / confusion scopes are settled
+                by the durable side-effect path (single ownership).
+            turn_id: Durable chat-turn id (idempotency observation key).
 
         Returns:
             Agent's response.
@@ -109,28 +125,37 @@ class SocraticDialogue:
             self._history.append(DialogueTurn(role="agent", content=reply))
             learn_fn = getattr(self._soul_engine, "learn_from_dialogue", None)
             if callable(learn_fn):
+                payload = {
+                    "user_message": user_message,
+                    "assistant_reply": reply,
+                    "session": self._session,
+                    "scope": scope,
+                    "turn_id": turn_id,
+                }
+                if self._learn_queue is not None:
+                    # Serialized path: append to the single-worker queue so
+                    # adjacent turns can't interleave read/merge/write.
+                    await self._learn_queue.submit(payload)
+                else:
 
-                async def _background_learn() -> None:
-                    try:
-                        # This chain was initiated by an interactive user turn.
-                        # It must keep running even when background admission is
-                        # parked because canonical inventory is empty; otherwise
-                        # the user's explicit correction cannot repair the very
-                        # recommendation state that triggered it. The bypass only
-                        # skips background admission — every provider call still
-                        # respects the runtime-wide total concurrency gate.
-                        from openbiliclaw.llm.service import _background_admission_bypass
+                    async def _background_learn() -> None:
+                        try:
+                            # This chain was initiated by an interactive user
+                            # turn. It must keep running even when background
+                            # admission is parked because canonical inventory is
+                            # empty; otherwise the user's explicit correction
+                            # cannot repair the very recommendation state that
+                            # triggered it. The bypass only skips background
+                            # admission — every provider call still respects the
+                            # runtime-wide total concurrency gate.
+                            from openbiliclaw.llm.service import _background_admission_bypass
 
-                        with _background_admission_bypass():
-                            await learn_fn(
-                                user_message=user_message,
-                                assistant_reply=reply,
-                                session=self._session,
-                            )
-                    except Exception:
-                        logger.exception("Failed to learn from dialogue turn.")
+                            with _background_admission_bypass():
+                                await learn_fn(**payload)
+                        except Exception:
+                            logger.exception("Failed to learn from dialogue turn.")
 
-                asyncio.create_task(_background_learn())
+                    asyncio.create_task(_background_learn())
             return reply
 
     async def _respond_with_tools(self, service: Any, user_message: str) -> str:

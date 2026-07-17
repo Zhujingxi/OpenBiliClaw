@@ -845,8 +845,17 @@ class SoulEngine:
         user_message: str,
         assistant_reply: str,
         session: str,
+        scope: str = "chat",
+        turn_id: str = "",
     ) -> dict[str, object]:
-        """Persist a chat turn and update long-term understanding when warranted."""
+        """Persist a chat turn and update long-term understanding when warranted.
+
+        ``scope`` / ``turn_id`` (Phase 1) are threaded from the durable chat
+        path. ``scope`` defaults to ``"chat"``; only ``"chat"`` turns run the
+        ``settles`` inventory settling (Task 3) — probe / confusion scopes are
+        settled by the durable side-effect path (single ownership). ``turn_id``
+        is stamped on the ledger rows as an idempotency observation key.
+        """
         await self._memory.propagate_event(
             {
                 "event_type": "dialogue",
@@ -924,6 +933,7 @@ class SoulEngine:
             source="chat",
             before=existing_preference,
             source_refs=candidate_refs,
+            turn_id=turn_id,
         ) as _entry:
             preference_layer.data.clear()
             preference_layer.data.update(updated_preference)
@@ -944,6 +954,7 @@ class SoulEngine:
                 after={"disliked_topics": sorted(new_disliked)},
                 source_refs=list(newly_added_dislikes),
                 outcome="success",
+                turn_id=turn_id,
             )
             self._schedule_dislike_purge(
                 newly_added=newly_added_dislikes,
@@ -962,6 +973,7 @@ class SoulEngine:
                     source="chat",
                     before=existing_profile,
                     source_refs=candidate_refs,
+                    turn_id=turn_id,
                 ) as _entry:
                     legacy_profile = await self._profile_builder.build(
                         history=[],
