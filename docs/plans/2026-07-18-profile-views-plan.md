@@ -144,17 +144,22 @@ re-exports the old names unchanged.
 
 **Steps:**
 
-- [ ] Write failing byte-equivalence golden test: three fixture profiles (young ~10 interests /
+- [x] Write failing byte-equivalence golden test: three fixture profiles (young ~10 interests /
       mature 200+ / legacy flat `SoulProfile`) rendered via old import path and via
       `profile_views` — outputs byte-identical (test imports both paths; fails until module
-      exists).
-- [ ] Move the functions verbatim (helpers included or imported); add re-export lines in
-      `_utils.py` with a deprecation comment.
-- [ ] Add the structural guard: test walks `src/openbiliclaw`, asserts the serializer names are
+      exists). *(Implemented as frozen pre-move golden snapshots under
+      `tests/golden/profile_views/` vs the new module — re-export makes the two live paths the
+      same object, so comparing against pre-move bytes is what actually verifies "no change".)*
+- [x] Move the functions verbatim (helpers included or imported); add re-export lines in
+      `_utils.py` with a deprecation comment. *(`normalize_match_text` /
+      `_coerce_query_embedding_vector` moved too — soul must not import discovery — and travel
+      back as re-exports alongside the `_CONTENT_PROMPT_*` caps that `discovery/engine.py`
+      imports.)*
+- [x] Add the structural guard: test walks `src/openbiliclaw`, asserts the serializer names are
       defined only in `profile_views.py` and that `discovery/`, `recommendation/`, `runtime/`,
       `sources/` modules referencing them import from `profile_views` or the `_utils` re-export.
-- [ ] Rerun `.venv/bin/python -m pytest tests/test_profile_views.py tests/test_search_strategy.py tests/test_recommendation_engine.py -q` → PASS.
-- [ ] Full suite `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check`, `.venv/bin/mypy src/`.
+- [x] Rerun `.venv/bin/python -m pytest tests/test_profile_views.py tests/test_search_strategy.py tests/test_recommendation_engine.py -q` → PASS.
+- [x] Full suite `.venv/bin/python -m pytest -q`, `.venv/bin/ruff check`, `.venv/bin/mypy src/`.
 
 **Acceptance:**
 

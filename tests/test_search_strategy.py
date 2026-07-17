@@ -298,6 +298,7 @@ def test_query_generation_profile_summary_embedding_selector_avoids_repeated_cos
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import openbiliclaw.discovery.strategies._utils as utils
+    from openbiliclaw.soul import profile_views
 
     calls = 0
 
@@ -306,7 +307,9 @@ def test_query_generation_profile_summary_embedding_selector_avoids_repeated_cos
         calls += 1
         return 1.0 if left == right else 0.0
 
-    monkeypatch.setattr(utils, "_cosine_similarity_safe", count_cosine)
+    # ``_cosine_similarity_safe`` now lives in ``soul/profile_views`` (Task 5
+    # move); patch it there so the re-exported serializer picks it up.
+    monkeypatch.setattr(profile_views, "_cosine_similarity_safe", count_cosine)
 
     profile = SoulProfile(
         preferences=PreferenceLayer(
@@ -1063,7 +1066,7 @@ def test_build_profile_summary_keeps_newest_window_and_all_dislikes() -> None:
 def test_extract_interest_tags_fills_specifics_by_global_weight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openbiliclaw.discovery.strategies import _utils
+    from openbiliclaw.soul import profile_views
 
     profile = OnionProfile(
         interest=InterestLayer(
@@ -1088,7 +1091,9 @@ def test_extract_interest_tags_fills_specifics_by_global_weight(
             ]
         )
     )
-    monkeypatch.setattr(_utils, "_INTEREST_TAG_CAP", 4)
+    # ``_INTEREST_TAG_CAP`` moved to ``soul/profile_views`` (Task 5); the
+    # serializer reads it there, so patch the cap in its new home.
+    monkeypatch.setattr(profile_views, "_INTEREST_TAG_CAP", 4)
 
     summary = build_profile_summary(profile)
     names = [str(i["name"]) for i in summary["interests"]]

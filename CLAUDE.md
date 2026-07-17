@@ -110,6 +110,16 @@ byte-identical across calls**. So:
    dict-key reordering is enough to break the cache prefix.
 4. Reference the system prompt's "see user message for X / Y / Z"
    contract explicitly so the LLM knows where to find each variable.
+5. Any prompt that carries the user profile MUST serialize it through a
+   named view in `src/openbiliclaw/soul/profile_views.py`
+   (`build_profile_summary` / `compact_content_prompt_profile_summary` /
+   `build_query_generation_profile_summary`, or a new view added there) —
+   **never hand-roll a profile serializer at the call site**. Views are
+   pure, deterministic functions of the effective profile and the portrait
+   boundary + caps live in one place. Consult `docs/profile-usage.md`
+   first; the structural guard in `tests/test_profile_views.py` fails if a
+   serializer is defined outside that module. The legacy
+   `discovery/strategies/_utils.py` import path is a compat re-export only.
 
 **Exception**: `build_socratic_dialogue_prompt` keeps tone / friend
 label / core memory in system. That's intentional for OpenBiliClaw's

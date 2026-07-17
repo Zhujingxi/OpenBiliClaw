@@ -5,20 +5,21 @@
 > new serializer fork appears by accident. Seeded from the profile-views spec
 > (`docs/plans/2026-07-18-profile-views-spec.md` §D1–D8) and the 2026-07-16
 > token-diet audit. Every `file:line` below was cross-checked against the working
-> tree; re-verify on move (Task 5 relocates the serializers into
-> `soul/profile_views.py`).
+> tree. Task 5 (Wave B) relocated the three content-pipeline serializers into
+> `soul/profile_views.py`; `discovery/strategies/_utils.py` now re-exports them.
 
 ## The serialization paths
 
-The profile reaches an LLM prompt through a small set of serializers, all
-currently defined in `discovery/strategies/_utils.py` (Task 5 moves them to
-`soul/profile_views.py` and leaves re-export stubs):
+The profile reaches an LLM prompt through a small set of serializers. The three
+content-pipeline serializers now live in `soul/profile_views.py` (Task 5 moved
+them verbatim from `discovery/strategies/_utils.py`, which keeps re-export stubs
+so every legacy import path stays valid):
 
 | Serializer | Defined at | Shape | Portrait? | Notes |
 | --- | --- | --- | --- | --- |
-| `build_profile_summary` | `discovery/strategies/_utils.py:595` | dict | **No** | Canonical structured profile; portrait deliberately excluded (`_utils.py:606-610`). `favorite_up_users` also excluded (`_utils.py:627`). |
-| `compact_content_prompt_profile_summary` | `discovery/strategies/_utils.py:60` | dict | **No** | Caps a `build_profile_summary` dict for high-volume content prompts. Aliased as `compact_evaluation_profile_summary` (`discovery/engine.py:102`). Dislike floor preserved (`_utils.py:25-29`). |
-| `build_query_generation_profile_summary` | `discovery/strategies/_utils.py:1053` | dict | **No** | Query-trimmed taste shape; drops awareness/insights/timestamps. Interests cap 64, domains ≤16. |
+| `build_profile_summary` | `soul/profile_views.py:360` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Canonical structured profile; portrait deliberately excluded (`profile_views.py:371-375`). `favorite_up_users` also excluded (`profile_views.py:392`). |
+| `compact_content_prompt_profile_summary` | `soul/profile_views.py:512` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Caps a `build_profile_summary` dict for high-volume content prompts. Aliased as `compact_evaluation_profile_summary` (`discovery/engine.py:102`). Dislike floor preserved (`profile_views.py:46-50`). |
+| `build_query_generation_profile_summary` | `soul/profile_views.py:914` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Query-trimmed taste shape; drops awareness/insights/timestamps. Interests cap 64, domains ≤16. |
 | `OnionProfile.to_llm_context(include_portrait=False)` | `soul/profile.py:720` | str | **No** (opted out) | Divergent string fork used only by the speculators. `include_portrait=True` default keeps the portrait for eval/persona rendering. Task 7 folds this into a `speculation` view. |
 | `render_core_memory_prompt` | `memory/manager.py:677` | str | **Yes** | Chat-only core-memory block; reads raw soul layer today (`get_core_memory`, `manager.py:593`). Injected into the system prompt by `complete_with_core_memory` (`llm/service.py:360`). Task 6 splits stable/volatile + honors overrides. |
 | `ProfileResponse` (openclaw) | `integrations/openclaw/operations.py:105` | dataclass | **Yes** (intentional) | External API surface; portrait re-exposed at `operations.py:113`, each list capped `[:5]` (`operations.py:114-120`). |

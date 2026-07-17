@@ -102,6 +102,31 @@
 | ~~VALUES/CORE 增量更新器~~（P1 已退役） | ⛔ | `_update_values` / `_update_core` 仍作为 delta-prompt 库函数保留（直接工具/潜在重建输入复用），但**已从 pipeline dispatch 摘除**：`update_layer` 对 VALUES/CORE 封死 no-op + WARNING。深层变更改由「假设确认 → 门控下 soul 重建」唯一模式驱动，见下文「深层影响唯一模式」 |
 | v0.3.74 Soul 结构化 JSON 容错统一 | ✅ | ProfileBuilder、PreferenceAnalyzer、DialogueInsightAnalyzer、AwarenessAnalyzer、InsightAnalyzer、LayerUpdaters 和 InterestSpeculator 都收敛到 `llm.json_utils`，每个任务用 predicate 约束自己需要的 schema；MiMo / 非 OpenAI wrapper 不再只修 awareness 一处 |
 | v0.3.147 画像上下文缓存前缀保护 | ✅ | PreferenceAnalyzer、ProfileBuilder、AwarenessAnalyzer、InsightAnalyzer、InterestSpeculator 和 AvoidanceSpeculator 的结构化 prompt 已经把 history / preference / soul_profile / profile_summary 放在 user message；调用 `LLMService` 时在支持路径上关闭额外 core memory 注入，避免把同一份动态画像再次拼进 system prompt |
+| 画像 → LLM 序列化门面 (`soul/profile_views.py`) | ✅ | 三个内容管线序列化器 `build_profile_summary` / `compact_content_prompt_profile_summary` / `build_query_generation_profile_summary` 从 `discovery/strategies/_utils.py` 原样迁入本模块（profile-views Wave B，机械搬家零行为变化），`_utils` 保留向后兼容 re-export。所有 view 是**有效画像的纯确定性函数**（同输入两次调用字节一致），三个内容管线 view 均排除 `personality_portrait`。字节对拍见 `tests/test_profile_views.py`（3 画像 × 3 view = 9 组），结构守护断言三序列化器仅定义于本模块 |
+
+## 画像 → LLM 序列化门面 (`soul/profile_views.py`)
+
+所有把画像对象转成 prompt 文本 / dict 的序列化逻辑集中在 `soul/profile_views.py`
+一个模块（spec 不变量 V1）。`discovery` / `recommendation` / `runtime` / `sources`
+的内容管线消费这些 view，不再各自造序列化分支；历史 `discovery/strategies/_utils.py`
+导入路径通过 re-export 保持不断。
+
+三个 public view：
+
+- `build_profile_summary` — 规范结构化画像（排除 `personality_portrait`），所有源平台
+  内容 prompt 的统一输入。
+- `compact_content_prompt_profile_summary` — 对 `build_profile_summary` dict 做高频
+  内容 prompt 的裁剪（20 核心 / 64 兴趣 / 32 域 × 12 specifics / 12 recent，长期避雷
+  不裁剪）。
+- `build_query_generation_profile_summary` — discovery 关键词 / 领域生成用的查询瘦身
+  口味 view（MMR 多样化、embedding 可选）。
+
+两个仅供 discovery 侧调用的叶子工具（`normalize_match_text` /
+`_coerce_query_embedding_vector`）也落在本模块并由 `_utils` re-export：查询生成 view
+依赖它们，而 `soul` 层**不得** import `discovery`，因此它们下沉到 soul 后再回流。
+
+> 新增携带画像的 prompt 前先查 [画像使用登记表](../profile-usage.md)，并复用本模块
+> 的 view，不要自建序列化器。
 
 ## 猜测兴趣系统 (Speculative Interest Lifecycle)
 
