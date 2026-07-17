@@ -897,6 +897,33 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_timestamp ON llm_usage(timestamp);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider, model);
+
+-- v0.3.174+ (cognitive profile pipeline Phase 0): append-only audit ledger
+-- for profile write points. One row per profile-mutating action, recorded
+-- AFTER the action finishes with its ``outcome`` (success|failed). The ledger
+-- is a best-effort observer: a failed write here is logged at WARNING and
+-- never blocks the underlying profile update. ``gate_verdict`` / ``held_id``
+-- are reserved for later waves (posture gate shadow_* verdicts, confusion
+-- held-update replay) and default empty in Wave A.
+CREATE TABLE IF NOT EXISTS profile_update_ledger (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    write_point    TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT '',
+    before_summary TEXT NOT NULL DEFAULT '',
+    after_summary  TEXT NOT NULL DEFAULT '',
+    diff           TEXT NOT NULL DEFAULT '',
+    source_refs    TEXT NOT NULL DEFAULT '',
+    outcome        TEXT NOT NULL DEFAULT 'success',
+    turn_id        TEXT NOT NULL DEFAULT '',
+    gate_verdict   TEXT NOT NULL DEFAULT '',
+    held_id        TEXT NOT NULL DEFAULT '',
+    error          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_profile_ledger_timestamp
+    ON profile_update_ledger(timestamp);
+CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
+    ON profile_update_ledger(write_point, timestamp);
 """
 
 
@@ -1162,6 +1189,7 @@ class Database:
         self._normalize_legacy_style_keys()
         self._ensure_llm_usage_cache_columns()
         self._ensure_chat_turns_table()
+        self._ensure_profile_update_ledger_table()
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
@@ -1827,6 +1855,98 @@ class Database:
             params,
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Profile update ledger (append-only audit trail)
+    # ------------------------------------------------------------------
+
+    def insert_profile_ledger(
+        self,
+        *,
+        write_point: str,
+        source: str = "",
+        before_summary: str = "",
+        after_summary: str = "",
+        diff: str = "",
+        source_refs: Sequence[str] | None = None,
+        outcome: str = "success",
+        turn_id: str = "",
+        gate_verdict: str = "",
+        held_id: str = "",
+        error: str = "",
+    ) -> int:
+        """Append one profile write-point ledger row.
+
+        Recorded AFTER the profile-mutating action finishes, with
+        ``outcome`` = ``success`` | ``failed`` (r3/R2-6: a single INSERT
+        per action, never a separate ``attempted`` pre-write). ``diff`` is
+        truncated to 2000 chars by callers; ``source_refs`` is JSON-encoded
+        here. Callers wrap this in try/except and log at WARNING — the
+        ledger must never break the underlying write.
+        """
+        refs_json = json.dumps(list(source_refs or []), ensure_ascii=False, sort_keys=True)
+        cursor = self._execute_write(
+            """INSERT INTO profile_update_ledger
+               (write_point, source, before_summary, after_summary, diff,
+                source_refs, outcome, turn_id, gate_verdict, held_id, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(write_point),
+                str(source or ""),
+                str(before_summary or ""),
+                str(after_summary or ""),
+                str(diff or ""),
+                refs_json,
+                str(outcome or "success"),
+                str(turn_id or ""),
+                str(gate_verdict or ""),
+                str(held_id or ""),
+                str(error or ""),
+            ),
+        )
+        return cursor.lastrowid or 0
+
+    def query_profile_ledger(
+        self,
+        *,
+        days: int = 30,
+        write_point: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return recent profile-ledger rows (newest-first) for the CLI.
+
+        ``source_refs`` is returned decoded back into a list.
+        """
+        self._ensure_fresh_read()
+        clauses = ["timestamp >= datetime('now', '-' || ? || ' day', 'localtime')"]
+        params: list[Any] = [max(1, int(days))]
+        if write_point:
+            clauses.append("write_point = ?")
+            params.append(write_point)
+        params.append(max(1, int(limit)))
+        cursor = self.conn.execute(
+            f"""
+            SELECT id, timestamp, write_point, source, before_summary,
+                   after_summary, diff, source_refs, outcome, turn_id,
+                   gate_verdict, held_id, error
+            FROM profile_update_ledger
+            WHERE {" AND ".join(clauses)}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        )
+        rows: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            raw_refs = record.get("source_refs") or "[]"
+            try:
+                decoded = json.loads(raw_refs)
+            except (TypeError, ValueError):
+                decoded = []
+            record["source_refs"] = decoded if isinstance(decoded, list) else []
+            rows.append(record)
+        return rows
 
     # ------------------------------------------------------------------
     # LLM usage ledger
@@ -7185,6 +7305,30 @@ class Database:
                 ON chat_turns(session, created_at, turn_id);
             CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
                 ON chat_turns(scope, subject_id, created_at);
+        """)
+
+    def _ensure_profile_update_ledger_table(self) -> None:
+        """Create the append-only profile write-point ledger for existing DBs."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS profile_update_ledger (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                write_point    TEXT NOT NULL,
+                source         TEXT NOT NULL DEFAULT '',
+                before_summary TEXT NOT NULL DEFAULT '',
+                after_summary  TEXT NOT NULL DEFAULT '',
+                diff           TEXT NOT NULL DEFAULT '',
+                source_refs    TEXT NOT NULL DEFAULT '',
+                outcome        TEXT NOT NULL DEFAULT 'success',
+                turn_id        TEXT NOT NULL DEFAULT '',
+                gate_verdict   TEXT NOT NULL DEFAULT '',
+                held_id        TEXT NOT NULL DEFAULT '',
+                error          TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_profile_ledger_timestamp
+                ON profile_update_ledger(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
+                ON profile_update_ledger(write_point, timestamp);
         """)
 
     def _ensure_watch_later_table(self) -> None:

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.soul.awareness_analyzer import AwarenessGenerationError
+from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -133,6 +134,10 @@ class CognitionCycle:
         self._awareness_analyzer = awareness_analyzer
         self._insight_analyzer = insight_analyzer
         self._min_interval_seconds = int(min_interval_seconds)
+
+    def _profile_ledger(self) -> ProfileLedger:
+        """Best-effort audit ledger over the memory manager's database."""
+        return ProfileLedger(getattr(self._memory, "_database", None))
 
     # -- Public API -----------------------------------------------------------
 
@@ -406,9 +411,26 @@ class CognitionCycle:
         profile.active_insights = all_insights[-_PROFILE_INSIGHT_WINDOW:]
         profile.updated_at = datetime.now().isoformat()
 
-        soul_layer.data.clear()
-        soul_layer.data.update(profile.to_dict())
-        soul_layer.save()
+        # Ledger write point D5 #8: cognition sync (awareness/insight → soul).
+        with self._profile_ledger().action(
+            write_point="cognition_sync",
+            source="cognition_cycle",
+            before={
+                "awareness_generated": result.awareness_generated,
+                "insight_generated": result.insight_generated,
+            },
+            source_refs=[
+                f"awareness_generated:{result.awareness_generated}",
+                f"insight_generated:{result.insight_generated}",
+            ],
+        ) as _entry:
+            soul_layer.data.clear()
+            soul_layer.data.update(profile.to_dict())
+            soul_layer.save()
+            _entry.after = {
+                "awareness_after": len(all_notes),
+                "insight_after": len(all_insights),
+            }
 
         # Also sync the markdown/json files so the filesystem-visible profile
         # reflects the new awareness/insights.

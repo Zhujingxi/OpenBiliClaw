@@ -83,7 +83,7 @@ async def update_layer(
     updater: LayerUpdater | None = _LAYER_UPDATERS.get(layer)
     if updater is None:
         return LayerUpdateResult(layer=layer, changed=False)
-    return await updater(
+    result = await updater(
         signals=signals,
         profile=profile,
         memory=memory,
@@ -91,6 +91,31 @@ async def update_layer(
         profile_builder=profile_builder,
         embedding_service=embedding_service,
         llm_service=llm_service,
+    )
+    # Ledger write point D5 #3: pipeline per-layer updater persistence. One row
+    # per layer that actually changed (a no-op update writes nothing).
+    if result.changed:
+        _record_layer_ledger(memory=memory, layer=layer, result=result)
+    return result
+
+
+def _record_layer_ledger(
+    *,
+    memory: MemoryManager,
+    layer: OnionLayer,
+    result: LayerUpdateResult,
+) -> None:
+    from openbiliclaw.soul.ledger import ProfileLedger
+
+    ledger = ProfileLedger(getattr(memory, "_database", None))
+    layer_name = getattr(layer, "value", str(layer))
+    ledger.record(
+        write_point="pipeline_layer_update",
+        source=f"pipeline:{layer_name}",
+        before={"layer": layer_name},
+        after={"layer": layer_name, "changes": list(result.changes)},
+        source_refs=list(result.changes) or [f"layer:{layer_name}"],
+        outcome="success",
     )
 
 

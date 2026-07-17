@@ -45,6 +45,7 @@ from openbiliclaw.llm.json_utils import (
     parse_llm_json_tolerant,
 )
 from openbiliclaw.llm.prompts import build_profile_consolidation_prompt
+from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.base import LLMResponse
@@ -285,6 +286,10 @@ class ProfileConsolidator:
         self._archive_enabled = bool(archive_enabled)
         self._database = database
 
+    def _profile_ledger(self) -> ProfileLedger:
+        """Best-effort audit ledger over the consolidator's database handle."""
+        return ProfileLedger(self._database or getattr(self._memory, "_database", None))
+
     # -- Public API -----------------------------------------------------------
 
     def set_embedding_service(self, embedding_service: SupportsEmbed | None) -> None:
@@ -460,10 +465,29 @@ class ProfileConsolidator:
             return report
 
         if changed:
-            preference_layer.data["interests"] = interests
-            preference_layer.data["archived_interests"] = archived_raw
-            preference_layer.data["disliked_topics"] = dislikes_raw
-            preference_layer.save()
+            # Ledger write point D5 #6: 12h profile consolidation (compress /
+            # archive). ``revert`` records a separate compensating row below.
+            with self._profile_ledger().action(
+                write_point="consolidation_apply",
+                source="consolidation",
+                before={
+                    "likes_before": report.likes_before,
+                    "dislikes_before": report.dislikes_before,
+                },
+                source_refs=(
+                    [f"merge:{op.get('cluster_id', '')}" for op in valid_ops]
+                    + [f"archived:{name}" for name in report.archived_interests]
+                )
+                or ["consolidation"],
+            ) as _entry:
+                preference_layer.data["interests"] = interests
+                preference_layer.data["archived_interests"] = archived_raw
+                preference_layer.data["disliked_topics"] = dislikes_raw
+                preference_layer.save()
+                _entry.after = {
+                    "likes_after": report.likes_after,
+                    "dislikes_after": report.dislikes_after,
+                }
             self._rebuild_profile_tree(preference_layer.data)
             overrides_before = self._remap_overrides(rename_map)
             keyword_label_rows = self._preview_keyword_interest_label_migration(
@@ -1145,14 +1169,24 @@ class ProfileConsolidator:
             return False
 
         preference_layer = self._memory.get_layer("preference")
-        preference_layer.data["interests"] = [
-            dict(item) for item in before.get("interests", []) if isinstance(item, dict)
-        ]
-        preference_layer.data["archived_interests"] = [
-            dict(item) for item in before.get("archived_interests", []) if isinstance(item, dict)
-        ]
-        preference_layer.data["disliked_topics"] = _as_str_list(before.get("disliked_topics"))
-        preference_layer.save()
+        # Ledger write point D5 #6: consolidation revert (compensating row).
+        with self._profile_ledger().action(
+            write_point="consolidation_revert",
+            source="consolidation",
+            before={"interests": len(preference_layer.data.get("interests", []))},
+            source_refs=[f"run_id:{run_id}"],
+        ) as _entry:
+            preference_layer.data["interests"] = [
+                dict(item) for item in before.get("interests", []) if isinstance(item, dict)
+            ]
+            preference_layer.data["archived_interests"] = [
+                dict(item)
+                for item in before.get("archived_interests", [])
+                if isinstance(item, dict)
+            ]
+            preference_layer.data["disliked_topics"] = _as_str_list(before.get("disliked_topics"))
+            preference_layer.save()
+            _entry.after = {"interests": len(preference_layer.data.get("interests", []))}
         self._rebuild_profile_tree(preference_layer.data)
 
         overrides_before = record.get("overrides_before")

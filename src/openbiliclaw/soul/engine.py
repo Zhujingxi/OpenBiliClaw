@@ -34,6 +34,7 @@ from .dialogue_insight_analyzer import (
     DialogueInsightAnalyzer,
 )
 from .insight_analyzer import InsightAnalyzer
+from .ledger import ProfileLedger
 from .overrides import ProfileOverrides, apply_edit, apply_overrides
 from .pipeline import ProfileUpdatePipeline
 from .preference_analyzer import (
@@ -54,6 +55,12 @@ from .profile_builder import ProfileBuilder
 from .speculator import InterestSpeculator
 
 logger = logging.getLogger(__name__)
+
+
+def _memory_database(memory: Any) -> Any | None:
+    """Resolve the SQLite database handle a memory manager owns (may be None)."""
+    return getattr(memory, "_database", None)
+
 
 SOURCE_LABELS = {
     "feedback": "推荐反馈",
@@ -249,6 +256,16 @@ class SoulEngine:
         # and expose a deterministic wait hook for tests / shutdown.
         self._background_edit_tasks: set[asyncio.Task[Any]] = set()
         self._init_cognition_context: dict[str, object] = {}
+        # Phase 0 audit ledger. Best-effort observer over profile write points;
+        # a ledger failure is logged at WARNING and never blocks a write. Resolve
+        # the database from the explicit arg or the memory manager's handle.
+        self._ledger_database = database if database is not None else _memory_database(memory)
+        self._ledger = ProfileLedger(self._ledger_database)
+        # Wire the same ledger into the speculator so promote/confirm/reject
+        # write points (D5 #5) land in the same audit trail.
+        attach_ledger = getattr(self._speculator, "attach_ledger", None)
+        if callable(attach_ledger):
+            attach_ledger(self._ledger)
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or update the embedding service after construction.
@@ -304,9 +321,19 @@ class SoulEngine:
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
-        preference_layer.data.clear()
-        preference_layer.data.update(updated_preference)
-        preference_layer.save()
+        # Ledger write point D5 #7: full-preference (re)build from raw events —
+        # the init bootstrap and any full-events re-analysis both land here.
+        existing_preference = dict(preference_layer.data)
+        with self._ledger.action(
+            write_point="init_preference_build",
+            source="init",
+            before=existing_preference,
+            source_refs=[f"events:{len(events)}"],
+        ) as _entry:
+            preference_layer.data.clear()
+            preference_layer.data.update(updated_preference)
+            preference_layer.save()
+            _entry.after = dict(updated_preference)
         logger.info(
             "analyze_events done: events=%d elapsed=%.1fs",
             len(events),
@@ -347,9 +374,19 @@ class SoulEngine:
         profile = OnionProfile.from_legacy(legacy_profile)
         profile.populate_from_flat_preference(preference_layer)
         soul_layer = self._memory.get_layer("soul")
-        soul_layer.data.clear()
-        soul_layer.data.update(profile.to_dict())
-        soul_layer.save()
+        # Ledger write point (extra, discovered during Phase 0 — clist item 7
+        # "init 全量建像" also covers the soul-layer bootstrap write here).
+        existing_soul = dict(soul_layer.data)
+        with self._ledger.action(
+            write_point="init_soul_build",
+            source="init",
+            before=existing_soul,
+            source_refs=[f"history:{len(history)}"],
+        ) as _entry:
+            soul_layer.data.clear()
+            soul_layer.data.update(profile.to_dict())
+            soul_layer.save()
+            _entry.after = dict(soul_layer.data)
         self._memory.sync_profile_files(profile)
         self._init_cognition_context = {}
         logger.info(
@@ -880,15 +917,34 @@ class SoulEngine:
             if str(item).strip()
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
-        preference_layer.data.clear()
-        preference_layer.data.update(updated_preference)
-        preference_layer.save()
+        candidate_refs = self._candidate_ledger_refs(eligible_candidates)
+        # Ledger write point D5 #1a: dialogue-driven preference overwrite.
+        with self._ledger.action(
+            write_point="dialogue_preference_overwrite",
+            source="chat",
+            before=existing_preference,
+            source_refs=candidate_refs,
+        ) as _entry:
+            preference_layer.data.clear()
+            preference_layer.data.update(updated_preference)
+            preference_layer.save()
+            _entry.after = dict(updated_preference)
 
         if newly_added_dislikes:
             # Start the deterministic purge as soon as the durable preference
             # write succeeds. A full profile rebuild can take tens of seconds;
             # it must not delay removing an explicitly rejected topic from the
             # active pool. Semantic recall continues detached in parallel.
+            # Ledger write point D5 #2: dislike purge (records the intent at
+            # schedule time; the detached recall itself is best-effort).
+            self._ledger.record(
+                write_point="dislike_purge",
+                source="chat",
+                before={"disliked_topics": sorted(old_disliked)},
+                after={"disliked_topics": sorted(new_disliked)},
+                source_refs=list(newly_added_dislikes),
+                outcome="success",
+            )
             self._schedule_dislike_purge(
                 newly_added=newly_added_dislikes,
                 all_dislikes=sorted(new_disliked),
@@ -899,23 +955,31 @@ class SoulEngine:
 
         profile_rebuilt = False
         if self._preference_changed_significantly(existing_preference, updated_preference):
+            # Ledger write point D5 #1b: dialogue-driven full soul rebuild.
             try:
-                legacy_profile = await self._profile_builder.build(
-                    history=[],
-                    preference=updated_preference,
-                    awareness_notes=[
-                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                    ],
-                    active_insights=[
-                        insight_hypothesis_to_dict(item) for item in self._load_insights()
-                    ],
-                )
-                profile = OnionProfile.from_legacy(legacy_profile)
-                profile.populate_from_flat_preference(updated_preference)
-                soul_layer = self._memory.get_layer("soul")
-                soul_layer.data.clear()
-                soul_layer.data.update(profile.to_dict())
-                soul_layer.save()
+                with self._ledger.action(
+                    write_point="dialogue_soul_rebuild",
+                    source="chat",
+                    before=existing_profile,
+                    source_refs=candidate_refs,
+                ) as _entry:
+                    legacy_profile = await self._profile_builder.build(
+                        history=[],
+                        preference=updated_preference,
+                        awareness_notes=[
+                            awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                        ],
+                        active_insights=[
+                            insight_hypothesis_to_dict(item) for item in self._load_insights()
+                        ],
+                    )
+                    profile = OnionProfile.from_legacy(legacy_profile)
+                    profile.populate_from_flat_preference(updated_preference)
+                    soul_layer = self._memory.get_layer("soul")
+                    soul_layer.data.clear()
+                    soul_layer.data.update(profile.to_dict())
+                    soul_layer.save()
+                    _entry.after = dict(soul_layer.data)
                 self._memory.sync_profile_files(profile)
                 profile_rebuilt = True
             except Exception:
@@ -1002,29 +1066,48 @@ class SoulEngine:
             if str(item).strip()
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
-        preference_layer.data.clear()
-        preference_layer.data.update(updated_preference)
-        preference_layer.save()
+        feedback_refs = [
+            f"feedback_event:{self._to_int(event.get('id', 0))}" for event in feedback_events
+        ] or ["feedback_batch"]
+        # Ledger write point D5 #4a: feedback-batch preference overwrite.
+        with self._ledger.action(
+            write_point="feedback_preference_overwrite",
+            source="feedback",
+            before=existing_preference,
+            source_refs=feedback_refs,
+        ) as _entry:
+            preference_layer.data.clear()
+            preference_layer.data.update(updated_preference)
+            preference_layer.save()
+            _entry.after = dict(updated_preference)
 
         profile_rebuilt = False
         if self._preference_changed_significantly(existing_preference, updated_preference):
+            # Ledger write point D5 #4b: feedback-batch full soul rebuild.
             try:
-                legacy_profile = await self._profile_builder.build(
-                    history=[],
-                    preference=updated_preference,
-                    awareness_notes=[
-                        awareness_note_to_dict(item) for item in self._load_awareness_notes()
-                    ],
-                    active_insights=[
-                        insight_hypothesis_to_dict(item) for item in self._load_insights()
-                    ],
-                )
-                profile = OnionProfile.from_legacy(legacy_profile)
-                profile.populate_from_flat_preference(updated_preference)
-                soul_layer = self._memory.get_layer("soul")
-                soul_layer.data.clear()
-                soul_layer.data.update(profile.to_dict())
-                soul_layer.save()
+                with self._ledger.action(
+                    write_point="feedback_soul_rebuild",
+                    source="feedback",
+                    before=existing_profile,
+                    source_refs=feedback_refs,
+                ) as _entry:
+                    legacy_profile = await self._profile_builder.build(
+                        history=[],
+                        preference=updated_preference,
+                        awareness_notes=[
+                            awareness_note_to_dict(item) for item in self._load_awareness_notes()
+                        ],
+                        active_insights=[
+                            insight_hypothesis_to_dict(item) for item in self._load_insights()
+                        ],
+                    )
+                    profile = OnionProfile.from_legacy(legacy_profile)
+                    profile.populate_from_flat_preference(updated_preference)
+                    soul_layer = self._memory.get_layer("soul")
+                    soul_layer.data.clear()
+                    soul_layer.data.update(profile.to_dict())
+                    soul_layer.save()
+                    _entry.after = dict(soul_layer.data)
                 self._memory.sync_profile_files(profile)
                 profile_rebuilt = True
             except Exception:
@@ -1355,6 +1438,20 @@ class SoulEngine:
                 existing["evidence"] = evidence
             existing["updated_at"] = now
         return merged
+
+    @staticmethod
+    def _candidate_ledger_refs(candidates: list[dict[str, object]]) -> list[str]:
+        """Compact source refs for a dialogue-learning ledger row.
+
+        Non-empty so the ledger's ``source_refs`` provenance is auditable even
+        when candidate contents are terse.
+        """
+        refs = [
+            f"{str(item.get('kind', '')).strip()}:{str(item.get('content', '')).strip()[:60]}"
+            for item in candidates
+            if str(item.get("content", "")).strip()
+        ]
+        return refs or ["dialogue"]
 
     def _candidate_ready_for_learning(self, candidate: dict[str, object]) -> bool:
         if bool(candidate.get("applied", False)):
