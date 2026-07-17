@@ -26,7 +26,7 @@
 4. **台账只追加**:只 INSERT;回滚以补偿行表达;挂钩异常 WARNING 不阻断主流程。
 5. **收编不迁移,身份用自然键**:speculation 与 insight hypothesis 存储/状态机不动。结算身份模型:speculation → `domain`(其存储主键);insight hypothesis → 内容 hash8(r3/R2-8 定义:SHA-256 over「NFC 规范化 + 首尾 strip + 连续空白折叠为单空格」后的 UTF-8 字节,取 hex 前 8;当轮注入清单内发生碰撞 → 碰撞项扩展至 hex16,仍碰撞则跳过注入该项 + WARNING);confusion → 表自增 id。`settles[].ref` 只接受**当轮注入清单中出现过的键**(白名单即注入清单,未见键丢弃 + WARNING)。
 6. **结算单一所有权**:带 scope 前缀的 durable turn(probe/avoidance_probe/confusion)的结算**只归** durable side-effect 路径(`api/app.py` 成功侧效应);`learn_from_dialogue` 的 `settles` 通道**只处理普通 chat scope 轮次**(scope 随 learn 调用传入,非 chat 时跳过 settles)。杜绝同一回复双路径重复结算(r1 finding 2)。
-7. **对话学习串行化**:`learn_from_dialogue` 后台任务改经**单 worker asyncio 队列**(进程内串行,消除相邻轮并发 read/merge/write)。**drain 时序(r3/R2-1)**:热重载与关闭时按「stop-accepting(新投递拒绝/落日志)→ `queue.join()` 等积压清空 → 停 worker → swap/shutdown」执行;必须接入两处现有生命周期点:`api/runtime_context.py:506` 的 `cancel_all` **之前**先 drain 本队列,`api/app.py:4005` 附近的 shutdown 钩子补 drain。带 uvicorn 生命周期测试(r1 finding 1)。
+7. **对话学习串行化**:`learn_from_dialogue` 后台任务改经**单 worker asyncio 队列**(进程内串行,消除相邻轮并发 read/merge/write)。**drain 时序(r4/R3-4 补失败回滚)**:关闭时「stop-accepting → `queue.join()` → 停 worker → shutdown」;热重载时旧队列先 **pause(drain 后暂停,不销毁)**,新 runtime 构建**成功**后才停用旧队列并启用新队列;构建**失败**走既有配置回滚路径(`app.py` 热重载失败分支)时必须 **resume 旧队列**(学习不能永久哑)。接入两处生命周期点:`api/runtime_context.py:506` 的 `cancel_all` 之前先 drain,`api/app.py:4005` 附近 shutdown 钩子补 drain。带 uvicorn 生命周期测试 + 热重载失败回滚测试(r1 finding 1)。
 8. **疑惑不写画像 + DB 级打扰预算**:疑惑只产出下游对象;`status='clarifying'` 由 partial unique index 保证全局至多 1(跨连接原子);冷却 ≥72h 持久化在行内(`asked_at`);defer 语义复用探针忽略状态机。
 9. **阈值有出处 + LLM 输出防御**:新常量带校准注释并标注首轮重校;结构化输出白名单/clamp + WARNING;解析失败保守化(门控→downgrade,settles/confusion_candidates→丢弃)。
 10. **单用户全量注入**:不建向量检索;core memory、活跃清单(speculation ≤10 + insight + open 疑惑)全量入 user prompt;新 LLM caller(posture_gate、confusion 相关)注册 usage recorder 供 `cost --by caller` 观察。
@@ -110,7 +110,7 @@
 
 **`confusions` 表**:r1 schema + `held_updates TEXT`(JSON:冻结期被搁置的 topic 变更)+ partial unique index `WHERE status='clarifying'`(不变量 8)。
 **产生源**:
-- 认知失调:`awareness_analyzer` 解析器扩展为复合返回 `(notes, confusion_candidates)`(旧调用方兼容:candidates 缺省空,r1 finding 6);prompt 静态扩展,候选 ≤2/轮,白名单校验;`cognition_cycle` 落库。Files 含 `awareness_analyzer.py`。
+- 认知失调(r4/R3-2 builder 分离):新增独立 builder `build_awareness_with_confusions_prompt`(静态 system,入 invariance 清单)与新 API `analyze_with_confusions() -> (notes, confusion_candidates)`;**既有 `analyze()` 与 `build_awareness_prompt` 一字不动**(字节不变门只保此路径)。`cognition_cycle` 切换到新 API 属**有意行为变更**——按质量铁律做新旧 awareness 输出 A/B 对照记录进 PR(无矛盾输入下 notes 语义等价抽查)。候选 ≤2/轮,白名单校验;`cognition_cycle` 落库。
 - speculation 僵局(**可判定版**,r1 finding 5):speculation expire 时 `0 < confirmation_count < threshold`(部分确认未达标,现存字段可读)→ 生成疑惑;"正反混合"判据 v2。
 **澄清三路**:ask(durable `scope="confusion"`,并发由 partial unique index 保证,冷却 72h 持久化于 `asked_at`;defer 复用探针忽略语义)/ probe(限可映射现有探针域)/ wait(TTL 14d)。
 **resolved 三出口**:转正假设(insight hypothesis,初始置信=解读置信)/ 直接结算(候选送门控,门控未上线时直写+台账;相关觉察/事件盖折扣标记,复用 retraction metadata patch)/ dismissed。
@@ -120,14 +120,14 @@
 - 解冻(r3/R2-2/R2-3):
   - **按 resolution outcome 筛选**:resolved 且解读为「真实兴趣」型 → 重放;resolved 且解读为「代理行为/误读」型 → 丢弃(同 dismissed);dismissed/expired → 丢弃。全部进台账。
   - **重放 = rebase 提交**:held 项作为证据并入下次偏好分析输入,由 LLM 以当前画像为基重新评估(不直接写权重)。
-  - **held 项状态机**:每项带稳定 id 与状态 `held → replaying → applied|discarded`(持久化于 confusions.held_updates 内);重放前置 replaying,偏好分析成功吸收后置 applied 并清除;崩溃恢复:replaying 项在 12h 扫描时重试,`replay_attempts` 上限 2(超限置 discarded + WARNING,防重复强化);重复 resolve 幂等(已 applied/discarded 项跳过)。
+  - **held 项状态机(r4/R3-1 封闭崩溃窗口)**:每项带稳定 held_id 与状态 `held → replaying → applied|discarded`;重放前置 replaying(持久化),重放提交的偏好分析在**写入 chokepoint 的台账行中携带 held_id**(台账 = 重放的持久回执);崩溃恢复:12h 扫描发现 replaying 项时**先查台账**——已有含该 held_id 的 success 行则直接置 applied(不再提交),否则重试;`replay_attempts` 上限 2(超限 discarded + WARNING);重复 resolve 幂等。必测「画像保存成功、applied 标记前崩溃 → 恢复不重复提交」。
 **验收门**:唯一约束的跨连接竞争测试(两连接并发置 clarifying,恰一成功)、held 存储/重放/丢弃、僵局判据、复合返回兼容;`pytest tests/test_confusion_lifecycle.py -q`。
 
 ### Phase 3 — 态势门控(r2:异步 shadow、三接入点、enforce 校验)
 
 **模式语义(不变量 3,r1 findings 14/15)**:
 - `shadow`(默认):原写入**立即执行**(零延迟零阻塞);**在 commit boundary 捕获不可变快照**(before/after 摘要、source_refs、gate_id;r3/R2-4)——异步旁路任务(进后台注册表)只消费该快照,不回读活状态(后续写入不得污染判定语境,带断言测试);结果进台账(`shadow_*` verdict);LLM 异常记 `shadow_error` 行。
-- `enforce`:写入前同步判定;异常/解析失败 → downgrade + WARNING(保守 fail-closed-to-hypothesis);save-time 校验(r3/R2-7 收紧):保存 enforce 需同时满足——近 14 天内**有效** shadow 判定行(shadow_accept/downgrade/reject,不含 shadow_error)≥10 条(校准:单用户日均 ~1-3 次深层候选 × 14 天的下界)且最近 7 天 ≥1 条(近期覆盖);任一不满足则 blocking 拒绝(pitfall #7),`posture_gate_force_enforce=true` 逃生门(文档注明风险)。
+- `enforce`:写入前同步判定;异常/解析失败 → downgrade + WARNING(保守 fail-closed-to-hypothesis);save-time 校验(r4/R3-3 统一语义):保存 enforce 需**同时满足三条**——(a) 最早有效 shadow 判定行距今 ≥14 天(观察时长门);(b) 近 14 天有效判定(shadow_accept/downgrade/reject,不含 shadow_error)≥10 条(样本量门,校准:单用户日均 ~1-3 次 × 14 天下界);(c) 最近 7 天 ≥1 条(近期覆盖门)。任一不满足 blocking 拒绝(pitfall #7),`posture_gate_force_enforce=true` 逃生门(文档注明风险)。
 - `off`:完全旁路,行为与现状逐字节一致(回放门)。
 **三接入点(r1 finding 10/11)**:
 1. dialogue candidates:按 kind 分流(interest/dislike → 现路径;goal/value/state → 门控;downgrade 置信 = candidate confidence × 0.6)。

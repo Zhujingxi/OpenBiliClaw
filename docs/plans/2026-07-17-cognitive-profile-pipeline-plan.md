@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-17-cognitive-profile-pipeline-spec.md`](./2026-07-17-cognitive-profile-pipeline-spec.md)
-> **Status:** r3 — codex 第二轮 8 findings 已修订,待第三轮 review
+> **Status:** r4 — codex 第三轮 4 findings 已修订,待第四轮 review
 > **Execution order:** Wave A(Task 0→1→2→3)→ Wave B(Task 4→5)→ Wave C(Task 6→7)→ Wave D(Task 8→9,RECOMMENDED)。每 Wave 最后完成其文档子集方可交付。A 独立;B 依赖 A;C 依赖 A(部分依赖 B:疑惑直接结算出口,B 未上则直写);D 依赖 A。
 > **Tech:** Python 3.11+/仓库 `.venv/bin/python`;测试 `PYTHONPATH=$PWD/src <venv>/python -m pytest <file> -q`(worktree 根,PYTHONPATH 指 worktree src);`ruff format/check src/ tests/`;`mypy src/`(strict)。无扩展侧改动。
 
@@ -69,7 +69,7 @@
 
 - [ ] Failing test:并发投递 5 个学习任务 → 严格串行执行(执行顺序断言 + 无交错)。
 - [ ] Confirm FAIL → 队列实现 → PASS。
-- [ ] Failing test:drain 时序(积压时关闭 → stop-accepting 拒绝新投递 → join 清空 → worker 停);热重载场景(runtime_context `cancel_all` 前旧队列已 drain,新旧 engine 切换无交错写);uvicorn shutdown 钩子触发 drain(生命周期测试)。
+- [ ] Failing test:drain 时序(积压时关闭 → stop-accepting → join 清空 → worker 停);热重载成功场景(旧队列 pause-drain → 新 runtime 就绪 → 旧停新启,无交错写);**热重载失败场景(r4/R3-4):新 runtime 构建抛异常 → 配置回滚分支 resume 旧队列 → 后续投递正常执行**;uvicorn shutdown 钩子触发 drain。
 - [ ] Failing test:scope/turn_id 透传到 learn 调用参数。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_soul_engine.py tests/test_api_app.py -q` 回归 + ruff + mypy。
@@ -105,13 +105,13 @@
 
 ### Task 4: confusions 表(DB 约束)+ 生命周期 + 两产生源
 
-**Files:** 修改 `src/openbiliclaw/storage/database.py`(confusions 表 + partial unique index `WHERE status='clarifying'` + DAO 含原子 claim:`UPDATE ... SET status='clarifying' WHERE id=? AND NOT EXISTS(clarifying)` 语义)、新增 `src/openbiliclaw/soul/confusion.py`(状态机 + TTL 扫描并入 12h 循环)、修改 `src/openbiliclaw/soul/awareness_analyzer.py`(r3/R2-5:**保留 `analyze()` 完全不变**,新增 `analyze_with_confusions() -> (notes, confusion_candidates)`;仅 cognition_cycle 切换新 API,`engine.py:1253` 等旧调用方零改动)、`src/openbiliclaw/llm/prompts.py`(awareness prompt 静态扩展:candidates ≤2 契约)、`src/openbiliclaw/soul/cognition_cycle.py`(候选落库)、`src/openbiliclaw/soul/speculator.py`(expire 钩子:`0 < confirmation_count < threshold` → 生成疑惑,现存字段可判定);新增 `tests/test_confusion_lifecycle.py`。
+**Files:** 修改 `src/openbiliclaw/storage/database.py`(confusions 表 + partial unique index `WHERE status='clarifying'` + DAO 含原子 claim:`UPDATE ... SET status='clarifying' WHERE id=? AND NOT EXISTS(clarifying)` 语义)、新增 `src/openbiliclaw/soul/confusion.py`(状态机 + TTL 扫描并入 12h 循环)、修改 `src/openbiliclaw/soul/awareness_analyzer.py`(r3/R2-5:**保留 `analyze()` 完全不变**,新增 `analyze_with_confusions() -> (notes, confusion_candidates)`;仅 cognition_cycle 切换新 API,`engine.py:1253` 等旧调用方零改动)、`src/openbiliclaw/llm/prompts.py`(r4/R3-2:**新增独立 builder `build_awareness_with_confusions_prompt`**,静态 system + 入 invariance 清单;既有 `build_awareness_prompt` 一字不动)、`src/openbiliclaw/soul/cognition_cycle.py`(切换到 analyze_with_confusions + 新 builder;候选落库;**新旧 awareness 输出 A/B 对照记录进 PR**——有意行为变更过质量铁律)、`src/openbiliclaw/soul/speculator.py`(expire 钩子:`0 < confirmation_count < threshold` → 生成疑惑,现存字段可判定);新增 `tests/test_confusion_lifecycle.py`。
 
 **Steps:**
 
 - [ ] Failing test:DAO 全生命周期 + **跨连接并发 claim**(两个独立 SQLite 连接并发置 clarifying → 恰一成功)。
 - [ ] Confirm FAIL → 表 + index + 状态机 → PASS。
-- [ ] Failing test:`analyze()` 行为字节不变(旧调用方零回归);`analyze_with_confusions` 无候选时 notes 与 `analyze()` 一致;合法候选落库、越界(>2 条/字段缺失)丢弃+WARNING。
+- [ ] Failing test:`analyze()` 与 `build_awareness_prompt` 字节不变(旧调用方零回归);`analyze_with_confusions` 用独立新 builder(invariance 清单含之),无候选时 notes 解析路径与 `analyze()` 等价;合法候选落库、越界丢弃+WARNING。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Failing test:speculation 部分确认 expire → 疑惑生成(speculation 照常 expire)+ 台账两行;零确认 expire → 不生成。
 - [ ] Confirm FAIL → 实现 → PASS。
@@ -133,7 +133,7 @@
 - [ ] Failing test:三出口(转正 insight / 直接结算+事件折扣标记 / dismissed),台账链完整。
 - [ ] Failing test(冻结):open 疑惑关联 topic → 新增被搁置进 held_updates(每项稳定 id + 状态 held)+ 台账;已有权重不动。
 - [ ] Failing test(重放状态机,r3/R2-2/R2-3):resolved-真实兴趣型 → held→replaying(持久化)→ 并入下次偏好分析输入(rebase 语义,LLM 以当前画像重评估)→ 成功后置 applied 并清除;resolved-代理行为/误读型 → 直接 discarded(不重放);expired/dismissed → discarded。
-- [ ] Failing test(崩溃与幂等):replaying 中断 → 12h 扫描重试;`replay_attempts` 达 2 上限 → discarded+WARNING;重复 resolve → 已 applied/discarded 项跳过(状态不劣化断言)。
+- [ ] Failing test(崩溃与幂等,r4/R3-1):replaying 中断且台账无回执 → 12h 扫描重试;**画像保存成功、applied 标记前崩溃 → 恢复时查台账发现含 held_id 的 success 行 → 直接置 applied 不重复提交**;`replay_attempts` 达 2 → discarded+WARNING;重复 resolve → 已 applied/discarded 跳过。重放提交的 chokepoint 台账行必须携带 held_id(回执)。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_api_app.py tests/test_preference_analyzer.py tests/test_soul_engine.py -q` 回归 + ruff + mypy。
 - [ ] **Wave B 文档 gate**:`docs/modules/soul.md`、`docs/modules/storage.md`(confusions)、`docs/changelog.md`。
@@ -149,14 +149,14 @@
 
 ### Task 6: gate builder + 执行体(异步 shadow / enforce 校验 / off 逐字节)
 
-**Files:** 修改 `src/openbiliclaw/llm/prompts.py`(`build_posture_gate_prompt`:静态 system + sort_keys,入 invariance 清单)、新增 `src/openbiliclaw/soul/posture_gate.py`(执行体:verdict 白名单、解析失败→downgrade、caller 注册;shadow=异步旁路任务进注册表、enforce=同步、off=旁路)、`src/openbiliclaw/config.py`(`posture_gate_mode: shadow|enforce|off` 默认 shadow;`posture_gate_force_enforce: false`;save-time 校验 r3/R2-7:enforce 且非 force 时需「近 14 天有效 shadow 判定(accept/downgrade/reject,不含 error)≥10 条 **且** 最近 7 天 ≥1 条」否则 blocking 拒绝)、新增 `tests/test_posture_gate.py`。
+**Files:** 修改 `src/openbiliclaw/llm/prompts.py`(`build_posture_gate_prompt`:静态 system + sort_keys,入 invariance 清单)、新增 `src/openbiliclaw/soul/posture_gate.py`(执行体:verdict 白名单、解析失败→downgrade、caller 注册;shadow=异步旁路任务进注册表、enforce=同步、off=旁路)、`src/openbiliclaw/config.py`(`posture_gate_mode: shadow|enforce|off` 默认 shadow;`posture_gate_force_enforce: false`;save-time 校验 r4/R3-3 三条件:enforce 且非 force 需「最早有效判定距今 ≥14 天 **且** 近 14 天有效判定 ≥10 条 **且** 近 7 天 ≥1 条」否则 blocking 拒绝)、新增 `tests/test_posture_gate.py`。
 
 **Steps:**
 
 - [ ] Failing test:builder invariance + user 段三要素(候选/core memory/台账 30 天摘要)。
 - [ ] Confirm FAIL → builder → PASS。
 - [ ] Failing tests:三 verdict;解析失败→downgrade;**shadow 异步零延迟 + 快照隔离**(写入完成时判定未跑;commit boundary 捕获不可变快照 {before, after, source_refs, gate_id},判定任务只消费快照——判定前对活状态再做一次写入,断言判定输入不受污染,r3/R2-4;判定事后落台账 shadow_* 行;LLM 异常→shadow_error 行);enforce 同步拦截;off 完全旁路(门控 LLM 零调用断言)。
-- [ ] Failing test:save-time 四态(r3/R2-7)——有效判定 <10 条拒;仅 shadow_error 拒;近 7 天无判定拒(一条 15 天前的旧记录不放行);达标放行;force=true 无条件放行。
+- [ ] Failing test:save-time 五态(r4/R3-3)——首日刷满 10 条但最早判定不足 14 天 → 拒;有效判定 <10 拒;仅 shadow_error 拒;近 7 天无判定拒;三条件齐 → 放行;force=true 无条件放行。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_llm_prompts.py tests/test_config.py tests/test_api_config_guards.py -q` + ruff + mypy。
 
