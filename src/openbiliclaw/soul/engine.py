@@ -28,6 +28,7 @@ from .cognition_cycle import (
 from .cognition_cycle import (
     CognitionCycle,
 )
+from .confusion import ConfusionManager, apply_confusion_freeze
 from .consolidator import ProfileConsolidator
 from .dialogue_insight_analyzer import (
     DialogueInsightAnalysisError,
@@ -268,6 +269,9 @@ class SoulEngine:
         # the database from the explicit arg or the memory manager's handle.
         self._ledger_database = database if database is not None else _memory_database(memory)
         self._ledger = ProfileLedger(self._ledger_database)
+        # Confusion state machine over the same database — drives the topic
+        # freeze reflex at the dialogue preference write chokepoint (Phase 2).
+        self._confusion_manager = ConfusionManager(self._ledger_database, self._ledger)
         # Wire the same ledger into the speculator so promote/confirm/reject
         # write points (D5 #5) land in the same audit trail.
         attach_ledger = getattr(self._speculator, "attach_ledger", None)
@@ -957,6 +961,25 @@ class SoulEngine:
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
         candidate_refs = self._candidate_ledger_refs(eligible_candidates)
+        # Topic freeze (Phase 2): a topic under an unresolved confusion must not
+        # be further reinforced. New/upgraded weights for frozen topics are held
+        # back here (existing weights untouched); no-op when nothing is frozen,
+        # so a confusion-free database yields a byte-identical write.
+        try:
+            frozen_topics = self._confusion_manager.frozen_topics()
+        except Exception:
+            frozen_topics = set()
+        if frozen_topics:
+            updated_preference, held_updates = apply_confusion_freeze(
+                before=existing_preference,
+                after=updated_preference,
+                frozen_topics=frozen_topics,
+            )
+            if held_updates:
+                try:
+                    self._confusion_manager.record_held_updates(held_updates)
+                except Exception:
+                    logger.debug("Failed to record held confusion updates", exc_info=True)
         # Ledger write point D5 #1a: dialogue-driven preference overwrite.
         with self._ledger.action(
             write_point="dialogue_preference_overwrite",
@@ -1513,10 +1536,23 @@ class SoulEngine:
             if text in key_by_text
         ]
 
+        confusions: list[dict[str, object]] = []
+        try:
+            for confusion in self._confusion_manager.list_active():
+                confusions.append(
+                    {
+                        "id": str(confusion.id),
+                        "topic": confusion.topic,
+                        "observation": confusion.observation,
+                    }
+                )
+        except Exception:
+            logger.debug("Failed to load active confusions for settles", exc_info=True)
+
         active_list: dict[str, object] = {
             "speculations": speculations,
             "insights": insights,
-            "confusions": [],
+            "confusions": confusions,
         }
         return active_list, insight_hash_map
 
@@ -1539,6 +1575,9 @@ class SoulEngine:
             str(item.get("domain", "")).strip()
             for item in _as_dict_list(active_list.get("speculations"))
         }
+        confusion_ids = {
+            str(item.get("id", "")).strip() for item in _as_dict_list(active_list.get("confusions"))
+        }
         for settle in settles:
             kind = str(settle.get("kind", "")).strip()
             ref = str(settle.get("ref", "")).strip()
@@ -1557,8 +1596,10 @@ class SoulEngine:
                     continue
                 await self._settle_insight(hypothesis, verdict, turn_id)
             elif kind == "confusion":
-                # Confusion objects land in Wave B; no injected confusions yet.
-                logger.warning("dialogue settle ref not in injected list: %s", ref)
+                if ref not in confusion_ids:
+                    logger.warning("dialogue settle ref not in injected list: %s", ref)
+                    continue
+                self._settle_confusion(ref, verdict, turn_id)
             else:
                 logger.warning("dialogue settle dropped: unknown kind=%s", kind)
 
@@ -1597,6 +1638,37 @@ class SoulEngine:
             after={"matched": matched},
             source_refs=[hypothesis[:60]],
             outcome="success" if matched else "failed",
+            turn_id=turn_id,
+        )
+
+    def _settle_confusion(self, ref: str, verdict: str, turn_id: str) -> None:
+        """Directly resolve a confusion referenced from a plain chat turn.
+
+        ``confirm`` → the confused behaviour reflects a real interest
+        (``real_interest``, held updates replay); ``reject`` → it was a proxy /
+        misread (``proxy_behavior``, held updates discarded). The confusion's
+        direct-settle exit (gate off ⇒ direct write + ledger, spec §Phase 2).
+        """
+        try:
+            confusion_id = int(ref)
+        except (TypeError, ValueError):
+            logger.warning("confusion settle dropped: non-int ref=%r", ref)
+            return
+        resolution = "real_interest" if verdict == "confirm" else "proxy_behavior"
+        terminal: str | None = None
+        try:
+            terminal = self._confusion_manager.resolve(
+                confusion_id, resolution=resolution, note="chat_settle"
+            )
+        except Exception:
+            logger.exception("Failed to settle confusion %s", confusion_id)
+        self._ledger.record(
+            write_point="settle_confusion",
+            source="chat",
+            before={"confusion_id": confusion_id, "verdict": verdict},
+            after={"resolution": resolution, "status": terminal},
+            source_refs=[ref],
+            outcome="success" if terminal else "failed",
             turn_id=turn_id,
         )
 

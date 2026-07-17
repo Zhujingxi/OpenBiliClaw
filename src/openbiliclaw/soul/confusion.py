@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -302,6 +302,250 @@ class ConfusionManager:
             self._record("confusion_expired", topic=confusion.topic, before={"id": confusion.id})
         return expired
 
+    # -- Clarification path 1: ask (durable chat, scope="confusion") ----------
+
+    def can_ask(self, confusion: Confusion, *, now: datetime | None = None) -> bool:
+        """Whether the 72h ask cooldown has elapsed since the last ask."""
+        if not confusion.asked_at:
+            return True
+        last = _parse_iso(confusion.asked_at)
+        if last is None:
+            return True
+        current = now or datetime.now()
+        return current - last >= timedelta(hours=ASK_COOLDOWN_HOURS)
+
+    def schedule_ask(
+        self,
+        confusion_id: int,
+        *,
+        ask_turn_id: str,
+        now: datetime | None = None,
+    ) -> bool:
+        """Claim the confusion into ``clarifying`` and stamp the ask time.
+
+        Returns ``False`` if the 72h cooldown has not elapsed, if another
+        confusion already holds the single clarifying slot (partial unique
+        index), or if the row is not ``open``. The cooldown is persisted in
+        ``asked_at`` so it survives restarts.
+        """
+        if self._db is None:
+            return False
+        confusion = self.get(confusion_id)
+        if confusion is None or not self.can_ask(confusion, now=now):
+            return False
+        current = now or datetime.now()
+        claimed = bool(
+            self._db.claim_confusion_clarifying(
+                confusion_id,
+                ask_turn_id=ask_turn_id,
+                asked_at=current.isoformat(),
+            )
+        )
+        if claimed:
+            self._record("confusion_ask", topic=confusion.topic, after={"id": confusion_id})
+        return claimed
+
+    def defer(self, confusion_id: int, *, now: datetime | None = None) -> None:
+        """User "暂时忽略" — release the clarifying slot, keep the cooldown.
+
+        Reuses the probe ignore semantics: back to ``open`` (freeing the slot),
+        ``defer_count`` incremented, ``asked_at`` retained so the 72h cooldown
+        still blocks an immediate re-ask.
+        """
+        if self._db is None:
+            return
+        confusion = self.get(confusion_id)
+        if confusion is None:
+            return
+        self._db.update_confusion(
+            confusion_id,
+            status="open",
+            defer_count=confusion.defer_count + 1,
+        )
+        self._record("confusion_defer", topic=confusion.topic, before={"id": confusion_id})
+
+    def start_wait(
+        self,
+        confusion_id: int,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Clarification path 3: park on wait with a 14d TTL (open + expires_at)."""
+        if self._db is None:
+            return
+        current = now or datetime.now()
+        expires = (current + timedelta(days=WAIT_TTL_DAYS)).isoformat()
+        self._db.update_confusion(confusion_id, status="open", expires_at=expires)
+
+    # -- Resolution: three exits ---------------------------------------------
+
+    def resolve(
+        self,
+        confusion_id: int,
+        *,
+        resolution: str,
+        note: str = "",
+        now: datetime | None = None,
+    ) -> str | None:
+        """Resolve a confusion via one of the three exits.
+
+        - ``real_interest``  → transient interest confirmed; held updates begin
+          replay (rebased into the next preference analysis). status=resolved.
+        - ``proxy_behavior`` → a misread / proxy behaviour; held updates
+          discarded, related evidence flagged for discount. status=resolved.
+        - ``dismissed``      → user dismisses; held updates discarded.
+          status=dismissed.
+
+        Returns the terminal status, or ``None`` if the row is missing / the
+        resolution is not whitelisted.
+        """
+        if self._db is None:
+            return None
+        if resolution not in _VALID_RESOLUTIONS:
+            logger.warning("confusion resolve dropped: bad resolution=%r", resolution)
+            return None
+        confusion = self.get(confusion_id)
+        if confusion is None or confusion.status in {"resolved", "dismissed", "expired"}:
+            # Idempotent: an already-terminal confusion is not re-resolved.
+            return confusion.status if confusion is not None else None
+        current = now or datetime.now()
+        if resolution == _RESOLUTION_REAL_INTEREST:
+            self._begin_replay(confusion, now=current)
+            terminal = "resolved"
+        else:
+            self._discard_all_held(confusion)
+            terminal = "resolved" if resolution == _RESOLUTION_PROXY else "dismissed"
+        self._db.update_confusion(
+            confusion_id,
+            status=terminal,
+            resolution=resolution,
+            resolution_note=note,
+            resolved_at=current.isoformat(),
+            held_updates=[h.to_dict() for h in confusion.held_updates],
+        )
+        self._record(
+            "confusion_resolve",
+            topic=confusion.topic,
+            before={"id": confusion_id},
+            after={"resolution": resolution, "status": terminal},
+        )
+        return terminal
+
+    # -- Topic freeze + held-update replay -----------------------------------
+
+    def record_held_updates(self, held: list[HeldUpdate]) -> None:
+        """Attach freeze-deferred updates to their topic's active confusion.
+
+        Each held update is appended to the ``held_updates`` of the newest
+        active confusion whose ``topic`` matches. Updates with no matching
+        confusion are dropped (the topic is not actually frozen).
+        """
+        if self._db is None or not held:
+            return
+        active = self.list_active()
+        by_topic: dict[str, Confusion] = {}
+        for confusion in active:  # list is newest-first; keep the newest per topic
+            by_topic.setdefault(confusion.topic.strip(), confusion)
+        touched: dict[int, Confusion] = {}
+        for update in held:
+            target = by_topic.get(update.topic.strip())
+            if target is None:
+                continue
+            target.held_updates.append(update)
+            touched[target.id] = target
+            self._record(
+                "confusion_hold_update",
+                topic=update.topic,
+                after={"kind": update.kind, "value": update.value},
+                held_id=update.held_id,
+            )
+        for confusion in touched.values():
+            self._db.update_confusion(
+                confusion.id,
+                held_updates=[h.to_dict() for h in confusion.held_updates],
+            )
+
+    def _begin_replay(self, confusion: Confusion, *, now: datetime) -> None:
+        """Move ``held`` updates → ``replaying`` and persist the receipt.
+
+        The receipt (``replay_submitted_at`` + ``batch_id``) is written in the
+        SAME ``update_confusion`` call as the status flip (single SQLite txn,
+        r5/R4-1) so a crash can never leave a replaying item without a receipt.
+        """
+        batch_id = uuid.uuid4().hex[:16]
+        for held in confusion.held_updates:
+            if held.state != "held":
+                continue
+            held.state = "replaying"
+            held.replay_submitted_at = now.isoformat()
+            held.batch_id = batch_id
+            held.replay_attempts += 1
+
+    def mark_replay_applied(self, confusion_id: int) -> None:
+        """Downstream preference analysis consumed the held updates → applied."""
+        if self._db is None:
+            return
+        confusion = self.get(confusion_id)
+        if confusion is None:
+            return
+        changed = False
+        for held in confusion.held_updates:
+            if held.state == "replaying":
+                held.state = "applied"
+                changed = True
+        if changed:
+            self._db.update_confusion(
+                confusion_id,
+                held_updates=[h.to_dict() for h in confusion.held_updates],
+            )
+
+    def recover_replaying(self) -> list[int]:
+        """Crash recovery for held updates stuck in ``replaying`` (r5/R4-1).
+
+        Scans terminal (resolved) confusions with ``replaying`` held updates:
+
+        - **has receipt** (``replay_submitted_at``) → ``applied_unverified`` +
+          WARNING and DO NOT resubmit (it may already have been absorbed —
+          prefer under- to double-counting).
+        - **no receipt** (defensive; the receipt is written in the same txn as
+          the status flip, so this should not happen) → retry: leave ``held``
+          for resubmission until ``replay_attempts`` reaches
+          ``MAX_REPLAY_ATTEMPTS``, then ``discarded`` + WARNING.
+
+        Returns the confusion ids whose held updates were touched.
+        """
+        if self._db is None:
+            return []
+        touched: list[int] = []
+        for confusion in self._list(["resolved"]):
+            changed = False
+            for held in confusion.held_updates:
+                if held.state != "replaying":
+                    continue
+                if held.replay_submitted_at:
+                    held.state = "applied_unverified"
+                    logger.warning(
+                        "held update %s was replaying with a receipt on recovery; "
+                        "marking applied_unverified (no resubmit)",
+                        held.held_id,
+                    )
+                elif held.replay_attempts >= MAX_REPLAY_ATTEMPTS:
+                    held.state = "discarded"
+                    logger.warning(
+                        "held update %s exhausted replay attempts; discarding",
+                        held.held_id,
+                    )
+                else:
+                    held.state = "held"
+                changed = True
+            if changed:
+                self._db.update_confusion(
+                    confusion.id,
+                    held_updates=[h.to_dict() for h in confusion.held_updates],
+                )
+                touched.append(confusion.id)
+        return touched
+
     # -- Internal helpers -----------------------------------------------------
 
     def _discard_all_held(self, confusion: Confusion) -> None:
@@ -331,6 +575,80 @@ class ConfusionManager:
             )
         except Exception:  # pragma: no cover - ledger is best-effort
             logger.debug("confusion ledger record failed", exc_info=True)
+
+
+def apply_confusion_freeze(
+    *,
+    before: dict[str, Any],
+    after: dict[str, Any],
+    frozen_topics: set[str],
+) -> tuple[dict[str, Any], list[HeldUpdate]]:
+    """Filter a preference write so frozen topics are not further reinforced.
+
+    Freeze semantics (spec §Phase 2): for a topic with an unresolved confusion,
+    a *new* interest or a *weight upgrade* is held back (returned as a
+    ``HeldUpdate``); an already-present weight is left untouched (no rollback —
+    only future reinforcement is blocked). Interests of non-frozen topics and
+    all other preference fields pass through unchanged.
+
+    **No-op when ``frozen_topics`` is empty** — the common case — so a database
+    with zero confusions produces a byte-identical write (regression guard).
+    """
+    if not frozen_topics:
+        return after, []
+    before_weights: dict[str, float] = {}
+    for item in _as_list(before.get("interests")):
+        if isinstance(item, dict):
+            name = str(item.get("name", "")).strip()
+            if name:
+                before_weights[name] = _to_float(item.get("weight", 0.0))
+
+    filtered_interests: list[Any] = []
+    held: list[HeldUpdate] = []
+    for item in _as_list(after.get("interests")):
+        if not isinstance(item, dict):
+            filtered_interests.append(item)
+            continue
+        name = str(item.get("name", "")).strip()
+        if not name or name not in frozen_topics:
+            filtered_interests.append(item)
+            continue
+        new_weight = _to_float(item.get("weight", 0.0))
+        prev = before_weights.get(name)
+        if prev is None:
+            # New frozen topic: hold the whole thing, drop from this write.
+            held.append(
+                HeldUpdate(
+                    held_id=uuid.uuid4().hex[:12],
+                    topic=name,
+                    kind="new",
+                    value=new_weight,
+                    prev_value=0.0,
+                )
+            )
+            continue
+        if new_weight > prev:
+            # Upgrade: hold the delta, keep the existing weight.
+            held.append(
+                HeldUpdate(
+                    held_id=uuid.uuid4().hex[:12],
+                    topic=name,
+                    kind="upgrade",
+                    value=new_weight,
+                    prev_value=prev,
+                )
+            )
+            frozen_item = dict(item)
+            frozen_item["weight"] = prev
+            filtered_interests.append(frozen_item)
+            continue
+        filtered_interests.append(item)
+
+    if not held:
+        return after, []
+    result = dict(after)
+    result["interests"] = filtered_interests
+    return result, held
 
 
 def _as_list(value: object) -> list[Any]:

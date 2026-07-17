@@ -2124,7 +2124,7 @@ def create_app(
 
     def _normalize_chat_scope(scope: str) -> str:
         normalized = scope.strip().lower()
-        if normalized in {"chat", "delight", "probe", "avoidance_probe"}:
+        if normalized in {"chat", "delight", "probe", "avoidance_probe", "confusion"}:
             return normalized
         return "chat"
 
@@ -6468,6 +6468,9 @@ def create_app(
         if turn.scope == "avoidance_probe":
             label = turn.subject_title or turn.subject_id or "这个避雷方向"
             return f"[关于避雷方向「{label}」的反馈] {turn.message}"
+        if turn.scope == "confusion":
+            label = turn.subject_title or turn.subject_id or "这个我没太看懂的地方"
+            return f"[关于我有点困惑的「{label}」的澄清] {turn.message}"
         return turn.message
 
     async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
@@ -6652,6 +6655,48 @@ def create_app(
                 detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
             )
             await _publish_probe_event("avoidance.chat", summary, domain)
+        elif turn.scope == "confusion":
+            # Confusion ask resolution (single ownership — durable side effect,
+            # NOT learn_from_dialogue settles). The user's reply disambiguates a
+            # behaviour we could not read: positive → real interest (held
+            # updates replay); negative → proxy / misread (held discarded);
+            # neutral → defer (keep the 72h cooldown).
+            label = turn.subject_title or turn.subject_id or "这个方向"
+            manager = getattr(ctx.soul_engine, "_confusion_manager", None)
+            try:
+                confusion_id = int(turn.subject_id)
+            except (TypeError, ValueError):
+                confusion_id = 0
+            sentiment, _classifier = await _classify_probe_sentiment(turn.message, reply, label)
+            if manager is not None and confusion_id:
+                if sentiment in {"strong_positive", "weak_positive"}:
+                    with suppress(Exception):
+                        manager.resolve(confusion_id, resolution="real_interest", note=turn.message)
+                    summary = f"你确认了对「{label}」确实有兴趣，之前搁置的信号会重新纳入。"
+                elif sentiment == "negative":
+                    with suppress(Exception):
+                        manager.resolve(
+                            confusion_id, resolution="proxy_behavior", note=turn.message
+                        )
+                    summary = f"明白了，「{label}」只是顺手，不算真的兴趣。"
+                elif sentiment == "neutral_deferred":
+                    with suppress(Exception):
+                        manager.defer(confusion_id)
+                    summary = f"关于「{label}」先放一放，过阵子再问。"
+                else:
+                    with suppress(Exception):
+                        manager.resolve(confusion_id, resolution="dismissed", note=turn.message)
+                    summary = f"关于「{label}」你说：{turn.message}"
+            else:
+                summary = f"关于「{label}」你说：{turn.message}"
+            _record_probe_cognition(
+                summary,
+                turn.subject_id or label,
+                "chat",
+                source="confusion",
+                detail=f"你的反馈：{turn.message}\n阿b的回复：{reply}",
+            )
+            await _publish_probe_event("confusion.chat", summary, turn.subject_id or label)
 
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         if turn_id in running_chat_turn_tasks:

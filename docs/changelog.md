@@ -4,6 +4,13 @@
 
 ---
 
+## v0.3.175：认知画像流水线 Wave B——疑惑机制「看不懂」（2026-07-17）
+
+认知画像流水线的 **Wave B（Phase 2）**：给系统一个表达「看不懂」的形式。规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`。
+
+- **疑惑对象 + 两产生源（Task 4）**：新增 `confusions` 表（partial unique index `WHERE status='clarifying'` 跨连接原子保证 clarifying ≤1，即打扰预算）与 `soul/confusion.py`（`ConfusionManager` 状态机 `open→clarifying→resolved|dismissed|expired`）。疑惑不写画像，只驱动下游澄清与冻结。产生源一=觉察：新增独立 builder `build_awareness_with_confusions_prompt`（静态 system，入 invariance 清单）+ `analyze_with_confusions()`；既有 `analyze()`/`build_awareness_prompt` 一字不动，`cognition_cycle` 切新 API 属**有意行为变更**（新旧输出 A/B 语义等价，过质量铁律）。产生源二=推测僵局：`SpeculatorTickResult.stalemate`=expire 时 `0<confirmation_count<threshold`（现存字段判定），pipeline 转疑惑。TTL 扫描并入 12h `cognition_cycle`。
+- **澄清三路 + 三出口 + 冻结（Task 5）**：**ask** 走 durable chat `scope="confusion"`（`schedule_ask` claim + 72h 冷却持久化于 `asked_at`，重启不复问；`defer` 复用探针忽略语义），**wait** 14 天 TTL，**probe** 复用现有探针域。三出口 `resolve()`：`real_interest`→held 重放 / `proxy_behavior`→丢弃 / `dismissed`；durable `scope="confusion"` 侧效应按情绪判断结算（单一所有权，不走 settles）。**冻结** `apply_confusion_freeze` 在对话偏好写 chokepoint 拦截——冻结 topic 的新增/上调搁置进 `held_updates`（已有权重不回滚），无疑惑时零差异。held 状态机 `held→replaying→applied|applied_unverified|discarded`：replaying 与回执（`replay_submitted_at+batch_id`）写同一 SQLite 事务；崩溃恢复见回执置 `applied_unverified`（不重复提交，宁漏勿双计），无回执重试至 `replay_attempts=2` 后丢弃。
+
 ## v0.3.174：认知画像流水线 Wave A——台账 + 觉察证据链 + 对话线（2026-07-17）
 
 认知画像流水线（三线更新 / 疑惑假设生命周期 / 态势门控 / 统一台账，规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`，经 Codex 对抗 review 六轮）的 **Wave A（Phase 0 + 1）**。
