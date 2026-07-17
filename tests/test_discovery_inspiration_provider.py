@@ -10,6 +10,7 @@ import pytest
 
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
 from openbiliclaw.discovery.inspiration_provider import (
+    BangumiPlatformSearchBackend,
     BilibiliPlatformSearchBackend,
     DouyinPlatformSearchBackend,
     FallbackInspirationSearchProvider,
@@ -1118,6 +1119,33 @@ async def test_zhihu_platform_backend_maps_bridge_rows_to_previews() -> None:
     ]
 
 
+async def test_bangumi_platform_backend_maps_official_rows_to_previews() -> None:
+    class Client:
+        async def search_subjects(self, query: str, **kwargs: object) -> SimpleNamespace:
+            assert query == "时间循环"
+            assert kwargs["subject_types"] == ("anime", "game")
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": 326,
+                        "name_cn": "攻壳机动队",
+                        "summary": "未来社会的故事",
+                        "tags": [{"name": "科幻"}],
+                    }
+                ]
+            )
+
+    backend = BangumiPlatformSearchBackend(Client(), subject_types=("anime", "game"))
+
+    assert await backend.search("时间循环", limit=3) == [
+        ExaPreviewItem(
+            title="攻壳机动队",
+            url="https://bgm.tv/subject/326",
+            highlights=("未来社会的故事", "科幻"),
+        )
+    ]
+
+
 def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
     config = SimpleNamespace(
         sources=SimpleNamespace(
@@ -1128,6 +1156,7 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
             twitter=SimpleNamespace(enabled=True),
             zhihu=SimpleNamespace(enabled=True),
             reddit=SimpleNamespace(enabled=False, backend="rdt"),
+            bangumi=SimpleNamespace(enabled=True, subject_types=("anime", "book")),
         )
     )
     youtube_client = object()
@@ -1146,6 +1175,7 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         youtube_client=youtube_client,
         x_client=object(),
         zhihu_search=zhihu_search,
+        bangumi_client=object(),
     )
 
     assert [backend.platform for backend in backends] == [
@@ -1155,4 +1185,5 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         "youtube",
         "twitter",
         "zhihu",
+        "bangumi",
     ]

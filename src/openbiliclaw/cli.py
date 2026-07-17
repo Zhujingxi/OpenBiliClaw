@@ -13,7 +13,7 @@ import re
 import sys
 import threading
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -4126,6 +4126,27 @@ def _reddit_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[s
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+def _bangumi_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Bangumi public-collection events into profile history rows."""
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": "",
+                "event_type": str(event.get("event_type", "")).strip(),
+                "context": str(event.get("context", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "bangumi",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
 @app.command("setup-embedding")
 def setup_embedding() -> None:
     """配置本地 Ollama 作为 embedding 兜底服务（可选）.
@@ -5426,6 +5447,26 @@ def _ask_reddit_inclusion() -> bool:
     return True
 
 
+def _ask_bangumi_inclusion() -> bool:
+    """Decide whether to enable Bangumi discovery and public bootstrap."""
+    if os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
+        console.print("[dim]  跳过 Bangumi 来源(OPENBILICLAW_NO_BANGUMI=1)。[/dim]")
+        return False
+    if not _is_interactive_terminal():
+        return False
+    console.print()
+    console.print("[bold]Bangumi 数据接入(可选)[/bold]")
+    console.print(
+        "使用 Bangumi 官方公开 API 导入[bold cyan]公开收藏[/bold cyan]，"
+        "并启用动画 / 书籍 / 游戏的搜索、排名和日期浏览。"
+    )
+    console.print("[dim]无需登录；只读取用户主动公开的收藏，不会向 Bangumi 写入任何内容。[/dim]")
+    if not typer.confirm("启用 Bangumi 数据接入?", default=False):
+        console.print("[dim]  已选择跳过，本次 init 不会启用 Bangumi。[/dim]")
+        return False
+    return True
+
+
 def _ask_network_binding() -> bool:
     """Ask whether the backend should listen on all interfaces (0.0.0.0).
 
@@ -5513,6 +5554,8 @@ def _persist_init_source_enabled_flags(
     include_x: bool = False,
     include_zhihu: bool = False,
     include_reddit: bool = False,
+    include_bangumi: bool = False,
+    bangumi_username: str = "",
 ) -> None:
     """Persist init source choices so background discovery obeys them."""
 
@@ -5548,6 +5591,20 @@ def _persist_init_source_enabled_flags(
         reddit_cfg = getattr(cfg.sources, "reddit", None)
         if reddit_cfg is not None and bool(getattr(reddit_cfg, "enabled", False)) != include_reddit:
             reddit_cfg.enabled = include_reddit
+            changed = True
+        bangumi_cfg = getattr(cfg.sources, "bangumi", None)
+        if (
+            bangumi_cfg is not None
+            and bool(getattr(bangumi_cfg, "enabled", False)) != include_bangumi
+        ):
+            bangumi_cfg.enabled = include_bangumi
+            changed = True
+        if (
+            bangumi_cfg is not None
+            and bangumi_username
+            and str(getattr(bangumi_cfg, "username", "")) != bangumi_username
+        ):
+            bangumi_cfg.username = bangumi_username
             changed = True
         if changed:
             save_config(cfg)
@@ -5789,6 +5846,9 @@ class InitResult:
     discover_exc: BaseException | None
     discovery_reason: str | None = None
     discovery_detail: str = ""
+    bangumi_events: list[dict[str, Any]] = field(default_factory=list)
+    bangumi_scope_counts: dict[str, Any] = field(default_factory=dict)
+    bangumi_status: str = "skipped"
 
 
 class GuidedInitError(Exception):
@@ -5927,6 +5987,35 @@ async def _fetch_x_init_data(
     return likes, bookmarks
 
 
+async def _fetch_bangumi_init_data(
+    *,
+    username: str,
+) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """Fetch one bounded, public-only Bangumi bootstrap sample."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi import fetch_bangumi_public_collection_events
+    from openbiliclaw.sources.bangumi_client import BangumiClient
+
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+    if not username.strip():
+        return [], {}, "missing_username"
+    async with BangumiClient(
+        request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+    ) as bangumi_client:
+        events = await fetch_bangumi_public_collection_events(
+            bangumi_client,
+            username=username,
+            subject_types=tuple(bangumi_cfg.subject_types),
+            limit=int(bangumi_cfg.bootstrap_limit),
+        )
+    counts: dict[str, int] = {}
+    for event in events:
+        status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return events, counts, "ok" if events else "empty"
+
+
 async def run_guided_init(
     *,
     client: Any,
@@ -5942,6 +6031,8 @@ async def run_guided_init(
     include_x: bool = False,
     include_zhihu: bool = False,
     include_reddit: bool = False,
+    include_bangumi: bool = False,
+    bangumi_username: str = "",
     target_pool_count: int,
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
     coordinator: Any = None,
@@ -6049,6 +6140,7 @@ async def run_guided_init(
             include_x,
             include_zhihu,
             include_reddit,
+            include_bangumi,
         )
     )
     _stage1_source_done = 0
@@ -6264,6 +6356,45 @@ async def run_guided_init(
         _stage1_finish_source()
     else:
         console.print("  [dim]未选择 B 站来源,跳过 B 站历史 / 收藏 / 关注拉取。[/dim]")
+
+    bangumi_events: list[dict[str, Any]] = []
+    bangumi_scope_counts: dict[str, int] = {}
+    bangumi_status = "skipped"
+    if include_bangumi:
+        await _stage1_begin_source("Bangumi", wait_hint="仅读取公开收藏")
+        try:
+            bangumi_result, bangumi_timed_out = await _await_stage1_operation(
+                lambda: _fetch_bangumi_init_data(username=bangumi_username),
+                label="Bangumi",
+                max_wait_seconds=_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS,
+            )
+            if bangumi_timed_out or bangumi_result is None:
+                bangumi_status = "timeout"
+            else:
+                bangumi_events, bangumi_scope_counts, bangumi_status = cast(
+                    "tuple[list[dict[str, Any]], dict[str, int], str]",
+                    bangumi_result,
+                )
+        except Exception as exc:
+            bangumi_status = "failed"
+            console.print(f"  [yellow]Bangumi 公开收藏读取失败: {exc}[/yellow]")
+        _stage1_finish_source()
+        if bangumi_status == "ok":
+            status_text = ", ".join(
+                f"{key}={value}" for key, value in sorted(bangumi_scope_counts.items())
+            )
+            console.print(
+                f"  Bangumi 公开收藏 [green]{len(bangumi_events)}[/green] 条 ({status_text})"
+            )
+        elif bangumi_status == "missing_username":
+            console.print(
+                "  [yellow]Bangumi 来源已启用，但未配置公开用户名；"
+                "本次只启用后续内容发现，不导入收藏信号。[/yellow]"
+            )
+        elif bangumi_status == "empty":
+            console.print("  [yellow]Bangumi 用户存在，但没有读到公开收藏。[/yellow]")
+        elif bangumi_status == "timeout":
+            console.print("  [yellow]Bangumi 公开收藏读取超时，已跳过并继续初始化。[/yellow]")
 
     # Bootstrap collectors poll a DB task queue with a blocking sleep —
     # run them in a worker thread (Database is check_same_thread=False) so
@@ -6581,11 +6712,13 @@ async def run_guided_init(
     events_to_persist = list(events)
     events_to_persist.extend(zhihu_events)
     events_to_persist.extend(reddit_events)
+    events_to_persist.extend(bangumi_events)
     events.extend(xhs_events)
     events.extend(dy_events)
     events.extend(yt_events)
     events.extend(zhihu_events)
     events.extend(reddit_events)
+    events.extend(bangumi_events)
     # With bilibili now optional, the floor is "at least one selected source
     # produced signals" — an all-empty run can't build a meaningful profile.
     if not events:
@@ -6621,6 +6754,7 @@ async def run_guided_init(
                 "twitter": x_event_count,
                 "zhihu": len(zhihu_events),
                 "reddit": len(reddit_events),
+                "bangumi": len(bangumi_events),
             }
         )
     propagate_events = getattr(memory, "propagate_events", None)
@@ -6788,6 +6922,8 @@ async def run_guided_init(
         combined_history.extend(_zhihu_events_to_history_items(zhihu_events))
     if reddit_events:
         combined_history.extend(_reddit_events_to_history_items(reddit_events))
+    if bangumi_events:
+        combined_history.extend(_bangumi_events_to_history_items(bangumi_events))
     # X likes/bookmarks previously only fed the analyze stage; feeding the
     # profile builder too keeps cross-source flow uniform AND guarantees a
     # non-empty profile input when X is the only selected source.
@@ -6963,6 +7099,9 @@ async def run_guided_init(
         discover_exc=discover_exc,
         discovery_reason=discovery_reason,
         discovery_detail=discovery_detail,
+        bangumi_events=bangumi_events,
+        bangumi_scope_counts=bangumi_scope_counts,
+        bangumi_status=bangumi_status,
     )
 
 
@@ -7032,6 +7171,21 @@ def init(
         False,
         "--yes-reddit",
         help="跳过 Reddit 的 y/n 提问,直接启用 Reddit 数据接入(适合脚本化场景)。",
+    ),
+    no_bangumi: bool = typer.Option(
+        False,
+        "--no-bangumi",
+        help="跳过 Bangumi 数据接入(默认非交互模式下就是跳过)。",
+    ),
+    skip_bangumi_prompt: bool = typer.Option(
+        False,
+        "--yes-bangumi",
+        help="跳过 Bangumi 的 y/n 提问，直接启用来源。",
+    ),
+    bangumi_username: str = typer.Option(
+        "",
+        "--bangumi-username",
+        help="用于初始化的公开 Bangumi 用户名；留空则读配置或交互输入。",
     ),
     bilibili_history_limit: int | None = typer.Option(
         None,
@@ -7190,6 +7344,38 @@ def init(
     else:
         include_reddit = _ask_reddit_inclusion()
 
+    if no_bangumi:
+        include_bangumi = False
+        console.print("[dim]  跳过 Bangumi 数据接入(命令行 --no-bangumi)。[/dim]")
+    elif os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
+        include_bangumi = False
+        console.print("[dim]  跳过 Bangumi 数据接入(OPENBILICLAW_NO_BANGUMI=1)。[/dim]")
+    elif skip_bangumi_prompt:
+        include_bangumi = True
+    else:
+        include_bangumi = _ask_bangumi_inclusion()
+
+    selected_bangumi_username = ""
+    if include_bangumi:
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+        configured_username = str(load_config().sources.bangumi.username or "").strip()
+        raw_username = str(bangumi_username or configured_username).strip()
+        if not raw_username and _is_interactive_terminal():
+            raw_username = str(
+                typer.prompt(
+                    "公开 Bangumi 用户名(留空则只启用内容发现)",
+                    default="",
+                    show_default=False,
+                )
+                or ""
+            ).strip()
+        try:
+            selected_bangumi_username = validate_bangumi_username(raw_username)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--bangumi-username") from exc
+
     selected_sources = (
         include_bili,
         include_xhs,
@@ -7198,6 +7384,7 @@ def init(
         include_x,
         include_zhihu,
         include_reddit,
+        include_bangumi,
     )
     if not any(selected_sources):
         _print_status_panel(
@@ -7206,9 +7393,24 @@ def init(
             "已跳过 B 站且未启用任何其他平台——init 至少需要一个数据来源。"
             "去掉 --no-bilibili，或配合 --yes-xhs / --yes-douyin / "
             "--yes-youtube / --yes-x / --yes-zhihu "
-            "启用其他来源。",
+            "/ --yes-reddit / --yes-bangumi 启用其他来源。",
         )
         raise typer.Exit(code=1)
+
+    profile_signal_sources = selected_sources[:-1]
+    if include_bangumi and not selected_bangumi_username and not any(profile_signal_sources):
+        _print_status_panel(
+            "error",
+            "Bangumi 缺少公开用户名",
+            "只选择 Bangumi 初始化时，需用 --bangumi-username 提供公开用户名；"
+            "如果只想启用内容发现，请先保存来源配置而不是运行 init。",
+        )
+        raise typer.Exit(code=1)
+    if include_bangumi and not selected_bangumi_username:
+        console.print(
+            "[yellow]  Bangumi 未填公开用户名：本次仅启用条目发现，"
+            "画像由其他已选来源提供。[/yellow]"
+        )
 
     _persist_init_source_enabled_flags(
         include_bili=include_bili,
@@ -7218,6 +7420,8 @@ def init(
         include_x=include_x,
         include_zhihu=include_zhihu,
         include_reddit=include_reddit,
+        include_bangumi=include_bangumi,
+        bangumi_username=selected_bangumi_username,
     )
 
     # gui-init (B2): the four init stages now run inside the shared async
@@ -7240,6 +7444,8 @@ def init(
                 include_x=include_x,
                 include_zhihu=include_zhihu,
                 include_reddit=include_reddit,
+                include_bangumi=include_bangumi,
+                bangumi_username=selected_bangumi_username,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
             )
@@ -7271,6 +7477,9 @@ def init(
     reddit_events = result.reddit_events
     reddit_scope_counts = result.reddit_scope_counts
     reddit_status = result.reddit_status
+    bangumi_events = list(getattr(result, "bangumi_events", []))
+    bangumi_scope_counts = dict(getattr(result, "bangumi_scope_counts", {}))
+    bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
 
@@ -7318,6 +7527,9 @@ def init(
     reddit_saved_count = int(reddit_scope_counts.get("reddit_saved", 0))
     reddit_upvoted_count = int(reddit_scope_counts.get("reddit_upvoted", 0))
     reddit_subscribed_count = int(reddit_scope_counts.get("reddit_subscribed", 0))
+    bangumi_wish_count = int(bangumi_scope_counts.get("wish", 0))
+    bangumi_done_count = int(bangumi_scope_counts.get("done", 0))
+    bangumi_doing_count = int(bangumi_scope_counts.get("doing", 0))
     summary_rows: list[tuple[str, str]] = [
         ("📺 B 站观看历史", f"{len(history)} 条"),
         ("📺 B 站收藏夹", f"{len(favorites_data)} 条"),
@@ -7344,6 +7556,10 @@ def init(
         ("Reddit 点赞(upvoted)", f"{reddit_upvoted_count} 条"),
         ("Reddit 订阅 subreddit", f"{reddit_subscribed_count} 个"),
         ("🌐 Reddit 入库事件", f"{len(reddit_events)} 条"),
+        ("Bangumi 想看/想读/想玩", f"{bangumi_wish_count} 条"),
+        ("Bangumi 看过/读过/玩过", f"{bangumi_done_count} 条"),
+        ("Bangumi 在看/在读/在玩", f"{bangumi_doing_count} 条"),
+        ("🌐 Bangumi 入库事件", f"{len(bangumi_events)} 条"),
         ("📊 画像建模总事件", f"{len(events)} 条"),
         ("✅ 灵魂画像", "已生成"),
         ("🔍 首轮发现内容", f"{discovered_count} 条"),
@@ -7380,6 +7596,11 @@ def init(
             "https://www.reddit.com / saved、upvoted、订阅列表为空或任务仍在后台跑。"
             "装好扩展后重新跑 [cyan]openbiliclaw init --yes-reddit[/cyan] 可补齐。[/dim]"
         )
+    if not bangumi_events and bangumi_status not in {"skipped", "missing_username"}:
+        console.print(
+            "[dim]ℹ️  Bangumi 0 条信号入库。请确认用户名存在，且收藏已设为公开。"
+            "可用 [cyan]openbiliclaw fetch-bangumi --username <name>[/cyan] 只读验证。[/dim]"
+        )
 
     source_parts = []
     if bilibili_events > 0:
@@ -7394,6 +7615,8 @@ def init(
         source_parts.append(f"[green]{len(zhihu_events)}[/green] 条知乎信号")
     if len(reddit_events) > 0:
         source_parts.append(f"[green]{len(reddit_events)}[/green] 条 Reddit 信号")
+    if len(bangumi_events) > 0:
+        source_parts.append(f"[green]{len(bangumi_events)}[/green] 条 Bangumi 信号")
     if len(source_parts) > 1:
         console.print(
             "[dim]ℹ️  本次画像综合了 "
@@ -8204,6 +8427,121 @@ def fetch_zhihu(
             )
         )
         _print_status_panel("success", "完成", "知乎事件已写入并完成画像重建")
+
+
+@app.command("fetch-bangumi")
+def fetch_bangumi(
+    username: str = typer.Option(
+        "",
+        "--username",
+        "-u",
+        help="公开 Bangumi 用户名；不提供时读取 [sources.bangumi].username。",
+    ),
+    limit: int = typer.Option(0, "--limit", "-n", min=0, help="最多读取的公开收藏条目数。"),
+    write_memory: bool = typer.Option(
+        False,
+        "--write-memory",
+        help="将转换后的公开收藏事件写入 memory；默认只做只读 smoke。",
+    ),
+    rebuild_profile: bool = typer.Option(
+        False,
+        "--rebuild-profile",
+        help="写入 memory 后用本次 Bangumi 事件重建画像（会触发真实 LLM 调用）。",
+    ),
+) -> None:
+    """读取 Bangumi 公开收藏；默认不写本地数据也不调用 LLM。"""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi import fetch_bangumi_public_collection_events
+    from openbiliclaw.sources.bangumi_client import (
+        BangumiAPIError,
+        BangumiClient,
+        validate_bangumi_username,
+    )
+
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+    try:
+        selected_username = validate_bangumi_username(username or bangumi_cfg.username)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--username") from exc
+    if not selected_username:
+        raise typer.BadParameter(
+            "请通过 --username 或 [sources.bangumi].username 提供公开 Bangumi 用户名。",
+            param_hint="--username",
+        )
+    selected_limit = limit or int(bangumi_cfg.bootstrap_limit)
+    write_memory = write_memory or rebuild_profile
+
+    async def _fetch() -> list[dict[str, Any]]:
+        async with BangumiClient(
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+        ) as client:
+            return await fetch_bangumi_public_collection_events(
+                client,
+                username=selected_username,
+                subject_types=tuple(bangumi_cfg.subject_types),
+                limit=selected_limit,
+            )
+
+    _print_page_title("Bangumi 公开收藏", "官方只读 API · anonymous")
+    try:
+        events = asyncio.run(_fetch())
+    except BangumiAPIError as exc:
+        if exc.code == "not_found":
+            body = "用户不存在，或该用户没有可公开读取的收藏。"
+        elif exc.code == "rate_limited":
+            body = "Bangumi API 正在限流，请等待冷却后重试。"
+        else:
+            body = str(exc)
+        _print_status_panel("warning", "Bangumi 读取失败", body)
+        raise typer.Exit(code=1) from exc
+
+    counts: dict[str, int] = {}
+    for event in events:
+        status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    _print_key_value_table(
+        "抓取摘要",
+        [
+            ("用户名", selected_username),
+            ("公开收藏事件", str(len(events))),
+            ("收藏状态", ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))),
+            ("写入 memory", "将写入" if write_memory else "未写入 memory"),
+            ("画像生成", "将重建" if rebuild_profile else "未触发画像生成"),
+        ],
+    )
+    for index, event in enumerate(events[:5], start=1):
+        console.print(
+            f"  {index}. [{event.get('event_type', '')}] {event.get('title') or '（无标题）'}"
+        )
+        console.print(f"     [dim]{event.get('url', '')}[/dim]")
+
+    if write_memory:
+        written, skipped = _write_events_to_memory(events, source="bangumi")
+        console.print(
+            f"  [green]已写入 memory: {written} 条 Bangumi 事件[/green]"
+            f"{f'，跳过重复 {skipped} 条。' if skipped else '。'}"
+        )
+    if rebuild_profile:
+        _prepare_init_runtime()
+        soul_engine = _build_soul_engine()
+        _print_section_title("1/2 分析 Bangumi 偏好")
+        asyncio.run(
+            _run_with_progress(
+                soul_engine.analyze_events(events, event_chunk_size=200),
+                label="分析 Bangumi 偏好",
+                eta_seconds=180,
+            )
+        )
+        _print_section_title("2/2 生成画像")
+        asyncio.run(
+            _run_with_progress(
+                soul_engine.build_initial_profile(_bangumi_events_to_history_items(events)),
+                label="生成灵魂画像",
+                eta_seconds=70,
+            )
+        )
+        _print_status_panel("success", "完成", "Bangumi 事件已写入并完成画像重建")
 
 
 @app.command("fetch-reddit")
@@ -10181,6 +10519,189 @@ def _run_reddit_discovery(*, limit: int) -> None:
     _print_status_panel(kind, title, body)
 
 
+def _run_bangumi_discovery_smoke(*, mode: str, keyword: str = "", limit: int) -> None:
+    """Run one read-only Bangumi API branch without cache, memory, or LLM writes."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi import bangumi_subject_to_content
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError, BangumiClient
+
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+
+    async def _fetch() -> list[Any]:
+        async with BangumiClient(
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+        ) as client:
+            if mode == "search":
+                page = await client.search_subjects(
+                    keyword,
+                    subject_types=tuple(bangumi_cfg.subject_types),
+                    limit=limit,
+                    sort="match",
+                )
+            else:
+                page = await client.browse_subjects(
+                    str(bangumi_cfg.subject_types[0]),
+                    sort="rank" if mode == "ranked" else "date",
+                    limit=limit,
+                )
+        return [
+            item
+            for row in page.data
+            if (item := bangumi_subject_to_content(row, strategy=f"bangumi-{mode}")) is not None
+        ]
+
+    subtitle = {
+        "search": f"关键词搜索 · {keyword}",
+        "ranked": "排名浏览",
+        "latest": "按日期浏览（可能含未播条目）",
+    }[mode]
+    _print_page_title("Bangumi 内容发现 smoke", subtitle)
+    try:
+        items = asyncio.run(_fetch())
+    except (BangumiAPIError, ValueError) as exc:
+        _print_status_panel("warning", "Bangumi API 读取失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_key_value_table(
+        "只读召回摘要",
+        [
+            ("模式", mode),
+            ("条目数", str(len(items))),
+            ("本地写入", "0"),
+            ("LLM 调用", "0"),
+        ],
+    )
+    for index, item in enumerate(items[:5], start=1):
+        _print_discovered_content_preview(item, index)
+
+
+@app.command("discover-bangumi")
+def discover_bangumi(
+    keyword: str = typer.Argument(..., help="Bangumi 搜索关键词。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 Bangumi 关键词搜索。"""
+    if not keyword.strip():
+        raise typer.BadParameter("搜索关键词不能为空。", param_hint="keyword")
+    _run_bangumi_discovery_smoke(mode="search", keyword=keyword.strip(), limit=limit)
+
+
+@app.command("discover-bangumi-ranked")
+def discover_bangumi_ranked(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 Bangumi 排名浏览。"""
+    _run_bangumi_discovery_smoke(mode="ranked", limit=limit)
+
+
+@app.command("discover-bangumi-latest")
+def discover_bangumi_latest(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 Bangumi 按日期浏览（可能含未播条目）。"""
+    _run_bangumi_discovery_smoke(mode="latest", limit=limit)
+
+
+def _run_bangumi_discovery(*, limit: int, force: bool = False) -> None:
+    """Run one formal Bangumi cycle through the shared candidate pipeline."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.bangumi_producer import BangumiDiscoveryProducer
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.bangumi_client import BangumiClient
+
+    _require_runtime_config()
+    config = load_config()
+    bangumi_cfg = config.sources.bangumi
+    if not bangumi_cfg.enabled:
+        _print_status_panel(
+            "warning",
+            "Bangumi discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.bangumi].enabled。",
+        )
+        raise typer.Exit(code=1)
+    database = _get_runtime_database()
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel("warning", "尚未初始化用户画像", "请先执行 `openbiliclaw init`。")
+        raise typer.Exit(code=1) from exc
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    keyword_fetch = KeywordFetchCoordinator(
+        database=database,
+        discovery_config=config.discovery,
+    )
+
+    async def _produce() -> dict[str, object]:
+        async with BangumiClient(
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+        ) as client:
+            producer = BangumiDiscoveryProducer(
+                database=database,
+                soul_engine=soul_engine,
+                client=client,
+                enabled=bool(bangumi_cfg.enabled),
+                subject_types=tuple(bangumi_cfg.subject_types),
+                source_modes=tuple(bangumi_cfg.source_modes),
+                daily_search_budget=bangumi_cfg.daily_search_budget,
+                daily_ranked_budget=bangumi_cfg.daily_ranked_budget,
+                daily_latest_budget=bangumi_cfg.daily_latest_budget,
+                min_interval_minutes=bangumi_cfg.min_interval_minutes,
+                candidate_pipeline=candidate_pipeline,
+                keyword_fetch=keyword_fetch,
+            )
+            return await producer.produce_if_due(limit=limit, force=force)
+
+    result = asyncio.run(_produce())
+    reason = str(result.get("reason") or "")
+    discovered = int(cast("Any", result.get("discovered") or 0))
+    enqueued = int(cast("Any", result.get("enqueued") or 0))
+    modes = ", ".join(bangumi_cfg.source_modes)
+    _print_page_title("Bangumi 内容发现", f"正式 discover · {modes}")
+    if reason in {"ok", "partial"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "bangumi"),
+                ("分支", modes),
+                ("状态", reason),
+            ],
+        )
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+    messages = {
+        "disabled": (
+            "warning",
+            "Bangumi discovery 已禁用",
+            "请在配置页或 config.toml 中启用 [sources.bangumi].enabled。",
+        ),
+        "no_profile": (
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init`。",
+        ),
+        "throttled": ("info", "Bangumi discovery 尚未到期", "可使用 --force 手动验证。"),
+        "rate_limited": ("warning", "Bangumi API 正在冷却", "到期后会自动重试。"),
+        "pool_full": ("info", "候选池已满", "当前无需补充 Bangumi 候选。"),
+        "empty": ("info", "Bangumi discovery 返回为空", "官方 API 可达，但本轮无可转换条目。"),
+        "error": ("warning", "Bangumi discovery 执行失败", str(result.get("mode_results") or "")),
+    }
+    kind, title, body = messages.get(
+        reason,
+        ("info", "Bangumi discovery 未产出内容", reason or "无详细信息"),
+    )
+    _print_status_panel(kind, title, body)
+
+
 @app.command("discover-douyin")
 def discover_douyin(
     keywords: list[str] | None = _DOUYIN_DISCOVERY_KEYWORDS_OPTION,
@@ -10220,7 +10741,7 @@ def discover(
         "bilibili",
         "--source",
         "-s",
-        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu 或 reddit。",
+        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit 或 bangumi。",
         case_sensitive=False,
     ),
     strategies: list[str] | None = _DISCOVER_STRATEGIES_OPTION,
@@ -10228,7 +10749,7 @@ def discover(
     force: bool = typer.Option(
         False,
         "--force",
-        help="xiaohongshu：忽略 4 小时节流强制生产一次关键词。",
+        help="xiaohongshu / bangumi：忽略最小调度间隔强制执行一次。",
     ),
 ) -> None:
     """手动触发内容发现（按来源选择渠道）."""
@@ -10276,9 +10797,20 @@ def discover(
         _run_reddit_discovery(limit=limit)
         return
 
+    if source_normalized == "bangumi":
+        if strategies:
+            _print_status_panel(
+                "info",
+                "--strategy 仅对 Bilibili 生效",
+                "bangumi 渠道走 source_modes 配置的官方 API discovery 分支，已忽略策略过滤。",
+            )
+        _run_bangumi_discovery(limit=limit, force=force)
+        return
+
     if source_normalized != "bilibili":
         raise typer.BadParameter(
-            f"未知的内容源 `{source}`，当前支持：bilibili、xiaohongshu、douyin、zhihu、reddit。"
+            f"未知的内容源 `{source}`，当前支持："
+            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi。"
         )
 
     active_strategies = _normalize_strategy_names(strategies)

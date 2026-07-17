@@ -32,6 +32,7 @@ from openbiliclaw.api.models import (
     AutostartConfigOut,
     AutostartStatusOut,
     BackendUpdateStatusOut,
+    BangumiSourceConfigOut,
     BehaviorEventBatchIn,
     BilibiliConfigOut,
     BilibiliCookieIn,
@@ -280,6 +281,7 @@ _SOURCE_SHARE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _INIT_SOURCE_ORDER = (
     "bilibili",
@@ -289,6 +291,7 @@ _INIT_SOURCE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
@@ -1077,6 +1080,8 @@ def _fallback_recommendation_click_url(
     if source_platform == "reddit":
         reddit_id = item_id[3:] if item_id.startswith("t3_") else item_id
         return f"https://www.reddit.com/comments/{quote(reddit_id, safe='')}/"
+    if source_platform == "bangumi":
+        return f"https://bgm.tv/subject/{quote(item_id, safe='')}"
     if source_platform == "bilibili":
         return f"https://www.bilibili.com/video/{quote(bvid or item_id, safe='')}"
     return ""
@@ -2738,7 +2743,11 @@ def create_app(
                 pass
         return True, ""
 
-    async def _persist_guided_init_source_opt_in(effective_sources: set[str]) -> None:
+    async def _persist_guided_init_source_opt_in(
+        effective_sources: set[str],
+        *,
+        bangumi_username: str | None = None,
+    ) -> None:
         """Best-effort: checked guided-init sources become enabled settings.
 
         The run itself uses ``effective_sources`` directly, so a config write
@@ -2760,6 +2769,15 @@ def create_app(
             if source_cfg is not None and not bool(getattr(source_cfg, "enabled", False)):
                 source_cfg.enabled = True
                 changed = True
+        bangumi_cfg = getattr(sources_cfg, "bangumi", None)
+        if (
+            bangumi_cfg is not None
+            and "bangumi" in effective_sources
+            and bangumi_username is not None
+            and str(getattr(bangumi_cfg, "username", "") or "").strip() != bangumi_username
+        ):
+            bangumi_cfg.username = bangumi_username
+            changed = True
         if not changed:
             return
 
@@ -2790,7 +2808,9 @@ def create_app(
             logger.warning("guided init source opt-in hot-reload failed", exc_info=True)
 
     async def _run_guided_init_wrapper(
-        run_id: str, selected_sources: set[str] | None = None
+        run_id: str,
+        selected_sources: set[str] | None = None,
+        bangumi_username: str = "",
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -2853,6 +2873,8 @@ def create_app(
                 include_x="twitter" in effective,
                 include_zhihu="zhihu" in effective,
                 include_reddit="reddit" in effective,
+                include_bangumi="bangumi" in effective,
+                bangumi_username=bangumi_username,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_api_discover_backfill,
                 coordinator=coord,
@@ -2908,6 +2930,62 @@ def create_app(
         # for this local guided-init run.
         raw_sources = body.get("sources") if isinstance(body, dict) else None
         selected_sources = {str(s) for s in raw_sources} if isinstance(raw_sources, list) else None
+        source_options = body.get("source_options") if isinstance(body, dict) else None
+        if source_options is not None and not isinstance(source_options, dict):
+            return JSONResponse(
+                {"error": "invalid_source_options", "detail": "source_options 必须是对象"},
+                status_code=400,
+            )
+        source_options = source_options or {}
+        unknown_source_options = sorted(set(source_options) - {"bangumi"})
+        if unknown_source_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": f"不支持的 source_options: {', '.join(unknown_source_options)}",
+                },
+                status_code=400,
+            )
+        bangumi_options = source_options.get("bangumi", {})
+        if not isinstance(bangumi_options, dict):
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": "source_options.bangumi 必须是对象",
+                },
+                status_code=400,
+            )
+        unknown_bangumi_options = sorted(set(bangumi_options) - {"username"})
+        if unknown_bangumi_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": (
+                        "不支持的 source_options.bangumi 字段: "
+                        + ", ".join(unknown_bangumi_options)
+                    ),
+                },
+                status_code=400,
+            )
+        scoped_bangumi_username = "username" in bangumi_options
+        legacy_bangumi_username = isinstance(body, dict) and "bangumi_username" in body
+        bangumi_username_supplied = scoped_bangumi_username or legacy_bangumi_username
+        selected_bangumi_username: str | None = None
+        if bangumi_username_supplied:
+            from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+            try:
+                raw_bangumi_username = (
+                    bangumi_options.get("username")
+                    if scoped_bangumi_username
+                    else body.get("bangumi_username")
+                )
+                selected_bangumi_username = validate_bangumi_username(raw_bangumi_username)
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_bangumi_username", "detail": str(exc)},
+                    status_code=400,
+                )
 
         coord = ctx.init_coordinator
 
@@ -2936,8 +3014,39 @@ def create_app(
                 {"error": "no_sources_selected", "detail": "至少选择一个有效数据来源"},
                 status_code=409,
             )
+        configured_bangumi_username = str(
+            getattr(
+                getattr(
+                    getattr(getattr(ctx, "config", None), "sources", None),
+                    "bangumi",
+                    None,
+                ),
+                "username",
+                "",
+            )
+            or ""
+        ).strip()
+        effective_bangumi_username = (
+            configured_bangumi_username
+            if selected_bangumi_username is None
+            else selected_bangumi_username
+        )
+        if effective_sources == {"bangumi"} and not effective_bangumi_username:
+            return JSONResponse(
+                {
+                    "error": "no_profile_signal_sources",
+                    "detail": "只选择 Bangumi 初始化时，需填写公开用户名以读取公开收藏。",
+                },
+                status_code=409,
+            )
+        warnings: list[str] = []
+        if "bangumi" in effective_sources and not effective_bangumi_username:
+            warnings.append("Bangumi 未填写公开用户名：本次仅启用条目发现，不提供画像信号。")
         if selected_sources is not None:
-            await _persist_guided_init_source_opt_in(effective_sources)
+            await _persist_guided_init_source_opt_in(
+                effective_sources,
+                bangumi_username=selected_bangumi_username,
+            )
 
         run_id = uuid.uuid4().hex
         if not coord.try_start(run_id):
@@ -2976,11 +3085,27 @@ def create_app(
 
         registry = getattr(ctx, "task_registry", None)
         if registry is not None:
-            task = registry.track("guided_init", _run_guided_init_wrapper(run_id, selected_sources))
+            task = registry.track(
+                "guided_init",
+                _run_guided_init_wrapper(
+                    run_id,
+                    selected_sources,
+                    effective_bangumi_username,
+                ),
+            )
         else:
-            task = asyncio.create_task(_run_guided_init_wrapper(run_id, selected_sources))
+            task = asyncio.create_task(
+                _run_guided_init_wrapper(
+                    run_id,
+                    selected_sources,
+                    effective_bangumi_username,
+                )
+            )
         coord.attach_task(run_id, task)
-        return JSONResponse({"run_id": run_id, **coord.get_status()}, status_code=202)
+        return JSONResponse(
+            {"run_id": run_id, **coord.get_status(), "warnings": warnings},
+            status_code=202,
+        )
 
     # ── embedding one-click repair (v0.3.155+) ──────────────────────────
     # Single-flight background `ollama pull` so the popup's "语义去重未启用"
@@ -3778,6 +3903,9 @@ def create_app(
                     or 0
                 ),
                 comment_count=int(getattr(item.content, "comment_count", 0) or 0),
+                rating_score=float(getattr(item.content, "rating_score", 0.0) or 0.0),
+                rating_count=int(getattr(item.content, "rating_count", 0) or 0),
+                source_rank=int(getattr(item.content, "source_rank", 0) or 0),
                 up_mid=int(getattr(item.content, "up_mid", 0) or 0),
             )
             for item in items
@@ -4023,6 +4151,11 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
+        bangumi_client = getattr(ctx, "bangumi_client", None)
+        close_bangumi = getattr(bangumi_client, "aclose", None)
+        if callable(close_bangumi):
+            with suppress(Exception):
+                await close_bangumi()
 
     @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
     async def profile_summary(
@@ -4597,6 +4730,9 @@ def create_app(
                         row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
                     ),
                     comment_count=int(row.get("comment_count", 0) or 0),
+                    rating_score=float(row.get("rating_score", 0.0) or 0.0),
+                    rating_count=int(row.get("rating_count", 0) or 0),
+                    source_rank=int(row.get("source_rank", 0) or 0),
                     up_mid=int(row.get("up_mid", 0) or 0),
                 )
                 for row in rows
@@ -9201,6 +9337,28 @@ def create_app(
                 logged_in=False,
             )
 
+        from openbiliclaw.runtime.bangumi_producer import bangumi_source_status
+
+        bgm_enabled = bool(getattr(getattr(srcs, "bangumi", None), "enabled", False))
+        bgm_status = (
+            bangumi_source_status(ctx.database, enabled=bgm_enabled)
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if bgm_enabled else "disabled",
+                "detail": "Bangumi 使用官方公开 API，尚未运行内容发现。",
+            }
+        )
+        bgm_state = str(bgm_status.get("state") or "unverified")
+        bangumi = SourceStatusItem(
+            enabled=bgm_enabled,
+            state=bgm_state,
+            detail=str(bgm_status.get("detail") or "Bangumi 使用官方公开 API。"),
+            # Bangumi is anonymous and has no login session. This legacy field
+            # follows SourceStatusItem's readiness semantics instead of merely
+            # mirroring the config switch.
+            logged_in=bgm_state in {"ok", "ready", "no_auth"},
+        )
+
         return SourcesStatusResponse(
             bilibili=bilibili,
             xiaohongshu=xiaohongshu,
@@ -9209,6 +9367,7 @@ def create_app(
             twitter=twitter,
             zhihu=zhihu,
             reddit=reddit,
+            bangumi=bangumi,
         )
 
     def _mask_source_credential(value: str, *, reveal: bool) -> str:
@@ -9314,6 +9473,11 @@ def create_app(
                     "Reddit Cookie 由插件同步到 rdt-cli credential store；这里只展示 Cookie 名称，"
                     "需要更换时可在下方 Reddit Cookie 覆盖输入框手动粘贴。"
                 ),
+            ),
+            bangumi=SourceCredentialItem(
+                label="无需凭据",
+                available=False,
+                detail="Bangumi 使用官方公开只读 API，后端不保存 Cookie 或 Token。",
             ),
         )
 
@@ -10378,6 +10542,18 @@ def create_app(
                     request_interval_seconds=cfg.sources.reddit.request_interval_seconds,
                     min_interval_minutes=cfg.sources.reddit.min_interval_minutes,
                 ),
+                bangumi=BangumiSourceConfigOut(
+                    enabled=cfg.sources.bangumi.enabled,
+                    username=cfg.sources.bangumi.username,
+                    subject_types=list(cfg.sources.bangumi.subject_types),
+                    source_modes=list(cfg.sources.bangumi.source_modes),
+                    daily_search_budget=cfg.sources.bangumi.daily_search_budget,
+                    daily_ranked_budget=cfg.sources.bangumi.daily_ranked_budget,
+                    daily_latest_budget=cfg.sources.bangumi.daily_latest_budget,
+                    request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
+                    bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
+                ),
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
@@ -11185,6 +11361,76 @@ def create_app(
                     ):
                         if key in reddit_data:
                             setattr(cfg.sources.reddit, key, int(reddit_data[key]))
+
+                bangumi_data = sources_data.get("bangumi")
+                if isinstance(bangumi_data, dict):
+                    from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+                    if "enabled" in bangumi_data:
+                        cfg.sources.bangumi.enabled = _as_bool(bangumi_data["enabled"])
+                    if "username" in bangumi_data:
+                        try:
+                            cfg.sources.bangumi.username = validate_bangumi_username(
+                                bangumi_data["username"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    if "subject_types" in bangumi_data:
+                        raw_types = bangumi_data["subject_types"]
+                        if not isinstance(raw_types, list):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi subject_types 必须是数组"
+                            )
+                        selected_types = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_types)
+                        )
+                        if not selected_types or any(
+                            value not in {"book", "anime", "music", "game", "real"}
+                            for value in selected_types
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi subject_types 包含不支持的值"
+                            )
+                        cfg.sources.bangumi.subject_types = selected_types
+                    if "source_modes" in bangumi_data:
+                        raw_modes = bangumi_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi source_modes 必须是数组"
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_modes)
+                        )
+                        if not selected_modes or any(
+                            value not in {"search", "ranked", "latest"} for value in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="Bangumi source_modes 包含不支持的值"
+                            )
+                        cfg.sources.bangumi.source_modes = selected_modes
+                    for key in (
+                        "daily_search_budget",
+                        "daily_ranked_budget",
+                        "daily_latest_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                        "bootstrap_limit",
+                    ):
+                        if key not in bangumi_data:
+                            continue
+                        try:
+                            value = int(bangumi_data[key])
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400, detail=f"Bangumi {key} 必须是整数"
+                            ) from exc
+                        minimum = 1 if key == "bootstrap_limit" else 0
+                        maximum = 1000 if key == "bootstrap_limit" else None
+                        if value < minimum or (maximum is not None and value > maximum):
+                            raise HTTPException(
+                                status_code=400, detail=f"Bangumi {key} 超出允许范围"
+                            )
+                        setattr(cfg.sources.bangumi, key, value)
 
         # Apply scheduler updates
         if "scheduler" in update:

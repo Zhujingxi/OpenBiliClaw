@@ -59,6 +59,7 @@ _PLATFORM_SOURCE_FIELDS = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 
 

@@ -51,6 +51,9 @@ from openbiliclaw.saved_sync.models import (
     SavedListKind,
 )
 from openbiliclaw.sources.platforms import (
+    PLATFORM_BANGUMI as _BANGUMI_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
     PLATFORM_BILIBILI as _BILIBILI_SOURCE_FAMILY,
 )
 from openbiliclaw.sources.platforms import (
@@ -748,6 +751,9 @@ CREATE TABLE IF NOT EXISTS content_cache (
     reply_count INTEGER DEFAULT 0,
     retweet_count INTEGER DEFAULT 0,
     bookmark_count INTEGER DEFAULT 0,
+    rating_score REAL DEFAULT 0.0,
+    rating_count INTEGER DEFAULT 0,
+    source_rank INTEGER DEFAULT 0,
     relevance_score REAL DEFAULT 0.0,
     relevance_reason TEXT DEFAULT '',
     pool_expression TEXT DEFAULT '',
@@ -803,6 +809,9 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     reply_count           INTEGER NOT NULL DEFAULT 0,
     retweet_count         INTEGER NOT NULL DEFAULT 0,
     bookmark_count        INTEGER NOT NULL DEFAULT 0,
+    rating_score          REAL NOT NULL DEFAULT 0.0,
+    rating_count          INTEGER NOT NULL DEFAULT 0,
+    source_rank           INTEGER NOT NULL DEFAULT 0,
     tags                  TEXT NOT NULL DEFAULT '[]',
     candidate_tier        TEXT NOT NULL DEFAULT 'primary',
     score_threshold       REAL NOT NULL DEFAULT 0.0,
@@ -832,6 +841,26 @@ CREATE INDEX IF NOT EXISTS idx_discovery_candidates_source_status
     ON discovery_candidates(source_platform, status);
 CREATE INDEX IF NOT EXISTS idx_discovery_candidates_content_id
     ON discovery_candidates(source_platform, content_id);
+
+-- Bangumi anonymous API discovery pacing, cursors and diagnostics.
+CREATE TABLE IF NOT EXISTS bangumi_discovery_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode        TEXT NOT NULL,
+    units       INTEGER NOT NULL DEFAULT 0,
+    discovered  INTEGER NOT NULL DEFAULT 0,
+    reason      TEXT NOT NULL DEFAULT 'ok',
+    error_code  TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_bangumi_runs_mode_created
+    ON bangumi_discovery_runs(mode, created_at);
+CREATE TABLE IF NOT EXISTS bangumi_discovery_state (
+    state_key       TEXT PRIMARY KEY,
+    cursor          INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    cooldown_until  TEXT NOT NULL DEFAULT '',
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 -- Recommendation history
 CREATE TABLE IF NOT EXISTS recommendations (
@@ -2353,12 +2382,15 @@ class Database:
                 author_name,
                 body_text,
                 content_type,
-                source_keyword_id
+                source_keyword_id,
+                rating_score,
+                rating_count,
+                source_rank
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?
+                CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
                 title = excluded.title,
@@ -2488,7 +2520,10 @@ class Database:
                 source_keyword_id = COALESCE(
                     excluded.source_keyword_id,
                     content_cache.source_keyword_id
-                )
+                ),
+                rating_score = excluded.rating_score,
+                rating_count = excluded.rating_count,
+                source_rank = excluded.source_rank
             """,
             (
                 bvid,
@@ -2529,6 +2564,9 @@ class Database:
                 kwargs.get("body_text", ""),
                 kwargs.get("content_type", "video") or "video",
                 self._coerce_source_keyword_id(kwargs.get("source_keyword_id")),
+                float(kwargs.get("rating_score", 0.0) or 0.0),
+                max(0, int(kwargs.get("rating_count", 0) or 0)),
+                max(0, int(kwargs.get("source_rank", 0) or 0)),
                 EXPLORE_STRATEGY,
                 EXPLORE_ADMISSION_MIN_SCORE,
                 self._pool_admission_min_score(),
@@ -2638,11 +2676,14 @@ class Database:
                     candidate_tier,
                     score_threshold,
                     raw_payload,
-                    source_keyword_id
+                    source_keyword_id,
+                    rating_score,
+                    rating_count,
+                    source_rank
                 )
                 VALUES (
                     ?, 'pending_eval', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 """,
                 (
@@ -2681,6 +2722,9 @@ class Database:
                     self._coerce_source_keyword_id(
                         self._candidate_value(candidate, "source_keyword_id", None)
                     ),
+                    float(self._candidate_value(candidate, "rating_score", 0.0) or 0.0),
+                    max(0, int(self._candidate_value(candidate, "rating_count", 0) or 0)),
+                    max(0, int(self._candidate_value(candidate, "source_rank", 0) or 0)),
                 ),
             )
             if source_platform:
@@ -2693,10 +2737,20 @@ class Database:
                 UPDATE discovery_candidates
                 SET last_seen_at = CURRENT_TIMESTAMP,
                     published_at = COALESCE(NULLIF(?, ''), published_at, ''),
-                    published_label = COALESCE(NULLIF(?, ''), published_label, '')
+                    published_label = COALESCE(NULLIF(?, ''), published_label, ''),
+                    rating_score = ?,
+                    rating_count = ?,
+                    source_rank = ?
                 WHERE candidate_key = ?
                 """,
-                (published.published_at, published.published_label, candidate_key),
+                (
+                    published.published_at,
+                    published.published_label,
+                    float(self._candidate_value(candidate, "rating_score", 0.0) or 0.0),
+                    max(0, int(self._candidate_value(candidate, "rating_count", 0) or 0)),
+                    max(0, int(self._candidate_value(candidate, "source_rank", 0) or 0)),
+                    candidate_key,
+                ),
             )
         if max_pending_per_source is not None:
             max_pending = max(0, int(max_pending_per_source))
@@ -6477,6 +6531,9 @@ class Database:
                 COALESCE(c.danmaku_count, 0) AS danmaku_count,
                 COALESCE(c.favorite_count, 0) AS favorite_count,
                 COALESCE(c.comment_count, 0) AS comment_count,
+                COALESCE(c.rating_score, 0.0) AS rating_score,
+                COALESCE(c.rating_count, 0) AS rating_count,
+                COALESCE(c.source_rank, 0) AS source_rank,
                 COALESCE(c.up_mid, 0) AS up_mid
             FROM recommendations AS r
             LEFT JOIN content_cache AS c ON c.item_key = COALESCE(
@@ -6832,6 +6889,9 @@ class Database:
             # P1.8 yield provenance: the discovery_keywords.id that produced this
             # row (NULL for legacy / non-search / flag-off). Nullable, additive.
             "source_keyword_id": "INTEGER",
+            "rating_score": "REAL DEFAULT 0.0",
+            "rating_count": "INTEGER DEFAULT 0",
+            "source_rank": "INTEGER DEFAULT 0",
         }
         added = False
         for column_name, column_type in required_columns.items():
@@ -7080,6 +7140,9 @@ class Database:
             "published_label": "TEXT NOT NULL DEFAULT ''",
             # P1.8 yield provenance: nullable, additive (existing rows stay NULL).
             "source_keyword_id": "INTEGER",
+            "rating_score": "REAL NOT NULL DEFAULT 0.0",
+            "rating_count": "INTEGER NOT NULL DEFAULT 0",
+            "source_rank": "INTEGER NOT NULL DEFAULT 0",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
@@ -12511,6 +12574,12 @@ class Database:
                 return f"t3_{path_parts[0]}"
             if len(path_parts) >= 4 and path_parts[0] == "r" and path_parts[2] == "comments":
                 return f"t3_{path_parts[3]}"
+        if (
+            platform == _BANGUMI_SOURCE_FAMILY
+            and len(path_parts) >= 2
+            and path_parts[0] == "subject"
+        ):
+            return path_parts[1] if path_parts[1].isdigit() else ""
         return ""
 
     @staticmethod

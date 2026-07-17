@@ -104,6 +104,7 @@ _PLANNER_PLATFORMS: tuple[str, ...] = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
 )
 _BILIBILI = "bilibili"
 _PLATFORM_QUERY_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
@@ -245,6 +246,23 @@ _PLATFORM_QUERY_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "examples": ("sakuga terminology explained", "homemade sukiyaki recipe tips"),
         "avoid_markers": ("小红书", "知乎", "抖音"),
+    },
+    "bangumi": {
+        "native_markers": (
+            "动画",
+            "漫画",
+            "轻小说",
+            "游戏",
+            "原作",
+            "监督",
+            "作者",
+            "制作公司",
+            "题材",
+            "系列",
+            "机种",
+        ),
+        "examples": ("赛博朋克 动画", "独立游戏 时间循环"),
+        "avoid_markers": ("爆款", "热议", "速看", "探店"),
     },
 }
 # The planner reclaims in-flight rows that leaked past the claim lease before

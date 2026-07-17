@@ -53,8 +53,25 @@ test("platformDisplayName maps known platforms and passes through unknown", () =
   assert.equal(platformDisplayName("bilibili"), "B 站");
   assert.equal(platformDisplayName("ZHIHU"), "知乎");
   assert.equal(platformDisplayName("reddit"), "Reddit");
+  assert.equal(platformDisplayName("bgm"), "Bangumi");
   assert.equal(platformDisplayName("newtube"), "newtube");
   assert.equal(platformDisplayName(""), "");
+});
+
+test("Bangumi cards keep canonical subject links and catalog metadata", () => {
+  const item = normalizeRecommendation({
+    content_id: "253",
+    source_platform: "bangumi",
+    title: "Cowboy Bebop",
+    rating_score: 8.9,
+    rating_count: 12345,
+    source_rank: 12,
+  });
+  assert.equal(item.up_name, "");
+  assert.equal(buildContentUrl(item), "https://bgm.tv/subject/253");
+  assert.equal(item.rating_score, 8.9);
+  assert.equal(item.rating_count, 12345);
+  assert.equal(item.source_rank, 12);
 });
 
 test("empty reshuffle preserves the visible recommendation batch", () => {
@@ -593,6 +610,9 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     comment_count: 0,
     favorite_count: 0,
     danmaku_count: 0,
+    rating_score: 0,
+    rating_count: 0,
+    source_rank: 0,
     turns: [],
     composer_open: false,
     chat_draft: "",

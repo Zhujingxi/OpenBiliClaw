@@ -49,6 +49,8 @@
       initReason: "",
       initBusy: false,
       initSelectedSources: ["bilibili"],
+      initBangumiUsername: "",
+      initBangumiUsernameTouched: false,
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -89,11 +91,12 @@
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
+      { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit" };
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -105,9 +108,10 @@
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X" },
       { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" }
+      { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" }
     ];
-    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
@@ -117,6 +121,7 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写公开用户名以读取公开收藏。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -995,7 +1000,7 @@
         item_key: canonical.item_key,
         content_id: contentId,
         title: displayRecommendationTitle(decodeHtmlEntities(item?.title ?? ""), bodyText, contentType) || "未命名内容",
-        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? "未知创作者"),
+        up: decodeHtmlEntities(item?.up_name ?? item?.up ?? (canonical.source_platform === "bangumi" ? "" : "未知创作者")),
         cover_url: normalizeImageUrl(item?.cover_url ?? item?.cover ?? item?.pic ?? item?.thumbnail_url ?? item?.thumbnail ?? item?.image_url),
         content_url: canonical.content_url,
         topic: decodeHtmlEntities(item?.topic_label ?? item?.topic ?? "未归类"),
@@ -1009,6 +1014,9 @@
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         up_mid: Number(item?.up_mid ?? 0) || 0,
         published_at: String(item?.published_at ?? "").trim(),
         published_label: String(item?.published_label ?? "").replace(/\s+/g, " ").trim().slice(0, 64),
@@ -1575,7 +1583,12 @@
         const label = opt.defaultChecked ? `${opt.label}（推荐）` : opt.label;
         return `<label class="init-source-row"><input type="checkbox" value="${escapeHtml(opt.key)}" data-init-source="${escapeHtml(opt.key)}"${checked}><span>${escapeHtml(label)}</span></label>`;
       }).join("");
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      const bangumiDisabled = selected.has("bangumi") ? "" : " disabled";
+      const bangumiUsername = state.initBangumiUsernameTouched
+        ? state.initBangumiUsername
+        : state.config?.sources?.bangumi?.username || state.initBangumiUsername || "";
+      const bangumiInput = `<label class="init-source-row"><span>Bangumi 公开用户名（可留空，仅启用发现）</span><input id="initBangumiUsername" maxlength="128" autocomplete="off" value="${escapeHtml(bangumiUsername)}"${bangumiDisabled}></label>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
@@ -1723,6 +1736,8 @@
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {
           state.initSelectedSources = selectedInitSourcesFromDom();
+          const bangumiUsername = grid.querySelector("#initBangumiUsername");
+          if (bangumiUsername) bangumiUsername.disabled = !state.initSelectedSources.includes("bangumi");
           // Refresh just the checklist so the B 站 row flips between hard
           // prerequisite and skippable hint as the checkbox changes.
           const checklist = grid.querySelector(".init-onboarding .init-checklist");
@@ -1730,6 +1745,10 @@
             checklist.innerHTML = initChecklistMarkup(state.initStatus, state.initSelectedSources);
           }
         });
+      });
+      grid.querySelector("#initBangumiUsername")?.addEventListener("input", (event) => {
+        state.initBangumiUsername = event.currentTarget.value || "";
+        state.initBangumiUsernameTouched = true;
       });
     }
 
@@ -1839,6 +1858,15 @@
         renderAll();
         return;
       }
+      const bangumiUsername = String(
+        $("#initBangumiUsername")?.value || state.initBangumiUsername || ""
+      ).trim();
+      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername) {
+        state.initReason = INIT_REASON_TEXT.no_profile_signal_sources;
+        state.initBusy = false;
+        renderAll();
+        return;
+      }
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         state.initReason = "还没检测到 B 站登录。先登录 bilibili.com，或取消勾选 B 站再开始。";
         state.initBusy = false;
@@ -1852,10 +1880,14 @@
         return;
       }
       try {
+        const payload = { sources: selected };
+        if (selected.includes("bangumi")) {
+          payload.source_options = { bangumi: { username: bangumiUsername } };
+        }
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
+          body: JSON.stringify(payload),
           timeoutMs: 60000
         });
         state.initStatus = { ...(state.initStatus || {}), ...started };
@@ -2858,6 +2890,7 @@
       if (platform === "bilibili" && item.bvid) return `https://www.bilibili.com/video/${encodeURIComponent(item.bvid)}`;
       if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
       if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
+      if (platform === "bangumi" && item.content_id) return `https://bgm.tv/subject/${encodeURIComponent(item.content_id)}`;
       if (platform === "reddit") return "";
       return "";
     }
@@ -2927,11 +2960,15 @@
 
     function recommendationStats(item) {
       const segments = [];
+      const sourceRank = Math.trunc(Number(item.source_rank) || 0);
       if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
       if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
       if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
       if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
       if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+      if (item.rating_score > 0) segments.push(`评分 ${item.rating_score.toFixed(1)}`);
+      if (item.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+      if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
       return segments.join(" · ");
     }
 
@@ -5504,6 +5541,39 @@
       return selected.length > 0 ? selected : ["search"];
     }
 
+    const BANGUMI_SOURCE_MODE_FIELDS = [
+      ["search", "bangumiModeSearch"],
+      ["ranked", "bangumiModeRanked"],
+      ["latest", "bangumiModeLatest"],
+    ];
+    const BANGUMI_SUBJECT_TYPE_FIELDS = [
+      ["anime", "bangumiTypeAnime"],
+      ["book", "bangumiTypeBook"],
+      ["game", "bangumiTypeGame"],
+      ["music", "bangumiTypeMusic"],
+      ["real", "bangumiTypeReal"],
+    ];
+
+    function setCheckedValues(fields, rawValues) {
+      const fallback = fields.map(([value]) => value);
+      const selected = new Set(
+        (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+          .map((value) => String(value).trim())
+          .filter(Boolean),
+      );
+      fields.forEach(([value, id]) => {
+        const el = document.getElementById(id);
+        if (el) el.checked = selected.has(value);
+      });
+    }
+
+    function collectCheckedValues(fields, fallback) {
+      const selected = fields
+        .filter(([, id]) => document.getElementById(id)?.checked === true)
+        .map(([value]) => value);
+      return selected.length > 0 ? selected : fallback;
+    }
+
     function joinPath(directory, filename) {
       const dir = String(directory || "").trim();
       const name = String(filename || "").trim();
@@ -5537,8 +5607,8 @@
 
     // Unified per-source login / cookie status (GET /api/sources/status),
     // rendered with separate scheduling and credential/plugin states.
-    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
-    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
+    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -5546,7 +5616,8 @@
       youtube: "youtubeEnabled",
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
-      reddit: "redditEnabled"
+      reddit: "redditEnabled",
+      bangumi: "bangumiEnabled"
     };
     const SOURCE_ACCESS_STATE = {
       ok: { tone: "ready", label: "接入可用" },
@@ -5562,7 +5633,8 @@
       error: { tone: "danger", label: "检查失败" },
       expired: { tone: "danger", label: "凭据失效" },
       expired_cookie: { tone: "danger", label: "Cookie 失效" },
-      blocked: { tone: "danger", label: "接入受阻" }
+      blocked: { tone: "danger", label: "接入受阻" },
+      disabled: { tone: "muted", label: "来源未启用" }
     };
 
     function setSourceBadge(badge, text, tone) {
@@ -5862,6 +5934,7 @@
       setInput("shareTwitter", scheduler.pool_source_shares?.twitter);
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
+      setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -6002,6 +6075,19 @@
       setInput("redditDailyRelatedBudget", config.sources?.reddit?.daily_related_budget);
       setInput("redditRequestInterval", config.sources?.reddit?.request_interval_seconds);
       setInput("redditMinInterval", config.sources?.reddit?.min_interval_minutes);
+      setSelect("bangumiEnabled", config.sources?.bangumi?.enabled === true ? "on" : "off");
+      setInput("bangumiUsername", config.sources?.bangumi?.username);
+      setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, config.sources?.bangumi?.source_modes);
+      setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, config.sources?.bangumi?.subject_types);
+      setInput("bangumiDailySearchBudget", config.sources?.bangumi?.daily_search_budget);
+      setInput("bangumiDailyRankedBudget", config.sources?.bangumi?.daily_ranked_budget);
+      setInput("bangumiDailyLatestBudget", config.sources?.bangumi?.daily_latest_budget);
+      setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
+      setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
+      setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      if (!state.initBangumiUsernameTouched) {
+        state.initBangumiUsername = config.sources?.bangumi?.username || "";
+      }
       void renderSourcesStatus();
       void renderSourceCredentials();
 
@@ -6062,6 +6148,9 @@
         comment_count: Number(item?.comment_count ?? 0) || 0,
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
+        rating_score: Number(item?.rating_score ?? 0) || 0,
+        rating_count: Number(item?.rating_count ?? 0) || 0,
+        source_rank: Number(item?.source_rank ?? 0) || 0,
         turns: delightTurnList(item.turns)
       };
     }
@@ -6974,6 +7063,18 @@
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
             min_interval_minutes: getIntInput("redditMinInterval", 60)
+          },
+          bangumi: {
+            enabled: $("#bangumiEnabled").value === "on",
+            username: getInput("bangumiUsername"),
+            subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+            source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("bangumiDailySearchBudget", 300),
+            daily_ranked_budget: getIntInput("bangumiDailyRankedBudget", 100),
+            daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
+            request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
+            min_interval_minutes: getIntInput("bangumiMinInterval", 60),
+            bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
           }
         },
         scheduler: {
@@ -6998,7 +7099,8 @@
             youtube: getIntInput("shareYoutube", 1),
             twitter: getIntInput("shareTwitter", 1),
             zhihu: getIntInput("shareZhihu", 1),
-            reddit: getIntInput("shareReddit", 1)
+            reddit: getIntInput("shareReddit", 1),
+            bangumi: getIntInput("shareBangumi", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -7651,7 +7753,7 @@
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -7661,6 +7763,7 @@
         if (shares.twitter !== undefined) setInput("shareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");

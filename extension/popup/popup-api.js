@@ -325,12 +325,17 @@ export async function fetchSourcesStatus() {
   return requestJson("/sources/status", { method: "GET" });
 }
 
-export async function startInit({ force = false, sources } = {}) {
+export async function startInit({ force = false, sources, bangumiUsername = "" } = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {
     payload.sources = sources;
+  }
+  if (Array.isArray(sources) && sources.includes("bangumi")) {
+    payload.source_options = {
+      bangumi: { username: String(bangumiUsername || "").trim() },
+    };
   }
   return requestJson("/init", {
     method: "POST",

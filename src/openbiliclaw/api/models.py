@@ -243,6 +243,9 @@ class RecommendationOut(BaseModel):
     # so the card stats row is not left with a lone like count.
     favorite_count: int = 0
     comment_count: int = 0
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
     up_mid: int = 0
 
 
@@ -413,6 +416,9 @@ class PendingDelightOut(BaseModel):
     comment_count: int = 0
     danmaku_count: int = 0
     favorite_count: int = 0
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
 
 
 class PendingDelightResponse(BaseModel):
@@ -624,8 +630,10 @@ class SourceStatusItem(BaseModel):
     - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
     - ``no_auth``    — source needs no login (YouTube, public).
 
-    ``logged_in`` is a convenience flag (``state in {ok, ready, no_auth}``) so
-    the UI can pick a dot colour without re-deriving the rule.
+    ``logged_in`` is a legacy convenience flag
+    (``state in {ok, ready, no_auth}``) so the UI can pick a dot colour without
+    re-deriving the rule. For anonymous sources it represents local readiness,
+    not a literal authenticated session.
     """
 
     enabled: bool = False
@@ -651,6 +659,7 @@ class SourcesStatusResponse(BaseModel):
     twitter: SourceStatusItem = Field(default_factory=SourceStatusItem)
     zhihu: SourceStatusItem = Field(default_factory=SourceStatusItem)
     reddit: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    bangumi: SourceStatusItem = Field(default_factory=SourceStatusItem)
 
 
 class SourceCredentialItem(BaseModel):
@@ -672,6 +681,7 @@ class SourcesCredentialsResponse(BaseModel):
     twitter: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     zhihu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     reddit: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    bangumi: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
 
 
 class NotificationAckIn(BaseModel):
@@ -1703,6 +1713,19 @@ class RedditSourceConfigOut(BaseModel):
     min_interval_minutes: int = 60
 
 
+class BangumiSourceConfigOut(BaseModel):
+    enabled: bool = False
+    username: str = ""
+    subject_types: list[str] = Field(default_factory=lambda: ["anime", "book", "game"])
+    source_modes: list[str] = Field(default_factory=lambda: ["search", "ranked", "latest"])
+    daily_search_budget: int = 300
+    daily_ranked_budget: int = 100
+    daily_latest_budget: int = 100
+    request_interval_seconds: int = 1
+    min_interval_minutes: int = 60
+    bootstrap_limit: int = 300
+
+
 class SourcesConfigOut(BaseModel):
     browser: SourcesBrowserConfigOut = Field(default_factory=SourcesBrowserConfigOut)
     bilibili: BilibiliSourceConfigOut = Field(default_factory=BilibiliSourceConfigOut)
@@ -1712,6 +1735,7 @@ class SourcesConfigOut(BaseModel):
     twitter: TwitterSourceConfigOut = Field(default_factory=TwitterSourceConfigOut)
     zhihu: ZhihuSourceConfigOut = Field(default_factory=ZhihuSourceConfigOut)
     reddit: RedditSourceConfigOut = Field(default_factory=RedditSourceConfigOut)
+    bangumi: BangumiSourceConfigOut = Field(default_factory=BangumiSourceConfigOut)
 
 
 class SchedulerConfigOut(BaseModel):

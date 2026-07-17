@@ -399,6 +399,15 @@ def _prompt_visible_content_fields(content: DiscoveredContent) -> dict[str, obje
         for field_name in _PROMPT_VISIBLE_METRIC_FIELDS
     }
     fields["tags"] = list(getattr(content, "tags", []) or [])
+    rating_score = float(getattr(content, "rating_score", 0.0) or 0.0)
+    rating_count = int(getattr(content, "rating_count", 0) or 0)
+    source_rank = int(getattr(content, "source_rank", 0) or 0)
+    if rating_score > 0:
+        fields["rating_score"] = rating_score
+    if rating_count > 0:
+        fields["rating_count"] = rating_count
+    if source_rank > 0:
+        fields["source_rank"] = source_rank
     return fields
 
 
@@ -471,6 +480,12 @@ class DiscoveredContent:
     reply_count: int = 0
     retweet_count: int = 0
     bookmark_count: int = 0
+    # Catalog metrics (Bangumi and future catalog-style sources). These are
+    # deliberately separate from engagement counts: a 1–10 rating is not a
+    # like, and rating participants are not comments.
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
     tags: list[str] = field(default_factory=list)
     topic_key: str = ""
     topic_group: str = ""  # Coarse semantic category (e.g. "强化学习") for diversity
@@ -573,6 +588,9 @@ class DiscoveredContent:
             "reply_count": self.reply_count,
             "retweet_count": self.retweet_count,
             "bookmark_count": self.bookmark_count,
+            "rating_score": self.rating_score,
+            "rating_count": self.rating_count,
+            "source_rank": self.source_rank,
             "relevance_score": self.relevance_score,
             "relevance_reason": self.relevance_reason,
             "candidate_tier": self.candidate_tier,

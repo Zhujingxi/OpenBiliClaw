@@ -4,6 +4,13 @@
 
 ---
 
+## Unreleased：Bangumi 来源接入（2026-07-17）
+
+- **新增第八个正式内容来源 Bangumi**：使用官方 `v0` API 匿名只读直连，`BangumiDiscoveryProducer` 以 `search / ranked / latest` 三分支、逐日预算、cursor、最小间隔和 `Retry-After` 冷却接入统一关键词与 `discovery_candidates → shared LLM eval/admission → content_cache` 主链；`sort=date` 在三端明确显示为“按日期浏览（可能含未播条目）”。用户显式提供公开用户名后，可把公开收藏转换为统一事件参与 guided init；Bangumi-only 初始化缺用户名会在预留 run 前拒绝，混合来源则仅跳过该画像分支并返回 warning。
+- **目录评分不再冒充社交互动**：新增通用 `rating_score / rating_count / source_rank`，与 Bangumi 真实收藏人数一起贯穿 `DiscoveredContent`、待评估池、正式缓存、推荐/惊喜 API、桌面/移动/扩展卡片；排名按原始序号 `#N` 展示，不套互动人数的万/亿缩写。canonical identity、点击 URL 与保存 identity 均识别 `bangumi/bgm`、`bgm.tv/subject/<id>` 与 `bangumi.tv/subject/<id>`，封面代理白名单加入 `lain.bgm.tv`。
+- **三端配置、状态和只读诊断齐备**：`[sources.bangumi]` 支持开关、公开用户名、条目类型、分支预算、节流和 bootstrap 上限，候选池 share 默认 `1`；桌面 Web、扩展设置/初始化与 packaged setup 同步接入。新增 `fetch-bangumi`、`discover-bangumi`、`discover-bangumi-ranked`、`discover-bangumi-latest` 只读 smoke，以及正式 `discover --source bangumi [--force]`；状态页纯本地读取，不因打开设置访问上游。首版明确不收 Cookie/token、不新增扩展 host permission、不调用 Bangumi 站内写接口。设计与验收见 `docs/plans/2026-07-17-bangumi-source-{spec,plan}.md`，模块说明见 `docs/modules/bangumi.md`。
+- **Fable review 收口运行边界**：显式 `discover --source bangumi` 不再被后台 scheduler 总开关误判为 disabled，并补全 disabled/no-profile 指引；每日预算改为跨分支去重与最终 limit 后按实际保留候选扣账，空白 keyword claim 直接标 failed，429 则 rollback；本地状态读取不再为 cooldown 临时构造 producer，匿名来源的 legacy `logged_in` 改为表达本地 ready 状态而非简单复制 enabled。复核进一步补上 browse total 缩小时超界 cursor 的 400 自愈、搜索第二词限流时保留首词候选、small-limit 下 subject type 持久化轮转、guided init 显式空用户名覆盖旧配置且三端草稿保留、设置页完整五类型，以及目录评分字段仅在非零时进入 evaluator prompt，避免改变存量平台模型输入。
+
 ## v0.3.173 / extension v0.3.173 / desktop v0.3.173：自动更新链路全面加固（2026-07-16）
 
 后端源码走 `backend-v0.3.173`，浏览器插件走 `extension-v0.3.173`，桌面安装包走 `desktop-v0.3.173`。三渠道版本重新对齐（0.3.172 因未发 extension tag 导致聚合校验失败、Latest 页面短暂空资产,已降级为 prerelease;本版为所有渠道的推荐升级目标）。

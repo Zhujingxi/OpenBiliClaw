@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_docs_homepage_mentions_reddit_source() -> None:
+def test_docs_homepage_mentions_reddit_and_bangumi_sources() -> None:
     html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
     project_version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
@@ -13,8 +13,12 @@ def test_docs_homepage_mentions_reddit_source() -> None:
     assert "Reddit 推荐" in html
     assert "sourceRedditTitle" in html
     assert "sourceRedditText" in html
+    assert "Bangumi 推荐" in html
+    assert "sourceBangumiTitle" in html
+    assert "sourceBangumiText" in html
     assert "知乎 / Reddit 登录态任务桥" in html
-    assert "Zhihu, Reddit, and Web sources" in html
+    assert "Zhihu, Reddit, Bangumi, and Web sources" in html
+    assert "不申请 `bgm.tv` host permission" in html
     assert f'"softwareVersion": "{project_version}"' in html
 
 

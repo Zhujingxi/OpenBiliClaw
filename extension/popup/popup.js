@@ -160,6 +160,8 @@ const state = {
   runtimeStatus: null,
   runtimeEvent: null,
   runtimeConfig: null,
+  initBangumiUsername: "",
+  initBangumiUsernameTouched: false,
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -482,6 +484,13 @@ function renderRuntimeToggles(config = state.runtimeConfig) {
 function applyRuntimeConfig(config) {
   if (!config) return;
   state.runtimeConfig = config;
+  if (!state.initBangumiUsernameTouched) {
+    state.initBangumiUsername = String(config.sources?.bangumi?.username || "").trim();
+    const input = document.getElementById("initBangumiUsername");
+    if (input instanceof HTMLInputElement) {
+      input.value = state.initBangumiUsername;
+    }
+  }
   renderRuntimeToggles(config);
 }
 
@@ -1211,6 +1220,25 @@ function _renderInitSources() {
     row.append(box, span);
     elements.initSources.append(row);
   }
+  const bangumiRow = document.createElement("label");
+  bangumiRow.className = "init-source-row";
+  const bangumiLabel = document.createElement("span");
+  bangumiLabel.textContent = "Bangumi 公开用户名（可留空，仅启用发现）";
+  const bangumiInput = document.createElement("input");
+  bangumiInput.id = "initBangumiUsername";
+  bangumiInput.maxLength = 128;
+  bangumiInput.autocomplete = "off";
+  bangumiInput.disabled = true;
+  bangumiInput.value = state.initBangumiUsername;
+  bangumiInput.addEventListener("input", () => {
+    state.initBangumiUsername = bangumiInput.value;
+    state.initBangumiUsernameTouched = true;
+  });
+  bangumiRow.append(bangumiLabel, bangumiInput);
+  elements.initSources.append(bangumiRow);
+  elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
+    bangumiInput.disabled = !event.currentTarget.checked;
+  });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
   hint.textContent = INIT_SOURCE_LOGIN_HINT;
@@ -1229,6 +1257,13 @@ function _readSelectedInitSources() {
     }
   }
   return selected;
+}
+
+function _readInitBangumiUsername() {
+  state.initBangumiUsername = String(
+    document.getElementById("initBangumiUsername")?.value || "",
+  ).trim();
+  return state.initBangumiUsername;
 }
 
 // Idle entry: source checkboxes + the actionable button + a one-line note.
@@ -1434,9 +1469,19 @@ function _startInitProgressPoll() {
 async function handleStartInitClick() {
   // Snapshot the source selection BEFORE we replace the panel contents.
   const selectedSources = _readSelectedInitSources();
+  const bangumiUsername = _readInitBangumiUsername();
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
+    return;
+  }
+  if (
+    selectedSources.length === 1 &&
+    selectedSources[0] === "bangumi" &&
+    !bangumiUsername
+  ) {
+    _setInitStartButton("开始初始化", true);
+    _setInitReason("只选择 Bangumi 时，请填写公开用户名以读取公开收藏。");
     return;
   }
   _setInitStartButton("检查中…", false);
@@ -1490,7 +1535,7 @@ async function handleStartInitClick() {
   // re-validates in its critical section, so a race can still 409 — surface
   // that and let the user retry.
   try {
-    await startInit({ force: false, sources: selectedSources });
+    await startInit({ force: false, sources: selectedSources, bangumiUsername });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
@@ -2870,11 +2915,15 @@ function formatCountCn(n) {
 // > 0 appear; when nothing qualifies the result is "" (render nothing).
 function recommendationStats(item) {
   const segments = [];
+  const sourceRank = Math.trunc(Number(item?.source_rank) || 0);
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
+  if (item?.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+  if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
   return segments.join(" · ");
 }
 
@@ -5622,7 +5671,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -5648,7 +5697,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = `这位 UP：${item.up_name}`;
+    metaLine.textContent = item.up_name ? `这位 UP：${item.up_name}` : "";
     appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
@@ -6928,6 +6977,37 @@ function bindSettings() {
     return selected.length > 0 ? selected : ["search"];
   }
 
+  const BANGUMI_SOURCE_MODE_FIELDS = [
+    ["search", "cfgBangumiModeSearch"],
+    ["ranked", "cfgBangumiModeRanked"],
+    ["latest", "cfgBangumiModeLatest"],
+  ];
+  const BANGUMI_SUBJECT_TYPE_FIELDS = [
+    ["anime", "cfgBangumiTypeAnime"],
+    ["book", "cfgBangumiTypeBook"],
+    ["game", "cfgBangumiTypeGame"],
+    ["music", "cfgBangumiTypeMusic"],
+    ["real", "cfgBangumiTypeReal"],
+  ];
+
+  function setCheckedValues(fields, rawValues) {
+    const fallback = fields.map(([value]) => value);
+    const selected = new Set(
+      (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+        .map((value) => String(value).trim())
+        .filter(Boolean),
+    );
+    for (const [value, id] of fields) {
+      const el = document.getElementById(id);
+      if (el) el.checked = selected.has(value);
+    }
+  }
+
+  function collectCheckedValues(fields, fallback) {
+    const selected = fields.filter(([, id]) => checked(id)).map(([value]) => value);
+    return selected.length > 0 ? selected : fallback;
+  }
+
   // Unified per-source login / cookie status from GET /api/sources/status,
   // rendered as a uniform colored-dot line inside every source card. Only X is
   // live-validated (state ok); the rest report local cookie/token readiness.
@@ -6946,6 +7026,7 @@ function bindSettings() {
     error: "#e74c3c",
     expired_cookie: "#e74c3c",
     blocked: "#e74c3c",
+    disabled: "#9aa0a6",
   };
   const SOURCE_STATUS_LABEL = {
     ok: "接入可用",
@@ -6963,8 +7044,9 @@ function bindSettings() {
     expired: "凭据失效",
     expired_cookie: "Cookie 失效",
     blocked: "接入受阻",
+    disabled: "来源未启用",
   };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -7126,6 +7208,17 @@ function bindSettings() {
     setVal("cfgRedditDailyRelatedBudget", cfg.sources?.reddit?.daily_related_budget);
     setVal("cfgRedditRequestInterval", cfg.sources?.reddit?.request_interval_seconds);
     setVal("cfgRedditMinInterval", cfg.sources?.reddit?.min_interval_minutes);
+    const bangumiEnabled = document.getElementById("cfgBangumiEnabled");
+    if (bangumiEnabled) bangumiEnabled.checked = cfg.sources?.bangumi?.enabled === true;
+    setVal("cfgBangumiUsername", cfg.sources?.bangumi?.username);
+    setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, cfg.sources?.bangumi?.source_modes);
+    setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, cfg.sources?.bangumi?.subject_types);
+    setVal("cfgBangumiDailySearchBudget", cfg.sources?.bangumi?.daily_search_budget);
+    setVal("cfgBangumiDailyRankedBudget", cfg.sources?.bangumi?.daily_ranked_budget);
+    setVal("cfgBangumiDailyLatestBudget", cfg.sources?.bangumi?.daily_latest_budget);
+    setVal("cfgBangumiRequestInterval", cfg.sources?.bangumi?.request_interval_seconds);
+    setVal("cfgBangumiMinInterval", cfg.sources?.bangumi?.min_interval_minutes);
+    setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
     void renderSourcesStatus();
 
     // General
@@ -7179,6 +7272,7 @@ function bindSettings() {
     setVal("cfgPoolShareTwitter", cfg.scheduler?.pool_source_shares?.twitter);
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
+    setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -7358,6 +7452,18 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
           min_interval_minutes: getInt("cfgRedditMinInterval", 60),
         },
+        bangumi: {
+          enabled: checked("cfgBangumiEnabled"),
+          username: getVal("cfgBangumiUsername"),
+          subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+          source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgBangumiDailySearchBudget", 300),
+          daily_ranked_budget: getInt("cfgBangumiDailyRankedBudget", 100),
+          daily_latest_budget: getInt("cfgBangumiDailyLatestBudget", 100),
+          request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
+          min_interval_minutes: getInt("cfgBangumiMinInterval", 60),
+          bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -7391,6 +7497,7 @@ function bindSettings() {
           twitter: getInt("cfgPoolShareTwitter", 1),
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
+          bangumi: getInt("cfgPoolShareBangumi", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -7660,6 +7767,7 @@ function bindSettings() {
             twitter: checked("cfgTwitterEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
+            bangumi: checked("cfgBangumiEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
@@ -7669,6 +7777,7 @@ function bindSettings() {
             twitter: getInt("cfgPoolShareTwitter", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
+            bangumi: getInt("cfgPoolShareBangumi", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -7679,6 +7788,7 @@ function bindSettings() {
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");

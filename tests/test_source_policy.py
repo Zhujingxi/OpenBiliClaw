@@ -24,6 +24,7 @@ def test_source_enabled_map_reads_bilibili_switch() -> None:
         "twitter": False,
         "zhihu": False,
         "reddit": False,
+        "bangumi": False,
     }
 
 
@@ -38,6 +39,7 @@ def test_default_enabled_sources_make_xiaohongshu_opt_in() -> None:
         "twitter": False,
         "zhihu": False,
         "reddit": False,
+        "bangumi": False,
     }
     assert effective_pool_source_shares(config) == {"bilibili": 5}
 
@@ -134,6 +136,14 @@ def test_effective_pool_source_shares_keep_enabled_reddit() -> None:
         "bilibili": 6,
         "reddit": 3,
     }
+
+
+def test_effective_pool_source_shares_keep_enabled_bangumi() -> None:
+    config = Config()
+    config.sources.bangumi.enabled = True
+    config.scheduler.pool_source_shares = {"bilibili": 5, "bangumi": 2}
+
+    assert effective_pool_source_shares(config) == {"bilibili": 5, "bangumi": 2}
 
 
 def test_effective_pool_source_shares_backfills_enabled_zhihu_default() -> None:

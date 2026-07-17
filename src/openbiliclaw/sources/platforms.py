@@ -12,6 +12,7 @@ PLATFORM_YOUTUBE = "youtube"
 PLATFORM_TWITTER = "twitter"
 PLATFORM_ZHIHU = "zhihu"
 PLATFORM_REDDIT = "reddit"
+PLATFORM_BANGUMI = "bangumi"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,12 @@ SOURCE_FAMILY_RULES = (
         platform_aliases=frozenset({"reddit", "rd"}),
         source_prefixes=("reddit-", "reddit_"),
         url_hosts=("reddit.com", "redd.it"),
+    ),
+    SourceFamilyRule(
+        family=PLATFORM_BANGUMI,
+        platform_aliases=frozenset({"bangumi", "bgm"}),
+        source_prefixes=("bangumi-", "bangumi_"),
+        url_hosts=("bgm.tv", "bangumi.tv"),
     ),
 )
 

@@ -23,6 +23,7 @@ import {
   requestJson,
   reshuffleRecommendations,
   respondToAvoidanceProbe,
+  startInit,
   startChatTurn,
   submitInsightFeedback,
   updateConfig,
@@ -37,6 +38,33 @@ test("guided init API calls all have finite request deadlines", () => {
   assert.match(source, /requestJson\("\/init-status", \{ method: "GET", timeoutMs: 45000 \}\)/);
   assert.match(source, /body: JSON\.stringify\(payload\),\s+timeoutMs: 60000,/);
   assert.match(source, /requestJson\("\/init\/cancel", \{ method: "POST", timeoutMs: 15000 \}\)/);
+});
+
+test("startInit sends Bangumi username in scoped source_options", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: " sai " });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "sai" } },
+  });
+});
+
+test("popup preserves the Bangumi username across init-panel rerenders", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /initBangumiUsername:\s*""/);
+  assert.match(source, /bangumiInput\.value = state\.initBangumiUsername/);
+  assert.match(
+    source,
+    /bangumiInput\.addEventListener\("input", \(\) => \{\s*state\.initBangumiUsername/,
+  );
 });
 
 test("popup exposes cancel, offline feedback, and indeterminate init progress", () => {
@@ -204,6 +232,9 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
         comment_count: 0,
         favorite_count: 0,
         danmaku_count: 0,
+        rating_score: 0,
+        rating_count: 0,
+        source_rank: 0,
       },
     ],
   });
@@ -265,6 +296,9 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
         comment_count: 0,
         favorite_count: 0,
         danmaku_count: 0,
+        rating_score: 0,
+        rating_count: 0,
+        source_rank: 0,
       },
     ],
   });
@@ -366,6 +400,9 @@ test("fetchRecommendations normalizes cover urls from the recommend endpoint", a
       comment_count: 0,
       favorite_count: 0,
       danmaku_count: 0,
+      rating_score: 0,
+      rating_count: 0,
+      source_rank: 0,
     },
   ]);
 });

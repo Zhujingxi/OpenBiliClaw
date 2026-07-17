@@ -2822,7 +2822,8 @@ def test_init_guides_missing_runtime_config_interactively(
     #   5. "n" — skip module overrides
     #   6. "y" — allow LAN access
     #   7-9. "" — accept Bili history/favorite/follow init limits
-    #   10+. "n" — skip optional source prompts (xhs / douyin / youtube / X / zhihu / reddit)
+    #   10+. "n" — skip optional source prompts
+    #               (xhs / douyin / youtube / X / zhihu / reddit / bangumi)
     wizard_input = (
         "\n".join(
             [
@@ -2835,6 +2836,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "",
                 "",
                 "",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -2912,9 +2914,13 @@ def test_init_guides_missing_auth_interactively(
     # test exercising the manual-paste path, send "2" first.
     # v0.3.89+: init asks whether to allow LAN access before the source
     # prompts. Answer yes, accept Bili signal-limit defaults, then send "n"
-    # to XHS / Douyin / YouTube / X / Zhihu / Reddit so this test stays focused on the
+    # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Bangumi so this test stays focused on the
     # cookie-prompt path.
-    result = runner.invoke(app, ["init"], input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\n")
+    result = runner.invoke(
+        app,
+        ["init"],
+        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\n",
+    )
 
     assert result.exit_code == 1
     assert fake_auth.saved_cookie == "SESSDATA=valid"
@@ -4132,6 +4138,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -4174,6 +4181,7 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -5875,6 +5883,84 @@ def test_discover_source_reddit_runs_formal_producer(monkeypatch: pytest.MonkeyP
     assert calls == {"limit": 11}
 
 
+def test_explicit_bangumi_discovery_ignores_scheduler_master_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config_module.Config()
+    cfg.scheduler.enabled = False
+    cfg.sources.bangumi.enabled = True
+    captured: dict[str, object] = {}
+    result_reasons = iter(("disabled", "no_profile"))
+    panels: list[tuple[str, str, str]] = []
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"preferences": {"interests": [{"name": "科幻"}]}}
+
+    class FakeBangumiClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self) -> "FakeBangumiClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeProducer:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        async def produce_if_due(self, *, limit: int, force: bool) -> dict[str, object]:
+            captured["limit"] = limit
+            captured["force"] = force
+            return {"reason": next(result_reasons), "discovered": 0, "enqueued": 0}
+
+    class FakeKeywordFetch:
+        def __init__(self, **kwargs: object) -> None:
+            captured["keyword_fetch_kwargs"] = kwargs
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", object)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", FakeSoulEngine)
+    monkeypatch.setattr(cli_module, "_build_discovery_engine", object)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_candidate_pipeline",
+        lambda **kwargs: SimpleNamespace(last_admitted_items=[]),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_fetch.KeywordFetchCoordinator",
+        FakeKeywordFetch,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.bangumi_client.BangumiClient",
+        FakeBangumiClient,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.bangumi_producer.BangumiDiscoveryProducer",
+        FakeProducer,
+    )
+    monkeypatch.setattr(cli_module, "_print_page_title", lambda *args: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_print_status_panel",
+        lambda kind, title, body: panels.append((kind, title, body)),
+    )
+
+    cli_module._run_bangumi_discovery(limit=7, force=True)
+    cli_module._run_bangumi_discovery(limit=7, force=True)
+
+    assert captured["enabled"] is True
+    assert captured["limit"] == 7
+    assert captured["force"] is True
+    assert [title for _, title, _ in panels] == [
+        "Bangumi discovery 已禁用",
+        "尚未初始化用户画像",
+    ]
+
+
 def test_discover_reddit_default_uses_rdt_command_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7128,6 +7214,16 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
         ),
         raising=False,
     )
+
+    async def _fetch_bangumi(*, username: str):
+        events = list(state.get("bangumi_events", []))
+        counts: dict[str, int] = {}
+        for event in events:
+            status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        return events, counts, "ok" if events else ("missing_username" if not username else "empty")
+
+    monkeypatch.setattr(cli_module, "_fetch_bangumi_init_data", _fetch_bangumi)
     monkeypatch.setattr(cli_module, "_maybe_update_init_source_shares", lambda counts: None)
 
     class _Memory:
@@ -7316,6 +7412,51 @@ def test_run_guided_init_without_bilibili_builds_profile_from_reddit(monkeypatch
     assert state["propagated"] == state["reddit_events"]
 
 
+def test_run_guided_init_builds_profile_from_bangumi_public_collection(monkeypatch) -> None:
+    import asyncio
+
+    state = _guided_init_pipeline_doubles(monkeypatch)
+    state["bangumi_events"] = [
+        {
+            "event_type": "like",
+            "title": "Cowboy Bebop",
+            "url": "https://bgm.tv/subject/253",
+            "context": "在Bangumi点赞了《Cowboy Bebop》",
+            "metadata": {
+                "source_platform": "bangumi",
+                "collection_status": "collect",
+                "user_rate": 9,
+            },
+        }
+    ]
+
+    result = asyncio.run(
+        cli_module.run_guided_init(
+            client=None,
+            memory=state["memory"],
+            soul_engine=state["soul"],
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=False,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            include_zhihu=False,
+            include_reddit=False,
+            include_bangumi=True,
+            bangumi_username="sai",
+            target_pool_count=10,
+            discover_backfill=state["backfill"],
+        )
+    )
+
+    assert result.bangumi_status == "ok"
+    assert result.bangumi_scope_counts == {"collect": 1}
+    assert state["analyzed"] == state["bangumi_events"]
+    assert state["profile_history"][0]["source_platform"] == "bangumi"
+    assert state["propagated"] == state["bangumi_events"]
+
+
 def test_init_command_rejects_no_sources_at_all(monkeypatch) -> None:
     """--no-bilibili plus every other source disabled must exit with guidance."""
     runner = CliRunner()
@@ -7341,6 +7482,45 @@ def test_init_command_rejects_no_sources_at_all(monkeypatch) -> None:
 
     assert result.exit_code == 1
     assert "至少需要一个数据来源" in result.output
+
+
+def test_init_command_rejects_bangumi_only_without_username(monkeypatch) -> None:
+    from openbiliclaw.config import Config
+
+    runner = CliRunner()
+    monkeypatch.setattr(cli_module, "_prepare_init_runtime", lambda: None)
+    monkeypatch.setattr(
+        cli_module, "_get_runtime_database", lambda: SimpleNamespace(max_llm_usage_id=lambda: None)
+    )
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object())
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: object())
+    monkeypatch.setattr(
+        cli_module,
+        "_build_bilibili_client",
+        lambda: (_ for _ in ()).throw(AssertionError("client must not be built")),
+    )
+    monkeypatch.setattr(cli_module, "_ask_network_binding", lambda: False)
+    monkeypatch.setattr(cli_module, "_persist_api_host_choice", lambda **kwargs: None)
+    monkeypatch.setattr(cli_module, "_maybe_setup_password_in_init", lambda **kwargs: None)
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: Config())
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--no-bilibili",
+            "--no-xhs",
+            "--no-douyin",
+            "--no-youtube",
+            "--no-x",
+            "--no-zhihu",
+            "--no-reddit",
+            "--yes-bangumi",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Bangumi 缺少公开用户名" in result.output
 
 
 def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -> None:

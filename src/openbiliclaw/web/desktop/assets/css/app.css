@@ -82,6 +82,7 @@
       /* ─── ⑩ 第三方平台色 ─── */
       --platform-zhihu: #0f88eb;
       --platform-reddit: #ff4500;
+      --platform-bangumi: #6950a1;
       --platform-bilibili: #fb7299;
       --platform-xiaohongshu: #ff2442;
       --source-pending: #3898ec;
@@ -185,6 +186,7 @@
       --message-shadow: rgba(0, 0, 0, 0.28) 0 10px 28px;
       --platform-zhihu: #70bdfb;
       --platform-reddit: #ff8a5c;
+      --platform-bangumi: #a99ad5;
       --platform-bilibili: #fc9eb9;
       --platform-xiaohongshu: #ff6b7f;
       --source-pending: #70bdfb;
@@ -237,6 +239,7 @@
         --message-shadow: rgba(0, 0, 0, 0.28) 0 10px 28px;
         --platform-zhihu: #70bdfb;
         --platform-reddit: #ff8a5c;
+      --platform-bangumi: #a99ad5;
       --platform-bilibili: #fc9eb9;
       --platform-xiaohongshu: #ff6b7f;
         --source-pending: #70bdfb;
@@ -660,6 +663,7 @@
     .cover[data-platform="twitter"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--fg), var(--surface) 82%)); }
     .cover[data-platform="zhihu"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-zhihu), var(--surface-warm) 62%)); }
     .cover[data-platform="reddit"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-reddit), var(--surface-warm) 62%)); }
+    .cover[data-platform="bangumi"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-bangumi), var(--surface-warm) 62%)); }
     .cover[data-platform="bilibili"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-bilibili), var(--surface-warm) 60%)); }
     .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .video-card.is-skeleton { pointer-events: none; }
@@ -686,6 +690,7 @@
     .platform[data-platform="zhihu"] { background: var(--platform-zhihu); color: var(--accent-on); }
     .platform[data-platform="xiaohongshu"] { background: var(--platform-xiaohongshu); color: var(--accent-on); }
     .platform[data-platform="reddit"] { background: var(--platform-reddit); color: var(--accent-on); }
+    .platform[data-platform="bangumi"] { background: var(--platform-bangumi); color: #fff; }
     .platform[data-platform="youtube"] { background: var(--danger); color: var(--accent-on); }
     .platform[data-platform="douyin"] { background: var(--fg); color: var(--surface); }
     .platform[data-platform="twitter"] { background: var(--fg); color: var(--surface); }

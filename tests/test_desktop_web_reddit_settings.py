@@ -43,11 +43,11 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     assert '"redditEnabled"' in js
     assert (
         'const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", '
-        '"youtube", "twitter", "zhihu", "reddit"]'
+        '"youtube", "twitter", "zhihu", "reddit", "bangumi"]'
     ) in js
     assert (
         'const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", '
-        '"youtube", "twitter", "zhihu", "reddit"]'
+        '"youtube", "twitter", "zhihu", "reddit", "bangumi"]'
     ) in js
     assert 'reddit: $("#redditEnabled").value === "on"' in js
     assert 'if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit)' in js

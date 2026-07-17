@@ -409,6 +409,8 @@ CLI 入口：
 
 `popup/` 目录当前承载 side panel 页面，已具备：
 
+- guided init 来源选择新增 Bangumi：它不要求浏览器登录，选中后显示公开用户名输入，并通过 `source_options.bangumi.username` 发送；Bangumi-only 空用户名在客户端提示，后端仍会权威拒绝。混合来源空用户名允许继续，Bangumi 只参与后续 discovery。popup 把输入草稿保存在页面 state，前置检查失败或 idle 面板重渲染不会丢失；显式清空会原样送到后端，不会回退旧配置用户名。
+
 - 后端连接状态检查：离线判定以 `/api/ping` 为准，顶部徽标区分绿色「已连接」、琥珀色「重连中」和红色「未连接」。`runtime-stream` 断开时先进入「重连中」并立即复检 `/api/ping`：HTTP 仍通则保留 API 可用状态并等待 WebSocket 自行重连，只有 ping 返回失败或抛错才进入「未连接」并启动 `popup-connection-poller.js` 每 1 秒重探测；HTTP 恢复后先回到「重连中」，流重新打开后才显示「已连接」。协调器使用 revision guard 忽略连接恢复后才返回的旧失败探活，主动切换后端地址关闭旧流也不会触发故障断线提示
 - 设置页的协议（HTTP / HTTPS）、后端地址（默认 `127.0.0.1`）和端口（默认 `8420`）由 `popup-backend-config.js` 一起写入 `chrome.storage.local`。局域网 / 远程地址保存前通过 `optional_host_permissions` 请求精确 origin；公网主机名和公网 IP 不允许 HTTP。popup、service worker、任务派发、cookie 同步和调试中继都在调用时解析当前 endpoint；变更后清除旧短会话并重连。远程认证使用 `obc_extension_device_key` 换取结构化 `obc_auth_session`，普通 HTTP 发 Bearer Header，只有 runtime WebSocket 和图片代理 URL 携带短会话 query
 - 顶部手机图标会打开移动端二维码面板，二维码完全在 popup 本地生成，指向当前插件后端地址的 `/m/`；打开后的 `/m/` 页面已带 PWA manifest 与 iOS Web Clip 元数据，可从手机浏览器保存到主屏幕；当前不提供离线缓存，仍需手机能访问运行中的本地后端。当前 host 仍是 `127.0.0.1` / `localhost` 时，插件会先通过轻量 `/api/qr-info` 读取后端探测到的局域网 IP 并替换二维码 host；端点失败或没有有效 LAN IP 才保留 loopback URL 与警告。在 460px 以下侧边栏宽度，顶部 Web / 二维码 / 消息 / 设置按钮会换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠
@@ -416,14 +418,14 @@ CLI 入口：
 - 从 `/api/recommendations` 拉取推荐列表
 - 从 `/api/profile-summary` 同步 `speculative_interests` 与 `speculative_avoidances`，分别渲染待确认兴趣和待确认避雷方向；正向兴趣项会保留 `probe_mode` / `challenge`，profile 页面点击“喜欢”会带 `surface="profile"`，不和 runtime inbox 的默认 probe 确认混在一起
 - 收到 `avoidance.probe` runtime 事件后在 inbox 渲染避雷确认卡；「确认避雷 / 搁置避雷 / 不是雷点 / 多聊聊」分别以 `confirm / defer / reject / chat` 调 `/api/avoidance-probes/respond`，其中 `chat` 进入 `scope=avoidance_probe` 的 durable turn
-- 设置页会通过 `/api/config` 读取并保存后端配置，保存后请求后端热重载；当前覆盖 LLM provider/key/model、LLM 显式备选 provider、DeepSeek reasoning、OpenRouter headers、embedding provider/key/model/显式备选 provider、per-module LLM override、B 站浏览器、通用 source 浏览器、Bilibili / 小红书 / 抖音 / YouTube source 开关、各源 discovery 预算、数据目录、SQLite 路径、调度、后端自动更新开关与检查间隔、候选池平台配比、真实 refresh / proactive push / speculator idle 频率、猜测兴趣和避雷探针参数、完整日志路径和日志清理参数
+- 设置页会通过 `/api/config` 读取并保存后端配置，保存后请求后端热重载；当前覆盖 LLM/embedding、B 站与通用 source 浏览器、八个平台 source 开关与 discovery 预算、Bangumi 公开用户名/五种合法条目类型/分支/节流/bootstrap 上限、数据目录、SQLite、调度、更新、候选池平台配比、探针与日志参数。Bangumi 凭据行明确显示“公开只读 API，无需 Cookie/token”。
 - 成功读取 `/api/config` 后，popup API 会把配置快照写入 `chrome.storage.local["openbiliclaw.config_cache"]`。后端离线时设置页会读取缓存填表，并显示缓存时间；没有缓存时显示错误横条且不伪造默认值
 - 后端返回 `degraded=true` 时，设置页会在表单顶部展示降级原因和 blocking issues，保存按钮显示“保存并提示重启”；保存响应带 `restart_required=true` 时用 warning tone 提示用户重启 daemon
 - 设置页的“按已有信号建议比例”会把当前页面上尚未保存的平台开关和比例一并 POST 到 `/api/config/source-share-suggestion`，按本地事件库的平台分布填入 B 站 / 小红书 / 抖音 / YouTube 占比，用户仍需点击保存才写入 `config.toml`
 - 设置页保存配置时会保留后端已有的高级字段：`save_config()` 会串行化 scheduler speculation / auto-update 和 logging unmanaged cleanup 字段，避免 UI 修改常用项时把隐藏高级项写回默认值
 - 设置页“版本与更新”只展示后端更新状态并调用 `/api/update-status`、`/api/update/check`、`/api/update/apply` 的 backend target；插件版本行只读取本地 manifest 版本并链接 GitHub Releases。
 - 推荐 tab 现已改成“换一批”，会调用 `/api/recommendations/reshuffle` 直接从 discovery pool 秒级换出一批新推荐
-- `/api/recommendations` 的 `RecommendationOut` 现增量携带 `duration`、`view_count`、`like_count`、`danmaku_count`、`up_mid`、`published_at`、`published_label` 元信息。popup 对推荐和惊喜卡统一采用精确时间优先、来源相对标签兜底、缺失隐藏的规则；文本用 `textContent` 写入，精确时间提供本地完整时间 tooltip。
+- `/api/recommendations` 的 `RecommendationOut` 携带 duration、互动、发布时间和 Bangumi `rating_score / rating_count / source_rank` 元信息。popup 对推荐和惊喜卡统一采用“真实值才显示”的规则；目录评分独立于 like/comment，精确时间优先、来源相对标签兜底。
 - 登录态来源只保留语义明确的发布时间：B 站 DOM 日期作为 `published_label`，小红书状态对象、抖音 `create_time`、知乎内容创建时间和 Reddit `created_utc` 作为 `published_at`；字段缺失时不写属性，不用任务执行/DOM 观察/互动时间猜测，也不额外请求详情页。回传后由后端统一规范化并进入候选池。
 - 推荐 tab 滚到底时会调用 `/api/recommendations/append` 继续往下续 10 条，不会把当前这一屏直接替换掉；首次渲染、切回推荐 tab 和追加完成后也会再检查一次底部距离，避免停在底部时没有新 scroll 事件导致续页卡住
 - 收到后台 `refresh.pool_updated` 时，推荐 tab 只更新池子数量、最近补货数量、方向提示和底部可换提示；移动 Web 空态也会用同一 runtime status 重新计算“还有多少可换 / 多少素材在整理”。不会调用 `/api/recommendations` 替换当前列表，用户已续页出来的历史内容会保留到下一次主动“换一批”或页面重新初始化。首次初始化推荐列表后会再读一次 `/api/runtime-status`，避免 `/api/recommendations` 从候选池 bootstrap 后仍显示 bootstrap 前库存
@@ -434,7 +436,7 @@ CLI 入口：
 - popup 推荐卡片现在不会再把空 `expression / topic_label` 补成固定占位文案；后端预生成没完成时，这两块会直接隐藏
 - popup 的收藏 / 稍后再看 toggle 统一走 `createSavedToggleRegistry()`：同一 bvid 可以被多个按钮注册，任一按钮增删成功后所有可见按钮同步 `aria-pressed` / title / 文本；旧的懒加载 `GET /api/watch-later/{bvid}` / `GET /api/favorites/{bvid}` 结果如果发生在用户点击或收藏列表加载 / 移除之后会被忽略，避免状态回跳。收藏列表中移除条目也会反向同步惊喜横幅里的收藏按钮，推荐卡稍后再看也会与惊喜横幅稍后再看同步。注册表会在每次状态同步时剪除已脱离 DOM（`isConnected === false`）的按钮，并在推荐列表 / 惊喜横幅 `replaceChildren` 后调用 `pruneDetached()`，避免按钮随重渲染在注册表里无限堆积。
 - 亮色 side panel 视觉系统：顶部 hero + inline 状态徽标、胶囊 tab、统一卡片体系，整体更贴近 B 站内容产品气质
-- 推荐 tab：展示内容封面、标题、作者 / UP 主、`topic_label`、朋友式推荐文案，并通过“打开内容”跳转到 `content_url`；缺少 URL 时按 `source_platform` 对 B 站 / YouTube 做安全 fallback
+- 推荐 tab：展示内容封面、标题、作者 / UP 主、`topic_label`、朋友式推荐文案，并通过“打开内容”跳转到 `content_url`；缺少 URL 时按 `source_platform` 构造安全 fallback，Bangumi Subject 固定使用 `bgm.tv/subject/<id>`
 - 如果某条内容暂时没有可用封面，卡片会回退到占位态，不影响换片和反馈
 - 推荐封面不再依赖原生 `loading="lazy"`，避免内部滚动容器续页时新卡片封面偶发空白
 - 底部提示区已升级为更明显的状态横条，会按成功 / 提示 / 错误切换对比度和状态点，减少“反馈发出去了但看不见”的感觉

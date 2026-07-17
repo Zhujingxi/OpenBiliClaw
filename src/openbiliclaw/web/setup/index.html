@@ -81,6 +81,10 @@
     .init-source-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
     .init-source-row input { width: 16px; height: 16px; padding: 0; accent-color: var(--accent); }
     .init-source-row input:disabled { opacity: .75; }
+    .init-source-detail { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
+    .init-source-detail input { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--text); padding: 8px 10px; }
+    .init-source-detail input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .init-source-detail input:disabled { opacity: .58; }
     .progress { margin-top: 18px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
     .progress-track { height: 8px; border-radius: 999px; background: #10131a; overflow: hidden; }
     .progress-fill { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
@@ -270,6 +274,7 @@
       { key: "twitter", label: "X" },
       { key: "zhihu", label: "知乎" },
       { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" },
     ];
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
@@ -280,6 +285,7 @@
       already_initialized: "已经初始化过了。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写公开用户名以读取公开收藏。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -291,12 +297,13 @@
       none: "",
     };
     const INIT_SOURCE_LOGIN_HINT =
-      "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+      "勾选要纳入初始化的平台，勾选会同时开启该来源。Bangumi 使用公开 API，不需登录；其他平台请先在当前浏览器登录。";
     const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let initPollInFlight = false, initPollPending = false, initOffline = false;
+    let initBangumiUsername = "", initBangumiUsernameTouched = false;
     // Providers whose api_key is already persisted server-side (GET /api/config
     // returns it masked). Lets a relaunch save step 0 without re-pasting the
     // key: PUT /api/config only touches fields present in the payload.
@@ -575,6 +582,25 @@
         label.append(input, text);
         root.append(label);
       }
+      const bangumiDetail = document.createElement("label");
+      bangumiDetail.className = "init-source-detail";
+      const bangumiText = document.createElement("span");
+      bangumiText.textContent = "Bangumi 公开用户名（可留空，仅启用条目发现）";
+      const bangumiInput = document.createElement("input");
+      bangumiInput.id = "initBangumiUsername";
+      bangumiInput.maxLength = 128;
+      bangumiInput.autocomplete = "off";
+      bangumiInput.value = initBangumiUsername;
+      bangumiInput.disabled = !root.querySelector('input[data-init-source="bangumi"]')?.checked;
+      bangumiInput.addEventListener("input", () => {
+        initBangumiUsername = bangumiInput.value || "";
+        initBangumiUsernameTouched = true;
+      });
+      bangumiDetail.append(bangumiText, bangumiInput);
+      root.append(bangumiDetail);
+      root.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
+        bangumiInput.disabled = !event.currentTarget.checked;
+      });
       const hint = document.createElement("p");
       hint.className = "hint";
       hint.textContent = INIT_SOURCE_LOGIN_HINT;
@@ -1045,6 +1071,17 @@
         setInitReason(INIT_REASON_TEXT.no_sources_selected);
         return;
       }
+      const bangumiUsernameInput = $("#initBangumiUsername");
+      const bangumiUsername = String(
+        bangumiUsernameInput ? bangumiUsernameInput.value : initBangumiUsername
+      ).trim();
+      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername) {
+        renderInitChecklist(status, selected);
+        $("#startInit").disabled = false;
+        $("#startInit").textContent = "开始初始化";
+        setInitReason(INIT_REASON_TEXT.no_profile_signal_sources);
+        return;
+      }
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
@@ -1061,10 +1098,14 @@
       }
 
       try {
+        const payload = { sources: selected };
+        if (selected.includes("bangumi")) {
+          payload.source_options = { bangumi: { username: bangumiUsername } };
+        }
         const r = await fetchWithTimeout("/api/init", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
+          body: JSON.stringify(payload),
         }, 60000);
         if (!r.ok) {
           let details = {};
@@ -1133,6 +1174,12 @@
         if (r.ok) {
           const data = await r.json();
           const llm = (data.config || data)?.llm || {};
+          const bangumiUsername = (data.config || data)?.sources?.bangumi?.username || "";
+          if (!initBangumiUsernameTouched) initBangumiUsername = String(bangumiUsername);
+          const bangumiInput = $("#initBangumiUsername");
+          if (bangumiInput && !initBangumiUsernameTouched) {
+            bangumiInput.value = initBangumiUsername;
+          }
           for (const [name, cfg] of Object.entries(llm)) {
             if (cfg && typeof cfg === "object") {
               savedProviderConfigs.set(name, { ...cfg });

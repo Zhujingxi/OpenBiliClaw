@@ -182,6 +182,7 @@ def test_mixed_states_same_cover_key_prefers_keep(tmp_path: Path) -> None:
 def test_is_allowed_image_url() -> None:
     assert is_allowed_image_url(BILI) is True
     assert is_allowed_image_url(XHS) is True
+    assert is_allowed_image_url("https://lain.bgm.tv/pic/cover/l/demo.jpg") is True
     # content_cache.cover_url forms: protocol-relative and http normalize to https.
     assert is_allowed_image_url(BILI_PROTO_RELATIVE) is True
     assert is_allowed_image_url(BILI_HTTP) is True

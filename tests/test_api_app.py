@@ -2280,7 +2280,16 @@ class TestBackendAPI:
         assert response.status_code == 200
         body = response.json()
         # One status item per source, each with the unified shape.
-        for key in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"):
+        for key in (
+            "bilibili",
+            "xiaohongshu",
+            "douyin",
+            "youtube",
+            "twitter",
+            "zhihu",
+            "reddit",
+            "bangumi",
+        ):
             assert key in body, f"{key} missing from sources status"
             item = body[key]
             assert set(item) >= {"enabled", "state", "detail", "logged_in"}
@@ -2298,6 +2307,40 @@ class TestBackendAPI:
             "stale",
             "error",
         }
+        assert body["bangumi"]["state"] == "disabled"
+        assert body["bangumi"]["logged_in"] is False
+
+    def test_bangumi_source_status_uses_local_readiness_for_logged_in_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-source-status.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        unverified = client.get("/api/sources/status").json()["bangumi"]
+
+        assert unverified["state"] == "unverified"
+        assert unverified["logged_in"] is False
+
+        database.conn.execute(
+            "INSERT INTO bangumi_discovery_runs(mode, units, discovered, reason) "
+            "VALUES ('search', 1, 1, 'ok')"
+        )
+        database.conn.commit()
+        ready = client.get("/api/sources/status").json()["bangumi"]
+
+        assert ready["state"] == "ready"
+        assert ready["logged_in"] is True
 
     def test_sources_credentials_returns_current_local_credentials(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2338,6 +2381,8 @@ class TestBackendAPI:
         assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
+        assert body["bangumi"]["available"] is False
+        assert body["bangumi"]["label"] == "无需凭据"
 
         masked = client.get("/api/sources/credentials").json()
         assert masked["bilibili"]["value"] != body["bilibili"]["value"]
@@ -5588,6 +5633,9 @@ class TestBackendAPI:
                     "danmaku_count": 890,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 987654321,
                     "published_at": "2026-07-08T06:30:00Z",
                     "published_label": "3 days ago",
@@ -5614,6 +5662,9 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 0,
                     "published_at": "",
                     "published_label": "",
@@ -5835,6 +5886,9 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 0,
                     "published_at": "",
                     "published_label": "",
@@ -9122,6 +9176,19 @@ class TestBackendAPI:
         assert signal.payload["source_platform"] == "reddit"
         assert signal.payload["content_url"] == "https://www.reddit.com/comments/abc123/"
 
+    def test_recommendation_click_builds_bangumi_fallback_url(self) -> None:
+        """Bangumi subjects must never fall back to a Bilibili video URL."""
+        from openbiliclaw.api.app import _fallback_recommendation_click_url
+
+        assert (
+            _fallback_recommendation_click_url(
+                source_platform="bangumi",
+                content_id="326",
+                bvid="326",
+            )
+            == "https://bgm.tv/subject/326"
+        )
+
     def test_recommendation_click_endpoint_persists_dwell_fields(self) -> None:
         """When the extension reports dwell on the click-through, those
         fields flow into the persisted click event so storage can classify
@@ -10180,6 +10247,72 @@ class TestBackendAPI:
         assert data["config"]["sources"]["reddit"]["daily_subreddit_budget"] == 4
         assert data["config"]["scheduler"]["pool_source_shares"]["reddit"] == 3
 
+    def test_put_config_persists_and_validates_bangumi_source(self, monkeypatch, tmp_path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            )
+        )
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "bangumi": {
+                        "enabled": True,
+                        "username": " sai ",
+                        "subject_types": ["anime", "book", "music"],
+                        "source_modes": ["search", "ranked", "latest"],
+                        "daily_search_budget": 21,
+                        "daily_ranked_budget": 8,
+                        "daily_latest_budget": 5,
+                        "request_interval_seconds": 2,
+                        "min_interval_minutes": 30,
+                        "bootstrap_limit": 250,
+                    }
+                },
+                "scheduler": {"pool_source_shares": {"bilibili": 8, "bangumi": 3}},
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.enabled is True
+        assert cfg.sources.bangumi.username == "sai"
+        assert cfg.sources.bangumi.subject_types == ("anime", "book", "music")
+        assert cfg.sources.bangumi.source_modes == ("search", "ranked", "latest")
+        assert cfg.sources.bangumi.bootstrap_limit == 250
+        assert cfg.scheduler.pool_source_shares["bangumi"] == 3
+        assert response.json()["config"]["sources"]["bangumi"]["username"] == "sai"
+
+        invalid = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"username": "bad/name"}}},
+        )
+        assert invalid.status_code == 400
+        assert "username" in invalid.json()["detail"].lower()
+
+        invalid_mode = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"source_modes": ["hot"]}}},
+        )
+        assert invalid_mode.status_code == 400
+        assert "source_modes" in invalid_mode.json()["detail"]
+
     def test_put_config_updates_embedding_credentials(
         self,
         monkeypatch,
@@ -10796,12 +10929,18 @@ class TestEmbeddingAndCompatProviderE2E:
         cfg.sources.twitter.daily_search_budget = 7
         cfg.sources.twitter.daily_feed_budget = 14
         cfg.sources.twitter.daily_creator_budget = 5
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "sai"
+        cfg.sources.bangumi.subject_types = ("anime", "book")
+        cfg.sources.bangumi.source_modes = ("search", "ranked")
+        cfg.sources.bangumi.daily_search_budget = 23
         cfg.scheduler.pool_source_shares = {
             "bilibili": 6,
             "xiaohongshu": 2,
             "douyin": 2,
             "youtube": 1,
             "twitter": 3,
+            "bangumi": 4,
         }
         cfg.scheduler.account_sync_interval_hours = 9
         cfg.scheduler.refresh_check_interval_seconds = 75
@@ -10872,6 +11011,18 @@ class TestEmbeddingAndCompatProviderE2E:
             "subreddit",
             "related",
         ]
+        assert data["sources"]["bangumi"] == {
+            "enabled": True,
+            "username": "sai",
+            "subject_types": ["anime", "book"],
+            "source_modes": ["search", "ranked"],
+            "daily_search_budget": 23,
+            "daily_ranked_budget": 100,
+            "daily_latest_budget": 100,
+            "request_interval_seconds": 1,
+            "min_interval_minutes": 60,
+            "bootstrap_limit": 300,
+        }
         assert data["scheduler"]["pool_source_shares"] == {
             "bilibili": 6,
             "xiaohongshu": 2,
@@ -10880,6 +11031,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "twitter": 3,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 4,
         }
         assert data["scheduler"]["account_sync_interval_hours"] == 9
         assert data["scheduler"]["refresh_check_interval_seconds"] == 75
@@ -11268,6 +11420,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "twitter": 1,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.signal_event_threshold == 9
@@ -11406,6 +11559,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "bangumi": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -11415,6 +11569,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": False,
                 "zhihu": False,
                 "reddit": False,
+                "bangumi": False,
             },
             "suggested_shares": {
                 "bilibili": 8,
@@ -11492,6 +11647,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "bangumi": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -11501,6 +11657,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": False,
                 "zhihu": False,
                 "reddit": True,
+                "bangumi": False,
             },
             "suggested_shares": {
                 "bilibili": 6,
@@ -12196,6 +12353,122 @@ class TestGuidedInitEndpoints:
         assert captured["include_bili"] is False
         assert captured["include_reddit"] is True
         assert db.get_latest_init_run() is not None
+
+    def test_init_rejects_bangumi_only_without_public_username(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bangumi"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "no_profile_signal_sources"
+        assert db.get_latest_init_run() is None
+
+    def test_init_accepts_scoped_bangumi_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"username": " sai "}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "sai"
+
+    def test_init_mixed_sources_allow_discovery_only_bangumi(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "mixed-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "previous-user"
+        app.state.runtime_context.config = cfg
+        app.state.runtime_context.degraded = True
+        saved_usernames: list[str] = []
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda saved: saved_usernames.append(saved.sources.bangumi.username),
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["reddit", "bangumi"],
+                    "source_options": {"bangumi": {"username": ""}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            assert resp.json()["warnings"]
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_reddit"] is True
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == ""
+        assert cfg.sources.bangumi.username == ""
+        assert saved_usernames == [""]
+
+    def test_init_uses_configured_bangumi_username_when_option_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "configured-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "configured-user"
+        app.state.runtime_context.config = cfg
+        captured = self._capture_run_guided_init(monkeypatch)
+
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "configured-user"
+
+    def test_init_rejects_unknown_source_options(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={"sources": ["reddit"], "source_options": {"weibo": {}}},
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_source_options"
+        assert db.get_latest_init_run() is None
 
     def _capture_run_guided_init(self, monkeypatch):
         """Replace the shared pipeline with an async capture of its kwargs.

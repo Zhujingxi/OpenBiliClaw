@@ -39,6 +39,8 @@ function normalizeSourcePlatform(value, url = "") {
     zhihu: "zhihu",
     rd: "reddit",
     reddit: "reddit",
+    bgm: "bangumi",
+    bangumi: "bangumi",
   };
   if (aliases[key]) return aliases[key];
   if (key) return key;
@@ -50,6 +52,7 @@ function normalizeSourcePlatform(value, url = "") {
   if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
   if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
   if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
+  if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
   return "";
 }
 
@@ -156,6 +159,8 @@ const PLATFORM_DISPLAY_NAMES = {
   x: "X",
   zhihu: "知乎",
   reddit: "Reddit",
+  bgm: "Bangumi",
+  bangumi: "Bangumi",
 };
 
 export function platformDisplayName(value) {
@@ -177,6 +182,7 @@ export function buildContentUrl(item) {
   const vid = normalizeText(item?.content_id || item?.bvid);
   if (!vid) return "";
   if (platform === "youtube") return buildYouTubeUrl(vid);
+  if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }
@@ -255,7 +261,7 @@ export function normalizeRecommendation(item) {
     id: Number(item?.id ?? 0),
     bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
-    up_name: normalizeText(item?.up_name) || DEFAULT_UP_NAME,
+    up_name: normalizeText(item?.up_name) || (sourcePlatform === "bangumi" ? "" : DEFAULT_UP_NAME),
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),
@@ -276,6 +282,9 @@ export function normalizeRecommendation(item) {
     comment_count: Number(item?.comment_count ?? 0) || 0,
     favorite_count: Number(item?.favorite_count ?? 0) || 0,
     danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
+    rating_score: Number(item?.rating_score ?? 0) || 0,
+    rating_count: Number(item?.rating_count ?? 0) || 0,
+    source_rank: Number(item?.source_rank ?? 0) || 0,
   };
 }
 
@@ -384,6 +393,9 @@ export function normalizeDelightCandidate(item) {
     comment_count: Number(item?.comment_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
+    rating_score: Number(item?.rating_score ?? 0),
+    rating_count: Number(item?.rating_count ?? 0),
+    source_rank: Number(item?.source_rank ?? 0),
     // Local UI fields preserved across re-normalizations
     turns: Array.isArray(item?.turns) ? item.turns : [],
     composer_open: Boolean(item?.composer_open),

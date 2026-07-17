@@ -761,6 +761,54 @@ class ZhihuPlatformSearchBackend:
         return _dedupe_previews([item for item in previews if item is not None], limit=limit)
 
 
+class BangumiPlatformSearchBackend:
+    """Use the official Bangumi API as inspiration-only grounding."""
+
+    platform = "bangumi"
+    risk_controlled = False
+
+    def __init__(self, client: object, *, subject_types: tuple[str, ...]) -> None:
+        self._client = client
+        self._subject_types = subject_types
+
+    async def search(self, query: str, *, limit: int, pages: int = 1) -> list[ExaPreviewItem]:
+        search = getattr(self._client, "search_subjects", None)
+        if not callable(search):
+            return []
+        page = await search(
+            query,
+            subject_types=self._subject_types,
+            limit=max(1, int(limit)),
+            offset=0,
+            sort="match",
+        )
+        rows = getattr(page, "data", [])
+        previews: list[ExaPreviewItem] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            subject_id = _first_text(row.get("id"))
+            title = _first_text(row.get("name_cn"), row.get("name"))
+            if not subject_id or not title:
+                continue
+            summary = _first_text(row.get("summary"), row.get("short_summary"))
+            raw_tags_value = row.get("tags")
+            raw_tags: list[Any] = raw_tags_value if isinstance(raw_tags_value, list) else []
+            tags = ", ".join(
+                _first_text(tag.get("name"))
+                for tag in raw_tags[:5]
+                if isinstance(tag, dict) and _first_text(tag.get("name"))
+            )
+            previews.append(
+                ExaPreviewItem(
+                    title=_clean_title(title),
+                    url=f"https://bgm.tv/subject/{subject_id}",
+                    highlights=tuple(_clean_highlights([summary, tags])),
+                )
+            )
+        return _dedupe_previews(previews, limit=max(1, int(limit)))
+
+
 def _douyin_preview(row: dict[str, Any]) -> ExaPreviewItem | None:
     aweme_id = _first_text(row.get("aweme_id"), row.get("id"), row.get("item_id"))
     title = _first_text(
@@ -942,6 +990,7 @@ def build_platform_source_backends(
     douyin_client: object | None = None,
     xhs_search: PlatformSearchCallable | None = None,
     zhihu_search: PlatformSearchCallable | None = None,
+    bangumi_client: object | None = None,
 ) -> list[PlatformSearchBackend]:
     """Build inspiration-only backends for enabled synchronous platform sources."""
 
@@ -994,6 +1043,17 @@ def build_platform_source_backends(
     zhihu_cfg = getattr(sources, "zhihu", None)
     if bool(getattr(zhihu_cfg, "enabled", False)) and zhihu_search is not None:
         backends.append(ZhihuPlatformSearchBackend(zhihu_search))
+
+    bangumi_cfg = getattr(sources, "bangumi", None)
+    if bool(getattr(bangumi_cfg, "enabled", False)) and bangumi_client is not None:
+        backends.append(
+            BangumiPlatformSearchBackend(
+                bangumi_client,
+                subject_types=tuple(
+                    getattr(bangumi_cfg, "subject_types", ("anime", "book", "game"))
+                ),
+            )
+        )
     return backends
 
 
