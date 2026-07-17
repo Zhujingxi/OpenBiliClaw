@@ -4,6 +4,15 @@
 
 ---
 
+## v0.3.177：认知画像流水线 Wave D——topic 状态机 + 觉察提炼节奏（2026-07-17）
+
+认知画像流水线的 **Wave D（Phase 4 + 5，RECOMMENDED）**，收官。规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`。
+
+- **topic 生命周期状态机（Task 8）**：新增 `soul/topic_lifecycle.py`，给 interest（flat `InterestTag` 与 Onion `InterestDomain` 两层）叠加 `state ∈ {trial|active|decaying|archived}` + `evidence_count` + `last_evidence_at` + `parent_topic`。序列化点（`soul/profile.py`）**只在非默认时 emit 这些键**——默认 `active` 的 topic 与旧数据序列化**逐字节不变**，旧数据缺字段兼容默认 `active`。跃迁（常量带首轮校准注释）：新 topic 首见→`trial`；证据 ≥5 或持续 ≥7 天→`active`（`apply_evidence` 接在 `analyze_events`/`learn_from_dialogue`/反馈批偏好写 chokepoint）；`last_evidence_at` 静默 ≥30 天→`decaying`（权重×0.5），再 ≥30 天→`archived`（不删）；`archived`/`decaying` 遇新证据→直接复燃 `active`。衰减扫描 `scan_lifecycle` 并入 12h `ProfileConsolidator`（缺 `last_evidence_at` 的旧 topic 永不被扫，启用不团灭）。**dislike 改「归档+避雷」**（`archive_topics` 置 `archived` 保留台账不删）；**细分提议**（子类占父域权重 ≥60%）只经 `topic_subdivision_proposal` 记台账不执行（shadow）。所有跃迁进 `profile_update_ledger`（`topic_lifecycle` 写点）。
+- **最小消费 + 开关（Task 8）**：新增 `[soul].topic_lifecycle_serialization`（`off`|`on`，默认 `off`）。`off` 时 `build_profile_summary` 与未接状态机前**字节不变**（回放门）；`on` 时把 `archived` topic 排出 LLM 可见画像（domain/tag 两级）。进程启动由 `create_app`/CLI 读入设 `discovery.strategies._utils.set_topic_lifecycle_serialization`；trial 小流量推荐消费仍 out of scope。
+- **觉察提炼节奏（Task 9）**：`cognition_cycle` 除 12h 兜底外新增**提前触发**——未提炼事件 ≥30 条 或 强信号事件（`comment/danmaku/reply` 带文本 / `feedback` / `inferred_satisfaction∈{positive,negative}`）→ 本 tick 立即跑觉察。新增**单飞锁**（`run_if_due` 见锁被持有即跳过，due-check + watermark 消费全在锁内，重叠 tick / 提前触发抢跑恰一执行）；state JSON 写入 **tmp+fsync+`os.replace`** 原子化；异常/取消时 watermark 不前进（下轮重做）。同批事件 awareness prompt 输出路径不变（回放不变性）。
+- **架构图**：Wave D 只在 `soul/` 内部加状态字段与触发节奏，无新模块 / 跨模块布线 / 数据流变化，架构图（Wave C 已含态势门控节点）无需改动。
+
 ## v0.3.176：认知画像流水线 Wave C——态势门控（2026-07-17）
 
 认知画像流水线的 **Wave C（Phase 3）**：给深层画像写入一道一致性闸门。规格见 `docs/plans/2026-07-17-cognitive-profile-pipeline-{spec,plan}.md`。
