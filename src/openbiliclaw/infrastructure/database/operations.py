@@ -120,6 +120,7 @@ class _OwnedFile:
 
 
 _SNAPSHOT_ATTEMPTS = 3
+_MAX_RETAINED_STAGING_DIRECTORIES = 32
 _COPY_BUFFER_SIZE = 1024 * 1024
 
 
@@ -172,7 +173,10 @@ class SQLiteOperationalStore:
 
     def _backup(self, *, source: Path, destination: Path) -> Path:
         if not _secure_backup_platform_supported():
-            raise DatabaseBackupError("secure database backup is not supported on Windows")
+            raise DatabaseBackupError(
+                "secure database backup is not supported on Windows or other platforms; "
+                "it is supported only on Linux and macOS"
+            )
         source_path = source.expanduser().absolute()
         target = _prepare_destination(destination)
         if source_path == target:
@@ -373,14 +377,20 @@ def _integrity_ok(path: Path) -> bool:
 def _write_transaction_available(path: Path) -> bool:
     """Check queue write access without committing a persistent mutation."""
 
-    uri = f"file:{quote(str(path), safe='/')}?mode=rw"
     descriptor = -1
     try:
+        parent_mode = path.parent.lstat().st_mode
+        if not stat.S_ISDIR(parent_mode) or parent_mode & 0o222 == 0:
+            return False
         descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
         if not _descriptor_matches_regular_path(path, descriptor):
             return False
+        uri = _held_sqlite_uri(descriptor)
+        if uri is None:
+            return False
         probe_table = f"__openbiliclaw_write_probe_{secrets.token_hex(8)}"
         with sqlite3.connect(uri, uri=True, timeout=1.0) as connection:
+            connection.execute("PRAGMA journal_mode=MEMORY")
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(f'CREATE TABLE "{probe_table}" (value INTEGER NOT NULL)')
             connection.execute(f'INSERT INTO "{probe_table}" (value) VALUES (1)')
@@ -391,6 +401,25 @@ def _write_transaction_available(path: Path) -> bool:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _held_sqlite_uri(descriptor: int) -> str | None:
+    if os.name == "nt":
+        return None
+    held = os.fstat(descriptor)
+    for candidate in (f"/proc/self/fd/{descriptor}", f"/dev/fd/{descriptor}"):
+        candidate_descriptor = -1
+        try:
+            candidate_descriptor = os.open(candidate, os.O_RDWR)
+            resolved = os.fstat(candidate_descriptor)
+        except OSError:
+            continue
+        finally:
+            if candidate_descriptor >= 0:
+                os.close(candidate_descriptor)
+        if (resolved.st_dev, resolved.st_ino) == (held.st_dev, held.st_ino):
+            return f"file:{quote(candidate, safe='/')}?mode=rw"
+    return None
 
 
 def _descriptor_matches_regular_path(path: Path, descriptor: int) -> bool:
@@ -488,6 +517,13 @@ def _create_stable_source(
     last_error: OSError | None = None
     parents = tuple(dict.fromkeys((source.parent, snapshot_parent)))
     for parent in parents:
+        retained = sum(
+            1
+            for candidate in parent.glob(".obc-backup-source-*")
+            if _directory_without_symlink(candidate)
+        )
+        if retained >= _MAX_RETAINED_STAGING_DIRECTORIES:
+            continue
         try:
             directory = Path(tempfile.mkdtemp(prefix=".obc-backup-source-", dir=parent))
         except OSError as exc:
@@ -793,19 +829,17 @@ def _cleanup_staging_directory(
             name=name,
             identity=identity,
         )
-    for name, identity in owned_entries:
-        _require_staging_entry(
-            directory=directory,
-            directory_descriptor=directory_descriptor,
-            name=name,
-            identity=identity,
-        )
-        if directory_descriptor is None:
-            (directory / name).unlink()
-        else:
-            os.unlink(name, dir_fd=directory_descriptor)
-    _require_directory_identity(directory, directory_identity)
-    os.rmdir(directory)
+    # POSIX and macOS do not provide compare-and-unlink-by-inode. Retain this
+    # bounded, private hard-link set for explicit maintenance rather than risk
+    # deleting a pathname replacement after the identity check above.
+
+
+def _directory_without_symlink(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISDIR(metadata.st_mode)
 
 
 def _staging_entry_identity(

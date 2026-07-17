@@ -760,7 +760,57 @@ def test_backup_staging_directory_replacement_before_cleanup_is_a_safe_error(
     assert not destination.exists()
 
 
-def test_backup_path_identity_failure_does_not_leak_staging_directory(
+def test_backup_staging_cleanup_never_unlinks_a_verified_name_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    staging = tmp_path / ".obc-backup-source-race"
+    staging.mkdir(mode=0o700)
+    entry = staging / "source.db"
+    entry.write_text("owned", encoding="utf-8")
+    directory_descriptor = os.open(staging, os.O_RDONLY)
+    directory_metadata = staging.stat()
+    entry_metadata = entry.stat()
+    original_unlink = operations.os.unlink
+    replacement_created = False
+
+    def swap_before_unlink(path: object, **kwargs: object) -> None:
+        nonlocal replacement_created
+        if os.fsdecode(path) == "source.db" and not replacement_created:
+            replacement_created = True
+            os.rename(
+                "source.db",
+                "source.db.held",
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
+            replacement = os.open(
+                "source.db",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+            os.write(replacement, b"attacker-owned")
+            os.close(replacement)
+        original_unlink(path, **kwargs)
+
+    monkeypatch.setattr(operations.os, "unlink", swap_before_unlink)
+    try:
+        operations._cleanup_staging_directory(
+            directory=staging,
+            directory_descriptor=directory_descriptor,
+            directory_identity=(directory_metadata.st_dev, directory_metadata.st_ino),
+            entries=(("source.db", (entry_metadata.st_dev, entry_metadata.st_ino)),),
+        )
+    finally:
+        os.close(directory_descriptor)
+
+    assert not replacement_created
+    assert entry.read_text(encoding="utf-8") == "owned"
+
+
+def test_backup_path_identity_failure_retains_bounded_staging_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from openbiliclaw.infrastructure.database import operations
@@ -780,7 +830,9 @@ def test_backup_path_identity_failure_does_not_leak_staging_directory(
     with pytest.raises(DatabaseBackupError, match="stable database backup source"):
         SQLiteOperationalStore().backup(source=source, destination=destination)
 
-    assert not list(tmp_path.glob(".obc-backup-source-*"))
+    retained = list(tmp_path.glob(".obc-backup-source-*"))
+    assert len(retained) == 1
+    assert retained[0].is_dir()
     assert not list(tmp_path.glob(".backup-*.tmp"))
 
 

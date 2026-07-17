@@ -95,16 +95,18 @@ Automation may pre-set `OPENBILICLAW_LITELLM_BASE_URL` and
 application database is `data/vnext/openbiliclaw.db`, and the queue is
 `data/vnext/huey.db`. The fixed order is dependencies → private environment →
 verified stop of the previous managed pair → Alembic migration → API + worker →
-`doctor` → public and bearer-protected checks. A separate cross-process lifecycle
-lock serializes that entire source-install transaction. Private installer UUID,
-canonical-root, and monotonic-generation bindings prevent concurrent installs,
-copied state, or stale failure cleanup from taking ownership of a newer runtime.
-The lock UUID/device/inode is persisted in installer metadata. Concurrent first calls
-wait on the same O_EXCL-created anchor. A crash-orphaned anchor is sanitized and rebound
-in place only when its held FD proves a private, owner-matching, single-link regular file
-with the same pathname identity; recovery never pathname-unlinks it. POSIX also validates through a held
-parent-directory FD; Windows uses the equivalent direct-path branch without `dir_fd`
-and Python 3.11-compatible reparse-point detection. The binding is reread after lock
+`doctor` → public and bearer-protected checks. A stable cross-process guard at the
+checkout root is acquired before the inner lifecycle lock and installer metadata are
+sampled. The two layers serialize the complete transaction and share one exact lease:
+installer UUID, canonical root, monotonic generation, and anchor UUID/device/inode.
+The lease is revalidated after waiting, before work, on generation advance, and at exit,
+under one non-resettable deadline. Initial metadata is synced through a held temporary
+FD, `fchmod`ed on that FD on POSIX, and published with a no-replace hard link; the
+published pathname is never chmoded. POSIX opens `data/vnext` one held component at a
+time and rejects symlinks, junctions, inode replacement, and multiply linked anchors.
+Crash-orphan recovery is allowed only on POSIX after private regular-file, owner, mode,
+single-link, and pathname checks; native Windows fails closed because it lacks an
+equivalent ACL/descriptor recovery proof. The binding is reread after lock
 acquisition and before release. A missing/replaced bound lock path, or a
 symlink/junction ancestor, fails closed. A
 copied `.env` rebinds managed root/DB/Huey/instance fields while preserving secrets
@@ -133,7 +135,10 @@ If a Linux capability policy rejects `AT_EMPTY_PATH`, a fallback through
 `/proc/self/fd` is allowed only after it is verified against the held inode, using
 `AT_SYMLINK_FOLLOW`. The destination parent pathname is rebound to its held directory
 FD after directory sync. Windows or a platform without a safe publication primitive
-fails before destination reservation.
+fails before destination reservation. Verified private source hard-link staging
+directories are not pathname-deleted after use; at most 32 are retained per candidate
+parent. Operators must remove `.obc-backup-source-*` only when no backup is running once
+that cap is reached.
 
 API readiness is `GET /api/v1/system/readiness`. Except for the first-run onboarding
 exception, business endpoints require a bearer token matching

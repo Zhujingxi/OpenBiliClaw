@@ -88,14 +88,16 @@ MODE=local bash scripts/install.sh
 `OPENBILICLAW_LITELLM_API_KEY`。运行设置写入本地 `.env`，应用数据库写入
 `data/vnext/openbiliclaw.db`，queue 写入 `data/vnext/huey.db`。安装顺序固定为：
 依赖 → 私密环境 → 验明并停止旧 managed pair → Alembic migration → API + worker →
-`doctor` → public 和 bearer-protected readiness。源码安装用独立的跨进程 lifecycle
-lock 串行整段流程，并用私密 installer UUID、canonical root 和单调 generation 绑定
-process state，避免并发安装、复制目录或旧失败清理覆盖新运行实例。
-Lock 的 UUID/device/inode 会持久绑定到 installer metadata；首次并发调用会等待同一
-O_EXCL anchor；崩溃留下的未绑定 anchor 只有在 held FD 同时通过普通文件、单链接、owner、
-私密 mode 与 pathname identity 检查后才会原位清空并重新绑定，恢复过程不按 pathname 删除。
-POSIX 同时通过 held parent-directory FD 校验，Windows 使用不带 `dir_fd` 的
-direct-path 校验和 Python 3.11 可用的 reparse-point 检测。持锁后及退出前都会重读绑定；
+`doctor` → public 和 bearer-protected readiness。源码安装先取得 checkout 根目录下的稳定
+跨进程 guard，再读取或初始化内层 lifecycle lock 与 installer metadata；两层共同串行整段
+流程，并以完整 installer UUID、canonical root、单调 generation 和 anchor UUID/device/inode
+作为同一份 lease。等待结束、进入业务前、generation 更新及退出时都会精确复核两份 lease，
+且所有等待共用一个不可重置的截止时间。首次 metadata 通过 held temp FD 同步，在 POSIX
+上对该 FD 执行 `fchmod`，再 hard-link no-replace 发布；不会按发布后的 pathname chmod。
+POSIX 以 held root/parent FD 逐级打开 `data/vnext`，拒绝 symlink、junction、换 inode 或
+多 hard-link anchor。崩溃遗留的未绑定 anchor 仅在 POSIX 上通过普通文件、单链接、owner、
+私密 mode 与 pathname identity 检查后原位重绑；native Windows 因无等价 ACL/descriptor
+恢复证明而失败关闭。持锁后及退出前都会重读绑定；
 已绑定 pathname 缺失或换 inode，以及 symlink/junction ancestor，都会失败关闭；复制 `.env` 后，managed root/DB/Huey/instance 字段会
 重绑定当前 checkout，而已有 secret 与外部 LiteLLM connection 保持不变。
 停止/失败清理保留 ownership-bound dead state，直到下次 ownership-checked publication；
@@ -120,7 +122,9 @@ openbiliclaw db backup <destination>
 Linux `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` 原子 no-replace 创建目标名；Linux 在
 `AT_EMPTY_PATH` 被 capability policy 拒绝时，仅在验证 `/proc/self/fd` 仍绑定 held inode 后
 使用 `AT_SYMLINK_FOLLOW` fallback。Directory sync 后会重查 parent pathname 与 held dir FD，Windows 或缺少
-该安全 primitive 的平台会在创建或预留目标前失败关闭。
+该安全 primitive 的平台会在创建或预留目标前失败关闭。私有 source hard-link staging
+目录在验证后也不按 pathname 删除，以免删除并发替换；每个候选 parent 最多保留 32 个，
+到达上限后需在确认没有 backup 运行时由运维显式清理 `.obc-backup-source-*`。
 
 API readiness：`GET /api/v1/system/readiness`。除 first-run onboarding 例外外，
 业务端点需要 `.env` 中 `OPENBILICLAW_ACCESS_TOKEN` 对应的 bearer token。不要把

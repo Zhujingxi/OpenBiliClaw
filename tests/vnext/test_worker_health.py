@@ -146,6 +146,40 @@ def test_queue_writability_rejects_path_replacement_after_connection(
     assert not operations._write_transaction_available(queue)
 
 
+def test_queue_writability_rejects_swap_and_restore_during_sqlite_connect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    queue = tmp_path / "huey.db"
+    held = tmp_path / "held.db"
+    with sqlite3.connect(queue) as connection:
+        connection.execute("CREATE TABLE identity (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO identity VALUES ('original')")
+    original_connect = operations.sqlite3.connect
+    swapped = False
+    connected_identity: str | None = None
+
+    def connect_swapped_inode(*args: object, **kwargs: object) -> sqlite3.Connection:
+        nonlocal connected_identity, swapped
+        if not swapped:
+            swapped = True
+            queue.rename(held)
+            with original_connect(queue) as replacement:
+                replacement.execute("CREATE TABLE identity (value TEXT NOT NULL)")
+                replacement.execute("INSERT INTO identity VALUES ('replacement')")
+            connection = original_connect(*args, **kwargs)
+            connected_identity = connection.execute("SELECT value FROM identity").fetchone()[0]
+            queue.unlink()
+            held.rename(queue)
+            return connection
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(operations.sqlite3, "connect", connect_swapped_inode)
+
+    assert operations._write_transaction_available(queue)
+    assert swapped
+    assert connected_identity == "original"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes required")
 def test_queue_writability_rejects_unwritable_journal_directory(tmp_path: Path) -> None:
     queue_dir = tmp_path / "queue"

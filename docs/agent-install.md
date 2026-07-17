@@ -62,18 +62,19 @@ URL; they never contain secret values or the LiteLLM URL.
 
 ## Source-install sequence
 
-The order is intentionally fixed and failures propagate. A dedicated bounded
-cross-process lifecycle lock serializes the complete sequence; it is separate from
-the short `.env` writer lock, so concurrent prepare/start invocations cannot overlap
-migrations or publish competing process pairs. Installer metadata persistently binds
-the one lock UUID/device/inode before the first lifecycle proceeds. Concurrent first
-callers open and wait on the same O_EXCL-created anchor. If initialization crashes before
-metadata publication, recovery only sanitizes and rebinds the held inode after regular-file,
-single-link, owner, private-mode, and pathname-identity checks; it never pathname-unlinks
-the orphan. POSIX checks the bound identity through a held
-parent-directory FD; native Windows uses a direct-path branch without `dir_fd` plus
-Python 3.11-compatible reparse metadata. Both reread metadata after acquisition and
-before release. Once bound, an absent or replaced lock path fails closed instead of
+The order is intentionally fixed and failures propagate. A bounded POSIX lock on the
+held checkout-root directory is acquired before the persistent root-guard file and inner
+lifecycle lock are sampled; native Windows uses the root-guard file directly. These layers
+serialize the complete sequence separately from the short `.env` writer lock, so concurrent
+prepare/start invocations cannot overlap migrations or publish competing process pairs.
+Their lease contains the complete installer state plus anchor UUID/device/inode and is
+checked after waiting, before work, on a legitimate generation advance, and before release.
+All lock waits consume one absolute deadline. Initial metadata is synced and permissioned
+through its retained temporary FD before hard-link no-replace publication. POSIX opens each
+`data/vnext` component through held directory FDs. If initialization crashes before metadata
+publication, POSIX recovery only rebinds the held inode after regular-file, single-link,
+owner, private-mode, and pathname-identity checks; native Windows fails closed because no
+equivalent ACL/descriptor recovery proof is implemented. Once bound, an absent or replaced lock path fails closed instead of
 creating a second lock domain. Copied lock inodes and symlink/junction ancestors are refused:
 
 1. Install dependencies with `uv sync --frozen`, or a Python editable fallback.
@@ -122,8 +123,9 @@ the same Compose status before success. A restarting,
 exited, or unhealthy worker fails the install even if API readiness succeeds. The
 worker healthcheck validates the PID 1 worker command, schema head, queue integrity,
 and real schema/data mutation inside a `BEGIN IMMEDIATE` transaction that is rolled
-back without leaving a probe artifact. The queue pathname must still match the held
-descriptor before and after SQLite access. The three application services mount
+back without leaving a probe artifact. SQLite is opened through `/proc/self/fd` or
+`/dev/fd` for the held inode; the queue pathname must still match that descriptor
+before and after access. The three application services mount
 `openbiliclaw_data:/app/runtime/data`; API and worker use exactly:
 
 ```text

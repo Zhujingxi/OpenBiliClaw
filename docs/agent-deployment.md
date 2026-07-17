@@ -54,12 +54,14 @@ installer 会再次检查 Compose 状态；`restarting`/`exited` 会立即失败
 KILL。新启动流程会轮询 API 与 worker 两个子进程；旧 queue 文件和 API HTTP readiness
 都不能掩盖 worker 已退出。任一部分启动、状态写入或 readiness 失败都会终止并回收本轮
 已启动的所有子进程。整个 stop → migration → launch → doctor/readiness 流程由独立、限时的
-跨进程 lifecycle lock 串行；私密 installer UUID、canonical checkout root 与单调 generation
-共同绑定进程状态。首次并发调用等待同一 O_EXCL anchor；初始化崩溃留下的未绑定 inode
-只有在 held FD 通过普通文件、单链接、owner、私密 mode 与 pathname identity 检查后才会
-原位清空并重新绑定，恢复不按 pathname 删除。Installer metadata 在进入业务临界区前
-持久绑定 lock UUID/device/inode；POSIX 通过 held parent dir FD、Windows 通过不含 `dir_fd`
-的 direct-path 分支和 Python 3.11 reparse metadata，在取得锁后及退出前重读绑定并复核 pathname。已绑定 pathname 缺失/换 inode、复制 checkout 或
+POSIX 先锁定 held checkout root directory，再取得持久 root guard 与内层 lifecycle lock；
+native Windows 使用 root guard file。完整 installer UUID、canonical checkout root、单调
+generation 和 anchor UUID/device/inode 形成同一持久 lease。等待结束、进入业务前、generation
+更新和退出均精确复核，所有等待共用同一截止时间。首次 metadata 通过 held temp FD 同步并在
+POSIX 上 `fchmod` 后 hard-link no-replace 发布。POSIX 逐级持有并校验 `data/vnext` parent FD；
+崩溃遗留的未绑定 inode 仅在普通文件、单链接、owner、私密 mode 与 pathname identity
+全部成立时原位重绑。native Windows 没有等价 ACL/descriptor 恢复证明，因此失败关闭。
+已绑定 pathname 缺失/换 inode、复制 checkout 或
 symlink/junction ancestor 会失败关闭。
 复制 `.env` 时 managed root/DB/Huey/instance 字段重绑定当前 checkout，secret 与外部
 LiteLLM connection 保留。复制/移动/篡改及 directory/FIFO 等非普通 state 会被拒绝。stop 与
