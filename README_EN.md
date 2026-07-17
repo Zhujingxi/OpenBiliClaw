@@ -141,9 +141,12 @@ openbiliclaw db migrate
 openbiliclaw db backup <destination>
 ```
 
-`db backup` fully syncs a held payload. macOS publishes a same-directory named temporary
-file with `renameatx_np(RENAME_EXCL)` (success consumes it; failure retains the ignored
-`.backup-*.tmp`); Linux keeps the unlinked `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` path.
+`db backup` fully syncs a held payload. macOS uses only `.backup-00.tmp` through
+`.backup-31.tmp`, holds the selected slot with an exclusive lock, and publishes directly
+from the held FD with no-replace `fclonefileat`. It then verifies exact bytes and SQLite
+integrity; complete success zeroes and syncs only the held FD for safe slot reuse, while
+nonzero failures remain bounded with no pathname cleanup. Linux keeps the unlinked
+`O_TMPFILE` + `linkat(AT_EMPTY_PATH)` path.
 If a Linux capability policy rejects `AT_EMPTY_PATH`, a fallback through
 `/proc/self/fd` is allowed only after it is verified against the held inode, using
 `AT_SYMLINK_FOLLOW`. The destination parent pathname is rebound to its held directory

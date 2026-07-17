@@ -1153,7 +1153,21 @@ def _atomic_write_private_file(path: Path, content: str) -> None:
         raise RuntimeError(f"refusing to replace symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp-{secrets.token_hex(16)}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    if os.name == "nt":
+        handle = _windows_create_file(
+            temporary,
+            access=_WIN_GENERIC_READ | _WIN_GENERIC_WRITE,
+            share=_WIN_SHARE_READ_WRITE_DELETE,
+            disposition=_WIN_CREATE_NEW,
+            flags=_WIN_ATTRIBUTE_NORMAL,
+        )
+        try:
+            descriptor = _windows_handle_to_fd(handle)
+        except BaseException:
+            _windows_close_handle(handle)
+            raise
+    else:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     replaced = False
     try:
         with os.fdopen(os.dup(descriptor), "w", encoding="utf-8", newline="\n") as stream:
@@ -1401,9 +1415,14 @@ def _run_checked(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)  # noqa: S603
 
 
+_WIN_GENERIC_READ = 0x80000000
+_WIN_GENERIC_WRITE = 0x40000000
 _WIN_SHARE_READ_WRITE = 0x00000001 | 0x00000002
+_WIN_SHARE_READ_WRITE_DELETE = _WIN_SHARE_READ_WRITE | 0x00000004
+_WIN_CREATE_NEW = 1
 _WIN_OPEN_EXISTING = 3
 _WIN_OPEN_ALWAYS = 4
+_WIN_ATTRIBUTE_NORMAL = 0x00000080
 _WIN_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WIN_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WIN_ATTRIBUTE_DIRECTORY = 0x00000010
@@ -1483,13 +1502,11 @@ def _windows_close_handle(handle: int) -> None:
         )
 
 
-def _windows_handle_to_fd(handle: int) -> int:
+def _windows_handle_to_fd(handle: int, *, flags: int = os.O_RDWR) -> int:
     import msvcrt
 
     return int(
-        msvcrt.open_osfhandle(  # type: ignore[attr-defined]
-            handle, os.O_APPEND | os.O_WRONLY
-        )
+        msvcrt.open_osfhandle(handle, flags)  # type: ignore[attr-defined]
     )
 
 
@@ -1519,7 +1536,7 @@ def _open_windows_runtime_log(logs: Path, log_path: Path) -> BinaryIO:
         attributes, links = _windows_file_metadata(file_handle)
         if attributes & (_WIN_ATTRIBUTE_DIRECTORY | _WIN_ATTRIBUTE_REPARSE_POINT) or links != 1:
             raise RuntimeError("runtime log is not a private regular file")
-        descriptor = _windows_handle_to_fd(file_handle)
+        descriptor = _windows_handle_to_fd(file_handle, flags=os.O_APPEND | os.O_WRONLY)
         file_handle = -1
         stream = os.fdopen(descriptor, "ab")
         descriptor = -1

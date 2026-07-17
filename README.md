@@ -127,8 +127,10 @@ openbiliclaw db migrate
 openbiliclaw db backup <destination>
 ```
 
-`db backup` 先完成并同步 held payload；macOS 使用同目录 `.backup-*.tmp`，通过
-`renameatx_np(RENAME_EXCL)` 原子 no-replace 发布（成功消费 temp，失败保留供忽略/审计），
+`db backup` 先完成并同步 held payload；macOS 仅使用 `.backup-00.tmp` 至
+`.backup-31.tmp` 固定槽并以 exclusive flock 持有，通过 `fclonefileat` 直接从 held FD
+原子 no-replace 发布，再核对完整字节与 SQLite integrity。完整成功后只按 held FD 清零并
+同步槽供复用；失败的非零槽有界保留，容量耗尽时给出仅可在无 backup 运行时清理的指引。
 Linux 保持 unlinked `O_TMPFILE` + `linkat(AT_EMPTY_PATH)`；Linux 在
 `AT_EMPTY_PATH` 被 capability policy 拒绝时，仅在验证 `/proc/self/fd` 仍绑定 held inode 后
 使用 `AT_SYMLINK_FOLLOW` fallback。Directory sync 后会重查 parent pathname 与 held dir FD，Windows 或缺少

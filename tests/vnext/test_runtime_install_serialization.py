@@ -587,6 +587,42 @@ def test_atomic_write_private_file_holds_source_and_never_path_chmods(
     assert target not in chmod_paths
 
 
+def test_windows_atomic_private_writer_shares_delete_and_replaces_while_held(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text("old\n", encoding="utf-8")
+    native_calls: list[dict[str, int]] = []
+    native_descriptors: list[int] = []
+    replaced_while_held = False
+    original_replace = os.replace
+
+    def create_file(path: Path, **kwargs: int) -> int:
+        native_calls.append(kwargs)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        native_descriptors.append(descriptor)
+        return descriptor
+
+    def replace_while_open(source: Path, destination: Path) -> None:
+        nonlocal replaced_while_held
+        replaced_while_held = bool(native_descriptors) and all(
+            os.fstat(descriptor).st_nlink == 1 for descriptor in native_descriptors
+        )
+        original_replace(source, destination)
+
+    monkeypatch.setattr(bootstrap.os, "name", "nt")
+    monkeypatch.setattr(bootstrap, "_windows_create_file", create_file)
+    monkeypatch.setattr(bootstrap, "_windows_handle_to_fd", lambda handle: handle)
+    monkeypatch.setattr(bootstrap.os, "replace", replace_while_open)
+
+    bootstrap._atomic_write_private_file(target, "new\n")
+
+    assert native_calls, "Windows private temp bypassed native CreateFileW"
+    assert native_calls[0]["share"] & 0x00000004, "FILE_SHARE_DELETE was not requested"
+    assert replaced_while_held, "os.replace ran after the verified temp handle was closed"
+    assert target.read_text(encoding="utf-8") == "new\n"
+
+
 def test_gitignore_covers_env_lock_and_backup_temps() -> None:
     root = Path(__file__).resolve().parents[2]
     ignored = (root / ".gitignore").read_text(encoding="utf-8")

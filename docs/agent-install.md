@@ -74,7 +74,10 @@ pending/committed pair. Recovery accepts only a single pending generation zero o
 one-generation record gap with the same root, instance, and anchor. All lock waits consume one
 absolute deadline. Metadata replacement is synced and permissioned through its retained
 temporary FD, verifies the name still identifies that FD before and after replacement, and
-never pathname-chmods or pathname-unlinks an uncertain failure artifact. POSIX opens each
+never pathname-chmods or pathname-unlinks an uncertain failure artifact. Native Windows
+creates that temp with `CreateFileW(CREATE_NEW)`, generic read/write access, normal attributes,
+and read/write/delete sharing, transfers handle ownership to an O_RDWR CRT descriptor, and
+keeps the descriptor open across `os.replace`. POSIX opens each
 `data/vnext` component through held directory FDs. If initialization crashes before metadata
 publication, POSIX recovery only rebinds the held inode after regular-file, single-link,
 owner, private-mode, and pathname-identity checks. Under the stable root guard, native

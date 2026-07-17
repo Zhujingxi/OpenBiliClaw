@@ -228,6 +228,7 @@ class SQLiteOperationalStore:
                 _require_destination_directory(directory)
                 _require_owned_entry(directory, final)
                 _require_source_identity(source, source_identity)
+                _recycle_macos_payload(temp)
                 return target
             finally:
                 os.close(final.descriptor)
@@ -240,14 +241,7 @@ class SQLiteOperationalStore:
         if directory.descriptor is None:
             raise DatabaseBackupError("secure backup publication is unavailable")
         if sys.platform == "darwin":
-            name = f".backup-{secrets.token_hex(16)}.tmp"
-            descriptor = os.open(
-                name,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-                dir_fd=directory.descriptor,
-            )
-            payload_path = directory.path / name
+            payload_path, descriptor = _reserve_macos_payload_slot(directory)
         else:
             descriptor = _create_anonymous_payload(directory)
             payload_path = directory.path / ".anonymous-backup-payload"
@@ -288,6 +282,55 @@ class SQLiteOperationalStore:
             if written <= 0:
                 raise DatabaseBackupError("database backup failed while writing snapshot")
             view = view[written:]
+
+
+def _reserve_macos_payload_slot(directory: _DestinationDirectory) -> tuple[Path, int]:
+    import fcntl
+
+    assert directory.descriptor is not None
+    create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    reuse_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    for slot in range(32):
+        name = f".backup-{slot:02d}.tmp"
+        try:
+            descriptor = os.open(name, create_flags, 0o600, dir_fd=directory.descriptor)
+        except FileExistsError:
+            try:
+                descriptor = os.open(name, reuse_flags, dir_fd=directory.descriptor)
+            except OSError:
+                continue
+        except OSError as exc:
+            raise DatabaseBackupError("could not reserve a private backup payload slot") from exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=directory.descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(held.st_mode)
+                or not stat.S_ISREG(named.st_mode)
+                or held.st_nlink != 1
+                or held.st_size != 0
+                or (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+            ):
+                os.close(descriptor)
+                continue
+            return directory.path / name, descriptor
+        except (BlockingIOError, OSError):
+            os.close(descriptor)
+            continue
+    raise DatabaseBackupError(
+        "backup temporary staging capacity reached; remove .backup-00.tmp through "
+        ".backup-31.tmp only while no backup is running"
+    )
+
+
+def _recycle_macos_payload(payload: _OwnedFile) -> None:
+    if sys.platform != "darwin":
+        return
+    if _descriptor_identity(payload.descriptor) != payload.identity:
+        raise DatabaseBackupError("backup payload changed before slot recycling")
+    os.ftruncate(payload.descriptor, 0)
+    os.fsync(payload.descriptor)
 
 
 def _snapshot_with_retries(
@@ -499,7 +542,7 @@ def _secure_backup_platform_supported() -> bool:
         return False
     libc = ctypes.CDLL(None)
     if sys.platform == "darwin":
-        return hasattr(libc, "renameatx_np")
+        return hasattr(libc, "fclonefileat")
     if sys.platform.startswith("linux"):
         return hasattr(os, "O_TMPFILE") and hasattr(libc, "linkat")
     return False
@@ -1016,14 +1059,10 @@ def _atomic_publish_no_replace_impl(
     _require_destination_directory(directory)
     if sys.platform.startswith("linux"):
         _link_anonymous_linux(payload.descriptor, descriptor, target.name)
+        same_inode_required = True
     elif sys.platform == "darwin":
-        try:
-            named = os.stat(payload.path.name, dir_fd=descriptor, follow_symlinks=False)
-        except OSError as exc:
-            raise DatabaseBackupError("backup payload changed before publication") from exc
-        if not stat.S_ISREG(named.st_mode) or (named.st_dev, named.st_ino) != payload.identity:
-            raise DatabaseBackupError("backup payload changed before publication")
-        _rename_exclusive_macos(descriptor, payload.path.name, target.name)
+        _clone_held_macos(payload.descriptor, descriptor, target.name)
+        same_inode_required = False
     else:
         raise DatabaseBackupError("secure backup publication is unavailable")
     final_descriptor = -1
@@ -1034,8 +1073,13 @@ def _atomic_publish_no_replace_impl(
             dir_fd=descriptor,
         )
         final_identity = _descriptor_identity(final_descriptor)
-        if final_identity != payload.identity:
+        if same_inode_required and final_identity != payload.identity:
             raise DatabaseBackupError("backup destination changed during publication")
+        if not same_inode_required and (
+            not _descriptors_equal(payload.descriptor, final_descriptor)
+            or not _sqlite_descriptor_integrity_ok(final_descriptor)
+        ):
+            raise DatabaseBackupError("backup destination failed held-payload validation")
         final = _OwnedFile(target, final_descriptor, final_identity)
         _require_owned_entry(directory, final)
         os.fchmod(final_descriptor, 0o600)
@@ -1097,14 +1141,13 @@ def _proc_fd_matches(descriptor: int) -> bool:
     )
 
 
-def _rename_exclusive_macos(directory: int, source: str, destination: str) -> None:
+def _clone_held_macos(source: int, destination_directory: int, destination: str) -> None:
     libc = ctypes.CDLL(None, use_errno=True)
-    result = libc.renameatx_np(
-        ctypes.c_int(directory),
-        ctypes.c_char_p(os.fsencode(source)),
-        ctypes.c_int(directory),
+    result = libc.fclonefileat(
+        ctypes.c_int(source),
+        ctypes.c_int(destination_directory),
         ctypes.c_char_p(os.fsencode(destination)),
-        ctypes.c_uint(0x00000004),  # RENAME_EXCL
+        ctypes.c_int(0),
     )
     if result == 0:
         return
@@ -1113,6 +1156,45 @@ def _rename_exclusive_macos(directory: int, source: str, destination: str) -> No
         raise DatabaseBackupError("backup destination already exists")
     cause = OSError(error, os.strerror(error))
     raise DatabaseBackupError("secure backup publication failed") from cause
+
+
+def _descriptors_equal(first: int, second: int) -> bool:
+    first_size = os.fstat(first).st_size
+    if os.fstat(second).st_size != first_size:
+        return False
+    offset = 0
+    while offset < first_size:
+        size = min(_COPY_BUFFER_SIZE, first_size - offset)
+        if os.pread(first, size, offset) != os.pread(second, size, offset):
+            return False
+        offset += size
+    return True
+
+
+def _sqlite_descriptor_integrity_ok(descriptor: int) -> bool:
+    size = os.fstat(descriptor).st_size
+    payload = bytearray()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(descriptor, min(_COPY_BUFFER_SIZE, size - offset), offset)
+        if not chunk:
+            return False
+        payload.extend(chunk)
+        offset += len(chunk)
+    if len(payload) < 20 or payload[:16] != b"SQLite format 3\x00":
+        return False
+    # deserialize() cannot open a WAL-mode header without a filesystem WAL/SHM
+    # peer.  The held snapshot is already complete, so validate an in-memory
+    # copy with only the transient journal-mode bytes normalized.
+    if payload[18:20] == b"\x02\x02":
+        payload[18:20] = b"\x01\x01"
+    try:
+        with sqlite3.connect(":memory:") as connection:
+            connection.deserialize(bytes(payload))
+            result: object = connection.execute("PRAGMA integrity_check").fetchone()
+            return result == ("ok",)
+    except sqlite3.Error:
+        return False
 
 
 def _close_destination_directory(directory: _DestinationDirectory) -> None:
