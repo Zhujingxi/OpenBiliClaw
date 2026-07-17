@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
 > **Spec:** [`2026-07-17-cognitive-profile-pipeline-spec.md`](./2026-07-17-cognitive-profile-pipeline-spec.md)
-> **Status:** r4 — codex 第三轮 4 findings 已修订,待第四轮 review
+> **Status:** r5 — codex 第四轮 4 findings 已修订,待第五轮 review
 > **Execution order:** Wave A(Task 0→1→2→3)→ Wave B(Task 4→5)→ Wave C(Task 6→7)→ Wave D(Task 8→9,RECOMMENDED)。每 Wave 最后完成其文档子集方可交付。A 独立;B 依赖 A;C 依赖 A(部分依赖 B:疑惑直接结算出口,B 未上则直写);D 依赖 A。
 > **Tech:** Python 3.11+/仓库 `.venv/bin/python`;测试 `PYTHONPATH=$PWD/src <venv>/python -m pytest <file> -q`(worktree 根,PYTHONPATH 指 worktree src);`ruff format/check src/ tests/`;`mypy src/`(strict)。无扩展侧改动。
 
@@ -63,13 +63,13 @@
 
 ### Task 2: 对话学习串行队列 + scope/turn_id 透传
 
-**Files:** 新增 `src/openbiliclaw/soul/dialogue_learn_queue.py`(单 worker asyncio 队列;drain 时序:stop-accepting → `queue.join()` → 停 worker → swap/shutdown,r3/R2-1);修改 `src/openbiliclaw/soul/dialogue.py`(`respond` 后投递队列替代 `asyncio.create_task`,`dialogue.py:133`;签名扩展透传 scope/turn_id,默认 scope="chat")、**`src/openbiliclaw/api/runtime_context.py`(`:506` 的 `cancel_all` 之前先 drain 本队列)**、**`src/openbiliclaw/api/app.py`(durable 路径传 scope/turn_id;`:4005` 附近 shutdown 钩子补 drain)**;新增 `tests/test_dialogue_learn_queue.py`。
+**Files:** 新增 `src/openbiliclaw/soul/dialogue_learn_queue.py`(单 worker asyncio 队列,**worker 自持生命周期、不入 cancel_all 注册表,r5/R4-2**;显式 pause/resume/shutdown;drain:stop-accepting → `queue.join()` → 停 worker);修改 `src/openbiliclaw/soul/dialogue.py`(投递替代 `asyncio.create_task`,`dialogue.py:133`;透传 scope/turn_id,默认 "chat")、`src/openbiliclaw/api/runtime_context.py`(`:506` cancel_all **之前** pause-drain 本队列;构建成功停旧启新)、`src/openbiliclaw/api/app.py`(durable 路径传 scope/turn_id;`:4005` shutdown 钩子;**热重载失败回滚分支 resume 旧队列**);新增 `tests/test_dialogue_learn_queue.py`。
 
 **Steps:**
 
 - [ ] Failing test:并发投递 5 个学习任务 → 严格串行执行(执行顺序断言 + 无交错)。
 - [ ] Confirm FAIL → 队列实现 → PASS。
-- [ ] Failing test:drain 时序(积压时关闭 → stop-accepting → join 清空 → worker 停);热重载成功场景(旧队列 pause-drain → 新 runtime 就绪 → 旧停新启,无交错写);**热重载失败场景(r4/R3-4):新 runtime 构建抛异常 → 配置回滚分支 resume 旧队列 → 后续投递正常执行**;uvicorn shutdown 钩子触发 drain。
+- [ ] Failing test:drain 时序;热重载成功(pause-drain → 就绪 → 停旧启新,无交错);热重载失败(构建抛异常 → 回滚分支 resume 旧队列 → 后续投递正常);**cancel_all 执行后队列 worker 仍存活可 resume(r5/R4-2)**;uvicorn shutdown 钩子触发 drain。
 - [ ] Failing test:scope/turn_id 透传到 learn 调用参数。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_soul_engine.py tests/test_api_app.py -q` 回归 + ruff + mypy。
@@ -133,7 +133,7 @@
 - [ ] Failing test:三出口(转正 insight / 直接结算+事件折扣标记 / dismissed),台账链完整。
 - [ ] Failing test(冻结):open 疑惑关联 topic → 新增被搁置进 held_updates(每项稳定 id + 状态 held)+ 台账;已有权重不动。
 - [ ] Failing test(重放状态机,r3/R2-2/R2-3):resolved-真实兴趣型 → held→replaying(持久化)→ 并入下次偏好分析输入(rebase 语义,LLM 以当前画像重评估)→ 成功后置 applied 并清除;resolved-代理行为/误读型 → 直接 discarded(不重放);expired/dismissed → discarded。
-- [ ] Failing test(崩溃与幂等,r4/R3-1):replaying 中断且台账无回执 → 12h 扫描重试;**画像保存成功、applied 标记前崩溃 → 恢复时查台账发现含 held_id 的 success 行 → 直接置 applied 不重复提交**;`replay_attempts` 达 2 → discarded+WARNING;重复 resolve → 已 applied/discarded 跳过。重放提交的 chokepoint 台账行必须携带 held_id(回执)。
+- [ ] Failing test(崩溃与幂等,r5/R4-1):置 replaying 与记 `replay_submitted_at+batch_id` 回执同一 SQLite 事务;**记回执后、applied 前崩溃 → 恢复置 applied_unverified+WARNING 且不重复提交**(宁漏勿双计);无回执防御分支 → 重试,`replay_attempts` 达 2 → discarded+WARNING;重复 resolve → 已 applied/applied_unverified/discarded 跳过。台账行带 held_id 仅作观察,回执不依赖台账。
 - [ ] Confirm FAIL → 实现 → PASS。
 - [ ] Run `pytest tests/test_api_app.py tests/test_preference_analyzer.py tests/test_soul_engine.py -q` 回归 + ruff + mypy。
 - [ ] **Wave B 文档 gate**:`docs/modules/soul.md`、`docs/modules/storage.md`(confusions)、`docs/changelog.md`。

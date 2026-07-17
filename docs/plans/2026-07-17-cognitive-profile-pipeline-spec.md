@@ -21,12 +21,12 @@
 ## Design invariants (MUST hold in every phase)
 
 1. **Prompt-cache 静态性**:所有被触碰的 builder(含现存不合规的 dialogue-insight builder,r1 finding 20)收敛为模块级常量 system + `sort_keys=True`,并加入 `test_prompt_builder_system_messages_are_call_invariant` 清单。
-2. **回放不变性(作用域=既有渲染与行为路径)**:不含新语义对象的输入,偏好分析渲染、对话 prompt(≤窗口)、awareness 输出路径与改动前一致;基线快照先行单独提交。`posture_gate_mode=off` 时 `learn_from_dialogue` 与 pipeline 行为与现状逐字节一致。
-3. **门控只拦深层,shadow 先行且异步**:门控作用面 =(a)dialogue candidates 的 goal/value/state 类;(b)pipeline 的 VALUES/CORE 层 updater 写入;(c)soul 整份重建。topic/interest 快线(preference 兴趣域、ROLE 层)永不过门控。shadow 判定不阻塞写入(事后旁路);enforce 需 shadow 台账数据 ≥14 天,save-time blocking 校验(逃生门 `posture_gate_force_enforce`,文档注明风险)。enforce 下 LLM 异常/解析失败 → downgrade(保守)+ WARNING。
+2. **回放不变性(作用域=既有渲染与行为路径,r5/R4-3 收窄)**:不含新语义对象的输入,偏好分析渲染、对话 prompt(≤窗口)、**`analyze()` 路径的 awareness prompt**(`build_awareness_prompt` 一字不动)与改动前一致;`cognition_cycle` 切换新 builder 属有意变更,以 A/B 语义对照代替字节门(过质量铁律,记录 PR)。基线快照先行单独提交。`posture_gate_mode=off` 时 `learn_from_dialogue` 与 pipeline 行为与现状逐字节一致。
+3. **门控只拦深层,shadow 先行且异步**:门控作用面 =(a)dialogue candidates 的 goal/value/state 类;(b)pipeline 的 VALUES/CORE 层 updater 写入;(c)soul 整份重建。topic/interest 快线(preference 兴趣域、ROLE 层)永不过门控。shadow 判定不阻塞写入(事后旁路);enforce 的 save-time blocking 校验三条件(r5/R4-4 与 Phase 3 同步):最早有效判定距今 ≥14 天 且 近 14 天有效判定 ≥10 条 且 近 7 天 ≥1 条(逃生门 `posture_gate_force_enforce`,文档注明风险)。enforce 下 LLM 异常/解析失败 → downgrade(保守)+ WARNING。
 4. **台账只追加**:只 INSERT;回滚以补偿行表达;挂钩异常 WARNING 不阻断主流程。
 5. **收编不迁移,身份用自然键**:speculation 与 insight hypothesis 存储/状态机不动。结算身份模型:speculation → `domain`(其存储主键);insight hypothesis → 内容 hash8(r3/R2-8 定义:SHA-256 over「NFC 规范化 + 首尾 strip + 连续空白折叠为单空格」后的 UTF-8 字节,取 hex 前 8;当轮注入清单内发生碰撞 → 碰撞项扩展至 hex16,仍碰撞则跳过注入该项 + WARNING);confusion → 表自增 id。`settles[].ref` 只接受**当轮注入清单中出现过的键**(白名单即注入清单,未见键丢弃 + WARNING)。
 6. **结算单一所有权**:带 scope 前缀的 durable turn(probe/avoidance_probe/confusion)的结算**只归** durable side-effect 路径(`api/app.py` 成功侧效应);`learn_from_dialogue` 的 `settles` 通道**只处理普通 chat scope 轮次**(scope 随 learn 调用传入,非 chat 时跳过 settles)。杜绝同一回复双路径重复结算(r1 finding 2)。
-7. **对话学习串行化**:`learn_from_dialogue` 后台任务改经**单 worker asyncio 队列**(进程内串行,消除相邻轮并发 read/merge/write)。**drain 时序(r4/R3-4 补失败回滚)**:关闭时「stop-accepting → `queue.join()` → 停 worker → shutdown」;热重载时旧队列先 **pause(drain 后暂停,不销毁)**,新 runtime 构建**成功**后才停用旧队列并启用新队列;构建**失败**走既有配置回滚路径(`app.py` 热重载失败分支)时必须 **resume 旧队列**(学习不能永久哑)。接入两处生命周期点:`api/runtime_context.py:506` 的 `cancel_all` 之前先 drain,`api/app.py:4005` 附近 shutdown 钩子补 drain。带 uvicorn 生命周期测试 + 热重载失败回滚测试(r1 finding 1)。
+7. **对话学习串行化**:`learn_from_dialogue` 后台任务改经**单 worker asyncio 队列**(进程内串行,消除相邻轮并发 read/merge/write)。**drain 时序与 worker 归属(r5/R4-2)**:队列 worker **不进入** `cancel_all` 管辖的后台任务注册表——它由队列对象自持生命周期(显式 pause/resume/shutdown 接口),避免热重载 `cancel_all`(`api/runtime_context.py:506`)误杀后无人重建。关闭时「stop-accepting → `queue.join()` → 停 worker → shutdown」(挂 `api/app.py:4005` 附近 shutdown 钩子);热重载时旧队列 pause-drain(在 cancel_all **之前**执行)→ 新 runtime 构建成功才停旧启新;构建失败走配置回滚分支时 **resume 旧队列**(worker 未被 cancel_all 波及,resume 即恢复消费;期间新投递被 pause 拒绝的落日志)。带 uvicorn 生命周期测试 + 热重载失败回滚测试 + 「cancel_all 后队列仍存活」测试(r1 finding 1)。
 8. **疑惑不写画像 + DB 级打扰预算**:疑惑只产出下游对象;`status='clarifying'` 由 partial unique index 保证全局至多 1(跨连接原子);冷却 ≥72h 持久化在行内(`asked_at`);defer 语义复用探针忽略状态机。
 9. **阈值有出处 + LLM 输出防御**:新常量带校准注释并标注首轮重校;结构化输出白名单/clamp + WARNING;解析失败保守化(门控→downgrade,settles/confusion_candidates→丢弃)。
 10. **单用户全量注入**:不建向量检索;core memory、活跃清单(speculation ≤10 + insight + open 疑惑)全量入 user prompt;新 LLM caller(posture_gate、confusion 相关)注册 usage recorder 供 `cost --by caller` 观察。
@@ -120,7 +120,7 @@
 - 解冻(r3/R2-2/R2-3):
   - **按 resolution outcome 筛选**:resolved 且解读为「真实兴趣」型 → 重放;resolved 且解读为「代理行为/误读」型 → 丢弃(同 dismissed);dismissed/expired → 丢弃。全部进台账。
   - **重放 = rebase 提交**:held 项作为证据并入下次偏好分析输入,由 LLM 以当前画像为基重新评估(不直接写权重)。
-  - **held 项状态机(r4/R3-1 封闭崩溃窗口)**:每项带稳定 held_id 与状态 `held → replaying → applied|discarded`;重放前置 replaying(持久化),重放提交的偏好分析在**写入 chokepoint 的台账行中携带 held_id**(台账 = 重放的持久回执);崩溃恢复:12h 扫描发现 replaying 项时**先查台账**——已有含该 held_id 的 success 行则直接置 applied(不再提交),否则重试;`replay_attempts` 上限 2(超限 discarded + WARNING);重复 resolve 幂等。必测「画像保存成功、applied 标记前崩溃 → 恢复不重复提交」。
+  - **held 项状态机(r5/R4-1:回执与台账解耦,保守不双计)**:每项带稳定 held_id 与状态 `held → replaying → applied|applied_unverified|discarded`。重放时序:置 replaying 的**同时**在 confusions 行内持久记录 `replay_submitted_at + batch_id`(与状态同一 SQLite 事务,这是回执——**不依赖 best-effort 台账**)→ 提交偏好分析 → 成功后置 applied。崩溃恢复:12h 扫描发现 replaying 且**已有 replay_submitted 回执** → 置 `applied_unverified` + WARNING(**不重试提交**——可能已被吸收,宁漏勿双计,与防重复强化方向一致);replaying 且**无回执**(置状态与记回执之间理论上同事务不会分离,防御分支)→ 重试,`replay_attempts` 上限 2;重复 resolve 幂等。必测「记回执后、applied 前崩溃 → 恢复置 applied_unverified 且不重复提交」。台账行仍带 held_id(观察用途,非回执)。
 **验收门**:唯一约束的跨连接竞争测试(两连接并发置 clarifying,恰一成功)、held 存储/重放/丢弃、僵局判据、复合返回兼容;`pytest tests/test_confusion_lifecycle.py -q`。
 
 ### Phase 3 — 态势门控(r2:异步 shadow、三接入点、enforce 校验)
