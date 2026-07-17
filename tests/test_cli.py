@@ -1527,7 +1527,12 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         data_path=Path("/tmp/openbiliclaw-test-data"),
         bilibili=SimpleNamespace(cookie=""),
         llm=SimpleNamespace(concurrency=3),
-        soul=SimpleNamespace(preference=SimpleNamespace(satisfaction_filter_enabled=True)),
+        soul=SimpleNamespace(
+            preference=SimpleNamespace(satisfaction_filter_enabled=True),
+            posture_gate_mode="shadow",
+            posture_gate_force_enforce=False,
+            topic_lifecycle_serialization="off",
+        ),
         scheduler=SimpleNamespace(
             speculation_interval_minutes=10,
             speculation_ttl_days=3,

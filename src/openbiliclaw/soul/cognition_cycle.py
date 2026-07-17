@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -96,6 +98,17 @@ _PROFILE_INSIGHT_WINDOW = 6
 # the cycle noticeably.
 _AWARENESS_RETRY_BACKOFF_SECONDS = 2.0
 
+# Early-trigger threshold (Phase 5): when this many events have accumulated
+# past the awareness watermark, run awareness ahead of the 12h throttle so a
+# heavy session doesn't wait half a day to be reflected on. Calibration
+# (first-round, pitfall #3): ~30 events is roughly a single active session;
+# re-tune after the first production month and after any event-schema change.
+_EARLY_TRIGGER_EVENT_COUNT = 30
+
+# Event types whose presence is a "strong signal" worth an early awareness
+# pass even below the count threshold (explicit user intent / authored text).
+_STRONG_EVENT_TYPES = frozenset({"comment", "danmaku", "reply", "feedback"})
+
 
 @dataclass
 class CognitionCycleResult:
@@ -135,6 +148,10 @@ class CognitionCycle:
         self._awareness_analyzer = awareness_analyzer
         self._insight_analyzer = insight_analyzer
         self._min_interval_seconds = int(min_interval_seconds)
+        # Single-flight guard (Phase 5): the due-check + watermark consumption
+        # must run under one lock so overlapping ticks (or an early trigger
+        # racing the 12h tick) never double-process the same events.
+        self._run_lock = asyncio.Lock()
 
     def _profile_ledger(self) -> ProfileLedger:
         """Best-effort audit ledger over the memory manager's database."""
@@ -155,6 +172,15 @@ class CognitionCycle:
         Returns a result describing what happened. On throttle skip, returns
         ``CognitionCycleResult(ran=False, throttled=True)``.
         """
+        # Single-flight: if a run is already in progress (long awareness call,
+        # or an overlapping tick), skip this invocation rather than block —
+        # exactly one runner consumes the watermark at a time.
+        if self._run_lock.locked():
+            return CognitionCycleResult(throttled=True)
+        async with self._run_lock:
+            return await self._run_if_due_locked(now=now)
+
+    async def _run_if_due_locked(self, *, now: datetime | None) -> CognitionCycleResult:
         current_time = now or datetime.now()
         state = self._load_state()
         result = CognitionCycleResult()
@@ -177,6 +203,12 @@ class CognitionCycle:
 
         awareness_due = self._is_due(last_awareness_at, current_time)
         insight_due = self._is_due(last_insight_at, current_time)
+
+        # Early trigger (Phase 5): a backlog of unrefined events or a strong
+        # signal (authored comment / explicit feedback) pulls the awareness pass
+        # ahead of the 12h throttle. The 12h fallback still fires via ``_is_due``.
+        if not awareness_due and self._should_early_trigger(state):
+            awareness_due = True
 
         if not awareness_due and not insight_due:
             result.throttled = True
@@ -245,6 +277,26 @@ class CognitionCycle:
             return True
         elapsed = (now - last_run_at).total_seconds()
         return elapsed >= self._min_interval_seconds
+
+    def _should_early_trigger(self, state: dict[str, Any]) -> bool:
+        """True when unrefined events warrant an awareness pass before 12h.
+
+        Reads the newest events past the awareness watermark once (bounded by
+        the count threshold) and fires when either there are enough of them or
+        any is a strong signal. Best-effort — a query failure never triggers.
+        """
+        watermark = _coerce_int(state.get("last_awareness_event_id", 0))
+        try:
+            rows = self._memory.query_events(
+                after_event_id=watermark,
+                limit=_EARLY_TRIGGER_EVENT_COUNT,
+            )
+        except Exception:
+            logger.debug("early-trigger event probe failed", exc_info=True)
+            return False
+        if len(rows) >= _EARLY_TRIGGER_EVENT_COUNT:
+            return True
+        return any(_is_strong_signal_event(row) for row in rows)
 
     async def _run_awareness(self, state: dict[str, Any]) -> int:
         """Fold events newer than the watermark into awareness notes.
@@ -530,11 +582,21 @@ class CognitionCycle:
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write (Phase 5): serialize to a sibling temp file, then rename
+        # over the target. A crash mid-write leaves the previous state intact
+        # instead of a truncated/corrupt JSON that would reset the watermark.
+        tmp_path = path.with_name(f"{path.name}.tmp")
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
         except OSError:
             logger.debug("Failed to save cognition cycle state", exc_info=True)
+            with suppress(OSError):
+                if tmp_path.exists():
+                    tmp_path.unlink()
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -544,6 +606,25 @@ def _parse_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _is_strong_signal_event(event: dict[str, Any]) -> bool:
+    """A single event carrying explicit intent worth an early awareness pass.
+
+    Strong = an authored comment/danmaku/reply with non-empty text, an explicit
+    feedback event, or any event the satisfaction classifier marked
+    positive/negative (an explicit like/dislike-shaped signal).
+    """
+    etype = str(event.get("event_type", "")).strip().lower()
+    if etype in _STRONG_EVENT_TYPES:
+        if etype in {"feedback", "reply"}:
+            return True
+        # comment / danmaku only count when they carry text (not an empty ping).
+        text = str(event.get("title", "") or event.get("comment_text", "") or "").strip()
+        if text:
+            return True
+    sat = str(event.get("inferred_satisfaction", "")).strip().lower()
+    return sat in {"positive", "negative"}
 
 
 def _coerce_int(value: Any) -> int:
