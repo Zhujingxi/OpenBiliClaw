@@ -100,9 +100,12 @@ checkout root is acquired before the inner lifecycle lock and installer metadata
 sampled. The two layers serialize the complete transaction and share one exact lease:
 installer UUID, canonical root, monotonic generation, and anchor UUID/device/inode.
 The lease is revalidated after waiting, before work, on generation advance, and at exit,
-under one non-resettable deadline. Initial metadata is synced through a held temporary
-FD, `fchmod`ed on that FD on POSIX, and published with a no-replace hard link; the
-published pathname is never chmoded. POSIX opens `data/vnext` one held component at a
+under one non-resettable deadline. The guard validates every complete history record and
+commits each generation as an identical pending/committed pair; only generation-zero
+initialization or an exact same-root/instance/anchor one-generation gap is recovered.
+Metadata replacement stays bound to its temporary FD, is `fchmod`ed only through that FD
+on POSIX, and verifies the inode before and after publication; uncertain failure artifacts
+are retained rather than pathname-unlinked. POSIX opens `data/vnext` one held component at a
 time and rejects symlinks, junctions, inode replacement, and multiply linked anchors.
 Crash-orphan recovery on POSIX requires private regular-file, owner, mode, single-link,
 and pathname checks. Under the stable root guard, native Windows accepts only a
@@ -114,7 +117,10 @@ copied `.env` rebinds managed root/DB/Huey/instance fields while preserving secr
 and the external LiteLLM connection.
 Stop/failure cleanup retains the ownership-bound dead state until the next
 ownership-checked publication, and non-regular state such as a directory or FIFO
-fails closed. Docker rechecks API and worker Compose health after protected readiness.
+fails closed. A migration-failure rerun may rebind only the same instance's process state
+that is exactly one generation behind before stopping that exact pair. Windows logs use
+no-delete-share, reparse-aware native handles. Docker rechecks API and worker Compose health
+after protected readiness.
 
 The trust boundary is the canonical checkout root resolved and held at startup. It covers
 normal concurrency, crash recovery, managed-leaf replacement, and symlink/junction
@@ -135,8 +141,9 @@ openbiliclaw db migrate
 openbiliclaw db backup <destination>
 ```
 
-`db backup` fully syncs a held/unlinked payload before macOS `fclonefileat` or Linux
-`O_TMPFILE` + `linkat(AT_EMPTY_PATH)` atomically creates the no-replace destination.
+`db backup` fully syncs a held payload. macOS publishes a same-directory named temporary
+file with `renameatx_np(RENAME_EXCL)` (success consumes it; failure retains the ignored
+`.backup-*.tmp`); Linux keeps the unlinked `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` path.
 If a Linux capability policy rejects `AT_EMPTY_PATH`, a fallback through
 `/proc/self/fd` is allowed only after it is verified against the held inode, using
 `AT_SYMLINK_FOLLOW`. The destination parent pathname is rebound to its held directory

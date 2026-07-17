@@ -38,6 +38,9 @@ data/
 .obc-backup-source-*/
 installer-instance.json.tmp-*
 runtime-processes.json.tmp-*
+.env.lock
+.env.tmp-*
+.backup-*.tmp
 *.db
 *.sqlite
 *.sqlite3

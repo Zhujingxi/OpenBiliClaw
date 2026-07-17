@@ -462,6 +462,45 @@ def test_windows_unbound_recovery_never_calls_unix_fchmod(
     assert not fchmod_called
 
 
+def test_windows_runtime_log_rejects_reparse_swap_with_native_handle_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[dict[str, int]] = []
+
+    def create(_path: Path, **kwargs: int) -> int:
+        calls.append(kwargs)
+        return len(calls)
+
+    monkeypatch.setattr(bootstrap, "_windows_create_file", create)
+    monkeypatch.setattr(
+        bootstrap,
+        "_windows_file_metadata",
+        lambda handle: (
+            (bootstrap._WIN_ATTRIBUTE_DIRECTORY if handle == 1 else 0)
+            | (bootstrap._WIN_ATTRIBUTE_REPARSE_POINT if handle == 2 else 0),
+            1,
+        ),
+    )
+    monkeypatch.setattr(bootstrap, "_windows_close_handle", lambda _handle: None)
+    monkeypatch.setattr(
+        bootstrap, "_windows_handle_to_fd", lambda _handle: pytest.fail("reparse opened")
+    )
+
+    with pytest.raises(RuntimeError, match="private regular file"):
+        bootstrap._open_windows_runtime_log(tmp_path / "logs", tmp_path / "logs/api.log")
+
+    assert all(call["share"] & 0x4 == 0 for call in calls)
+    assert calls[0]["flags"] & bootstrap._WIN_FLAG_OPEN_REPARSE_POINT
+    assert calls[0]["flags"] & bootstrap._WIN_FLAG_BACKUP_SEMANTICS
+    assert calls[1]["flags"] == bootstrap._WIN_FLAG_OPEN_REPARSE_POINT
+
+
+def test_windows_file_information_layout_matches_native_abi() -> None:
+    assert bootstrap.ctypes.sizeof(bootstrap._WindowsFileTime) == 8
+    assert bootstrap.ctypes.sizeof(bootstrap._WindowsByHandleFileInformation) == 52
+    assert bootstrap._WindowsByHandleFileInformation.link_count.offset == 40
+
+
 def test_generation_guard_first_crash_recovers_exactly_one_generation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -506,6 +545,54 @@ def test_guard_append_trims_incomplete_tail_and_preserves_last_complete_lease(
     assert recovered == current
     assert advanced.generation == current.generation + 1
     assert guard_path.read_bytes().endswith(b"\n")
+
+
+def test_guard_history_rejects_corrupt_earlier_complete_record(tmp_path: Path) -> None:
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        current = bootstrap._load_or_create_installation_state(tmp_path)
+        bootstrap._advance_installation_generation(tmp_path, current)
+    guard = tmp_path / bootstrap.ROOT_LIFECYCLE_GUARD
+    records = guard.read_bytes().splitlines(keepends=True)
+    records[0] = b'{"corrupt":true}\n'
+    guard.write_bytes(b"".join(records))
+    with (
+        pytest.raises(RuntimeError, match="guard metadata|guard history"),
+        bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+    ):
+        pytest.fail("corrupt earlier guard record was ignored")
+
+
+def test_guard_history_commits_each_generation_with_duplicate_records(tmp_path: Path) -> None:
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        current = bootstrap._load_or_create_installation_state(tmp_path)
+        bootstrap._advance_installation_generation(tmp_path, current)
+    guard = tmp_path / bootstrap.ROOT_LIFECYCLE_GUARD
+    generations = [json.loads(line)["generation"] for line in guard.read_text().splitlines()]
+    assert generations == [0, 0, 1, 1]
+
+
+def test_atomic_write_private_file_holds_source_and_never_path_chmods(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "state.json"
+    target.write_text("old", encoding="utf-8")
+    chmod_paths: list[Path] = []
+    monkeypatch.setattr(
+        bootstrap.os,
+        "chmod",
+        lambda path, _mode: chmod_paths.append(Path(os.fsdecode(path))),
+    )
+    bootstrap._atomic_write_private_file(target, "new\n")
+    assert target.read_text() == "new\n"
+    assert target not in chmod_paths
+
+
+def test_gitignore_covers_env_lock_and_backup_temps() -> None:
+    root = Path(__file__).resolve().parents[2]
+    ignored = (root / ".gitignore").read_text(encoding="utf-8")
+    assert ".env.lock" in ignored
+    assert ".env.tmp-*" in ignored
+    assert ".backup-*.tmp" in ignored
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink contract")

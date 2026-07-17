@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import hashlib
 import json
@@ -406,6 +407,27 @@ def _require_bound_installation(
 def _read_guard_lease(
     descriptor: int,
 ) -> tuple[InstallationState, LifecycleAnchorIdentity] | None:
+    history = _read_guard_history(descriptor)
+    return history[-1] if history else None
+
+
+def _parse_guard_record(
+    line: bytes,
+) -> tuple[InstallationState, LifecycleAnchorIdentity]:
+    try:
+        value = json.loads(line)
+    except ValueError as exc:
+        raise RuntimeError("invalid root lifecycle guard metadata") from exc
+    installation = InstallationState.from_dict(value)
+    anchor = LifecycleAnchorIdentity.from_dict(value)
+    if installation is None or anchor is None:
+        raise RuntimeError("invalid root lifecycle guard metadata")
+    return installation, anchor
+
+
+def _read_guard_history(
+    descriptor: int,
+) -> tuple[tuple[InstallationState, LifecycleAnchorIdentity], ...]:
     os.lseek(descriptor, 0, os.SEEK_SET)
     remaining = os.fstat(descriptor).st_size
     chunks: list[bytes] = []
@@ -417,21 +439,33 @@ def _read_guard_lease(
         remaining -= len(chunk)
     raw = b"".join(chunks)
     if raw in {b"", b"0"}:
-        return None
+        return ()
     complete = [line for line in raw.splitlines(keepends=True) if line.endswith(b"\n")]
     if not complete:
         raise RuntimeError("invalid root lifecycle guard metadata")
     if complete == [b"0\n"]:
-        return None
-    try:
-        value = json.loads(complete[-1])
-    except ValueError as exc:
-        raise RuntimeError("invalid root lifecycle guard metadata") from exc
-    installation = InstallationState.from_dict(value)
-    anchor = LifecycleAnchorIdentity.from_dict(value)
-    if installation is None or anchor is None:
-        raise RuntimeError("invalid root lifecycle guard metadata")
-    return installation, anchor
+        return ()
+    history = [_parse_guard_record(line) for line in complete]
+    first_installation, first_anchor = history[0]
+    expected_generation = 0
+    index = 0
+    while index < len(history):
+        pending = history[index]
+        installation, anchor = pending
+        if (
+            installation.generation != expected_generation
+            or installation.project_root != first_installation.project_root
+            or installation.instance_id != first_installation.instance_id
+            or anchor != first_anchor
+        ):
+            raise RuntimeError("invalid root lifecycle guard history")
+        if index + 1 == len(history):
+            break
+        if history[index + 1] != pending:
+            raise RuntimeError("invalid root lifecycle guard history")
+        index += 2
+        expected_generation += 1
+    return tuple(history)
 
 
 def _write_guard_lease(
@@ -469,34 +503,45 @@ def _reconcile_guard_lease(
     root: Path,
     guard: tuple[InstallationState, LifecycleAnchorIdentity] | None,
     record: tuple[InstallationState, LifecycleAnchorIdentity] | None,
+    guard_descriptor: int | None = None,
 ) -> tuple[InstallationState, LifecycleAnchorIdentity] | None:
     if guard is None:
-        return record
-    if record == guard:
+        if record is not None:
+            raise RuntimeError("lifecycle lock identity changed: missing root guard history")
+        return None
+    history = _read_guard_history(guard_descriptor) if guard_descriptor is not None else ()
+    pending = bool(history) and len(history) % 2 == 1
+    if not pending:
+        if record != guard:
+            raise RuntimeError("lifecycle lock identity changed: root guard lease")
         return guard
     guard_installation, guard_anchor = guard
     if record is None:
+        if guard_installation.generation != 0 or len(history) != 1:
+            raise RuntimeError("lifecycle lock identity changed: root guard lease")
         _require_anchor_path_binding(root, guard_anchor)
         _atomic_create_private_file(
             root / INSTALLATION_STATE,
             json.dumps(_installation_payload(guard_installation, guard_anchor), sort_keys=True)
             + "\n",
         )
-        return guard
-    record_installation, record_anchor = record
-    if (
-        guard_anchor == record_anchor
-        and guard_installation.project_root == record_installation.project_root
-        and guard_installation.instance_id == record_installation.instance_id
-        and guard_installation.generation == record_installation.generation + 1
-    ):
+    elif record != guard:
+        record_installation, record_anchor = record
+        if not (
+            guard_anchor == record_anchor
+            and guard_installation.project_root == record_installation.project_root
+            and guard_installation.instance_id == record_installation.instance_id
+            and guard_installation.generation == record_installation.generation + 1
+        ):
+            raise RuntimeError("lifecycle lock identity changed: root guard lease")
         _atomic_write_private_file(
             root / INSTALLATION_STATE,
             json.dumps(_installation_payload(guard_installation, guard_anchor), sort_keys=True)
             + "\n",
         )
-        return guard
-    raise RuntimeError("lifecycle lock identity changed: root guard lease")
+    if guard_descriptor is not None:
+        _write_guard_lease(guard_descriptor, guard_installation, guard_anchor)
+    return guard
 
 
 def _remaining_timeout(deadline: float) -> float:
@@ -872,6 +917,8 @@ def _bound_lifecycle(
         if guard_descriptor is not None:
             _write_guard_lease(guard_descriptor, installation, identity)
         _persist_initial_installation(root, identity, installation)
+        if guard_descriptor is not None:
+            _write_guard_lease(guard_descriptor, installation, identity)
         record = _read_installation_record(root)
         if record is None or record[1] != identity:
             raise RuntimeError("lifecycle lock identity changed")
@@ -900,6 +947,7 @@ def _bound_lifecycle(
                     root,
                     _read_guard_lease(guard_descriptor),
                     _read_installation_record(root),
+                    guard_descriptor,
                 )
                 if reconciled is None or reconciled[1] != lease.anchor:
                     raise RuntimeError("root lifecycle guard lease changed")
@@ -1074,6 +1122,7 @@ def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
             root,
             _read_guard_lease(guard_descriptor),
             _read_installation_record(root),
+            guard_descriptor,
         )
         expected_installation = None if lease is None else lease[0]
         expected_anchor = None if lease is None else lease[1]
@@ -1105,13 +1154,28 @@ def _atomic_write_private_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp-{secrets.token_hex(16)}")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    replaced = False
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+        with os.fdopen(os.dup(descriptor), "w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        held = os.fstat(descriptor)
+        current = temporary.lstat()
+        held_identity = (held.st_dev, held.st_ino)
+        if (
+            not stat.S_ISREG(held.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != held_identity
+        ):
+            raise RuntimeError("private file source changed before publication")
         os.replace(temporary, path)
-        os.chmod(path, 0o600)
+        replaced = True
+        final = path.lstat()
+        if not stat.S_ISREG(final.st_mode) or (final.st_dev, final.st_ino) != held_identity:
+            raise RuntimeError("private file destination changed during publication")
         if os.name != "nt":
             directory = os.open(path.parent, os.O_RDONLY)
             try:
@@ -1119,7 +1183,11 @@ def _atomic_write_private_file(path: Path, content: str) -> None:
             finally:
                 os.close(directory)
     finally:
-        temporary.unlink(missing_ok=True)
+        os.close(descriptor)
+        # A failed publication deliberately leaves the unpredictable temporary name
+        # behind.  Removing it by pathname could delete an attacker's replacement.
+        if replaced and temporary.exists():
+            raise RuntimeError("private file temporary alias survived publication")
 
 
 def _is_canonical_uuid(value: object) -> bool:
@@ -1197,6 +1265,8 @@ def _advance_installation_generation(
         root / INSTALLATION_STATE,
         json.dumps(_installation_payload(advanced, anchor), sort_keys=True) + "\n",
     )
+    if lease.guard_descriptor is not None:
+        _write_guard_lease(lease.guard_descriptor, advanced, anchor)
     lease.installation = advanced
     return advanced
 
@@ -1331,11 +1401,148 @@ def _run_checked(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)  # noqa: S603
 
 
+_WIN_SHARE_READ_WRITE = 0x00000001 | 0x00000002
+_WIN_OPEN_EXISTING = 3
+_WIN_OPEN_ALWAYS = 4
+_WIN_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WIN_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WIN_ATTRIBUTE_DIRECTORY = 0x00000010
+_WIN_ATTRIBUTE_REPARSE_POINT = 0x00000400
+
+
+class _WindowsFileTime(ctypes.Structure):
+    _fields_ = [("low", ctypes.c_uint32), ("high", ctypes.c_uint32)]
+
+
+class _WindowsByHandleFileInformation(ctypes.Structure):
+    _fields_ = [
+        ("attributes", ctypes.c_uint32),
+        ("creation_time", _WindowsFileTime),
+        ("access_time", _WindowsFileTime),
+        ("write_time", _WindowsFileTime),
+        ("volume_serial", ctypes.c_uint32),
+        ("size_high", ctypes.c_uint32),
+        ("size_low", ctypes.c_uint32),
+        ("link_count", ctypes.c_uint32),
+        ("file_index_high", ctypes.c_uint32),
+        ("file_index_low", ctypes.c_uint32),
+    ]
+
+
+def _windows_create_file(
+    path: Path, *, access: int, share: int, disposition: int, flags: int
+) -> int:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+    ]
+    create_file.restype = ctypes.c_void_p
+    handle = create_file(str(path), access, share, None, disposition, flags, None)
+    invalid = ctypes.c_void_p(-1).value
+    if handle in {None, invalid}:
+        raise OSError(
+            ctypes.get_last_error(),  # type: ignore[attr-defined]
+            f"CreateFileW failed: {path}",
+        )
+    return int(handle)
+
+
+def _windows_file_metadata(handle: int) -> tuple[int, int]:
+    info = _WindowsByHandleFileInformation()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_WindowsByHandleFileInformation),
+    ]
+    get_information.restype = ctypes.c_int
+    if not get_information(ctypes.c_void_p(handle), ctypes.byref(info)):
+        raise OSError(
+            ctypes.get_last_error(),  # type: ignore[attr-defined]
+            "GetFileInformationByHandle failed",
+        )
+    return int(info.attributes), int(info.link_count)
+
+
+def _windows_close_handle(handle: int) -> None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+    if not close_handle(ctypes.c_void_p(handle)):
+        raise OSError(
+            ctypes.get_last_error(),  # type: ignore[attr-defined]
+            "CloseHandle failed",
+        )
+
+
+def _windows_handle_to_fd(handle: int) -> int:
+    import msvcrt
+
+    return int(
+        msvcrt.open_osfhandle(  # type: ignore[attr-defined]
+            handle, os.O_APPEND | os.O_WRONLY
+        )
+    )
+
+
+def _open_windows_runtime_log(logs: Path, log_path: Path) -> BinaryIO:
+    with suppress(FileExistsError):
+        logs.mkdir(mode=0o700)
+    directory_handle = _windows_create_file(
+        logs,
+        access=0x80000000,
+        share=_WIN_SHARE_READ_WRITE,
+        disposition=_WIN_OPEN_EXISTING,
+        flags=_WIN_FLAG_OPEN_REPARSE_POINT | _WIN_FLAG_BACKUP_SEMANTICS,
+    )
+    file_handle = -1
+    descriptor = -1
+    try:
+        attributes, _links = _windows_file_metadata(directory_handle)
+        if not attributes & _WIN_ATTRIBUTE_DIRECTORY or attributes & _WIN_ATTRIBUTE_REPARSE_POINT:
+            raise RuntimeError("runtime log path is not a contained directory")
+        file_handle = _windows_create_file(
+            log_path,
+            access=0x00000004,
+            share=_WIN_SHARE_READ_WRITE,
+            disposition=_WIN_OPEN_ALWAYS,
+            flags=_WIN_FLAG_OPEN_REPARSE_POINT,
+        )
+        attributes, links = _windows_file_metadata(file_handle)
+        if attributes & (_WIN_ATTRIBUTE_DIRECTORY | _WIN_ATTRIBUTE_REPARSE_POINT) or links != 1:
+            raise RuntimeError("runtime log is not a private regular file")
+        descriptor = _windows_handle_to_fd(file_handle)
+        file_handle = -1
+        stream = os.fdopen(descriptor, "ab")
+        descriptor = -1
+        return stream
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if file_handle >= 0:
+            _windows_close_handle(file_handle)
+        _windows_close_handle(directory_handle)
+
+
 def _open_runtime_log(project_dir: Path, log_path: Path) -> BinaryIO:
     root = _canonical_project_root(project_dir)
     expected_parent = root / "logs"
     if log_path.parent != expected_parent or log_path.name not in {"api.log", "worker.log"}:
         raise RuntimeError("runtime log path escapes the managed logs directory")
+    if os.name == "nt":
+        return _open_windows_runtime_log(expected_parent, log_path)
+    return _open_posix_runtime_log(root, expected_parent, log_path)
+
+
+def _open_posix_runtime_log(root: Path, expected_parent: Path, log_path: Path) -> BinaryIO:
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     if _lifecycle_uses_dir_fd():
         root_descriptor = os.open(
@@ -1646,6 +1853,36 @@ def _read_process_state(
     return ownership, api, worker
 
 
+def _reconcile_process_state_generation(project_dir: Path, current: InstallationState) -> None:
+    """Bind a crash-left process record to the immediately following generation."""
+
+    root = _canonical_project_root(project_dir)
+    path = root / PROCESS_STATE
+    if not path.exists():
+        return
+    lease = _ACTIVE_LIFECYCLE_LEASE.get()
+    if lease is None or lease.root != root or lease.installation != current:
+        raise RuntimeError("runtime process state reconciliation is outside the active lease")
+    ownership, api, worker = _read_process_state(path)
+    if ownership == current:
+        return
+    if not (
+        ownership.project_root == current.project_root
+        and ownership.instance_id == current.instance_id
+        and ownership.generation + 1 == current.generation
+    ):
+        raise RuntimeError("runtime process state ownership does not match this installation")
+    payload = {
+        "version": 2,
+        "project_root": current.project_root,
+        "instance_id": current.instance_id,
+        "generation": current.generation,
+        "api": api.to_dict(),
+        "worker": worker.to_dict(),
+    }
+    _atomic_write_private_file(path, json.dumps(payload, sort_keys=True) + "\n")
+
+
 def _signal_process(pid: int, signum: int) -> None:
     if os.name == "nt":
         command = ["taskkill", "/PID", str(pid), "/T"]
@@ -1947,6 +2184,7 @@ def install_local_runtime(
         )
         environment = _runtime_env(values)
         prefix = _command_prefix(project_dir)
+        _reconcile_process_state_generation(project_dir, installation)
         _stop_managed_processes(
             project_dir,
             installation=installation,

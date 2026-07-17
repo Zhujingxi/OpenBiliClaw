@@ -35,6 +35,26 @@ def test_windows_queue_health_uses_normal_path_and_remains_functional(
     with sqlite3.connect(queue) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
 
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor proof")
+def test_queue_fd_proof_rejects_unrelated_new_regular_descriptor(tmp_path: Path) -> None:
+    queue = tmp_path / "huey.db"
+    unrelated = tmp_path / "unrelated.log"
+    with sqlite3.connect(queue) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+    unrelated.write_text("unrelated", encoding="utf-8")
+    held = os.open(queue, os.O_RDWR)
+    before = operations._process_file_descriptors()
+    assert before is not None
+    sqlite_main = os.dup(held)
+    foreign = os.open(unrelated, os.O_RDONLY)
+    try:
+        assert not operations._connection_opened_held_inode(held, before)
+    finally:
+        os.close(foreign)
+        os.close(sqlite_main)
+        os.close(held)
+
     assert operations._write_transaction_available(queue)
     with sqlite3.connect(queue) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)

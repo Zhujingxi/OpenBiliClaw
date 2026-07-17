@@ -69,8 +69,12 @@ serialize the complete sequence separately from the short `.env` writer lock, so
 prepare/start invocations cannot overlap migrations or publish competing process pairs.
 Their lease contains the complete installer state plus anchor UUID/device/inode and is
 checked after waiting, before work, on a legitimate generation advance, and before release.
-All lock waits consume one absolute deadline. Initial metadata is synced and permissioned
-through its retained temporary FD before hard-link no-replace publication. POSIX opens each
+The guard validates every complete history record and commits each generation as an identical
+pending/committed pair. Recovery accepts only a single pending generation zero or an exact
+one-generation record gap with the same root, instance, and anchor. All lock waits consume one
+absolute deadline. Metadata replacement is synced and permissioned through its retained
+temporary FD, verifies the name still identifies that FD before and after replacement, and
+never pathname-chmods or pathname-unlinks an uncertain failure artifact. POSIX opens each
 `data/vnext` component through held directory FDs. If initialization crashes before metadata
 publication, POSIX recovery only rebinds the held inode after regular-file, single-link,
 owner, private-mode, and pathname-identity checks. Under the stable root guard, native
@@ -100,13 +104,18 @@ binds process state to that UUID, the canonical checkout root, and a monotonic
 generation. Verified identities are stored privately in
 `data/vnext/runtime-processes.json`; bare or stale PIDs are never signalled. Copied,
 moved, malformed, or ownership-mismatched state is refused instead of managed.
+If migration fails after allocating a generation, the next invocation may, only under the
+active lease, rebind an exact same-root/same-instance process record that is one generation
+behind before verifying and stopping that recorded pair; every other mismatch is refused.
 Managed shutdown sends TERM, waits for a bounded interval, and escalates only while
 the same identity is still present. A present state path must be a regular file;
 directories, FIFOs, symlinks, and other objects fail closed. Stop and failure cleanup
 never pathname-unlink process state. The ownership-bound dead record remains until
 the next ownership-checked process-state publication, so stale cleanup cannot delete
 a newer generation.
-Logs are separate at `logs/api.log` and `logs/worker.log`. A failed migration starts
+Logs are separate at `logs/api.log` and `logs/worker.log`. Native Windows opens the directory
+and final log with `CreateFileW`, excludes delete sharing, uses `OPEN_REPARSE_POINT`, and rejects
+directory/final reparse points and non-single-link final files. A failed migration starts
 nothing. A partial launch, state-write failure, dead worker, or failed protected
 check terminates and reaps every newly started child and returns non-zero.
 
@@ -128,9 +137,11 @@ the same Compose status before success. A restarting,
 exited, or unhealthy worker fails the install even if API readiness succeeds. The
 worker healthcheck validates the PID 1 worker command, schema head, queue integrity,
 and real schema/data mutation inside a `BEGIN IMMEDIATE` transaction that is rolled
-back without leaving a probe artifact. SQLite is opened through `/proc/self/fd` or
-`/dev/fd` for the held inode; the queue pathname must still match that descriptor
-before and after access. The three application services mount
+back without leaving a probe artifact. SQLite uses its normal pathname; POSIX pins
+main and any existing WAL/SHM identities before connect, then requires every newly
+opened regular FD to belong to that set and requires main to be present. The queue
+pathname must still match the held descriptor before and after access. The three
+application services mount
 `openbiliclaw_data:/app/runtime/data`; API and worker use exactly:
 
 ```text

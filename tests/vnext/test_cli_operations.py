@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -370,7 +371,7 @@ def test_backup_loses_publish_race_without_overwriting_destination(
         SQLiteOperationalStore().backup(source=source, destination=destination)
 
     assert destination.read_text(encoding="utf-8") == "racer-won"
-    assert not list(tmp_path.glob(".backup-*.tmp"))
+    assert len(list(tmp_path.glob(".backup-*.tmp"))) == (1 if sys.platform == "darwin" else 0)
 
 
 def test_backup_destination_is_absent_until_atomic_publication(
@@ -486,12 +487,22 @@ def test_backup_never_publishes_a_late_temp_path_replacement(
         payload: operations._OwnedFile,
         target: Path,
     ) -> operations._OwnedFile:
+        if sys.platform == "darwin":
+            payload.path.unlink()
         payload.path.write_text("foreign-inode", encoding="utf-8")
         return original_publish(directory=directory, payload=payload, target=target)
 
     monkeypatch.setattr(
         operations, "_atomic_publish_no_replace", replace_synthetic_path_before_publish
     )
+
+    if sys.platform == "darwin":
+        with pytest.raises(DatabaseBackupError, match="payload changed"):
+            SQLiteOperationalStore().backup(source=source, destination=destination)
+        assert not destination.exists()
+        assert (payloads := list(tmp_path.glob(".backup-*.tmp")))
+        assert payloads[0].read_text() == "foreign-inode"
+        return
 
     SQLiteOperationalStore().backup(source=source, destination=destination)
 
@@ -524,7 +535,7 @@ def test_backup_failure_only_cleans_up_the_temp_inode_it_created(
     with pytest.raises(DatabaseBackupError, match="backup failed"):
         SQLiteOperationalStore().backup(source=source, destination=destination)
 
-    assert not list(tmp_path.glob(".backup-*.tmp"))
+    assert len(list(tmp_path.glob(".backup-*.tmp"))) == (1 if sys.platform == "darwin" else 0)
     assert not destination.exists()
 
 
@@ -540,8 +551,10 @@ def test_backup_payload_is_unlinked_before_snapshot_write(
         self: SQLiteOperationalStore, directory: operations._DestinationDirectory
     ) -> tuple[Path, int, tuple[int, int]]:
         temp, descriptor, identity = original_create(self, directory)
-        assert not temp.exists()
-        assert not list(directory.path.glob(".backup-*.tmp"))
+        assert temp.exists() is (sys.platform == "darwin")
+        assert len(list(directory.path.glob(".backup-*.tmp"))) == (
+            1 if sys.platform == "darwin" else 0
+        )
         return temp, descriptor, identity
 
     monkeypatch.setattr(SQLiteOperationalStore, "_create_temp", observe_anonymous_payload)
@@ -549,6 +562,37 @@ def test_backup_payload_is_unlinked_before_snapshot_write(
     SQLiteOperationalStore().backup(source=source, destination=destination)
 
     assert destination.exists()
+
+
+def test_macos_backup_rename_exclusive_failure_retains_named_held_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    directory_descriptor = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    metadata = os.fstat(directory_descriptor)
+    directory = operations._DestinationDirectory(
+        tmp_path, directory_descriptor, (metadata.st_dev, metadata.st_ino)
+    )
+    monkeypatch.setattr(operations.sys, "platform", "darwin")
+    temp_path, payload_descriptor, identity = SQLiteOperationalStore()._create_temp(directory)
+    payload = operations._OwnedFile(temp_path, payload_descriptor, identity)
+    monkeypatch.setattr(
+        operations,
+        "_rename_exclusive_macos",
+        lambda *_args: (_ for _ in ()).throw(DatabaseBackupError("publish failed")),
+    )
+    try:
+        with pytest.raises(DatabaseBackupError, match="publish failed"):
+            operations._atomic_publish_no_replace(
+                directory=directory, payload=payload, target=tmp_path / "backup.db"
+            )
+        assert temp_path.exists()
+        assert temp_path.name.startswith(".backup-") and temp_path.name.endswith(".tmp")
+        assert os.fstat(payload_descriptor).st_ino == temp_path.lstat().st_ino
+    finally:
+        os.close(payload_descriptor)
+        os.close(directory_descriptor)
 
 
 @pytest.mark.parametrize("operation", ["fchmod", "fsync"])
@@ -573,7 +617,7 @@ def test_backup_wraps_descriptor_sync_failure_and_removes_its_temp(
         SQLiteOperationalStore().backup(source=source, destination=destination)
 
     assert not destination.exists()
-    assert not list(tmp_path.glob(".backup-*.tmp"))
+    assert len(list(tmp_path.glob(".backup-*.tmp"))) == (1 if sys.platform == "darwin" else 0)
 
 
 @pytest.mark.parametrize(
@@ -929,7 +973,7 @@ def test_backup_path_identity_failure_retains_bounded_staging_directory(
     retained = list(tmp_path.glob(".obc-backup-source-*"))
     assert len(retained) == 1
     assert retained[0].is_dir()
-    assert not list(tmp_path.glob(".backup-*.tmp"))
+    assert len(list(tmp_path.glob(".backup-*.tmp"))) == (1 if sys.platform == "darwin" else 0)
 
 
 @pytest.mark.parametrize(
@@ -993,7 +1037,7 @@ def test_backup_fails_closed_after_bounded_identity_churn_exhaustion(
 
     assert calls == 3
     assert not destination.exists()
-    assert not list(tmp_path.glob(".backup-*.tmp"))
+    assert len(list(tmp_path.glob(".backup-*.tmp"))) == (1 if sys.platform == "darwin" else 0)
 
 
 def test_backup_retries_sidecar_created_after_snapshot_enumeration(

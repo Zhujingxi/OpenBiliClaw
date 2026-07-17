@@ -67,6 +67,8 @@ AI application 代码只允许 `obc-interactive`、`obc-analysis`、`obc-embeddi
 
 worker production composition 固定构造全部七个平台，不加载动态插件。direct/CLI client 只在首次调用时读取 `source_accounts` 并用 `CredentialCipher` 解密；默认全部来源 disabled，registry 构造不会发起网络调用。DB→Huey 采用 pending commit、immediate enqueue、`dispatched_at` marker；启动会重新发布全部 pending row，因此 Huey 已 dequeue、应用尚未 claim 的 message 也可恢复，重复消息由原子 claim 消解。Huey 只负责 transport、priority、periodic、retry 和 lock，产品状态、取消和 progress 只读应用库 `job_runs`。Docker Compose 以唯一一次性 `migrate` 服务串行 Alembic 写入，并以 successful-completion dependency 阻止失败时启动 API/worker；两个 runtime startup 只执行 schema-head 只读 gate。Source installer 也在启动两个进程前独占 migration。FastAPI 已切到注入式 feature router 与 `/api/v1`，CLI 只保留运行/诊断/评测/数据库命令；旧 app/CLI 不再是入口。现有静态 Web 与扩展 dispatcher 到 Task 22 才消费这些 route。下方 v0.3 图只用于最终删除前追踪不可达实现。
 
+Source-install stable-root boundary 由 held checkout root、append-only root guard 与内层 lifecycle anchor 组成。Guard 对每代写入相同 pending/committed record 并校验完整历史；只在 active lease 内恢复 generation 0 初始 pending，或同 root/instance/anchor 恰落后一代的 installer/process record。环境、installer 与 process state 的 replacement 保留 temp FD、只对 FD 改 mode，并在 replace 前后验证 inode，失败不 pathname-unlink 不确定 temp。Windows runtime logs 以不共享 delete 的 native reparse-aware handles 固定目录与 final；POSIX 保持 held dirfd。Queue health 正常 pathname connect 后要求全部新增普通 FD 都来自预先固定的 main/WAL/SHM identity set。Backup publication 在 Linux 保持 anonymous payload + `linkat`，macOS 使用 named held temp + `renameatx_np(RENAME_EXCL)`；失败的 macOS temp 保留并由 ignore policy 排除。
+
 ## 已停止作为入口的 v0.3 实现
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：

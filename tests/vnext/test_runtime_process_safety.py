@@ -152,6 +152,49 @@ def test_rerun_signals_verified_identity_then_waits_before_escalating(tmp_path: 
     assert waits == [(4321, 5.0), (4321, 5.0), (4322, 5.0)]
 
 
+def test_failed_migration_rerun_reconciles_one_generation_and_stops_exact_pair(
+    tmp_path: Path,
+) -> None:
+    api = _identity(4321, "api-start")
+    worker = _identity(4322, "worker-start")
+    ownership = _write_state(tmp_path, api=api, worker=worker)
+    signals: list[tuple[int, int]] = []
+    fail_migration = True
+
+    def migrate(*_args: object, **_kwargs: object) -> None:
+        nonlocal fail_migration
+        if fail_migration:
+            fail_migration = False
+            raise RuntimeError("migration failed")
+
+    common = {
+        "host": "127.0.0.1",
+        "port": 8420,
+        "litellm_base_url": "https://models.example/v1",
+        "litellm_api_key": "proxy-secret",
+        "install_dependencies": False,
+        "run_command": migrate,
+        "identity_probe": lambda pid: {4321: api, 4322: worker}.get(pid),
+        "signal_process": lambda pid, signum: signals.append((pid, signum)),
+        "wait_for_exit": lambda *_args: True,
+    }
+    with pytest.raises(RuntimeError, match="migration failed"):
+        bootstrap.install_local_runtime(tmp_path, start=True, **common)
+
+    result = bootstrap.install_local_runtime(tmp_path, start=False, **common)
+
+    assert result.status == "prepared"
+    assert json.loads((tmp_path / bootstrap.PROCESS_STATE).read_text())["generation"] == (
+        ownership.generation + 1
+    )
+    assert signals == [
+        (4321, signal.SIGTERM),
+        (4322, signal.SIGTERM),
+        (4321, signal.SIGTERM),
+        (4322, signal.SIGTERM),
+    ]
+
+
 def test_rerun_refuses_to_launch_when_verified_process_cannot_be_reaped(tmp_path: Path) -> None:
     api = _identity(4321, "api-start")
     ownership = _write_state(tmp_path, api=api, worker=api)

@@ -92,7 +92,9 @@ MODE=local bash scripts/install.sh
 跨进程 guard，再读取或初始化内层 lifecycle lock 与 installer metadata；两层共同串行整段
 流程，并以完整 installer UUID、canonical root、单调 generation 和 anchor UUID/device/inode
 作为同一份 lease。等待结束、进入业务前、generation 更新及退出时都会精确复核两份 lease，
-且所有等待共用一个不可重置的截止时间。首次 metadata 通过 held temp FD 同步，在 POSIX
+root guard 会校验全部 complete history，并为每代依次 fsync 相同的 pending/committed 两条记录；
+只允许修复恰好落后一代且 root/instance/anchor 全相同的 installer 或 process record。
+且所有等待共用一个不可重置的截止时间。所有 metadata 替换均保留 held temp FD，在 POSIX
 上对该 FD 执行 `fchmod`，再 hard-link no-replace 发布；不会按发布后的 pathname chmod。
 POSIX 以 held root/parent FD 逐级打开 `data/vnext`，拒绝 symlink、junction、换 inode 或
 多 hard-link anchor。崩溃遗留的未绑定 anchor 仅在 POSIX 上通过普通文件、单链接、owner、
@@ -102,7 +104,9 @@ POSIX 以 held root/parent FD 逐级打开 `data/vnext`，拒绝 symlink、junct
 已绑定 pathname 缺失或换 inode，以及 symlink/junction ancestor，都会失败关闭；复制 `.env` 后，managed root/DB/Huey/instance 字段会
 重绑定当前 checkout，而已有 secret 与外部 LiteLLM connection 保持不变。
 停止/失败清理保留 ownership-bound dead state，直到下次 ownership-checked publication；
-directory/FIFO 等非普通 state 会失败关闭。Docker 在受保护 readiness 后再次检查 API
+directory/FIFO 等非普通 state 会失败关闭。Windows log 目录和文件使用不共享 delete、带
+`OPEN_REPARSE_POINT` 的 native handle，拒绝 junction/symlink、目录 final 或多链接文件。
+Docker 在受保护 readiness 后再次检查 API
 与 worker Compose health，避免 probe 期间的 crash-loop 被误报成功。
 
 安全边界是启动时解析并持有的 canonical checkout root。该边界覆盖正常并发、崩溃恢复、
@@ -123,8 +127,9 @@ openbiliclaw db migrate
 openbiliclaw db backup <destination>
 ```
 
-`db backup` 先完成并同步 held/unlinked payload，之后才通过 macOS `fclonefileat` 或
-Linux `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` 原子 no-replace 创建目标名；Linux 在
+`db backup` 先完成并同步 held payload；macOS 使用同目录 `.backup-*.tmp`，通过
+`renameatx_np(RENAME_EXCL)` 原子 no-replace 发布（成功消费 temp，失败保留供忽略/审计），
+Linux 保持 unlinked `O_TMPFILE` + `linkat(AT_EMPTY_PATH)`；Linux 在
 `AT_EMPTY_PATH` 被 capability policy 拒绝时，仅在验证 `/proc/self/fd` 仍绑定 held inode 后
 使用 `AT_SYMLINK_FOLLOW` fallback。Directory sync 后会重查 parent pathname 与 held dir FD，Windows 或缺少
 该安全 primitive 的平台会在创建或预留目标前失败关闭。私有 source hard-link staging
