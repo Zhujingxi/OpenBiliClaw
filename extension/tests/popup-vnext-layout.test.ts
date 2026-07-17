@@ -193,7 +193,7 @@ test("dropped feature CSS is not shipped after the retained stylesheet is restor
   for (const selector of [
     ".delight-banner", ".embedding-banner", ".messages-button", ".messages-overlay",
     ".popup-model-shell", ".saved-sync-toolbar", ".speculative-list", ".awareness-list",
-    ".saved-toggle", ".saved-card", ".saved-load-retry",
+    ".saved-toggle", ".saved-card", ".saved-load-retry", ".spec-specific",
   ]) {
     assert.doesNotMatch(style, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
