@@ -41,13 +41,13 @@ with `inject_core_memory=False` (via `without_core_memory_kwargs`, matching sibl
 
 **Steps:**
 
-- [ ] Write one focused failing test: fake service records kwargs; assert the extractor call
+- [x] Write one focused failing test: fake service records kwargs; assert the extractor call
       carries `inject_core_memory=False`.
-- [ ] Run `.venv/bin/python -m pytest tests/test_llm_extractor.py -q` and confirm FAIL for the
+- [x] Run `.venv/bin/python -m pytest tests/test_llm_extractor.py -q` and confirm FAIL for the
       missing opt-out.
-- [ ] Add `**without_core_memory_kwargs(complete_structured)` at `llm_extractor.py:82`.
-- [ ] Rerun the focused test and confirm PASS with no warnings.
-- [ ] Run `.venv/bin/ruff check src/ tests/` and `.venv/bin/mypy src/`.
+- [x] Add `**without_core_memory_kwargs(complete_structured)` at `llm_extractor.py:82`.
+- [x] Rerun the focused test and confirm PASS with no warnings.
+- [x] Run `.venv/bin/ruff check src/ tests/` and `.venv/bin/mypy src/`.
 
 **Acceptance:**
 
