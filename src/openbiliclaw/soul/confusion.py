@@ -415,6 +415,10 @@ class ConfusionManager:
         else:
             self._discard_all_held(confusion)
             terminal = "resolved" if resolution == _RESOLUTION_PROXY else "dismissed"
+            if resolution == _RESOLUTION_PROXY:
+                # The behaviour was a proxy / misread — discount its evidence so
+                # it stops driving preference weight (retraction-style patch).
+                self._discount_proxy_evidence(confusion)
         self._db.update_confusion(
             confusion_id,
             status=terminal,
@@ -480,6 +484,21 @@ class ConfusionManager:
             held.replay_submitted_at = now.isoformat()
             held.batch_id = batch_id
             held.replay_attempts += 1
+
+    def pending_replays(self) -> list[Confusion]:
+        """Resolved confusions with held updates still in ``replaying`` state.
+
+        These were flipped to ``replaying`` (with a receipt) by
+        :meth:`resolve` on a real-interest resolution but have not yet been
+        rebased into a preference analysis. The 12h held-replay consumer picks
+        them up, feeds the held topics as evidence, then calls
+        :meth:`mark_replay_applied`.
+        """
+        return [
+            confusion
+            for confusion in self._list(["resolved"])
+            if any(held.state == "replaying" for held in confusion.held_updates)
+        ]
 
     def mark_replay_applied(self, confusion_id: int) -> None:
         """Downstream preference analysis consumed the held updates → applied."""
@@ -547,6 +566,26 @@ class ConfusionManager:
         return touched
 
     # -- Internal helpers -----------------------------------------------------
+
+    def _discount_proxy_evidence(self, confusion: Confusion) -> None:
+        """Discount events behind a proxy-resolved confusion (best-effort)."""
+        if self._db is None or not confusion.evidence_refs:
+            return
+        discount = getattr(self._db, "discount_events_by_confusion", None)
+        if not callable(discount):
+            return
+        try:
+            marked = int(discount(confusion.evidence_refs))
+        except Exception:
+            logger.debug("confusion proxy evidence discount failed", exc_info=True)
+            return
+        if marked:
+            self._record(
+                "confusion_proxy_discount",
+                topic=confusion.topic,
+                before={"id": confusion.id},
+                after={"discounted_events": marked},
+            )
 
     def _discard_all_held(self, confusion: Confusion) -> None:
         for held in confusion.held_updates:

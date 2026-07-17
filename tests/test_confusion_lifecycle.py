@@ -384,3 +384,61 @@ def test_mark_replay_applied_transitions(tmp_path: Path) -> None:
     mgr.resolve(cid, resolution="real_interest")
     mgr.mark_replay_applied(cid)
     assert mgr.get(cid).held_updates[0].state == "applied"
+
+
+def test_pending_replays_lists_only_replaying(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    mgr = ConfusionManager(db)
+    cid = db.insert_confusion(topic="a", observation="x")
+    db.update_confusion(cid, held_updates=[HeldUpdate(held_id="h1", topic="a").to_dict()])
+    assert mgr.pending_replays() == []  # still open, nothing replaying
+    mgr.resolve(cid, resolution="real_interest")  # → replaying
+    assert [c.id for c in mgr.pending_replays()] == [cid]
+    mgr.mark_replay_applied(cid)  # → applied
+    assert mgr.pending_replays() == []
+
+
+# --------------------------------------------------------------------------
+# Leftover wiring 2: proxy-behaviour evidence discount
+# --------------------------------------------------------------------------
+
+
+def test_resolve_proxy_discounts_evidence_events(tmp_path: Path) -> None:
+    import json
+
+    db = _db(tmp_path)
+    eid = db.insert_event("view", title="解压视频", metadata={"signal_strength": 0.9})
+    other = db.insert_event("view", title="别的", metadata={"signal_strength": 0.8})
+    mgr = ConfusionManager(db)
+    cid = db.insert_confusion(
+        topic="解压", observation="x", evidence_refs=[str(eid), "note-not-an-id"]
+    )
+    assert mgr.resolve(cid, resolution="proxy_behavior") == "resolved"
+    # Read the patched event metadata back directly.
+    conn = db.open_connection()
+    try:
+        patched = conn.execute("SELECT metadata FROM events WHERE id = ?", (eid,)).fetchone()
+        untouched = conn.execute("SELECT metadata FROM events WHERE id = ?", (other,)).fetchone()
+    finally:
+        conn.close()
+    meta = json.loads(patched["metadata"])
+    assert meta["discounted_by_confusion"] is True
+    assert meta["signal_strength"] == 0.2
+    # An unrelated event is untouched.
+    assert "discounted_by_confusion" not in json.loads(untouched["metadata"])
+
+
+def test_resolve_real_interest_does_not_discount_evidence(tmp_path: Path) -> None:
+    import json
+
+    db = _db(tmp_path)
+    eid = db.insert_event("view", title="桌游", metadata={"signal_strength": 0.9})
+    mgr = ConfusionManager(db)
+    cid = db.insert_confusion(topic="桌游", observation="x", evidence_refs=[str(eid)])
+    mgr.resolve(cid, resolution="real_interest")
+    conn = db.open_connection()
+    try:
+        patched = conn.execute("SELECT metadata FROM events WHERE id = ?", (eid,)).fetchone()
+    finally:
+        conn.close()
+    assert "discounted_by_confusion" not in json.loads(patched["metadata"])

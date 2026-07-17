@@ -297,6 +297,15 @@ class SoulEngine:
         set_gate = getattr(self._pipeline, "set_posture_gate", None)
         if callable(set_gate):
             set_gate(self._posture_gate)
+        # Held-replay crash recovery (Wave B, r5/R4-1): any held update left in
+        # ``replaying`` at construction is a leftover from a previously crashed
+        # session — reconcile it to ``applied_unverified`` (never resubmit;
+        # prefer under- to double-counting). Fresh replays created later in THIS
+        # session are consumed by ``replay_held_updates`` instead. Best-effort.
+        try:
+            self._confusion_manager.recover_replaying()
+        except Exception:
+            logger.debug("held-replay crash recovery failed", exc_info=True)
 
     def set_embedding_service(self, embedding_service: Any) -> None:
         """Attach or update the embedding service after construction.
@@ -1122,7 +1131,16 @@ class SoulEngine:
                 "reason": "feedback_batch_in_progress",
             }
         async with self._feedback_batch_lock:
-            return await self._process_feedback_batch_if_needed_locked()
+            result = await self._process_feedback_batch_if_needed_locked()
+        # Consume any held updates left ``replaying`` by a resolved real-interest
+        # confusion (Wave B held-replay leftover). Best-effort — a replay failure
+        # never breaks feedback processing; the items stay ``replaying`` for a
+        # later run (and startup crash recovery bounds the worst case).
+        try:
+            await self.replay_held_updates()
+        except Exception:
+            logger.debug("held-replay consumer failed", exc_info=True)
+        return result
 
     async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:
         """Feedback batch implementation guarded by ``_feedback_batch_lock``."""
@@ -1710,6 +1728,80 @@ class SoulEngine:
             outcome="success" if terminal else "failed",
             turn_id=turn_id,
         )
+
+    async def replay_held_updates(self) -> dict[str, object]:
+        """Rebase resolved-real-interest held updates into preference analysis.
+
+        Wave B held-replay consumer (leftover wiring). A confusion resolved as
+        ``real_interest`` leaves its held topic updates in the ``replaying``
+        state with a receipt. This consumer feeds those held topics as evidence
+        into the preference analyzer (rebase semantics — never a direct weight
+        write), persists the result through the normal chokepoint (freeze + the
+        interest fast line, which is not gated), then marks the replay
+        ``applied``. Idempotent: once applied the items are no longer
+        ``replaying``, so a second run is a no-op. A crash between the
+        preference write and ``mark_replay_applied`` is reconciled to
+        ``applied_unverified`` by :meth:`recover_replaying` at next startup.
+        """
+        pending = self._confusion_manager.pending_replays()
+        if not pending:
+            return {"replayed": 0, "confusions": 0}
+        events: list[dict[str, object]] = []
+        for confusion in pending:
+            for held in confusion.held_updates:
+                if held.state != "replaying":
+                    continue
+                events.append(
+                    {
+                        "event_type": "dialogue_insight",
+                        "title": held.topic,
+                        "metadata": {
+                            "kind": "interest",
+                            "confidence": held.value,
+                            "evidence": "疑惑被确认为真实兴趣，重放此前搁置的兴趣变更。",
+                            "source": "confusion_replay",
+                            "occurrences": 1,
+                        },
+                    }
+                )
+        if not events:
+            return {"replayed": 0, "confusions": 0}
+        preference_layer = self._memory.get_layer("preference")
+        existing_preference = dict(preference_layer.data)
+        updated_preference = await self._preference_analyzer.analyze_events(
+            events=events,
+            existing_preference=existing_preference,
+        )
+        # Freeze filter still applies (other topics may be frozen); the replayed
+        # topics themselves are resolved, so they are no longer frozen.
+        try:
+            frozen_topics = self._confusion_manager.frozen_topics()
+        except Exception:
+            frozen_topics = set()
+        if frozen_topics:
+            updated_preference, held_updates = apply_confusion_freeze(
+                before=existing_preference,
+                after=updated_preference,
+                frozen_topics=frozen_topics,
+            )
+            if held_updates:
+                try:
+                    self._confusion_manager.record_held_updates(held_updates)
+                except Exception:
+                    logger.debug("Failed to record held confusion updates", exc_info=True)
+        with self._ledger.action(
+            write_point="confusion_replay_preference",
+            source="confusion",
+            before=existing_preference,
+            source_refs=[c.topic for c in pending if c.topic],
+        ) as _entry:
+            preference_layer.data.clear()
+            preference_layer.data.update(updated_preference)
+            preference_layer.save()
+            _entry.after = dict(updated_preference)
+        for confusion in pending:
+            self._confusion_manager.mark_replay_applied(confusion.id)
+        return {"replayed": len(events), "confusions": len(pending)}
 
     # -- Posture gate (Phase 3) ----------------------------------------------
 

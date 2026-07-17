@@ -99,6 +99,40 @@ def test_soul_engine_wires_scheduler_speculation_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_replay_held_updates_applies_and_is_idempotent(tmp_path: Path) -> None:
+    from openbiliclaw.soul.confusion import ConfusionManager, HeldUpdate
+    from openbiliclaw.storage.database import Database
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    db = Database(tmp_path / "confusion.db")
+    db.initialize()
+    registry = FakeRegistry(
+        json.dumps(
+            {"interests": [{"name": "桌游", "category": "游戏", "weight": 0.7}]},
+            ensure_ascii=False,
+        )
+    )
+    engine = SoulEngine(llm=registry, memory=memory, database=db)
+
+    mgr = ConfusionManager(db)
+    cid = db.insert_confusion(topic="桌游", observation="x")
+    db.update_confusion(
+        cid,
+        held_updates=[HeldUpdate(held_id="h1", topic="桌游", kind="upgrade", value=0.7).to_dict()],
+    )
+    mgr.resolve(cid, resolution="real_interest")  # → replaying (with receipt)
+
+    result = await engine.replay_held_updates()
+    assert result["confusions"] == 1
+    assert mgr.get(cid).held_updates[0].state == "applied"
+
+    # Idempotent: nothing left replaying.
+    again = await engine.replay_held_updates()
+    assert again["replayed"] == 0
+
+
+@pytest.mark.asyncio
 async def test_analyze_events_updates_preference_layer(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()
