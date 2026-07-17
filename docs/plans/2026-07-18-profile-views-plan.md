@@ -121,10 +121,10 @@ keep updated.
 
 **Steps:**
 
-- [ ] Draft the table: surface / cadence / view / fields / caps / portrait? / LLM? — one row
+- [x] Draft the table: surface / cadence / view / fields / caps / portrait? / LLM? — one row
       per consumer from spec D1–D8, including non-LLM direct reads (seeds, digests, filters).
-- [ ] Cross-check every row's `file:line` against the working tree (no stale citations).
-- [ ] Add the integrations note: portrait re-exposure at `operations.py:113` is deliberate.
+- [x] Cross-check every row's `file:line` against the working tree (no stale citations).
+- [x] Add the integrations note: portrait re-exposure at `operations.py:113` is deliberate.
 
 **Acceptance:**
 

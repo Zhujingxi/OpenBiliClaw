@@ -18,6 +18,10 @@
 - **AvoidanceSpeculator** — 主动确认用户可能想避开的内容方向
 - **SoulProfile** — 用户灵魂画像数据结构
 
+> **画像 → LLM 的所有序列化路径**（哪些 prompt 看到画像、看到哪些字段、是否含
+> `personality_portrait`）统一登记在 [画像使用登记表](../profile-usage.md)。新增
+> 消费画像的 prompt 前先查这张表，并复用其中的 view，不要另造序列化分支。
+
 ## 已实现功能
 
 | 任务 | 状态 | 说明 |
