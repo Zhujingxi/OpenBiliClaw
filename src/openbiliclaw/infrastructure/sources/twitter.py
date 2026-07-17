@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Protocol
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from openbiliclaw.features.activity.domain import ActivityEvent  # noqa: TC001
 from openbiliclaw.features.feed.domain import ContentItem  # noqa: TC001
@@ -71,14 +71,6 @@ def build_twitter_connector(
 
 class TwitterSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    enabled: bool = False
-    mode: Literal["cookie"] = "cookie"
-    daily_search_budget: int = Field(default=0, ge=0)
-    daily_feed_budget: int = Field(default=0, ge=0)
-    daily_creator_budget: int = Field(default=0, ge=0)
-    request_interval_seconds: int = Field(default=3, ge=1)
-    min_interval_minutes: int = Field(default=60, ge=1)
 
 
 _MANIFEST = SourceManifest(

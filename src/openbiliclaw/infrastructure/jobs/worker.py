@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from openbiliclaw.config import LoggingConfig
 from openbiliclaw.features.system.domain import DatabaseSettings, UserSettings
 from openbiliclaw.features.system.service import SettingsService
 from openbiliclaw.infrastructure.ai.runner import LiteLLMModelResolver, TaskRunner
@@ -30,6 +31,7 @@ from openbiliclaw.infrastructure.jobs.tasks import (
     configure_job_runtime,
 )
 from openbiliclaw.infrastructure.runtime_settings import applied_runtime_settings
+from openbiliclaw.logging_setup import installed_owned_logging_handlers
 
 MAX_WORKERS = 4
 RuntimeFactory = Callable[[], tuple[JobService, Mapping[str, JobHandler]]]
@@ -96,13 +98,15 @@ def run_worker(
     *,
     workers: int = MAX_WORKERS,
     settings_loader: SettingsLoader | None = None,
+    deployment_logging: LoggingConfig | None = None,
 ) -> None:
     """Configure dependencies, recover interrupted runs, and start the consumer."""
 
     if not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"worker concurrency must be between 1 and {MAX_WORKERS}")
     loader = settings_loader or _load_database_user_settings
-    with applied_runtime_settings(loader()):
+    logging_config = deployment_logging or LoggingConfig()
+    with installed_owned_logging_handlers(logging_config), applied_runtime_settings(loader()):
         service, handlers = runtime_factory()
         configure_job_runtime(service, handlers)
         service.recover_interrupted()

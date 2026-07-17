@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
+from openbiliclaw.api import dependencies as dependencies_module
 from openbiliclaw.api.dependencies import build_application_container
+from openbiliclaw.features.sources.domain import SourceId
+from openbiliclaw.infrastructure.database.models import SettingModel
 from openbiliclaw.infrastructure.database.operations import (
     SchemaNotReadyError,
     require_schema_at_head,
@@ -37,6 +43,66 @@ def test_runtime_schema_check_rejects_unmigrated_database(tmp_path: Path) -> Non
             database_url=_database_url(database),
             alembic_ini=ROOT / "alembic.ini",
         )
+
+
+def test_api_defers_source_settings_and_registry_until_after_schema_guard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "lazy-source-registry.db"
+    _migrate(database)
+    url = _database_url(database)
+    engine = create_engine(url)
+    with Session(engine) as session, session.begin():
+        session.add(
+            SettingModel(
+                key="source-config:douyin",
+                value={"mode": "extension"},
+                updated_at=datetime.now(UTC),
+            )
+        )
+    engine.dispose()
+    monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", url)
+    monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
+    calls = 0
+    real_builder = dependencies_module.build_default_source_registry
+
+    def observed_builder(session_factory):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return real_builder(session_factory)
+
+    monkeypatch.setattr(dependencies_module, "build_default_source_registry", observed_builder)
+
+    container = build_application_container()
+    assert calls == 0
+    try:
+        asyncio.run(container.startup())
+        assert calls == 1
+        assert container.sources.settings(SourceId.DOUYIN).settings["mode"] == "extension"
+    finally:
+        asyncio.run(container.shutdown())
+
+
+def test_api_schema_guard_failure_never_builds_the_source_registry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "unmigrated-api.db"
+    database.touch()
+    monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", _database_url(database))
+    monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
+    calls = 0
+
+    def unexpected_builder(_session_factory: object) -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(dependencies_module, "build_default_source_registry", unexpected_builder)
+
+    container = build_application_container()
+    with pytest.raises(SchemaNotReadyError, match="db migrate"):
+        asyncio.run(container.startup())
+    assert calls == 0
+    asyncio.run(container.shutdown())
 
 
 def test_runtime_schema_check_is_read_only_and_concurrency_safe(tmp_path: Path) -> None:

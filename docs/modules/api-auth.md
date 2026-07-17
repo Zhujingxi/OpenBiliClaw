@@ -34,10 +34,14 @@ passwords nor device keys appear in the limiter key, response, or log.
 all previously issued Web and extension sessions without rotating or exposing the signing
 secret. Expired and revoked sessions return the same safe authentication errors. The
 installer bearer is not a browser bootstrap secret and is not revoked by the session epoch.
-At startup, the environment password hash is converted to a non-secret keyed fingerprint. First
-use records it without revocation; a changed fingerprint and the epoch increment commit in one
-database transaction, so password rotation atomically invalidates old sessions. Reconciliation
-failure closes session mint/verification instead of accepting a stale epoch.
+At startup, the environment password hash is converted to a non-secret keyed fingerprint. A
+fresh install with no password leaves no fingerprint row; first enable records a fingerprint
+without revocation, and an unchanged state does not advance the epoch. Rotation, removal, and
+re-enable are credential-state transitions: rotation replaces the fingerprint, removal stores
+the explicit `disabled` sentinel, and re-enable replaces that sentinel even when the same old
+hash returns. Each transition advances the epoch in the same database transaction, so old
+sessions cannot survive removal or revive after re-enable. Repeated disabled state is idempotent.
+Reconciliation failure closes session mint/verification instead of accepting a stale epoch.
 
 ```http
 Authorization: Bearer <installer token or finite extension session>
@@ -56,11 +60,14 @@ Browser authentication credentials are infrastructure secrets, not `UserSettings
 | secret | private runtime representation |
 |---|---|
 | password | scrypt hash in `OPENBILICLAW_WEB_PASSWORD_HASH`; never plaintext |
-| session signing key | random `OPENBILICLAW_SESSION_SECRET` |
+| session signing key | installer-generated random `OPENBILICLAW_SESSION_SECRET`, persisted once and reused |
 | extension device key | complete key delivered once to the extension; only digest record retained in `OPENBILICLAW_EXTENSION_ACCESS_KEYS` |
 
-Generate these through the installer/provisioning host and write them directly to the
-mode-`0600` `.env` or a deployment secret store. Do not paste generated values into docs,
+The source and Docker installers generate `OPENBILICLAW_SESSION_SECRET` before runtime or
+Compose preparation, write it to the mode-`0600` `.env`, and preserve the existing non-empty
+value on rerun. Password hashes and extension digest records remain explicit optional
+provisioning inputs. Write all browser credentials directly to the private `.env` or a
+deployment secret store. Do not paste generated values into docs,
 shell history, issue text, screenshots, API examples, logs, OpenAPI examples, or generated
 clients. `GET/PATCH /api/v1/settings` exposes only `password_configured` and
 `installer_bearer_configured` deployment facts plus mutable access behavior.

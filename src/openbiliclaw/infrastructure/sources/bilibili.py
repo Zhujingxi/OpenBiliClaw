@@ -150,8 +150,6 @@ def build_bilibili_connector(
 class BilibiliSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    enabled: bool = True
-
 
 _MANIFEST = SourceManifest(
     source_id=SourceId.BILIBILI,

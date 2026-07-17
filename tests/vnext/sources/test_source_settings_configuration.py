@@ -28,12 +28,12 @@ if TYPE_CHECKING:
 
 SOURCE_IDS = tuple(source_id.value for source_id in SourceId)
 VALID_PATCHES: dict[SourceId, dict[str, object]] = {
-    SourceId.BILIBILI: {"enabled": False},
-    SourceId.XIAOHONGSHU: {"task_interval_seconds": 12},
+    SourceId.BILIBILI: {},
+    SourceId.XIAOHONGSHU: {},
     SourceId.DOUYIN: {"mode": "extension"},
-    SourceId.YOUTUBE: {"min_interval_minutes": 15},
-    SourceId.TWITTER: {"request_interval_seconds": 8},
-    SourceId.ZHIHU: {"daily_related_budget": 17},
+    SourceId.YOUTUBE: {},
+    SourceId.TWITTER: {},
+    SourceId.ZHIHU: {},
     SourceId.REDDIT: {"backend": "extension"},
 }
 
@@ -117,7 +117,7 @@ def test_restart_composition_consumes_persisted_transport_setting(
     session_factory, _, service = settings_context
     state = service.update_settings(
         SourceId.DOUYIN,
-        {"mode": "extension", "daily_search_budget": 23},
+        {"mode": "extension"},
     )
     assert state == SourceSettingsState(
         source_id=SourceId.DOUYIN,
@@ -127,10 +127,29 @@ def test_restart_composition_consumes_persisted_transport_setting(
     restarted = build_default_source_registry(session_factory)
     connector = restarted.get("douyin")
     assert connector.settings.mode == "extension"
-    assert connector.settings.daily_search_budget == 23
     assert (
         connector.manifest.operation_spec(SourceOperation.SEARCH).transport_kind.value == "browser"
     )
+
+
+def test_every_advertised_source_setting_has_a_named_runtime_consumer(
+    settings_context: tuple[Any, Any, SourceAccountService],
+) -> None:
+    _, _, service = settings_context
+    expected_fields = {
+        SourceId.BILIBILI: set(),
+        SourceId.XIAOHONGSHU: set(),
+        SourceId.DOUYIN: {"mode"},
+        SourceId.YOUTUBE: set(),
+        SourceId.TWITTER: set(),
+        SourceId.ZHIHU: set(),
+        SourceId.REDDIT: {"backend"},
+    }
+
+    for manifest in service.manifests():
+        properties = manifest.settings_schema["properties"]
+        assert set(properties) == expected_fields[manifest.source_id]
+        assert all(property_schema.get("x-consumer") for property_schema in properties.values())
 
 
 def test_source_settings_state_and_manifest_are_credential_free(

@@ -96,7 +96,7 @@ class AuthStateRepository(Protocol):
 
     def bump_epoch(self) -> int: ...
 
-    def reconcile_password_fingerprint(self, fingerprint: str) -> bool: ...
+    def reconcile_password_fingerprint(self, fingerprint: str | None) -> bool: ...
 
 
 class SourceAccountRepository(Protocol):
@@ -279,6 +279,7 @@ class SQLAlchemyAuthStateRepository:
 
     _EPOCH_KEY = "session_epoch"
     _PASSWORD_FINGERPRINT_KEY = "password_fingerprint"
+    _PASSWORD_DISABLED = "disabled"
 
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -306,23 +307,31 @@ class SQLAlchemyAuthStateRepository:
             raise RuntimeError("authentication revocation state is unavailable")
         return next_epoch
 
-    def reconcile_password_fingerprint(self, fingerprint: str) -> bool:
-        """Record first use, or atomically rotate fingerprint and session epoch."""
+    def reconcile_password_fingerprint(self, fingerprint: str | None) -> bool:
+        """Atomically reconcile absent, enabled, rotated, and disabled password state."""
 
-        if not fingerprint or len(fingerprint) > 128:
+        if fingerprint is not None and (not fingerprint or len(fingerprint) > 128):
             raise ValueError("password fingerprint is invalid")
+        target = fingerprint if fingerprint is not None else self._PASSWORD_DISABLED
+        stored = self._session.get(AuthStateModel, self._PASSWORD_FINGERPRINT_KEY)
+        if stored is None and fingerprint is None:
+            return False
         inserted = self._session.execute(
             sqlite_insert(AuthStateModel)
             .values(
                 key=self._PASSWORD_FINGERPRINT_KEY,
                 integer_value=None,
-                text_value=fingerprint,
+                text_value=target,
             )
             .on_conflict_do_nothing(index_elements=[AuthStateModel.key])
         )
         if getattr(inserted, "rowcount", 0):
             return False
-        stored = self._session.get(AuthStateModel, self._PASSWORD_FINGERPRINT_KEY)
+        stored = self._session.get(
+            AuthStateModel,
+            self._PASSWORD_FINGERPRINT_KEY,
+            populate_existing=True,
+        )
         if stored is None or stored.text_value is None or stored.integer_value is not None:
             raise RuntimeError("authentication password state is unavailable")
         changed = self._session.scalar(
@@ -330,9 +339,9 @@ class SQLAlchemyAuthStateRepository:
             .where(
                 AuthStateModel.key == self._PASSWORD_FINGERPRINT_KEY,
                 AuthStateModel.integer_value.is_(None),
-                AuthStateModel.text_value != fingerprint,
+                AuthStateModel.text_value != target,
             )
-            .values(text_value=fingerprint)
+            .values(text_value=target)
             .returning(AuthStateModel.key)
         )
         if changed is None:

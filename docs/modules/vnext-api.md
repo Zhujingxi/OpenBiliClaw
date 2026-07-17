@@ -10,7 +10,10 @@ extension device-key exchange, and global session revocation. Installer bearer, 
 HttpOnly cookie, and finite extension bearer sessions coexist. Unsafe cookie requests
 require a same-origin `Origin` plus `X-OBC-Auth`; the monotonic database-backed
 `auth_state` epoch revokes Web/extension sessions without changing the installer bearer.
-No password, hash, device key, cookie, bearer, or signing secret appears in response models.
+No password, hash, device key, cookie, installer/infrastructure/provider bearer, or signing
+secret appears in response models. The deliberate exception is
+`POST /api/v1/auth/extension-token`: after a valid device-key exchange it returns only the
+finite extension bearer and `expires_at` needed by that client session.
 
 Chat and onboarding/job progress use SSE with typed JSON frames and clean
 terminal events. Extension work uses generic lease-safe claim/complete; result

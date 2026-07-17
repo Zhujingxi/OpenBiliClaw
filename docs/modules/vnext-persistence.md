@@ -24,8 +24,8 @@
 | Repository + UoW | ✅ | 领域对象经同步 repository 持久化；`UnitOfWork` 只在显式 `commit()` 时提交，退出时统一 rollback 并关闭 session |
 | 画像并发保护 | ✅ | `ProfileRepository.append()` 使用 expected revision 检查，拒绝陈旧修订和画像 ID 漂移；`profile_consumed_evidence` 与 revision 在同一事务提交/回滚 |
 | 类型化用户设置 | ✅ | `SettingsService` 先合并默认值、严格校验完整 `UserSettings`，再在同一事务中替换设置 |
-| Session revocation | ✅ | `SQLAlchemyAuthStateRepository` 维护 non-secret `session_epoch` 与 keyed password fingerprint；password fingerprint 改变与 epoch increment 在同一事务提交，使旧 Web/extension session 原子失效；表内不保存 password/hash、cookie、bearer、device key 或 signing secret |
-| 来源 settings | ✅ | 七平台 strict settings 复用现有 `settings` table 的 `source-config:<source_id>` namespaced row；global settings replace 保留这些 rows，registry rebuild 时重新验证并应用 |
+| Session revocation | ✅ | `SQLAlchemyAuthStateRepository` 维护 non-secret `session_epoch` 与 keyed password fingerprint/state；首次 enable 记录 fingerprint 不 bump，rotation、removal (`disabled` sentinel) 与 re-enable 在同一事务更新 state 并 increment epoch，使旧 Web/extension session 原子失效且不能复活；表内不保存 password/hash、cookie、bearer、device key 或 signing secret |
+| 来源 settings | ✅ | 七平台 strict settings 复用现有 `settings` table 的 `source-config:<source_id>` namespaced row；global settings replace 保留这些 rows。API 先通过 schema-head gate 再构造 settings-backed registry；只有 Douyin `mode` 与 Reddit `backend` 是有 runtime consumer 的 per-source 字段，其它五个平台 schema 为空 |
 | 凭据密文 | ✅ | `CredentialCipher` 从 `OPENBILICLAW_SECRET_KEY` 派生上下文隔离的 Fernet key；`source_accounts` repository 只接受 cipher 签发的 opaque `EncryptedCredential`，伪造 token 前缀会被拒绝 |
 | worker 接线 | ✅ | 独立 Huey worker 使用同一 UoW 执行 activity/profile/feed/job 用例；`job_runs` 是产品任务状态权威 |
 | 后端生产切换 | ✅ | `/api/v1`、worker、运维 CLI、安装器 secret 生命周期与 fresh vNext database 已是权威；只剩 Task 22 的现有 Web/extension client 接线 |
@@ -90,7 +90,9 @@ facts 在每次 GET overlay，不落入可写 product state。
 
 开发者可在仓库根目录执行 `alembic upgrade head` 创建 vNext 空库并依次应用 `0001`
 与 `0002`；迁移环境会先为 file-backed SQLite URL 创建缺失的父目录。API/worker 要求
-revision 精确位于 head，不能在运行时隐式创建 `auth_state`。该命令只操作 `alembic.ini`
+revision 精确位于 head，不能在运行时隐式创建 `auth_state`。API container construction 的
+source registry holder 是 zero-I/O；startup 先执行该 gate，再读取 `source-config:*` 并安装
+registry，因此 stale schema 不会被提前的 settings read 掩盖。该命令只操作 `alembic.ini`
 指向的 vNext URL；不得把 legacy 数据库 URL 传给这套迁移，也不得用
 `Base.metadata.create_all()` 代替版本化迁移。
 

@@ -68,6 +68,7 @@ if TYPE_CHECKING:
         SourceSettingsState,
         SourceTaskCompletion,
     )
+    from openbiliclaw.features.sources.registry import SourceRegistry
     from openbiliclaw.features.system.domain import UserSettings
     from openbiliclaw.features.system.service import OnboardingWorkflowProgress
     from openbiliclaw.infrastructure.jobs.tasks import JobRunSnapshot
@@ -83,6 +84,22 @@ _COOKIE_SCHEME = APIKeyCookie(
 
 class DependencyUnavailableError(RuntimeError):
     """A configured infrastructure dependency is currently unavailable."""
+
+
+class _DeferredSourceRegistry:
+    """Install the settings-backed registry only after the schema guard succeeds."""
+
+    def __init__(self) -> None:
+        self._registry: SourceRegistry | None = None
+
+    def install(self, registry: SourceRegistry) -> None:
+        if self._registry is None:
+            self._registry = registry
+
+    def get(self) -> SourceRegistry:
+        if self._registry is None:
+            raise DependencyUnavailableError("source registry is not initialized")
+        return self._registry
 
 
 class SettingsPort(Protocol):
@@ -223,6 +240,31 @@ def _unix_time() -> int:
 class _RateLimitEntry:
     failures: list[int] = field(default_factory=list)
     locked_until: int | None = None
+    in_flight: int = 0
+
+
+class AuthAttemptReservation:
+    """One admitted credential verification that must be finalized exactly once."""
+
+    def __init__(self, limiter: _BoundedRateLimiter, key: str) -> None:
+        self._limiter = limiter
+        self._key = key
+        self._active = True
+
+    def success(self) -> None:
+        self._finish("success")
+
+    def failure(self) -> None:
+        self._finish("failure")
+
+    def release(self) -> None:
+        self._finish("release")
+
+    def _finish(self, outcome: str) -> None:
+        if not self._active:
+            return
+        self._active = False
+        self._limiter.finish(self._key, outcome)
 
 
 class _BoundedRateLimiter:
@@ -247,42 +289,64 @@ class _BoundedRateLimiter:
         self._entries: OrderedDict[str, _RateLimitEntry] = OrderedDict()
         self._lock = threading.Lock()
 
-    def retry_after(self, key: str) -> int | None:
+    def begin(self, key: str) -> tuple[AuthAttemptReservation | None, int | None]:
         with self._lock:
             entry = self._entries.get(key)
-            if entry is None:
-                return None
             now = self._clock()
-            if entry.locked_until is not None and entry.locked_until > now:
+            if entry is not None and entry.locked_until is not None and entry.locked_until > now:
                 self._entries.move_to_end(key)
-                return max(1, entry.locked_until - now)
-            if entry.locked_until is not None:
+                return None, max(1, entry.locked_until - now)
+            if entry is not None and entry.locked_until is not None:
                 self._entries.pop(key, None)
-                return None
+                entry = None
+            if entry is None:
+                if len(self._entries) >= self._max_clients:
+                    evictable = next(
+                        (
+                            stored_key
+                            for stored_key, stored in self._entries.items()
+                            if stored.in_flight == 0
+                        ),
+                        None,
+                    )
+                    if evictable is None:
+                        return None, 1
+                    self._entries.pop(evictable, None)
+                entry = _RateLimitEntry()
+                self._entries[key] = entry
             entry.failures = [
                 moment for moment in entry.failures if now - moment < self._window_seconds
             ]
-            if not entry.failures:
-                self._entries.pop(key, None)
-            return None
+            if len(entry.failures) + entry.in_flight >= self._max_failures:
+                self._entries.move_to_end(key)
+                return None, 1
+            entry.in_flight += 1
+            self._entries.move_to_end(key)
+            return AuthAttemptReservation(self, key), None
 
-    def record_failure(self, key: str) -> None:
+    def finish(self, key: str, outcome: str) -> None:
         with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or entry.in_flight < 1:
+                return
+            entry.in_flight -= 1
             now = self._clock()
-            entry = self._entries.pop(key, _RateLimitEntry())
             entry.failures = [
                 moment for moment in entry.failures if now - moment < self._window_seconds
             ]
-            entry.failures.append(now)
-            if len(entry.failures) >= self._max_failures:
-                entry.locked_until = now + self._lockout_seconds
-            self._entries[key] = entry
-            while len(self._entries) > self._max_clients:
-                self._entries.popitem(last=False)
-
-    def reset(self, key: str) -> None:
-        with self._lock:
-            self._entries.pop(key, None)
+            if outcome == "success":
+                entry.failures.clear()
+                entry.locked_until = None
+            elif outcome == "failure":
+                entry.failures.append(now)
+                if len(entry.failures) >= self._max_failures:
+                    entry.locked_until = now + self._lockout_seconds
+            elif outcome != "release":
+                raise ValueError("unknown authentication attempt outcome")
+            if entry.in_flight == 0 and not entry.failures and entry.locked_until is None:
+                self._entries.pop(key, None)
+            else:
+                self._entries.move_to_end(key)
 
 
 @dataclass(slots=True)
@@ -303,7 +367,7 @@ class AccessPolicy:
     rate_limit_max_clients: int = 2048
     epoch_getter: Callable[[], int] | None = field(default=None, repr=False)
     epoch_bumper: Callable[[], int] | None = field(default=None, repr=False)
-    fingerprint_reconciler: Callable[[str], bool] | None = field(default=None, repr=False)
+    fingerprint_reconciler: Callable[[str | None], bool] | None = field(default=None, repr=False)
     _epoch: int = field(default=0, init=False, repr=False)
     _reconcile_ok: bool = field(default=True, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -352,27 +416,28 @@ class AccessPolicy:
         *,
         epoch_getter: Callable[[], int],
         epoch_bumper: Callable[[], int],
-        fingerprint_reconciler: Callable[[str], bool],
+        fingerprint_reconciler: Callable[[str | None], bool],
     ) -> None:
         """Attach vNext auth state before application startup."""
 
         self.epoch_getter = epoch_getter
         self.epoch_bumper = epoch_bumper
         self.fingerprint_reconciler = fingerprint_reconciler
-        self._reconcile_ok = not self.password_configured
+        self._reconcile_ok = False
 
     def reconcile_password_fingerprint(self) -> bool:
-        if not self.password_configured:
-            self._reconcile_ok = True
-            return False
         reconciler = self.fingerprint_reconciler
         if reconciler is None:
             self._reconcile_ok = True
             return False
-        fingerprint = auth_core.password_fingerprint(
-            self.session_secret,
-            plain=None,
-            password_hash=self.password_hash,
+        fingerprint = (
+            auth_core.password_fingerprint(
+                self.session_secret,
+                plain=None,
+                password_hash=self.password_hash,
+            )
+            if self.password_configured
+            else None
         )
         try:
             changed = reconciler(fingerprint)
@@ -384,14 +449,10 @@ class AccessPolicy:
         self._reconcile_ok = True
         return changed
 
-    def auth_retry_after(self, kind: str, key: str) -> int | None:
-        return self._limiter(kind).retry_after(key)
-
-    def record_auth_failure(self, kind: str, key: str) -> None:
-        self._limiter(kind).record_failure(key)
-
-    def reset_auth_failures(self, kind: str, key: str) -> None:
-        self._limiter(kind).reset(key)
+    def begin_auth_attempt(
+        self, kind: str, key: str
+    ) -> tuple[AuthAttemptReservation | None, int | None]:
+        return self._limiter(kind).begin(key)
 
     def _limiter(self, kind: str) -> _BoundedRateLimiter:
         if kind == "login":
@@ -618,7 +679,7 @@ def build_application_container() -> ApplicationContainer:
             uow.commit()
             return epoch
 
-    def reconcile_password_fingerprint(fingerprint: str) -> bool:
+    def reconcile_password_fingerprint(fingerprint: str | None) -> bool:
         with uow_factory() as uow:
             changed = uow.auth_state.reconcile_password_fingerprint(fingerprint)
             uow.commit()
@@ -631,7 +692,7 @@ def build_application_container() -> ApplicationContainer:
         fingerprint_reconciler=reconcile_password_fingerprint,
     )
 
-    registry = build_default_source_registry(session_factory)
+    registry = _DeferredSourceRegistry()
     settings = SettingsService(
         cast("Callable[[], Any]", uow_factory),
         on_change=_apply_runtime_settings,
@@ -640,11 +701,11 @@ def build_application_container() -> ApplicationContainer:
             "password_configured": access.password_configured,
         },
     )
-    source_tasks = SourceTaskService(cast("Callable[[], Any]", uow_factory), registry)
+    source_tasks = SourceTaskService(cast("Callable[[], Any]", uow_factory), registry.get)
     sources = SourceAccountService(
         cast("Callable[[], Any]", uow_factory),
         cipher=_DeferredCredentialCipher(),
-        registry=registry,
+        registry=registry.get,
     )
     runner, resolver = _build_task_runner(uow_factory, settings)
     profile = ProfileService(
@@ -653,7 +714,7 @@ def build_application_container() -> ApplicationContainer:
     )
     feed = FeedService(
         cast("Callable[[], Any]", uow_factory),
-        connectors=registry.connectors,
+        connectors=lambda: registry.get().connectors,
         assessor=TaskRunnerBatchAssessor(runner) if runner else cast("Any", _UnavailableAssessor()),
         policy=FeedPolicy(),
         settings=settings,
@@ -676,6 +737,7 @@ def build_application_container() -> ApplicationContainer:
             database_url=database_settings.url,
             alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
         )
+        registry.install(build_default_source_registry(session_factory))
         access.reconcile_password_fingerprint()
         _apply_runtime_settings(settings.get())
         jobs.recover_interrupted()

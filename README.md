@@ -66,8 +66,9 @@ cd OpenBiliClaw
 MODE=docker bash scripts/install.sh
 ```
 
-安装器以原子方式生成 `.env` 中的 PostgreSQL、LiteLLM、来源加密和 API bearer
-secret，权限为 `0600`，重复执行会复用现有值。Compose 先运行一次性 `migrate`
+安装器以原子方式生成 `.env` 中的 PostgreSQL、LiteLLM、来源加密、API bearer 和独立
+Web/extension session signing secret，权限为 `0600`，重复执行会复用现有值且不会打印。
+Compose 先运行一次性 `migrate`
 服务，再启动 `api`、`worker`、`litellm` 和 LiteLLM PostgreSQL；migration 失败会
 阻止 API/worker 启动。两个长期进程只读检查 schema head，并使用完全相同的应用库
 和 Huey queue 路径。安装成功还要求 `migrate` 以 0 退出、API 和 worker 都处于

@@ -24,7 +24,7 @@ feature service 只依赖自身声明的 repository、AI、settings 和 source P
 
 ## 四个任务与权威状态
 
-只注册以下四个 Huey task：`source_sync`、`profile_projection`、`feed_replenishment`、`cleanup`。`source_sync` 执行已启用 connector 的真实 bootstrap activity operation；`profile_projection` 只处理 consumed ledger 尚未登记的事件；`feed_replenishment` 调用上述有界用例；`cleanup` 只删除超过保留期的 terminal `job_runs`。`source_sync` 的 Huey periodic wrapper 每分钟做一次轻量 tick，真实幂等时间桶读取 `UserSettings.source_sync_interval_minutes`；其它任务类型不增加。
+只注册以下四个 Huey task：`source_sync`、`profile_projection`、`feed_replenishment`、`cleanup`。`source_sync` 执行已启用 connector 的真实 bootstrap activity operation；`profile_projection` 只处理 consumed ledger 尚未登记的事件；`feed_replenishment` 调用上述有界用例；`cleanup` 只删除超过保留期的 terminal `job_runs`。`source_sync` 的 Huey periodic wrapper 每分钟做一次轻量 tick，真实幂等时间桶读取 `UserSettings.schedules.source_sync_interval_minutes`；其它任务类型不增加。
 
 Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priority、有限 retry、periodic schedule 与 task lock；结果只属于 transport。应用先持久化 pending `job_runs`，再通过 TaskWrapper immediate enqueue 发布，成功后写 `dispatched_at`。queue failure 保留 undispatched row；重复 schedule 只 reconcile undispatched row，而 worker startup 会重新发布**全部** pending row，包括已有 marker 但可能已被 Huey dequeue、尚未完成应用 claim 的 row。enqueue/marker 或 dequeue/claim 任一窗口崩溃都允许产生重复 transport message，业务原子 claim 保证只有一个执行者；重启在 republish 中再次崩溃也不会重复业务 effect。产品状态、幂等键、协作式运行中取消、attempt、单调 progress、error/timestamps 全部以应用库为权威，`JobService.inspect()` 从不读取 Huey Result。consumer 异常退出后会把遗留 running 重置为 pending/undispatched，再与其它 pending row 一起重新发布。
 
@@ -34,12 +34,21 @@ Huey 使用独立 `data/vnext/huey.db`，开启 durable result storage、priorit
 
 ## 配置与生产组合
 
-`UserSettings.source_weights` 默认给七个平台相同合法权重，`source_enabled` 默认全部关闭。零权重来源不分配预算；负数、非有限权重和未知 SourceId 拒绝保存。worker composition 固定注册七个平台；启用来源缺少可用账户、凭据密文无法解密或缺少 Cookie 时，会以 `MissingSourceConfigurationError` 明确失败，不会发起匿名调用或伪装为空成功。
+`UserSettings.sources.weights` 默认给七个平台相同合法权重，
+`UserSettings.sources.enabled` 默认全部关闭。零权重来源不分配预算；负数、非有限权重和
+未知 SourceId 拒绝保存。per-source schema 不重复这些全局控制：五个平台为空，Douyin 只用
+`mode` 选择 direct/browser，Reddit 只用 `backend` 选择 CLI/browser。worker composition 固定注册
+七个平台；启用来源缺少可用账户、凭据密文无法解密或缺少 Cookie 时，会以
+`MissingSourceConfigurationError` 明确失败，不会发起匿名调用或伪装为空成功。
 
 worker 默认只读验证隔离 vNext 数据库已经位于 Alembic head，再读取 persisted
-`UserSettings`。它在构造 registry、恢复任务和启动 consumer 前应用 network proxy 与
-OpenBiliClaw-owned logging handler levels，并在正常退出或 consumer/runtime 构造失败时恢复
-先前 process state，不修改 host-owned handler/root logger policy。随后构造 SQLAlchemy UoW、
+`UserSettings`。它先安装或复用 OpenBiliClaw-owned console 与 rotating-file sinks（deployment
+默认 `logs/openbiliclaw.log`），保留 host-owned handlers 与 root logger level，再在构造
+registry、恢复任务和启动 consumer 前应用 network proxy 及 persisted console/file levels。
+正常退出或 consumer/runtime 构造失败时只移除并关闭本次 worker 创建的 sinks，复用的 owned
+sinks 与 package logger 状态恢复原值；logging level 在 cleanup 前恢复。network teardown 同时
+恢复此前 proxy，以及 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、
+`CURL_CA_BUNDLE` 四个 CA 环境变量进入 scope 前的精确存在性和值。随后构造 SQLAlchemy UoW、
 `SettingsService`、LiteLLM `TaskRunner` 和真实四任务 orchestration。Compose 中唯一一次性
 `migrate` 服务先完成 schema 写入；失败时 `service_completed_successfully` dependency 阻止
 API/worker 启动。backend/API 与 worker 使用同一个 mounted

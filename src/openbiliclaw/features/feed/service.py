@@ -241,13 +241,13 @@ class FeedService:
         self,
         uow_factory: Callable[[], FeedUnitOfWork],
         *,
-        connectors: Sequence[SourceConnector],
+        connectors: Sequence[SourceConnector] | Callable[[], Sequence[SourceConnector]],
         assessor: CandidateBatchAssessor,
         policy: FeedPolicy | None = None,
         settings: FeedSettings | None = None,
     ) -> None:
         self._uow_factory = uow_factory
-        self._connectors = tuple(connectors)
+        self._connector_provider = connectors if callable(connectors) else lambda: tuple(connectors)
         self._assessor = assessor
         self._policy = policy or FeedPolicy()
         self._settings = settings
@@ -299,7 +299,7 @@ class FeedService:
         self, settings: UserSettings | None
     ) -> tuple[tuple[SourceConnector, SourceOperation], ...]:
         eligible: list[tuple[SourceConnector, SourceOperation]] = []
-        for connector in self._connectors:
+        for connector in self._connector_provider():
             source_id = connector.manifest.source_id.value
             enabled = (
                 cast("Mapping[str, bool]", settings.sources.enabled)

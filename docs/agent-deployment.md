@@ -33,8 +33,9 @@ OPENBILICLAW_LITELLM_API_KEY=<user LiteLLM key>
 不要把 key 拼进复制命令或用户可见日志。让用户在 installer 的隐藏输入中填写，
 或由用户在当前 shell 自己设置环境变量。
 
-可选 browser auth 必须另行安全 provision：password 只保存 scrypt hash，session 使用独立
-random `OPENBILICLAW_SESSION_SECRET`，extension 只保存 device key 的
+安装器在 source 与 Docker 路径进入 migration/Compose 前生成独立 random
+`OPENBILICLAW_SESSION_SECRET`，只写 mode-`0600` `.env`，重复执行保留非空原值且不打印。
+其它可选 browser auth 另行安全 provision：password 只保存 scrypt hash，extension 只保存 device key 的
 `key-id:sha256-digest` record 并把完整 key 一次性交付目标 extension。不要在命令参数、
 shell history、状态事件、日志、截图或对话中展开任何值，也不要复用 installer bearer、
 来源 encryption secret 或 LiteLLM master key。可选

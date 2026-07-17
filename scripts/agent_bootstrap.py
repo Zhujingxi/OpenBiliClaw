@@ -1355,6 +1355,7 @@ def ensure_local_runtime_environment(
     required = {
         "OPENBILICLAW_SECRET_KEY": secrets.token_hex(32),
         "OPENBILICLAW_ACCESS_TOKEN": secrets.token_urlsafe(48),
+        "OPENBILICLAW_SESSION_SECRET": secrets.token_urlsafe(48),
         "OPENBILICLAW_LITELLM_BASE_URL": base_url,
         "OPENBILICLAW_LITELLM_API_KEY": api_key,
         "OPENBILICLAW_PROJECT_ROOT": installation.project_root,
@@ -1381,6 +1382,7 @@ def ensure_docker_infrastructure_secrets(project_dir: Path) -> dict[str, str]:
         "LITELLM_MASTER_KEY": f"sk-{secrets.token_hex(32)}",
         "OPENBILICLAW_SECRET_KEY": secrets.token_hex(32),
         "OPENBILICLAW_ACCESS_TOKEN": secrets.token_urlsafe(48),
+        "OPENBILICLAW_SESSION_SECRET": secrets.token_urlsafe(48),
     }
     return _merge_environment(project_dir.resolve() / RUNTIME_ENV_NAME, required)
 

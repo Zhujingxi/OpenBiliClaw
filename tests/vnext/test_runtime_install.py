@@ -78,6 +78,7 @@ def test_local_environment_is_private_atomic_and_idempotent(tmp_path: Path) -> N
     assert values["OPENBILICLAW_LITELLM_API_KEY"] == "proxy-secret"
     assert len(values["OPENBILICLAW_ACCESS_TOKEN"]) >= 48
     assert len(values["OPENBILICLAW_SECRET_KEY"]) == 64
+    assert len(values["OPENBILICLAW_SESSION_SECRET"]) >= 48
     assert values["OPENBILICLAW_DATABASE_URL"].endswith("/data/vnext/openbiliclaw.db")
     assert values["OPENBILICLAW_HUEY_PATH"].endswith("/data/vnext/huey.db")
     assert not list(tmp_path.glob(".env.tmp-*"))
@@ -117,6 +118,7 @@ def test_copied_local_environment_rebinds_managed_paths_and_instance(
 
     assert rebound["OPENBILICLAW_SECRET_KEY"] == first["OPENBILICLAW_SECRET_KEY"]
     assert rebound["OPENBILICLAW_ACCESS_TOKEN"] == first["OPENBILICLAW_ACCESS_TOKEN"]
+    assert rebound["OPENBILICLAW_SESSION_SECRET"] == first["OPENBILICLAW_SESSION_SECRET"]
     assert rebound["OPENBILICLAW_LITELLM_BASE_URL"] == first["OPENBILICLAW_LITELLM_BASE_URL"]
     assert rebound["OPENBILICLAW_LITELLM_API_KEY"] == first["OPENBILICLAW_LITELLM_API_KEY"]
     assert rebound["OPENBILICLAW_PROJECT_ROOT"] == str(copied.resolve())
@@ -344,6 +346,8 @@ def test_docker_skip_start_runs_one_shot_migration(
     result = bootstrap._install_docker_runtime(tmp_path, start=False)
 
     assert result.status == "prepared"
+    values = _read_env(tmp_path / ".env")
+    assert len(values["OPENBILICLAW_SESSION_SECRET"]) >= 48
     assert calls == [["docker", "compose", "run", "--rm", "migrate"]]
 
 
@@ -372,6 +376,8 @@ def test_docker_install_requires_migration_api_and_worker_health(
     result = bootstrap._install_docker_runtime(tmp_path, start=True)
 
     assert result.status == "complete"
+    values = _read_env(tmp_path / ".env")
+    assert len(values["OPENBILICLAW_SESSION_SECRET"]) >= 48
     assert calls == [
         ["docker", "compose", "up", "-d", "--build"],
         [

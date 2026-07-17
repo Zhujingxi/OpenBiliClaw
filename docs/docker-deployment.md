@@ -38,16 +38,18 @@ services in containers.
 - `LITELLM_MASTER_KEY`
 - `OPENBILICLAW_SECRET_KEY`
 - `OPENBILICLAW_ACCESS_TOKEN`
+- `OPENBILICLAW_SESSION_SECRET`
 
 文件以 mode `0600` 原子写入并被 Git 忽略。不要把 provider key 写进该文件或
 Compose；provider credentials 只进入 LiteLLM Admin。`OPENBILICLAW_SECRET_KEY`
 加密来源账户，`OPENBILICLAW_ACCESS_TOKEN` 保护 `/api/v1` 业务接口。
 
-要启用 Web/extension browser auth，另在私密 `.env` 或 deployment secret store 中
-provision：
+`OPENBILICLAW_SESSION_SECRET` 在任何 Compose render（包括 `SKIP_START=1`）之前生成，
+重复安装幂等复用且不会打印。要启用 Web/extension browser auth，另在私密 `.env` 或
+deployment secret store 中 provision：
 
 - `OPENBILICLAW_WEB_PASSWORD_HASH`：只放 scrypt hash，不放明文密码；
-- `OPENBILICLAW_SESSION_SECRET`：独立随机 signing secret；
+- `OPENBILICLAW_SESSION_SECRET`：使用上方 installer-generated 独立 signing secret；
 - `OPENBILICLAW_EXTENSION_ACCESS_KEYS`：只放 `key-id:sha256-digest` JSON array；完整
   `obc_ext_...` device key 只在生成时交付给目标 extension；
 - `OPENBILICLAW_LITELLM_ADMIN_URL`：可选 public navigation URL，不是 internal proxy URL/key。

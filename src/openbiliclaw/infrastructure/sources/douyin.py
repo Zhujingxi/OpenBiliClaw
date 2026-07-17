@@ -60,12 +60,10 @@ class DouyinDirectTransport:
 class DouyinSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    enabled: bool = False
-    mode: Literal["direct", "extension"] = "direct"
-    daily_search_budget: int = Field(default=0, ge=0)
-    daily_hot_budget: int = Field(default=0, ge=0)
-    daily_feed_budget: int = Field(default=0, ge=0)
-    request_interval_seconds: int = Field(default=2, ge=1)
+    mode: Literal["direct", "extension"] = Field(
+        default="direct",
+        json_schema_extra={"x-consumer": "DouyinConnector transport selection"},
+    )
 
 
 class DouyinConnector(NormalizingConnector):

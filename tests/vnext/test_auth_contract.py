@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Barrier, Event, Lock
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import inspect, select
+from sqlalchemy import delete, inspect, select
 
 from openbiliclaw import auth_core
 from openbiliclaw.api.app import create_app
@@ -502,7 +505,108 @@ def test_public_auth_rate_limits_are_bounded_separate_and_clock_driven() -> None
     )
 
 
-def test_auth_epoch_and_password_fingerprint_reconcile_across_restarts(tmp_path: Path) -> None:
+def test_auth_rate_limit_atomically_reserves_expensive_verification_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    max_attempts = 2
+    original_begin = AccessPolicy.begin_auth_attempt
+
+    def exercise(
+        *,
+        policy: AccessPolicy,
+        path: str,
+        origin: str,
+        payload: dict[str, str],
+    ) -> tuple[int, list[int]]:
+        entered = 0
+        entered_lock = Lock()
+        slots_full = Event()
+        release = Event()
+        admission_barrier = Barrier(8)
+
+        def synchronized_begin(
+            policy: AccessPolicy, kind: str, key: str
+        ) -> tuple[object | None, int | None]:
+            reservation, retry_after = original_begin(policy, kind, key)
+            admission_barrier.wait(timeout=5)
+            return reservation, retry_after
+
+        monkeypatch.setattr(AccessPolicy, "begin_auth_attempt", synchronized_begin)
+
+        def enter() -> None:
+            nonlocal entered
+            with entered_lock:
+                entered += 1
+                if entered == max_attempts:
+                    slots_full.set()
+            assert release.wait(timeout=5)
+
+        if path.endswith("/login"):
+
+            def verify_password(_policy: AccessPolicy, _candidate: str) -> bool:
+                enter()
+                return False
+
+            monkeypatch.setattr(AccessPolicy, "verify_password", verify_password)
+        else:
+
+            def exchange_key(
+                _policy: AccessPolicy,
+                _candidate: str,
+                *,
+                ttl_hours: int | None = None,
+            ) -> str:
+                del ttl_hours
+                enter()
+                raise HTTPException(status_code=401, detail="invalid device key")
+
+            monkeypatch.setattr(AccessPolicy, "exchange_extension_key", exchange_key)
+
+        container = _Container(policy)
+
+        def request() -> int:
+            client = _peer_client(container, "198.51.100.44")
+            return client.post(path, headers={"Origin": origin}, json=payload).status_code
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(request) for _ in range(8)]
+            assert slots_full.wait(timeout=5)
+            release.set()
+            statuses = [future.result(timeout=5) for future in futures]
+        return entered, statuses
+
+    login_policy = AccessPolicy(
+        password_hash=auth_core.hash_password("configured-password"),
+        session_secret="concurrent-login-secret",
+        rate_limit_max_failures=max_attempts,
+    )
+    login_entered, login_statuses = exercise(
+        policy=login_policy,
+        path="/api/v1/auth/login",
+        origin="https://testserver",
+        payload={"password": "wrong"},
+    )
+    assert login_entered == max_attempts
+    assert sorted(login_statuses) == [401, 401, 429, 429, 429, 429, 429, 429]
+
+    _key_id, device_key, record = auth_core.generate_extension_access_key()
+    extension_policy = AccessPolicy(
+        session_secret="concurrent-extension-secret",
+        extension_access_enabled=True,
+        extension_access_records=(record,),
+        rate_limit_max_failures=max_attempts,
+    )
+    extension_entered, extension_statuses = exercise(
+        policy=extension_policy,
+        path="/api/v1/auth/extension-token",
+        origin="chrome-extension://concurrent-test",
+        payload={"key": device_key},
+    )
+    assert extension_entered == max_attempts
+    assert sorted(extension_statuses) == [401, 401, 429, 429, 429, 429, 429, 429]
+
+
+def test_password_state_transitions_revoke_remove_and_reenable_sessions(tmp_path: Path) -> None:
     url = f"sqlite:///{tmp_path / 'auth.db'}"
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", url)
@@ -519,11 +623,23 @@ def test_auth_epoch_and_password_fingerprint_reconcile_across_restarts(tmp_path:
             uow.commit()
             return epoch
 
-    def reconcile_fingerprint(fingerprint: str) -> bool:
+    def reconcile_fingerprint(fingerprint: str | None) -> bool:
         with UnitOfWork(session_factory) as uow:
             changed = uow.auth_state.reconcile_password_fingerprint(fingerprint)
             uow.commit()
             return changed
+
+    first_absent = AccessPolicy(
+        session_secret="restart-stable-signing-secret",
+        epoch_getter=current_epoch,
+        epoch_bumper=bump_epoch,
+        fingerprint_reconciler=reconcile_fingerprint,
+        clock=_Clock(),
+    )
+    assert first_absent.reconcile_password_fingerprint() is False
+    assert current_epoch() == 0
+    with session_factory() as session:
+        assert session.get(AuthStateModel, "password_fingerprint") is None
 
     initial_hash = auth_core.hash_password("initial-password")
     first_process = AccessPolicy(
@@ -564,11 +680,45 @@ def test_auth_epoch_and_password_fingerprint_reconcile_across_restarts(tmp_path:
     assert rotated.verify_session(old_session) is False
     assert rotated.reconcile_password_fingerprint() is False
     assert current_epoch() == 1
+    pre_removal_session = rotated.mint_session(ttl_hours=1)
+
+    removed = AccessPolicy(
+        session_secret="restart-stable-signing-secret",
+        epoch_getter=current_epoch,
+        epoch_bumper=bump_epoch,
+        fingerprint_reconciler=reconcile_fingerprint,
+        clock=_Clock(),
+    )
+    assert removed.reconcile_password_fingerprint() is True
+    assert current_epoch() == 2
+    assert removed.verify_session(pre_removal_session) is False
+    assert removed.reconcile_password_fingerprint() is False
+    assert current_epoch() == 2
+    with session_factory() as session:
+        disabled = session.get(AuthStateModel, "password_fingerprint")
+        assert disabled is not None
+        assert disabled.text_value == "disabled"
+
+    reenabled = AccessPolicy(
+        password_hash=rotated.password_hash,
+        session_secret="restart-stable-signing-secret",
+        epoch_getter=current_epoch,
+        epoch_bumper=bump_epoch,
+        fingerprint_reconciler=reconcile_fingerprint,
+        clock=_Clock(),
+    )
+    assert reenabled.reconcile_password_fingerprint() is True
+    assert current_epoch() == 3
+    assert reenabled.verify_session(pre_removal_session) is False
+    assert reenabled.reconcile_password_fingerprint() is False
+    assert current_epoch() == 3
 
     with session_factory() as session:
         rows = session.scalars(select(AuthStateModel).order_by(AuthStateModel.key)).all()
         assert [row.key for row in rows] == ["password_fingerprint", "session_epoch"]
-        assert next(row for row in rows if row.key == "session_epoch").integer_value == 1
+        assert next(row for row in rows if row.key == "session_epoch").integer_value == 3
+        password_state = next(row for row in rows if row.key == "password_fingerprint")
+        assert password_state.text_value not in {None, "disabled"}
     assert "auth_state" in inspect(engine).get_table_names()
     database_bytes = (tmp_path / "auth.db").read_bytes()
     for secret in (
@@ -577,6 +727,60 @@ def test_auth_epoch_and_password_fingerprint_reconcile_across_restarts(tmp_path:
         rotated.password_hash,
     ):
         assert secret.encode() not in database_bytes
+    engine.dispose()
+
+
+def test_concurrent_password_rotation_bumps_epoch_exactly_once(tmp_path: Path) -> None:
+    url = f"sqlite:///{tmp_path / 'concurrent-auth.db'}"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "head")
+    engine, session_factory = create_engine_and_session(DatabaseSettings(url=url))
+
+    with UnitOfWork(session_factory) as uow:
+        assert uow.auth_state.reconcile_password_fingerprint("first-fingerprint") is False
+        uow.commit()
+
+    def rotate() -> bool:
+        with UnitOfWork(session_factory) as uow:
+            changed = uow.auth_state.reconcile_password_fingerprint("second-fingerprint")
+            uow.commit()
+            return changed
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: rotate(), range(2)))
+
+    assert sorted(results) == [False, True]
+    with UnitOfWork(session_factory) as uow:
+        assert uow.auth_state.current_epoch() == 1
+    engine.dispose()
+
+
+def test_password_rotation_rolls_back_when_epoch_state_is_unavailable(tmp_path: Path) -> None:
+    url = f"sqlite:///{tmp_path / 'failed-auth.db'}"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", url)
+    command.upgrade(config, "head")
+    engine, session_factory = create_engine_and_session(DatabaseSettings(url=url))
+
+    with UnitOfWork(session_factory) as uow:
+        assert uow.auth_state.reconcile_password_fingerprint("first-fingerprint") is False
+        uow.commit()
+    with session_factory() as session:
+        session.execute(delete(AuthStateModel).where(AuthStateModel.key == "session_epoch"))
+        session.commit()
+
+    with (
+        pytest.raises(RuntimeError, match="revocation state is unavailable"),
+        UnitOfWork(session_factory) as uow,
+    ):
+        uow.auth_state.reconcile_password_fingerprint("second-fingerprint")
+        uow.commit()
+
+    with session_factory() as session:
+        password_state = session.get(AuthStateModel, "password_fingerprint")
+        assert password_state is not None
+        assert password_state.text_value == "first-fingerprint"
     engine.dispose()
 
 

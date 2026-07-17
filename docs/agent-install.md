@@ -50,15 +50,18 @@ Docker generates:
 - `LITELLM_MASTER_KEY`
 - `OPENBILICLAW_SECRET_KEY`
 - `OPENBILICLAW_ACCESS_TOKEN`
+- `OPENBILICLAW_SESSION_SECRET`
 
 Optional browser access is provisioned as separate secrets:
 
 - `OPENBILICLAW_WEB_PASSWORD_HASH`: scrypt hash only, never a plaintext password;
-- `OPENBILICLAW_SESSION_SECRET`: independent random Web/extension signing secret;
+- `OPENBILICLAW_SESSION_SECRET`: independent Web/extension signing secret generated above;
 - `OPENBILICLAW_EXTENSION_ACCESS_KEYS`: JSON array of `key-id:sha256-digest` records;
 - `OPENBILICLAW_LITELLM_ADMIN_URL`: optional credential-free public navigation URL.
 
-The complete extension device key is delivered once to the intended extension and is not
+Both source and Docker install paths create the session secret before migration/Compose,
+persist it once in the private `.env`, preserve the existing non-empty value on rerun, and do
+not print it. The complete extension device key is delivered once to the intended extension and is not
 retained in runtime configuration. Provisioning must write generated values directly to the
 private `.env`/secret store without command-line arguments, shell history, status JSON, logs,
 screenshots, examples, or docs. Do not derive or reuse these values from the installer bearer,

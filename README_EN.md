@@ -71,8 +71,9 @@ cd OpenBiliClaw
 MODE=docker bash scripts/install.sh
 ```
 
-The installer atomically generates PostgreSQL, LiteLLM, source-encryption, and API
-bearer secrets in a mode-`0600` `.env`; reruns reuse existing values. Compose runs a
+The installer atomically generates PostgreSQL, LiteLLM, source-encryption, API bearer,
+and an independent Web/extension session-signing secret in a mode-`0600` `.env`; reruns
+reuse existing values without printing them. Compose runs a
 one-shot `migrate` service before `api`, `worker`, `litellm`, and LiteLLM PostgreSQL;
 a migration failure blocks both runtime processes. API and worker only verify schema
 head and use the exact same application database and Huey queue paths. Installation

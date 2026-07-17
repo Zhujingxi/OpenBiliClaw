@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from typing import TYPE_CHECKING
 
 from rich.logging import RichHandler
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from os import stat_result
     from pathlib import Path
 
-    from openbiliclaw.config import Config
+    from openbiliclaw.config import Config, LoggingConfig
 
 logger = logging.getLogger(__name__)
 _NOISY_LOGGERS = ("httpx", "httpcore", "openai", "openai._base_client")
@@ -59,6 +61,59 @@ def restore_owned_handler_levels(
 
     for handler, level in snapshot:
         handler.setLevel(level)
+
+
+@contextmanager
+def installed_owned_logging_handlers(config: LoggingConfig) -> Iterator[None]:
+    """Install missing product-owned sinks for a bounded worker lifecycle.
+
+    Unlike :func:`configure_logging`, this preserves every host-installed root
+    handler. Existing OpenBiliClaw sinks are reused, and only handlers created
+    by this context are removed and closed when the worker exits.
+    """
+
+    root_logger = logging.getLogger()
+    package_logger = logging.getLogger("openbiliclaw")
+    package_level = package_logger.level
+    package_disabled = package_logger.disabled
+    created: list[logging.Handler] = []
+
+    try:
+        package_logger.setLevel(logging.DEBUG)
+        package_logger.disabled = False
+        existing_sinks = {
+            getattr(handler, _OWNED_SINK_ATTRIBUTE, None) for handler in root_logger.handlers
+        }
+
+        if "console" not in existing_sinks:
+            console_handler = RichHandler(rich_tracebacks=True, show_path=False)
+            setattr(console_handler, _OWNED_SINK_ATTRIBUTE, "console")
+            console_handler.setLevel(_coerce_level(config.level))
+            console_handler.setFormatter(logging.Formatter("%(message)s"))
+            root_logger.addHandler(console_handler)
+            created.append(console_handler)
+
+        if "file" not in existing_sinks:
+            log_file = config.file_path
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            _enforce_size_budget_once(log_file, config.max_file_size_mb)
+            file_handler = _build_file_handler(
+                log_file,
+                max_file_size_mb=config.max_file_size_mb,
+                backup_count=config.backup_count,
+                level=_coerce_level(config.file_level),
+            )
+            setattr(file_handler, _OWNED_SINK_ATTRIBUTE, "file")
+            root_logger.addHandler(file_handler)
+            created.append(file_handler)
+
+        yield
+    finally:
+        for handler in reversed(created):
+            root_logger.removeHandler(handler)
+            handler.close()
+        package_logger.setLevel(package_level)
+        package_logger.disabled = package_disabled
 
 
 def _build_file_handler(

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from openbiliclaw import auth_core
 from openbiliclaw.api.dependencies import (
+    AuthAttemptReservation,
     Container,
     DependencyUnavailableError,
     require_access,
@@ -59,14 +60,15 @@ def _client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _enforce_auth_rate_limit(container: Container, *, kind: str, key: str) -> None:
-    retry_after = container.access.auth_retry_after(kind, key)
-    if retry_after is not None:
+def _begin_auth_attempt(container: Container, *, kind: str, key: str) -> AuthAttemptReservation:
+    reservation, retry_after = container.access.begin_auth_attempt(kind, key)
+    if reservation is None:
         raise HTTPException(
             status_code=429,
             detail="request rate limit exceeded",
-            headers={"Retry-After": str(retry_after)},
+            headers={"Retry-After": str(retry_after or 1)},
         )
+    return reservation
 
 
 def _same_origin(request: Request) -> bool:
@@ -162,11 +164,16 @@ def login(
     if not container.access.password_configured:
         raise HTTPException(status_code=503, detail="password authentication is unavailable")
     client_key = _client_key(request)
-    _enforce_auth_rate_limit(container, kind="login", key=client_key)
-    if not container.access.verify_password(payload.password):
-        container.access.record_auth_failure("login", client_key)
+    attempt = _begin_auth_attempt(container, kind="login", key=client_key)
+    try:
+        valid_password = container.access.verify_password(payload.password)
+    except BaseException:
+        attempt.release()
+        raise
+    if not valid_password:
+        attempt.failure()
         raise HTTPException(status_code=401, detail="invalid credentials")
-    container.access.reset_auth_failures("login", client_key)
+    attempt.success()
     ttl_hours = int(
         getattr(access_control, "session_ttl_hours", container.access.session_ttl_hours)
     )
@@ -207,7 +214,7 @@ def extension_token(
     if not bool(getattr(access_control, "extension_access_enabled", True)):
         raise HTTPException(status_code=403, detail="extension access is disabled")
     client_key = _client_key(request)
-    _enforce_auth_rate_limit(container, kind="extension", key=client_key)
+    attempt = _begin_auth_attempt(container, kind="extension", key=client_key)
     ttl_hours = int(
         getattr(
             access_control,
@@ -219,9 +226,14 @@ def extension_token(
         token = container.access.exchange_extension_key(payload.key, ttl_hours=ttl_hours)
     except HTTPException as error:
         if error.status_code == 401:
-            container.access.record_auth_failure("extension", client_key)
+            attempt.failure()
+        else:
+            attempt.release()
         raise
-    container.access.reset_auth_failures("extension", client_key)
+    except BaseException:
+        attempt.release()
+        raise
+    attempt.success()
     expires_at = auth_core.token_expires_at(token)
     if expires_at is None:
         raise HTTPException(status_code=503, detail="finite extension session required")

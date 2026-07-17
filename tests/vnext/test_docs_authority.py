@@ -224,7 +224,9 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             "never receive `trust_loopback`",
             "bounded per-peer failure limiters",
             "environment-only",
-            "password rotation atomically invalidates",
+            "explicit `disabled` sentinel",
+            "cannot survive removal or revive after re-enable",
+            "installer-generated random `OPENBILICLAW_SESSION_SECRET`",
         ),
         "docs/modules/vnext-api.md": (
             "LibraryItem",
@@ -232,6 +234,9 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             "ChatHistoryPage",
             "ErrorEnvelope",
             "`405`",
+            "deliberate exception",
+            "finite extension bearer",
+            "installer/infrastructure/provider bearer",
         ),
         "docs/modules/vnext-sources.md": (
             "settings_schema",
@@ -240,19 +245,27 @@ def test_task21b_contract_docs_name_safe_browser_boundaries() -> None:
             "result_schema",
             "idempotent",
             "source-config:<source_id>",
-            "registry rebuild",
+            "zero-I/O deferred registry holder",
+            "require_schema_at_head()",
+            "`x-consumer`",
+            "Douyin 仅保留 `mode=direct|extension`",
+            "Reddit 仅保留 `backend=rdt|extension`",
         ),
         "docs/modules/vnext-ai.md": ("OPENBILICLAW_LITELLM_ADMIN_URL", "admin_url"),
         "docs/modules/vnext-persistence.md": (
             "0002_auth_state",
             "auth_state",
             "password fingerprint",
+            "`disabled` sentinel",
             "aware UTC `created_at`",
         ),
         "docs/modules/vnext-use-cases-jobs.md": (
             "读取 persisted",
             "network proxy",
-            "先前 process state",
+            "OpenBiliClaw-owned console",
+            "rotating-file sinks",
+            "SSL_CERT_FILE",
+            "CURL_CA_BUNDLE",
             "source-config:*",
         ),
     }
@@ -279,6 +292,41 @@ def test_deployment_docs_name_compose_browser_auth_forwarding_without_plaintext_
             assert marker in source, f"missing Compose auth marker in {name}: {marker}"
         assert "OPENBILICLAW_EXTENSION_DEVICE_KEY" not in source
         assert re.search(r"obc_ext_[A-Za-z0-9._-]{16,}", source) is None
+    assert "create the session secret" in _read("docs/agent-install.md")
+    assert "生成独立 random" in _read("docs/agent-deployment.md")
+    assert "Compose render" in _read("docs/docker-deployment.md")
+
+
+def test_active_docs_use_nested_settings_names_and_only_consumed_source_fields() -> None:
+    active = {
+        "docs/modules/vnext-sources.md": _read("docs/modules/vnext-sources.md"),
+        "docs/modules/vnext-use-cases-jobs.md": _read("docs/modules/vnext-use-cases-jobs.md"),
+        "docs/modules/config.md": _read("docs/modules/config.md"),
+        "docs/architecture.md": _read("docs/architecture.md").split(
+            "## 已停止作为入口的 v0.3 实现", 1
+        )[0],
+        "docs/spec.md": _section("docs/spec.md", "### 3.1 vNext", "### 3.2"),
+    }
+    stale_patterns = (
+        r"UserSettings\.source_enabled\b",
+        r"UserSettings\.source_weights\b",
+        r"UserSettings\.source_sync_interval_minutes\b",
+        r"UserSettings\.feed_[a-z_]+\b",
+        r"\bsource_enabled\b",
+        r"\bsource_weights\b",
+    )
+    for name, source in active.items():
+        for pattern in stale_patterns:
+            assert re.search(pattern, source) is None, f"stale flat setting in {name}: {pattern}"
+
+    source_doc = active["docs/modules/vnext-sources.md"]
+    for removed in ("daily_search_budget", "daily_hot_budget", "request_interval_seconds"):
+        assert removed not in source_doc
+    assert "`UserSettings.sources.enabled`" in source_doc
+    assert (
+        "`UserSettings.schedules.source_sync_interval_minutes`"
+        in active["docs/modules/vnext-use-cases-jobs.md"]
+    )
 
 
 def test_current_changelog_summary_does_not_repeat_superseded_authority() -> None:

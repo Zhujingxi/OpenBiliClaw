@@ -64,20 +64,10 @@ class RedditCliTransport:
 class RedditSettings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    enabled: bool = False
-    backend: Literal["rdt", "extension"] = "rdt"
-    source_modes: tuple[Literal["search", "hot", "subreddit", "related"], ...] = (
-        "search",
-        "hot",
-        "subreddit",
-        "related",
+    backend: Literal["rdt", "extension"] = Field(
+        default="rdt",
+        json_schema_extra={"x-consumer": "RedditConnector transport selection"},
     )
-    daily_search_budget: int = Field(default=300, ge=0)
-    daily_hot_budget: int = Field(default=300, ge=0)
-    daily_subreddit_budget: int = Field(default=300, ge=0)
-    daily_related_budget: int = Field(default=300, ge=0)
-    request_interval_seconds: int = Field(default=3, ge=1)
-    min_interval_minutes: int = Field(default=60, ge=1)
 
 
 class RedditConnector(NormalizingConnector):

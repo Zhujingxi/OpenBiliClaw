@@ -51,6 +51,7 @@ def test_docker_secrets_are_private_idempotent_and_preserve_unrelated_values(
     assert values["LITELLM_MASTER_KEY"].startswith("sk-")
     assert len(values["OPENBILICLAW_SECRET_KEY"]) == 64
     assert len(values["OPENBILICLAW_ACCESS_TOKEN"]) >= 48
+    assert len(values["OPENBILICLAW_SESSION_SECRET"]) >= 48
     if os.name != "nt":
         assert env_path.stat().st_mode & 0o777 == 0o600
 
@@ -69,6 +70,7 @@ def test_docker_secret_updates_are_serialized(tmp_path: Path) -> None:
         "LITELLM_MASTER_KEY",
         "OPENBILICLAW_SECRET_KEY",
         "OPENBILICLAW_ACCESS_TOKEN",
+        "OPENBILICLAW_SESSION_SECRET",
     ):
         assert sum(line.startswith(f"{key}=") for line in lines) == 1
     assert not list(tmp_path.glob(".env.tmp-*"))

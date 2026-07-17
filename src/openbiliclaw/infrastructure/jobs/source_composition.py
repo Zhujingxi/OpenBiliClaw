@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from cryptography.fernet import InvalidToken
 from pydantic import BaseModel
-from sqlalchemy import inspect, select
+from sqlalchemy import select
 
 from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.features.sources.registry import SourceRegistry, build_source_registry
@@ -123,9 +123,6 @@ def _source_settings(
     default: SettingsT | None = None,
 ) -> SettingsT:
     with session_factory() as session:
-        bind = session.get_bind()
-        if not inspect(bind).has_table(SettingModel.__tablename__):
-            return default if default is not None else model.model_validate({})
         row = session.get(SettingModel, f"source-config:{source_id}")
     if row is None:
         return default if default is not None else model.model_validate({})
