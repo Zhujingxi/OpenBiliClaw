@@ -16,6 +16,8 @@ import json
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
+import pytest
+
 from openbiliclaw.discovery.strategies._utils import (
     build_profile_summary,
     set_topic_lifecycle_serialization,
@@ -42,7 +44,21 @@ from openbiliclaw.soul.topic_lifecycle import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+
+
+@pytest.fixture(autouse=True)
+def _reset_topic_lifecycle_serialization() -> Iterator[None]:
+    """Restore the process-level serialization toggle after every test.
+
+    ``set_topic_lifecycle_serialization`` mutates module state shared across the
+    whole test session; leaking ``on`` (e.g. via a mid-test assertion failure)
+    would silently change ``build_profile_summary`` for later test files. This
+    guarantees the default ``off`` regardless of test outcome.
+    """
+    yield
+    set_topic_lifecycle_serialization(False)
 
 
 def _interest(name: str, category: str = "", **extra: object) -> dict[str, object]:

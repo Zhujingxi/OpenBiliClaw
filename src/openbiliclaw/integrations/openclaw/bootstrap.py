@@ -105,14 +105,16 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
 
     usage_recorder = UsageRecorder(sink=database)
 
+    # Defensive read matching the getattr(config.scheduler, ..., default)
+    # convention below: test doubles (SimpleNamespace configs) may omit the
+    # top-level [soul] section entirely.
+    soul_cfg = getattr(config, "soul", None)
     soul_engine = SoulEngine(
         llm=llm_registry,
         memory=memory_manager,
         usage_recorder=usage_recorder,
-        posture_gate_mode=str(getattr(config.soul, "posture_gate_mode", "shadow")),
-        posture_gate_force_enforce=bool(
-            getattr(config.soul, "posture_gate_force_enforce", False)
-        ),
+        posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
+        posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
         module_overrides=module_overrides,
         llm_concurrency=llm_concurrency,
         llm_concurrency_gate=llm_gate,
