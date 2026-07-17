@@ -455,3 +455,87 @@ async def test_ap2_role_layer_is_not_gated(tmp_path: Any) -> None:
         posture_gate=gate,
     )
     assert gate.calls == []  # ROLE bypasses the gate
+
+
+# --------------------------------------------------------------------------
+# Reasoning-model output budget (E2E finding: sensenova deepseek-v4-flash)
+# --------------------------------------------------------------------------
+
+
+class _ReasoningExhaustedRegistry:
+    """First call raises the reasoning-only length error; retry succeeds.
+
+    Mirrors what openai_provider raises when a reasoning provider burns the
+    whole output budget on thinking (finish_reason=length, no final content).
+    """
+
+    def __init__(self, content: str, *, fail_first_n: int = 1) -> None:
+        self._content = content
+        self._fail_first_n = fail_first_n
+        self.calls: list[dict[str, Any]] = []
+
+    async def complete_structured_task(self, **kwargs: Any) -> _FakeResponse:
+        self.calls.append(dict(kwargs))
+        if len(self.calls) <= self._fail_first_n:
+            raise RuntimeError(
+                "openai_compatible returned reasoning but no final content "
+                "(finish_reason=length); disable thinking/reasoning or increase max_tokens"
+            )
+        return _FakeResponse(self._content)
+
+
+async def test_reasoning_length_retries_once_with_raised_budget() -> None:
+    """The deterministic reasoning-only length failure gets ONE raised-budget retry."""
+    from openbiliclaw.soul.posture_gate import (
+        _POSTURE_GATE_MAX_TOKENS,
+        _POSTURE_GATE_REASONING_FALLBACK_MAX_TOKENS,
+    )
+
+    registry = _ReasoningExhaustedRegistry('{"verdict": "accept", "reason": "ok"}')
+    gate = PostureGate(mode="enforce", registry=registry)
+    decision = await gate.evaluate(write_point="wp", change={"goal": "转行"})
+
+    assert decision.verdict == "accept"
+    assert len(registry.calls) == 2
+    assert registry.calls[0]["max_tokens"] == _POSTURE_GATE_MAX_TOKENS
+    assert registry.calls[1]["max_tokens"] == _POSTURE_GATE_REASONING_FALLBACK_MAX_TOKENS
+
+
+async def test_reasoning_length_shadow_records_verdict_not_error() -> None:
+    """Shadow path: budget retry succeeds → shadow_accept row, no shadow_error."""
+    registry = _ReasoningExhaustedRegistry('{"verdict": "accept", "reason": "ok"}')
+    ledger = _FakeLedger()
+    gate = PostureGate(mode="shadow", registry=registry, ledger=ledger)  # type: ignore[arg-type]
+    await gate.evaluate(write_point="wp", change={"value": "自由"})
+    await gate.drain_shadow()
+
+    verdicts = [row["gate_verdict"] for row in ledger.rows]
+    assert verdicts == ["shadow_accept"]
+
+
+async def test_reasoning_length_persistent_failure_still_conservative() -> None:
+    """Retry budget is one-shot: a second length failure propagates as before."""
+    registry = _ReasoningExhaustedRegistry('{"verdict": "accept"}', fail_first_n=10)
+    gate = PostureGate(mode="enforce", registry=registry)
+    decision = await gate.evaluate(write_point="wp", change={"goal": "转行"})
+
+    assert decision.verdict == "downgrade"  # enforce fails closed
+    assert len(registry.calls) == 2  # exactly one retry, no loop
+
+
+async def test_non_reasoning_error_does_not_trigger_budget_retry() -> None:
+    """Other provider errors keep the existing single-attempt behaviour."""
+
+    class _Boom:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, **kwargs: Any) -> _FakeResponse:
+            self.calls += 1
+            raise RuntimeError("connection reset")
+
+    boom = _Boom()
+    gate = PostureGate(mode="enforce", registry=boom)
+    decision = await gate.evaluate(write_point="wp", change={"goal": "x"})
+    assert decision.verdict == "downgrade"
+    assert boom.calls == 1

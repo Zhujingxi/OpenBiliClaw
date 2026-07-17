@@ -50,7 +50,23 @@ _VALID_VERDICTS = frozenset({ACCEPT, DOWNGRADE, REJECT})
 # values / a candidate line); 512 output tokens comfortably holds a verdict +
 # one-sentence reason. Revisit after a provider swap (pitfall #3).
 _POSTURE_GATE_MAX_TOKENS = 512
+# Reasoning-model fallback budget. Reasoning providers (e.g. sensenova
+# deepseek-v4-flash) burn the whole output budget on invisible thinking and
+# return "reasoning but no final content (finish_reason=length)" — a
+# deterministic failure at 512 tokens that would poison the shadow observation
+# window with shadow_error rows. Mirrors the preference-analyzer precedent:
+# on that exact signature, retry ONCE with this raised budget (8k covers any
+# realistic thinking trace for a 3-way verdict; calibrate after provider swap).
+_POSTURE_GATE_REASONING_FALLBACK_MAX_TOKENS = 8192
 _GATE_CALLER = "soul.posture_gate"
+
+
+def _is_reasoning_budget_exhausted(exc: Exception) -> bool:
+    """Provider burned the output budget on reasoning with no final content."""
+    message = str(exc).lower()
+    return (
+        "returned reasoning but no final content" in message and "finish_reason=length" in message
+    )
 
 
 @dataclass
@@ -215,14 +231,39 @@ class PostureGate:
             core_memory=snapshot.core_memory,
             ledger_digest=snapshot.ledger_digest,
         )
-        response = await self._registry.complete_structured_task(
-            system_instruction=messages[0]["content"],
-            user_input=messages[1]["content"],
-            max_tokens=_POSTURE_GATE_MAX_TOKENS,
-            caller=_GATE_CALLER,
-            reasoning_effort="",
-            inject_core_memory=False,
-        )
+        max_tokens = _POSTURE_GATE_MAX_TOKENS
+        reasoning_budget_retried = False
+        while True:
+            try:
+                response = await self._registry.complete_structured_task(
+                    system_instruction=messages[0]["content"],
+                    user_input=messages[1]["content"],
+                    max_tokens=max_tokens,
+                    caller=_GATE_CALLER,
+                    reasoning_effort="",
+                    inject_core_memory=False,
+                )
+                break
+            except Exception as exc:
+                # Reasoning providers can exhaust the small verdict budget on
+                # invisible thinking (deterministic, would land as shadow_error
+                # every time). Retry once with the raised fallback budget —
+                # same pattern as soul/preference_analyzer.py's chunk path.
+                if (
+                    _is_reasoning_budget_exhausted(exc)
+                    and not reasoning_budget_retried
+                    and max_tokens < _POSTURE_GATE_REASONING_FALLBACK_MAX_TOKENS
+                ):
+                    reasoning_budget_retried = True
+                    max_tokens = _POSTURE_GATE_REASONING_FALLBACK_MAX_TOKENS
+                    logger.warning(
+                        "posture gate reasoning exhausted %d-token budget; "
+                        "retrying once with %d tokens",
+                        _POSTURE_GATE_MAX_TOKENS,
+                        max_tokens,
+                    )
+                    continue
+                raise
         parsed = parse_llm_json_tolerant(getattr(response, "content", "") or "")
         if not isinstance(parsed, dict):
             logger.warning("posture gate returned non-dict; downgrading conservatively")
