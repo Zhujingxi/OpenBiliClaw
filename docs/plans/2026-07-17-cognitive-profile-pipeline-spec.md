@@ -100,7 +100,7 @@
 
 ### Phase 1 — 对话线(r2 大改:并发、所有权、身份、合规)
 
-1. **学习串行队列(不变量 7)**:`learn_from_dialogue` 调用改投递 `DialogueLearnQueue`(单 worker asyncio 队列);worker 注册后台任务注册表,热重载 drain。队列携带 `{message, reply, session, scope, turn_id}`——scope/turn_id 从 durable 路径与 `respond()` 透传(`dialogue.py:125` 签名扩展,默认 scope="chat")。
+1. **学习串行队列(不变量 7)**:`learn_from_dialogue` 调用改投递 `DialogueLearnQueue`(单 worker asyncio 队列);worker 自持生命周期(不入 cancel_all 注册表),热重载 pause-drain、失败回滚 resume(详见不变量 7)。队列携带 `{message, reply, session, scope, turn_id}`——scope/turn_id 从 durable 路径与 `respond()` 透传(`dialogue.py:125` 签名扩展,默认 scope="chat")。
 2. **窗口 + 回灌(范围限定,r1 finding 3)**:`DIALOGUE_WINDOW_TURNS = 20`(校准注释同 r1);回灌**仅 popup 会话、仅 `scope='chat'`、仅 completed** 的 chat_turns;CLI/OpenClaw 会话不回灌(文档注明:CLI 历史为进程内,现状不变)。≤20 轮 prompt 字节不变(基线先行)。
 3. **活跃清单注入 + settles(自然键 + 所有权)**:注入清单项携带自然键(speculation: `domain`;insight: 内容 hash8,注入时生成;confusion: id)。输出 `settles: [{kind, ref, verdict, note}]`;**白名单 = 当轮注入清单**;scope != "chat" 的轮次跳过 settles(不变量 6);结算动作调既有函数(`user_confirm/reject_speculation`、`update_from_feedback`)并进台账,台账行含 turn_id(幂等观察键)。
 4. **dialogue-insight builder 合规化(r1 finding 20)**:system 段模块常量化、JSON `sort_keys=True`、加入 invariance 清单——此为行为等价重构,回放对照覆盖。
