@@ -143,6 +143,27 @@ def test_local_environment_rejects_symlink(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "DO_NOT_TOUCH=1\n"
 
 
+def test_public_run_preserves_symlink_path_for_local_lifecycle_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(actual, target_is_directory=True)
+    args = bootstrap.build_parser().parse_args(
+        ["--project-dir", str(linked), "--mode", "local", "--skip-install", "--skip-start"]
+    )
+
+    def enter_local_lifecycle(project_dir: Path, **_kwargs: object) -> object:
+        with bootstrap._lifecycle_lock(project_dir, timeout=1.0):
+            raise AssertionError("symlinked project path entered local lifecycle")
+
+    monkeypatch.setattr(bootstrap, "install_local_runtime", enter_local_lifecycle)
+
+    with pytest.raises(RuntimeError, match="symlinked project path"):
+        bootstrap.run(args)
+
+
 def test_local_install_migrates_then_starts_api_and_worker_without_secret_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

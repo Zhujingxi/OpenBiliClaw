@@ -142,6 +142,72 @@ def test_lifecycle_lock_replacement_cannot_create_a_second_holder(tmp_path: Path
     assert not second_entered
 
 
+def test_absent_active_lock_path_cannot_create_a_second_holder(tmp_path: Path) -> None:
+    first_entered = threading.Event()
+    removed = threading.Event()
+    release_first = threading.Event()
+    second_entered = False
+
+    def hold_first() -> None:
+        with (
+            pytest.raises(RuntimeError, match="lock identity changed"),
+            bootstrap._lifecycle_lock(tmp_path, timeout=1.0),
+        ):
+            bootstrap._load_or_create_installation_state(tmp_path)
+            first_entered.set()
+            lock_path = tmp_path / bootstrap.LIFECYCLE_LOCK
+            lock_path.rename(lock_path.with_suffix(".displaced"))
+            removed.set()
+            assert release_first.wait(2.0)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(hold_first)
+        assert first_entered.wait(2.0)
+        assert removed.wait(2.0)
+        with (
+            pytest.raises(RuntimeError, match="lock identity"),
+            bootstrap._lifecycle_lock(tmp_path, timeout=0.1),
+        ):
+            second_entered = True
+        release_first.set()
+        first.result(timeout=2.0)
+
+    assert not second_entered
+
+
+def test_direct_path_lifecycle_branch_avoids_dir_fd_operations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    original_open = bootstrap.os.open
+    observed_dir_fds: list[int | None] = []
+
+    def record_open(*args: object, **kwargs: object) -> int:
+        observed_dir_fds.append(kwargs.get("dir_fd"))  # type: ignore[arg-type]
+        return original_open(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bootstrap, "_lifecycle_uses_dir_fd", lambda: False, raising=False)
+    monkeypatch.setattr(bootstrap.os, "open", record_open)
+
+    with bootstrap._lifecycle_lock(tmp_path, timeout=1.0):
+        bootstrap._load_or_create_installation_state(tmp_path)
+
+    assert all(descriptor is None for descriptor in observed_dir_fds)
+
+
+def test_project_root_rejects_windows_junction_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        bootstrap,
+        "_path_is_link_or_junction",
+        lambda path: path == tmp_path,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="symlinked project path"):
+        bootstrap._canonical_project_root(tmp_path)
+
+
 def test_lifecycle_lock_rejects_symlinked_project_ancestor(tmp_path: Path) -> None:
     actual = tmp_path / "actual"
     actual.mkdir()

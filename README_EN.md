@@ -99,8 +99,10 @@ verified stop of the previous managed pair → Alembic migration → API + worke
 lock serializes that entire source-install transaction. Private installer UUID,
 canonical-root, and monotonic-generation bindings prevent concurrent installs,
 copied state, or stale failure cleanup from taking ownership of a newer runtime.
-The lock inode is bound through a held parent-directory FD and embedded
-root/device/inode identity; replacement or a symlinked ancestor fails closed. A
+The lock UUID/device/inode is persisted in installer metadata. POSIX also validates
+through a held parent-directory FD; Windows uses the equivalent direct-path branch
+without `dir_fd`. A missing/replaced bound lock path, or a symlink/junction ancestor,
+fails closed. A
 copied `.env` rebinds managed root/DB/Huey/instance fields while preserving secrets
 and the external LiteLLM connection.
 Stop/failure cleanup retains the ownership-bound dead state until the next
@@ -123,7 +125,11 @@ openbiliclaw db backup <destination>
 
 `db backup` fully syncs a held/unlinked payload before macOS `fclonefileat` or Linux
 `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` atomically creates the no-replace destination.
-Windows or a platform without that primitive fails before destination reservation.
+If a Linux capability policy rejects `AT_EMPTY_PATH`, a fallback through
+`/proc/self/fd` is allowed only after it is verified against the held inode, using
+`AT_SYMLINK_FOLLOW`. The destination parent pathname is rebound to its held directory
+FD after directory sync. Windows or a platform without a safe publication primitive
+fails before destination reservation.
 
 API readiness is `GET /api/v1/system/readiness`. Except for the first-run onboarding
 exception, business endpoints require a bearer token matching

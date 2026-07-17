@@ -107,7 +107,9 @@ Queue writable probe 会在 `BEGIN IMMEDIATE` 中执行真实 `CREATE`/`INSERT` 
 不留下 durable artifact，并在 SQLite connection 前后确认 pathname 仍指向 held inode。Source installer
 在 migration 后启动 API/worker、等待 queue
 文件就绪，再运行 `openbiliclaw doctor` 检查应用数据库、access token 和 LiteLLM
-配置；任一步失败都会停止这两个新进程并非零退出。
+配置；任一步失败都会停止这两个新进程并非零退出。其 lifecycle lock UUID/device/inode
+持久绑定到 installer metadata；POSIX 使用 held parent dir FD，native Windows 使用 direct-path
+校验，已绑定 lock pathname 缺失/替换或 symlink/junction ancestor 都会失败关闭。
 
 ## 来源与 onboarding
 

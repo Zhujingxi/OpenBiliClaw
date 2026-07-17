@@ -222,6 +222,7 @@ class SQLiteOperationalStore:
             )
             try:
                 _sync_directory(directory)
+                _require_destination_directory(directory)
                 _require_owned_entry(directory, final)
                 _require_source_identity(source, source_identity)
                 return target
@@ -972,8 +973,40 @@ def _link_anonymous_linux(source: int, destination_directory: int, name: str) ->
     error = ctypes.get_errno()
     if error == errno.EEXIST:
         raise DatabaseBackupError("backup destination already exists")
+    fallback_errors = {errno.EINVAL, errno.ENOENT, errno.EPERM}
+    if hasattr(errno, "EOPNOTSUPP"):
+        fallback_errors.add(errno.EOPNOTSUPP)
+    if error in fallback_errors and _proc_fd_matches(source):
+        proc_descriptor = os.fsencode(f"/proc/self/fd/{source}")
+        result = libc.linkat(
+            ctypes.c_int(-100),
+            ctypes.c_char_p(proc_descriptor),
+            ctypes.c_int(destination_directory),
+            ctypes.c_char_p(os.fsencode(name)),
+            ctypes.c_int(0x400),
+        )
+        if result == 0:
+            return
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise DatabaseBackupError("backup destination already exists")
     cause = OSError(error, os.strerror(error))
     raise DatabaseBackupError("secure backup publication failed") from cause
+
+
+def _proc_fd_matches(descriptor: int) -> bool:
+    """Verify the procfs descriptor link still resolves to the held inode."""
+
+    try:
+        held = os.fstat(descriptor)
+        proc = os.stat(f"/proc/self/fd/{descriptor}", follow_symlinks=True)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(held.st_mode)
+        and stat.S_ISREG(proc.st_mode)
+        and (held.st_dev, held.st_ino) == (proc.st_dev, proc.st_ino)
+    )
 
 
 def _clone_anonymous_macos(source: int, destination_directory: int, name: str) -> None:

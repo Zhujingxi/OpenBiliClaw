@@ -134,6 +134,35 @@ class InstallationState:
         return cls(project_root, instance_id, generation)
 
 
+@dataclass(frozen=True, slots=True)
+class LifecycleAnchorIdentity:
+    """Persistent identity of the one lifecycle-lock inode for an installation."""
+
+    anchor_id: str
+    device: int
+    inode: int
+
+    @classmethod
+    def from_dict(cls, value: object) -> LifecycleAnchorIdentity | None:
+        if not isinstance(value, dict):
+            return None
+        anchor_id = value.get("lifecycle_anchor_id")
+        device = value.get("lifecycle_anchor_device")
+        inode = value.get("lifecycle_anchor_inode")
+        if (
+            not isinstance(anchor_id, str)
+            or not _is_canonical_uuid(anchor_id)
+            or not isinstance(device, int)
+            or isinstance(device, bool)
+            or device < 0
+            or not isinstance(inode, int)
+            or isinstance(inode, bool)
+            or inode <= 0
+        ):
+            return None
+        return cls(anchor_id, device, inode)
+
+
 def _emit(status: str, message: str, **details: object) -> None:
     """Emit a machine-readable event containing no credential values."""
 
@@ -258,9 +287,16 @@ def _canonical_project_root(project_dir: Path) -> Path:
             metadata = candidate.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISLNK(metadata.st_mode):
+        if stat.S_ISLNK(metadata.st_mode) or _path_is_link_or_junction(candidate):
             raise RuntimeError(f"refusing symlinked project path: {candidate}")
     return absolute.resolve(strict=True)
+
+
+def _path_is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(is_junction is not None and is_junction())
 
 
 def _read_locked_json(descriptor: int, *, description: str) -> object:
@@ -272,18 +308,77 @@ def _read_locked_json(descriptor: int, *, description: str) -> object:
             raise RuntimeError(f"invalid {description}") from exc
 
 
-def _lifecycle_anchor_payload(root: Path, descriptor: int) -> dict[str, object]:
+def _lifecycle_anchor_payload(
+    root: Path, descriptor: int, identity: LifecycleAnchorIdentity
+) -> dict[str, object]:
     metadata = os.fstat(descriptor)
     return {
         "version": 1,
         "project_root": str(root),
         "device": metadata.st_dev,
         "inode": metadata.st_ino,
-        "anchor_id": str(uuid4()),
+        "anchor_id": identity.anchor_id,
     }
 
 
-def _require_lifecycle_anchor(*, root: Path, parent_descriptor: int, descriptor: int) -> None:
+def _anchor_identity(descriptor: int, *, anchor_id: str | None = None) -> LifecycleAnchorIdentity:
+    metadata = os.fstat(descriptor)
+    return LifecycleAnchorIdentity(
+        anchor_id=anchor_id or str(uuid4()),
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+    )
+
+
+def _installation_payload(
+    installation: InstallationState, anchor: LifecycleAnchorIdentity
+) -> dict[str, int | str]:
+    return {
+        **installation.to_dict(),
+        "lifecycle_anchor_id": anchor.anchor_id,
+        "lifecycle_anchor_device": anchor.device,
+        "lifecycle_anchor_inode": anchor.inode,
+    }
+
+
+def _read_installation_record(
+    root: Path,
+) -> tuple[InstallationState, LifecycleAnchorIdentity] | None:
+    path = root / INSTALLATION_STATE
+    try:
+        value = _read_private_json(path, description="installer ownership metadata")
+    except FileNotFoundError:
+        return None
+    installation = InstallationState.from_dict(value)
+    anchor = LifecycleAnchorIdentity.from_dict(value)
+    if installation is None or anchor is None:
+        raise RuntimeError(f"invalid installer ownership metadata: {path}")
+    if installation.project_root != str(root):
+        raise RuntimeError("lifecycle lock identity changed")
+    return installation, anchor
+
+
+def _persist_initial_installation(root: Path, anchor: LifecycleAnchorIdentity) -> None:
+    if (root / INSTALLATION_STATE).exists():
+        raise RuntimeError("installer ownership metadata changed during lock creation")
+    installation = InstallationState(str(root), str(uuid4()), 0)
+    _atomic_write_private_file(
+        root / INSTALLATION_STATE,
+        json.dumps(_installation_payload(installation, anchor), sort_keys=True) + "\n",
+    )
+
+
+def _lifecycle_uses_dir_fd() -> bool:
+    return os.name != "nt" and os.open in os.supports_dir_fd
+
+
+def _require_lifecycle_anchor(
+    *,
+    root: Path,
+    parent_descriptor: int,
+    descriptor: int,
+    expected: LifecycleAnchorIdentity,
+) -> None:
     value = _read_locked_json(descriptor, description="lifecycle lock metadata")
     metadata = os.fstat(descriptor)
     parent_path = root / LIFECYCLE_LOCK.parent
@@ -303,7 +398,9 @@ def _require_lifecycle_anchor(*, root: Path, parent_descriptor: int, descriptor:
         or value.get("project_root") != str(root)
         or value.get("device") != metadata.st_dev
         or value.get("inode") != metadata.st_ino
-        or not _is_canonical_uuid(value.get("anchor_id"))
+        or value.get("anchor_id") != expected.anchor_id
+        or expected.device != metadata.st_dev
+        or expected.inode != metadata.st_ino
         or not stat.S_ISDIR(held_parent.st_mode)
         or not stat.S_ISDIR(path_parent.st_mode)
         or (path_parent.st_dev, path_parent.st_ino) != (held_parent.st_dev, held_parent.st_ino)
@@ -314,43 +411,91 @@ def _require_lifecycle_anchor(*, root: Path, parent_descriptor: int, descriptor:
         raise RuntimeError("lifecycle lock identity changed")
 
 
-@contextmanager
-def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
-    """Serialize lifecycle work on a self-identifying, inode-bound lock FD."""
+def _require_lifecycle_anchor_direct(
+    *, root: Path, path: Path, descriptor: int, expected: LifecycleAnchorIdentity
+) -> None:
+    value = _read_locked_json(descriptor, description="lifecycle lock metadata")
+    held = os.fstat(descriptor)
+    try:
+        current = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("lifecycle lock identity changed") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 1
+        or value.get("project_root") != str(root)
+        or value.get("anchor_id") != expected.anchor_id
+        or (value.get("device"), value.get("inode")) != (held.st_dev, held.st_ino)
+        or (expected.device, expected.inode) != (held.st_dev, held.st_ino)
+        or not stat.S_ISREG(held.st_mode)
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)
+    ):
+        raise RuntimeError("lifecycle lock identity changed")
 
-    root = _canonical_project_root(project_dir)
+
+def _write_lifecycle_anchor(root: Path, descriptor: int, identity: LifecycleAnchorIdentity) -> None:
+    payload = _lifecycle_anchor_payload(root, descriptor, identity)
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, (json.dumps(payload, sort_keys=True) + "\n").encode())
+    os.fsync(descriptor)
+
+
+@contextmanager
+def _locked_anchor_descriptor(descriptor: int, *, path: Path, timeout: float) -> Iterator[int]:
+    acquired = False
+    try:
+        _acquire_lock_before(descriptor, path=path, timeout=timeout)
+        acquired = True
+        yield descriptor
+    finally:
+        if acquired:
+            with suppress(OSError):
+                _unlock_descriptor(descriptor)
+        os.close(descriptor)
+
+
+def _prepare_anchor_parent(root: Path, *, create: bool) -> Path:
     parent = root / LIFECYCLE_LOCK.parent
-    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if create:
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if _path_is_link_or_junction(parent) or not parent.is_dir():
+        raise RuntimeError("lifecycle lock parent is not a contained directory")
+    return parent
+
+
+@contextmanager
+def _lifecycle_lock_dir_fd(
+    root: Path, expected: LifecycleAnchorIdentity | None, *, timeout: float
+) -> Iterator[None]:
+    parent = _prepare_anchor_parent(root, create=expected is None)
     parent_descriptor = os.open(
         parent,
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    created = False
     try:
         try:
             descriptor = os.open(
                 LIFECYCLE_LOCK.name,
-                flags | os.O_CREAT | os.O_EXCL,
+                flags | (os.O_CREAT | os.O_EXCL if expected is None else 0),
                 0o600,
                 dir_fd=parent_descriptor,
             )
-            created = True
-        except FileExistsError:
-            descriptor = os.open(LIFECYCLE_LOCK.name, flags, dir_fd=parent_descriptor)
-        acquired = False
-        try:
-            _acquire_lock_before(descriptor, path=root / LIFECYCLE_LOCK, timeout=timeout)
-            acquired = True
-            if created:
-                payload = _lifecycle_anchor_payload(root, descriptor)
-                os.ftruncate(descriptor, 0)
-                os.write(descriptor, (json.dumps(payload, sort_keys=True) + "\n").encode())
-                os.fsync(descriptor)
+        except OSError as exc:
+            raise RuntimeError("lifecycle lock identity changed") from exc
+        with _locked_anchor_descriptor(
+            descriptor, path=root / LIFECYCLE_LOCK, timeout=timeout
+        ) as held:
+            identity = expected or _anchor_identity(held)
+            if expected is None:
+                _write_lifecycle_anchor(root, held, identity)
+                _persist_initial_installation(root, identity)
             _require_lifecycle_anchor(
                 root=root,
                 parent_descriptor=parent_descriptor,
-                descriptor=descriptor,
+                descriptor=held,
+                expected=identity,
             )
             try:
                 yield
@@ -358,15 +503,52 @@ def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
                 _require_lifecycle_anchor(
                     root=root,
                     parent_descriptor=parent_descriptor,
-                    descriptor=descriptor,
+                    descriptor=held,
+                    expected=identity,
                 )
-        finally:
-            if acquired:
-                with suppress(OSError):
-                    _unlock_descriptor(descriptor)
-            os.close(descriptor)
     finally:
         os.close(parent_descriptor)
+
+
+@contextmanager
+def _lifecycle_lock_direct(
+    root: Path, expected: LifecycleAnchorIdentity | None, *, timeout: float
+) -> Iterator[None]:
+    _prepare_anchor_parent(root, create=expected is None)
+    path = root / LIFECYCLE_LOCK
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(
+            path,
+            flags | (os.O_CREAT | os.O_EXCL if expected is None else 0),
+            0o600,
+        )
+    except OSError as exc:
+        raise RuntimeError("lifecycle lock identity changed") from exc
+    with _locked_anchor_descriptor(descriptor, path=path, timeout=timeout) as held:
+        identity = expected or _anchor_identity(held)
+        if expected is None:
+            _write_lifecycle_anchor(root, held, identity)
+            _persist_initial_installation(root, identity)
+        _require_lifecycle_anchor_direct(root=root, path=path, descriptor=held, expected=identity)
+        try:
+            yield
+        finally:
+            _require_lifecycle_anchor_direct(
+                root=root, path=path, descriptor=held, expected=identity
+            )
+
+
+@contextmanager
+def _lifecycle_lock(project_dir: Path, *, timeout: float) -> Iterator[None]:
+    """Serialize lifecycle work on the persistently bound installer lock inode."""
+
+    root = _canonical_project_root(project_dir)
+    record = _read_installation_record(root)
+    expected = None if record is None else record[1]
+    lock = _lifecycle_lock_dir_fd if _lifecycle_uses_dir_fd() else _lifecycle_lock_direct
+    with lock(root, expected, timeout=timeout):
+        yield
 
 
 def _atomic_write_private_file(path: Path, content: str) -> None:
@@ -429,19 +611,10 @@ def _load_or_create_installation_state(project_dir: Path) -> InstallationState:
     """Load a root-bound installer identity while the lifecycle lock is held."""
 
     project_dir = _canonical_project_root(project_dir)
-    path = project_dir / INSTALLATION_STATE
-    try:
-        value = _read_private_json(path, description="installer ownership metadata")
-    except FileNotFoundError:
-        created = InstallationState(str(project_dir), str(uuid4()), 0)
-        _atomic_write_private_file(path, json.dumps(created.to_dict(), sort_keys=True) + "\n")
-        return created
-    parsed = InstallationState.from_dict(value)
-    if parsed is None:
-        raise RuntimeError(f"invalid installer ownership metadata: {path}")
-    if parsed.project_root != str(project_dir):
-        raise RuntimeError("installer ownership metadata belongs to a different project root")
-    return parsed
+    record = _read_installation_record(project_dir)
+    if record is None:
+        raise RuntimeError("installer ownership metadata is not bound to a lifecycle anchor")
+    return record[0]
 
 
 def _advance_installation_generation(
@@ -449,7 +622,11 @@ def _advance_installation_generation(
 ) -> InstallationState:
     """Allocate the next monotonic runtime owner while lifecycle-locked."""
 
-    observed = _load_or_create_installation_state(project_dir)
+    root = _canonical_project_root(project_dir)
+    record = _read_installation_record(root)
+    if record is None:
+        raise RuntimeError("installer ownership metadata disappeared during installation")
+    observed, anchor = record
     if observed != current:
         raise RuntimeError("installer ownership metadata changed during installation")
     advanced = InstallationState(
@@ -458,8 +635,8 @@ def _advance_installation_generation(
         current.generation + 1,
     )
     _atomic_write_private_file(
-        project_dir.resolve() / INSTALLATION_STATE,
-        json.dumps(advanced.to_dict(), sort_keys=True) + "\n",
+        root / INSTALLATION_STATE,
+        json.dumps(_installation_payload(advanced, anchor), sort_keys=True) + "\n",
     )
     return advanced
 
@@ -1308,12 +1485,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> InstallResult:
-    project_dir = Path(args.project_dir).expanduser().resolve()
+    project_dir = Path(args.project_dir).expanduser()
     mode = args.mode
     if mode == "auto":
         mode = "docker" if shutil.which("docker") else "local"
     if mode == "docker":
-        return _install_docker_runtime(project_dir, start=not args.skip_start)
+        return _install_docker_runtime(
+            _canonical_project_root(project_dir), start=not args.skip_start
+        )
     return install_local_runtime(
         project_dir,
         host=args.host,

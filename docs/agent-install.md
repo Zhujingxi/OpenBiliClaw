@@ -65,11 +65,12 @@ URL; they never contain secret values or the LiteLLM URL.
 The order is intentionally fixed and failures propagate. A dedicated bounded
 cross-process lifecycle lock serializes the complete sequence; it is separate from
 the short `.env` writer lock, so concurrent prepare/start invocations cannot overlap
-migrations or publish competing process pairs. Its stable private metadata file is
-itself the locked inode: the held parent-directory FD, embedded root/device/inode,
-and pathname identity are checked before and after the lifecycle. Replaced/copied
-lock inodes and symlinked project ancestors fail closed instead of creating a second
-lock domain:
+migrations or publish competing process pairs. Installer metadata persistently binds
+the one lock UUID/device/inode before the first lifecycle proceeds. POSIX checks that
+identity through a held parent-directory FD; native Windows uses a direct-path branch
+without `dir_fd`. Both verify the metadata and pathname before and after the lifecycle.
+Once bound, an absent or replaced lock path fails closed instead of creating a second
+lock domain. Copied lock inodes and symlink/junction project ancestors are also refused:
 
 1. Install dependencies with `uv sync --frozen`, or a Python editable fallback.
 2. Persist stable access/encryption secrets and the supplied LiteLLM connection.

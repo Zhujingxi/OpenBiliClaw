@@ -312,6 +312,66 @@ def test_backup_destination_is_absent_until_atomic_publication(
         assert connection.execute("SELECT value FROM payload").fetchone() == ("ready",)
 
 
+def test_linux_anonymous_publish_falls_back_to_verified_proc_fd_on_eperm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    calls: list[tuple[int, bytes, int, bytes, int]] = []
+
+    class FakeLibc:
+        def linkat(
+            self, source: object, source_path: object, target: object, name: object, flags: object
+        ) -> int:
+            call = (
+                source.value,  # type: ignore[attr-defined]
+                source_path.value,  # type: ignore[attr-defined]
+                target.value,  # type: ignore[attr-defined]
+                name.value,  # type: ignore[attr-defined]
+                flags.value,  # type: ignore[attr-defined]
+            )
+            calls.append(call)
+            return -1 if len(calls) == 1 else 0
+
+    monkeypatch.setattr(operations.ctypes, "CDLL", lambda *_args, **_kwargs: FakeLibc())
+    monkeypatch.setattr(operations.ctypes, "get_errno", lambda: operations.errno.EPERM)
+    monkeypatch.setattr(operations, "_proc_fd_matches", lambda _source: True, raising=False)
+
+    operations._link_anonymous_linux(7, 11, "backup.db")
+
+    assert calls == [
+        (7, b"", 11, b"backup.db", 0x1000),
+        (-100, b"/proc/self/fd/7", 11, b"backup.db", 0x400),
+    ]
+
+
+def test_backup_rechecks_parent_path_after_directory_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openbiliclaw.infrastructure.database import operations
+
+    source = tmp_path / "app.db"
+    destination_directory = tmp_path / "destination"
+    destination_directory.mkdir()
+    destination = destination_directory / "backup.db"
+    sqlite3.connect(source).close()
+    original_sync = operations._sync_directory
+    replacement = tmp_path / "replacement"
+
+    def sync_then_replace(directory: operations._DestinationDirectory) -> None:
+        original_sync(directory)
+        directory.path.rename(tmp_path / "held-destination")
+        directory.path.mkdir()
+        replacement.write_text("do-not-touch", encoding="utf-8")
+
+    monkeypatch.setattr(operations, "_sync_directory", sync_then_replace)
+
+    with pytest.raises(DatabaseBackupError, match="destination directory changed"):
+        SQLiteOperationalStore().backup(source=source, destination=destination)
+
+    assert replacement.read_text(encoding="utf-8") == "do-not-touch"
+
+
 def test_backup_never_publishes_a_late_temp_path_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
