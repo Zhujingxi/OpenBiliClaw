@@ -176,8 +176,10 @@ async function loadConversationId() {
 function activateView(view) {
   state.activeView = view;
   for (const tab of $$("[data-view]")) {
-    tab.setAttribute("aria-selected", String(tab.dataset.view === view));
-    tab.classList.toggle("is-active", tab.dataset.view === view);
+    const selected = tab.dataset.view === view;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.classList.toggle("is-active", selected);
+    tab.tabIndex = selected ? 0 : -1;
   }
   for (const panel of $$("[data-view-panel]")) {
     panel.hidden = panel.dataset.viewPanel !== view;
@@ -310,8 +312,35 @@ async function startOnboarding(event) {
 
 function contentCard(feedItem, collection = "") {
   const content = feedItem.content || {};
+  const sourceId = String(content.source_id || "unknown").toLowerCase();
   const article = node("article", { class: "recommendation-card" });
   const preview = node("div", { class: "recommendation-preview" });
+  const coverUrl = content?.metadata?.thumbnail
+    || content?.metadata?.cover
+    || content?.metadata?.image
+    || "";
+  const cover = node(content.url ? "a" : "div", {
+    class: "recommendation-cover",
+    ...(content.url ? { href: content.url, target: "_blank", rel: "noreferrer" } : {}),
+  });
+  if (coverUrl) {
+    cover.append(node("img", {
+      src: coverUrl,
+      alt: content.title ? `${content.title} 的封面` : "内容封面",
+      loading: "lazy",
+    }));
+  } else {
+    cover.classList.add("is-fallback", "is-text-card");
+    cover.append(node("p", {
+      class: "recommendation-cover-text",
+      text: content.summary || content.body_text || "先看标题也行",
+    }));
+  }
+  cover.append(node("span", {
+    class: `recommendation-source-corner source-platform-${sourceId}`,
+    text: sourceId,
+  }));
+  cover.addEventListener("click", () => recordInteraction(content.id, "open"));
   const title = node("a", {
     class: "recommendation-title",
     text: content.title || "未命名内容",
@@ -321,7 +350,13 @@ function contentCard(feedItem, collection = "") {
   });
   title.addEventListener("click", () => recordInteraction(content.id, "open"));
   const copy = node("div", { class: "recommendation-content" }, [
-    title,
+    node("div", { class: "recommendation-top" }, [
+      node("span", {
+        class: "recommendation-state",
+        text: collection ? "已保存在本地" : "刚给你翻出来",
+      }),
+    ]),
+    node("div", { class: "recommendation-copy-block" }, [title]),
     node("div", { class: "recommendation-meta-line" }, [
       node("span", { text: content.source_id || "unknown" }),
       node("span", { text: content.creator || "" }),
@@ -330,7 +365,7 @@ function contentCard(feedItem, collection = "") {
   ]);
   if (content.summary) copy.append(node("p", { class: "recommendation-expression", text: content.summary }));
   if (feedItem.entry?.explanation) copy.append(node("p", { class: "feedback-status", text: feedItem.entry.explanation }));
-  preview.append(copy);
+  preview.append(cover, copy);
   const actions = node("div", { class: "recommendation-actions" });
   if (collection) {
     const remove = node("button", { class: "action-button action-secondary", text: "移除", type: "button" });
@@ -906,7 +941,22 @@ function bindEvents() {
     tabChat: "chat",
   };
   for (const [tabId, view] of Object.entries(primaryTabs)) {
-    $(`#${tabId}`).addEventListener("click", () => activateView(view));
+    const tab = $(`#${tabId}`);
+    tab.addEventListener("click", () => activateView(view));
+    tab.addEventListener("keydown", (event) => {
+      const tabs = Object.keys(primaryTabs).map((id) => $(`#${id}`));
+      const current = tabs.indexOf(tab);
+      let next = current;
+      if (event.key === "ArrowRight") next = (current + 1) % tabs.length;
+      else if (event.key === "ArrowLeft") next = (current - 1 + tabs.length) % tabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = tabs.length - 1;
+      else return;
+      event.preventDefault();
+      const nextTab = tabs[next];
+      activateView(nextTab.dataset.view);
+      nextTab.focus();
+    });
   }
   for (const tab of $$("[data-settings-tab]")) {
     tab.addEventListener("click", () => activateSettingsPanel(tab.dataset.settingsTab));

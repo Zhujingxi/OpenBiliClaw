@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID, uuid4
@@ -174,6 +175,7 @@ class SourceAccountService:
         self._cipher = cipher
         self._registry_provider = registry if callable(registry) else lambda: registry
         self._on_settings_change = on_settings_change
+        self._settings_update_lock = threading.Lock()
 
     def manifests(self) -> tuple[SourceManifest, ...]:
         return tuple(self._registry_provider().manifests.values())
@@ -202,24 +204,28 @@ class SourceAccountService:
     ) -> SourceSettingsState:
         """Validate through the source package before atomically persisting safe settings."""
 
-        connector = self._registry_provider().get(source_id.value)
-        connector_settings = _connector_settings(connector)
-        with self._uow_factory() as uow:
-            stored = uow.settings.get_source_settings(source_id.value)
-            current = (
-                connector_settings
-                if stored is None
-                else type(connector_settings).model_validate_json(json.dumps(stored))
-            )
-            candidate = type(current).model_validate(
-                {**current.model_dump(), **dict(patch)}, strict=True
-            )
-            safe_settings = candidate.model_dump(mode="json")
-            validate_source_task_payload(safe_settings)
-            uow.settings.replace_source_settings(source_id.value, safe_settings)
-            uow.commit()
-        if self._on_settings_change is not None:
-            self._on_settings_change()
+        # Persist and publish as one process-local critical section. Without
+        # serialization, two desktop saves can each rebuild from a different
+        # database snapshot and let the older registry publish last.
+        with self._settings_update_lock:
+            connector = self._registry_provider().get(source_id.value)
+            connector_settings = _connector_settings(connector)
+            with self._uow_factory() as uow:
+                stored = uow.settings.get_source_settings(source_id.value)
+                current = (
+                    connector_settings
+                    if stored is None
+                    else type(connector_settings).model_validate_json(json.dumps(stored))
+                )
+                candidate = type(current).model_validate(
+                    {**current.model_dump(), **dict(patch)}, strict=True
+                )
+                safe_settings = candidate.model_dump(mode="json")
+                validate_source_task_payload(safe_settings)
+                uow.settings.replace_source_settings(source_id.value, safe_settings)
+                uow.commit()
+            if self._on_settings_change is not None:
+                self._on_settings_change()
         return SourceSettingsState(source_id=source_id, settings=safe_settings)
 
     def configure(

@@ -14,11 +14,14 @@ stream 解析 SSE，既支持 POST，也保持 cookie/CSRF 语义。
 
 - `/setup`：readiness、登录、来源连接、bootstrap 和 onboarding progress。
 - `/web`：feed/interaction、profile edit、chat/history、library、来源与系统设置。
-- `/m`：与 `/web` 相同合同的响应式入口。
+- `/m`：feed/interaction、profile edit、chat/history、library、feed replenishment progress
+  与高频设置子集的响应式入口；不提供 onboarding/source bootstrap 或完整设置面。
 
-设置界面投影 `sources/schedules/feed/profile/tasks/network/logging/access_control/jobs` 全部可变
-字段；deployment facts 只读。AI 页面只展示三个稳定 alias 的健康状态和后端提供的 LiteLLM
-Admin URL，不编辑 provider 凭据或路由。
+桌面 `/web` 设置面投影
+`sources/schedules/feed/profile/tasks/network/logging/access_control/jobs` 全部可变字段；
+deployment facts 只读。`/m` 只投影 feed 水位/最低分、来源同步间隔、network
+与 extension access 子集。AI 界面只展示三个稳定 alias 的健康状态和后端提供的
+LiteLLM Admin URL，不编辑 provider 凭据或路由。
 
 生成检查：
 

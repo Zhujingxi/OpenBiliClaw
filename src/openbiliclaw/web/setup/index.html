@@ -20,6 +20,9 @@
       * {
         box-sizing: border-box;
       }
+      [hidden] {
+        display: none !important;
+      }
       body {
         margin: 0;
         min-height: 100vh;
@@ -635,12 +638,15 @@
                 document.getElementById("initProgressBar").style.width = "100%";
                 document.getElementById("initProgressLabel").textContent = "画像与发现流已准备好";
                 step(3);
-              } else if (event === "error")
+              } else if (event === "error") {
+                document.getElementById("startInit").disabled = false;
+                document.getElementById("initProgressLabel").textContent = "初始化失败";
                 message(
                   "initReason",
                   data.message || "初始化失败，请稍后重试。",
                   "err",
                 );
+              }
             },
           );
         } catch (error) {

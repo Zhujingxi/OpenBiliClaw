@@ -4,6 +4,7 @@ import {
   escapeHtml,
   errorMessage,
   newConversationId,
+  recordInteraction,
   safeWebUrl,
 } from "./vnext-api.js";
 
@@ -95,14 +96,8 @@ function imageOf(content) {
     ""
   );
 }
-async function interaction(content_id, kind) {
-  try {
-    await request("v1_interactions_create", {
-      body: { content_id, kind, metadata: { surface: "mobile_web" } },
-    });
-  } catch {
-    /* feedback remains best effort */
-  }
+function interaction(content_id, kind) {
+  return recordInteraction(content_id, kind, "mobile_web");
 }
 async function save(collection, content_id, button) {
   try {
@@ -127,12 +122,19 @@ function card(content, entry, collection = "") {
   el.innerHTML = `<a class="card-open" href="${escapeHtml(content.url)}" target="_blank" rel="noreferrer" data-open><div class="card-cover-frame rec-thumb">${image ? `<img class="card-cover" src="${escapeHtml(image)}" alt="" loading="lazy">` : ""}</div><div class="card-body rec-body"><h3 class="card-title">${escapeHtml(content.title)}</h3><p class="card-meta rec-meta"><span class="card-source" data-source="${escapeHtml(content.source_id)}">${escapeHtml(content.source_id)}</span>${content.creator ? ` · ${escapeHtml(content.creator)}` : ""}</p>${entry?.explanation ? `<p class="card-expression rec-reason">${escapeHtml(entry.explanation)}</p>` : ""}</div></a><div class="card-actions rec-actions">${collection ? `<button data-remove class="card-action-btn btn btn-outline">移除</button>` : `<button data-kind="positive" class="card-action-btn btn btn-outline">喜欢</button><button data-kind="negative" class="card-action-btn btn btn-outline">不感兴趣</button><button data-save="watch_later" class="card-action-btn btn btn-outline">稍后</button><button data-save="favorites" class="card-action-btn btn btn-outline">收藏</button>`}</div>`;
   el.querySelector("[data-open]").addEventListener(
     "click",
-    () => void interaction(content.id, "open"),
+    () => void interaction(content.id, "open").catch(() => undefined),
   );
   el.querySelectorAll("[data-kind]").forEach((button) =>
-    button.addEventListener("click", () => {
-      void interaction(content.id, button.dataset.kind);
-      button.classList.add("active");
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await interaction(content.id, button.dataset.kind);
+        button.classList.add("active");
+      } catch {
+        button.textContent = "重试";
+      } finally {
+        button.disabled = false;
+      }
     }),
   );
   el.querySelectorAll("[data-save]").forEach((button) =>

@@ -42,7 +42,7 @@ class WorkerDependencies:
     """Explicit composition inputs; source and model transports remain injectable."""
 
     session_factory: sessionmaker[Session]
-    source_registry: SourceRegistry
+    source_registry: SourceRegistry | Callable[[], SourceRegistry]
     task_runner: TaskRunner
     job_queue: JobQueue | None = None
 
@@ -52,6 +52,10 @@ class WorkerOrchestrator:
 
     def __init__(self, dependencies: WorkerDependencies, job_service: JobService) -> None:
         self._dependencies = dependencies
+        configured_registry = dependencies.source_registry
+        self._source_registry_provider: Callable[[], SourceRegistry] = (
+            configured_registry if callable(configured_registry) else lambda: configured_registry
+        )
         self._uow_factory: Callable[[], UnitOfWork] = lambda: UnitOfWork(
             dependencies.session_factory
         )
@@ -63,7 +67,7 @@ class WorkerOrchestrator:
         )
         self._feed = FeedService(
             cast("Callable[[], Any]", self._uow_factory),
-            connectors=dependencies.source_registry.connectors,
+            connectors=lambda: self._source_registry_provider().connectors,
             assessor=TaskRunnerBatchAssessor(dependencies.task_runner),
             settings=self._settings,
         )
@@ -73,6 +77,7 @@ class WorkerOrchestrator:
         """Import deterministic activity from every enabled bootstrap connector."""
 
         settings = self._settings.get()
+        source_registry = self._source_registry_provider()
         enabled_sources = [
             source_id
             for source_id in sorted(settings.sources.enabled)
@@ -81,7 +86,7 @@ class WorkerOrchestrator:
         for index, source_id in enumerate(enabled_sources):
             context.checkpoint(0.05 + 0.75 * index / max(1, len(enabled_sources)))
             try:
-                connector = self._dependencies.source_registry.get(source_id)
+                connector = source_registry.get(source_id)
             except LookupError as exc:
                 raise PermanentJobError(
                     f"enabled source has no configured connector: {source_id}"

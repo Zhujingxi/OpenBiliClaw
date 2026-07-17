@@ -4,6 +4,7 @@ import {
   escapeHtml,
   errorMessage,
   newConversationId,
+  recordInteraction,
   safeWebUrl,
 } from "/m/js/vnext-api.js";
 
@@ -139,18 +140,33 @@ function contentCard(content, explanation = "", collection = "") {
   article.innerHTML = `<a href="${escapeHtml(content.url)}" target="_blank" rel="noreferrer" data-open><div class="vnext-cover">${image ? `<img src="${escapeHtml(image)}" alt="" loading="lazy">` : ""}</div><h3 class="video-title">${escapeHtml(content.title)}</h3></a><p class="video-meta">${escapeHtml(SOURCE_LABELS[content.source_id] || content.source_id)}${content.creator ? ` · ${escapeHtml(content.creator)}` : ""}</p>${content.summary ? `<p>${escapeHtml(content.summary)}</p>` : ""}${explanation ? `<p class="reason">${escapeHtml(explanation)}</p>` : ""}<div class="vnext-card-actions">${collection ? `<button class="small-btn" data-remove="${escapeHtml(collection)}">移除</button>` : `<button class="small-btn" data-feedback="positive">喜欢</button><button class="small-btn" data-feedback="negative">不感兴趣</button><button class="small-btn" data-save="watch_later">稍后再看</button><button class="small-btn" data-save="favorites">收藏</button>`}</div>`;
   article
     .querySelector("[data-open]")
-    ?.addEventListener("click", () => void interact(content.id, "open"));
+    ?.addEventListener("click", () => {
+      void interact(content.id, "open").catch(() => undefined);
+    });
   article.querySelectorAll("[data-feedback]").forEach((button) =>
     button.addEventListener("click", async () => {
-      await interact(content.id, button.dataset.feedback);
-      button.setAttribute("aria-pressed", "true");
-      toast("反馈已记录，会影响之后的排序");
+      button.disabled = true;
+      try {
+        await interact(content.id, button.dataset.feedback);
+        button.setAttribute("aria-pressed", "true");
+        toast("反馈已记录，会影响之后的排序");
+      } catch (error) {
+        toast(errorMessage(error));
+      } finally {
+        button.disabled = false;
+      }
     }),
   );
   article.querySelectorAll("[data-save]").forEach((button) =>
     button.addEventListener("click", async () => {
-      await saveItem(button.dataset.save, content.id);
-      button.setAttribute("aria-pressed", "true");
+      button.disabled = true;
+      try {
+        if (await saveItem(button.dataset.save, content.id)) {
+          button.setAttribute("aria-pressed", "true");
+        }
+      } finally {
+        button.disabled = false;
+      }
     }),
   );
   article
@@ -168,14 +184,8 @@ function contentCard(content, explanation = "", collection = "") {
   return article;
 }
 
-async function interact(contentId, kind) {
-  try {
-    await request("v1_interactions_create", {
-      body: { content_id: contentId, kind, metadata: { surface: "web" } },
-    });
-  } catch (error) {
-    toast(errorMessage(error));
-  }
+function interact(contentId, kind) {
+  return recordInteraction(contentId, kind, "web");
 }
 
 async function saveItem(collection, contentId) {
@@ -189,9 +199,14 @@ async function saveItem(collection, contentId) {
       collection === "favorites" ? "save_favorite" : "save_watch_later",
     );
     toast("已保存到本地列表");
+    return true;
   } catch (error) {
-    if (error.status === 409) toast("已在列表中");
-    else toast(errorMessage(error));
+    if (error.status === 409) {
+      toast("已在列表中");
+      return true;
+    }
+    toast(errorMessage(error));
+    return false;
   }
 }
 

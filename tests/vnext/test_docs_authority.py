@@ -166,6 +166,45 @@ def test_historical_v03_material_is_explicitly_archived() -> None:
     assert "Historical v0.3 archive" in source_guide
 
 
+def test_mobile_docs_match_the_current_reduced_surface() -> None:
+    mobile = _read("docs/mobile-web-spec.md")
+    web = _read("docs/modules/web.md")
+    current_changelog = _read("docs/changelog.md").split(
+        "### Historical delivery sequence", 1
+    )[0]
+
+    for source in (mobile, web):
+        assert "feed replenishment" in source
+        assert "完整 nested settings" not in source
+    assert "不声称拥有与桌面端完全相同的设置合同" in mobile
+    assert "不提供 onboarding/source bootstrap 或完整设置面" in web
+    assert "`/setup` 承载 onboarding/来源 bootstrap" in current_changelog
+    assert "`/web` 与 popup 承载完整 nested settings" in current_changelog
+    assert "`/m` 保留" in current_changelog
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("docs/native-save-e2e.md", "docs/testing/six-platform-native-save-e2e.md"),
+)
+def test_native_save_runbooks_are_non_executable_archives(name: str) -> None:
+    source = _read(name)
+    assert "Historical v0.3" in source
+    assert "Non-executable archive" in source
+    assert "Git history" in source
+    assert "/api/v1/library/{collection}" in source
+    for removed_instruction in (
+        "curl ",
+        "allow_state_changing=true",
+        "auto_sync_enabled = false",
+        "POST /api/saved",
+        "GET /api/saved-sync",
+        "PUT /api/config",
+        "/api/extension/e2e/run",
+    ):
+        assert removed_instruction not in source
+
+
 def test_architecture_archive_does_not_restate_removed_runtime_as_current() -> None:
     architecture = _read("docs/architecture.md")
     archive = architecture.split("## 已停止作为入口的 v0.3 实现", 1)[1]

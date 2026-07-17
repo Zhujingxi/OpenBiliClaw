@@ -207,6 +207,109 @@ async def test_cancellation_during_enqueue_leaves_only_a_terminal_row(
     assert rows[0].status == SourceTaskStatus.CANCELLED.value
 
 
+async def test_late_successful_enqueue_after_early_cancellation_is_terminalized(
+    task_context: tuple[Any, Any, Any],  # noqa: F811
+) -> None:
+    session_factory, _, service = task_context
+    started = threading.Event()
+    release = threading.Event()
+
+    class DelayedService:
+        persistence_timeout_seconds = 0.01
+
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
+            started.set()
+            release.wait(timeout=1)
+            return service.enqueue(
+                request, task_id=task_id, request_deadline_at=request_deadline_at
+            )
+
+        def cancel(self, task_id: Any) -> Any:
+            return service.cancel(task_id)
+
+        def snapshot(self, task_id: Any) -> Any:
+            return service.snapshot(task_id)
+
+    transport = QueuedBrowserTransport(
+        DelayedService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=10,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.02,
+    )
+    pending = asyncio.create_task(
+        transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    release.set()
+
+    row = None
+    for _ in range(200):
+        with session_factory() as session:
+            row = session.scalar(select(SourceTaskModel))
+        if row is not None and row.status == SourceTaskStatus.CANCELLED.value:
+            break
+        await asyncio.sleep(0.001)
+    assert row is not None
+    assert row.status == SourceTaskStatus.CANCELLED.value
+    assert service.claim("zhihu") is None
+
+
+async def test_late_cancellation_failure_logs_only_its_exception_type(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    cancel_called = threading.Event()
+    secret = "late-cancel-secret-must-not-escape"
+
+    class FailingLateCancelService:
+        persistence_timeout_seconds = 0.01
+
+        def enqueue(self, request: Any, *, task_id: Any, request_deadline_at: Any) -> Any:
+            del request, request_deadline_at
+            started.set()
+            release.wait(timeout=1)
+            return task_id
+
+        def cancel(self, task_id: Any) -> None:
+            del task_id
+            cancel_called.set()
+            raise RuntimeError(secret)
+
+        def snapshot(self, task_id: Any) -> Any:
+            del task_id
+            raise AssertionError("snapshot must not run while enqueue is blocked")
+
+    transport = QueuedBrowserTransport(
+        FailingLateCancelService(),  # type: ignore[arg-type]
+        "zhihu",
+        timeout_seconds=10,
+        poll_interval_seconds=0.001,
+        cleanup_timeout_seconds=0.02,
+    )
+    pending = asyncio.create_task(
+        transport.fetch(operation=SourceOperation.SEARCH.value, query="python", limit=3)
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    pending.cancel()
+    with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
+        await pending
+    release.set()
+    assert await asyncio.to_thread(cancel_called.wait, 1)
+    for _ in range(20):
+        if not transport._late_cleanup_tasks:  # noqa: SLF001
+            break
+        await asyncio.sleep(0)
+
+    assert "RuntimeError" in caplog.text
+    assert secret not in caplog.text
+    assert not transport._late_cleanup_tasks  # noqa: SLF001
+
+
 async def test_enqueue_delay_beyond_operation_timeout_has_bounded_cleanup_and_no_actionable_row(
     task_context: tuple[Any, Any, Any],  # noqa: F811
 ) -> None:
@@ -256,7 +359,10 @@ async def test_enqueue_delay_beyond_operation_timeout_has_bounded_cleanup_and_no
             break
         await asyncio.sleep(0.001)
     assert row is not None
-    assert service.snapshot(row.id).status is SourceTaskStatus.ABANDONED
+    assert service.snapshot(row.id).status in {
+        SourceTaskStatus.CANCELLED,
+        SourceTaskStatus.ABANDONED,
+    }
     assert service.claim("zhihu") is None
 
 

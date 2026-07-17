@@ -188,7 +188,7 @@ def test_retained_cards_use_safe_links_and_local_library_operations() -> None:
 
     for controller in (desktop, mobile):
         assert 'target="_blank" rel="noreferrer" data-open' in controller
-        assert 'request("v1_interactions_create"' in controller
+        assert "recordInteraction(" in controller
         assert 'request("v1_library_add"' in controller
         assert 'request("v1_library_remove"' in controller
         assert "saved-sync" not in controller
@@ -257,6 +257,17 @@ def test_setup_stage_controls_preserve_forward_and_back_navigation() -> None:
     for control in ("nextAi", "back1", "next1", "backInit", "startInit", "back2"):
         assert f'id="{control}"' in html
         assert f'getElementById("{control}").addEventListener' in html
+
+
+def test_setup_hidden_admin_link_and_terminal_errors_restore_actionability() -> None:
+    html = _read("setup/index.html")
+
+    assert "[hidden]" in html
+    assert "display: none !important" in html
+    error_start = html.index('event === "error"')
+    error_branch = html[error_start : html.index(",\n          );", error_start)]
+    assert 'getElementById("startInit").disabled = false' in error_branch
+    assert 'getElementById("initProgressLabel").textContent = "初始化失败"' in error_branch
 
 
 def test_terminal_sse_states_and_required_alias_gate_are_explicit() -> None:

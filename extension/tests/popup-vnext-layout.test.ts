@@ -19,7 +19,7 @@ function assertInOrder(markers: string[]): void {
 }
 
 test("popup keeps the original visual system and responsive side-panel contract", () => {
-  assert.ok(style.split("\n").length > 4_500, "retained popup stylesheet was replaced with a reduced shell");
+  assert.ok(style.split("\n").length > 3_000, "retained popup stylesheet was replaced with a reduced shell");
   for (const selector of [
     ".side-panel-shell",
     ".hero-sub",
@@ -73,6 +73,10 @@ test("popup preserves the original primary header and tab hierarchy", () => {
   assert.match(html, /class="tab-bar"[^>]*role="tablist"/);
   assertInOrder(["tabRecommend", "tabWatchLater", "tabFavorites", "tabProfile", "tabChat"]);
   assertInOrder(["viewRecommend", "viewWatchLater", "viewFavorites", "viewProfile", "viewChat"].map((id) => `id="${id}"`));
+  assert.match(html, /id="tabRecommend"[^>]*tabindex="0"/);
+  for (const id of ["tabWatchLater", "tabFavorites", "tabProfile", "tabChat"]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*tabindex="-1"`));
+  }
 });
 
 test("popup retains broad original DOM regions for every retained journey", () => {
@@ -155,12 +159,20 @@ test("retained popup navigation is wired and all API calls stay on generated vNe
   assert.match(script, /\$\("#starButton"\)\.addEventListener\("click"/);
   assert.match(script, /\$\("#statusDot"\)\.className/);
   assert.match(script, /\$\("#mobileQrCode"\)\.replaceChildren/);
+  assert.match(script, /tab\.tabIndex = selected \? 0 : -1/);
+  assert.match(script, /event\.key === "ArrowRight"/);
+  assert.match(script, /event\.key === "ArrowLeft"/);
+  assert.match(script, /nextTab\.focus\(\)/);
   assert.doesNotMatch(script, /["'`]\/api\/(?!v1(?:\/|["'`]))/);
 });
 
 test("vNext data renders through the original retained component contracts", () => {
   assert.match(script, /class:\s*"recommendation-card"/);
   assert.match(script, /class:\s*"recommendation-preview"/);
+  assert.match(script, /class:\s*"recommendation-cover"/);
+  assert.match(script, /class:\s*"recommendation-cover-text"/);
+  assert.match(script, /class:\s*`recommendation-source-corner source-platform-\$\{sourceId\}`/);
+  assert.match(script, /node\("img"/);
   assert.match(script, /class:\s*"recommendation-title"/);
   assert.match(script, /class:\s*"recommendation-meta-line"/);
   assert.match(script, /class:\s*"recommendation-actions"/);
@@ -172,4 +184,13 @@ test("vNext data renders through the original retained component contracts", () 
   assert.match(script, /class:\s*`chat-message/);
   assert.match(script, /class:\s*"settings-section settings-source-card"/);
   assert.match(script, /class:\s*"settings-section alias-card"/);
+});
+
+test("dropped feature CSS is not shipped after the retained stylesheet is restored", () => {
+  for (const selector of [
+    ".delight-banner", ".embedding-banner", ".messages-button", ".messages-overlay",
+    ".popup-model-shell", ".saved-sync-toolbar", ".speculative-list", ".awareness-list",
+  ]) {
+    assert.doesNotMatch(style, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });

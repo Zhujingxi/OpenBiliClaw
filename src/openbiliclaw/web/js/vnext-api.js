@@ -37,6 +37,12 @@ export async function readSse(operationId, input, onEvent) {
   }
 }
 
+export function recordInteraction(contentId, kind, surface) {
+  return request("v1_interactions_create", {
+    body: { content_id: contentId, kind, metadata: { surface } },
+  });
+}
+
 export const escapeHtml = (value) =>
   String(value ?? "")
     .replaceAll("&", "&amp;")

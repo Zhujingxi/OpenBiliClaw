@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -102,6 +104,68 @@ def test_api_defers_source_settings_and_registry_until_after_schema_guard(
             .operation_spec(SourceOperation.SEARCH)
             .transport_kind.value
             == "direct"
+        )
+    finally:
+        asyncio.run(container.shutdown())
+
+
+def test_concurrent_source_setting_updates_serialize_registry_rebuilds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    database = tmp_path / "serialized-source-refresh.db"
+    _migrate(database)
+    monkeypatch.setenv("OPENBILICLAW_DATABASE_URL", _database_url(database))
+    monkeypatch.setenv("OPENBILICLAW_ALEMBIC_INI", str(ROOT / "alembic.ini"))
+    real_builder = dependencies_module.build_default_source_registry
+    state_lock = threading.Lock()
+    active_builds = 0
+    max_active_builds = 0
+
+    def observed_builder(session_factory):  # type: ignore[no-untyped-def]
+        nonlocal active_builds, max_active_builds
+        with state_lock:
+            active_builds += 1
+            max_active_builds = max(max_active_builds, active_builds)
+        try:
+            time.sleep(0.05)
+            return real_builder(session_factory)
+        finally:
+            with state_lock:
+                active_builds -= 1
+
+    monkeypatch.setattr(dependencies_module, "build_default_source_registry", observed_builder)
+    container = build_application_container()
+    try:
+        asyncio.run(container.startup())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = (
+                pool.submit(
+                    container.sources.update_settings,
+                    SourceId.DOUYIN,
+                    {"mode": "extension"},
+                ),
+                pool.submit(
+                    container.sources.update_settings,
+                    SourceId.REDDIT,
+                    {"backend": "rdt"},
+                ),
+            )
+            for future in futures:
+                future.result(timeout=2)
+
+        assert max_active_builds == 1
+        manifests = {manifest.source_id: manifest for manifest in container.sources.manifests()}
+        assert (
+            manifests[SourceId.DOUYIN]
+            .operation_spec(SourceOperation.SEARCH)
+            .transport_kind.value
+            == "browser"
+        )
+        assert (
+            manifests[SourceId.REDDIT]
+            .operation_spec(SourceOperation.SEARCH)
+            .transport_kind.value
+            == "cli"
         )
     finally:
         asyncio.run(container.shutdown())

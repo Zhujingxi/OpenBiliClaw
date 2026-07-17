@@ -349,6 +349,7 @@ class QueuedBrowserTransport:
         )
         if self._cleanup_timeout <= 0:
             raise ValueError("browser transport cleanup timeout must be positive")
+        self._late_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     async def fetch(
         self, *, operation: str, query: str | None, limit: int
@@ -406,7 +407,9 @@ class QueuedBrowserTransport:
                     return
                 await asyncio.to_thread(self._service.cancel, task_id)
         except TimeoutError:
-            enqueue_task.add_done_callback(_consume_late_enqueue_outcome)
+            enqueue_task.add_done_callback(
+                lambda task: self._handle_late_enqueue_outcome(task, task_id)
+            )
             logger.warning("source task cleanup reached its persistence deadline")
         except Exception as error:
             logger.warning("source task cleanup failed (%s)", type(error).__name__)
@@ -422,6 +425,27 @@ class QueuedBrowserTransport:
             except BaseException as error:
                 logger.warning("source task cleanup failed (%s)", type(error).__name__)
                 break
+
+    def _handle_late_enqueue_outcome(
+        self, enqueue_task: asyncio.Task[UUID], task_id: UUID
+    ) -> None:
+        """Terminalize a successful insert that finished after local compensation returned."""
+
+        if not _consume_late_enqueue_outcome(enqueue_task):
+            return
+        cleanup_task = asyncio.create_task(self._cancel_late_enqueue(task_id))
+        self._late_cleanup_tasks.add(cleanup_task)
+        cleanup_task.add_done_callback(self._late_cleanup_tasks.discard)
+
+    async def _cancel_late_enqueue(self, task_id: UUID) -> None:
+        try:
+            await asyncio.to_thread(self._service.cancel, task_id)
+        except asyncio.CancelledError:
+            return
+        except BaseException as error:
+            # Never include exception messages: database/adapter errors may
+            # contain persisted payload or credential-adjacent diagnostics.
+            logger.warning("late source task cancellation failed (%s)", type(error).__name__)
 
 
 def _aware(value: datetime) -> datetime:
@@ -461,12 +485,14 @@ def _database_time_is_at_or_after(column: Any) -> Any:
     return func.julianday(column) <= func.julianday("now")
 
 
-def _consume_late_enqueue_outcome(task: asyncio.Task[UUID]) -> None:
+def _consume_late_enqueue_outcome(task: asyncio.Task[UUID]) -> bool:
     """Retrieve a late enqueue result so its exception never reaches the loop handler."""
 
     try:
         task.result()
     except asyncio.CancelledError:
-        return
+        return False
     except BaseException as error:
         logger.warning("late source task enqueue failed (%s)", type(error).__name__)
+        return False
+    return True

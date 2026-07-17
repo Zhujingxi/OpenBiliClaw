@@ -229,7 +229,7 @@ HTTP / CLI / logged-in browser transports
         │ typed repository contracts
         ▼
 SQLAlchemy repositories + UnitOfWork
-        ├─ nested settings + DatabaseSettings / UserSettings / SettingsService
+        ├─ nested settings + serialized API / per-job worker source-registry refresh
         ├─ auth_state.session_epoch (non-secret session revocation)
         ├─ source_accounts ── Fernet ciphertext ◄── OPENBILICLAW_SECRET_KEY
         ├─ activity/profile + consumed-evidence/content/feed/collection/chat tables
@@ -249,6 +249,7 @@ Application services + worker handlers
                                              LiteLLM ─► dedicated PostgreSQL
 
 Huey (separate huey.db) ─► source_sync / profile_projection / feed_replenishment / cleanup
+                              ├─► current source registry ◄── persisted source settings
                               └─► JobService ─► all-pending recovery/claim/cancel/txn guard
 
 Implemented now: domain contracts/policies, seven source manifests/connectors/settings,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from alembic import command
@@ -180,6 +180,77 @@ async def test_all_four_production_handlers_execute_real_use_cases(
         assert len(uow.activities.list_all()) == 1
         assert uow.profiles.latest() is not None
         assert uow.feed.unseen_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_long_lived_worker_resolves_a_fresh_source_registry_for_each_job(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "refreshing-worker.db"
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
+    command.upgrade(config, "head")
+    engine, session_factory = create_engine_and_session(
+        DatabaseSettings(url=f"sqlite:///{database}")
+    )
+    settings = SettingsService(lambda: UnitOfWork(session_factory))
+    current = settings.get()
+    settings.update(
+        {
+            "sources": {
+                "enabled": {**current.sources.enabled, "bilibili": True},
+            },
+        }
+    )
+
+    class RefreshingConnector(MockConnector):
+        def __init__(self, event_id: UUID) -> None:
+            self._event_id = event_id
+
+        async def execute(
+            self, operation: SourceOperation, query: str | None = None, limit: int = 20
+        ) -> tuple[ActivityEvent, ...] | tuple[ContentItem, ...]:
+            if operation is SourceOperation.BOOTSTRAP_IMPORT:
+                return (
+                    ActivityEvent(
+                        id=self._event_id,
+                        source_id="bilibili",
+                        kind=ActivityKind.FAVORITE,
+                        title=str(self._event_id),
+                    ),
+                )
+            return await super().execute(operation, query=query, limit=limit)
+
+    connectors = [RefreshingConnector(uuid4()), RefreshingConnector(uuid4())]
+    provider_calls = 0
+
+    def registry_provider() -> SourceRegistry:
+        nonlocal provider_calls
+        selected = connectors[min(provider_calls, len(connectors) - 1)]
+        provider_calls += 1
+        return SourceRegistry((selected,))
+
+    service, handlers = build_worker_runtime(
+        WorkerDependencies(
+            session_factory=session_factory,
+            source_registry=registry_provider,
+            task_runner=MockTaskRunner(),  # type: ignore[arg-type]
+            job_queue=Queue(),
+        )
+    )
+    try:
+        for index in range(2):
+            run = service.schedule("source_sync", idempotency_key=f"refresh:{index}")
+            assert service.claim(run.id)
+            await handlers["source_sync"](run.id, JobExecutionContext(service, run.id))  # type: ignore[misc]
+
+        with UnitOfWork(session_factory) as uow:
+            assert {event.id for event in uow.activities.list_all()} == {
+                connector._event_id for connector in connectors
+            }
+        assert provider_calls == 2
+    finally:
+        engine.dispose()
 
 
 def test_default_worker_composition_registers_all_builtins_without_live_calls(

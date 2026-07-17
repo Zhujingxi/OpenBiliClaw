@@ -57,7 +57,6 @@ def database_runtime_factory() -> tuple[JobService, Mapping[str, JobHandler]]:
         alembic_ini=Path(os.getenv("OPENBILICLAW_ALEMBIC_INI", "alembic.ini")),
     )
     _engine, session_factory = create_engine_and_session(settings)
-    source_registry = build_default_source_registry(session_factory)
     base_url = os.getenv("OPENBILICLAW_LITELLM_BASE_URL", "http://litellm:4000")
     api_key = os.getenv("OPENBILICLAW_LITELLM_API_KEY")
     if not api_key:
@@ -73,7 +72,9 @@ def database_runtime_factory() -> tuple[JobService, Mapping[str, JobHandler]]:
     return build_worker_runtime(
         WorkerDependencies(
             session_factory=session_factory,
-            source_registry=source_registry,
+            # Resolve persisted per-source transport settings for each job.
+            # The worker is long-lived and must not retain its startup mode.
+            source_registry=lambda: build_default_source_registry(session_factory),
             task_runner=runner,
         )
     )
