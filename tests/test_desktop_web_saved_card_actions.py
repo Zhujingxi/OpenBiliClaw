@@ -75,7 +75,7 @@ def test_saved_card_renders_dedicated_icon_bar_and_wires_it() -> None:
 
     # The dedicated bar is injected before the existing sync/remove row.
     assert (
-        '${savedCardFeedbackBarHtml(listKind)}\n'
+        "${savedCardFeedbackBarHtml(listKind)}\n"
         '          <div class="card-actions saved-card-actions">'
     ) in app_js
     assert "wireSavedCardFeedback(card, item, listKind);" in app_js

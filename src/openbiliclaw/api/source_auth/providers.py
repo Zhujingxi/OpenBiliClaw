@@ -1,0 +1,1035 @@
+"""Per-platform source-auth providers.
+
+``GET /api/sources/status`` used to be a 424-line if/elif chain that flattened
+seven heterogeneous platforms by hand (spec D8). Adding a platform meant editing
+that one function, and nothing forced the new branch to answer the same
+questions as the previous seven — which is how the same ``state="ready"`` came
+to mean "we counted three cookie field names" for B站 and "a file exists on
+disk" for Reddit.
+
+Here each platform owns one pure function ``auth_<slug>(ctx) -> SourceAuthContract``.
+Every provider must answer the *same* questions, so a new platform cannot
+quietly skip one:
+
+* ``auth_required`` — does this source need a credential at all?
+* ``credential`` / ``credential_origin`` — is one stored, and where?
+* ``verification`` / ``verify_method`` — what was concluded, and *how*?
+* ``legacy_state`` / ``legacy_logged_in`` — the pre-existing verdict, carried
+  verbatim.
+
+**The legacy fields are transcribed, never derived.** Wave A promises
+byte-identical output from the old endpoint, and the old ``state`` is provably
+not a function of the orthogonal fields (see ``legacy.py``). Each provider
+therefore repeats its historical branch structure exactly, and
+``check_legacy_consistency`` asserts the two views never contradict each other.
+
+**No provider performs network I/O.** The status endpoint is polled every ~30s
+by open settings pages; the two platforms with live probes (B站, 抖音) read a
+cached verdict written by the verify action instead. See ``probe_cache`` for the
+full rationale.
+
+Two conventions keep the dimensions from re-merging (invariant I2):
+
+* Structural verdicts live in ``credential`` ("this cookie is missing fields"),
+  liveness verdicts live in ``verification`` ("the platform rejected it").
+  Never encode the same fact in both.
+* ``credential_origin`` describes where an *existing* credential lives; it is
+  ``none`` whenever ``credential == "none"``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+
+from openbiliclaw.api.source_auth.contract import SourceAuthContract
+from openbiliclaw.api.source_auth.probe_cache import (
+    LIVE_PROBES,
+    PROBE_FAIL_TTL_SECONDS,
+    PROBE_OK_TTL_SECONDS,
+    LiveProbeCache,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from openbiliclaw.api.source_auth.contract import (
+        Credential,
+        CredentialOrigin,
+        Verification,
+    )
+    from openbiliclaw.config import Config
+
+# ── freshness windows ────────────────────────────────────────────────
+# Window for trusting the extension's privacy-preserving login heartbeat. A
+# live browser pushes on startup, on cookie changes, and on the periodic
+# cookie-sync alarm; stale rows fall back to missing. Verified at the boundary
+# on 2026-07-18: 71h -> ready, 73h -> stale (spec D2).
+_XHS_LOGIN_FRESH_HOURS = 72
+_ZHIHU_LOGIN_FRESH_HOURS = 72
+_HEARTBEAT_TTL_SECONDS = 72 * 3600
+
+# Live-probe verdict windows. Imported rather than redeclared: ``probe_cache``
+# owns both the verdicts and their freshness policy, and ``runtime.init_prereqs``
+# reads the same constants, so the guided-init page and the settings page cannot
+# drift apart on when a verdict goes stale.
+_PROBE_OK_TTL_SECONDS = PROBE_OK_TTL_SECONDS
+_PROBE_FAIL_TTL_SECONDS = PROBE_FAIL_TTL_SECONDS
+
+# rdt-cli's own credential lifetime (``reddit_tasks._RDT_CREDENTIAL_TTL_SECONDS``).
+_RDT_TTL_SECONDS = 7 * 24 * 3600
+
+# Human-readable detail for each X (twitter) health state.
+_X_STATE_DETAIL = {
+    "ok": "X 来源正常，cookie 有效。",
+    "missing_cookie": "未检测到登录 —— 在浏览器登录 x.com，插件会自动同步 cookie。",
+    "expired_cookie": "cookie 已过期 —— 请重新登录 x.com。",
+    "rate_limited": (
+        "cookie 正常，只是当前被 X 限流。已进入退避冷却，到点自动重试，无需手动操作。"
+    ),
+    "blocked": "请求被拒绝 (403) —— 账号可能受限或需要重新验证。",
+}
+
+# X health states that are a verdict about the credential, and what they mean.
+# ``rate_limited`` / ``blocked`` deliberately map to themselves: the platform
+# throttled or refused us, which says nothing about whether the cookie is valid.
+_X_HEALTH_VERIFICATION: dict[str, Verification] = {
+    "ok": "verified",
+    "missing_cookie": "failed",
+    "expired_cookie": "failed",
+    "rate_limited": "rate_limited",
+    "blocked": "blocked",
+}
+
+# rdt-cli credential states, split across the two dimensions they each speak
+# to. Structural outcomes land in ``credential``; only the "usable right now"
+# question lands in ``verification``. ``login_required`` (no file) and the
+# default ``error`` (malformed file) are structural, so they leave the verdict
+# ``unverified`` rather than claiming a check failed that never ran.
+_RDT_CREDENTIAL: dict[str, Credential] = {
+    "ready": "present",
+    "stale": "present",
+    "login_required": "none",
+}
+_RDT_VERIFICATION: dict[str, Verification] = {
+    "ready": "verified",
+    "stale": "stale",
+}
+
+# Sources scheduled by default when the config omits the flag. Only B站, the
+# project's原生 source, is on unless switched off.
+_ENABLED_BY_DEFAULT: dict[str, bool] = {"bilibili": True}
+
+# The note rendered under the status chip on the two live-probe platforms,
+# keyed on what the probe actually concluded.
+#
+# These used to be single constants written when neither platform could be
+# probed at all. Once the frontends started reading the orthogonal fields, the
+# 抖音 card rendered "接入：已验证" beside a badge reading "联网验证 · 刚刚" and a
+# body still reading "需在实际任务中验证" — three sentences, on one card,
+# disagreeing (caught on-device, not by any test, because ``detail`` was frozen
+# only against the no-verdict case).
+#
+# The ``unverified`` entries are the original strings verbatim: that is the only
+# state reachable before this branch existed, so the frozen legacy output is
+# unchanged and the new wording only ever appears in states that are themselves
+# new. Both tables are keyed by ``Verification``; ``rate_limited`` / ``blocked``
+# are X-only and fall through to the ``unverified`` default.
+_DOUYIN_DETAIL: dict[str, str] = {
+    "verified": "已登录抖音（已通过抖音登录态接口联网确认）。",
+    "failed": "抖音登录态已失效 —— 联网检查返回未登录，请在浏览器重新登录后由插件同步。",
+    "stale": "上次联网确认已超出有效期，可点「测试连接」重新确认。",
+    "unverified": "Cookie 已同步，需在实际任务中验证。",
+}
+
+_BILIBILI_READY_DETAIL: dict[str, str] = {
+    "verified": "Cookie 就绪，已联网确认登录态。",
+    "failed": (
+        "Cookie 字段齐全，但联网检查返回未登录或已失效 —— 请重新登录 bilibili.com 后重新同步。"
+    ),
+    "stale": "Cookie 就绪；上次联网确认已超出有效期，可点「测试连接」重新确认。",
+    "unverified": "Cookie 就绪（含 SESSDATA / bili_jct / DedeUserID）。",
+}
+
+
+@dataclass
+class SourceAuthContext:
+    """Everything the providers may read, resolved once per request.
+
+    Deliberately narrow: a provider gets the config and the database, nothing
+    else. It cannot reach an HTTP client, so "the status endpoint never goes
+    out" is enforced by what is in scope, not by reviewer discipline.
+    """
+
+    cfg: Config
+    database: Any
+    probes: LiveProbeCache = LIVE_PROBES
+    _memo: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def sources(self) -> Any:
+        return self.cfg.sources
+
+    def source_cfg(self, slug: str) -> Any:
+        return getattr(self.sources, slug, None)
+
+    def has_conn(self) -> bool:
+        return hasattr(self.database, "conn")
+
+    def x_health(self) -> dict[str, Any]:
+        """X health row, read at most once per request (used twice: auth + feed_paused)."""
+        if "x_health" not in self._memo:
+            health: dict[str, Any] = {}
+            if self.has_conn():
+                from openbiliclaw.storage.x_health import XSourceHealthStore
+
+                health = XSourceHealthStore(self.database).get()
+            self._memo["x_health"] = health
+        return dict(self._memo["x_health"])
+
+
+# ── shared helpers ───────────────────────────────────────────────────
+
+
+def _login_heartbeat(
+    database: Any,
+    *,
+    getter: str,
+    fresh_hours: int,
+) -> tuple[bool, str, bool]:
+    """Read an extension login heartbeat -> ``(logged_in, when_iso, is_fresh)``.
+
+    Shared by 小红书 and 知乎, which store the identical shape: a bool plus a
+    timestamp, and never a byte of the actual cookie.
+
+    ``when`` is passed through exactly as stored, never coerced. Coercing it
+    would change the verdict for a non-string value: ``str(datetime(...))``
+    happens to parse as ISO, so a stringified timestamp would read as *fresh*
+    where the raw value raises below and correctly reads as stale.
+    """
+    stored, when = False, ""
+    if hasattr(database, getter):
+        try:
+            stored, when = getattr(database, getter)()
+        except Exception:  # pragma: no cover - defensive
+            stored, when = False, ""
+
+    fresh = False
+    if when:
+        try:
+            parsed = datetime.fromisoformat(when.strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            fresh = datetime.now(UTC) - parsed.astimezone(UTC) <= timedelta(hours=fresh_hours)
+        except Exception:  # pragma: no cover - defensive
+            fresh = False
+    return bool(stored), when, fresh
+
+
+def _probe_verdict(
+    ctx: SourceAuthContext,
+    slug: str,
+    *,
+    credential: Credential,
+    cookie: str = "",
+) -> tuple[Verification, str]:
+    """Translate a cached live-probe verdict into ``(verification, verified_at)``.
+
+    Never probes. Four refusals to overclaim:
+
+    * no credential -> ``unverified``; there is nothing a verdict could be about.
+    * a transport failure (``network_error``) -> ``unverified``, never ``failed``.
+      A flaky proxy is not an expired cookie.
+    * a lapsed *failure* -> ``unverified``, not ``stale``. ``stale`` means "was
+      verified once and the window lapsed"; a lapsed rejection was never a
+      success, and showing it as stale-green would be backwards.
+    * a verdict whose fingerprint identifies a *different* credential ->
+      ``unverified``. The stored cookie can change without passing through a
+      write path (an env var, an edited data file), and reporting the previous
+      one's verdict against it would be the read-side twin of the write-side
+      cache defect.
+    """
+    if credential == "none":
+        return "unverified", ""
+    verdict = ctx.probes.peek(slug)
+    if verdict is None or verdict.network_error:
+        return "unverified", ""
+    if ctx.probes.contradicts(verdict, _fingerprint(slug, cookie)):
+        return "unverified", ""
+
+    ttl = _PROBE_OK_TTL_SECONDS if verdict.authenticated else _PROBE_FAIL_TTL_SECONDS
+    if not verdict.is_fresh(ttl):
+        return ("stale", verdict.checked_at) if verdict.authenticated else ("unverified", "")
+    return ("verified" if verdict.authenticated else "failed"), verdict.checked_at
+
+
+def _fingerprint(slug: str, cookie: str) -> str:
+    """Identity digest of *cookie*, or "" when it cannot be computed.
+
+    Imported lazily and failure-tolerant: this is a display-path helper, and a
+    fingerprint we cannot compute must degrade to "cannot contradict" rather
+    than take down a status poll.
+    """
+    if not cookie.strip():
+        return ""
+    with suppress(Exception):
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
+
+        return credential_fingerprint(slug, cookie)
+    return ""
+
+
+def _probe_ttl(verification: Verification) -> int:
+    """Freshness window that applies to the current live-probe verdict."""
+    return _PROBE_FAIL_TTL_SECONDS if verification == "failed" else _PROBE_OK_TTL_SECONDS
+
+
+def _row_value(row: Any, key: str, index: int) -> Any:
+    """Read a sqlite row by name when it supports it, else positionally."""
+    return row[key] if hasattr(row, "keys") else row[index]
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    parsed_dict: dict[str, Any] = {}
+    with suppress(Exception):
+        parsed = json.loads(str(raw or "{}"))
+        if isinstance(parsed, dict):
+            parsed_dict = parsed
+    return parsed_dict
+
+
+# ── bilibili ─────────────────────────────────────────────────────────
+
+
+def auth_bilibili(ctx: SourceAuthContext) -> SourceAuthContract:
+    """B站: counts the three core login field names in the resolved cookie.
+
+    config.toml is the mirror, ``data/bilibili_cookie.json`` the runtime store
+    (CLI QR login writes only the file), so both are consulted through the one
+    canonical resolver (invariant I1).
+    """
+    cfg = ctx.cfg
+    configured = str(getattr(cfg.bilibili, "cookie", "") or "")
+    cookie = configured
+    origin: CredentialOrigin = "config" if configured.strip() else "none"
+    if not cookie.strip():
+        with suppress(Exception):
+            from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+
+            cookie = resolve_runtime_cookie(
+                data_dir=cfg.data_path,
+                configured_cookie=configured,
+            )
+        origin = "data_file" if cookie.strip() else "none"
+
+    has_fields = sum(1 for f in ("SESSDATA", "bili_jct", "DedeUserID") if f"{f}=" in cookie)
+    credential: Credential = (
+        "present" if has_fields >= 3 else ("invalid" if cookie.strip() else "none")
+    )
+    if credential == "none":
+        origin = "none"
+
+    # auth_method=none is a *scheduling* statement ("do not log in"), so it
+    # flips auth_required without touching what is actually stored — the
+    # credential fields above stay true either way (invariant I2).
+    if str(getattr(cfg.bilibili, "auth_method", "cookie")) == "none":
+        return SourceAuthContract(
+            auth_required=False,
+            credential=credential,
+            credential_origin=origin,
+            verification="unverified",
+            verify_method="none",
+            verify_ttl_seconds=None,
+            can_verify_now=False,
+            detail="未启用 B 站登录（auth_method=none）。",
+            legacy_state="no_auth",
+            legacy_logged_in=True,
+        )
+
+    verification, verified_at = _probe_verdict(
+        ctx, "bilibili", credential=credential, cookie=cookie
+    )
+    if has_fields >= 3:
+        legacy_state, legacy_logged_in = "ready", True
+        # Only the ready branch varies: with a partial or absent cookie there is
+        # nothing for a probe to have concluded, so those two keep their single
+        # structural sentence.
+        detail = _BILIBILI_READY_DETAIL.get(verification, _BILIBILI_READY_DETAIL["unverified"])
+    elif cookie.strip():
+        legacy_state, legacy_logged_in = "partial", False
+        detail = "Cookie 已配置，但缺少部分登录字段，可能未完整登录。"
+    else:
+        legacy_state, legacy_logged_in = "missing", False
+        detail = "未配置 Cookie —— 在浏览器登录 bilibili.com，插件会自动同步。"
+
+    return SourceAuthContract(
+        auth_required=True,
+        credential=credential,
+        credential_origin=origin,
+        verification=verification,
+        verify_method="live_probe",
+        verified_at=verified_at,
+        verify_ttl_seconds=_probe_ttl(verification),
+        can_verify_now=credential != "none",
+        detail=detail,
+        legacy_state=legacy_state,
+        legacy_logged_in=legacy_logged_in,
+    )
+
+
+# ── 小红书 ───────────────────────────────────────────────────────────
+
+
+def auth_xiaohongshu(ctx: SourceAuthContext) -> SourceAuthContract:
+    """小红书: the extension reports a login bool; the backend stores no cookie.
+
+    Fetching is client-side, so the backend never stores or replays the raw
+    ``web_session`` cookie — which is also why it can never verify this source
+    itself (spec D2). ``xsec_token`` content rows are a secondary hint, never
+    the login gate: a fresh account is logged in with zero tokenized rows.
+    """
+    stored, when, fresh = _login_heartbeat(
+        ctx.database,
+        getter="get_xhs_login_state",
+        fresh_hours=_XHS_LOGIN_FRESH_HOURS,
+    )
+
+    tokens = 0
+    if ctx.has_conn():
+        try:
+            row = ctx.database.conn.execute(
+                "SELECT COUNT(*) FROM content_cache "
+                "WHERE source_platform = 'xiaohongshu' "
+                "AND content_url LIKE '%xsec_token=%'"
+            ).fetchone()
+            tokens = int(row[0]) if row else 0
+        except Exception:  # pragma: no cover - defensive
+            tokens = 0
+
+    credential: Credential = "present" if stored else "none"
+    common: dict[str, Any] = {
+        "auth_required": True,
+        "credential": credential,
+        "credential_origin": "extension" if credential == "present" else "none",
+        "verify_method": "browser_heartbeat",
+        "verify_ttl_seconds": _HEARTBEAT_TTL_SECONDS,
+        # The verify action asks the extension to re-report, which is useful
+        # precisely when we have never heard from it.
+        "can_verify_now": True,
+    }
+
+    if not when:
+        return SourceAuthContract(
+            **common,
+            verification="unverified",
+            detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
+            legacy_state="unverified",
+            legacy_logged_in=False,
+        )
+    if stored and fresh:
+        token_hint = f"内容令牌 {tokens} 条。" if tokens else ""
+        return SourceAuthContract(
+            **common,
+            verification="verified",
+            verified_at=str(when),
+            detail=f"已登录小红书。{token_hint}",
+            legacy_state="ready",
+            legacy_logged_in=True,
+        )
+    if stored:
+        return SourceAuthContract(
+            **common,
+            verification="stale",
+            verified_at=str(when),
+            detail="小红书登录态已过期，请连接插件刷新本地状态。",
+            legacy_state="stale",
+            legacy_logged_in=False,
+        )
+    # The browser actively told us it is logged out — a real negative verdict,
+    # which is what separates this from the "never heard from it" case above.
+    return SourceAuthContract(
+        **common,
+        verification="failed",
+        verified_at=when,
+        detail="未检测到小红书登录 —— 在浏览器登录小红书后插件会自动同步。",
+        legacy_state="missing",
+        legacy_logged_in=False,
+    )
+
+
+# ── 抖音 ─────────────────────────────────────────────────────────────
+
+
+def auth_douyin(ctx: SourceAuthContext) -> SourceAuthContract:
+    """抖音: cookie from env or ``data/douyin_cookie.json``.
+
+    ``verify_method`` is ``live_probe`` because 抖音 *does* have a clean login
+    discriminator — ``/aweme/v1/web/user/profile/self/`` answers
+    ``status_code=0`` + a real uid when logged in and ``status_code=8``
+    ("用户未登录") when not (spec D11, refuting the old "no stable nav endpoint"
+    claim). The verdict is read from the probe cache, never fetched here.
+
+    Note the legacy verdict stays ``("unverified", False)`` even when a cached
+    probe says ``verified``: that literal pair is what Wave A froze, and the
+    upgrade reaches users when the frontends switch to the orthogonal fields.
+    """
+    cfg = ctx.cfg
+    dy_cfg = ctx.source_cfg("douyin")
+    cookie_env = str(getattr(dy_cfg, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"))
+    cookie = ""
+    try:
+        from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+
+        cookie = resolve_douyin_cookie(data_dir=cfg.data_path, cookie_env=cookie_env)
+    except Exception:  # pragma: no cover - defensive
+        cookie = ""
+
+    if not cookie.strip():
+        return SourceAuthContract(
+            auth_required=True,
+            credential="none",
+            credential_origin="none",
+            verification="unverified",
+            verify_method="live_probe",
+            verify_ttl_seconds=_PROBE_OK_TTL_SECONDS,
+            can_verify_now=False,
+            detail="未配置 Cookie —— 设置环境变量，或登录抖音后由插件同步。",
+            legacy_state="missing",
+            legacy_logged_in=False,
+        )
+
+    origin: CredentialOrigin = "env" if os.environ.get(cookie_env, "").strip() else "data_file"
+    verification, verified_at = _probe_verdict(ctx, "douyin", credential="present", cookie=cookie)
+    return SourceAuthContract(
+        auth_required=True,
+        credential="present",
+        credential_origin=origin,
+        verification=verification,
+        verify_method="live_probe",
+        verified_at=verified_at,
+        verify_ttl_seconds=_probe_ttl(verification),
+        can_verify_now=True,
+        detail=_DOUYIN_DETAIL.get(verification, _DOUYIN_DETAIL["unverified"]),
+        legacy_state="unverified",
+        legacy_logged_in=False,
+    )
+
+
+# ── YouTube ──────────────────────────────────────────────────────────
+
+
+def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
+    """YouTube: public source, the one platform legitimately needing no login.
+
+    ``verify_method`` must stay ``none`` here — not because verification is
+    hard, but because there is nothing to verify. That is the only honest use
+    of ``none`` in the whole table (invariant I3).
+    """
+    return SourceAuthContract(
+        auth_required=False,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        verify_method="none",
+        verify_ttl_seconds=None,
+        can_verify_now=False,
+        detail="公开源 · 无需登录。",
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+
+
+# ── X (Twitter) ──────────────────────────────────────────────────────
+
+
+def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
+    """X: the only platform whose verdict comes from real traffic.
+
+    ``passive_health`` reflects that nothing is probed on demand — the health
+    store records what genuine fetches ran into (401 / 403 / 429), so the
+    verdict is as fresh as the last real request and has no TTL of its own.
+    """
+    cfg = ctx.cfg
+    tw_cfg = ctx.source_cfg("twitter")
+    health = ctx.x_health()
+
+    state = "missing_cookie"
+    feed_paused = False
+    if ctx.has_conn():
+        state = str(health.get("state", "ok"))
+        feed_paused = bool(health.get("feed_paused", False))
+
+    cookie_env = str(getattr(tw_cfg, "cookie_env", "OPENBILICLAW_X_COOKIE"))
+    cookie = ""
+    with suppress(Exception):
+        from openbiliclaw.sources.x_auth import resolve_x_cookie
+
+        cookie = resolve_x_cookie(data_dir=cfg.data_path, cookie_env=cookie_env)
+    # The health row defaults to ``ok`` before any fetch has run, so an ``ok``
+    # without an actual cookie would falsely report a logged-in source.
+    if state == "ok" and not cookie.strip():
+        state = "missing_cookie"
+
+    detail = _X_STATE_DETAIL.get(state, f"X 来源状态：{state}。")
+
+    credential: Credential = "present" if cookie.strip() else "none"
+    # No credential means no verdict to hold, whatever the health row says.
+    verification: Verification = (
+        _X_HEALTH_VERIFICATION.get(state, "unverified") if credential == "present" else "unverified"
+    )
+
+    # ``passive_health`` means "read off real traffic", so there has to have
+    # been some. The health row is *created* with ``state='ok'``, which made a
+    # first-ever cookie — including one that expired months ago — report
+    # ``verified`` with ``verify_method="passive_health"`` before a single
+    # request had ever gone out. That is a fabricated verdict, and the one
+    # method that cannot correct itself on demand (invariant I3). ``ok`` is
+    # therefore only a verdict once ``record_success`` has stamped a real one;
+    # until then the honest answer is that we have not asked.
+    #
+    # The negative states need no such guard: they are only ever written by
+    # ``record_error``, i.e. by traffic that genuinely happened.
+    #
+    # The success must also be attributable to *this* cookie. Recording only
+    # "the platform succeeded" let a swapped-in, never-used credential inherit
+    # the previous one's verdict together with its timestamp — the same mistake
+    # as keying the live-probe cache on the platform slug, one store over. The
+    # fingerprint is compared rather than a write-path hook consulted, because a
+    # cookie can also change by env var or an edited data file, and those pass
+    # through no hook at all. An empty stored fingerprint (a success recorded
+    # before this existed, or by a reader-built store) cannot be attributed and
+    # so is not evidence.
+    last_success_at = str(health.get("last_success_at", "") or "").strip()
+    earned_by = str(health.get("last_success_credential", "") or "").strip()
+    if verification == "verified" and (
+        not last_success_at or not earned_by or earned_by != _fingerprint("twitter", cookie)
+    ):
+        verification = "unverified"
+        # ...and the prose has to follow the verdict, or this fix re-creates the
+        # 抖音 contradiction on the next card over: a chip reading 待验证 beside
+        # a body still asserting "cookie 有效". ``_X_STATE_DETAIL['ok']`` was
+        # written when ``ok`` was taken at face value. This is the one legacy
+        # ``detail`` this wave moves on purpose — the frozen case is updated
+        # with it, and the confirmed path keeps the original string byte for
+        # byte, so a genuinely verified X reads exactly as it always did.
+        detail = "已配置 X Cookie，但还没有成功的真实请求可以确认登录态。"
+
+    if feed_paused:
+        detail += " 其中 For-You 子流因连续失败已临时熔断，下次抓取成功会自动恢复。"
+
+    origin: CredentialOrigin = "none"
+    if credential == "present":
+        origin = "env" if os.environ.get(cookie_env, "").strip() else "data_file"
+
+    # A confirmed verdict is dated by the success itself; every other verdict
+    # by the row's last write, which is when that failure was observed.
+    verified_at = ""
+    if verification == "verified":
+        verified_at = last_success_at
+    elif verification != "unverified":
+        verified_at = str(health.get("updated_at", ""))
+
+    return SourceAuthContract(
+        auth_required=True,
+        credential=credential,
+        credential_origin=origin,
+        verification=verification,
+        verify_method="passive_health",
+        verified_at=verified_at,
+        verify_ttl_seconds=None,
+        can_verify_now=credential == "present",
+        detail=detail,
+        legacy_state=state,
+        legacy_logged_in=state == "ok",
+    )
+
+
+# ── 知乎 ─────────────────────────────────────────────────────────────
+
+
+def auth_zhihu(ctx: SourceAuthContext) -> SourceAuthContract:
+    """知乎: extension heartbeat first, then a fallback to task history.
+
+    The fallback must declare ``verify_method="task_history"`` rather than
+    impersonating a heartbeat (invariant I3): "a task succeeded an hour ago" is
+    weaker evidence than "the browser holds a login cookie right now", and
+    collapsing the two is how a green light stops meaning anything.
+    """
+    stored, when, fresh = _login_heartbeat(
+        ctx.database,
+        getter="get_zhihu_login_state",
+        fresh_hours=_ZHIHU_LOGIN_FRESH_HOURS,
+    )
+    # ``credential_origin`` is set per return rather than shared: it must track
+    # ``credential``, not the heartbeat's presence, or a logged-out browser
+    # would report "credential none, stored in the extension".
+    heartbeat: dict[str, Any] = {
+        "auth_required": True,
+        "verify_method": "browser_heartbeat",
+        "verify_ttl_seconds": _HEARTBEAT_TTL_SECONDS,
+        "can_verify_now": True,
+    }
+
+    if when:
+        if stored and fresh:
+            return SourceAuthContract(
+                **heartbeat,
+                credential="present",
+                credential_origin="extension",
+                verification="verified",
+                verified_at=str(when),
+                detail="已登录知乎。",
+                legacy_state="ready",
+                legacy_logged_in=True,
+            )
+        if stored:
+            return SourceAuthContract(
+                **heartbeat,
+                credential="present",
+                credential_origin="extension",
+                verification="stale",
+                verified_at=str(when),
+                detail="知乎登录态已过期，请连接插件刷新本地状态。",
+                legacy_state="stale",
+                legacy_logged_in=False,
+            )
+        return SourceAuthContract(
+            **heartbeat,
+            credential="none",
+            credential_origin="none",
+            verification="failed",
+            verified_at=str(when),
+            detail="浏览器最近同步的状态为未登录知乎。",
+            legacy_state="missing",
+            legacy_logged_in=False,
+        )
+
+    row = None
+    if ctx.has_conn():
+        try:
+            row = ctx.database.conn.execute(
+                """
+                SELECT type, status, result_json, created_at, completed_at
+                FROM zhihu_tasks
+                WHERE status IN ('pending', 'in_progress', 'completed', 'failed')
+                ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        except Exception:
+            row = None
+
+    if row is not None:
+        task_type = str(_row_value(row, "type", 0))
+        status = str(_row_value(row, "status", 1))
+        payload = _json_dict(_row_value(row, "result_json", 2))
+        # Timestamp columns feed only the display-only ``verified_at``. The
+        # legacy branch never read them, so a row that cannot supply them must
+        # cost the timestamp and nothing else — without this guard an unexpected
+        # row shape would raise out of the handler and 500 all seven platforms.
+        at = ""
+        with suppress(Exception):
+            at = str(_row_value(row, "completed_at", 4) or _row_value(row, "created_at", 3) or "")
+        items = payload.get("items")
+        item_count = len(items) if isinstance(items, list) else 0
+        error_code = str(payload.get("error", "") or "").strip()
+        debug = payload.get("debug")
+        login_required = error_code == "zhihu_login_required" or (
+            isinstance(debug, dict) and bool(debug.get("login_required"))
+        )
+        history: dict[str, Any] = {
+            "auth_required": True,
+            "verify_method": "task_history",
+            # A past task outcome has no freshness window of its own — it is
+            # simply the last thing that happened.
+            "verify_ttl_seconds": None,
+            # The verify action itself is still a heartbeat request; only the
+            # *current* verdict came from history.
+            "can_verify_now": True,
+        }
+        if status == "completed":
+            return SourceAuthContract(
+                **history,
+                credential="present",
+                credential_origin="extension",
+                verification="verified",
+                verified_at=at,
+                detail=f"最近任务完成（{task_type}，{item_count} 条）。",
+                legacy_state="ready",
+                legacy_logged_in=True,
+            )
+        if login_required:
+            return SourceAuthContract(
+                **history,
+                credential="none",
+                credential_origin="none",
+                verification="failed",
+                verified_at=at,
+                detail="最近知乎任务提示需要登录知乎。请在当前浏览器登录知乎后重试。",
+                legacy_state="missing",
+                legacy_logged_in=False,
+            )
+        if status == "failed":
+            suffix = f"：{error_code}" if error_code else ""
+            # An operational failure (timeout, parse error) says nothing about
+            # the login, so the verdict stays ``unverified`` rather than
+            # blaming the credential.
+            return SourceAuthContract(
+                **history,
+                credential="none",
+                credential_origin="none",
+                verification="unverified",
+                detail=f"最近知乎任务失败{suffix}。可在浏览器登录态正常后重试。",
+                legacy_state="partial",
+                legacy_logged_in=False,
+            )
+        if status in {"pending", "in_progress"}:
+            return SourceAuthContract(
+                **history,
+                credential="none",
+                credential_origin="none",
+                verification="unverified",
+                detail=f"知乎任务正在等待插件执行（{task_type} / {status}）。",
+                legacy_state="unverified",
+                legacy_logged_in=False,
+            )
+
+    return SourceAuthContract(
+        **heartbeat,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        detail=(
+            "浏览器插件登录态源 · 尚未看到知乎任务结果，保存后可运行 init 或 discover 验证登录态。"
+        ),
+        legacy_state="unverified",
+        legacy_logged_in=False,
+    )
+
+
+# ── Reddit ───────────────────────────────────────────────────────────
+
+
+def _reddit_extension(ctx: SourceAuthContext) -> SourceAuthContract:
+    """Reddit via the OpenBiliClaw extension, credential still in rdt-cli's file."""
+    base: dict[str, Any] = {"auth_required": True, "can_verify_now": True}
+
+    cookie_names: tuple[str, ...] = ()
+    with suppress(Exception):
+        from openbiliclaw.sources.reddit_tasks import rdt_credential_cookie_names
+
+        cookie_names = rdt_credential_cookie_names()
+
+    if "reddit_session" in cookie_names:
+        return SourceAuthContract(
+            **base,
+            credential="present",
+            credential_origin="external_cli",
+            verification="verified",
+            verify_method="local_file",
+            verified_at=_rdt_saved_at(),
+            verify_ttl_seconds=_RDT_TTL_SECONDS,
+            detail="已登录 Reddit（reddit_session 已同步）。",
+            legacy_state="ready",
+            legacy_logged_in=True,
+        )
+
+    default = SourceAuthContract(
+        **base,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        verify_method="local_file",
+        verify_ttl_seconds=_RDT_TTL_SECONDS,
+        detail="Reddit 使用 OpenBiliClaw 插件登录态；尚未看到成功任务结果。",
+        legacy_state="unverified",
+        legacy_logged_in=False,
+    )
+
+    db_conn = getattr(ctx.database, "conn", None)
+    if db_conn is None or not hasattr(db_conn, "execute"):
+        return default
+
+    history: dict[str, Any] = {
+        "auth_required": True,
+        "can_verify_now": True,
+        "credential": "none",
+        "credential_origin": "none",
+        "verify_method": "task_history",
+        "verify_ttl_seconds": None,
+    }
+    with suppress(Exception):
+        row = db_conn.execute(
+            """
+            SELECT type, status, result_json,
+                   COALESCE(completed_at, claimed_at, created_at)
+            FROM reddit_tasks
+            ORDER BY COALESCE(completed_at, claimed_at, created_at) DESC,
+                     created_at DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is not None:
+            task_type = str(_row_value(row, "type", 0))
+            status = str(_row_value(row, "status", 1))
+            payload = _json_dict(_row_value(row, "result_json", 2))
+            # The COALESCE column has no stable name; index works for both
+            # sqlite3.Row and a plain tuple. Guarded separately from the
+            # enclosing suppress: this timestamp is display-only, and letting it
+            # abort the block would silently downgrade a completed task back to
+            # the "no task seen yet" default.
+            at = ""
+            with suppress(Exception):
+                at = str(row[3] or "")
+            error_code = str(payload.get("error", "") or "")
+            debug = payload.get("debug")
+            login_required = error_code == "reddit_login_required" or bool(
+                debug.get("login_required") if isinstance(debug, dict) else False
+            )
+            if status == "completed":
+                return SourceAuthContract(
+                    **{**history, "credential": "present", "credential_origin": "extension"},
+                    verification="verified",
+                    verified_at=at,
+                    detail=f"最近 Reddit 插件任务已完成（{task_type}）。",
+                    legacy_state="ready",
+                    legacy_logged_in=True,
+                )
+            if login_required:
+                return SourceAuthContract(
+                    **history,
+                    verification="failed",
+                    verified_at=at,
+                    detail="最近 Reddit 任务提示需要登录 Reddit。请在当前浏览器登录后重试。",
+                    legacy_state="missing",
+                    legacy_logged_in=False,
+                )
+            if status == "failed":
+                suffix = f"：{error_code}" if error_code else ""
+                return SourceAuthContract(
+                    **history,
+                    verification="unverified",
+                    detail=f"最近 Reddit 插件任务失败{suffix}。",
+                    legacy_state="partial",
+                    legacy_logged_in=False,
+                )
+            if status in {"pending", "in_progress"}:
+                return SourceAuthContract(
+                    **history,
+                    verification="unverified",
+                    detail=f"Reddit 任务正在等待插件执行（{task_type} / {status}）。",
+                    legacy_state="unverified",
+                    legacy_logged_in=False,
+                )
+    return default
+
+
+def _rdt_saved_at() -> str:
+    """When rdt-cli last wrote its credential file (ISO-8601, "" if unknown)."""
+    with suppress(Exception):
+        from openbiliclaw.sources.reddit_tasks import rdt_credential_saved_at
+
+        return rdt_credential_saved_at()
+    return ""
+
+
+def auth_reddit(ctx: SourceAuthContext) -> SourceAuthContract:
+    """Reddit: a third-party CLI owns the credential, so we only read its file.
+
+    ``local_file`` is the honest method name — ``local_reddit_credential_status``
+    explicitly never invokes ``rdt`` and never touches the network, so "ready"
+    here means "a file exists, has reddit_session, and is younger than 7 days".
+    """
+    rd_cfg = ctx.source_cfg("reddit")
+    backend = str(getattr(rd_cfg, "backend", "rdt") or "rdt").strip().lower()
+
+    if backend in {"extension", "openbiliclaw", "plugin"}:
+        return _reddit_extension(ctx)
+
+    if backend == "rdt":
+        try:
+            from openbiliclaw.sources.reddit_tasks import local_reddit_credential_status
+
+            status = local_reddit_credential_status()
+        except Exception:
+            return SourceAuthContract(
+                auth_required=True,
+                credential="none",
+                credential_origin="none",
+                verification="unverified",
+                verify_method="local_file",
+                verify_ttl_seconds=_RDT_TTL_SECONDS,
+                can_verify_now=False,
+                detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
+                legacy_state="missing",
+                legacy_logged_in=False,
+            )
+
+        state = status.state
+        credential: Credential = _RDT_CREDENTIAL.get(state, "invalid")
+        verification: Verification = _RDT_VERIFICATION.get(state, "unverified")
+        return SourceAuthContract(
+            auth_required=True,
+            credential=credential,
+            credential_origin="external_cli" if credential != "none" else "none",
+            verification=verification,
+            verify_method="local_file",
+            verified_at=_rdt_saved_at() if verification != "unverified" else "",
+            verify_ttl_seconds=_RDT_TTL_SECONDS,
+            can_verify_now=credential != "none",
+            detail=status.message,
+            legacy_state=state,
+            legacy_logged_in=state == "ready",
+        )
+
+    # An unrecognised backend: we genuinely cannot check it, and saying so is
+    # the point of ``verify_method="none"``.
+    return SourceAuthContract(
+        auth_required=True,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        verify_method="none",
+        verify_ttl_seconds=None,
+        can_verify_now=False,
+        detail=f"Reddit {backend} 后端已配置；状态页不执行命令探测，请通过显式任务验证。",
+        legacy_state="unverified",
+        legacy_logged_in=False,
+    )
+
+
+# ── registry ─────────────────────────────────────────────────────────
+
+#: Slug -> provider. Keys and order define the ``SourcesStatusResponse`` fields,
+#: so adding a platform means adding one entry and one provider here rather than
+#: editing the endpoint.
+SOURCE_AUTH_PROVIDERS: dict[str, Callable[[SourceAuthContext], SourceAuthContract]] = {
+    "bilibili": auth_bilibili,
+    "xiaohongshu": auth_xiaohongshu,
+    "douyin": auth_douyin,
+    "youtube": auth_youtube,
+    "twitter": auth_twitter,
+    "zhihu": auth_zhihu,
+    "reddit": auth_reddit,
+}
+
+
+def source_enabled(ctx: SourceAuthContext, slug: str) -> bool:
+    """Whether the scheduler should run this source (orthogonal to auth)."""
+    return bool(getattr(ctx.source_cfg(slug), "enabled", _ENABLED_BY_DEFAULT.get(slug, False)))
+
+
+def source_feed_paused(ctx: SourceAuthContext, slug: str) -> bool:
+    """Whether a sub-feed of this source is circuit-broken.
+
+    X-only today: its For-You sub-feed trips after consecutive failures and
+    recovers on the next successful fetch. Not an auth fact, which is why it
+    lives beside the contract instead of inside it.
+    """
+    if slug != "twitter" or not ctx.has_conn():
+        return False
+    return bool(ctx.x_health().get("feed_paused", False))

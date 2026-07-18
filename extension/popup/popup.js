@@ -140,6 +140,7 @@ import {
   savedItemStatus,
   sendBehaviorEvents,
   syncSavedItems,
+  verifySource,
 } from "./popup-api.js";
 
 const state = {
@@ -7072,42 +7073,21 @@ function bindSettings() {
   }
 
   // Unified per-source login / cookie status from GET /api/sources/status,
-  // rendered as a uniform colored-dot line inside every source card. Only X is
-  // live-validated (state ok); the rest report local cookie/token readiness.
-  const SOURCE_STATUS_DOT = {
-    ok: "#2ecc71",
-    ready: "#2ecc71",
-    syncing: "#9aa0a6",
-    no_auth: "#9aa0a6",
-    unverified: "#9aa0a6",
-    missing: "#e0a800",
-    missing_cookie: "#e0a800",
-    login_required: "#e0a800",
-    rate_limited: "#9aa0a6",
-    partial: "#e0a800",
-    stale: "#e0a800",
-    error: "#e74c3c",
-    expired_cookie: "#e74c3c",
-    blocked: "#e74c3c",
-  };
-  const SOURCE_STATUS_LABEL = {
-    ok: "接入可用",
-    ready: "凭据已就绪",
-    syncing: "接入中",
-    no_auth: "无需登录",
-    unverified: "状态待验证",
-    missing: "需要登录",
-    missing_cookie: "缺少 Cookie",
-    login_required: "需要登录",
-    rate_limited: "频率受限",
-    partial: "部分可用",
-    stale: "需要刷新",
-    error: "检查失败",
-    expired: "凭据失效",
-    expired_cookie: "Cookie 失效",
-    blocked: "接入受阻",
-  };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  // rendered as a uniform colored-dot line inside every source card.
+  //
+  // The verdict, its colour and the strength of the evidence behind it all come
+  // from shared/source-status.js, which the desktop page and the setup wizard
+  // load too. This panel used to keep its own pair of tables, and they had
+  // drifted: `no_auth` and `unverified` were the same grey here while the
+  // desktop page told them apart, and an unrecognised state rendered as an
+  // empty string instead of "状态未知" (spec D6). Having only one row per source
+  // to write into, this surface takes `access.line`, which folds the evidence
+  // in parenthetically — 「已验证（◆ 联网验证 · 3 分钟前）」 — where the desktop
+  // page gives it a badge of its own. Loaded as
+  // a classic script by popup.html, so it is a global rather than an import —
+  // MV3's CSP forbids pulling it from the backend over HTTP.
+  const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+  const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -7122,20 +7102,12 @@ function bindSettings() {
       if (!row) continue;
       const dot = row.querySelector(".src-dot");
       const detail = row.querySelector(".src-detail");
-      const item = data && data[key];
-      if (!item) {
-        if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
-        if (dot) dot.style.color = "#9aa0a6";
-        row.style.opacity = "1";
-        continue;
-      }
-      if (detail) {
-        const label = SOURCE_STATUS_LABEL[item.state] || "";
-        const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
-        detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
-      }
-      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
-      row.style.opacity = item.enabled ? "1" : "0.6";
+      const access = SourceStatus.describeAccess(data && data[key]);
+      // Offline wording comes from the shared module too, so a backend the user
+      // cannot reach reads the same here as on the desktop page.
+      if (detail) detail.textContent = access.present ? access.line : access.detail;
+      if (dot) dot.style.color = access.color;
+      row.style.opacity = access.present && !access.enabled ? "0.6" : "1";
     }
   }
 
@@ -7569,6 +7541,17 @@ function bindSettings() {
     };
   }
 
+  // One DOM convention for every "click, wait, read a verdict" strip in this
+  // panel: tone in the dataset, verdict in the text. The LLM/embedding probes
+  // and the per-source 测试连接 buttons share it instead of each keeping a
+  // private copy — two independent copies of one rendering rule is exactly the
+  // drift that left this codebase with two divergent source status maps.
+  function setProbeStatus(statusEl, tone, text) {
+    if (!statusEl) return;
+    statusEl.dataset.tone = tone;
+    statusEl.textContent = text;
+  }
+
   function renderProbeResult(statusEl, result) {
     if (!statusEl) return;
     const ok = Boolean(result?.ok);
@@ -7578,15 +7561,59 @@ function bindSettings() {
       ? ` (${Math.round(Number(result.latency_ms))}ms)`
       : "";
     const detail = result?.message || result?.error || (ok ? "服务可用" : "服务不可用");
-    statusEl.dataset.tone = ok ? "success" : "error";
-    statusEl.textContent = `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`;
+    setProbeStatus(
+      statusEl,
+      ok ? "success" : "error",
+      `${ok ? "可用" : "不可用"}${provider}${model}${latency}: ${detail}`,
+    );
   }
 
   function renderProbePending(statusEl, label) {
-    if (!statusEl) return;
-    statusEl.dataset.tone = "pending";
-    statusEl.textContent = `${label} 探测中...`;
+    setProbeStatus(statusEl, "pending", `${label} 探测中...`);
   }
+
+  // Three outcomes, three tones. The third one is the whole point: a dead proxy,
+  // a closed browser, a throttled platform or YouTube (which needs no login at
+  // all) all mean "could not tell", and showing that in red would send a user
+  // off to delete a credential that works. The backend picks the outcome — this
+  // map is a rendering detail, not a second opinion derived from
+  // `auth.verification` (invariant I4).
+  function renderVerifyResult(statusEl, result) {
+    const view = SourceStatus.describeVerifyResult(result);
+    setProbeStatus(statusEl, view.tone, view.text);
+  }
+
+  const sourceVerifyInFlight = new Set();
+
+  async function runSourceVerify(button) {
+    const slug = button?.closest("[data-source-card]")?.dataset?.sourceCard || "";
+    if (!slug || sourceVerifyInFlight.has(slug)) return;
+    const statusEl = button.parentElement?.querySelector(".source-verify-status");
+    sourceVerifyInFlight.add(slug);
+    button.disabled = true;
+    renderProbePending(statusEl, "连接");
+    let cooldown = 0;
+    try {
+      const result = await verifySource(slug);
+      renderVerifyResult(statusEl, result);
+      cooldown = Number(result?.retry_after_seconds) || 0;
+      // Only a verification that actually moved the credential or the verdict
+      // makes the status line above it stale; a refreshed timestamp does not.
+      if (result?.changed) void renderSourcesStatus();
+    } catch (err) {
+      const view = SourceStatus.describeVerifyError(err);
+      setProbeStatus(statusEl, view.tone, view.text);
+    } finally {
+      sourceVerifyInFlight.delete(slug);
+      SourceStatus.startVerifyCooldown(button, cooldown);
+    }
+  }
+
+  document.getElementById("settingsPanelSources")?.addEventListener("click", (event) => {
+    const button = event.target?.closest?.(".source-verify-btn");
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return;
+    void runSourceVerify(button);
+  });
 
   async function runLlmConfigProbe(button, statusEl) {
     if (!button) return;

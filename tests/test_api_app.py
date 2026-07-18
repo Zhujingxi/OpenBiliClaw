@@ -3372,10 +3372,29 @@ class TestBackendAPI:
 
         from fastapi.testclient import TestClient
 
+        from openbiliclaw.api.source_auth import verify
         from openbiliclaw.config import Config, save_config
 
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
         save_config(Config(), tmp_path / "config.toml")
+
+        # Douyin cookies are now live-checked before they land — the endpoint
+        # used to store whatever arrived, on the strength of a docstring claim
+        # that no clean login probe existed (refuted in spec D11). Stub the one
+        # shared probe so this test stays offline.
+        probed: list[str] = []
+
+        async def _probe(slug, *, cfg, cookie=None, probes=None, record=True):
+            probed.append(str(cookie or ""))
+            return verify.LiveProbeOutcome(
+                slug=slug,
+                has_credential=True,
+                authenticated=True,
+                network_error=False,
+                message="stubbed probe",
+            )
+
+        monkeypatch.setattr(verify, "run_live_probe", _probe)
 
         app = create_app(memory_manager=object(), database=object(), soul_engine=object())
         client = TestClient(app)
@@ -3398,6 +3417,7 @@ class TestBackendAPI:
         assert payload["cookie"] == cookie_value
         assert payload["source"] == "extension"
         assert cookie_value not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert probed == [cookie_value]
 
     def test_events_endpoint_persists_batch(self) -> None:
         from fastapi.testclient import TestClient

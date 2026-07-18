@@ -127,6 +127,13 @@ def issue_98_server() -> tuple[str, Issue98Stub]:
 
         def do_GET(self) -> None:  # noqa: N802
             path = self.path.split("?", 1)[0]
+            if path.startswith("/shared/"):
+                # The desktop page and the setup wizard both load the shared
+                # source-status module from the backend's /shared mount. Without
+                # this route it 404s, app.js dies on the missing global, and the
+                # failure surfaces as an unrelated test timing out.
+                rel = path.removeprefix("/shared/")
+                return self._serve_file(ROOT / "src/openbiliclaw/web/shared" / rel)
             if path in {"/web", "/web/", "/web/index.html"}:
                 return self._serve_file(
                     ROOT / "src/openbiliclaw/web/desktop/index.html",

@@ -3,10 +3,33 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import pytest
+
+from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
 from openbiliclaw.runtime import init_prereqs
 from openbiliclaw.runtime.init_prereqs import InitPrereqs
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+
+@pytest.fixture(autouse=True)
+def _clean_probe_store() -> Iterator[None]:
+    """Start every case with no B站 verdict on record.
+
+    ``InitPrereqs`` no longer keeps a private B站 cache: its verdict lives in
+    the process-wide ``LIVE_PROBES``, shared with ``GET /api/sources/status`` so
+    the two surfaces cannot hold opposite answers about one cookie (spec D3).
+    Process-wide is the point, which means a verdict recorded by one case would
+    otherwise satisfy the next case's TTL check and suppress the probe it is
+    trying to observe. Constructing a fresh ``InitPrereqs`` is no longer enough
+    isolation — the store has to be cleared too.
+    """
+    LIVE_PROBES.clear()
+    yield
+    LIVE_PROBES.clear()
 
 
 class _Provider:
@@ -241,7 +264,7 @@ async def test_bilibili_detail_timeout_carries_proxy_hint(monkeypatch: Any) -> N
             return SimpleNamespace(authenticated=True)
 
     monkeypatch.setattr(init_prereqs, "AuthManager", _FakeAuth)
-    monkeypatch.setattr(init_prereqs, "_BILI_PROBE_TIMEOUT", 0.01)
+    monkeypatch.setattr(init_prereqs, "BILI_PROBE_TIMEOUT_SECONDS", 0.01)
     pr = InitPrereqs(_ctx(provider=_Provider(ok=True), cookie="sessdata=abc"))
     assert await pr.bilibili_check() == "failed"
     detail = pr.peek_bilibili_detail()
@@ -312,3 +335,62 @@ async def test_bilibili_detail_blames_explicit_proxy_when_configured(monkeypatch
     assert "[bilibili] proxy" in detail
     assert "http://10.0.0.1:8080" in detail
     assert "绕过系统代理" not in detail
+
+
+class _RecordingAuth:
+    """Fake AuthManager that records the cookie handed to validate_cookie."""
+
+    seen: dict[str, str] = {}
+
+    def __init__(self, **_: Any) -> None: ...
+
+    async def validate_cookie(self, cookie: str) -> Any:
+        _RecordingAuth.seen["cookie"] = cookie
+        return SimpleNamespace(authenticated=True, message="", network_error=False)
+
+
+async def test_bilibili_check_resolves_cli_only_login(tmp_path: Any, monkeypatch: Any) -> None:
+    """Spec D3 regression: CLI ``auth login`` writes the file, not config.toml.
+
+    Before the fix this probe read config alone, so a CLI login left
+    /api/init-status reporting "not logged in" while /api/sources/status
+    reported "ready" for the very same credential.
+    """
+    (tmp_path / "bilibili_cookie.json").write_text(
+        '{"cookie": "SESSDATA=s; bili_jct=j; DedeUserID=d"}', encoding="utf-8"
+    )
+    _RecordingAuth.seen = {}
+    monkeypatch.setattr(init_prereqs, "AuthManager", _RecordingAuth)
+
+    ctx = _ctx(provider=_Provider(ok=True), cookie="")  # nothing in config.toml
+    ctx.config.data_path = tmp_path  # but the runtime store has it
+    pr = InitPrereqs(ctx)
+
+    assert await pr.bilibili_check() == "ok"
+    assert "SESSDATA=s" in _RecordingAuth.seen["cookie"]
+
+
+async def test_bilibili_check_prefers_config_over_file(tmp_path: Any, monkeypatch: Any) -> None:
+    """resolve_runtime_cookie semantics: config.toml wins when both are set."""
+    (tmp_path / "bilibili_cookie.json").write_text(
+        '{"cookie": "SESSDATA=from_file"}', encoding="utf-8"
+    )
+    _RecordingAuth.seen = {}
+    monkeypatch.setattr(init_prereqs, "AuthManager", _RecordingAuth)
+
+    ctx = _ctx(provider=_Provider(ok=True), cookie="SESSDATA=from_config")
+    ctx.config.data_path = tmp_path
+    pr = InitPrereqs(ctx)
+
+    assert await pr.bilibili_check() == "ok"
+    assert _RecordingAuth.seen["cookie"] == "SESSDATA=from_config"
+
+
+async def test_bilibili_check_still_fails_when_neither_source_has_cookie(tmp_path: Any) -> None:
+    """The fix must not turn an genuinely empty store into a false positive."""
+    ctx = _ctx(provider=_Provider(ok=True), cookie="")
+    ctx.config.data_path = tmp_path  # empty dir, no cookie file
+    pr = InitPrereqs(ctx)
+
+    assert await pr.bilibili_check() == "failed"
+    assert "还没有收到" in pr.peek_bilibili_detail()

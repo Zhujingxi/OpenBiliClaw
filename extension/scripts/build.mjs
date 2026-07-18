@@ -69,6 +69,18 @@ const entrypoints = [
   },
 ];
 
+// Frontend logic shared with the desktop page and the setup wizard, which load
+// it over HTTP from the backend's /shared mount. MV3's default CSP
+// (`script-src 'self'`) forbids the side panel doing the same, so the file has
+// to be physically present in the extension package — hence a copy, generated
+// on every build and gitignored. Copying (rather than committing a second
+// checked-in file) is what keeps it a *shared module* instead of a fourth
+// hand-maintained duplicate of the same table.
+// Runs before the Firefox staging step below, which recursively copies popup/.
+const sharedWebDir = resolve(root, "../src/openbiliclaw/web/shared");
+await cp(sharedWebDir, resolve(root, "popup/shared"), { recursive: true });
+console.log(`📁 Copied web/shared/ → popup/shared/`);
+
 for (const target of entrypoints) {
   await mkdir(dirname(target.outfile), { recursive: true });
   await build({

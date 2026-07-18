@@ -460,17 +460,24 @@ class TestMultiSourceDiversityE2E:
                 scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
             )
 
+            import openbiliclaw.bilibili.auth
             import openbiliclaw.config
+            import openbiliclaw.llm
 
+            # All three are restored in the ``finally`` below. Leaving any of
+            # them patched leaks into every later test in the session: these are
+            # raw module-attribute writes, not monkeypatch, so pytest cannot
+            # undo them. ``resolve_runtime_cookie`` in particular is read by
+            # /api/sources/status and /api/sources/credentials, so a leaked stub
+            # silently turns a configured B站 cookie into "missing" hundreds of
+            # tests later.
             original_load = openbiliclaw.config.load_config
+            original_registry = openbiliclaw.llm.build_llm_registry
+            original_resolve = openbiliclaw.bilibili.auth.resolve_runtime_cookie
 
             try:
                 openbiliclaw.config.load_config = lambda: fake_config
-                import openbiliclaw.llm
-
                 openbiliclaw.llm.build_llm_registry = lambda config: "registry"  # type: ignore
-                import openbiliclaw.bilibili.auth
-
                 openbiliclaw.bilibili.auth.resolve_runtime_cookie = lambda **_: ""  # type: ignore
 
                 db2 = Database(Path(tmpdir) / "test2.db")
@@ -510,6 +517,8 @@ class TestMultiSourceDiversityE2E:
                 assert body["enqueued"] == 1  # Only the one with title enters candidate pool
             finally:
                 openbiliclaw.config.load_config = original_load
+                openbiliclaw.llm.build_llm_registry = original_registry
+                openbiliclaw.bilibili.auth.resolve_runtime_cookie = original_resolve
 
     @pytest.mark.asyncio
     async def test_classify_lock_prevents_duplicate_llm_calls(self) -> None:

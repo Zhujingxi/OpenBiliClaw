@@ -727,10 +727,30 @@ test("settings page wires the keyword generation mode selector (matches desktop 
 });
 
 test("settings source status labels distinguish local readiness", () => {
+  // The labels moved into the shared module (src/openbiliclaw/web/shared/
+  // source-status.js) that the desktop page and the setup wizard also load.
+  // They used to be pinned here as popup.js source text, which is precisely how
+  // the two surfaces drifted apart unnoticed: this file could stay green while
+  // the desktop page's copy said something else (spec D6).
+  const shared = readFileSync(
+    resolve("..", "src/openbiliclaw/web/shared/source-status.js"),
+    "utf8",
+  );
+
+  assert.match(shared, /ready: { tone: "ready", label: "凭据已就绪" }/);
+  assert.match(shared, /unverified: { tone: "pending", label: "状态待验证" }/);
+  assert.match(shared, /login_required: { tone: "warning", label: "需要登录" }/);
+  assert.match(shared, /error: { tone: "danger", label: "检查失败" }/);
+});
+
+test("the side panel keeps no second copy of the source status table", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  assert.match(popupJs, /ready: "凭据已就绪"/);
-  assert.match(popupJs, /unverified: "状态待验证"/);
-  assert.match(popupJs, /login_required: "需要登录"/);
-  assert.match(popupJs, /error: "检查失败"/);
+  // A local re-declaration is the regression this whole refactor removes: the
+  // panel painted no_auth and unverified the same grey while the desktop page
+  // told them apart, and nothing failed.
+  assert.doesNotMatch(popupJs, /const SOURCE_STATUS_DOT\s*=/);
+  assert.doesNotMatch(popupJs, /const SOURCE_STATUS_LABEL\s*=/);
+  assert.doesNotMatch(popupJs, /const VERIFY_OUTCOME_TONE\s*=/);
+  assert.match(popupJs, /globalThis\.OpenBiliClawSourceStatus/);
 });

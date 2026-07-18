@@ -119,9 +119,17 @@ class TestXCookieEndpoint:
         assert response.json()["has_cookie"] is False
         assert XSourceHealthStore(db).is_ready() is False  # still parked
 
-    def test_x_cookie_endpoint_reports_has_cookie_false_without_ct0(
+    def test_x_cookie_endpoint_refuses_to_store_a_jar_without_ct0(
         self, monkeypatch, tmp_path: Path
     ) -> None:
+        """A jar without ``ct0`` cannot authenticate, so it must not land.
+
+        This used to answer ``ok=true`` and write the file anyway (spec D5's
+        "结构校验但仍先落盘"), which left a credential on disk that provably
+        401s and a status chip with nothing to explain why. The response shape
+        is unchanged — the extension keys its success branch off
+        ``ok && has_cookie`` and already treated this case as a rejection.
+        """
         from fastapi.testclient import TestClient
 
         from openbiliclaw.api.app import create_app
@@ -140,8 +148,11 @@ class TestXCookieEndpoint:
 
         assert response.status_code == 200, response.text
         body = response.json()
-        assert body["ok"] is True
+        assert body["ok"] is False
         assert body["has_cookie"] is False
+        assert body["error_code"] == "missing_x_cookies"
+        # The refusal is what matters: nothing reached the store.
+        assert not (tmp_path / "data" / "x_cookie.json").exists()
 
     def test_x_cookie_endpoint_rejects_empty_cookie(self, monkeypatch, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

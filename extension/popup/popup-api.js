@@ -325,6 +325,17 @@ export async function fetchSourcesStatus() {
   return requestJson("/sources/status", { method: "GET" });
 }
 
+// The counterpart to fetchSourcesStatus: that one is polled and never goes out,
+// this one is an explicit user action and is the only place a platform gets
+// probed. Generous timeout because it really can reach the network — a B站 nav
+// probe or a 5s wait for this very extension to answer a heartbeat request.
+export async function verifySource(slug) {
+  return requestJson(`/sources/${encodeURIComponent(slug)}/verify`, {
+    method: "POST",
+    timeoutMs: 30_000,
+  });
+}
+
 export async function startInit({ force = false, sources } = {}) {
   const payload = { force };
   // Only attach an explicit per-run platform selection when given; omitting it

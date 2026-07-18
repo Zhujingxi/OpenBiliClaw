@@ -1073,6 +1073,16 @@
     .settings-probe-status { flex: 1 1 240px; min-width: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
     .settings-probe-status[data-tone="success"] { color: var(--success); }
     .settings-probe-status[data-tone="error"] { color: var(--danger); }
+    /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
+       closed browser, a throttled platform, YouTube needing no login at all — is
+       not a failure, and painting it red sends users off to delete a cookie that
+       was working fine. It also must not reuse the muted "pending" gray, or a
+       final verdict becomes indistinguishable from "still probing". */
+    .settings-probe-status[data-tone="neutral"] { color: var(--source-pending); }
+    .source-verify-row { align-items: center; }
+    .source-verify-btn { min-height: 30px; padding: 0 var(--space-3); font-size: var(--text-sm); }
+    .source-verify-btn:disabled { opacity: 0.55; cursor: default; }
+    .source-verify-btn:disabled:hover { background: var(--surface); color: var(--fg-2); border-color: var(--border-soft); box-shadow: var(--elev-ring); }
     .settings-section-title { grid-column: 1 / -1; margin: var(--space-2) 0 0; padding-top: var(--space-4); border-top: 1px solid var(--border-soft); color: var(--fg); font-weight: 750; }
     .settings-panel .settings-section-title:first-child { border-top: 0; padding-top: 0; margin-top: 0; }
     .settings-switch-field { align-items: start; grid-template-columns: minmax(180px, 1fr) auto; gap: var(--space-2) var(--space-4); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--surface), var(--bg) 42%); }
@@ -1095,6 +1105,19 @@
     .source-source-badge[data-tone="pending"], .source-access-badge[data-tone="pending"] { border-color: color-mix(in oklab, var(--source-pending), var(--border-soft) 45%); background: color-mix(in oklab, var(--surface), var(--source-pending) 10%); color: var(--source-pending-fg); }
     .source-access-badge[data-tone="warning"] { border-color: color-mix(in oklab, var(--warn), var(--border-soft) 48%); background: color-mix(in oklab, var(--surface), var(--warn) 16%); color: color-mix(in oklab, var(--warn-fg), var(--fg) 18%); }
     .source-access-badge[data-tone="danger"] { border-color: color-mix(in oklab, var(--danger), var(--border-soft) 48%); background: color-mix(in oklab, var(--surface), var(--danger) 10%); color: var(--danger); }
+    /* Evidence strength, beside the verdict rather than inside it: two sources
+       can honestly both be 已验证 while resting on very different evidence, and
+       collapsing that into the verdict's colour is what let a live probe and a
+       week-old local file wear the same green (spec D2). Deliberately carries
+       no tone of its own — the glyph (◆ / ◇ / —), the method名 and the border
+       treatment each encode `rank` on their own, so the distinction survives
+       greyscale, colour blindness and a screen reader alike. */
+    .source-evidence-badge { max-width: 100%; display: inline-flex; align-items: center; gap: 4px; min-height: 24px; padding: 2px 8px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), var(--bg) 40%); color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+    .source-evidence-badge[hidden] { display: none; }
+    .source-evidence-badge[data-rank="direct"] { border-style: solid; border-color: color-mix(in oklab, var(--fg-2), var(--border-soft) 45%); color: var(--fg-2); font-weight: 700; }
+    .source-evidence-badge[data-rank="indirect"] { border-style: dashed; }
+    .source-evidence-badge[data-rank="unknown"] { border-style: dashed; }
+    .source-evidence-badge[data-rank="unable"] { border-style: dotted; }
     .source-status-row .src-detail { margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
     .source-credential-list { grid-column: 1 / -1; display: grid; gap: var(--space-2); }
     .source-credential-row { min-width: 0; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 42%); overflow: hidden; }

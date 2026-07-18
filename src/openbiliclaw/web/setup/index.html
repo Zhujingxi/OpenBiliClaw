@@ -227,6 +227,10 @@
     </div>
   </div>
 
+  <!-- Shared with the desktop page and the extension side panel; served from
+       its own /shared mount. A classic script, so the inline block below sees
+       it as a global without becoming a module. -->
+  <script src="/shared/source-status.js"></script>
   <script>
     const $ = (s) => document.querySelector(s);
     async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
@@ -259,18 +263,23 @@
       openai_compatible: "",
       ollama: "qwen2.5:7b",
     };
+    // Platform roster and source-auth interpretation come from the module the
+    // desktop page and the extension side panel also load, so this wizard can
+    // never disagree with them about which sources exist or what counts as
+    // "connected" (spec I4/I6).
+    const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
-    // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" },
-    ];
+    // stay checked to start. This is first-run *policy*, not a display rule,
+    // which is why it stays local instead of moving into the shared module;
+    // the backend keeps the same default in providers._ENABLED_BY_DEFAULT.
+    const INIT_DEFAULT_SOURCES = new Set(["bilibili"]);
+    const INIT_SOURCE_OPTIONS = SourceStatus.SOURCE_KEYS.map((key) => ({
+      key,
+      label: SourceStatus.sourceLabel(key),
+      ...(INIT_DEFAULT_SOURCES.has(key) ? { defaultChecked: true } : {}),
+    }));
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
@@ -430,15 +439,26 @@
       }
     }
 
+    // Reads the same source-auth contract the settings pages render, through
+    // the same helper. The previous version string-tested config.bilibili.cookie
+    // directly, which is blind to the data file and the env var — a machine with
+    // a working cookie in data/bilibili_cookie.json was told it was not logged
+    // in, while the settings page two clicks away said "凭据已就绪" (spec D3).
+    // Returns the rendered access descriptor once a credential is stored, or
+    // null while there is none. The *gate* is still "is a credential stored" —
+    // an unverified cookie must keep letting the user past this step, exactly
+    // as before. What the contract adds is the strength line the caller prints
+    // beside it, so a user waved through on nothing more than three cookie
+    // field names can see that that is what happened.
     async function checkBili() {
       try {
-        const r = await fetch("/api/config");
-        if (!r.ok) return false;
+        const r = await fetch("/api/sources/status");
+        if (!r.ok) return null;
         const data = await r.json();
-        const cfg = data.config || data;
-        const cookie = cfg?.bilibili?.cookie || "";
-        return Boolean(cookie && String(cookie).trim());
-      } catch { return false; }
+        const item = data?.bilibili;
+        if (!SourceStatus.hasCredential(item)) return null;
+        return SourceStatus.describeAccess(item);
+      } catch { return null; }
     }
 
     function describeInitReason(reason) {
@@ -1104,15 +1124,20 @@
     function startBiliPoll() {
       if (biliPoll) return;
       const tick = async () => {
-        if (await checkBili()) {
+        const access = await checkBili();
+        if (access) {
           biliConnected = true;
           clearInterval(biliPoll); biliPoll = null;
+          // Same verdict and same evidence wording as the settings page and the
+          // side panel, because it is the same module: this wizard used to say
+          // a flat「已检测到 B站 登录」whatever the evidence was.
+          const evidence = access.evidence.text ? `（${access.evidence.text}）` : "";
           $("#biliStatus").className = "msg show ok";
-          $("#biliStatus").innerHTML = "✓ 已检测到 B站 登录；其他平台会在初始化时按勾选项检查。";
+          $("#biliStatus").textContent = `✓ B站 ${access.label}${evidence}；其他平台会在初始化时按勾选项检查。`;
           $("#next1").textContent = "继续 →";
           const done = $("#biliDone"); done.classList.remove("pending");
           done.querySelector(".tick").textContent = "✓";
-          $("#doneBili").textContent = "B 站已连接；其他平台按初始化勾选项检查";
+          $("#doneBili").textContent = `B 站${access.label}；其他平台按初始化勾选项检查`;
         }
       };
       tick();

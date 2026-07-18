@@ -271,6 +271,15 @@ class DouyinDirectClient:
         items = [item for item in raw_items if isinstance(item, dict)]
         return _dedupe_awemes(items)[:limit]
 
+    async def request_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Public seam for a signed GET against an arbitrary Douyin web path.
+
+        Discovery surfaces should use the dedicated methods above. This exists
+        for callers that need a non-discovery endpoint — currently only
+        ``douyin_login_probe``, which reads ``/aweme/v1/web/user/profile/self/``.
+        """
+        return await self._request_json(path, params)
+
     async def _request_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         query = {**self._default_query(), **params}
         unsigned = f"{self.BASE_URL}{path}?{urlencode(query)}"
