@@ -396,7 +396,7 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
   );
 });
 
-test("settings page round-trips douyin and x cookies like the bilibili card", () => {
+test("settings source cookie fields are write-only with masked status", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
@@ -406,8 +406,19 @@ test("settings page round-trips douyin and x cookies like the bilibili card", ()
   assert.match(popupHtml, /<textarea id="cfgTwitterCookie"/);
   assert.match(popupHtml, /<textarea id="cfgRedditCookie"/);
 
-  assert.match(popupJs, /setVal\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/);
-  assert.match(popupJs, /setVal\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/);
+  // GET /api/config is masked, so populateForm must never echo a credential
+  // (raw or masked) into the input value — the field renders EMPTY and only
+  // its placeholder carries the 已保存/未保存 status (same write-only pattern
+  // as the model-settings credential editor).
+  assert.doesNotMatch(popupJs, /setVal\("cfgBiliCookie"/);
+  assert.doesNotMatch(popupJs, /setVal\("cfgDouyinCookie"/);
+  assert.doesNotMatch(popupJs, /setVal\("cfgTwitterCookie"/);
+  assert.match(popupJs, /setCredentialInput\("cfgBiliCookie", cfg\.bilibili\?\.cookie\)/);
+  assert.match(popupJs, /setCredentialInput\("cfgDouyinCookie", cfg\.sources\?\.douyin\?\.cookie\)/);
+  assert.match(popupJs, /setCredentialInput\("cfgTwitterCookie", cfg\.sources\?\.twitter\?\.cookie\)/);
+  assert.match(popupJs, /function setCredentialInput\(/);
+  assert.match(popupJs, /已保存/);
+  assert.match(popupJs, /未保存/);
 
   // An empty textarea is omitted from the payload so saving the form can
   // never wipe a synced cookie (bilibili included).

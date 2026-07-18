@@ -232,10 +232,10 @@
       gap: 10px;
     }
 
-    /* "Star" button in the familiar GitHub-Buttons two-part style (the look big
-       repos use): an action chip (Octocat + "Star") joined to a live star-count
-       box. Clicking opens the repo (direct-starring needs GitHub auth, so even
-       GitHub's own widget links out). The count is fetched + cached by popup.js. */
+    /* "Star" button in the familiar GitHub-Buttons action-chip style: Octocat +
+       "Star", opening the repo (direct-starring needs GitHub auth, so even
+       GitHub's own widget links out). No live count — the GitHub REST host is
+       not in the manifest host_permissions, so a fetch could never succeed. */
     .gh-star {
       flex-shrink: 0;
       display: inline-flex;
@@ -275,20 +275,6 @@
       width: 14px;
       height: 14px;
       color: #24292f;
-    }
-
-    .gh-star-count {
-      display: inline-flex;
-      align-items: center;
-      padding: 0 9px;
-      color: #24292f;
-      background: #ffffff;
-      border-left: 1px solid rgba(208, 215, 222, 0.95);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .gh-star-count[hidden] {
-      display: none;
     }
 
     .status-badge {
@@ -5174,7 +5160,6 @@
             <svg class="gh-star-mark" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.02-1.49-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.89.88 2.35.67.07-.52.28-.88.51-1.08-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
             <span>Star</span>
           </span>
-          <span id="starCount" class="gh-star-count" hidden></span>
         </button>
       </div>
     </header>
@@ -5492,12 +5477,12 @@
         <section class="settings-section popup-model-shell" aria-labelledby="popupModelHeading">
           <div class="popup-model-heading">
             <div>
-              <p class="eyebrow">Ordered routes</p>
+              <p class="eyebrow">有序路由</p>
               <h3 id="popupModelHeading"><span class="section-icon">&#x1F916;</span> 模型路由</h3>
             </div>
             <span class="popup-model-authority">独立保存</span>
           </div>
-          <p class="settings-hint">Primary 与 fallback 使用同一条有序列表。点开一项后进入详情页，返回即可继续调整优先级。</p>
+          <p class="settings-hint">Primary 与 Fallback 使用同一条有序列表。点开一项后进入详情页，返回即可继续调整优先级。</p>
 
           <div id="popupModelRouteTabs" class="popup-model-tabs" role="tablist" aria-label="模型类型">
             <button class="is-active" type="button" role="tab" aria-selected="true" data-popup-model-route="chat">Chat</button>
@@ -5525,7 +5510,7 @@
               </div>
               <label class="settings-field-row">
                 <input id="popupModelEmbeddingEnabled" type="checkbox">
-                <span>启用 Embedding route</span>
+                <span>启用 Embedding 路由</span>
               </label>
               <label class="settings-field">
                 <span>共享模型</span>
@@ -5551,8 +5536,8 @@
               <section class="popup-model-route-page" aria-labelledby="popupModelRouteTitle">
                 <div class="popup-model-section-heading">
                   <div>
-                    <strong id="popupModelRouteTitle">Chat connections</strong>
-                    <span id="popupModelRouteHelp">第 1 项是 Primary，其余项依序 fallback。</span>
+                    <strong id="popupModelRouteTitle">Chat 连接</strong>
+                    <span id="popupModelRouteHelp">第 1 项是 Primary，其余项依序作为 Fallback。</span>
                   </div>
                   <button id="popupModelAddConnection" class="settings-secondary-btn" type="button">添加</button>
                 </div>
@@ -5560,7 +5545,7 @@
               </section>
 
               <section id="popupModelDetail" class="popup-model-detail-page" aria-labelledby="popupModelInspectorTitle" hidden>
-                <button id="popupModelDetailBack" class="popup-model-detail-back" type="button">&larr; 返回 route 列表</button>
+                <button id="popupModelDetailBack" class="popup-model-detail-back" type="button">&larr; 返回路由列表</button>
                 <div class="popup-model-detail-heading">
                   <div>
                     <span id="popupModelInspectorRole" class="popup-model-role">Primary</span>
@@ -5579,7 +5564,7 @@
                   <div class="popup-model-section-heading">
                     <div>
                       <strong>连接类型</strong>
-                      <span>先选协议、原生 SDK、本地 runtime 或独立 OAuth。</span>
+                      <span>先选协议、原生 SDK、本地 Runtime 或独立 OAuth。</span>
                     </div>
                   </div>
                   <label class="settings-field">
@@ -5602,8 +5587,8 @@
             <section id="popupModelRuntimeView" class="popup-model-runtime" hidden>
               <div class="popup-model-section-heading">
                 <div>
-                  <strong>Chat runtime</strong>
-                  <span>这些值属于模型 route，并随模型配置独立保存。</span>
+                  <strong>Chat Runtime</strong>
+                  <span>这些值属于模型路由，并随模型配置独立保存。</span>
                 </div>
               </div>
               <div class="popup-model-field-grid">
@@ -5624,7 +5609,7 @@
 
           <div class="popup-model-save-bar">
             <span id="popupModelSaveStatus" class="settings-probe-status" aria-live="polite"></span>
-            <button id="popupModelSaveButton" class="settings-save" type="button">保存模型 route</button>
+            <button id="popupModelSaveButton" class="settings-save" type="button">保存模型路由</button>
           </div>
         </section>
       </div>

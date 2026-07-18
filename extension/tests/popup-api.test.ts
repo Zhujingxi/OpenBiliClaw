@@ -17,7 +17,6 @@ import {
   fetchProfileSummary,
   fetchSourceShareSuggestion,
   fetchUpdateStatus,
-  fetchWatchLater,
   probeConfigService,
   readCachedConfigSnapshot,
   requestJson,
@@ -455,120 +454,6 @@ test("backend update API helpers use backend-only update endpoints", async () =>
   assert.equal(calls[2].options.body, JSON.stringify({ target: "backend", tag: "backend-v0.3.92" }));
 });
 
-test("watch-later popup API helpers use the shared backend endpoint", async () => {
-  const calls = [];
-  globalThis.fetch = async (url, options = {}) => {
-    calls.push({ url, options });
-    return {
-      ok: true,
-      async json() {
-        return url.includes("?")
-          ? {
-              items: [
-                {
-                  bvid: "BV1WL",
-                  title: "稍后条目",
-                  up_name: "测试 UP",
-                  cover_url: "//i0.hdslb.com/bfs/archive/watch-later.jpg",
-                  content_url: "",
-                  source_platform: "",
-                },
-              ],
-              total: 1,
-            }
-          : { saved: true, total: 1 };
-      },
-    };
-  };
-
-  const { addToWatchLater, removeFromWatchLater, watchLaterStatus } = await import(
-    "../popup/popup-api.js"
-  );
-
-  await addToWatchLater("BV1WL");
-  await removeFromWatchLater("BV1WL");
-  await watchLaterStatus("BV1WL");
-  const list = await fetchWatchLater(20, 40);
-
-  assert.deepEqual(list, {
-    items: [
-      {
-        bvid: "BV1WL",
-        title: "稍后条目",
-        up_name: "测试 UP",
-        cover_url: "https://i0.hdslb.com/bfs/archive/watch-later.jpg",
-        content_url: "",
-        source_platform: "bilibili",
-      },
-    ],
-    total: 1,
-  });
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/watch-later");
-  assert.equal(calls[0].options.method, "POST");
-  assert.equal(calls[0].options.body, JSON.stringify({ bvid: "BV1WL" }));
-  assert.equal(calls[1].url, "http://127.0.0.1:8420/api/watch-later/BV1WL");
-  assert.equal(calls[1].options.method, "DELETE");
-  assert.equal(calls[2].url, "http://127.0.0.1:8420/api/watch-later/BV1WL");
-  assert.equal(calls[3].url, "http://127.0.0.1:8420/api/watch-later?limit=20&offset=40");
-});
-
-test("favorites popup API helpers use the shared backend endpoint", async () => {
-  const calls = [];
-  globalThis.fetch = async (url, options = {}) => {
-    calls.push({ url, options });
-    return {
-      ok: true,
-      async json() {
-        return url.includes("?")
-          ? {
-              items: [
-                {
-                  bvid: "BV1FAV",
-                  title: "收藏条目",
-                  up_name: "测试 UP",
-                  cover_url: "http://i0.hdslb.com/bfs/archive/favorite.jpg",
-                  content_url: "",
-                  source_platform: "",
-                },
-              ],
-              total: 1,
-            }
-          : { saved: true, total: 1 };
-      },
-    };
-  };
-
-  const { addToFavorite, removeFromFavorite, favoriteStatus, fetchFavorites } = await import(
-    "../popup/popup-api.js"
-  );
-
-  await addToFavorite("BV1FAV");
-  await removeFromFavorite("BV1FAV");
-  await favoriteStatus("BV1FAV");
-  const list = await fetchFavorites(20, 40);
-
-  assert.deepEqual(list, {
-    items: [
-      {
-        bvid: "BV1FAV",
-        title: "收藏条目",
-        up_name: "测试 UP",
-        cover_url: "https://i0.hdslb.com/bfs/archive/favorite.jpg",
-        content_url: "",
-        source_platform: "bilibili",
-      },
-    ],
-    total: 1,
-  });
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/favorites");
-  assert.equal(calls[0].options.method, "POST");
-  assert.equal(calls[0].options.body, JSON.stringify({ bvid: "BV1FAV" }));
-  assert.equal(calls[1].url, "http://127.0.0.1:8420/api/favorites/BV1FAV");
-  assert.equal(calls[1].options.method, "DELETE");
-  assert.equal(calls[2].url, "http://127.0.0.1:8420/api/favorites/BV1FAV");
-  assert.equal(calls[3].url, "http://127.0.0.1:8420/api/favorites?limit=20&offset=40");
-});
-
 test("fetchPendingDelight loads the current pending delight candidate", async () => {
   const calls = [];
   globalThis.fetch = async (url, options) => {
@@ -672,7 +557,7 @@ test("fetchProfileSummary forwards limit and cursor for cognition history pagina
   assert.equal(calls[0].options.method, "GET");
 });
 
-test("fetchConfig sends GET to /config with reveal_keys", async () => {
+test("fetchConfig sends GET to /config without reveal_keys (masked secrets only)", async () => {
   const calls: Array<{ url: string; options: any }> = [];
   globalThis.fetch = async (url: any, options: any) => {
     calls.push({ url, options });
@@ -681,9 +566,10 @@ test("fetchConfig sends GET to /config with reveal_keys", async () => {
       async json() {
         return {
           language: "zh",
+          bilibili: { cookie: "SESS****masked" },
           llm: {
             default_provider: "gemini",
-            gemini: { api_key: "test-key", model: "gemini-2.5-flash" },
+            gemini: { api_key: "", model: "gemini-2.5-flash" },
             embedding: {
               provider: "gemini",
               model: "gemini-embedding-001",
@@ -698,13 +584,60 @@ test("fetchConfig sends GET to /config with reveal_keys", async () => {
   const result = await fetchConfig();
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config?reveal_keys=true");
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/config");
   assert.equal(calls[0].options.method, "GET");
+  assert.ok(!calls[0].url.includes("reveal_keys"));
   assert.equal(result.llm.default_provider, "gemini");
-  assert.equal(result.llm.gemini.api_key, "test-key");
+  // Masked placeholder from the backend is passed through untouched — the
+  // popup must never see (or request) the raw credential.
+  assert.equal(result.bilibili.cookie, "SESS****masked");
   assert.equal(result.llm.embedding.provider, "gemini");
   assert.equal(result.llm.embedding.model, "gemini-embedding-001");
   assert.equal(result.llm.embedding.similarity_threshold, 0.85);
+});
+
+test("popup-api source never requests revealed credentials or legacy saved routes", () => {
+  const source = readFileSync(resolve("popup/popup-api.js"), "utf8");
+
+  // Credential-revealing query param must not appear anywhere in popup code.
+  assert.doesNotMatch(source, /reveal_keys=true/);
+  // Legacy Bilibili-only saved routes must not be called by the popup —
+  // the platform-neutral /saved/{watch_later|favorite} API is the only path.
+  assert.doesNotMatch(source, /requestJson\(["'`]\/watch-later/);
+  assert.doesNotMatch(source, /requestJson\(["'`]\/favorites/);
+});
+
+test("popup-api drops legacy bilibili saved exports, keeps platform-neutral saved API", () => {
+  for (const name of [
+    "addToWatchLater",
+    "removeFromWatchLater",
+    "watchLaterStatus",
+    "fetchWatchLater",
+    "addToFavorite",
+    "removeFromFavorite",
+    "favoriteStatus",
+    "fetchFavorites",
+  ]) {
+    assert.equal(
+      typeof (popupApi as any)[name],
+      "undefined",
+      `legacy export ${name} should be removed`,
+    );
+  }
+  for (const name of [
+    "saveItem",
+    "removeSavedItem",
+    "savedItemStatus",
+    "fetchSavedItems",
+    "syncSavedItems",
+    "pollSavedSyncTask",
+  ]) {
+    assert.equal(
+      typeof (popupApi as any)[name],
+      "function",
+      `canonical saved helper ${name} should remain`,
+    );
+  }
 });
 
 test("fetchConfig caches successful config snapshots in chrome storage", async () => {
@@ -725,18 +658,23 @@ test("fetchConfig caches successful config snapshots in chrome storage", async (
       },
     },
   };
-  globalThis.fetch = async () => ({
-    ok: true,
-    async json() {
-      return {
-        language: "zh",
-        llm: {
-          default_provider: "openai",
-          openai: { api_key: "sk-test" },
-        },
-      };
-    },
-  }) as Response;
+  const calls: Array<{ url: string }> = [];
+  globalThis.fetch = async (url: any) => {
+    calls.push({ url });
+    return {
+      ok: true,
+      async json() {
+        return {
+          language: "zh",
+          llm: {
+            default_provider: "openai",
+            openai: { api_key: "" },
+          },
+          bilibili: { cookie: "SESS****ED" },
+        };
+      },
+    } as Response;
+  };
 
   try {
     const result = await fetchConfig();
@@ -745,7 +683,12 @@ test("fetchConfig caches successful config snapshots in chrome storage", async (
     assert.equal(result.llm.default_provider, "openai");
     assert.equal(writes.length, 1);
     assert.ok(writes[0]["openbiliclaw.config_cache"]);
-    assert.equal(cached?.config.llm.openai.api_key, "sk-test");
+    // The cached snapshot carries the masked endpoint payload verbatim, so a
+    // raw credential can never end up in chrome.storage.
+    assert.equal(cached?.config.bilibili.cookie, "SESS****ED");
+    assert.equal(cached?.config.llm.openai.api_key, "");
+    assert.ok(!JSON.stringify(cached).includes("reveal_keys"));
+    assert.ok(calls.every((call) => !call.url.includes("reveal_keys")));
     assert.match(cached?.cached_at ?? "", /^\d{4}-\d{2}-\d{2}T/);
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
@@ -1207,7 +1150,8 @@ test("popup-api requests honor configured backend host and port from chrome.stor
   try {
     await fetchConfig();
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config?reveal_keys=true");
+    assert.equal(calls[0].url, "http://192.168.1.100:19090/api/config");
+    assert.ok(!calls[0].url.includes("reveal_keys"));
   } finally {
     (globalThis as { chrome?: unknown }).chrome = originalChrome;
     __resetBackendEndpointForTests();

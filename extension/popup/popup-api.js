@@ -606,7 +606,9 @@ export async function respondToDelight(bvid, responseType, title = "", message =
 }
 
 export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
-  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
+  // GET /api/config is masked by default — secrets never leave the backend, so
+  // the popup (and its chrome.storage cache) only ever holds masked values.
+  const config = await requestJson("/config", { method: "GET", timeoutMs });
   await cacheConfigSnapshot(config);
   return config;
 }
@@ -774,62 +776,4 @@ export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_M
   return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
     timeoutMs,
   });
-}
-
-export async function addToWatchLater(bvid) {
-  return requestJson("/watch-later", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bvid }),
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
-  });
-}
-
-export async function removeFromWatchLater(bvid) {
-  return requestJson(`/watch-later/${encodeURIComponent(bvid)}`, {
-    method: "DELETE",
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
-  });
-}
-
-export async function watchLaterStatus(bvid) {
-  return requestJson(`/watch-later/${encodeURIComponent(bvid)}`);
-}
-
-export async function fetchWatchLater(limit = 50, offset = 0) {
-  const payload = await requestJson(`/watch-later?limit=${limit}&offset=${offset}`);
-  return {
-    ...payload,
-    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
-  };
-}
-
-// ── Favorites (收藏夹) ────────────────────────────────────────────
-
-export async function addToFavorite(bvid) {
-  return requestJson("/favorites", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ bvid }),
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
-  });
-}
-
-export async function removeFromFavorite(bvid) {
-  return requestJson(`/favorites/${encodeURIComponent(bvid)}`, {
-    method: "DELETE",
-    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
-  });
-}
-
-export async function favoriteStatus(bvid) {
-  return requestJson(`/favorites/${encodeURIComponent(bvid)}`);
-}
-
-export async function fetchFavorites(limit = 50, offset = 0) {
-  const payload = await requestJson(`/favorites?limit=${limit}&offset=${offset}`);
-  return {
-    ...payload,
-    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
-  };
 }
