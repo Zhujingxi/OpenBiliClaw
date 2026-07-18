@@ -666,6 +666,7 @@ def test_account_sync_state_defaults_when_missing(tmp_path: Path) -> None:
         "following_mids": [],
         "last_account_sync_at": "",
         "last_sync_error": "",
+        "last_sync_error_kind": "",
     }
 
 
@@ -891,3 +892,43 @@ def test_load_profile_overrides_corrupt_file_returns_empty(tmp_path: Path) -> No
 
     # Corrupt overrides must not raise (which would degrade the profile API).
     assert memory.load_profile_overrides().is_empty()
+
+
+def test_account_sync_state_default_includes_error_kind(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    # Missing state file must still expose the full schema — a caller reading
+    # last_sync_error_kind should never hit a KeyError.
+    assert memory.load_account_sync_state()["last_sync_error_kind"] == ""
+
+
+def test_account_sync_state_roundtrips_error_kind(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    state = memory.load_account_sync_state()
+    state["last_sync_error"] = "Bilibili session expired on /x/web-interface/nav (-101)."
+    state["last_sync_error_kind"] = "auth_expired"
+    memory.save_account_sync_state(state)
+
+    # Regression: the save/load whitelists used to drop this field, so the
+    # desktop's auth_expired branch was unreachable and users saw raw English.
+    reloaded = memory.load_account_sync_state()
+    assert reloaded["last_sync_error_kind"] == "auth_expired"
+
+
+def test_account_sync_state_reads_legacy_file_without_error_kind(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    path = tmp_path / "memory" / "account_sync_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"last_account_sync_at": "2026-07-18T06:36:39+00:00"}),
+        encoding="utf-8",
+    )
+
+    # State files written before the field existed must stay readable.
+    loaded = memory.load_account_sync_state()
+    assert loaded["last_sync_error_kind"] == ""
+    assert loaded["last_account_sync_at"] == "2026-07-18T06:36:39+00:00"
