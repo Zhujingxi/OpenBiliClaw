@@ -189,11 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.173 (2026-07-16)**
+📌 Latest: **v0.3.174 (2026-07-18)**
 
-- **No more CPU burn when content sources are temporarily unavailable** — replenishment requests now back off on an escalating cooldown, fixing the fan-spinning / overheating regression; normal cadence resumes within ten minutes of a source recovering.
-- **Source-install auto-update hardened across the board** — multi-URL origins and SSH port-443 clones are no longer falsely blocked, failed checks fall back automatically, and the `[network]` custom proxy now covers update downloads too.
-- **Every update failure carries its real cause** — no more blank or misleading errors on the status card, and repair commands with spaces in paths are copy-paste safe.
+- **Bangumi joins as the eighth content source** — anime/book/game catalog via the official read-only API: search/ranked/latest discovery modes, one-step profile init from your public collection, with ratings and rank shown right on recommendation cards.
+- **Optional personal access token with auto-identity** — paste a Bangumi token to read your own collection including private entries; with the browser extension installed, your logged-in account is recognized with zero configuration.
+- **Token expiry is never silent anymore** — status and settings pages clearly flag a rejected token with a regeneration link, and saving a bad token is refused on the spot.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
