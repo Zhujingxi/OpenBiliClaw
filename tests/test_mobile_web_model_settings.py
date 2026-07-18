@@ -129,6 +129,11 @@ def test_mobile_routes_add_remove_and_touch_reorder_by_stable_id() -> None:
 
 def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    # After the shared-render extraction the descriptor copy (category
+    # labels, credential editor, OAuth/status strings) lives in the shared
+    # module; route-list copy (未命名连接/未设置模型/etc) remains local.
+    combined = model + "\n" + shared_render
 
     for copy in (
         '"未命名连接"',
@@ -145,7 +150,7 @@ def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -
         "<span>Embedding 路由</span>",
         "<span>当前健康状态</span>",
     ):
-        assert copy in model
+        assert copy in combined
     for old_copy in (
         "Unnamed connection",
         "No model",
@@ -158,24 +163,32 @@ def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -
         "Current health",
         "Probe failed",
     ):
-        assert old_copy not in model
+        assert old_copy not in combined
 
 
 def test_connection_types_are_grouped_searchable_and_descriptor_driven() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
 
+    # Marker split: the listbox shell + search input live in the mobile
+    # HTML; group rendering moved to the shared render module; the
+    # keyboard handler stays in the mobile controller as a thin wrapper.
     for marker in (
         'id="mobileModelTypeSearch"',
         'role="listbox"',
         "connectionTypes.groups",
-        "group.category",
         "descriptor.fields",
         "preset_definitions",
-        "field.capabilities",
-        "field.presets",
-        "function moveTypeOptionFocus",
+        "moveTypeOptionFocus",
     ):
         assert marker in model
+    # Category-group markup + the actual keyboard handler live in the
+    # shared render module, along with the descriptor-field capability /
+    # preset gating.
+    assert "group.category" in shared_render
+    assert "export function moveTypeOptionFocus" in shared_render
+    assert "field.capabilities" in shared_render
+    assert "field.presets" in shared_render
 
 
 def test_credentials_and_embedding_shared_settings_keep_the_full_contract() -> None:

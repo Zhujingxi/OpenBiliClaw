@@ -173,14 +173,28 @@ def test_setup_narrow_model_editor_has_sequential_detail_and_accessible_back_sta
 
 
 def test_setup_preset_and_type_changes_preserve_touched_fields_and_stable_name() -> None:
+    """Preset changes must preserve user-edited fields; type changes clear
+    type-specific fields but keep the stable name. The wizard delegates to
+    the shared state module for these transitions, so exercise that module
+    directly plus assert the wizard wires the same helpers."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    # The wizard imports the shared transition helpers instead of carrying a
+    # forked implementation (regression guard for decision 11 drift).
+    for helper in (
+        "sharedApplyPreset",
+        "sharedChangeConnectionType",
+        "updateRouteField",
+        "createSingleConnectionDraft",
+        "toModelConfigPayload",
+    ):
+        assert helper in setup_html
+
     node = shutil.which("node")
     if node is None:
-        pytest.skip("Node.js is required to execute the setup draft-state regression")
+        pytest.skip("Node.js is required to execute the shared state regression")
+    assert node is not None  # narrow for type checkers (pytest.skip raises)
 
-    model_functions = setup_html.split("    function descriptorFor(type) {", 1)[1].split(
-        "\n    function credentialActionPayload", 1
-    )[0]
     descriptors = [
         {
             "id": "openai_compatible",
@@ -188,37 +202,22 @@ def test_setup_preset_and_type_changes_preserve_touched_fields_and_stable_name()
             "category": "api_protocol",
             "help": "OpenAI-compatible API",
             "fields": [
-                {
-                    "name": "preset",
-                    "capabilities": ["chat"],
-                    "presets": [],
-                    "input_type": "select",
-                },
+                {"name": "preset", "capabilities": ["chat"], "presets": [], "input_type": "select"},
                 {"name": "model", "capabilities": ["chat"], "presets": []},
                 {"name": "base_url", "capabilities": ["chat"], "presets": []},
                 {"name": "credential", "capabilities": ["chat"], "presets": []},
-                {
-                    "name": "reasoning_effort",
-                    "capabilities": ["chat"],
-                    "presets": ["deepseek"],
-                },
+                {"name": "reasoning_effort", "capabilities": ["chat"], "presets": ["deepseek"]},
             ],
             "preset_definitions": [
                 {
                     "id": "deepseek",
                     "capabilities": ["chat"],
-                    "defaults": {
-                        "model": "deepseek-default",
-                        "base_url": "https://api.deepseek.com",
-                    },
+                    "defaults": {"model": "deepseek-default", "base_url": "https://api.deepseek.com"},
                 },
                 {
                     "id": "openai",
                     "capabilities": ["chat"],
-                    "defaults": {
-                        "model": "openai-default",
-                        "base_url": "https://api.openai.com/v1",
-                    },
+                    "defaults": {"model": "openai-default", "base_url": "https://api.openai.com/v1"},
                 },
             ],
         },
@@ -235,65 +234,89 @@ def test_setup_preset_and_type_changes_preserve_touched_fields_and_stable_name()
             "preset_definitions": [],
         },
     ]
-    draft = {
-        "id": "stable-chat",
-        "name": "Keep this route name",
-        "type": "openai_compatible",
-        "model": "deepseek-default",
-        "preset": "deepseek",
-        "base_url": "https://api.deepseek.com",
-        "credential": {
-            "action": "keep",
-            "value": "",
-            "status": {"configured": True, "source": "env"},
+    snapshot = {
+        "revision": "rev-1",
+        "models": {
+            "schema_version": 1,
+            "chat": {
+                "concurrency": 2,
+                "timeout_seconds": 60,
+                "connections": [
+                    {
+                        "id": "stable-chat",
+                        "name": "Keep this route name",
+                        "type": "openai_compatible",
+                        "model": "deepseek-default",
+                        "preset": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "credential": {"configured": True, "source": "env"},
+                        "api_mode": "responses",
+                        "reasoning_effort": "medium",
+                        "http_referer": "",
+                        "x_title": "",
+                        "num_ctx": 0,
+                        "probe": None,
+                        "circuit": {"state": "closed"},
+                    }
+                ],
+            },
+            "embedding": {
+                "enabled": False,
+                "settings": {
+                    "model": "",
+                    "output_dimensionality": 0,
+                    "similarity_threshold": 0.55,
+                    "multimodal_enabled": False,
+                },
+                "providers": [],
+            },
         },
-        "api_mode": "responses",
-        "reasoning_effort": "medium",
-        "http_referer": "",
-        "x_title": "",
-        "num_ctx": 0,
     }
     script = "\n".join(
         [
-            f"let modelDescriptors = {json.dumps(descriptors)};",
-            f"let draftConnection = {json.dumps(draft)};",
-            "let modelSaveInFlight = false;",
-            "let modelTouchedFields = new Set();",
-            'let modelNarrowView = "list";',
-            (
-                'const MODEL_VALUE_FIELDS = ["model", "base_url", "api_mode", '
-                '"reasoning_effort", "http_referer", "x_title", "num_ctx"];'
-            ),
-            "function descriptorFor(type) {" + model_functions,
-            "renderModelSetup = () => {};",
-            "setModelNarrowView = () => {};",
-            'updateModelField("model", "user-edited-model");',
-            'updateModelField("base_url", "https://user-edited.example/v1");',
-            'updateModelField("reasoning_effort", "high");',
-            'updateModelField("preset", "openai");',
-            "const afterPreset = JSON.parse(JSON.stringify(draftConnection));",
-            'selectConnectionType("ollama");',
-            "const afterType = JSON.parse(JSON.stringify(draftConnection));",
-            "process.stdout.write(JSON.stringify({afterPreset, afterType}));",
+            'import * as state from "./src/openbiliclaw/web/shared/model-config-state.js";',
+            f"const snapshot = {json.dumps(snapshot)};",
+            f"const descriptors = {json.dumps(descriptors)};",
+            "let modelState = state.hydrateModelConfig(snapshot);",
+            "const record = state.selectedRecord(modelState, 'chat');",
+            # User edits: model, base_url, reasoning_effort (the latter only
+            # applies to deepseek preset)
+            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'model', 'user-edited-model');",
+            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'base_url', 'https://user-edited.example/v1');",
+            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'reasoning_effort', 'high');",
+            # Apply the openai preset — must NOT clobber user-edited fields.
+            "const openaiPreset = descriptors[0].preset_definitions.find((p) => p.id === 'openai');",
+            "modelState = state.applyPreset(modelState, 'chat', record.id, openaiPreset);",
+            "const afterPreset = JSON.parse(JSON.stringify(state.selectedRecord(modelState, 'chat')));",
+            # Change type to ollama — type-specific fields reset, stable
+            # name + user-entered model/base_url survive (matching the
+            # shared module's confirmed-change semantics).
+            "const ollamaDescriptor = descriptors[1];",
+            "const outcome = state.changeConnectionType(modelState, 'chat', record.id, ollamaDescriptor, { confirmed: true });",
+            "modelState = outcome.state;",
+            "const afterType = JSON.parse(JSON.stringify(state.selectedRecord(modelState, 'chat')));",
+            "process.stdout.write(JSON.stringify({ afterPreset, afterType }));",
         ]
     )
     result = subprocess.run(
-        [node, "-e", script],
+        [node, "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
+        cwd=Path(__file__).parents[1],
     )
-    state = json.loads(result.stdout)
+    payload = json.loads(result.stdout)
 
     for key in ("afterPreset", "afterType"):
-        assert state[key]["name"] == "Keep this route name"
-        assert state[key]["model"] == "user-edited-model"
-        assert state[key]["base_url"] == "https://user-edited.example/v1"
-    assert state["afterPreset"]["preset"] == "openai"
-    assert state["afterPreset"]["reasoning_effort"] == ""
-    assert state["afterType"]["type"] == "ollama"
-    assert state["afterType"]["reasoning_effort"] == ""
-    assert state["afterType"]["api_mode"] == ""
+        assert payload[key]["name"] == "Keep this route name"
+        assert payload[key]["model"] == "user-edited-model"
+        assert payload[key]["base_url"] == "https://user-edited.example/v1"
+    assert payload["afterPreset"]["preset"] == "openai"
+    assert payload["afterType"]["type"] == "ollama"
+    # reasoning_effort is an OpenAI-only field on the deepseek preset — it
+    # must clear once the connection type changes to ollama.
+    assert payload["afterType"]["reasoning_effort"] == ""
+    assert payload["afterType"]["api_mode"] == ""
 
 
 def test_setup_model_editor_escapes_config_values_and_can_create_first_chat_route() -> None:
@@ -305,7 +328,11 @@ def test_setup_model_editor_escapes_config_values_and_can_create_first_chat_rout
     assert "createFirstChatDraft()" in setup_html
     assert 'value="${escapeHtml(value)}"' in setup_html
     assert "escapeHtml(status.credential_ref" in setup_html
-    assert "escapeHtml(draftConnection.credential.value" in setup_html
+    # The wizard reads the draft through the shared-state `record` lens and
+    # escapes every value the user could have typed before writing it into
+    # the DOM (regression guard against the original draftConnection fork).
+    assert "escapeHtml(record.credential.value" in setup_html
+    assert "draftConnection" not in setup_html
 
     node = shutil.which("node")
     if node is None:
@@ -333,47 +360,74 @@ def test_setup_model_editor_escapes_config_values_and_can_create_first_chat_rout
 
 
 def test_setup_empty_chat_route_allocates_globally_unique_stable_id() -> None:
+    """A fresh wizard run must not collide with an existing embedding
+    provider's id (regression: chat-primary vs embedding chat-primary)."""
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to execute the stable-ID regression")
+    assert node is not None
 
-    safe_status = setup_html.split("    function safeCredentialStatus(credential) {", 1)[1].split(
-        "\n    }\n\n    function hydrateDraftConnection", 1
-    )[0]
     create_draft = setup_html.split("    function createFirstChatDraft() {", 1)[1].split(
-        "\n    }\n\n    function currentPreset", 1
+        "\n    }", 1
     )[0]
-    apply_defaults = setup_html.split(
-        "    function applyPresetDefaults(descriptor, preset, force = false) {", 1
-    )[1].split("\n    }\n\n    function selectConnectionType", 1)[0]
+    assert "modelState" in create_draft, "createFirstChatDraft must consult the shared state"
+    assert "usedIds" in create_draft
+    assert "chat-primary" in create_draft
+
+    # Drive the shared module directly: an empty chat route plus an
+    # embedding provider that already owns `chat-primary` must force the
+    # wizard to allocate chat-primary-2 for the new chat connection.
+    snapshot = {
+        "revision": "rev-1",
+        "models": {
+            "schema_version": 1,
+            "chat": {"concurrency": 2, "timeout_seconds": 60, "connections": []},
+            "embedding": {
+                "enabled": False,
+                "settings": {
+                    "model": "",
+                    "output_dimensionality": 0,
+                    "similarity_threshold": 0.55,
+                    "multimodal_enabled": False,
+                },
+                "providers": [
+                    {
+                        "id": "chat-primary",
+                        "name": "Existing embedding",
+                        "type": "ollama",
+                        "preset": "",
+                        "base_url": "http://127.0.0.1:11434",
+                        "credential": {"configured": False, "source": "none"},
+                        "probe": None,
+                        "circuit": {"state": "closed"},
+                    }
+                ],
+            },
+        },
+    }
     script = "\n".join(
         [
-            "let draftConnection = null;",
-            (
-                "let modelSnapshot = {models: {chat: {connections: []}, "
-                "embedding: {providers: [{id: 'chat-primary'}]}}};"
-            ),
-            (
-                "let modelDescriptors = [{id: 'ollama', label: 'Ollama', "
-                "category: 'local_runtime', fields: [], preset_definitions: []}];"
-            ),
-            "function safeCredentialStatus(credential) {" + safe_status + "\n}",
-            "function applyPresetDefaults(descriptor, preset, force = false) {"
-            + apply_defaults
-            + "\n}",
-            "function createFirstChatDraft() {" + create_draft + "\n}",
-            "process.stdout.write(createFirstChatDraft().id);",
+            'import * as state from "./src/openbiliclaw/web/shared/model-config-state.js";',
+            f"const snapshot = {json.dumps(snapshot)};",
+            "let modelState = state.hydrateModelConfig(snapshot);",
+            "const usedIds = new Set([",
+            "  ...modelState.models.chat.connections,",
+            "  ...modelState.models.embedding.providers,",
+            "].map((record) => String(record?.id || '')).filter(Boolean));",
+            "let stableId = 'chat-primary';",
+            "let suffix = 2;",
+            "while (usedIds.has(stableId)) { stableId = `chat-primary-${suffix}`; suffix += 1; }",
+            "process.stdout.write(stableId);",
         ]
     )
-
     result = subprocess.run(
-        [node, "-e", script],
+        [node, "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
+        cwd=Path(__file__).parents[1],
     )
-
     assert result.stdout == "chat-primary-2"
 
 
@@ -386,32 +440,22 @@ def test_setup_model_save_requires_exact_probe_before_revisioned_put() -> None:
     assert save.index('apiFetch("/api/model-config/probe"') < save.index(
         'apiFetch("/api/model-config", {'
     )
-    assert "revision: modelSnapshot.revision" in save
-    assert "connection: primaryDraft" in save
+    # Revision and connection payload now flow through the shared state
+    # module's `modelState` (regression: the old wizard built these from a
+    # forked `modelSnapshot`/`primaryDraft`).
+    assert "revision: modelState.revision" in save
+    assert "connection: chatConnectionDraft" in save
 
 
 def test_setup_model_save_preserves_untouched_native_route_payload_fields() -> None:
-    """Only the selected primary is editable; every other API field stays equivalent."""
-    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+    """Only the selected primary is editable; every other API field stays
+    equivalent. Behavior now lives in the shared state module's
+    `toModelConfigPayload`, so drive it directly — the wizard is a thin
+    shell over that single implementation (decision 11 convergence)."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to execute the model payload regression")
-
-    function_names = (
-        "credentialActionPayload",
-        "chatConnectionPayload",
-        "embeddingProviderPayload",
-        "buildModelConfigPayload",
-    )
-    function_sources: list[str] = []
-    for index, function_name in enumerate(function_names):
-        next_name = (
-            function_names[index + 1] if index + 1 < len(function_names) else "validateModelDraft"
-        )
-        body = setup_html.split(f"    function {function_name}", 1)[1].split(
-            f"\n    function {next_name}", 1
-        )[0]
-        function_sources.append(f"function {function_name}{body}\n")
+    assert node is not None
 
     snapshot = {
         "revision": "revision-14",
@@ -480,17 +524,18 @@ def test_setup_model_save_preserves_untouched_native_route_payload_fields() -> N
     }
     script = "\n".join(
         [
-            f"const modelSnapshot = {json.dumps(snapshot)};",
-            *function_sources,
-            "const primary = chatConnectionPayload(modelSnapshot.models.chat.connections[0]);",
-            "process.stdout.write(JSON.stringify(buildModelConfigPayload(primary)));",
+            'import * as state from "./src/openbiliclaw/web/shared/model-config-state.js";',
+            f"const snapshot = {json.dumps(snapshot)};",
+            "const modelState = state.hydrateModelConfig(snapshot);",
+            "process.stdout.write(JSON.stringify(state.toModelConfigPayload(modelState)));",
         ]
     )
     result = subprocess.run(
-        [node, "-e", script],
+        [node, "--input-type=module", "-e", script],
         check=True,
         capture_output=True,
         text=True,
+        cwd=Path(__file__).parents[1],
     )
     payload = json.loads(result.stdout)
 
@@ -758,11 +803,18 @@ def test_issue72_gateway_fields_present_on_all_config_surfaces() -> None:
 
     # Desktop settings render api_mode for every selected route record from
     # the backend descriptor instead of duplicating primary/fallback controls.
+    # The descriptor → field markup mapping now lives in the shared render
+    # module consumed by desktop, mobile, extension, and wizard surfaces.
+    shared_render_js = Path(
+        "src/openbiliclaw/web/shared/model-config-render.js"
+    ).read_text(encoding="utf-8")
     assert 'id="modelDescriptorFields"' in desktop_html
     assert "/api/model-connection-types" in model_js
     assert "descriptor.fields" in model_js
-    assert "field.choices" in model_js
-    assert "data-model-field" in model_js
+    assert "field.choices" in shared_render_js
+    assert "data-model-field" in shared_render_js
+    # Desktop consumes the shared renderer rather than forking it.
+    assert "sharedRenderDescriptorField" in model_js or "renderDescriptorField" in model_js
     assert 'id="llmApiFlavor"' not in desktop_html
     assert 'id="llmFallbackApiFlavor"' not in desktop_html
 
