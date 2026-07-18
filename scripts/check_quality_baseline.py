@@ -38,7 +38,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-BASELINE_PATH = Path(__file__).resolve().parent.parent / "tests" / "contracts" / "quality-baseline.json"
+BASELINE_PATH = (
+    Path(__file__).resolve().parent.parent / "tests" / "contracts" / "quality-baseline.json"
+)
 
 # Matches mypy error lines like:
 #   src/openbiliclaw/cli_models.py:123:45: error: Message here  [arg-type]
@@ -182,8 +184,7 @@ def compare_pytest(
     new_skips = skips - known_skips
     if new_skips:
         problems.append(
-            f"new pytest skips not in baseline (must be justified + baselined): "
-            f"{sorted(new_skips)}"
+            f"new pytest skips not in baseline (must be justified + baselined): {sorted(new_skips)}"
         )
     return problems
 
