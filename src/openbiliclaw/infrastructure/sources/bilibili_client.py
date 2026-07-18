@@ -1,0 +1,771 @@
+"""Bilibili API Client.
+
+Primary interface for interacting with Bilibili, prioritizing the official
+and reverse-engineered API for speed and efficiency.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import logging
+import re
+import time
+from dataclasses import dataclass
+from typing import Any, ClassVar, cast
+from urllib.parse import quote, urlencode, urlparse
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class BilibiliAPIError(RuntimeError):
+    """Raised when a Bilibili API request returns an application error."""
+
+    def __init__(self, message: str, *, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = 429 if code in {-412, -429} else None
+
+
+class BilibiliAuthExpiredError(BilibiliAPIError):
+    """Raised when Bilibili reports the current Cookie is logged out."""
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    """Validate an object-shaped JSON value for strict typing.
+
+    Returns an empty dict when *value* is ``None`` (common when B站
+    returns ``"data": null`` under rate-limiting or for empty ranking
+    regions), mirroring :func:`_json_list`'s null-handling.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise BilibiliAPIError("Bilibili API returned a malformed object")
+    return cast("dict[str, Any]", value)
+
+
+def _json_list(value: Any) -> list[dict[str, Any]]:
+    """Validate a list-of-objects JSON value for strict typing.
+
+    Returns an empty list when *value* is ``None`` (common when B站
+    returns ``"result": null`` under rate-limiting).
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise BilibiliAPIError("Bilibili API returned a malformed list")
+    return cast("list[dict[str, Any]]", value)
+
+
+@dataclass
+class NavInfo:
+    """Basic authenticated user info from the nav endpoint."""
+
+    is_login: bool = False
+    uname: str = ""
+    mid: int = 0
+
+
+@dataclass
+class FavoriteFolder:
+    """Favorite folder metadata."""
+
+    media_id: int
+    title: str
+    media_count: int = 0
+
+
+@dataclass
+class FavoriteFolderWithItems:
+    """Favorite folder plus fetched items."""
+
+    folder: FavoriteFolder
+    items: list[dict[str, Any]]
+    truncated: bool = False
+
+
+@dataclass
+class FollowingUser:
+    """Basic followed user info."""
+
+    mid: int
+    uname: str
+    sign: str = ""
+
+
+class BilibiliAPIClient:
+    """Client for Bilibili's web API.
+
+    This is the primary data access layer (API-first approach).
+    For operations not supported by the API, use BilibiliBrowser.
+    """
+
+    _BASE_URL = "https://api.bilibili.com"
+    _SEARCH_WEB_LOCATION = 1430654
+    # A v_voucher exhaustion is usually recoverable WBI-key churn / mild
+    # rate limiting, so it gets a short, escalating back-off. A genuine
+    # HTTP 412 is an explicit IP-level block and gets the longer hard
+    # cooldown instead (see ``_SEARCH_COOLDOWN_412_SECONDS``).
+    _SEARCH_COOLDOWN_BASE_SECONDS: ClassVar[float] = 180.0
+    _SEARCH_COOLDOWN_412_SECONDS: ClassVar[float] = 600.0
+    _SEARCH_COOLDOWN_MAX_SECONDS: ClassVar[float] = 1800.0
+    _SEARCH_DOM_FALLBACK_SECONDS: ClassVar[float] = 180.0
+    # A single challenged keyword (transient churn) must NOT zero out the
+    # whole search round + the explore strategy that shares this cooldown.
+    # Only trip the process-wide cooldown after this many *consecutive*
+    # keyword-level v_voucher exhaustions; any success resets the streak.
+    _SEARCH_VOUCHER_BLOCK_THRESHOLD: ClassVar[int] = 3
+    _search_cooldown_until: ClassVar[float] = 0.0
+    _search_cooldown_level: ClassVar[int] = 0
+    _search_voucher_block_streak: ClassVar[int] = 0
+    _search_dom_fallback_until: ClassVar[float] = 0.0
+    _WBI_MIXIN_KEY_ENC_TAB = [
+        46,
+        47,
+        18,
+        2,
+        53,
+        8,
+        23,
+        32,
+        15,
+        50,
+        10,
+        31,
+        58,
+        3,
+        45,
+        35,
+        27,
+        43,
+        5,
+        49,
+        33,
+        9,
+        42,
+        19,
+        29,
+        28,
+        14,
+        39,
+        12,
+        38,
+        41,
+        13,
+        37,
+        48,
+        7,
+        16,
+        24,
+        55,
+        40,
+        61,
+        26,
+        17,
+        0,
+        1,
+        60,
+        51,
+        30,
+        4,
+        22,
+        25,
+        54,
+        21,
+        56,
+        59,
+        6,
+        63,
+        57,
+        62,
+        11,
+        36,
+        20,
+        34,
+        44,
+        52,
+    ]
+
+    _WBI_KEY_TTL: float = 300.0  # Refresh WBI keys every 5 minutes
+
+    def __init__(
+        self,
+        cookie: str = "",
+        *,
+        min_request_interval: float = 0.2,
+        proxy: str | None = None,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._cookie = cookie
+        self._min_request_interval = min_request_interval
+        self._proxy = proxy or None
+        self._last_request_at = 0.0
+        self._cached_wbi_keys: tuple[str, str] | None = None
+        self._wbi_keys_fetched_at: float = 0.0
+        self._client = http_client or httpx.AsyncClient(
+            timeout=30.0,
+            # B站 is a CN domain: direct connection always works, while an
+            # inherited proxy (httpx trust_env reads env vars AND the OS
+            # system proxy — Clash & co.) routes through an exit IP that
+            # B站 risk-controls, showing logged-in users as "not logged
+            # in". Never inherit; [bilibili].proxy opts back in for
+            # networks that genuinely require one.
+            trust_env=False,
+            proxy=self._proxy,
+        )
+        self._client.headers.setdefault(
+            "User-Agent",
+            (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        )
+        self._client.headers.setdefault("Referer", "https://www.bilibili.com")
+        if cookie:
+            self._client.headers["Cookie"] = cookie
+
+    @property
+    def is_authenticated(self) -> bool:
+        """Whether we have a valid authentication cookie."""
+        return bool(self._cookie)
+
+    async def _respect_rate_limit(self) -> None:
+        """Wait to keep a minimum interval between requests."""
+        elapsed = time.monotonic() - self._last_request_at
+        remaining = self._min_request_interval - elapsed
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        self._last_request_at = time.monotonic()
+
+    @classmethod
+    def search_cooldown_remaining(cls) -> float:
+        """Seconds remaining in the process-wide Bilibili search cooldown."""
+        return max(0.0, cls._search_cooldown_until - time.monotonic())
+
+    @classmethod
+    def search_dom_fallback_remaining(cls) -> float:
+        """Seconds remaining while rendered-page search fallback is preferred."""
+        return max(0.0, cls._search_dom_fallback_until - time.monotonic())
+
+    @classmethod
+    def _activate_search_dom_fallback(cls, *, seconds: float | None = None) -> float:
+        """Ask the extension-search producer to try DOM search soon.
+
+        This signal is intentionally weaker than the global cooldown: API
+        search may keep probing, but the browser extension can backfill via a
+        rendered search page while the API path looks degraded.
+        """
+        duration = cls._SEARCH_DOM_FALLBACK_SECONDS if seconds is None else seconds
+        cls._search_dom_fallback_until = max(
+            cls._search_dom_fallback_until,
+            time.monotonic() + duration,
+        )
+        return duration
+
+    @classmethod
+    def _activate_search_cooldown(cls, *, base_seconds: float | None = None) -> float:
+        """Back off all search clients after repeated v_voucher/412 blocks.
+
+        ``base_seconds`` overrides the per-step base (412 blocks pass the
+        longer hard-cooldown base); the escalation multiplier and absolute
+        ceiling are shared across both causes.
+        """
+        cls._search_cooldown_level = min(cls._search_cooldown_level + 1, 3)
+        base = cls._SEARCH_COOLDOWN_BASE_SECONDS if base_seconds is None else base_seconds
+        duration = min(
+            base * cls._search_cooldown_level,
+            cls._SEARCH_COOLDOWN_MAX_SECONDS,
+        )
+        cls._search_cooldown_until = max(
+            cls._search_cooldown_until,
+            time.monotonic() + duration,
+        )
+        cls._activate_search_dom_fallback(seconds=duration)
+        return duration
+
+    @classmethod
+    def _record_voucher_block(cls) -> float:
+        """Record one keyword exhausting its v_voucher retries.
+
+        Returns the cooldown duration if this block crossed the
+        consecutive-failure threshold (the whole search path now backs
+        off), or ``0.0`` if search stays live and only this one keyword is
+        dropped — a lone challenged keyword is usually transient WBI churn,
+        not an IP-level block, and must not strand the search round +
+        explore for the full cooldown.
+        """
+        cls._search_voucher_block_streak += 1
+        if cls._search_voucher_block_streak >= cls._SEARCH_VOUCHER_BLOCK_THRESHOLD:
+            return cls._activate_search_cooldown()
+        return 0.0
+
+    @classmethod
+    def _reset_search_cooldown_backoff(cls) -> None:
+        """Reset escalation + the v_voucher streak once search succeeds again."""
+        cls._search_cooldown_level = 0
+        cls._search_voucher_block_streak = 0
+
+    @staticmethod
+    def _sanitized_http_error(
+        method: str,
+        path: str,
+        exc: httpx.HTTPError,
+    ) -> BilibiliAPIError:
+        """Map transport failures without exposing request or response payloads."""
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+            if status_code in {412, 429}:
+                code = -status_code
+                return BilibiliAPIError(
+                    f"Bilibili API {method} rate limited on {path} (code {code})",
+                    code=code,
+                )
+        return BilibiliAPIError(f"Bilibili API {method} failed on {path}")
+
+    async def _get_json(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Perform a GET request and return an object-valued `data` payload."""
+        return _json_object(await self._get_payload(path, params=params, headers=headers))
+
+    async def _get_payload(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> object:
+        """Perform a GET and return a validated envelope's raw ``data`` value."""
+        await self._respect_rate_limit()
+        try:
+            resp = await self._client.get(
+                f"{self._BASE_URL}{path}",
+                params=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise self._sanitized_http_error("GET", path, exc) from exc
+
+        try:
+            payload = _json_object(resp.json())
+        except (ValueError, TypeError) as exc:
+            raise BilibiliAPIError("Bilibili API returned malformed JSON") from exc
+        raw_code = payload.get("code", 0)
+        if isinstance(raw_code, bool):
+            raise BilibiliAPIError("Bilibili API returned a malformed code")
+        try:
+            code = int(raw_code)
+        except (TypeError, ValueError) as exc:
+            raise BilibiliAPIError("Bilibili API returned a malformed code") from exc
+        if code == -101:
+            detail = (
+                f"Bilibili session expired on {path} (-101). "
+                "Please re-authenticate in the browser or keep the extension "
+                "online to sync a fresh Cookie."
+            )
+            logger.warning("%s", detail)
+            raise BilibiliAuthExpiredError(detail, code=code)
+        if code != 0:
+            raise BilibiliAPIError(
+                f"Bilibili API rejected request on {path} (code {code})",
+                code=code,
+            )
+        return payload.get("data", {})
+
+    async def _get_wbi_keys(self) -> tuple[str, str]:
+        """Fetch and cache the WBI image/sub keys used for signed search requests.
+
+        Keys are refreshed after :attr:`_WBI_KEY_TTL` seconds because B站
+        rotates them periodically — stale keys cause search to return an
+        empty ``v_voucher`` response instead of actual results.
+        """
+        if (
+            self._cached_wbi_keys is not None
+            and (time.monotonic() - self._wbi_keys_fetched_at) < self._WBI_KEY_TTL
+        ):
+            return self._cached_wbi_keys
+
+        data = await self._get_json("/x/web-interface/nav")
+        wbi_img = _json_object(data.get("wbi_img", {}))
+        img_key = self._extract_wbi_key_component(str(wbi_img.get("img_url", "")))
+        sub_key = self._extract_wbi_key_component(str(wbi_img.get("sub_url", "")))
+        if not img_key or not sub_key:
+            raise BilibiliAPIError("Missing wbi keys in nav response")
+        self._cached_wbi_keys = (img_key, sub_key)
+        self._wbi_keys_fetched_at = time.monotonic()
+        return self._cached_wbi_keys
+
+    @staticmethod
+    def _extract_wbi_key_component(url: str) -> str:
+        """Return the key segment from a WBI image URL."""
+        path = urlparse(url).path
+        filename = path.rsplit("/", 1)[-1]
+        return filename.rsplit(".", 1)[0]
+
+    @classmethod
+    def _build_wbi_mixin_key(cls, img_key: str, sub_key: str) -> str:
+        """Build the mixed key used by Bilibili WBI request signing."""
+        merged = img_key + sub_key
+        return "".join(merged[index] for index in cls._WBI_MIXIN_KEY_ENC_TAB)[:32]
+
+    @classmethod
+    def _sign_wbi_params(
+        cls,
+        params: dict[str, object],
+        *,
+        img_key: str,
+        sub_key: str,
+    ) -> dict[str, str]:
+        """Sign search params using Bilibili's WBI algorithm."""
+        mixin_key = cls._build_wbi_mixin_key(img_key, sub_key)
+        signed_params = {**params, "wts": int(time.time())}
+        ordered_items = sorted(signed_params.items())
+        sanitized = {key: re.sub(r"[!'()*]", "", str(value)) for key, value in ordered_items}
+        query = urlencode(sanitized)
+        sanitized["w_rid"] = hashlib.md5((query + mixin_key).encode()).hexdigest()
+        return sanitized
+
+    async def get_nav_info(self) -> NavInfo:
+        """Get the current login state from Bilibili nav API."""
+        data = await self._get_json("/x/web-interface/nav")
+        return NavInfo(
+            is_login=bool(data.get("isLogin", False)),
+            uname=str(data.get("uname", "")),
+            mid=int(data.get("mid", 0)),
+        )
+
+    async def search(
+        self,
+        keyword: str,
+        page: int = 1,
+        page_size: int = 20,
+        order: str = "totalrank",
+    ) -> list[dict[str, Any]]:
+        """Search for videos by keyword.
+
+        Args:
+            keyword: Search query.
+            page: Page number.
+            page_size: Results per page.
+
+        Returns:
+            List of search result dicts.
+        """
+        cooldown_remaining = self.search_cooldown_remaining()
+        if cooldown_remaining > 0:
+            logger.info(
+                "Bilibili search cooldown active (%.0fs left) — skipping query=%r",
+                cooldown_remaining,
+                keyword,
+            )
+            return []
+
+        # v0.3.55+: 3 attempts with exponential backoff (was 2 with 1.5s
+        # linear). Production logs (2026-05-05) showed 141 v_voucher
+        # challenges in 43 minutes; with only 1 retry, ~9 full search
+        # rounds returned 0 results because keywords got challenged twice
+        # and we gave up. The new schedule (1.5s / 5s / 15s = ~21s total
+        # per keyword) lets the WBI key churn settle without immediately
+        # surrendering. Steady-state cost is zero — retries don't fire
+        # when keys are healthy.
+        #
+        # Fast-fail once a storm is suspected: the first keyword to fail in
+        # a fresh round gets the full retry budget so transient churn can
+        # settle, but once one keyword has already fully exhausted
+        # (streak>0) we drop to a single quick probe — confirming a real
+        # storm in a few fast attempts instead of hammering B站 with doomed
+        # ~21s retry chains per keyword (which would only deepen the block).
+        max_attempts = 1 if type(self)._search_voucher_block_streak > 0 else 3
+        backoff_schedule = (1.5, 5.0, 15.0)
+        for attempt in range(max_attempts):
+            try:
+                img_key, sub_key = await self._get_wbi_keys()
+                data = await self._get_json(
+                    "/x/web-interface/wbi/search/type",
+                    params=self._sign_wbi_params(
+                        {
+                            "keyword": keyword,
+                            "search_type": "video",
+                            "page": page,
+                            "page_size": page_size,
+                            "order": order,
+                            "web_location": self._SEARCH_WEB_LOCATION,
+                        },
+                        img_key=img_key,
+                        sub_key=sub_key,
+                    ),
+                    headers={
+                        "Referer": (
+                            f"https://search.bilibili.com/all?keyword={quote(keyword, safe='')}"
+                        ),
+                        "Origin": "https://search.bilibili.com",
+                    },
+                )
+            except BilibiliAPIError as exc:
+                cause = exc.__cause__
+                if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 412:
+                    # 412 is an explicit IP-level block — back off hard and
+                    # immediately (no streak threshold), with the longer base.
+                    duration = self._activate_search_cooldown(
+                        base_seconds=self._SEARCH_COOLDOWN_412_SECONDS
+                    )
+                    logger.warning(
+                        "Bilibili search blocked with 412 for query=%r — "
+                        "cooling down search for %.0fs",
+                        keyword,
+                        duration,
+                    )
+                    return []
+                self._activate_search_dom_fallback()
+                raise
+
+            # Detect v_voucher-only response (stale WBI keys or rate limit)
+            if "v_voucher" in data and data.get("result") is None:
+                if attempt < max_attempts - 1:
+                    delay = backoff_schedule[attempt]
+                    logger.info(
+                        "Search v_voucher challenge (attempt %d/%d) for query=%r — "
+                        "refreshing WBI keys, retry in %.1fs",
+                        attempt + 1,
+                        max_attempts,
+                        keyword,
+                        delay,
+                    )
+                    self._cached_wbi_keys = None
+                    await asyncio.sleep(delay)
+                    continue
+                # Final attempt also got v_voucher. Record the block; only
+                # trip the shared cooldown once consecutive keyword failures
+                # cross the threshold — a lone challenged keyword just gets
+                # dropped so the rest of the round (and explore) stays live.
+                self._activate_search_dom_fallback()
+                duration = self._record_voucher_block()
+                if duration > 0:
+                    logger.warning(
+                        "Search v_voucher storm confirmed (%d consecutive blocked "
+                        "queries, latest=%r) — cooling down search for %.0fs "
+                        "(likely WBI storm or IP rate limit)",
+                        type(self)._search_voucher_block_streak,
+                        keyword,
+                        duration,
+                    )
+                else:
+                    logger.info(
+                        "Search v_voucher challenge persisted for query=%r "
+                        "(streak %d/%d) — dropping this keyword; search stays live",
+                        keyword,
+                        type(self)._search_voucher_block_streak,
+                        self._SEARCH_VOUCHER_BLOCK_THRESHOLD,
+                    )
+                return []
+
+            results = _json_list(data.get("result", []))
+            self._reset_search_cooldown_backoff()
+            if not results:
+                logger.debug("Search returned empty result for query=%r", keyword)
+            return results
+        return []
+
+    async def get_user_history(self, max_items: int = 100) -> list[dict[str, Any]]:
+        """Get the authenticated user's watch history.
+
+        Requires valid authentication cookie.
+
+        Args:
+            max_items: Maximum number of history items to fetch. 0 means fetch all.
+
+        Returns:
+            List of history item dicts.
+        """
+        if not self.is_authenticated:
+            logger.warning("Cannot fetch history without authentication.")
+            return []
+
+        items: list[dict[str, Any]] = []
+        cursor_params: dict[str, Any] = {"type": "archive"}
+        while max_items == 0 or len(items) < max_items:
+            data = await self._get_json(
+                "/x/web-interface/history/cursor",
+                params=cursor_params,
+            )
+            batch = _json_list(data.get("list", []))
+            if not batch:
+                break
+            items.extend(batch)
+            cursor = _json_object(data.get("cursor", {}))
+            next_max = cursor.get("max")
+            next_view_at = cursor.get("view_at")
+            if not next_max or not next_view_at:
+                break
+            cursor_params = {
+                "type": "archive",
+                "max": next_max,
+                "view_at": next_view_at,
+            }
+        return items if max_items == 0 else items[:max_items]
+
+    async def get_favorites(
+        self,
+        media_id: int,
+        *,
+        max_items: int = 20,
+        page_size: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Get content from a favorites folder.
+
+        Args:
+            media_id: Favorites folder media ID.
+            max_items: Maximum number of favorite items to fetch.
+            page_size: Page size for the Bilibili resource list endpoint.
+
+        Returns:
+            List of favorite item dicts.
+        """
+        item_limit = max(0, int(max_items))
+        if item_limit <= 0:
+            return []
+
+        effective_page_size = max(1, min(int(page_size), 20))
+        items: list[dict[str, Any]] = []
+        page = 1
+        while len(items) < item_limit:
+            data = await self._get_json(
+                "/x/v3/fav/resource/list",
+                params={"media_id": media_id, "pn": page, "ps": effective_page_size},
+            )
+            batch = _json_list(data.get("medias", []))
+            if not batch:
+                break
+            items.extend(batch)
+            has_more = data.get("has_more")
+            if has_more is not None:
+                if not bool(has_more):
+                    break
+            elif len(batch) < effective_page_size:
+                break
+            page += 1
+        return items[:item_limit]
+
+    async def get_favorite_folders(self) -> list[FavoriteFolder]:
+        """Get the authenticated user's favorite folder metadata."""
+        nav = await self.get_nav_info()
+        data = await self._get_json(
+            "/x/v3/fav/folder/created/list-all",
+            params={"up_mid": nav.mid},
+        )
+        folders = _json_list(data.get("list", []))
+        return [
+            FavoriteFolder(
+                media_id=int(folder.get("id", 0)),
+                title=str(folder.get("title", "")),
+                media_count=int(folder.get("media_count", 0)),
+            )
+            for folder in folders
+        ]
+
+    async def get_all_favorites(
+        self,
+        *,
+        max_folders: int = 10,
+        max_items_per_folder: int = 50,
+        max_total_items: int | None = None,
+    ) -> list[FavoriteFolderWithItems]:
+        """Get favorite folders and fetch each folder's items within budget."""
+        folders = await self.get_favorite_folders()
+        folder_limit = max(0, int(max_items_per_folder))
+        folder_count = max(0, int(max_folders))
+        if folder_count <= 0 or folder_limit <= 0:
+            return []
+
+        remaining_total: int | None
+        if max_total_items is None:
+            remaining_total = None
+        else:
+            remaining_total = max(0, int(max_total_items))
+            if remaining_total <= 0:
+                return []
+
+        aggregated: list[FavoriteFolderWithItems] = []
+        for folder in folders[:folder_count]:
+            if remaining_total is not None and remaining_total <= 0:
+                break
+            current_limit = folder_limit
+            if remaining_total is not None:
+                current_limit = min(current_limit, remaining_total)
+            limited_items = await self.get_favorites(folder.media_id, max_items=current_limit)
+            aggregated.append(
+                FavoriteFolderWithItems(
+                    folder=folder,
+                    items=limited_items,
+                    truncated=folder.media_count > len(limited_items),
+                )
+            )
+            if remaining_total is not None:
+                remaining_total -= len(limited_items)
+        return aggregated
+
+    async def get_following(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> list[FollowingUser]:
+        """Get the authenticated user's following list."""
+        nav = await self.get_nav_info()
+        data = await self._get_json(
+            "/x/relation/followings",
+            params={"vmid": nav.mid, "pn": page, "ps": page_size},
+        )
+        users = _json_list(data.get("list", []))
+        return [
+            FollowingUser(
+                mid=int(user.get("mid", 0)),
+                uname=str(user.get("uname", "")),
+                sign=str(user.get("sign", "")),
+            )
+            for user in users
+        ]
+
+    async def get_related_videos(self, bvid: str) -> list[dict[str, Any]]:
+        """Get related/recommended videos for a given video.
+
+        Args:
+            bvid: Source video BV ID.
+
+        Returns:
+            List of related video dicts.
+        """
+        return _json_list(
+            await self._get_payload(
+                "/x/web-interface/archive/related",
+                params={"bvid": bvid},
+            )
+        )
+
+    async def get_ranking(self, rid: int = 0) -> list[dict[str, Any]]:
+        """Get ranking/trending videos.
+
+        Args:
+            rid: Region ID (0 for all).
+
+        Returns:
+            List of ranking item dicts.
+        """
+        data = await self._get_json(
+            "/x/web-interface/ranking/v2",
+            params={"rid": rid, "type": "all"},
+        )
+        return _json_list(data.get("list", []))
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()

@@ -16,6 +16,8 @@ test("unreachable backend renders the gray daemon hint", () => {
   assert.equal(view.text, "!");
   assert.equal(view.color, BADGE_COLOR_UNREACHABLE);
   assert.equal(view.title, BADGE_TITLE_UNREACHABLE);
+  assert.match(view.title, /Docker Compose/);
+  assert.doesNotMatch(view.title, /openbiliclaw start/);
 });
 
 test("unreachable wins over a stale uninitialized flag", () => {

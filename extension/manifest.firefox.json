@@ -24,9 +24,6 @@
     "permissions": [
         "activeTab",
         "alarms",
-        "cookies",
-        "notifications",
-        "scripting",
         "storage"
     ],
     "host_permissions": [
@@ -75,7 +72,6 @@
                 "*://*.xiaohongshu.com/*"
             ],
             "js": [
-                "main/xhs-token-sniffer.js",
                 "main/xhs-state-bridge.js"
             ],
             "run_at": "document_start",

@@ -1,123 +1,31 @@
-# 手动端到端联调
+# Manual end-to-end verification
 
-> 用于验证 CLI 首跑、插件采集、持续补货和浏览器通知是否在真实环境中串通。
+The maintained manual matrix has four runbooks. Run them against a disposable vNext environment. Do not use old data, live provider/source credentials, or state-changing platform actions unless the test explicitly requires and authorizes them.
 
-## 前置条件
+| Runbook | Purpose |
+|---|---|
+| [Docker first run](e2e/docker-first-run.md) | installation, migrations, LiteLLM aliases, onboarding, retained product journey |
+| [Web](e2e/web.md) | `/setup`, `/web`, `/m`, auth, settings, profile, feed, feedback, chat, library |
+| [Browser extension](e2e/extension.md) | device bearer, popup, passive events, generic source tasks, Chrome/Firefox builds |
+| [Source install](e2e/source-install.md) | external LiteLLM, migration, API/worker lifecycle, doctor, backup, recovery |
 
-1. 本地已配置有效的 LLM Provider 和 B 站 Cookie
-2. 已在项目根目录创建本地 `config.toml`
-3. Chrome 已允许加载 unpacked extension
+## Shared completion criteria
 
-## CLI 首跑
+- first-run setup reaches a terminal success only after source sync, profile projection, and feed replenishment succeed;
+- before onboarding completes, periodic source sync, profile projection, and feed replenishment create no job rows, while cleanup and explicit onboarding child jobs remain enabled; after completion, due periodic maintenance resumes;
+- first-run installer exposes the Web password and extension key once, persists neither plaintext, and a rerun exposes neither again;
+- setup login succeeds, the LiteLLM Admin link is visible, manifest credentials are configured before onboarding, and empty-schema sources show no backend credential form;
+- configured first-run onboarding rejects anonymous requests, browser settings cannot disable the Web login path, and explicit rotation remains the recovery path;
+- concurrent installers serialize credential stage/start/commit/disclosure, and Docker reruns preserve a previously persisted custom Admin URL unless an explicit replacement is supplied;
+- failed or cancelled jobs/onboarding are shown as failed or cancelled, never as success;
+- profile facets cite evidence and an explicit edit creates a new revision;
+- feedback is preserved and changes later feed ordering or score projection;
+- chat streams deltas and one terminal event, then appears in bounded history;
+- favorites and watch later are local collections and never mutate a platform account;
+- API and worker use the same application database and separate Huey queue;
+- changing any of the four schedule intervals in Web or extension settings affects the next worker tick without restart and does not duplicate a time bucket;
+- feed SEARCH uses a generated query, admitted items expose grounded generated explanations, and embedding alias failure is visible as a feed job failure rather than an unused setup prerequisite;
+- errors use the safe typed envelope and do not contain secrets, traceback, SQL, or provider payloads;
+- no residual test process, temporary browser tab, or disposable container remains.
 
-```bash
-PYTHONPATH=src .venv/bin/openbiliclaw auth status
-PYTHONPATH=src .venv/bin/openbiliclaw init
-PYTHONPATH=src .venv/bin/openbiliclaw recommend
-```
-
-验收：
-
-- `init` 输出历史条数、画像状态和发现内容数
-- `recommend` 能输出朋友式推荐文案
-
-## 启动本地后端
-
-```bash
-PYTHONPATH=src .venv/bin/openbiliclaw start
-```
-
-校验接口：
-
-```bash
-curl http://127.0.0.1:8420/api/health
-curl http://127.0.0.1:8420/api/runtime-status
-curl http://127.0.0.1:8420/api/recommendations
-```
-
-## 加载插件
-
-```bash
-cd extension && npm install && npm run build
-```
-
-1. 进入 Chrome 扩展管理页
-2. 打开”开发者模式”
-3. 加载 `extension/` 目录
-4. 固定侧边栏图标
-
-## 插件采集与持续补货
-
-1. 打开 B 站首页、搜索页、视频页
-2. 执行搜索、点击、播放、暂停、滚动等行为
-3. 等待 1 到 2 个 flush 周期
-
-校验：
-
-```bash
-sqlite3 data/openbiliclaw.db "select count(*) from events;"
-sqlite3 data/openbiliclaw.db "select event_type, count(*) from events group by event_type order by event_type;"
-curl http://127.0.0.1:8420/api/runtime-status
-```
-
-重点看：
-
-- `events` 数量增长
-- `runtime-status.pending_signal_events` 会先升高，再在自动刷新后归零
-- `runtime-status.last_refresh_at` 发生变化
-
-## 侧边栏验证
-
-### 推荐 tab
-
-- 能显示连接状态
-- 未初始化时提示先跑 `openbiliclaw init`
-- 有候选但正在补货时提示“正在根据你最近的新行为补货”
-- 有推荐时能展示推荐卡片
-
-### 我的画像 tab
-
-- 能显示画像摘要、核心特质、深层需求和当前偏好
-
-### 和阿B聊聊 tab
-
-- 能发送消息并收到回复
-- 聊天后数据库中应新增 `dialogue` 事件
-
-## 推荐反馈
-
-在侧边栏中分别测试：
-
-- `喜欢`
-- `不喜欢`
-- `写一句`
-
-校验：
-
-```bash
-sqlite3 data/openbiliclaw.db "select id,bvid,feedback_type,feedback_note,feedback_at from recommendations order by id desc limit 10;"
-sqlite3 data/openbiliclaw.db "select id,event_type,title,metadata from events where event_type='feedback' order by id desc limit 10;"
-```
-
-## 浏览器通知
-
-1. 让系统产生一条高置信、未展示、未通知过的推荐
-2. 等待 `service worker` alarm 或新事件 flush 成功
-3. 观察是否弹出浏览器通知
-4. 点击通知，确认跳转到目标 B 站视频页
-
-校验：
-
-```bash
-curl http://127.0.0.1:8420/api/notifications/pending
-sqlite3 data/openbiliclaw.db "select bvid,notification_sent,notified_at from content_cache where notification_sent=1 order by notified_at desc limit 10;"
-```
-
-## 期望结果
-
-- CLI 能完成首跑初始化
-- 插件能持续上报行为
-- 后端能自动补货候选池
-- 侧边栏能读到运行状态与新推荐
-- 高置信推荐会触发浏览器通知
-- 反馈和聊天都会继续推动系统理解用户
+Record exact commands, commit, browser/build version, pass/fail result, and environment-blocked checks. Never record `.env`, bearer tokens, device keys, cookies, provider keys, or source credentials.

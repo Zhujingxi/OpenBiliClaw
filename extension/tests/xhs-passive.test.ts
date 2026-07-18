@@ -16,7 +16,9 @@ import {
   extractNoteMetadataFromAnchor,
   collectInViewportNoteUrls,
   dedupeObservedUrls,
+  releaseObservedUrls,
   filterSelfAuthoredNotes,
+  urlsAfterSelfAuthorFilter,
   type AnchorLike,
   type ViewportRect,
   type XhsNoteMetadata,
@@ -253,6 +255,24 @@ test("dedupeObservedUrls removes previously reported URLs", () => {
   assert.equal(seen.size, 2);
 });
 
+test("a rejected service-worker handoff releases reserved URLs for observation retry", () => {
+  const seen = new Set<string>(["first", "second", "older"]);
+  releaseObservedUrls(["first", "second"], seen);
+  assert.deepEqual([...seen], ["older"]);
+});
+
+test("passive batching reserves only submitted URLs so overflow remains collectable", () => {
+  const visible = Array.from({ length: 25 }, (_, index) => `note-${index}`);
+  const reported = new Set<string>();
+
+  const firstBatch = dedupeObservedUrls(visible, reported, 20);
+  const secondBatch = dedupeObservedUrls(visible, reported, 20);
+
+  assert.deepEqual(firstBatch, visible.slice(0, 20));
+  assert.deepEqual(secondBatch, visible.slice(20));
+  assert.deepEqual([...reported], visible);
+});
+
 // v0.3.10+: scrape-time self-author filter — even before the backend
 // gate fires, the extension drops notes whose author matches the
 // logged-in user. Defends against XHS search/explore feeds that mix
@@ -267,6 +287,17 @@ test("filterSelfAuthoredNotes drops notes whose author matches self.nickname", (
   const filtered = filterSelfAuthoredNotes(notes, self);
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].author, "Jupiter");
+});
+
+test("self-authored metadata removal also removes its raw URL from passive handoff", () => {
+  const notes: XhsNoteMetadata[] = [
+    { url: "self", title: "mine", author: "Me", cover_url: "" },
+    { url: "other", title: "theirs", author: "You", cover_url: "" },
+  ];
+  const filtered = filterSelfAuthoredNotes(notes, { user_id: "me", nickname: "me" });
+  assert.deepEqual(urlsAfterSelfAuthorFilter(["self", "other", "url-only"], notes, filtered), [
+    "other", "url-only",
+  ]);
 });
 
 test("filterSelfAuthoredNotes is case-insensitive", () => {

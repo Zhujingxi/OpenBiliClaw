@@ -1,0 +1,474 @@
+"""Lease-safe application service for generic browser source work."""
+
+from __future__ import annotations
+
+import json
+import threading
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Protocol
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, JsonValue, TypeAdapter
+
+from openbiliclaw.features._metadata import freeze_metadata, serialize_metadata
+from openbiliclaw.features._urls import sanitize_public_url
+from openbiliclaw.features.sources.domain import (
+    BrowserOperationResult,
+    BrowserOperationResultValue,
+    ClaimedSourceTask,
+    CredentialShapedPayloadError,
+    SourceAccountDisconnectResult,
+    SourceAccountStatus,
+    SourceCredentialInput,
+    SourceId,
+    SourceManifest,
+    SourceSettingsState,
+    SourceTaskCompletion,
+    SourceTaskFailure,
+    SourceTaskRequest,
+    SourceTaskSnapshot,
+    UnsupportedSourceOperationError,
+    reject_credential_fields,
+)
+from openbiliclaw.features.system.domain import DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+    from types import TracebackType
+
+    from openbiliclaw.features.sources.registry import SourceRegistry
+
+_JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+class StaleSourceTaskLeaseError(RuntimeError):
+    """Raised when a completion callback does not own the active task lease."""
+
+
+class SourceTaskCompletionConflictError(RuntimeError):
+    """Raised when a completed task receives a different duplicate result."""
+
+
+class CancelledSourceTaskError(RuntimeError):
+    """Raised when a cancelled durable task receives a completion callback."""
+
+
+class AbandonedSourceTaskError(RuntimeError):
+    """Raised when a request-deadline-expired task receives a completion callback."""
+
+
+class SourceTaskRepository(Protocol):
+    """Persistence operations required by the generic source-task service."""
+
+    def add_pending(
+        self,
+        request: SourceTaskRequest,
+        *,
+        task_id: UUID,
+        request_deadline_at: datetime,
+        now: datetime,
+    ) -> UUID: ...
+
+    def claim(
+        self,
+        *,
+        source_id: str,
+        lease_token: str,
+        lease_seconds: int,
+    ) -> ClaimedSourceTask | None: ...
+
+    def complete(
+        self,
+        *,
+        task_id: UUID,
+        lease_token: str,
+        result: dict[str, JsonValue],
+    ) -> SourceTaskCompletion: ...
+
+    def fail(
+        self,
+        *,
+        task_id: UUID,
+        lease_token: str,
+        failure: dict[str, JsonValue],
+    ) -> SourceTaskCompletion: ...
+
+    def get_snapshot(self, task_id: UUID) -> SourceTaskSnapshot: ...
+
+    def source_id(self, task_id: UUID) -> SourceId: ...
+
+    def cancel(self, task_id: UUID) -> SourceTaskSnapshot: ...
+
+
+class SourceTaskUnitOfWork(Protocol):
+    """Small transaction boundary needed by the source feature."""
+
+    source_tasks: SourceTaskRepository
+
+    def __enter__(self) -> SourceTaskUnitOfWork: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
+
+    def commit(self) -> None: ...
+
+
+class SourceAccountRepository(Protocol):
+    def upsert_credentials(
+        self, *, source_id: str, account_key: str, encrypted_credentials: object
+    ) -> UUID: ...
+
+    def list_statuses(self) -> tuple[SourceAccountStatus, ...]: ...
+
+    def delete(self, *, source_id: str, account_key: str) -> bool: ...
+
+
+class SourceConfigurationRepository(Protocol):
+    def get_source_settings(self, source_id: str) -> Mapping[str, object] | None: ...
+
+    def replace_source_settings(self, source_id: str, settings: Mapping[str, object]) -> None: ...
+
+
+class SourceAccountUnitOfWork(Protocol):
+    source_accounts: SourceAccountRepository
+    settings: SourceConfigurationRepository
+
+    def __enter__(self) -> SourceAccountUnitOfWork: ...
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
+
+    def commit(self) -> None: ...
+
+
+class CredentialCipherPort(Protocol):
+    def encrypt(self, plaintext: str) -> object: ...
+
+
+def _connector_settings(connector: object) -> BaseModel:
+    """Resolve the internal configurable capability without widening the public port."""
+
+    settings = getattr(connector, "settings", None)
+    if not isinstance(settings, BaseModel):
+        raise TypeError("source connector does not expose configurable settings")
+    return settings
+
+
+class SourceAccountService:
+    """Configure source accounts while returning only secret-free state."""
+
+    def __init__(
+        self,
+        uow_factory: Callable[[], SourceAccountUnitOfWork],
+        *,
+        cipher: CredentialCipherPort,
+        registry: SourceRegistry | Callable[[], SourceRegistry],
+        validate_settings_change: Callable[[str, Mapping[str, object]], None] | None = None,
+    ) -> None:
+        self._uow_factory = uow_factory
+        self._cipher = cipher
+        self._registry_provider = registry if callable(registry) else lambda: registry
+        self._validate_settings_change = validate_settings_change
+        self._settings_update_lock = threading.Lock()
+
+    def manifests(self) -> tuple[SourceManifest, ...]:
+        return tuple(self._registry_provider().manifests.values())
+
+    def statuses(self) -> tuple[SourceAccountStatus, ...]:
+        with self._uow_factory() as uow:
+            return uow.source_accounts.list_statuses()
+
+    def settings(self, source_id: SourceId) -> SourceSettingsState:
+        connector = self._registry_provider().get(source_id.value)
+        connector_settings = _connector_settings(connector)
+        with self._uow_factory() as uow:
+            stored = uow.settings.get_source_settings(source_id.value)
+        settings = (
+            connector_settings
+            if stored is None
+            else type(connector_settings).model_validate_json(json.dumps(stored))
+        )
+        return SourceSettingsState(
+            source_id=source_id,
+            settings=settings.model_dump(mode="json"),
+        )
+
+    def update_settings(
+        self, source_id: SourceId, patch: Mapping[str, object]
+    ) -> SourceSettingsState:
+        """Validate through the source package before atomically persisting safe settings."""
+
+        # Persist and publish as one process-local critical section. Without
+        # serialization, two desktop saves can each rebuild from a different
+        # database snapshot and let the older registry publish last.
+        with self._settings_update_lock:
+            connector = self._registry_provider().get(source_id.value)
+            connector_settings = _connector_settings(connector)
+            with self._uow_factory() as uow:
+                stored = uow.settings.get_source_settings(source_id.value)
+                current = (
+                    connector_settings
+                    if stored is None
+                    else type(connector_settings).model_validate_json(json.dumps(stored))
+                )
+                candidate = type(current).model_validate(
+                    {**current.model_dump(), **dict(patch)}, strict=True
+                )
+                safe_settings = candidate.model_dump(mode="json")
+                validate_source_task_payload(safe_settings)
+                if self._validate_settings_change is not None:
+                    self._validate_settings_change(source_id.value, safe_settings)
+                uow.settings.replace_source_settings(source_id.value, safe_settings)
+                uow.commit()
+        return SourceSettingsState(source_id=source_id, settings=safe_settings)
+
+    def configure(
+        self,
+        source_id: SourceId,
+        account_key: str,
+        credentials: Mapping[str, object],
+    ) -> SourceAccountStatus:
+        manifest = self._registry_provider().get(source_id.value).manifest
+        if not manifest.credential_schema:
+            raise ValueError(f"{source_id.value} does not accept backend credentials")
+        key = account_key.strip()
+        if not key:
+            raise ValueError("source account key cannot be empty")
+        validated = SourceCredentialInput.model_validate(dict(credentials), strict=True)
+        plaintext = json.dumps(
+            {"cookie": validated.cookie.get_secret_value()},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        ciphertext = self._cipher.encrypt(plaintext)
+        with self._uow_factory() as uow:
+            uow.source_accounts.upsert_credentials(
+                source_id=source_id.value,
+                account_key=key,
+                encrypted_credentials=ciphertext,
+            )
+            uow.commit()
+        return SourceAccountStatus(source_id=source_id, account_key=key, enabled=True)
+
+    def disconnect(self, source_id: SourceId, account_key: str) -> SourceAccountDisconnectResult:
+        """Delete encrypted account material; repeated calls remain successful and secret-free."""
+
+        self._registry_provider().get(source_id.value)
+        key = account_key.strip()
+        if not key:
+            raise ValueError("source account key cannot be empty")
+        with self._uow_factory() as uow:
+            deleted = uow.source_accounts.delete(source_id=source_id.value, account_key=key)
+            uow.commit()
+        return SourceAccountDisconnectResult(
+            source_id=source_id,
+            account_key=key,
+            disconnected=True,
+            idempotent=not deleted,
+        )
+
+
+class SourceTaskService:
+    """Validate capabilities and own durable claim/complete lease semantics."""
+
+    def __init__(
+        self,
+        uow_factory: Callable[[], SourceTaskUnitOfWork],
+        registry: SourceRegistry | Callable[[], SourceRegistry],
+        *,
+        lease_seconds: int = 360,
+        persistence_timeout_seconds: float = DEFAULT_DATABASE_BUSY_TIMEOUT_SECONDS,
+    ) -> None:
+        if lease_seconds < 1:
+            raise ValueError("source task lease must be positive")
+        if persistence_timeout_seconds <= 0:
+            raise ValueError("source task persistence timeout must be positive")
+        self._uow_factory = uow_factory
+        self._registry_provider = registry if callable(registry) else lambda: registry
+        self._lease_seconds = lease_seconds
+        self._persistence_timeout_seconds = persistence_timeout_seconds
+
+    @property
+    def persistence_timeout_seconds(self) -> float:
+        """Finite local persistence bound, configured to match SQLite busy timeout."""
+
+        return self._persistence_timeout_seconds
+
+    def enqueue(
+        self,
+        request: SourceTaskRequest,
+        *,
+        task_id: UUID | None = None,
+        request_deadline_at: datetime | None = None,
+    ) -> UUID:
+        """Persist validated work only when the source advertises the operation."""
+
+        connector = self._registry_provider().get(request.source_id)
+        spec = connector.manifest.operation_spec(request.operation)
+        if not spec.browser_assisted:
+            raise UnsupportedSourceOperationError(
+                f"{request.source_id.value} {request.operation.value} is not browser-assisted"
+            )
+        _safe_json_object(request.payload.model_dump(mode="json"))
+        now = datetime.now(UTC)
+        deadline = request_deadline_at or now + timedelta(seconds=self._lease_seconds)
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError("source task request deadline must be timezone-aware")
+        resolved_task_id = task_id or uuid4()
+        with self._uow_factory() as uow:
+            persisted_id = uow.source_tasks.add_pending(
+                request,
+                task_id=resolved_task_id,
+                request_deadline_at=deadline,
+                now=now,
+            )
+            uow.commit()
+        return persisted_id
+
+    def claim(self, source_id: str) -> ClaimedSourceTask | None:
+        """Lease durable work by its enqueue-time contract, independent of current mode."""
+
+        SourceId(source_id)
+        token = uuid4().hex
+        with self._uow_factory() as uow:
+            task = uow.source_tasks.claim(
+                source_id=source_id,
+                lease_token=token,
+                lease_seconds=self._lease_seconds,
+            )
+            uow.commit()
+        return task
+
+    def complete(
+        self,
+        task_id: UUID,
+        lease_token: str,
+        result: BrowserOperationResultValue,
+    ) -> SourceTaskCompletion:
+        """Complete once; identical retries succeed without rewriting the result."""
+
+        with self._uow_factory() as uow:
+            snapshot = uow.source_tasks.get_snapshot(task_id)
+            raw_result = result.model_dump(mode="json")
+            safe_result = _safe_json_object(raw_result)
+            sanitized_result = _sanitize_public_url_values(safe_result)
+            typed_result = BrowserOperationResult.validate_python(sanitized_result)
+            serialized_result = typed_result.model_dump(mode="json")
+            source_id = uow.source_tasks.source_id(task_id)
+            try:
+                if snapshot.operation is not typed_result.operation:
+                    raise ValueError("source task completion operation does not match request")
+                connector = self._registry_provider().get(source_id.value)
+                validator = getattr(connector, "validate_browser_completion", None)
+                if not callable(validator):
+                    raise TypeError("source connector has no browser result validator")
+                validator(typed_result.operation, typed_result.items)
+            except (TypeError, ValueError):
+                failure = SourceTaskFailure(
+                    code="result_mismatch",
+                    error_type="SourceResultMismatch",
+                )
+                completion = uow.source_tasks.fail(
+                    task_id=task_id,
+                    lease_token=lease_token,
+                    failure=_safe_json_object(failure.model_dump(mode="json")),
+                )
+                uow.commit()
+                return completion
+            completion = uow.source_tasks.complete(
+                task_id=task_id,
+                lease_token=lease_token,
+                result=serialized_result,
+            )
+            uow.commit()
+        return completion
+
+    def fail(
+        self,
+        task_id: UUID,
+        lease_token: str,
+        *,
+        code: str,
+        error_type: str,
+    ) -> SourceTaskCompletion:
+        """Finish browser work with a bounded classification and no page error text."""
+
+        failure = SourceTaskFailure.model_validate(
+            {"code": code, "error_type": error_type}, strict=True
+        )
+        safe_failure = _safe_json_object(failure.model_dump(mode="json"))
+        with self._uow_factory() as uow:
+            completion = uow.source_tasks.fail(
+                task_id=task_id,
+                lease_token=lease_token,
+                failure=safe_failure,
+            )
+            uow.commit()
+        return completion
+
+    def snapshot(self, task_id: UUID) -> SourceTaskSnapshot:
+        """Read task state without exposing lease or persistence details."""
+
+        with self._uow_factory() as uow:
+            snapshot = uow.source_tasks.get_snapshot(task_id)
+            uow.commit()
+        return snapshot
+
+    def cancel(self, task_id: UUID) -> SourceTaskSnapshot:
+        """Make pending or leased browser work durably non-actionable."""
+
+        with self._uow_factory() as uow:
+            snapshot = uow.source_tasks.cancel(task_id)
+            uow.commit()
+        return snapshot
+
+
+def _safe_json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Validate JSON recursively and reject credential-shaped keys without echoing values."""
+
+    reject_credential_fields(value)
+    frozen = freeze_metadata(value)
+    result = _JSON_OBJECT.validate_python(serialize_metadata(frozen), strict=True)
+    return result
+
+
+def _sanitize_public_url_values(value: JsonValue) -> JsonValue:
+    """Recursively remove credential query parameters from transport URL strings."""
+
+    if isinstance(value, str):
+        sanitized = sanitize_public_url(value)
+        return sanitized if isinstance(sanitized, str) else value
+    if isinstance(value, list):
+        return [_sanitize_public_url_values(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_public_url_values(item) for key, item in value.items()}
+    return value
+
+
+def validate_source_task_payload(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Public transport-boundary validation for source-task request/result payloads."""
+
+    return _safe_json_object(value)
+
+
+# Re-export the request from the service module as the application-facing task API.
+__all__ = [
+    "AbandonedSourceTaskError",
+    "CancelledSourceTaskError",
+    "CredentialShapedPayloadError",
+    "SourceTaskCompletionConflictError",
+    "SourceTaskRequest",
+    "SourceTaskService",
+    "SourceAccountService",
+    "StaleSourceTaskLeaseError",
+    "validate_source_task_payload",
+]

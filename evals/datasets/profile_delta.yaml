@@ -1,0 +1,33 @@
+name: profile_delta_foundation_v1
+cases:
+  - name: adds_evidence_backed_interest
+    inputs:
+      profile:
+        revision: 0
+        narrative: "Enjoys practical creative software workflows."
+        facets: []
+        confidence: 0.0
+        created_at: "2026-07-17T00:00:00Z"
+      evidence:
+        - id: "00000000-0000-0000-0000-000000000101"
+          content: "Repeatedly completed long tutorials about procedural 3D modeling."
+    expected_output:
+      narrative: "Enjoys practical creative software workflows and procedural 3D modeling."
+      upserts:
+        - name: interests
+          value: "procedural 3D modeling"
+          weight: 0.8
+          confidence: 0.8
+          evidence_ids:
+            - "00000000-0000-0000-0000-000000000101"
+          overridden: false
+      removals: []
+    metadata:
+      rubric: "Every inferred facet is supported by supplied evidence and no user override is removed."
+      min_changes: 1
+      max_changes: 3
+      required_concepts:
+        - "procedural 3D modeling"
+        - "procedural modeling"
+evaluators:
+  - ProfileDeltaInvariants

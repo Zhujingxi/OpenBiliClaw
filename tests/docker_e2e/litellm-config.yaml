@@ -1,0 +1,16 @@
+# Start with no deployments. The product driver creates the three aliases through
+# LiteLLM's authenticated /model/new management endpoint after the proxy is ready,
+# exercising the same database-backed path as Admin UI model configuration.
+model_list: []
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  num_retries: 0
+  # Production cache policy is covered by litellm/config.yaml contracts. The
+  # deterministic E2E provider disables proxy caching so every typed task is
+  # independently exercised across its own JSON schema.
+  cache: false
+  turn_off_message_logging: true

@@ -1,0 +1,22 @@
+# Providers and credentials are intentionally absent. Add deployments through
+# LiteLLM Admin at /ui and publish them under exactly these model groups:
+# obc-interactive, obc-analysis, and obc-embedding (mode: embedding).
+model_list: []
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+
+litellm_settings:
+  # LiteLLM is the only layer that may retry provider/network failures or cache
+  # provider responses. OpenBiliClaw performs semantic output retries only.
+  num_retries: 2
+  cache: true
+  # LiteLLM v1.92 defaults a proxy cache with no explicit type to Redis.
+  # This deployment intentionally has no Redis service, so select the
+  # supported process-local cache explicitly.
+  cache_params:
+    type: local
+  # Keep prompts and model responses out of LiteLLM application logs. The
+  # OpenBiliClaw ai_runs table likewise stores no input/prompt channel.
+  turn_off_message_logging: true
