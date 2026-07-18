@@ -5550,6 +5550,10 @@ ${cardFeedbackBarHtml()}`;
         last_account_sync_at: String(merged.last_account_sync_at ?? ""),
         last_account_sync_error: String(merged.last_account_sync_error ?? ""),
         last_account_sync_error_kind: String(merged.last_account_sync_error_kind ?? ""),
+        // This is an explicit-key whitelist: a field missing here is dropped
+        // silently, which is how the backend copy stopped reaching the chip.
+        last_account_sync_message: String(merged.last_account_sync_message ?? ""),
+        last_account_sync_severity: String(merged.last_account_sync_severity ?? ""),
         live_summary: String(merged.live_summary || merged.message || merged.state || "")
       };
     }

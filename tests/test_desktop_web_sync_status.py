@@ -46,6 +46,23 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     # Timestamps go through the shared local-time formatter, not raw ISO.
     assert "formatLocalTime(" in render_body
 
+    # normalizeRuntimeStatus() rebuilds the payload from an explicit key list,
+    # so a field missing there is dropped before render. That is exactly how
+    # the backend copy stopped reaching this chip once already — and how the
+    # same field was lost on the Python side before that.
+    normalize = re.search(
+        r"function normalizeRuntimeStatus\((?P<args>[^)]*)\) \{(?P<body>.*?)\n    \}",
+        app_js,
+        flags=re.S,
+    )
+    assert normalize is not None, "desktop normalizeRuntimeStatus not found"
+    for field in (
+        "last_account_sync_error_kind",
+        "last_account_sync_message",
+        "last_account_sync_severity",
+    ):
+        assert field in normalize.group("body"), f"{field} dropped by the normalizer whitelist"
+
     assert 'id="accountSyncStatus"' in index_html
     assert ".account-sync-status" in app_css
 
