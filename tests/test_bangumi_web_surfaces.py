@@ -186,6 +186,66 @@ def test_all_surfaces_name_the_extension_tier_in_the_rejection_copy() -> None:
         assert "bgm.tv" in copy, name
 
 
+def test_every_token_field_explains_the_three_ways_to_supply_an_account() -> None:
+    """The token/username/extension choice is explained wherever it is asked.
+
+    Five screens ask for a Bangumi token and each stores its own copy, so the
+    wording drifts (rule 5). The setup wizard is where a new user meets the
+    field first and it used to say only "约 1 年有效" — nothing about what the
+    token buys, and nothing about the fact that leaving both fields blank is a
+    valid path when the browser is already logged into bgm.tv. That silence is
+    what made the admission bug plausible in the first place.
+
+    Each screen must name all three ways in, and the trade-off that picks
+    between them: the token reads private collections, the public username
+    does not, and the extension-read account may be unverified.
+    """
+    screens = {
+        "setup init": ROOT / "src/openbiliclaw/web/setup/index.html",
+        "desktop init": ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js",
+        "desktop settings": ROOT / "src/openbiliclaw/web/desktop/index.html",
+        "popup init": ROOT / "extension/popup/popup.js",
+        "popup settings": ROOT / "extension/popup/popup.html",
+    }
+    doc_anchor = (
+        "https://github.com/whiteguo233/OpenBiliClaw/blob/main/"
+        "docs/modules/bangumi.md#获取-bangumi-个人令牌"
+    )
+    for name, path in screens.items():
+        source = path.read_text(encoding="utf-8")
+        marker = "Bangumi 账号三选一"
+        assert marker in source, f"{name} lost the three-way explanation"
+        copy = source[source.index(marker) : source.index(marker) + 420]
+        assert "个人令牌" in copy, name  # tier 1
+        assert "私密收藏" in copy, name  # ...and why it is the most complete
+        assert "公开用户名" in copy, name  # tier 2
+        assert "公开收藏" in copy, name  # ...and its narrower reach
+        assert "bgm.tv" in copy, name  # tier 3
+        assert "未经校验" in copy, name  # ...and its caveat
+        # Step-by-step token instructions live in the doc, not in the UI: the
+        # generation page is somebody else's site and would go stale here.
+        assert doc_anchor in source, f"{name} lost the token how-to link"
+        assert "https://next.bgm.tv/demo/access-token" in source, name
+
+    # The linked anchor has to exist, or every screen deep-links to nothing.
+    module_doc = (ROOT / "docs/modules/bangumi.md").read_text(encoding="utf-8")
+    assert "\n## 获取 Bangumi 个人令牌\n" in module_doc
+
+
+def test_token_how_to_doc_covers_prerequisites_validity_and_expiry() -> None:
+    """The doc the UI defers to must actually answer what the UI stopped saying."""
+    doc = (ROOT / "docs/modules/bangumi.md").read_text(encoding="utf-8")
+    section = doc[doc.index("## 获取 Bangumi 个人令牌") :]
+    section = section[: section.index("\n## ", 1)] if "\n## " in section[1:] else section
+    assert "登录" in section  # must be signed in to bgm.tv first
+    assert "https://next.bgm.tv/demo/access-token" in section
+    assert "1 年" in section  # validity
+    assert "视同密码" in section  # handling
+    assert "token_state" in section and "rejected" in section  # expiry signal
+    assert "令牌已失效" in section  # ...as the status area words it
+    assert "bgm.tv 实际页面为准" in section  # external page may change
+
+
 def test_setup_exposes_anonymous_bangumi_bootstrap() -> None:
     html = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 

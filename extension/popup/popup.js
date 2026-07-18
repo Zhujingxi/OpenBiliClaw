@@ -1408,12 +1408,31 @@ function _renderInitSources() {
   elements.initSources.append(bangumiTokenRow);
   const bangumiTokenHint = document.createElement("p");
   bangumiTokenHint.className = "init-sources-hint";
+  // Spell out the three-way choice: the backend accepts a token, an explicit
+  // public username, OR the account the extension reads off a logged-in
+  // bgm.tv page. Leaving both fields empty is a valid path, and users who
+  // aren't told that assume Bangumi needs a token they haven't got.
   const bangumiTokenLink = document.createElement("a");
   bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
   bangumiTokenLink.target = "_blank";
   bangumiTokenLink.rel = "noopener noreferrer";
   bangumiTokenLink.textContent = "生成个人令牌";
-  bangumiTokenHint.append(bangumiTokenLink, document.createTextNode("（约 1 年有效，视同密码保管）"));
+  const bangumiTokenDocLink = document.createElement("a");
+  bangumiTokenDocLink.href =
+    "https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌";
+  bangumiTokenDocLink.target = "_blank";
+  bangumiTokenDocLink.rel = "noopener noreferrer";
+  bangumiTokenDocLink.textContent = "取令牌步骤";
+  bangumiTokenHint.append(
+    document.createTextNode(
+      "Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；" +
+        "公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，" +
+        "扩展会自动识别账号（只拿到账号名，可能未经校验）。",
+    ),
+    bangumiTokenLink,
+    document.createTextNode("（约 1 年有效，视同密码保管）·"),
+    bangumiTokenDocLink,
+  );
   elements.initSources.append(bangumiTokenHint);
 
   elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {

@@ -1597,7 +1597,7 @@
       // Optional personal access token: identifies the account via /v0/me and
       // reads private collections; when set, the username above is auto-resolved.
       const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
-      const bangumiTokenHint = `<p class="init-sources-hint"><a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）</p>`;
+      const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
       return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
