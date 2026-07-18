@@ -45,6 +45,7 @@ from openbiliclaw.llm.json_utils import (
     parse_llm_json_tolerant,
 )
 from openbiliclaw.llm.prompts import build_profile_consolidation_prompt
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
@@ -883,12 +884,17 @@ class ProfileConsolidator:
             likes_clusters=likes_payload,
             dislikes_clusters=dislikes_payload,
         )
+        # Cluster merge/keep decisions are judged purely from the interest-label
+        # payload in the user prompt (see ``build_profile_consolidation_prompt``);
+        # the user's portrait/core memory is irrelevant to whether two labels denote
+        # the same interest. Opt out of the default core-memory injection.
         response = await self._llm_service.complete_structured_task(
             system_instruction=messages[0]["content"],
             user_input=messages[1]["content"],
             temperature=0.2,
             max_tokens=DEFAULT_STRUCTURED_MAX_TOKENS,
             caller="soul.consolidation",
+            **without_core_memory_kwargs(self._llm_service.complete_structured_task),
         )
         parsed = parse_llm_json_tolerant(response.content)
         if not isinstance(parsed, dict):

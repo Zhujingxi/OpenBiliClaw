@@ -44,12 +44,12 @@ so every legacy import path stays valid):
 | Avoidance speculation | 12h speculation | `profile_views.speculation(profile)` — `soul/avoidance_speculator.py:1271` (getattr guard keeps `{}` fallback for non-object profiles) | string, portrait excluded | No | Yes |
 | Page extractor | Per fetched page | none — profile not read; `inject_core_memory=False` — `sources/llm_extractor.py:85` | (none) | No | Yes |
 | Chat (Socratic dialogue) | Per chat turn | `chat_core_memory` via `render_core_memory_blocks` → `complete_with_core_memory` — `llm/service.py` | effective core memory, split: system = portrait + 核心特质/价值观/深层需求/MBTI + 偏好摘要 (stable); user = 近期观察 + 当前洞察 (volatile) | Yes | Yes |
-| Consolidator judge | 12h consolidation | inherits `inject_core_memory=True` — `soul/consolidator.py:809` | core memory (unaudited; Task 8) | Yes | Yes |
-| Layer updaters (×3) | On profile update | inherits `inject_core_memory=True` — `soul/layer_updaters.py:320`, `:415`, `:526` | core memory (unaudited; Task 8) | Yes | Yes |
-| Category migration | On migration | inherits `inject_core_memory=True` — `soul/category_migration.py:141` | core memory (unaudited; Task 8) | Yes | Yes |
-| Pool purge (dislike match) | On new dislike | inherits `inject_core_memory=True` — `soul/pool_purge.py:196` | core memory (unaudited; Task 8) | Yes | Yes |
-| Dialogue-insight analyzer | Post-chat | inherits `inject_core_memory=True` — `soul/dialogue_insight_analyzer.py:64` | core memory (plausibly wanted; Task 8) | Yes | Yes |
-| Probe sentiment judge | Per probe reply | inherits `inject_core_memory=True` — `api/app.py:6241` | core memory (plausibly wanted; Task 8) | Yes | Yes |
+| Consolidator judge | 12h consolidation | `inject_core_memory=False` (opt-out) — `soul/consolidator.py:814` | none (judges cluster payload only) | No | Yes |
+| Layer updaters (×3) | On profile update | `inject_core_memory=True` (intentional) — `soul/layer_updaters.py:324`, `:423`, `:538` | core memory (kept: connects evidence to user context) | Yes | Yes |
+| Category migration | On migration | `inject_core_memory=False` (opt-out) — `soul/category_migration.py:145` | none (pure taxonomy mapping) | No | Yes |
+| Pool purge (dislike match) | On new dislike | `inject_core_memory=False` (opt-out) — `soul/pool_purge.py:201` | none (judges dislike-vs-candidate payload only) | No | Yes |
+| Dialogue-insight analyzer | Post-chat | `inject_core_memory=False` (opt-out) — `soul/dialogue_insight_analyzer.py:70` | core memory already in user prompt (injection was a duplicate) | Yes (user prompt) | Yes |
+| Probe sentiment judge | Per probe reply | `inject_core_memory=True` (intentional) — `api/app.py:6244` | core memory (kept: chat-adjacent tone reading) | Yes | Yes |
 | Related-chain seed | Per discovery cycle | direct read `favorite_up_users[:1]` — `discovery/strategies/related_chain.py:392` | favorite UPs only | No | No |
 | `/api/profile-summary` (UI) | On request | direct read — `api/app.py:3990` | full profile incl. portrait | Yes | No |
 | OpenClaw `get_profile` | On request | `ProfileResponse` — `integrations/openclaw/operations.py:105` | portrait + 5 traits / 5 needs / 5 interests | Yes (external) | No |
@@ -69,3 +69,25 @@ Every content-pipeline serializer (`build_profile_summary`,
 `build_query_generation_profile_summary`, the `speculation` view →
 `to_llm_context(include_portrait=False)`) MUST exclude it. Enforced by
 `tests/test_profile_views_guards.py`.
+
+## Maintenance-caller injection audit (Task 8)
+
+Per-caller decision for the eight `complete_structured_task` /
+`complete_with_core_memory` sites that inherited the default core-memory
+injection. **Opt-out** = added `inject_core_memory=False`; **keep** = documented
+in-code as intentionally core-memory-bearing.
+
+| Call site | Decision | Reason |
+| --- | --- | --- |
+| `soul/consolidator.py:814` | opt-out | Merge/keep judged purely from the interest-label cluster payload; portrait irrelevant to whether two labels denote the same interest. |
+| `soul/layer_updaters.py:324` (role) | keep | Role-layer self-update; injected "who the user is" context helps connect new evidence to the user's life stage. |
+| `soul/layer_updaters.py:423` (values) | keep | Values-layer delta; core context legitimately informs whether a value should be added/removed (author-curated 用户背景 confirms the intent). |
+| `soul/layer_updaters.py:538` (core) | keep | Deepest core layer under strongest diff protection; core context helps weigh whether evidence justifies a change. |
+| `soul/category_migration.py:145` | opt-out | Pure taxonomy canonicalization of category labels; no user-specific judgment. |
+| `soul/pool_purge.py:201` | opt-out | Dislike-match judgment fully specified by the user prompt (new dislikes + all dislikes + candidates). |
+| `soul/dialogue_insight_analyzer.py:70` | opt-out | The prompt already serializes the full `core_memory` dict into the user message; injection was an exact duplicate. Model still sees core memory via the explicit param. |
+| `api/app.py:6244` (probe sentiment) | keep | Chat-adjacent sentiment classification; reading tone in the user's own context is desirable. |
+
+Guarded by `tests/test_maintenance_injection_audit.py` (pool purge + dialogue
+insight), `tests/test_profile_consolidator.py::test_consolidation_judge_opts_out_of_core_memory_injection`,
+and `tests/test_category_migration.py::test_category_mapping_opts_out_of_core_memory_injection`.

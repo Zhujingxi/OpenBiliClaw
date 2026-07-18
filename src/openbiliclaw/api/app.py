@@ -8423,6 +8423,9 @@ def create_app(
 
         messages = build_probe_sentiment_prompt(domain=domain, user_message=user_message)
         try:
+            # Intentionally carries core memory (chat-adjacent): classifying the
+            # sentiment of a probe reply benefits from knowing who the user is, so
+            # tone/intent is read in the user's own context. Kept per Task 8 audit.
             response = await asyncio.wait_for(
                 llm.complete_with_core_memory(
                     system_instruction=messages[0]["content"],

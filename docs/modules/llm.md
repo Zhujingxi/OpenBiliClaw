@@ -287,6 +287,24 @@ messages = build_dialogue_insight_prompt(
 
 `anchor` 是可选公开参数。未传或传 `None` 时，builder 不增加任何锚段，继续输出普通 `{candidates, settles}` 契约；传入时只在 user message 增加当前锚和 `anchor.relation` 契约，允许 hypothesis 的 `support/contradict/revise/ambiguous/unrelated` 或 confusion 的 `answer/ambiguous/unrelated`。调用方仍必须用持久化 ref+generation 做 CAS，prompt 中的 generation 不是授权凭证。
 
+### Core-memory 注入默认表（维护/画像类调用点）
+
+`complete_structured_task()` / `complete_with_core_memory()` 默认 `inject_core_memory=True`。
+下表记录 Soul 维护类调用点经 Task 8 审计后的最终注入策略；完整逐点理由见
+[`docs/profile-usage.md`](../profile-usage.md) 的「Maintenance-caller injection audit」。
+
+| 调用点 | 注入 | 依据 |
+| --- | --- | --- |
+| `soul/consolidator.py` 簇裁决 | ❌ opt-out | 只按 user prompt 的簇成员列表裁决合并/保留，画像无关 |
+| `soul/category_migration.py` 分类映射 | ❌ opt-out | 纯分类名规范化，无用户特定判断 |
+| `soul/pool_purge.py` 厌恶精判 | ❌ opt-out | 判定材料（新厌恶 + 全部厌恶 + 候选）已全在 user prompt |
+| `soul/dialogue_insight_analyzer.py` 洞察抽取 | ❌ opt-out | prompt 已显式 `json.dumps(core_memory)` 进 user 消息，注入是重复 |
+| `soul/layer_updaters.py` role / values / core 更新 ×3 | ✅ 保留 | 更新画像层自身，注入上下文帮 LLM 把证据 connect 到用户情境 |
+| `api/app.py` 探针情感判定 | ✅ 保留 | 聊天邻接，在用户自身语境里读语气/意图 |
+
+维护类调用点关闭注入统一用 `llm.task_options.without_core_memory_kwargs(fn)`，它在旧 stub
+不支持该参数时安全降级为空 kwargs。
+
 ### 结构化 JSON 解析 helper
 
 ```python

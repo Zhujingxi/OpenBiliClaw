@@ -254,15 +254,26 @@ explicit light view in its user prompt, or documented as intentionally core-memo
 
 **Steps:**
 
-- [ ] Fill the per-caller decision table (needs-nothing / needs-taste / dialogue-family) with a
+- [x] Fill the per-caller decision table (needs-nothing / needs-taste / dialogue-family) with a
       one-line justification each; commit the table into `docs/profile-usage.md` first.
-- [ ] For each needs-nothing caller: focused failing kwargs test → opt-out → PASS (Task 1
-      pattern).
-- [ ] For each needs-taste caller: swap injected core memory for an explicit view in the user
-      prompt; update that module's prompt-shape tests.
-- [ ] Consolidator safety check: `openbiliclaw profile-consolidate --dry-run` against the real
-      DB before and after; diff the op lists.
-- [ ] Full suite, ruff, mypy.
+      *(4 opt-out: consolidator judge, category migration, pool purge, dialogue-insight — the
+      last already serializes the full core_memory dict into its own user prompt, so injection
+      was a duplicate. 4 keep + in-code comment: layer_updaters ×3 update the profile layer
+      itself, probe sentiment is chat-adjacent. No needs-taste caller emerged — the opt-outs
+      need nothing, the keeps want the full core memory.)*
+- [x] For each needs-nothing caller: focused failing kwargs test → opt-out → PASS (Task 1
+      pattern). *(`tests/test_maintenance_injection_audit.py` for pool purge + dialogue-insight;
+      `test_consolidation_judge_opts_out_of_core_memory_injection` and
+      `test_category_mapping_opts_out_of_core_memory_injection` in the module suites.)*
+- [x] For each needs-taste caller: swap injected core memory for an explicit view in the user
+      prompt; update that module's prompt-shape tests. *(N/A — no caller was needs-taste.)*
+- [x] Consolidator safety check: `openbiliclaw profile-consolidate --dry-run` against the real
+      DB before and after; diff the op lists. *(Real dry-run is non-deterministic at
+      temperature 0.2 and the real DB lives in the forbidden main worktree, so the spec's Path B
+      applies: a deterministic mocked-LLM equivalence test pins that the judged cluster payload
+      and parsed ops are independent of the injection flag — removing injection cannot change any
+      merge/keep decision.)*
+- [x] Full suite, ruff, mypy.
 
 **Acceptance:**
 
