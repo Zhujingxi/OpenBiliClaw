@@ -193,9 +193,11 @@ def test_connection_types_are_grouped_searchable_and_descriptor_driven() -> None
 
 def test_credentials_and_embedding_shared_settings_keep_the_full_contract() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    combined = model + shared_render
 
     for action in ("keep", "set", "env", "clear"):
-        assert f'["{action}",' in model
+        assert f'["{action}",' in combined
     for marker in (
         "credential.action",
         "credential.status",
@@ -207,7 +209,7 @@ def test_credentials_and_embedding_shared_settings_keep_the_full_contract() -> N
         "settings.similarity_threshold",
         "settings.multimodal_enabled",
     ):
-        assert marker in model
+        assert marker in combined
 
 
 def test_runtime_override_migration_and_field_errors_are_rendered() -> None:
@@ -473,8 +475,12 @@ def test_mobile_numeric_preflight_and_error_lifecycle_use_production_seams() -> 
     assert 'aria-describedby="mobileModelEmbeddingSimilarityError"' in model
     assert "data-mobile-model-num-ctx-error" in model
     assert "mobileModelSelectedNumCtxError" in model
-    assert 'field.name === "num_ctx"' in model
-    assert 'min="0" step="1" inputmode="numeric"' in model
+    assert 'field.name === "num_ctx"' in model or 'field.name === "num_ctx"' in _read(
+        WEB / "shared/model-config-render.js"
+    )
+    numeric_attrs = 'min="0" step="1" inputmode="numeric"'
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    assert numeric_attrs in model or numeric_attrs in shared_render
     assert "parseMobileModelNumericDraft(event.target.value)" in model
     assert "runtimeFieldErrors" not in model
 
@@ -521,8 +527,10 @@ def test_opener_list_and_detail_focus_are_restored_with_semantic_controls() -> N
 
 def test_dynamic_model_data_is_escaped_before_inner_html_rendering() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    combined = model + shared_render
 
-    assert "function escapeHtml(" in model
+    assert "function escapeHtml(" in combined
     for value in (
         "record.id",
         "record.name",
@@ -532,7 +540,7 @@ def test_dynamic_model_data_is_escaped_before_inner_html_rendering() -> None:
         "override.source",
         "error.message",
     ):
-        assert f"escapeHtml({value})" in model
+        assert f"escapeHtml({value})" in combined
 
 
 def test_mobile_model_controls_have_touch_targets_and_visible_focus() -> None:
