@@ -67,7 +67,7 @@
 5. **设置页**
    - 顶部设置 overlay 保留 Saved Sync，并新增独立 Models section；两者分别保存，模型草稿不会进入通用 `/api/config` payload
    - Models 按 Chat / Embedding / Runtime 三个 tab 组织；Chat 与 Embedding 均先显示最多 10 项的稳定-ID 有序列表，再进入详情
-   - 详情页通过 Back 回列表且保留草稿和选中 ID；移动排序以 44px 触摸区的 Move Up / Move Down 为主，不依赖拖拽
+   - 详情页通过 Back 回列表且保留草稿和选中 ID；移动排序以 44px 触摸区的「上移 / 下移」为主，按设计不提供拖拽；编辑器文案中文优先（「未命名连接」等），Chat / Embedding / Runtime / Primary / Fallback 等技术术语保留英文
    - 连接类型完全由 descriptor 分组、搜索、preset 与字段定义驱动；credentials 使用 `keep / set / env / clear` 显式动作
    - Embedding 的 model、维度、相似度阈值和多模态开关是 route 共享设置；Runtime 编辑 Chat concurrency 与 timeout
    - 保存使用 revisioned `PUT /api/model-config`，失败保留草稿，`409` 与字段错误就地展示；精确 probe 绑定 revision、route kind、稳定 ID 与 draft fingerprint
@@ -106,6 +106,7 @@ src/openbiliclaw/web/
 │   ├── view-models.js  # 后端响应 → 移动端渲染字段适配
 │   ├── app-launch.js   # 移动端深链拉起目标平台 App + 网页回落
 │   ├── mobile-model-settings-controller.js # Models 资源 readiness、精确草稿渲染与保存校验
+│   ├── saved-sync-runtime.js # 保存同步运行时：../shared/saved-sync-core.js 的薄适配器，注入 Date.now / 定时器 / 页面可见性 / activeElement
 │   ├── views/
 │   │   ├── recommend.js  # 推荐页渲染 & 交互
 │   │   ├── profile.js    # 画像页渲染 & 交互
@@ -121,7 +122,8 @@ src/openbiliclaw/web/
 │       ├── messages.js      # 消息收件箱 overlay
 │       └── pull-refresh.js  # 下拉刷新
 └── shared/
-    └── model-config-state.js # 桌面与移动 Web 共用的 DOM-free 模型草稿/竞态状态
+    ├── model-config-state.js # 桌面与移动 Web 共用的 DOM-free 模型草稿/竞态状态
+    └── saved-sync-core.js    # 桌面与移动共用的保存同步核心（surface-neutral，ES module + globalThis.OBCSavedSyncCore）
 ```
 
 ### 后端改动
@@ -179,10 +181,9 @@ if web_dir.is_dir():
 |------|------|
 | 推荐 | `GET /api/recommendations`, `POST /api/recommendations/reshuffle`, `POST /api/recommendations/append`, `POST /api/recommendation-click`, `GET /api/runtime-status` |
 | Delight | `GET /api/delight/pending-batch`, `POST /api/delight/respond` |
-| 画像 | `GET /api/profile-summary` |
+| 画像（含认知更新历史分页） | `GET /api/profile-summary`（`limit` / `cursor` 分页，返回 `has_more_cognition_updates` / `next_cognition_cursor`；移动端不再调用 `/api/cognition-updates/*`） |
 | 对话 | `POST /api/chat/turns`, `GET /api/chat/turns`, `GET /api/chat/turns/{id}`；主聊天使用 `session=popup&scope=chat` 与插件共享历史 |
 | 消息 | `GET /api/notifications/pending`, `POST /api/notifications/sent` |
-| 认知通知 | `GET /api/cognition-updates/pending`, `POST /api/cognition-updates/seen` |
 | 活动流 | `GET /api/activity-feed` |
 | 兴趣探测 | `GET /api/interest-probes/pending`, `POST /api/interest-probes/respond` |
 | 避雷探针 | `GET /api/avoidance-probes/pending`, `POST /api/avoidance-probes/respond` |

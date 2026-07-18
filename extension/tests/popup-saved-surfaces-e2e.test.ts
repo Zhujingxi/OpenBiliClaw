@@ -9,15 +9,12 @@ import {
   updateBackendEndpoint,
 } from "../popup/popup-backend-config.js";
 import {
-  addToFavorite,
-  addToWatchLater,
-  favoriteStatus,
-  fetchFavorites,
-  fetchWatchLater,
-  removeFromFavorite,
-  removeFromWatchLater,
-  watchLaterStatus,
+  fetchSavedItems,
+  removeSavedItem,
+  saveItem,
+  savedItemStatus,
 } from "../popup/popup-api.js";
+import * as popupApi from "../popup/popup-api.js";
 
 function jsonResponse(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -33,57 +30,71 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function makeItem(bvid, surface) {
+function makeItem(itemKey, listKind) {
+  const [sourcePlatform, contentId] = itemKey.split(":", 2);
   return {
-    bvid,
-    title: `${surface} ${bvid}`,
-    up_name: "测试 UP",
+    item_key: itemKey,
+    content_id: contentId,
+    title: `${listKind} ${contentId}`,
+    author_name: "测试 UP",
     cover_url: "",
-    content_url: `https://www.bilibili.com/video/${bvid}`,
-    source_platform: "bilibili",
+    content_url: `https://www.bilibili.com/video/${contentId}`,
+    source_platform: sourcePlatform,
     added_at: "2026-05-31T12:00:00",
+  };
+}
+
+function savedItemInput(contentId) {
+  return {
+    source_platform: "bilibili",
+    content_id: contentId,
+    content_url: `https://www.bilibili.com/video/${contentId}`,
+    title: `video ${contentId}`,
+    up_name: "测试 UP",
   };
 }
 
 async function startSavedBackend() {
   const store = {
-    "watch-later": new Set(),
-    favorites: new Set(),
+    watch_later: new Map(),
+    favorite: new Map(),
   };
+  const requests = [];
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
-    const match = url.pathname.match(/^\/api\/(watch-later|favorites)(?:\/([^/]+))?$/);
+    requests.push(`${req.method} ${url.pathname}${url.search}`);
+    const match = url.pathname.match(/^\/api\/saved\/(watch_later|favorite)(\/remove|\/status)?$/);
     if (!match) {
       jsonResponse(res, 404, { error: "not_found" });
       return;
     }
 
-    const [, surface, rawBvid] = match;
-    const set = store[surface];
-    const label = surface === "watch-later" ? "watch-later" : "favorite";
+    const [, listKind, action] = match;
+    const map = store[listKind];
 
-    if (req.method === "GET" && rawBvid) {
-      const bvid = decodeURIComponent(rawBvid);
-      jsonResponse(res, 200, { saved: set.has(bvid), total: set.size });
-      return;
-    }
-    if (req.method === "GET") {
-      jsonResponse(res, 200, {
-        items: Array.from(set).map((bvid) => makeItem(bvid, label)),
-        total: set.size,
-      });
-      return;
-    }
-    if (req.method === "POST") {
+    if (req.method === "POST" && !action) {
       const body = await readJson(req);
-      const bvid = String(body.bvid || "").trim();
-      if (bvid) set.add(bvid);
-      jsonResponse(res, 200, { saved: true, total: set.size });
+      const itemKey = `${body.source_platform}:${body.content_id}`;
+      map.set(itemKey, body);
+      jsonResponse(res, 200, { ok: true, item_key: itemKey });
       return;
     }
-    if (req.method === "DELETE" && rawBvid) {
-      set.delete(decodeURIComponent(rawBvid));
-      jsonResponse(res, 200, { saved: false, total: set.size });
+    if (req.method === "POST" && action === "/remove") {
+      const body = await readJson(req);
+      map.delete(String(body.item_key || ""));
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "GET" && action === "/status") {
+      const itemKey = url.searchParams.get("item_key") || "";
+      jsonResponse(res, 200, { item_key: itemKey, saved: map.has(itemKey) });
+      return;
+    }
+    if (req.method === "GET" && !action) {
+      jsonResponse(res, 200, {
+        items: Array.from(map.keys()).map((key) => makeItem(key, listKind)),
+        total: map.size,
+      });
       return;
     }
 
@@ -93,31 +104,40 @@ async function startSavedBackend() {
   await new Promise((resolveListen) => {
     server.listen(0, "127.0.0.1", resolveListen);
   });
-  return { server, port: server.address().port };
+  return { server, port: server.address().port, requests };
 }
 
-test("popup saved surfaces round-trip through api clients and are wired in the UI", async () => {
-  const { server, port } = await startSavedBackend();
+test("popup saved surfaces round-trip through the platform-neutral saved API", async () => {
+  const { server, port, requests } = await startSavedBackend();
   __resetBackendEndpointForTests();
   await updateBackendEndpoint("http", "127.0.0.1", port);
 
   try {
-    assert.deepEqual(await watchLaterStatus("BV1E2E"), { saved: false, total: 0 });
-    assert.deepEqual(await favoriteStatus("BV1E2E"), { saved: false, total: 0 });
+    assert.deepEqual(await savedItemStatus("watch_later", "bilibili:BV1E2E"), {
+      item_key: "bilibili:BV1E2E",
+      saved: false,
+    });
 
-    assert.deepEqual(await addToWatchLater(" BV1E2E "), { saved: true, total: 1 });
-    assert.deepEqual(await addToFavorite("BV1E2E"), { saved: true, total: 1 });
-    assert.deepEqual(await watchLaterStatus("BV1E2E"), { saved: true, total: 1 });
-    assert.deepEqual(await favoriteStatus("BV1E2E"), { saved: true, total: 1 });
-    assert.equal((await fetchWatchLater()).items[0].bvid, "BV1E2E");
-    assert.equal((await fetchFavorites()).items[0].bvid, "BV1E2E");
+    await saveItem("watch_later", savedItemInput("BV1E2E"));
+    await saveItem("favorite", savedItemInput("BV1E2E"));
+    assert.equal((await savedItemStatus("watch_later", "bilibili:BV1E2E")).saved, true);
+    assert.equal((await savedItemStatus("favorite", "bilibili:BV1E2E")).saved, true);
+    assert.equal((await fetchSavedItems("watch_later")).items[0].item_key, "bilibili:BV1E2E");
+    assert.equal((await fetchSavedItems("favorite")).items[0].item_key, "bilibili:BV1E2E");
 
-    await removeFromWatchLater("BV1E2E");
-    assert.deepEqual(await watchLaterStatus("BV1E2E"), { saved: false, total: 0 });
-    assert.deepEqual(await favoriteStatus("BV1E2E"), { saved: true, total: 1 });
+    await removeSavedItem("watch_later", "bilibili:BV1E2E");
+    assert.equal((await savedItemStatus("watch_later", "bilibili:BV1E2E")).saved, false);
+    assert.equal((await savedItemStatus("favorite", "bilibili:BV1E2E")).saved, true);
 
-    await removeFromFavorite("BV1E2E");
-    assert.deepEqual(await favoriteStatus("BV1E2E"), { saved: false, total: 0 });
+    await removeSavedItem("favorite", "bilibili:BV1E2E");
+    assert.equal((await savedItemStatus("favorite", "bilibili:BV1E2E")).saved, false);
+
+    // Every call went to the canonical /api/saved/* routes — never the legacy
+    // Bilibili-only /api/watch-later or /api/favorites endpoints.
+    assert.ok(requests.length > 0);
+    assert.ok(requests.every((line) => line.includes("/api/saved/")));
+    assert.ok(requests.every((line) => !line.includes("/api/watch-later")));
+    assert.ok(requests.every((line) => !line.includes("/api/favorites")));
 
     const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
     const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
@@ -148,5 +168,24 @@ test("popup saved surfaces round-trip through api clients and are wired in the U
   } finally {
     __resetBackendEndpointForTests();
     await new Promise((resolveClose) => server.close(resolveClose));
+  }
+});
+
+test("popup-api exposes no legacy bilibili saved exports", () => {
+  for (const name of [
+    "addToWatchLater",
+    "removeFromWatchLater",
+    "watchLaterStatus",
+    "fetchWatchLater",
+    "addToFavorite",
+    "removeFromFavorite",
+    "favoriteStatus",
+    "fetchFavorites",
+  ]) {
+    assert.equal(
+      typeof (popupApi as Record<string, unknown>)[name],
+      "undefined",
+      `legacy export ${name} should be removed`,
+    );
   }
 });

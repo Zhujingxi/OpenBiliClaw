@@ -32,9 +32,9 @@ import {
 
 const CONFIG_RELOADED_TYPE = "config_reloaded";
 const CATEGORY_LABELS = {
-  api_protocol: "API protocols",
-  local_runtime: "Local runtimes",
-  oauth: "OAuth connections",
+  api_protocol: "API 协议",
+  local_runtime: "本地 Runtime",
+  oauth: "OAuth 连接",
 };
 const ROUTE_OVERRIDE_PATHS = {
   chat: "models.chat.connections",
@@ -152,11 +152,11 @@ function setStatus(message, tone = "") {
 
 function safeHealth(record) {
   if (record?.circuit?.state === "open") {
-    return { label: record.circuit.failure_kind || "Circuit open", tone: "error" };
+    return { label: record.circuit.failure_kind || "熔断已打开", tone: "error" };
   }
-  if (record?.probe?.ok === true) return { label: "Probe passed", tone: "success" };
-  if (record?.probe?.ok === false) return { label: record.probe.error_code || "Probe failed", tone: "error" };
-  return { label: "Not probed", tone: "" };
+  if (record?.probe?.ok === true) return { label: "探测通过", tone: "success" };
+  if (record?.probe?.ok === false) return { label: record.probe.error_code || "探测失败", tone: "error" };
+  return { label: "尚未探测", tone: "" };
 }
 
 function renderTabs() {
@@ -230,10 +230,10 @@ function renderRouteList() {
   const kind = state.activeRoute;
   const items = activeItems();
   const locked = routeLocked(kind);
-  byId("popupModelRouteTitle").textContent = kind === "chat" ? "Chat connections" : "Embedding providers";
+  byId("popupModelRouteTitle").textContent = kind === "chat" ? "Chat 连接" : "Embedding Provider";
   byId("popupModelRouteHelp").textContent = kind === "chat"
-    ? "第 1 项是 Primary，其余项按顺序作为 fallback；最多 10 项。"
-    : "所有 Provider 按此顺序 fallback，并共享上方唯一模型设置；最多 10 项。";
+    ? "第 1 项是 Primary，其余项按顺序作为 Fallback；最多 10 项。"
+    : "所有 Provider 按此顺序 Fallback，并共享上方唯一模型设置；最多 10 项。";
   byId("popupModelAddConnection").disabled = Boolean(locked) || items.length >= 10 || (
     kind === "embedding" && !state.models.embedding.enabled
   );
@@ -245,14 +245,14 @@ function renderRouteList() {
     const selected = state.selected[kind] === record.id;
     return `
       <div class="model-route-row${selected ? " is-selected" : ""}" draggable="${locked ? "false" : "true"}" data-model-record-id="${escapeHtml(record.id)}" tabindex="${selected ? "0" : "-1"}" aria-current="${selected ? "true" : "false"}">
-        <span class="model-route-drag-handle" aria-label="Drag to reorder" title="${locked ? "Order is provided by a read-only override" : "Drag to reorder"}" aria-disabled="${locked ? "true" : "false"}">⋮⋮</span>
+        <span class="model-route-drag-handle" aria-label="拖拽排序" title="${locked ? "顺序由只读覆盖配置提供" : "拖拽排序"}" aria-disabled="${locked ? "true" : "false"}">⋮⋮</span>
         <button class="model-route-row-copy" type="button" data-model-select="${escapeHtml(record.id)}">
-          <strong>${escapeHtml(derivedRole(index))} · ${escapeHtml(record.name || "Unnamed connection")}</strong>
-          <span>${escapeHtml(descriptor?.label || record.type)}${preset ? ` / ${escapeHtml(preset.label)}` : ""} · ${escapeHtml(model || "No model")}</span>
+          <strong>${escapeHtml(derivedRole(index))} · ${escapeHtml(record.name || "未命名连接")}</strong>
+          <span>${escapeHtml(descriptor?.label || record.type)}${preset ? ` / ${escapeHtml(preset.label)}` : ""} · ${escapeHtml(model || "未设置模型")}</span>
         </button>
         <span class="model-route-health" data-tone="${health.tone}">${escapeHtml(health.label)}</span>
       </div>`;
-  }).join("") || '<p class="settings-note-inline">当前 route 为空。</p>';
+  }).join("") || '<p class="settings-note-inline">当前路由为空。</p>';
 }
 
 function renderConnectionTypes() {
@@ -357,27 +357,27 @@ function renderCredential(record, descriptor) {
   if (descriptor.category === "oauth") {
     const importedReference = status.credential_ref || definition.choices?.[0] || descriptor.label;
     host.innerHTML = `
-      <strong>Imported OAuth credential</strong>
+      <strong>已导入 OAuth 凭据</strong>
       <p class="settings-note-inline">${status.oauth_logged_in ? "已登录" : "尚未检测到登录"} · ${escapeHtml(importedReference)}</p>
       <input type="hidden" data-model-credential-action="keep" value="keep">
       ${errorMarkup(record.id, "credential")}`;
     return;
   }
   const actions = [
-    ["keep", "Keep existing"],
-    ["set", "Set API key"],
-    ["env", "Environment variable"],
-    ["clear", "Clear"],
+    ["keep", "保留现有凭据"],
+    ["set", "设置 API Key"],
+    ["env", "环境变量"],
+    ["clear", "清除"],
   ];
   const sourceLabel = status.configured
-    ? `Current source: ${status.source}${status.env_name ? ` (${status.env_name})` : ""}`
-    : "No credential is currently configured.";
+    ? `当前来源：${status.source}${status.env_name ? ` (${status.env_name})` : ""}`
+    : "当前未配置凭据。";
   const needsValue = credential.action === "set" || credential.action === "env";
   host.innerHTML = `
-    <strong>Credential source</strong>
+    <strong>凭据来源</strong>
     <p class="settings-note-inline">${escapeHtml(sourceLabel)}</p>
     <div class="model-credential-actions">${actions.map(([action, label]) => `<button class="model-credential-action" type="button" data-model-credential-action="${action}" aria-pressed="${credential.action === action ? "true" : "false"}"${disabled}>${label}</button>`).join("")}</div>
-    ${needsValue ? `<label class="settings-field"><span>${credential.action === "env" ? "Environment variable name" : "New API key"}</span><input id="popupModelCredentialValue" type="${credential.action === "set" ? "password" : "text"}" value="${escapeHtml(credential.value || "")}" autocomplete="new-password"${disabled}></label>` : ""}
+    ${needsValue ? `<label class="settings-field"><span>${credential.action === "env" ? "环境变量名" : "新 API Key"}</span><input id="popupModelCredentialValue" type="${credential.action === "set" ? "password" : "text"}" value="${escapeHtml(credential.value || "")}" autocomplete="new-password"${disabled}></label>` : ""}
     ${errorMarkup(record.id, "credential")}`;
 }
 
@@ -402,7 +402,7 @@ function renderInspector() {
   byId("popupModelTypeSearch").disabled = locked;
   byId("popupModelInspectorFields").innerHTML = `
     <label class="settings-field full"><span>连接名称</span><input data-model-field="name" value="${escapeHtml(record.name)}" autocomplete="off" required${disabledMarkup(locked)}>${errorMarkup(record.id, "name")}</label>
-    <label class="settings-field full"><span>Stable ID</span><input value="${escapeHtml(record.id)}" readonly aria-readonly="true"><small>排序或改名不会改变此 ID。</small>${errorMarkup(record.id, "id")}</label>`;
+    <label class="settings-field full"><span>稳定 ID</span><input value="${escapeHtml(record.id)}" readonly aria-readonly="true"><small>排序或改名不会改变此 ID。</small>${errorMarkup(record.id, "id")}</label>`;
   const descriptorFields = descriptor ? descriptor.fields : [];
   byId("popupModelDescriptorFields").innerHTML = descriptorFields
     .map((field) => renderDescriptorField(record, descriptor, field))
@@ -420,7 +420,7 @@ function renderProbeStatus(record) {
     delete status.dataset.tone;
     return;
   }
-  const dimensions = probe.observed_dimension ? ` · ${probe.observed_dimension} dimensions` : "";
+  const dimensions = probe.observed_dimension ? ` · ${probe.observed_dimension} 维` : "";
   const latency = probe.latency_ms ? ` · ${probe.latency_ms} ms` : "";
   const timestamp = probe.probed_at ? ` · ${new Date(probe.probed_at).toLocaleString()}` : "";
   status.textContent = `${probe.ok ? "通过" : probe.error_code || "失败"}${dimensions}${latency}${timestamp}`;
@@ -449,9 +449,9 @@ function renderRuntime() {
   const open = all.filter((record) => record.circuit?.state === "open").length;
   const healthy = all.filter((record) => record.probe?.ok === true).length;
   byId("popupModelRuntimeSummary").innerHTML = `
-    <div class="model-runtime-card"><span>Chat route</span><strong>${state.models.chat.connections.length} connections</strong></div>
-    <div class="model-runtime-card"><span>Embedding route</span><strong>${state.models.embedding.providers.length} providers · ${state.models.embedding.enabled ? "enabled" : "disabled"}</strong></div>
-    <div class="model-runtime-card"><span>Current health</span><strong>${healthy} passed probes · ${open} open circuits</strong></div>`;
+    <div class="model-runtime-card"><span>Chat 路由</span><strong>${state.models.chat.connections.length} 个连接</strong></div>
+    <div class="model-runtime-card"><span>Embedding 路由</span><strong>${state.models.embedding.providers.length} 个 Provider · ${state.models.embedding.enabled ? "已启用" : "已停用"}</strong></div>
+    <div class="model-runtime-card"><span>当前健康状态</span><strong>${healthy} 个探测通过 · ${open} 个熔断打开</strong></div>`;
 }
 
 function migrationResolution(action) {
@@ -469,7 +469,7 @@ function renderMigration() {
   const issues = state.migration?.issues || [];
   panel.hidden = issues.length === 0;
   panel.innerHTML = issues.length ? `
-    <div class="model-section-heading"><div><p class="eyebrow">Migration</p><h3>确认旧配置迁移</h3></div></div>
+    <div class="model-section-heading"><div><p class="eyebrow">迁移</p><h3>确认旧配置迁移</h3></div></div>
     ${issues.map((issue) => {
       const selected = state.migration_resolutions?.[issue.id]?.action || "";
       return `<article class="model-migration-issue" data-migration-issue="${escapeHtml(issue.id)}">
@@ -717,7 +717,7 @@ async function probeSelected() {
     }
     if (probeRequestVisible(signature)) {
       if (probeSignatureMatches(state, signature)) {
-        status.textContent = error.details?.error || error.message || "Probe failed";
+        status.textContent = error.details?.error || error.message || "探测失败";
         status.dataset.tone = "error";
       } else {
         renderProbeStatus(selectedRecord(state, signature.kind));
@@ -746,13 +746,13 @@ async function saveModels() {
   const { generation } = save;
   snapshotRequestGate.invalidate();
   setModelEditorLocked(true);
-  setStatus("正在验证并热重载模型 route…");
+  setStatus("正在验证并热重载模型路由…");
   try {
     const result = await updateModelConfig(toModelConfigPayload(state));
     state = retainSelection(hydrateModelConfig(result.snapshot), state);
     render();
-    setStatus("模型 route 已保存并热重载。", "success");
-    notify("模型 route 已保存", "success");
+    setStatus("模型路由已保存并热重载。", "success");
+    notify("模型路由已保存", "success");
   } catch (error) {
     if (error.status === 409 && error.details?.error === "revision_conflict") {
       state = receiveRemoteSnapshot(state, error.details.latest);
@@ -798,7 +798,7 @@ async function loadModelSettings() {
       blocked: () => modelOperations.saveInFlight || Boolean(state?.dirty),
       onSnapshotBlocked: (snapshot) => {
         if (!state?.dirty || modelOperations.saveInFlight) return;
-        state = receiveRemoteSnapshot(state, snapshot, { force: true });
+        state = receiveRemoteSnapshot(state, snapshot);
         render();
       },
       applySnapshot: (snapshot) => {
@@ -818,7 +818,7 @@ async function loadModelSettings() {
 }
 
 function confirmLeave() {
-  return !state?.dirty || window.confirm("模型 route 有未保存的更改，确定离开吗？");
+  return !state?.dirty || window.confirm("模型路由有未保存的更改，确定离开吗？");
 }
 
 function bindEvents() {
@@ -921,7 +921,7 @@ function bindEvents() {
     }
     const providersLocked = Boolean(routeLocked("embedding"));
     if (!event.target.checked && state.models.embedding.providers.length && !providersLocked) {
-      if (!window.confirm("停用 Embedding 会清空当前 Provider route。继续吗？")) {
+    if (!window.confirm("停用 Embedding 会清空当前 Provider 路由。继续吗？")) {
         event.target.checked = true;
         return;
       }
@@ -995,7 +995,7 @@ function bindEvents() {
 
 const LOCAL_OLLAMA_EMBEDDING_DEFAULTS = Object.freeze({
   id: "embedding-local-ollama",
-  name: "Local Ollama",
+  name: "本地 Ollama",
   model: "bge-m3",
   output_dimensionality: 1024,
   base_url: "http://127.0.0.1:11434/v1",
@@ -1008,10 +1008,10 @@ const LOCAL_OLLAMA_EMBEDDING_DEFAULTS = Object.freeze({
 export async function enableLocalOllamaEmbeddingRoute() {
   if (!initialized) initPopupModelSettings();
   if (modelOperations.saveInFlight) {
-    throw new Error("Another model save is already in progress.");
+    throw new Error("已有模型保存正在进行。");
   }
   if (state?.dirty) {
-    throw new Error("Unsaved model changes must be saved or reloaded first.");
+    throw new Error("请先保存或重新加载未保存的模型更改。");
   }
   const startedSaveGeneration = modelOperations.saveGeneration;
   const loaded = await loadModelSettings();
@@ -1021,7 +1021,7 @@ export async function enableLocalOllamaEmbeddingRoute() {
     state,
   })) {
     throw new Error(
-      "The authoritative model route changed or became dirty while loading; no changes were written.",
+      "加载期间权威模型路由已变化或草稿已被编辑；未写入任何更改。",
     );
   }
 
@@ -1033,7 +1033,7 @@ export async function enableLocalOllamaEmbeddingRoute() {
   );
   const save = beginModelSave();
   if (save === null) {
-    throw new Error("Another model save is already in progress.");
+    throw new Error("已有模型保存正在进行。");
   }
   const { generation } = save;
   snapshotRequestGate.invalidate();

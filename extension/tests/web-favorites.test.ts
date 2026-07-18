@@ -18,15 +18,21 @@ test("mobile web exposes favorites API and tab entry", async () => {
 
   const api = await import("../../src/openbiliclaw/web/js/api.js?favorites-api");
 
-  assert.equal(typeof api.fetchFavorites, "function");
-  assert.equal(typeof api.addToFavorite, "function");
-  assert.equal(typeof api.removeFromFavorite, "function");
-  assert.equal(typeof api.favoriteStatus, "function");
-  assert.deepEqual(await api.fetchFavorites(20, 40), {
+  // The legacy bilibili-only helpers are gone; the platform-neutral saved
+  // API (/api/saved/{kind}) is the only favorites path.
+  assert.equal(typeof api.fetchFavorites, "undefined");
+  assert.equal(typeof api.addToFavorite, "undefined");
+  assert.equal(typeof api.removeFromFavorite, "undefined");
+  assert.equal(typeof api.favoriteStatus, "undefined");
+  assert.equal(typeof api.fetchSavedItems, "function");
+  assert.equal(typeof api.saveItem, "function");
+  assert.equal(typeof api.removeSavedItem, "function");
+  assert.equal(typeof api.savedItemStatus, "function");
+  assert.deepEqual(await api.fetchSavedItems("favorite", 20, 40), {
     items: [{ bvid: "BV1FAVMOBILE" }],
     total: 1,
   });
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/favorites?limit=20&offset=40");
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/saved/favorite?limit=20&offset=40");
 
   const appJs = readFileSync(resolve("../src/openbiliclaw/web/js/app.js"), "utf8");
   assert.match(appJs, /initFavoritesView/);

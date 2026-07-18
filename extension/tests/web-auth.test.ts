@@ -68,8 +68,8 @@ test("state-changing requests carry the CSRF header; reads do not", async () => 
     } };
   };
   const api = await import("../../src/openbiliclaw/web/js/api.js?auth-csrf");
-  await api.addToFavorite("BV1AUTH"); // POST
-  await api.favoriteStatus("BV1AUTH"); // GET
+  await api.saveItem("favorite", { bvid: "BV1AUTH" }); // POST
+  await api.savedItemStatus("favorite", "BV1AUTH"); // GET
   const post = calls[0];
   const get = calls[1];
   assert.equal(post.options.method, "POST");

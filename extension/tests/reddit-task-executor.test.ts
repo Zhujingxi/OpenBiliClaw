@@ -242,10 +242,6 @@ test("installRedditMessageListener responds after sending task result", async ()
     },
   };
   globalThis.fetch = (async (input: string | URL | Request) => {
-    const url = String(input);
-    if (url.includes("/sources/_debug/log")) {
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }
     return new Response(
       JSON.stringify({
         data: {

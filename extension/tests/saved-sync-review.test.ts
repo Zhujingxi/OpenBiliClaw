@@ -167,9 +167,7 @@ test("save payload normalization does not force unknown text content to video", 
 });
 
 test("desktop saved API uses bounded strict requests and propagates failures", async () => {
-  delete (globalThis as any).OpenBiliClawSavedSync;
-  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
-  const core = (globalThis as any).OpenBiliClawSavedSync;
+  const core = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   const calls: Array<{ path: string; options: Record<string, unknown> }> = [];
   const api = core.createStrictSavedApi(async (path: string, options = {}) => {
     calls.push({ path, options });
@@ -214,7 +212,7 @@ test("desktop saved API uses bounded strict requests and propagates failures", a
 });
 
 test("durable task tracker keeps nonterminal tasks resumable beyond the foreground horizon", async () => {
-  const core = (globalThis as any).OpenBiliClawSavedSync;
+  const core = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   let now = 0;
   let visible = true;
   const scheduled: Array<{ run: () => void; delay: number }> = [];
@@ -364,7 +362,7 @@ test("extension saved runtime retains list state and keeps polling after the hor
 });
 
 test("desktop saved core retains rows, isolates mutations, and restores focus", async () => {
-  const core = (globalThis as any).OpenBiliClawSavedSync;
+  const core = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   const retained = core.createRetainedSavedListState();
   retained.commit({ items: [{ item_key: "reddit:t3_1" }], total: 1 });
   retained.fail("offline");
@@ -386,6 +384,35 @@ test("desktop saved core retains rows, isolates mutations, and restores focus", 
   const token = core.captureSavedFocus(root, action);
   assert.equal(core.restoreSavedFocus(root, token), true);
   assert.equal(focused, true);
+});
+
+test("mobile adapter injects document into the dialog focus controller", async () => {
+  // The canonical core requires options.document explicitly; the adapter must
+  // preserve the old mobile default (globalThis.document) or Escape/Tab
+  // handling silently no-ops in the mobile settings dialog.
+  const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
+  const listeners = new Map<string, (event: any) => void>();
+  const doc = {
+    activeElement: null,
+    addEventListener(type: string, fn: (event: any) => void) { listeners.set(type, fn); },
+    removeEventListener(type: string) { listeners.delete(type); },
+  };
+  (globalThis as any).document = doc;
+  try {
+    let closed = 0;
+    const controller = mobile.createDialogFocusController({
+      dialog: { querySelectorAll: () => [] },
+      opener: { focus() {} },
+      onClose: () => { closed += 1; },
+    });
+    controller.activate();
+    assert.equal(listeners.has("keydown"), true, "adapter must inject document");
+    listeners.get("keydown")?.({ key: "Escape", preventDefault() {} });
+    assert.equal(closed, 1);
+    controller.deactivate();
+  } finally {
+    delete (globalThis as any).document;
+  }
 });
 
 test("dialog focus controller closes on Escape and restores its opener", () => {
@@ -649,8 +676,7 @@ async function exerciseRecoveredTaskCoordinator(createCoordinator: Function) {
 test("all three saved runtimes recover and deduplicate persisted nonterminal tasks", async () => {
   const popup = await import("../popup/popup-saved-sync.js");
   const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
-  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
-  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   for (const createCoordinator of [
     popup.createSavedTaskCoordinator,
     mobile.createSavedTaskCoordinator,
@@ -667,8 +693,7 @@ test("saved sync eligibility distinguishes content limits from rolling upgrades 
   const popup = await import("../popup/popup-saved-sync.js");
   const mobile = await import("../../src/openbiliclaw/web/js/views/saved.js");
   (globalThis as any).location = oldLocation;
-  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
-  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
 
   for (const runtime of [popup, mobile, desktop]) {
     assert.equal(typeof runtime.isSavedSyncEligibleStatus, "function");
@@ -684,19 +709,25 @@ test("saved sync eligibility distinguishes content limits from rolling upgrades 
   }
 
   const { readFile } = await import("node:fs/promises");
-  const [popupRuntime, popupView, mobileView, desktopRuntime, desktopView] = await Promise.all([
+  const [popupRuntime, popupView, mobileView, desktopCore, desktopView] = await Promise.all([
     readFile(new URL("../popup/popup-saved-sync.js", import.meta.url), "utf8"),
     readFile(new URL("../popup/popup.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/openbiliclaw/web/js/views/saved.js", import.meta.url), "utf8"),
-    readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js", import.meta.url), "utf8"),
+    readFile(new URL("../../src/openbiliclaw/web/shared/saved-sync-core.js", import.meta.url), "utf8"),
     readFile(new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8"),
   ]);
-  for (const source of [popupRuntime, mobileView, desktopRuntime]) {
+  for (const source of [popupRuntime, mobileView]) {
     assert.match(source, /仅本地保存/);
     assert.match(source, /unsupported_content_type/);
     assert.match(source, /unsupported_adapter_missing/);
     assert.match(source, /滚动升级/);
   }
+  // Desktop keeps error-code semantics in the canonical shared core and the
+  // Chinese copy in the surface (app.js), never in the shared module.
+  assert.match(desktopCore, /unsupported_content_type/);
+  assert.match(desktopCore, /unsupported_adapter_missing/);
+  assert.match(desktopView, /仅本地保存/);
+  assert.match(desktopView, /滚动升级/);
   for (const source of [popupView, mobileView, desktopView]) assert.match(source, /aria-disabled/);
 });
 
@@ -706,8 +737,7 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
   const popup = await import("../popup/popup-saved-sync.js");
   const mobile = await import("../../src/openbiliclaw/web/js/views/saved.js");
   (globalThis as any).location = oldLocation;
-  await import("../../src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js");
-  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   const viewModels = [
     (item: any) => popup.getSavedSyncPresentation(
       item.sync_status,
@@ -719,7 +749,6 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
     (item: any) => mobile.getSavedSyncViewModel({
       item_key: "youtube:1", source_platform: "youtube", content_id: "1", ...item,
     }),
-    (item: any) => desktop.getSavedSyncPresentation(item),
   ];
 
   for (const model of viewModels) {
@@ -775,6 +804,70 @@ test("popup desktop and mobile expose the same truthful saved-state matrix", asy
     assert.equal(ready.label, "待同步", platform);
     assert.equal(ready.actionable, true, platform);
   }
+
+  // The desktop leg consumes the canonical presentation, which returns i18n
+  // keys; semantic parity is asserted on the keys, and copy parity is pinned
+  // statically against the surface that maps them (app.js).
+  const desktopModel = (item: any) => desktop.getSavedSyncPresentation(item);
+  for (const sync_status of ["pending", "syncing"]) {
+    const busy = desktopModel({
+      sync_status,
+      sync_task_id: sync_status === "pending" ? "task-1" : "",
+    });
+    assert.equal(busy.busy, true);
+    assert.equal(busy.actionable, false);
+    assert.equal(busy.detailKey, "busy");
+  }
+
+  const localPending = desktopModel({ sync_status: "pending", sync_task_id: "" });
+  assert.equal(localPending.busy, false);
+  assert.equal(localPending.actionable, true);
+  assert.equal(localPending.detailKey, "pending");
+
+  const extensionRequired = desktopModel({ sync_status: "extension_required" });
+  assert.equal(extensionRequired.actionable, true);
+  assert.equal(extensionRequired.actionKey, "retry");
+  assert.equal(extensionRequired.detailKey, "extension_required");
+
+  const contentLimit = desktopModel({
+    sync_status: "unsupported", error_code: "unsupported_content_type",
+  });
+  assert.equal(contentLimit.localOnly, true);
+  assert.equal(contentLimit.actionable, false);
+
+  const rollingUpgrade = desktopModel({
+    sync_status: "unsupported", error_code: "unsupported_adapter_missing",
+  });
+  assert.equal(rollingUpgrade.localOnly, false);
+  assert.equal(rollingUpgrade.actionable, true);
+  assert.equal(rollingUpgrade.detailKey, "unsupported_adapter_missing");
+  assert.equal(rollingUpgrade.labelKey, "upgrade_required");
+
+  for (const sync_status of ["login_required", "rate_limited", "failed"]) {
+    const retry = desktopModel({ sync_status });
+    assert.equal(retry.actionable, true);
+    assert.equal(retry.actionKey, "retry");
+    assert.equal(retry.detailKey, sync_status);
+  }
+
+  const success = desktopModel({ sync_status: "synced", resolved_target: "YouTube Watch Later" });
+  assert.equal(success.actionable, false);
+  assert.equal(success.detailKey, "synced");
+
+  const { readFile } = await import("node:fs/promises");
+  const desktopView = await readFile(
+    new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url), "utf8",
+  );
+  for (const copy of [
+    /平台同步任务已提交，请稍候/,
+    /已保存在本地，可手动同步到平台/,
+    /重试同步/,
+    /请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试/,
+    /同步能力可能正在滚动升级/,
+    /平台同步失败，请重试/,
+    /平台已确认同步完成/,
+    /待同步/,
+  ]) assert.match(desktopView, copy);
 });
 
 function actionCard(itemKey: string, action: string, sink: string[]) {
@@ -802,7 +895,7 @@ function fallbackRoot(cards: any[], listAction: any = null, heading: any = null)
 test("focus restoration follows adjacent card, batch action, then heading across all surfaces", async () => {
   const popup = await import("../popup/popup-saved-sync.js");
   const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
-  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   const flows = [
     [popup.restoreSavedFocus, "popup-remove"],
     [mobile.restoreSavedFocus, "mobile-sync"],
@@ -836,7 +929,7 @@ test("focus restoration follows adjacent card, batch action, then heading across
 test("list-level batch and retry focus tokens round-trip before card fallback on all runtimes", async () => {
   const popup = await import("../popup/popup-saved-sync.js");
   const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
-  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   for (const [capture, restore] of [
     [popup.captureSavedFocus, popup.restoreSavedFocus],
     [mobile.captureSavedFocus, mobile.restoreSavedFocus],
@@ -875,7 +968,7 @@ test("retry and batch handlers capture list focus before work on all three surfa
 test("static batch buttons clear stale busy ARIA after success failure or abort reload", async () => {
   const { readFile } = await import("node:fs/promises");
   const popupRuntime = await import("../popup/popup-saved-sync.js");
-  const desktopRuntime = (globalThis as any).OpenBiliClawSavedSync;
+  const desktopRuntime = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   const popup = await readFile(new URL("../popup/popup.js", import.meta.url), "utf8");
   const desktop = await readFile(
     new URL("../../src/openbiliclaw/web/desktop/assets/js/app.js", import.meta.url),
@@ -927,7 +1020,7 @@ test("single-item submission fences exclude batch and refresh overlap on all sur
   const { readFile } = await import("node:fs/promises");
   const popupRuntime = await import("../popup/popup-saved-sync.js");
   const mobileRuntime = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
-  const desktopRuntime = (globalThis as any).OpenBiliClawSavedSync;
+  const desktopRuntime = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
 
   for (const createFence of [
     popupRuntime.createSavedSubmissionFence,
@@ -1014,7 +1107,7 @@ test("saved task lifecycles dispose on page teardown and mobile binds visibility
 test("disposing a task tracker suppresses callbacks from an in-flight poll", async () => {
   const popup = await import("../popup/popup-saved-sync.js");
   const mobile = await import("../../src/openbiliclaw/web/js/saved-sync-runtime.js");
-  const desktop = (globalThis as any).OpenBiliClawSavedSync;
+  const desktop = await import("../../src/openbiliclaw/web/shared/saved-sync-core.js");
   for (const createTracker of [
     popup.createSavedSyncTaskTracker,
     mobile.createDurableTaskTracker,
@@ -1025,6 +1118,7 @@ test("disposing a task tracker suppresses callbacks from an in-flight poll", asy
     let callbacks = 0;
     const tracker = createTracker({
       poll: () => new Promise((resolve) => { finishPoll = resolve; }),
+      now: () => 0,
       schedule: (run: () => Promise<void>) => { scheduled = run; return 1; },
       cancel: () => {},
     });

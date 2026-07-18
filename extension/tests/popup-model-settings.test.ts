@@ -52,6 +52,7 @@ function embeddingProvider(id: string, overrides: Record<string, unknown> = {}) 
 }
 
 function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
+  const overrides: Array<{ path: string; source: string }> = [];
   return {
     revision,
     source: "native",
@@ -74,7 +75,7 @@ function snapshot(ids = ["a", "b", "c"], revision = "revision-a") {
       },
     },
     migration: { state: "none", confirmed: true, issues: [] },
-    overrides: [],
+    overrides,
   };
 }
 
@@ -133,7 +134,7 @@ test("popup model load installs descriptors independently when its snapshot beco
   assert.deepEqual(installedTypes, ["ollama"]);
 });
 
-test("pending popup model load retains a new dirty draft and reports the snapshot as remote", async () => {
+test("pending popup model load retains a dirty draft without a false same-revision conflict", async () => {
   const snapshotGate = modelState.createLatestRequestGate();
   const descriptorGate = modelState.createLatestRequestGate();
   const pendingSnapshot = deferred<any>();
@@ -146,7 +147,7 @@ test("pending popup model load retains a new dirty draft and reports the snapsho
     descriptorRequest: async () => ({ connection_types: [], groups: [] }),
     blocked: () => Boolean(current.dirty),
     onSnapshotBlocked: (value: any) => {
-      current = modelState.receiveRemoteSnapshot(current, value, { force: true });
+      current = modelState.receiveRemoteSnapshot(current, value);
     },
     applySnapshot: (value: any) => {
       current = modelState.hydrateModelConfig(value);
@@ -168,9 +169,7 @@ test("pending popup model load retains a new dirty draft and reports the snapsho
     descriptorsInstalled: true,
   });
   assert.equal(current.models.chat.connections[0].model, "local-edit-while-loading");
-  assert.notEqual(current.remoteUpdate, null);
-  assert.equal(current.remoteUpdate.latestRevision, "revision-a");
-  assert.equal(current.remoteUpdate.snapshot.models.chat.connections[0].id, "remote");
+  assert.equal(current.remoteUpdate, null);
 });
 
 test("full load revalidates snapshot ownership after its snapshot already applied", async () => {
@@ -809,12 +808,52 @@ test("model settings page is sequential list/detail and removes every legacy pro
   assert.match(controller, /focusSelectedRouteControl/);
 });
 
+test("popup model editor copy is Chinese-first and keeps technical terms", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
+
+  for (const copy of [
+    'aria-label="拖拽排序"',
+    '"顺序由只读覆盖配置提供"',
+    '"未命名连接"',
+    '"未设置模型"',
+    '"API 协议"',
+    '"本地 Runtime"',
+    '"OAuth 连接"',
+    "<strong>已导入 OAuth 凭据</strong>",
+    '"保留现有凭据"',
+    '"设置 API Key"',
+    '"当前未配置凭据。"',
+    "<span>稳定 ID</span>",
+    "<span>Chat 路由</span>",
+    "<span>Embedding 路由</span>",
+    "<span>当前健康状态</span>",
+  ]) assert.match(controller, new RegExp(copy));
+  assert.match(popupHtml, /<strong id="popupModelRouteTitle">Chat 连接<\/strong>/);
+  assert.match(popupHtml, />上移<\/button>/);
+  assert.match(popupHtml, />下移<\/button>/);
+
+  for (const oldCopy of [
+    "Drag to reorder",
+    "Unnamed connection",
+    "No model",
+    "API protocols",
+    "Local runtimes",
+    "OAuth connections",
+    "Imported OAuth credential",
+    "Keep existing",
+    "Credential source",
+    "Current health",
+    "Probe failed",
+  ]) assert.doesNotMatch(controller, new RegExp(oldCopy));
+});
+
 test("model and general settings saves are separate scopes", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const controller = readFileSync(resolve("popup", "popup-model-settings.js"), "utf8");
 
-  assert.match(popupHtml, /id="popupModelSaveButton"[^>]*>保存模型 route</);
+  assert.match(popupHtml, /id="popupModelSaveButton"[^>]*>保存模型路由</);
   assert.match(popupHtml, /id="settingsSave"[^>]*>保存通用配置</);
   assert.match(controller, /updateModelConfig\(toModelConfigPayload\(state\)\)/);
   assert.match(popupJs, /updateConfig\(data\)/);

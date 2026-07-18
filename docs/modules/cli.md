@@ -104,7 +104,7 @@ $ openbiliclaw config-show
 
 ### `openbiliclaw models`
 
-统一模型路由编辑器直接调用 `ModelConfigService`，与桌面、插件和移动端共享同一 `[models]` schema、connection-type descriptor、稳定 ID、迁移决定、revision 冲突和 credential action 语义；CLI 不再写 legacy `[llm.<provider>]` 或模块 override。
+统一模型路由编辑器直接调用 `ModelConfigService`，与桌面、插件和移动端共享同一 `[models]` schema、connection-type descriptor、稳定 ID、迁移决定、revision 冲突和 credential action 语义；CLI 不再写 legacy `[llm.<provider>]` 或模块 override。实现上 `cli_models.py` 直接 `import click`（与当前锁定版本的 typer 兼容），不再依赖 typer 私有 shim；命令面与行为不变。
 
 ```bash
 # 查看 Chat primary/fallback、Embedding providers 与共享向量空间

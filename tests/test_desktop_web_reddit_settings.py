@@ -39,15 +39,17 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     assert 'data-source-status="reddit"' in html
-    assert 'data-source-credential="reddit"' in html
+    assert 'data-source-credential="reddit"' not in html
     assert '"redditEnabled"' in js
     assert (
         'const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", '
         '"youtube", "twitter", "zhihu", "reddit"]'
     ) in js
-    assert (
-        'const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", '
-        '"youtube", "twitter", "zhihu", "reddit"]'
-    ) in js
+    assert "CURRENT_CREDENTIAL_KEYS" not in js
+    # Reddit's cookie lives in rdt-cli's credential store, not config.toml, so
+    # the masked config cannot describe it; the write-only placeholder is
+    # driven by the safe /api/sources/status logged_in flag instead.
+    assert 'id="redditCookie"' in html
+    assert 'setCookieOverrideInput("redditCookie"' in js
     assert 'reddit: $("#redditEnabled").value === "on"' in js
     assert 'if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit)' in js

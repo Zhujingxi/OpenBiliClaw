@@ -71,30 +71,29 @@ test("popup header stays a single row with inline icons at narrow side-panel wid
   assert.match(narrowHeaderQuery, /\.hero-actions button\s*\{[\s\S]*?width:\s*28px;/);
 });
 
-test("popup shows a GitHub-Buttons style Star button (icon + label + live count)", () => {
+test("popup shows a GitHub Star button (icon + label, no live count)", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const heroSub = popupHtml.match(/<div class="hero-sub">[\s\S]*?<\/div>\s*<\/header>/)?.[0] ?? "";
   const heroActions = popupHtml.match(/<div class="hero-actions">[\s\S]*?<\/div>/)?.[0] ?? "";
 
-  // The familiar two-part GitHub-Buttons look (used by big repos): an Octocat +
-  // "Star" action chip joined to a live star-count box, on the row below the
-  // action icons (in .hero-sub, right of the hero copy).
+  // The Star action chip (Octocat + "Star") stays on the row below the action
+  // icons (in .hero-sub, right of the hero copy) and still links to the repo.
   assert.match(heroSub, /id="starButton"/);
   assert.match(heroSub, /class="gh-star-mark"/); // Octocat SVG
   assert.match(heroSub, /<span>Star<\/span>/); // text label
-  assert.match(heroSub, /id="starCount"/); // live count box
-  // Two-part chip + count styling exists.
   assert.match(popupHtml, /\.gh-star-left\s*\{/);
-  assert.match(popupHtml, /\.gh-star-count\s*\{/);
+  assert.match(popupJs, /STAR_REPO_URL\s*=\s*"https:\/\/github\.com\/whiteguo233\/OpenBiliClaw"/);
+  assert.match(popupJs, /bindStarButton\(\);/);
+  // The live count is gone: api.github.com is not in manifest host_permissions,
+  // so the startup fetch could never succeed — no count markup, no fetch, no cache.
+  assert.doesNotMatch(heroSub, /id="starCount"/);
+  assert.doesNotMatch(popupHtml, /gh-star-count/);
+  assert.doesNotMatch(popupJs, /api\.github\.com/);
+  assert.doesNotMatch(popupJs, /loadStarCount|starCount|STAR_COUNT|stargazers/);
   // Not in the action-icon strip, and the old banner is gone.
   assert.doesNotMatch(heroActions, /id="starButton"/);
   assert.doesNotMatch(popupHtml, /id="starCta"/);
-  // Click opens the repo (direct-star needs GitHub auth); count is fetched/cached.
-  assert.match(popupJs, /STAR_REPO_URL\s*=\s*"https:\/\/github\.com\/whiteguo233\/OpenBiliClaw"/);
-  assert.match(popupJs, /bindStarButton\(\);/);
-  assert.match(popupJs, /api\.github\.com\/repos\/\$\{STAR_REPO_SLUG\}/);
-  assert.match(popupJs, /loadStarCount/);
 });
 
 test("recommendation header uses a compact top row with status chips", () => {

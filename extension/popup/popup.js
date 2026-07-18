@@ -284,7 +284,6 @@ const elements = {
   chatStatus: document.getElementById("chatStatus"),
   openWebButton: document.getElementById("openWebButton"),
   starButton: document.getElementById("starButton"),
-  starCount: document.getElementById("starCount"),
   mobileQrButton: document.getElementById("mobileQrButton"),
   mobileQrOverlay: document.getElementById("mobileQrOverlay"),
   mobileQrBack: document.getElementById("mobileQrBack"),
@@ -2526,78 +2525,8 @@ function openMobileWebUrl(url) {
 const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
 
 // Wire the persistent header Star button: always present, opens the repo so the
-// user can give a GitHub Star.
-const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
-const STAR_COUNT_CACHE_KEY = "obc:starCount";
-const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
-
-function _formatStarCount(n) {
-  if (typeof n !== "number" || !Number.isFinite(n)) {
-    return "";
-  }
-  if (n >= 10000) {
-    return `${(n / 1000).toFixed(0)}k`;
-  }
-  if (n >= 1000) {
-    return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-  }
-  return String(n);
-}
-
-function _showStarCount(n) {
-  const el = elements.starCount;
-  const text = _formatStarCount(n);
-  if (el instanceof HTMLElement && text) {
-    el.textContent = text;
-    el.hidden = false;
-  }
-}
-
-// Fetch + cache the GitHub stargazers count for the count box (the GitHub-Buttons
-// look). api.github.com sends CORS `*`, so no host permission is needed; the
-// count is cached in localStorage so we don't hit the unauthenticated rate limit.
-async function loadStarCount() {
-  if (!(elements.starCount instanceof HTMLElement)) {
-    return;
-  }
-  let cachedTime = 0;
-  try {
-    const raw = localStorage.getItem(STAR_COUNT_CACHE_KEY);
-    if (raw) {
-      const { n, t } = JSON.parse(raw);
-      if (typeof n === "number") {
-        _showStarCount(n);
-        cachedTime = typeof t === "number" ? t : 0;
-      }
-    }
-  } catch {
-    cachedTime = 0;
-  }
-  if (Date.now() - cachedTime < STAR_COUNT_TTL_MS) {
-    return; // cached value is fresh enough
-  }
-  try {
-    const res = await fetch(`https://api.github.com/repos/${STAR_REPO_SLUG}`, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) {
-      return;
-    }
-    const data = await res.json();
-    const n = data?.stargazers_count;
-    if (typeof n === "number") {
-      _showStarCount(n);
-      try {
-        localStorage.setItem(STAR_COUNT_CACHE_KEY, JSON.stringify({ n, t: Date.now() }));
-      } catch {
-        // storage full / unavailable → just skip caching
-      }
-    }
-  } catch {
-    // offline / rate-limited → keep the button without a count
-  }
-}
-
+// user can give a GitHub Star. No live count — the GitHub REST host is not in
+// the manifest host_permissions, so a startup fetch could never succeed.
 function bindStarButton() {
   const { starButton } = elements;
   if (!(starButton instanceof HTMLElement)) {
@@ -2606,7 +2535,6 @@ function bindStarButton() {
   starButton.addEventListener("click", () => {
     openMobileWebUrl(STAR_REPO_URL);
   });
-  void loadStarCount();
 }
 
 async function renderMobileQrPanel() {
@@ -6739,6 +6667,24 @@ function bindSettings() {
     return el ? el.value : "";
   };
 
+  // Credential fields are write-only (same pattern as the model-settings
+  // credential editor): GET /api/config masks secrets, so a configured field
+  // renders EMPTY and only the placeholder carries 已保存/未保存 status. An
+  // empty input is omitted from the PUT payload (see collectForm), so saving
+  // never overwrites the stored secret. A non-empty masked value means the
+  // backend holds a credential; "" means none is saved.
+  function setCredentialInput(id, maskedValue) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!el.dataset.emptyPlaceholder) {
+      el.dataset.emptyPlaceholder = el.placeholder || "";
+    }
+    el.value = "";
+    el.placeholder = maskedValue
+      ? "已保存 Cookie（留空保持不变，粘贴新值覆盖）"
+      : `未保存 Cookie${el.dataset.emptyPlaceholder ? ` — ${el.dataset.emptyPlaceholder}` : ""}`;
+  }
+
   function joinLogPath(directory, filename) {
     const dir = String(directory || "").trim();
     const name = String(filename || "").trim();
@@ -6923,7 +6869,7 @@ function bindSettings() {
     // Bilibili
     const biliAuth = document.getElementById("cfgBiliAuth");
     if (biliAuth) biliAuth.value = cfg.bilibili?.auth_method || "cookie";
-    setVal("cfgBiliCookie", cfg.bilibili?.cookie);
+    setCredentialInput("cfgBiliCookie", cfg.bilibili?.cookie);
     setVal("cfgBiliBrowserExecutable", cfg.bilibili?.browser_executable);
     const biliBrowserHeaded = document.getElementById("cfgBiliBrowserHeaded");
     if (biliBrowserHeaded) biliBrowserHeaded.checked = cfg.bilibili?.browser_headed === true;
@@ -6943,7 +6889,7 @@ function bindSettings() {
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
     const douyinEnabled = document.getElementById("cfgDouyinEnabled");
     if (douyinEnabled) douyinEnabled.checked = cfg.sources?.douyin?.enabled === true;
-    setVal("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
+    setCredentialInput("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
     setVal("cfgDouyinCookieEnv", cfg.sources?.douyin?.cookie_env);
     setVal("cfgDouyinDailySearchBudget", cfg.sources?.douyin?.daily_search_budget);
     setVal("cfgDouyinDailyHotBudget", cfg.sources?.douyin?.daily_hot_budget);
@@ -6958,7 +6904,7 @@ function bindSettings() {
     setVal("cfgYoutubeMinInterval", cfg.sources?.youtube?.min_interval_minutes);
     const twitterEnabled = document.getElementById("cfgTwitterEnabled");
     if (twitterEnabled) twitterEnabled.checked = cfg.sources?.twitter?.enabled === true;
-    setVal("cfgTwitterCookie", cfg.sources?.twitter?.cookie);
+    setCredentialInput("cfgTwitterCookie", cfg.sources?.twitter?.cookie);
     setVal("cfgTwitterCookieEnv", cfg.sources?.twitter?.cookie_env);
     setVal("cfgTwitterDailySearchBudget", cfg.sources?.twitter?.daily_search_budget);
     setVal("cfgTwitterDailyFeedBudget", cfg.sources?.twitter?.daily_feed_budget);

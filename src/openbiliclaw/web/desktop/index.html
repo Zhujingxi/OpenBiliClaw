@@ -259,7 +259,7 @@
       <section class="settings-page content-page" id="settingsPage" aria-label="后端设置" hidden>
         <div class="content-page-head">
           <div>
-            <p class="eyebrow">Settings</p>
+            <p class="eyebrow">设置</p>
             <h2>后端与模型设置</h2>
             <p class="video-meta">配置模型、平台源、调度和本地运行参数。</p>
           </div>
@@ -277,8 +277,8 @@
         <div class="settings-panel model-settings-panel" data-settings-panel="models">
           <fieldset class="model-editor-boundary" id="modelEditorBoundary" aria-label="模型路由编辑器" aria-busy="false">
           <div class="model-route-tabs" id="modelRouteTabs" role="tablist" aria-label="模型类型">
-            <button class="model-route-tab is-active" type="button" role="tab" aria-selected="true" data-model-route="chat">Chat route</button>
-            <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="embedding">Embedding route</button>
+            <button class="model-route-tab is-active" type="button" role="tab" aria-selected="true" data-model-route="chat">Chat 路由</button>
+            <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="embedding">Embedding 路由</button>
             <button class="model-route-tab" type="button" role="tab" aria-selected="false" data-model-route="runtime">Runtime</button>
           </div>
 
@@ -293,8 +293,8 @@
           <section class="model-route-view" data-model-view="route">
             <section class="model-embedding-shared" id="modelEmbeddingSharedSettings" aria-label="Embedding 共享设置" hidden>
               <div class="model-section-heading">
-                <div><p class="eyebrow">Shared vector space</p><h3>Embedding 共享模型设置</h3></div>
-                <label class="settings-toggle-row"><input id="modelEmbeddingEnabled" type="checkbox"><span>启用 Embedding route</span></label>
+                <div><p class="eyebrow">共享向量空间</p><h3>Embedding 共享模型设置</h3></div>
+                <label class="settings-toggle-row"><input id="modelEmbeddingEnabled" type="checkbox"><span>启用 Embedding 路由</span></label>
               </div>
               <div class="model-shared-grid">
                 <label class="settings-field"><span>共享模型</span><input id="modelEmbeddingModel" autocomplete="off"></label>
@@ -321,8 +321,8 @@
                   <div class="model-section-heading">
                     <div><p class="eyebrow" id="modelInspectorRole">Primary</p><h3 id="modelInspectorTitle">连接详情</h3></div>
                     <div class="model-order-actions" aria-label="调整优先级">
-                      <button class="small-btn" id="modelMoveUp" type="button">Move Up</button>
-                      <button class="small-btn" id="modelMoveDown" type="button">Move Down</button>
+                      <button class="small-btn" id="modelMoveUp" type="button">上移</button>
+                      <button class="small-btn" id="modelMoveDown" type="button">下移</button>
                     </div>
                   </div>
                   <div class="model-inspector-fields" id="modelInspectorFields"></div>
@@ -346,10 +346,10 @@
           </section>
 
           <section class="model-runtime-view" id="modelRuntimeView" data-model-view="runtime" hidden>
-            <div class="model-section-heading"><div><p class="eyebrow">Route policy</p><h3>Runtime</h3></div></div>
+            <div class="model-section-heading"><div><p class="eyebrow">路由策略</p><h3>Runtime</h3></div></div>
             <div class="model-runtime-grid">
               <label class="settings-field"><span>Chat 并发数</span><input id="modelChatConcurrency" type="number" min="1" max="16" inputmode="numeric"></label>
-              <label class="settings-field"><span>整条 route 超时（秒）</span><input id="modelChatTimeout" type="number" min="10" inputmode="numeric"></label>
+              <label class="settings-field"><span>整条路由超时（秒）</span><input id="modelChatTimeout" type="number" min="10" inputmode="numeric"></label>
             </div>
             <div class="model-runtime-summary" id="modelRuntimeSummary" aria-live="polite"></div>
           </section>
@@ -403,45 +403,7 @@
               <p class="src-detail">加载中…</p>
             </div>
           </div>
-          <p class="settings-section-title">当前 Cookie / 登录凭据</p>
-          <p class="settings-note-inline">默认折叠；展开后只读查看当前后端可读取的 Cookie 或令牌，只能复制、不能编辑或粘贴。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用你的登录态取数，YouTube 走公开接口，这三个平台没有也不需要 Cookie 输入框，浏览器登录后插件自动接通。</p>
-          <div id="sourceCredentialList" class="source-credential-list">
-            <details class="source-credential-row" data-source-credential="bilibili">
-              <summary><strong>Bilibili<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="xiaohongshu">
-              <summary><strong>小红书<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="douyin">
-              <summary><strong>抖音<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="youtube">
-              <summary><strong>YouTube<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="twitter">
-              <summary><strong>X (Twitter)<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="zhihu">
-              <summary><strong>知乎<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-            <details class="source-credential-row" data-source-credential="reddit">
-              <summary><strong>Reddit<span class="source-credential-ro-tag">只读</span></strong><span class="source-credential-summary">加载中…</span></summary>
-              <textarea class="source-credential-value" rows="3" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
-              <div class="source-credential-actions"><button type="button" class="small-btn source-credential-copy" disabled>复制</button></div>
-            </details>
-          </div>
+          <p class="settings-note-inline">Cookie 覆盖输入只提供给后端直接带 Cookie 请求平台接口的源——B站、抖音、X、Reddit（下方各自的覆盖输入框，留空保存不会覆盖）；小红书、知乎由浏览器插件用你的登录态取数，YouTube 走公开接口，这三个平台没有也不需要 Cookie 输入框，浏览器登录后插件自动接通。</p>
           <label class="settings-field"><span>B 站认证</span><select id="biliAuth"><option value="cookie">Cookie</option><option value="qrcode">二维码</option><option value="none">无</option></select></label>
           <label class="settings-field full"><span>B 站 Cookie</span><textarea id="biliCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie"></textarea></label>
           <label class="settings-field"><span>agent-browser 路径</span><input id="biliBrowserExecutable" placeholder="留空使用全局安装"></label>
@@ -796,7 +758,7 @@
   <div class="toast-container" id="toastContainer" role="status" aria-live="polite"></div>
   <script src="/web/assets/js/mobile-qr.js" defer></script>
   <script src="/web/assets/js/pending-actions.js" defer></script>
-  <script src="/web/assets/js/saved-sync-core.js" defer></script>
+  <script type="module" src="/web/shared/saved-sync-core.js"></script>
   <script src="/web/assets/js/app.js" defer></script>
   <script type="module" src="/web/assets/js/model-settings.js"></script>
 </body></html>

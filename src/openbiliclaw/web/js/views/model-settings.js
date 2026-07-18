@@ -42,9 +42,9 @@ import {
 
 const CONFIG_RELOADED_TYPE = "config_reloaded";
 const CATEGORY_LABELS = {
-  api_protocol: "API protocols",
-  local_runtime: "Local runtimes",
-  oauth: "OAuth connections",
+  api_protocol: "API 协议",
+  local_runtime: "本地 Runtime",
+  oauth: "OAuth 连接",
 };
 const ROUTE_OVERRIDE_PATHS = {
   chat: "models.chat.connections",
@@ -94,14 +94,14 @@ export async function openMobileSettings(opener) {
   card.className = "mobile-settings-card mobile-model-settings";
   card.innerHTML = `
     <div class="mobile-settings-head">
-      <div><p class="eyebrow">Settings</p><h2>设置</h2></div>
+      <div><p class="eyebrow">设置</p><h2>设置</h2></div>
       <button class="mobile-settings-close" type="button" aria-label="关闭设置">×</button>
     </div>
     <nav class="mobile-settings-sections" role="tablist" aria-label="设置分类">
       <button class="mobile-settings-section is-active" type="button" role="tab"
         aria-selected="true" data-mobile-settings-section="saved">保存与同步</button>
       <button class="mobile-settings-section" type="button" role="tab"
-        aria-selected="false" data-mobile-settings-section="models">Models</button>
+        aria-selected="false" data-mobile-settings-section="models">模型</button>
     </nav>
 
     <section class="mobile-settings-panel" data-mobile-settings-panel="saved">
@@ -119,19 +119,19 @@ export async function openMobileSettings(opener) {
     </section>
 
     <section class="mobile-settings-panel" data-mobile-settings-panel="models" hidden>
-      <h3 class="mobile-settings-panel-title" tabindex="-1">Models</h3>
+      <h3 class="mobile-settings-panel-title" tabindex="-1">模型</h3>
       <div class="mobile-model-load-feedback">
-        <span id="mobileModelSaveStatus" aria-live="polite">选择 Models 后加载配置。</span>
+        <span id="mobileModelSaveStatus" aria-live="polite">选择模型后加载配置。</span>
         <button id="mobileModelLoadRetry" class="mobile-model-load-retry btn btn-outline"
-          type="button" hidden>重试加载 Models</button>
+          type="button" hidden>重试加载模型</button>
       </div>
       <fieldset id="mobileModelEditorBoundary" class="mobile-model-editor-boundary"
         aria-label="模型路由编辑器" aria-busy="false">
         <div class="mobile-model-route-tabs" role="tablist" aria-label="模型类型">
           <button class="mobile-model-route-tab is-active" type="button" role="tab"
-            aria-selected="true" data-mobile-model-route="chat">Chat route</button>
+            aria-selected="true" data-mobile-model-route="chat">Chat 路由</button>
           <button class="mobile-model-route-tab" type="button" role="tab"
-            aria-selected="false" data-mobile-model-route="embedding">Embedding route</button>
+            aria-selected="false" data-mobile-model-route="embedding">Embedding 路由</button>
           <button class="mobile-model-route-tab" type="button" role="tab"
             aria-selected="false" data-mobile-model-route="runtime">Runtime</button>
         </div>
@@ -151,7 +151,7 @@ export async function openMobileSettings(opener) {
           <section id="mobileModelEmbeddingSharedSettings"
             class="mobile-model-embedding-shared" aria-label="Embedding 共享设置" hidden>
             <div class="mobile-model-section-heading">
-              <div><p class="eyebrow">Shared vector space</p><h3>Embedding 共享设置</h3></div>
+              <div><p class="eyebrow">共享向量空间</p><h3>Embedding 共享设置</h3></div>
               <label class="mobile-model-toggle">
                 <input id="mobileModelEmbeddingEnabled" type="checkbox">
                 <span>启用</span>
@@ -187,7 +187,7 @@ export async function openMobileSettings(opener) {
             <section id="mobileModelRouteListPane" class="mobile-model-route-list-pane"
               aria-label="模型路由列表">
               <div class="mobile-model-section-heading">
-                <div><p class="eyebrow">Ordered route</p><h3 id="mobileModelRouteTitle">Chat connections</h3></div>
+                <div><p class="eyebrow">有序路由</p><h3 id="mobileModelRouteTitle">Chat 连接</h3></div>
                 <button id="mobileModelAddConnection" type="button">添加连接</button>
               </div>
               <p id="mobileModelRouteHelp" class="mobile-settings-hint"></p>
@@ -207,8 +207,8 @@ export async function openMobileSettings(opener) {
                   </div>
                 </div>
                 <div class="mobile-model-order-actions" aria-label="调整优先级">
-                  <button id="mobileModelMoveUp" type="button">Move Up</button>
-                  <button id="mobileModelMoveDown" type="button">Move Down</button>
+                  <button id="mobileModelMoveUp" type="button">上移</button>
+                  <button id="mobileModelMoveDown" type="button">下移</button>
                 </div>
                 <div id="mobileModelInspectorFields"></div>
                 <fieldset class="mobile-model-type-chooser">
@@ -238,7 +238,7 @@ export async function openMobileSettings(opener) {
 
         <section id="mobileModelRuntimeView" class="mobile-model-runtime" hidden>
           <div class="mobile-model-section-heading">
-            <div><p class="eyebrow">Route policy</p><h3>Runtime</h3></div>
+            <div><p class="eyebrow">路由策略</p><h3>Runtime</h3></div>
           </div>
           <label class="mobile-model-field">
             <span>Chat 并发数</span>
@@ -248,7 +248,7 @@ export async function openMobileSettings(opener) {
               role="alert" hidden></span>
           </label>
           <label class="mobile-model-field">
-            <span>整条 route 超时（秒）</span>
+            <span>整条路由超时（秒）</span>
             <input id="mobileModelChatTimeout" type="number" min="10" inputmode="numeric"
               aria-describedby="mobileModelChatTimeoutError">
             <span id="mobileModelChatTimeoutError" class="mobile-model-field-error"
@@ -546,13 +546,13 @@ export async function openMobileSettings(opener) {
 
   function safeHealth(record) {
     if (record?.circuit?.state === "open") {
-      return { label: record.circuit.failure_kind || "Circuit open", tone: "error" };
+      return { label: record.circuit.failure_kind || "熔断已打开", tone: "error" };
     }
-    if (record?.probe?.ok === true) return { label: "Probe passed", tone: "success" };
+    if (record?.probe?.ok === true) return { label: "探测通过", tone: "success" };
     if (record?.probe?.ok === false) {
-      return { label: record.probe.error_code || "Probe failed", tone: "error" };
+      return { label: record.probe.error_code || "探测失败", tone: "error" };
     }
-    return { label: "Not probed", tone: "" };
+    return { label: "尚未探测", tone: "" };
   }
 
   function uniqueId(kind) {
@@ -683,11 +683,11 @@ export async function openMobileSettings(opener) {
     const items = activeItems();
     const locked = routeLocked(kind);
     byId("mobileModelRouteTitle").textContent = kind === "chat"
-      ? "Chat connections"
-      : "Embedding providers";
+      ? "Chat 连接"
+      : "Embedding Provider";
     byId("mobileModelRouteHelp").textContent = kind === "chat"
-      ? "第 1 项是 Primary，其余项依序作为 fallback；最多 10 项。"
-      : "Provider 按此顺序 fallback，并共享唯一 Embedding 模型设置；最多 10 项。";
+      ? "第 1 项是 Primary，其余项依序作为 Fallback；最多 10 项。"
+      : "Provider 按此顺序 Fallback，并共享唯一 Embedding 模型设置；最多 10 项。";
     byId("mobileModelAddConnection").disabled = (
       Boolean(locked)
       || items.length >= MAX_ROUTE_ITEMS
@@ -706,15 +706,15 @@ export async function openMobileSettings(opener) {
             data-model-select="${escapeHtml(record.id)}"
             aria-current="${selected ? "true" : "false"}">
             <strong>${escapeHtml(derivedRole(index))} ·
-              ${escapeHtml(record.name || "Unnamed connection")}</strong>
+              ${escapeHtml(record.name || "未命名连接")}</strong>
             <span>${escapeHtml(descriptor?.label || record.type)}
               ${preset ? ` / ${escapeHtml(preset.label)}` : ""}
-              · ${escapeHtml(model || "No model")}</span>
+              · ${escapeHtml(model || "未设置模型")}</span>
             <small class="mobile-model-route-health" data-tone="${health.tone}">
               ${escapeHtml(health.label)}</small>
           </button>
         </article>`;
-    }).join("") || '<p class="mobile-settings-hint">当前 route 为空。</p>';
+    }).join("") || '<p class="mobile-settings-hint">当前路由为空。</p>';
   }
 
   function renderConnectionTypes() {
@@ -853,7 +853,7 @@ export async function openMobileSettings(opener) {
         status.credential_ref || definition.choices?.[0] || descriptor.label
       );
       host.innerHTML = `
-        <strong>Imported OAuth credential</strong>
+        <strong>已导入 OAuth 凭据</strong>
         <p>${status.oauth_logged_in ? "已登录" : "尚未检测到登录"} ·
           ${escapeHtml(importedReference)}</p>
         <input type="hidden" data-model-credential-action="keep" value="keep">
@@ -861,17 +861,17 @@ export async function openMobileSettings(opener) {
       return;
     }
     const actions = [
-      ["keep", "Keep existing"],
-      ["set", "Set API key"],
-      ["env", "Environment variable"],
-      ["clear", "Clear"],
+      ["keep", "保留现有凭据"],
+      ["set", "设置 API Key"],
+      ["env", "环境变量"],
+      ["clear", "清除"],
     ];
     const sourceLabel = status.configured
-      ? `Current source: ${status.source}${status.env_name ? ` (${status.env_name})` : ""}`
-      : "No credential is currently configured.";
+      ? `当前来源：${status.source}${status.env_name ? ` (${status.env_name})` : ""}`
+      : "当前未配置凭据。";
     const needsValue = credential.action === "set" || credential.action === "env";
     host.innerHTML = `
-      <strong>Credential source</strong>
+      <strong>凭据来源</strong>
       <p>${escapeHtml(sourceLabel)}</p>
       <div class="mobile-model-credential-actions">
         ${actions.map(([action, label]) => `
@@ -882,7 +882,7 @@ export async function openMobileSettings(opener) {
       ${needsValue ? `
         <label class="mobile-model-field">
           <span>${credential.action === "env"
-    ? "Environment variable name" : "New API key"}</span>
+    ? "环境变量名" : "新 API Key"}</span>
           <input id="mobileModelCredentialValue"
             type="${credential.action === "set" ? "password" : "text"}"
             value="${escapeHtml(credential.value || "")}"
@@ -901,7 +901,7 @@ export async function openMobileSettings(opener) {
       return;
     }
     const dimensions = probe.observed_dimension
-      ? ` · ${probe.observed_dimension} dimensions`
+      ? ` · ${probe.observed_dimension} 维`
       : "";
     const latency = probe.latency_ms ? ` · ${probe.latency_ms} ms` : "";
     const timestamp = probe.probed_at
@@ -941,7 +941,7 @@ export async function openMobileSettings(opener) {
         ${errorMarkup(record.id, "name")}
       </label>
       <label class="mobile-model-field">
-        <span>Stable ID</span>
+        <span>稳定 ID</span>
         <input value="${escapeHtml(record.id)}" readonly aria-readonly="true">
         <small>排序或改名不会改变此 ID。</small>
         ${errorMarkup(record.id, "id")}
@@ -970,13 +970,13 @@ export async function openMobileSettings(opener) {
     const open = all.filter((record) => record.circuit?.state === "open").length;
     const healthy = all.filter((record) => record.probe?.ok === true).length;
     byId("mobileModelRuntimeSummary").innerHTML = `
-      <div><span>Chat route</span><strong>
-        ${state.models.chat.connections.length} connections</strong></div>
-      <div><span>Embedding route</span><strong>
-        ${state.models.embedding.providers.length} providers ·
-        ${state.models.embedding.enabled ? "enabled" : "disabled"}</strong></div>
-      <div><span>Current health</span><strong>
-        ${healthy} passed probes · ${open} open circuits</strong></div>`;
+      <div><span>Chat 路由</span><strong>
+        ${state.models.chat.connections.length} 个连接</strong></div>
+      <div><span>Embedding 路由</span><strong>
+        ${state.models.embedding.providers.length} 个 Provider ·
+        ${state.models.embedding.enabled ? "已启用" : "已停用"}</strong></div>
+      <div><span>当前健康状态</span><strong>
+        ${healthy} 个探测通过 · ${open} 个熔断打开</strong></div>`;
     renderNumericFieldErrors();
   }
 
@@ -1102,7 +1102,7 @@ export async function openMobileSettings(opener) {
     if (modelMutationBlocked() || routeLocked(state.activeRoute)) return;
     const descriptor = descriptorsFor(state.activeRoute)[0];
     if (!descriptor) {
-      setModelStatus("当前 route 没有可用连接类型。", "error");
+      setModelStatus("当前路由没有可用连接类型。", "error");
       return;
     }
     const preset = descriptor.preset_definitions?.find(
@@ -1314,7 +1314,7 @@ export async function openMobileSettings(opener) {
       }
       if (probeRequestVisible(signature)) {
         if (probeSignatureMatches(state, signature)) {
-          status.textContent = error.details?.error || error.message || "Probe failed";
+      status.textContent = error.details?.error || error.message || "探测失败";
           status.dataset.tone = "error";
         } else {
           renderProbeStatus(selectedRecord(state, signature.kind));
@@ -1355,14 +1355,14 @@ export async function openMobileSettings(opener) {
     if (save.invalidatedProbe) {
       renderProbeStatus(selectedRecord(state, state.activeRoute));
     }
-    setModelStatus("正在验证并热重载模型 route…");
+    setModelStatus("正在验证并热重载模型路由…");
     try {
       const result = await updateModelConfig(toModelConfigPayload(state));
       if (disposed) return;
       state = retainSelection(hydrateModelConfig(result.snapshot), state);
       numericValidation.afterAuthoritativeHydration();
       render({ preserveStatus: true });
-      setModelStatus("模型 route 已保存并热重载。", "success");
+      setModelStatus("模型路由已保存并热重载。", "success");
     } catch (error) {
       if (disposed) return;
       if (error.status === 409 && error.details?.error === "revision_conflict") {
@@ -1413,7 +1413,7 @@ export async function openMobileSettings(opener) {
   }
 
   function confirmLeave() {
-    return !state?.dirty || window.confirm("模型 route 有未保存的更改，确定离开吗？");
+    return !state?.dirty || window.confirm("模型路由有未保存的更改，确定离开吗？");
   }
 
   function destroy({ restoreFocus = true } = {}) {
@@ -1570,7 +1570,7 @@ export async function openMobileSettings(opener) {
     const providersLocked = Boolean(routeLocked("embedding"));
     if (!event.target.checked && state.models.embedding.providers.length
       && !providersLocked) {
-      if (!window.confirm("停用 Embedding 会清空当前 Provider route。继续吗？")) {
+      if (!window.confirm("停用 Embedding 会清空当前 Provider 路由。继续吗？")) {
         event.target.checked = true;
         return;
       }
