@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeAlias, cast
+from typing import Any, Literal, NoReturn, TypeAlias, cast
 
 import click
 import typer
@@ -44,9 +44,6 @@ from openbiliclaw.model_config.service import (
     PublicChatConnection,
     PublicEmbeddingProvider,
 )
-
-if TYPE_CHECKING:
-    from typing import Any
 
 ModelKind: TypeAlias = Literal["chat", "embedding"]
 RouteRecord: TypeAlias = ChatConnection | EmbeddingProviderConfig

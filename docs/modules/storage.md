@@ -19,6 +19,7 @@
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，避免 pool readiness / maintenance 的推荐历史排除和最近已看读取反复全表扫描。 |
+| 初始化终态共享 | ✅ | `init_runs` 同时承载 API `InitCoordinator` 和独立 CLI 进程的最近终态；`record_external_init_failure()` 以短连接 `BEGIN IMMEDIATE` 写入 reason/detail/失败阶段，存在 `starting/running` GUI run 时拒绝覆盖，不伪造跨进程实时进度。 |
 | LLM usage 连接归因 | ✅ | `llm_usage` 保存 `connection_id / connection_type / preset / route_position`，同时保留 provider/model/caller/token/cost 字段；旧库初始化时幂等补列，并建立 `idx_llm_usage_connection_timestamp`。Provider 汇总接口保持兼容，新增连接级汇总用于 ordered fallback 成本诊断。 |
 | 推荐池 readiness 计数 | ✅ | `count_pool_readiness()` 返回 `available/raw/pending/admitted_pending_copy/pending_eval/evaluated_pending`。其中 `admitted_pending_copy` 只统计已通过 admission、已完成 style/topic 分类、链接可用且尚缺 expression/topic label 的 canonical 行，并复用 recommendation、近期已看、self-XHS 与 delight guards。 |
 | 规范化保存存储 | ✅ | `saved_items` 以 canonical key 保存跨平台元数据快照，`saved_memberships` 独立表达收藏 / 稍后看归属，`native_save_states` 持久化当前逐项同步状态；`native_save_tasks` / `native_save_task_items` 独立持久化每次请求的 UUID、不可变成员集合和 task-scoped 结果。旧 `watch_later` / `favorites` 由带 marker 的单次事务迁移导入。 |
@@ -42,6 +43,20 @@
 | 保存内容封面生命周期 | ✅ | `iter_cover_lifecycle()` / `iter_servable_cover_urls()` 以 `content_cache.item_key` 关联 normalized `saved_memberships`，跨平台本地保存内容不会因缺少 legacy BVID 行而被漏预取或误清理；旧 `favorites` / `watch_later` 仍作为兼容 fallback。`saved_memberships(item_key)` 独立索引支持该关联。 |
 
 ## 公开 API
+
+### 初始化终态
+
+```python
+written = database.record_external_init_failure(
+    "cli-<uuid>",
+    reason="analyze_failed",
+    detail="偏好分析等待 AI 服务超过 6 分钟仍未返回结果。",
+    stage=2,
+)
+latest = database.get_latest_init_run()
+```
+
+该方法只供 CLI/bootstrap 等 coordinator 外部执行路径记录 terminal failure；活跃 GUI run 优先时返回 `False`，调用方保持原有失败输出，不把它当成业务失败覆盖器。
 
 ### LLM Usage Ledger
 

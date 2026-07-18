@@ -388,6 +388,9 @@ def test_init_status_endpoint_shape(tmp_path: Path) -> None:
     # No configured cookie / chat creds in this minimal app → can't start.
     assert body["prerequisites"]["bilibili_check"] == "failed"
     assert body["can_start"] is False
+    assert body["start_mode"] in ("web", "local_only", "cli_only")
+    assert body["last_failure_reason"] == ""
+    assert body["last_failure_detail"] == ""
     # local_only: TestClient's peer is not loopback, and v0.3.155+ the reason
     # ladder surfaces the untrusted cause instead of falling through to a
     # generic "none".

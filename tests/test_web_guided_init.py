@@ -30,13 +30,15 @@ def test_desktop_web_static_contract_exposes_guided_init_cta() -> None:
     assert "buildInitChecklist" in app_js
     assert "INIT_SOURCE_OPTIONS" in app_js
     assert "init_progress" in app_js
-    # "openbiliclaw init" may appear ONLY inside the unsupported_runtime copy
-    # (the container-blocked docker-exec fallback) — never as generic guidance
-    # steering users away from the in-page guided-init CTA.
+    # Keep the Docker recovery command in one copyable constant instead of
+    # duplicating it in generic reason text.
     assert app_js.count("openbiliclaw init") == 1
+    assert (
+        'const INIT_CLI_COMMAND = "docker exec -it openbiliclaw-backend openbiliclaw init"'
+        in app_js
+    )
     unsupported_line = next(line for line in app_js.splitlines() if "unsupported_runtime:" in line)
-    assert "docker exec" in unsupported_line
-    assert "openbiliclaw init" in unsupported_line
+    assert "复制下方命令" in unsupported_line
     assert ".init-onboarding" in app_css
     assert ".init-progress-fill" in app_css
 
@@ -588,7 +590,7 @@ def test_init_onboarding_gate_trusts_init_status_when_runtime_status_is_unavaila
     gate = app_js.split("function shouldShowInitOnboarding(", 1)[1]
     gate = gate.split("\n    }", 1)[0]
     assert "state.initStatus?.initialized === false" in gate
-    assert "hasPostInitRuntimeSignals(runtime)" in gate
+    assert "hasPostInitRuntimeSignals" not in gate
 
 
 def test_hydrate_runtime_status_fallback_is_not_dead_catch() -> None:
@@ -676,6 +678,39 @@ def test_setup_wizard_guard_resumes_running_and_initialized_states_on_load() -> 
     assert "connectInitStream()" in guard
     assert "if (status.initialized)" in guard
     assert "renderWaitingForFirstPool(status)" in guard
+    assert "shouldResumeRecovery" in guard
+    assert 'initStartMode(status) === "cli_only"' in guard
+    assert "renderCliInitRequired(status)" in guard
+
+
+def test_desktop_recovery_routes_model_failures_and_hides_internal_event_codes() -> None:
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    settings = app_js.split("function preferredInitSettingsPanel", 1)[1].split(
+        "function initEnabledPlatforms", 1
+    )[0]
+    assert '"analyze_failed"' in settings
+    assert '"profile_failed"' in settings
+    assert 'return "models"' in settings
+
+    event_summary = app_js.split("function runtimeEventSummary", 1)[1].split(
+        "function handleRuntimeEvent", 1
+    )[0]
+    assert "bilibili_cookie_synced" in event_summary
+    assert "B 站登录信息已同步" in event_summary
+    assert "return labels[event?.type]" in event_summary
+    handler = app_js.split("function handleRuntimeEvent", 1)[1].split(
+        "function hydrateFromBackend", 1
+    )[0]
+    assert "event.message || event.live_summary || event.type" not in handler
+
+
+def test_desktop_model_route_selection_resets_detail_scroll() -> None:
+    model_js = Path("src/openbiliclaw/web/desktop/assets/js/model-settings.js").read_text(
+        encoding="utf-8"
+    )
+    selection = model_js.split("function selectRecord", 1)[1].split("function addConnection", 1)[0]
+    assert 'window.scrollTo({ top: 0, behavior: "auto" })' in selection
 
 
 def test_setup_wizard_hydrates_credential_status_without_secret_value() -> None:
@@ -875,6 +910,9 @@ def test_init_status_out_has_last_activity_default() -> None:
     from openbiliclaw.api.models import InitStatusOut
 
     assert InitStatusOut().last_activity == ""
+    assert InitStatusOut().start_mode == "web"
+    assert InitStatusOut().last_failure_reason == ""
+    assert InitStatusOut().last_failure_detail == ""
 
 
 def test_heartbeat_interval_bounds_last_activity_freshness() -> None:

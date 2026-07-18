@@ -66,6 +66,39 @@ def test_try_reserve_is_single_flight(tmp_path: Path) -> None:
     assert db.get_latest_init_run()["run_id"] == "run-3"
 
 
+def test_record_external_init_failure_persists_terminal_recovery_state(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    assert db.record_external_init_failure(
+        "cli-timeout",
+        reason="analyze_failed",
+        detail="偏好分析等待 AI 服务超过 6 分钟仍未返回结果。",
+        stage=2,
+    )
+
+    run = db.get_latest_init_run()
+    assert run["run_id"] == "cli-timeout"
+    assert run["status"] == "failed"
+    assert run["stage"] == 2
+    assert run["error_reason"] == "analyze_failed"
+    assert "超过 6 分钟" in run["error_detail"]
+    stages = json.loads(run["stages_json"])
+    assert [stage["status"] for stage in stages] == ["ok", "failed", "pending", "pending"]
+
+
+def test_record_external_init_failure_does_not_override_active_gui_run(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    assert db.try_reserve_init_starting("web-active")
+
+    assert not db.record_external_init_failure(
+        "cli-late",
+        reason="analyze_failed",
+        detail="late failure",
+        stage=2,
+    )
+    assert db.get_latest_init_run()["run_id"] == "web-active"
+
+
 def test_reconcile_fails_stale_active_runs_on_boot(tmp_path: Path) -> None:
     db = _db(tmp_path)
     db.try_reserve_init_starting("run-1")

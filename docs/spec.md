@@ -222,6 +222,8 @@ background ─ background admission (default 3) ──────┘
 
 模型配置只有一条生产数据流：`connection-type descriptor registry → ModelConfigService → 原生 ordered Chat/Embedding factories → RuntimeModelBundle → Soul / Dialogue / Discovery / Recommendation / CLI / OpenClaw`。桌面、移动、插件与 `/setup/` 消费同一脱敏 snapshot 和 descriptor；CLI 直接调用同一 service。旧 `[llm]` 只在加载时生成明确待确认的迁移候选，legacy `/api/config` 只提供无凭据只读投影，二者都不参与生产 route 构造或权威写入。
 
+初始化恢复的数据流是：`CLI GuidedInitError → init_runs 终态 → /api/init-status(start_mode + last_failure_*) → 桌面 / 移动 / 插件 / CLI`。profile `initialized` 是 readiness 权威，raw/pending 候选与 refresh 事件不能把失败的阶段 1 提升成已初始化；Docker 只改变 `start_mode=cli_only`，不会覆盖上次模型超时根因。
+
 ```text
 descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
              └─ CLI models ────────────────────────────────────────┤
@@ -300,7 +302,7 @@ descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
 │  │ 画像编辑：编辑面板 -> /api/profile/edit -> 覆盖层（插件/移动/桌面三端） │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 引导初始化：画像信号来源选择 + 前置清单 -> /api/init + 进度流（B 站可取消；Reddit 可独立初始化）│ │
+│  │ 引导初始化：profile readiness + 来源/前置 -> /api/init；CLI 终态 -> init_runs -> 四端恢复 │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
 │                      Agent 核心层                             │
@@ -330,7 +332,7 @@ descriptors ─┬─ Desktop / Mobile / Extension / Setup ─ model API ─┐
 │  │     Interest probes: near 5 + challenge 3 独立 active 额度 │   │
 │  │     Probe memory: domain / axis / distance + exploration buffer │ │
 │  │     AccountSync: B 站账号增量 -> Memory/Soul bootstrap     │   │
-│  │     Guided init: selected profile-signal sources + LLM/embedding live probe -> run_guided_init + InitCoordinator │ │
+│  │     Guided init: selected sources + live probe -> run_guided_init + InitCoordinator；CLI failure -> init_runs │ │
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │

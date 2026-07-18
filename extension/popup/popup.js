@@ -47,11 +47,13 @@ import {
 import {
   buildInitChecklist,
   describeInitFailure,
+  describeInitLastFailure,
   describeInitReason,
   describeInitStatusReason,
   describeInitStartError,
   embeddingRepairStartAccepted,
   initProgressView,
+  initStartMode,
   INIT_EXPECTATION_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
@@ -217,6 +219,7 @@ const elements = {
   initProgressBar: document.getElementById("initProgressBar"),
   initProgressLabel: document.getElementById("initProgressLabel"),
   initStallHint: document.getElementById("initStallHint"),
+  initCliCommand: document.getElementById("initCliCommand"),
   initStartBtn: document.getElementById("initStartBtn"),
   initStartReason: document.getElementById("initStartReason"),
   list: document.getElementById("recommendationList"),
@@ -1030,6 +1033,7 @@ function hideRecommendationEmptyState() {
 
 // ── Guided init (gui-init F1) ──────────────────────────────────────────────
 let initPollTimer = null;
+const INIT_CLI_COMMAND = "docker exec -it openbiliclaw-backend openbiliclaw init";
 
 function clearInitPolling() {
   if (initPollTimer != null) {
@@ -1247,6 +1251,9 @@ function renderInitPanelIdle() {
     elements.initStallHint.hidden = true;
     elements.initStallHint.classList.remove("stale");
   }
+  if (elements.initCliCommand instanceof HTMLElement) {
+    elements.initCliCommand.hidden = true;
+  }
   _setInitStartButton("开始初始化", true);
   _setInitReason("");
 }
@@ -1256,6 +1263,9 @@ function renderInitProgress(status) {
     return;
   }
   elements.initPanel.hidden = false;
+  if (elements.initCliCommand instanceof HTMLElement) {
+    elements.initCliCommand.hidden = true;
+  }
   // Source selection is an idle-only affordance; hide it once a run is shown.
   if (elements.initSources instanceof HTMLElement) {
     elements.initSources.hidden = true;
@@ -1264,23 +1274,24 @@ function renderInitProgress(status) {
     elements.initChecklist.replaceChildren();
   }
   const progress = initProgressView(status);
+  const failed = progress.failed || Boolean(describeInitLastFailure(status));
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
       elements.initProgressBar.style.width = `${progress.pct}%`;
     }
     if (elements.initProgressLabel instanceof HTMLElement) {
-      elements.initProgressLabel.textContent = progress.failed
+      elements.initProgressLabel.textContent = failed
         ? `初始化未完成：${describeInitFailure(status, progress)}`
         : progress.partial
           ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
         : progress.active
           ? `${progress.stageLabel || "正在初始化"}（${progress.pct}%）`
           : "初始化完成！";
-      elements.initProgressLabel.setAttribute("role", progress.failed ? "alert" : "status");
+      elements.initProgressLabel.setAttribute("role", failed ? "alert" : "status");
       elements.initProgressLabel.setAttribute(
         "aria-live",
-        progress.failed ? "assertive" : "polite",
+        failed ? "assertive" : "polite",
       );
     }
   }
@@ -1303,7 +1314,7 @@ function renderInitProgress(status) {
   if (progress.active) {
     _setInitStartButton("初始化进行中…", false);
     _setInitReason("");
-  } else if (progress.failed) {
+  } else if (failed) {
     _setInitStartButton("重试初始化", true);
     _setInitReason("");
   } else if (progress.partial) {
@@ -1312,6 +1323,33 @@ function renderInitProgress(status) {
   } else {
     _setInitStartButton("已初始化", false);
     _setInitReason("");
+  }
+}
+
+function renderCliInitRequired(status) {
+  if (!(elements.initPanel instanceof HTMLElement)) return;
+  elements.initPanel.hidden = false;
+  if (elements.initSources instanceof HTMLElement) elements.initSources.hidden = true;
+  if (elements.initProgress instanceof HTMLElement) elements.initProgress.hidden = true;
+  if (elements.initStallHint instanceof HTMLElement) elements.initStallHint.hidden = true;
+  if (elements.initCliCommand instanceof HTMLElement) elements.initCliCommand.hidden = false;
+  _renderInitChecklist(status);
+  _setInitStartButton("复制初始化命令", true);
+  const failure = describeInitLastFailure(status);
+  _setInitReason(
+    failure
+      ? `上次初始化未完成：${failure}。请在宿主机终端重新运行下方命令。`
+      : "Docker 环境请在宿主机终端运行下方命令。",
+    Boolean(failure),
+  );
+}
+
+async function copyCliInitCommand() {
+  try {
+    await navigator.clipboard.writeText(INIT_CLI_COMMAND);
+    _setInitReason("初始化命令已复制，请粘贴到宿主机终端运行。", false);
+  } catch {
+    _setInitReason(`请复制并运行：${INIT_CLI_COMMAND}`, false);
   }
 }
 
@@ -1350,12 +1388,9 @@ async function pollInitProgress() {
   }
 }
 
-// Boot-time re-attach: when the popup opens while a run is already live, the
-// uninitialized branch would otherwise paint the idle panel and never poll
-// (the run started elsewhere, so no click/SSE kicked the poll here). Fetch once
-// and, ONLY if a run is in flight, take over with the progress view + poll.
-// The idle path is left untouched (renderInitProgress would clobber it). This
-// mirrors the setup wizard's boot guard and the desktop hydrate re-attach.
+// Boot-time recovery: re-attach a live run, restore a terminal failure, or
+// replace the web-start CTA with the Docker CLI command. A genuinely fresh
+// web-capable status leaves the idle panel untouched.
 async function maybeAttachRunningInitProgress() {
   let status;
   try {
@@ -1365,6 +1400,10 @@ async function maybeAttachRunningInitProgress() {
   }
   if (!shouldAttachRunningInitProgress(status)) {
     return false;
+  }
+  if (initStartMode(status) === "cli_only") {
+    renderCliInitRequired(status);
+    return true;
   }
   renderInitProgress(status);
   _startInitProgressPoll();
@@ -1415,6 +1454,12 @@ async function handleStartInitClick() {
     return;
   }
 
+  if (initStartMode(status) === "cli_only") {
+    renderCliInitRequired(status);
+    await copyCliInitCommand();
+    return;
+  }
+
   // B 站登录只在勾选了 B 站时才拦截（v0.3.118+：可取消勾选跳过 B 站）。
   if (
     selectedSources.includes("bilibili") &&
@@ -1442,6 +1487,11 @@ async function handleStartInitClick() {
   try {
     await startInit({ force: false, sources: selectedSources });
   } catch (error) {
+    const code = error?.details?.error || error?.details?.reason;
+    if (code === "unsupported_runtime") {
+      renderCliInitRequired({ ...status, start_mode: "cli_only", reason: code });
+      return;
+    }
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(describeInitStartError(error));

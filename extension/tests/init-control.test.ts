@@ -15,6 +15,7 @@ import {
   initProgressView,
   initSelectedSourcesNeedingEnable,
   initSourceLabels,
+  initStartMode,
   INIT_SOURCE_LOGIN_HINT,
   INIT_SOURCE_OPTIONS,
   initStartButtonState,
@@ -730,11 +731,20 @@ test("stageEtaText rounds up to half minutes and expectation copy exists", () =>
   assert.ok(INIT_EXPECTATION_HINT.includes("进度会保留"));
 });
 
-test("shouldAttachRunningInitProgress: boot re-attach only when a run is live", () => {
+test("shouldAttachRunningInitProgress restores live, failed, and CLI-only recovery", () => {
   // A run in flight (popup opened / refreshed mid-init, started elsewhere so no
   // click or SSE kicked the poll here) → re-attach the progress poll.
   assert.equal(shouldAttachRunningInitProgress(statusWith({ running: true })), true);
-  // Idle / not-yet-started → leave the idle panel, no poll.
+  assert.equal(
+    shouldAttachRunningInitProgress(
+      statusWith({ last_failure_reason: "analyze_failed", last_failure_detail: "超时" }),
+    ),
+    true,
+  );
+  assert.equal(shouldAttachRunningInitProgress(statusWith({ start_mode: "cli_only" })), true);
+  assert.equal(initStartMode(statusWith({ reason: "unsupported_runtime" })), "cli_only");
+  assert.equal(shouldAttachRunningInitProgress(statusWith({ reason: "unsupported_runtime" })), true);
+  // Fresh web-capable idle state leaves the idle panel untouched.
   assert.equal(shouldAttachRunningInitProgress(statusWith({ running: false })), false);
   // Missing/legacy status must never throw or falsely attach.
   assert.equal(shouldAttachRunningInitProgress(null), false);

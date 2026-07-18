@@ -61,6 +61,9 @@
     .msg.err { background: rgba(255,107,107,.12); color: var(--err); border: 1px solid rgba(255,107,107,.3); }
     .msg.warn { background: rgba(244,185,66,.12); color: var(--warn); border: 1px solid rgba(244,185,66,.3); }
     .msg.info { background: rgba(255,122,162,.12); color: var(--accent); border: 1px solid rgba(255,122,162,.28); }
+    .init-cli-command { display: none; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text); overflow-wrap: anywhere; }
+    .init-cli-command.show { display: block; }
+    .init-cli-command code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
     .check-list { list-style: none; padding: 0; margin: 18px 0; }
     .check-list li { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: var(--panel-2);
       border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; }
@@ -206,6 +209,7 @@
           <p class="progress-label stall-hint" id="initStallHint" hidden></p>
         </div>
         <div class="msg" id="initReason" role="status" aria-live="polite" aria-atomic="true"></div>
+        <div class="init-cli-command" id="initCliCommand"><code>docker exec -it openbiliclaw-backend openbiliclaw init</code></div>
         <div class="msg" id="initEscape">后台会继续补齐首轮内容池，你可以<a href="/web">先进入应用 →</a>，首池就绪后推荐会自动出现。</div>
         <div class="row-actions">
           <button class="ghost" id="backInit">← 上一步</button>
@@ -266,6 +270,7 @@
     };
     const INIT_SOURCE_LOGIN_HINT =
       "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+    const INIT_CLI_COMMAND = "docker exec -it openbiliclaw-backend openbiliclaw init";
     const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
@@ -836,6 +841,23 @@
       return describeInitReason(reason) || detail;
     }
 
+    function initLastFailureText(status) {
+      const reason = String(status?.last_failure_reason || "");
+      const detail = String(status?.last_failure_detail || "").trim();
+      return detail || describeInitReason(reason);
+    }
+
+    function initRecoveryReasonText(status) {
+      return initLastFailureText(status) || initStatusReasonText(status);
+    }
+
+    function initStartMode(status) {
+      if (status?.start_mode) return String(status.start_mode);
+      if (status?.reason === "unsupported_runtime") return "cli_only";
+      if (status?.reason === "local_only") return "local_only";
+      return "web";
+    }
+
     function enabledPlatforms(status) {
       const platforms = status?.prerequisites?.enabled_platforms;
       return Array.isArray(platforms) ? platforms.map(String) : [];
@@ -1027,6 +1049,33 @@
       el.setAttribute("aria-live", kind === "err" ? "assertive" : "polite");
     }
 
+    function renderCliInitRequired(status) {
+      clearInitPoll();
+      $("#initSources").style.display = "none";
+      $("#initProgress").hidden = true;
+      $("#initEscape").className = "msg";
+      $("#initCliCommand").className = "init-cli-command show";
+      renderInitChecklist(status);
+      $("#startInit").disabled = false;
+      $("#startInit").textContent = "复制初始化命令";
+      const failure = initLastFailureText(status);
+      setInitReason(
+        failure
+          ? `上次初始化未完成：${failure}。Docker 环境请在宿主机终端重新运行下方命令。`
+          : INIT_REASON_TEXT.unsupported_runtime,
+        failure ? "err" : "info",
+      );
+    }
+
+    async function copyCliInitCommand() {
+      try {
+        await navigator.clipboard.writeText(INIT_CLI_COMMAND);
+        setInitReason("初始化命令已复制，请粘贴到宿主机终端运行。", "ok");
+      } catch {
+        setInitReason(`请复制并在宿主机终端运行：${INIT_CLI_COMMAND}`, "info");
+      }
+    }
+
     async function fetchInitStatus() {
       return apiFetch("/api/init-status");
     }
@@ -1076,6 +1125,8 @@
     // message, v0.3.156+) — append it so internal_error is diagnosable from
     // the UI instead of only the generic "请稍后重试".
     function initFailureText(status, failedStage) {
+      const previousFailure = initLastFailureText(status);
+      if (previousFailure) return previousFailure;
       const base = describeInitReason(status?.reason) || "";
       const detail = String(status?.detail || "").trim();
       const reason = String(status?.reason || "");
@@ -1185,7 +1236,8 @@
       const total = status?.total_stages || 4;
       const stages = Array.isArray(status?.stages) ? status.stages : [];
       const done = stages.filter((s) => s.status === "ok").length;
-      const failed = stages.find((s) => s.status === "failed" || s.status === "cancelled");
+      const failedStage = stages.find((s) => s.status === "failed" || s.status === "cancelled");
+      const failed = failedStage || (initLastFailureText(status) ? { reason: status?.last_failure_reason } : null);
       const running = Boolean(status?.running);
       const runId = status?.run_id ? String(status.run_id) : "";
       const st = runId ? _viewState(runId) : null;
@@ -1218,6 +1270,7 @@
     }
 
     function renderInitProgress(status) {
+      $("#initCliCommand").className = "init-cli-command";
       $("#initSources").style.display = "none";
       $("#initEscape").className = "msg";
       $("#initProgress").hidden = false;
@@ -1257,6 +1310,7 @@
       clearInitPoll();
       renderInitSources();
       $("#initEscape").className = "msg";
+      $("#initCliCommand").className = "init-cli-command";
       $("#initSources").style.display = "";
       $("#initChecklist").innerHTML =
         '<li class="init-hint-row">点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。</li>' +
@@ -1313,6 +1367,10 @@
           scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
           return;
         }
+        if (initStartMode(status) === "cli_only") {
+          renderCliInitRequired(status);
+          return;
+        }
         clearInitPoll();
         // Pre-init: keep the checklist fresh, and while a one-click model
         // download is running keep polling so the row shows live percent
@@ -1322,13 +1380,13 @@
           scheduleInitPoll(INIT_POLL_MS);
           return;
         }
-        if (status.reason && status.reason !== "none") {
+        if (initRecoveryReasonText(status)) {
           const failedStage = (Array.isArray(status.stages) ? status.stages : [])
             .find((s) => s.status === "failed" || s.status === "cancelled");
           setInitReason(
             failedStage
               ? initFailureText(status, failedStage)
-              : initStatusReasonText(status) || "初始化未完成。"
+              : initRecoveryReasonText(status) || "初始化未完成。"
           );
         }
       } catch {
@@ -1398,6 +1456,11 @@
         scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_START_POLL_MS);
         return;
       }
+      if (initStartMode(status) === "cli_only") {
+        renderCliInitRequired(status);
+        await copyCliInitCommand();
+        return;
+      }
       if (!selected.length) {
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
@@ -1428,6 +1491,11 @@
           body: JSON.stringify({ sources: selected }),
         });
       } catch (e) {
+        const initErrorCode = e.details?.error || e.details?.reason;
+        if (initErrorCode === "unsupported_runtime") {
+          renderCliInitRequired({ ...status, start_mode: "cli_only", reason: initErrorCode });
+          return;
+        }
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
         $("#startInit").textContent = "开始初始化";
@@ -1498,6 +1566,20 @@
           renderWaitingForFirstPool(status);
           connectInitStream();
           scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_POLL_MS);
+          return;
+        }
+        const shouldResumeRecovery = Boolean(initLastFailureText(status)) || (
+          initStartMode(status) === "cli_only" && Boolean(status?.prerequisites?.llm_ready)
+        );
+        if (shouldResumeRecovery) {
+          setStep(2);
+          if (initStartMode(status) === "cli_only") {
+            renderCliInitRequired(status);
+          } else {
+            renderInitProgress(status);
+            renderInitChecklist(status, readSelectedInitSources());
+            setInitReason(initRecoveryReasonText(status) || "上次初始化未完成，可以修正配置后重试。");
+          }
         }
       } catch {}
     })();

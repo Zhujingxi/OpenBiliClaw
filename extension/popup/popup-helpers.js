@@ -861,6 +861,7 @@ export function normalizeRuntimeStatus(status) {
     last_update_error: normalizeText(status?.last_update_error),
     backend_update_state: normalizeText(status?.backend_update_state) || "unknown",
     backend_update_reason: normalizeText(status?.backend_update_reason) || "none",
+    last_account_sync_error: normalizeText(status?.last_account_sync_error),
   };
 }
 
@@ -1237,13 +1238,6 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
     };
   }
   const runtime = normalizeRuntimeStatus(runtimeStatus);
-  const hasPostInitRuntimeSignals =
-    runtime.recommendation_count > 0 ||
-    runtime.pool_available_count > 0 ||
-    runtime.pool_pending_count > 0 ||
-    runtime.last_replenished_count > 0 ||
-    runtime.last_discovered_count > 0;
-
   if (normalizedItems.length === 0) {
     const refreshMessage =
       runtime.manual_refresh_message || "正在根据你最近的新行为补货，再刷一会儿就会更新。";
@@ -1257,7 +1251,7 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
     // (gui-init: live Windows testing). The init panel itself shows the CTA vs.
     // live progress based on /api/init-status, so an in-flight run still renders
     // correctly under this kind.
-    if (!runtime.initialized && !hasPostInitRuntimeSignals) {
+    if (!runtime.initialized) {
       return {
         kind: "uninitialized",
         message: "还没完成初始化，先运行 openbiliclaw init",

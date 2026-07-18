@@ -175,7 +175,12 @@ function render() {
   renderInto(delightSlot, renderDelightTray);
 
   // Recommendation cards — hide disliked items
-  const recs = state.recommendations.filter((r) => feedbackDone.get(r.id) !== "dislike" && r.feedback_type !== "dislike");
+  const runtime = normalizeRuntimeStatus(state.runtimeStatus);
+  const initializationRequired =
+    runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized;
+  const recs = initializationRequired
+    ? []
+    : state.recommendations.filter((r) => feedbackDone.get(r.id) !== "dislike" && r.feedback_type !== "dislike");
   if (recs.length === 0 && !loading) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
@@ -230,7 +235,7 @@ function renderInto(container, fn) {
 // ── Recommendation Header ───────────────────────────────────
 function renderRecommendationHeader() {
   const headerState = getMobileRecommendationHeaderState({
-    runtimeStatus: state.runtimeStatus,
+    runtimeStatus: runtimeStatusLoadState === "ready" ? state.runtimeStatus : null,
     activityFeed: state.activityFeed,
     runtimeEvent: state.runtimeEvent,
     activityExpanded: state.activityExpanded,
@@ -252,7 +257,13 @@ function renderRecommendationHeader() {
   refreshBtn.type = "button";
   refreshBtn.textContent = loading ? "\u6B63\u5728\u6362\u4E00\u6279\u2026" : headerState.primaryActionLabel;
   refreshBtn.disabled = loading;
-  refreshBtn.addEventListener("click", handleReshuffle);
+  refreshBtn.addEventListener("click", () => {
+    if (headerState.initializationRequired) {
+      window.location.assign("/setup/");
+      return;
+    }
+    void handleReshuffle();
+  });
   top.appendChild(refreshBtn);
   header.appendChild(top);
 
@@ -445,6 +456,10 @@ async function sendDelightChat(d, message) {
 
 // ── Delight Tray ─────────────────────────────────────────────
 function renderDelightTray() {
+  const runtime = normalizeRuntimeStatus(state.runtimeStatus);
+  if (runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized) {
+    return;
+  }
   const delights = state.activeDelights;
   if (delights.length === 0) return;
 
@@ -951,8 +966,10 @@ async function handleDelightAction(d, action) {
 
 // ── Load More ────────────────────────────────────────────────
 function renderLoadMoreRow() {
+  const runtime = normalizeRuntimeStatus(state.runtimeStatus);
+  if (runtimeStatusLoadState === "ready" && runtime.initialized_known && !runtime.initialized) return;
   if (state.recommendations.length === 0) return;
-  const headerState = getMobileRecommendationHeaderState();
+  const headerState = getMobileRecommendationHeaderState({ runtimeStatus: state.runtimeStatus });
   const actions = document.createElement("div");
   actions.className = "load-more-row";
   const appendBtn = document.createElement("button");
@@ -1509,7 +1526,7 @@ async function handleAppend() {
   // Restore button state.
   if (appendBtnEl) {
     appendBtnEl.disabled = false;
-    const headerState = getMobileRecommendationHeaderState();
+    const headerState = getMobileRecommendationHeaderState({ runtimeStatus: state.runtimeStatus });
     appendBtnEl.textContent = headerState.secondaryActionLabel;
   }
   observeAutoAppendSentinel();
@@ -1627,7 +1644,9 @@ function recommendationEmptyMessage() {
   if (runtimeStatusLoadState === "failed-exhausted") {
     return "库存状态同步失败，点一下重新加载。";
   }
-  return getReadyRecommendationHint(state.runtimeStatus).message;
+  return getReadyRecommendationHint(
+    runtimeStatusLoadState === "ready" ? state.runtimeStatus : null,
+  ).message;
 }
 
 function clearRecommendationRecovery(nextState) {

@@ -14,6 +14,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 import click
 import typer
@@ -5711,6 +5712,22 @@ def init(
             )
         )
     except GuidedInitError as exc:
+        # The Docker/API process cannot observe this CLI process's in-memory
+        # coordinator. Persist the terminal result so /api/init-status and all
+        # UI surfaces can explain the real failure after the command exits.
+        failure_stage = {
+            "empty_history": 1,
+            "empty_signals": 1,
+            "analyze_failed": 2,
+            "profile_failed": 3,
+        }.get(exc.reason, 1)
+        with suppress(Exception):
+            _get_runtime_database().record_external_init_failure(
+                f"cli-{uuid4().hex}",
+                reason=exc.reason,
+                detail=exc.message,
+                stage=failure_stage,
+            )
         if exc.reason == "empty_history":
             _print_status_panel("warning", "历史为空", exc.message)
         elif exc.reason == "empty_signals":
