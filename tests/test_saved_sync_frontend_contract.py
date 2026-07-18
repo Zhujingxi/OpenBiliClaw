@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -9,6 +10,33 @@ WARNING = (
 
 def _read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_canonical_web_shared_saved_sync_core_contract() -> None:
+    core = _read("src/openbiliclaw/web/shared/saved-sync-core.js")
+
+    for helper in (
+        "captureSavedFocus",
+        "createDialogFocusController",
+        "createDurableTaskTracker",
+        "createRetainedSavedListState",
+        "createSavedMutationRegistry",
+        "createSavedSubmissionFence",
+        "createSavedTaskCoordinator",
+        "createStrictSavedApi",
+        "getSavedSyncPresentation",
+        "isSavedSyncEligibleStatus",
+        "isSavedTaskTerminal",
+        "normalizeSavedItem",
+        "restoreSavedFocus",
+        "taskIsTerminal",
+        "updateSavedBatchButtonState",
+    ):
+        assert re.search(rf"export (?:function|const) {helper}\b", core), helper
+    assert "OBCSavedSyncCore" in core
+    assert "globalThis.document" not in core
+    assert "globalThis.window" not in core
+    assert not any("\u4e00" <= character <= "\u9fff" for character in core)
 
 
 def test_mobile_web_saved_sync_api_and_view_contract() -> None:
@@ -44,7 +72,7 @@ def test_mobile_web_saved_sync_api_and_view_contract() -> None:
 def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
     html = _read("src/openbiliclaw/web/desktop/index.html")
     js = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
-    core = _read("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
+    core = _read("src/openbiliclaw/web/shared/saved-sync-core.js")
 
     assert 'id="savedAutoSync"' in html
     assert "保存时自动同步到对应平台" in html
@@ -53,7 +81,7 @@ def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
     assert 'aria-live="polite"' in html
     assert WARNING in js
     assert "`/saved/${listKind}`" in core
-    assert html.index('src="/web/assets/js/saved-sync-core.js"') < html.index(
+    assert html.index('src="/web/shared/saved-sync-core.js"') < html.index(
         'src="/web/assets/js/app.js"'
     )
     assert "createStrictSavedApi(requestJsonStrict)" in js
@@ -65,6 +93,94 @@ def test_desktop_web_saved_sync_controls_and_consent_contract() -> None:
     assert "unsupported_adapter_missing" in core
     assert "aria-disabled" in js
     assert "error_code" in core
+
+
+def test_desktop_web_uses_canonical_shared_saved_sync_core() -> None:
+    html = _read("src/openbiliclaw/web/desktop/index.html")
+    js = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
+
+    # The desktop-only copy is gone; the canonical shared core is the only
+    # saved-sync module and loads before app.js so window.OBCSavedSyncCore is
+    # installed by the time app.js evaluates.
+    assert not (ROOT / "src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js").exists()
+    assert 'src="/web/shared/saved-sync-core.js"' in html
+    assert 'src="/web/assets/js/saved-sync-core.js"' not in html
+    assert html.index('src="/web/shared/saved-sync-core.js"') < html.index(
+        'src="/web/assets/js/app.js"'
+    )
+    assert "window.OBCSavedSyncCore" in js
+    assert "window.OpenBiliClawSavedSync" not in js
+
+
+def test_desktop_web_config_reads_are_masked_and_credentials_are_write_only() -> None:
+    html = _read("src/openbiliclaw/web/desktop/index.html")
+    js = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
+
+    # No raw-secret reads: masked GET /api/config only, no credential endpoint.
+    assert "reveal_keys" not in js
+    assert "sources/credentials" not in js
+    assert "renderSourceCredentials" not in js
+    assert "CURRENT_CREDENTIAL_KEYS" not in js
+    assert "sourceCredentialList" not in js
+    assert 'id="sourceCredentialList"' not in html
+    assert "source-credential" not in html
+
+    # Credential inputs render empty; placeholders carry 已保存/未保存 status
+    # from the masked config (non-empty masked value means configured), and
+    # empty inputs are omitted from PUT bodies so saves never clobber secrets.
+    for element_id in ("biliCookie", "douyinCookie", "twitterCookie", "redditCookie"):
+        assert f'id="{element_id}"' in html
+        assert f'setCookieOverrideInput("{element_id}"' in js
+    assert "已保存" in js and "留空保存不会覆盖" in js
+    assert "未保存" in js
+    assert "const result = await requestJsonStrict(ENDPOINTS.config, {" in js
+
+
+def test_mobile_web_saved_sync_runtime_is_thin_adapter_over_shared_core() -> None:
+    runtime = _read("src/openbiliclaw/web/js/saved-sync-runtime.js")
+    api = _read("src/openbiliclaw/web/js/api.js")
+    desktop = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
+
+    # The mobile runtime re-exports the canonical shared core instead of
+    # maintaining a parallel implementation; only dependency-injecting
+    # wrappers (browser timers, activeElement) live in the adapter.
+    assert '"../shared/saved-sync-core.js"' in runtime
+    for helper in (
+        "createSavedSubmissionFence",
+        "createDurableTaskTracker",
+        "createSavedMutationRegistry",
+        "createRetainedSavedListState",
+        "captureSavedFocus",
+        "restoreSavedFocus",
+        "createDialogFocusController",
+        "createSavedTaskCoordinator",
+    ):
+        assert f"export function {helper}" not in runtime, helper
+    assert "document?.activeElement" in runtime
+    assert "setTimeout" in runtime
+
+    # The mobile API client only speaks the platform-neutral saved contract;
+    # legacy bilibili-only saved routes and orphaned cognition helpers are gone.
+    assert '"/watch-later' not in api
+    assert '"/favorites' not in api
+    assert "cognition-updates" not in api
+    for helper in (
+        "addToWatchLater",
+        "removeFromWatchLater",
+        "watchLaterStatus",
+        "fetchWatchLater",
+        "addToFavorite",
+        "removeFromFavorite",
+        "favoriteStatus",
+        "fetchFavorites",
+        "fetchPendingCognitionUpdates",
+        "markCognitionSeen",
+    ):
+        assert f"function {helper}" not in api, helper
+
+    # The desktop endpoint table keeps no dead legacy saved routes either.
+    assert 'watchLater: "/watch-later"' not in desktop
+    assert 'favorites: "/favorites"' not in desktop
 
 
 def test_extension_side_panel_and_config_contract() -> None:
@@ -129,7 +245,7 @@ def test_saved_sync_review_repairs_are_wired_to_all_surfaces() -> None:
     mobile_recommend = _read("src/openbiliclaw/web/js/views/recommend.js")
     desktop_html = _read("src/openbiliclaw/web/desktop/index.html")
     desktop = _read("src/openbiliclaw/web/desktop/assets/js/app.js")
-    desktop_core = _read("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js")
+    desktop_core = _read("src/openbiliclaw/web/shared/saved-sync-core.js")
 
     assert "partitionSavedQueueResults" in popup
     assert "createSavedSyncTaskTracker" in popup_runtime
