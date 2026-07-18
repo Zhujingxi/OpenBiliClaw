@@ -24,8 +24,10 @@ import {
   applyProbeResult,
   changeConnectionType,
   changePreset,
+  circuitView,
   createModelOperationGate,
   createProbeSignature,
+  hasUnverifiedChanges,
   hydrateModelConfig,
   mapServerFieldErrors,
   moveRouteItem,
@@ -36,39 +38,27 @@ import {
   selectedRecord,
   setMigrationResolution,
   toModelConfigPayload,
+  unverifiedConnections,
   updateRouteField,
   updateRouteSetting,
 } from "../../shared/model-config-state.js";
+import {
+  applyTypeOptionRovingTabindex,
+  disabledMarkup,
+  escapeHtml,
+  moveTypeOptionFocus as sharedMoveTypeOptionFocus,
+  renderConnectionTypeGroups,
+  renderCredentialEditor,
+  renderDescriptorField as sharedRenderDescriptorField,
+} from "../../shared/model-config-render.js";
 
 const CONFIG_RELOADED_TYPE = "config_reloaded";
-const CATEGORY_LABELS = {
-  api_protocol: "API 协议",
-  local_runtime: "本地 Runtime",
-  oauth: "OAuth 连接",
-};
 const ROUTE_OVERRIDE_PATHS = {
   chat: "models.chat.connections",
   embedding: "models.embedding.providers",
 };
 
 let requestCloseActiveSettings = null;
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(
-    /[&<>'"]/g,
-    (character) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      "'": "&#39;",
-      '"': "&quot;",
-    })[character],
-  );
-}
-
-function disabledMarkup(disabled) {
-  return disabled ? ' disabled aria-disabled="true"' : "";
-}
 
 function buildSavedSyncUpdate(enabled) {
   return { saved_sync: { auto_sync_enabled: Boolean(enabled) } };
@@ -546,7 +536,8 @@ export async function openMobileSettings(opener) {
 
   function safeHealth(record) {
     if (record?.circuit?.state === "open") {
-      return { label: record.circuit.failure_kind || "熔断已打开", tone: "error" };
+      const circuit = circuitView(record);
+      return { label: circuit?.label || record.circuit.failure_kind || "熔断已打开", tone: "warning" };
     }
     if (record?.probe?.ok === true) return { label: "探测通过", tone: "success" };
     if (record?.probe?.ok === false) {
@@ -721,63 +712,19 @@ export async function openMobileSettings(opener) {
     const record = selectedRecord(state, state.activeRoute);
     if (!record) return;
     const locked = Boolean(routeLocked(state.activeRoute));
-    const query = String(byId("mobileModelTypeSearch")?.value || "").trim().toLowerCase();
     const host = byId("mobileModelConnectionTypeGroups");
-    const blocks = [];
-    for (const group of connectionTypes.groups) {
-      const matches = group.connection_types.filter((descriptor) => {
-        if (!descriptor.capabilities?.includes(state.activeRoute)) return false;
-        const searchText = [
-          descriptor.id,
-          descriptor.label,
-          descriptor.help,
-          ...(descriptor.preset_definitions || []).map(
-            (preset) => `${preset.id} ${preset.label}`,
-          ),
-        ].join(" ").toLowerCase();
-        return !query || searchText.includes(query);
-      });
-      if (!matches.length) continue;
-      blocks.push(`
-        <section class="mobile-model-type-group"
-          data-model-type-category="${escapeHtml(group.category)}">
-          <p>${escapeHtml(CATEGORY_LABELS[group.category] || group.category)}</p>
-          ${matches.map((descriptor) => `
-            <button class="mobile-model-type-option" type="button" role="option"
-              tabindex="-1" data-model-type="${escapeHtml(descriptor.id)}"
-              aria-selected="${descriptor.id === record.type ? "true" : "false"}"
-              ${disabledMarkup(locked)}>
-              <span><strong>${escapeHtml(descriptor.label)}</strong>
-                <small>${escapeHtml(descriptor.help)}</small></span>
-              <small>${escapeHtml(
-                descriptor.category === "oauth" ? "OAuth" : descriptor.id,
-              )}</small>
-            </button>`).join("")}
-        </section>`);
-    }
-    host.innerHTML = blocks.join("")
-      || '<p class="mobile-settings-hint">没有匹配的连接类型。</p>';
-    const options = [...host.querySelectorAll('[role="option"]:not(:disabled)')];
-    const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
-    const roving = selected || options[0];
-    if (roving) roving.tabIndex = 0;
+    host.innerHTML = renderConnectionTypeGroups({
+      groups: connectionTypes.groups,
+      record,
+      kind: state.activeRoute,
+      locked,
+      query: byId("mobileModelTypeSearch")?.value || "",
+    });
+    applyTypeOptionRovingTabindex(host);
   }
 
   function moveTypeOptionFocus(event) {
-    if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-    const options = [
-      ...event.currentTarget.querySelectorAll('[role="option"]:not(:disabled)'),
-    ];
-    if (!options.length) return;
-    const current = event.target.closest('[role="option"]');
-    let index = Math.max(0, options.indexOf(current));
-    if (event.key === "Home") index = 0;
-    else if (event.key === "End") index = options.length - 1;
-    else if (event.key === "ArrowUp") index = Math.max(0, index - 1);
-    else index = Math.min(options.length - 1, index + 1);
-    event.preventDefault();
-    for (const option of options) option.tabIndex = option === options[index] ? 0 : -1;
-    options[index].focus();
+    sharedMoveTypeOptionFocus(event);
   }
 
   function focusSelectedTypeOption() {
@@ -791,104 +738,33 @@ export async function openMobileSettings(opener) {
   }
 
   function renderDescriptorField(record, descriptor, field) {
-    if (field.name === "credential") return "";
-    if (field.capabilities?.length && !field.capabilities.includes(state.activeRoute)) {
-      return "";
-    }
-    if (field.presets?.length && !field.presets.includes(record.preset)) return "";
-    const required = field.required ? " required" : "";
-    const disabled = disabledMarkup(Boolean(routeLocked(state.activeRoute)));
-    const help = field.help
-      ? `<small>${escapeHtml(field.help)}</small>`
-      : "";
-    if (field.name === "preset") {
-      const presets = (descriptor.preset_definitions || []).filter(
-        (preset) => preset.capabilities?.includes(state.activeRoute),
-      );
-      return `<label class="mobile-model-field"><span>${escapeHtml(field.label)}</span>
-        <select data-model-field="preset"${required}${disabled}>
-          ${presets.map((preset) => `<option value="${escapeHtml(preset.id)}"
-            ${preset.id === record.preset ? " selected" : ""}>
-            ${escapeHtml(preset.label)}</option>`).join("")}
-        </select>${help}${errorMarkup(record.id, "preset")}</label>`;
-    }
-    if (field.input_type === "select") {
-      return `<label class="mobile-model-field"><span>${escapeHtml(field.label)}</span>
-        <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>
-          ${(field.choices || []).map((choice) => `<option
-            value="${escapeHtml(choice)}"
-            ${String(record[field.name] || "") === choice ? " selected" : ""}>
-            ${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`).join("")}
-        </select>${help}${errorMarkup(record.id, field.name)}</label>`;
-    }
-    const type = field.input_type === "number" ? "number" : "text";
-    const numericAttributes = field.name === "num_ctx"
-      ? ' min="0" step="1" inputmode="numeric"'
-      : "";
-    const describedBy = field.name === "num_ctx"
-      ? ' aria-describedby="mobileModelSelectedNumCtxError"'
-      : "";
-    return `<label class="mobile-model-field"><span>${escapeHtml(field.label)}</span>
-      <input type="${type}" data-model-field="${escapeHtml(field.name)}"
-        value="${escapeHtml(record[field.name] ?? "")}"
-        placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"
-        ${required}${disabled}${numericAttributes}${describedBy}>
-      ${help}${errorMarkup(record.id, field.name)}</label>`;
+    return sharedRenderDescriptorField({
+      record,
+      descriptor,
+      field,
+      kind: state.activeRoute,
+      locked: Boolean(routeLocked(state.activeRoute)),
+      errorMarkup,
+      fieldClass: "mobile-model-field",
+      fullWidthFields: false,
+      numCtxDescribedBy: "mobileModelSelectedNumCtxError",
+    });
   }
 
   function renderCredential(record, descriptor) {
     const host = byId("mobileModelCredentialEditor");
-    const definition = descriptor?.fields?.find((field) => field.name === "credential");
-    if (!definition) {
-      host.hidden = true;
-      host.innerHTML = "";
-      return;
-    }
-    host.hidden = false;
-    const credential = record.credential;
-    const status = credential.status || {};
-    const disabled = disabledMarkup(Boolean(routeLocked(state.activeRoute)));
-    if (descriptor.category === "oauth") {
-      const importedReference = (
-        status.credential_ref || definition.choices?.[0] || descriptor.label
-      );
-      host.innerHTML = `
-        <strong>已导入 OAuth 凭据</strong>
-        <p>${status.oauth_logged_in ? "已登录" : "尚未检测到登录"} ·
-          ${escapeHtml(importedReference)}</p>
-        <input type="hidden" data-model-credential-action="keep" value="keep">
-        ${errorMarkup(record.id, "credential")}`;
-      return;
-    }
-    const actions = [
-      ["keep", "保留现有凭据"],
-      ["set", "设置 API Key"],
-      ["env", "环境变量"],
-      ["clear", "清除"],
-    ];
-    const sourceLabel = status.configured
-      ? `当前来源：${status.source}${status.env_name ? ` (${status.env_name})` : ""}`
-      : "当前未配置凭据。";
-    const needsValue = credential.action === "set" || credential.action === "env";
-    host.innerHTML = `
-      <strong>凭据来源</strong>
-      <p>${escapeHtml(sourceLabel)}</p>
-      <div class="mobile-model-credential-actions">
-        ${actions.map(([action, label]) => `
-          <button type="button" data-model-credential-action="${action}"
-            aria-pressed="${credential.action === action ? "true" : "false"}"
-            ${disabled}>${label}</button>`).join("")}
-      </div>
-      ${needsValue ? `
-        <label class="mobile-model-field">
-          <span>${credential.action === "env"
-    ? "环境变量名" : "新 API Key"}</span>
-          <input id="mobileModelCredentialValue"
-            type="${credential.action === "set" ? "password" : "text"}"
-            value="${escapeHtml(credential.value || "")}"
-            autocomplete="new-password" ${disabled}>
-        </label>` : ""}
-      ${errorMarkup(record.id, "credential")}`;
+    const rendered = renderCredentialEditor({
+      record,
+      descriptor,
+      kind: state.activeRoute,
+      locked: Boolean(routeLocked(state.activeRoute)),
+      errorMarkup,
+      fieldClass: "mobile-model-field",
+      credentialValueId: "mobileModelCredentialValue",
+      noteClass: "mobile-settings-hint",
+    });
+    host.hidden = rendered.hidden;
+    host.innerHTML = rendered.html;
   }
 
   function renderProbeStatus(record) {
@@ -933,6 +809,13 @@ export async function openMobileSettings(opener) {
         && activeItems().length <= 1)
     );
     byId("mobileModelTypeSearch").disabled = locked;
+    const circuit = circuitView(record);
+    const circuitChip = circuit
+      ? `<p class="mobile-model-circuit-chip" role="status">${escapeHtml(circuit.label)}</p>`
+      : "";
+    const unverified = hasUnverifiedChanges(state, kind, record.id)
+      ? '<p class="mobile-model-unverified" role="status">此连接在上次探测通过后被修改，保存前建议重新探测。</p>'
+      : "";
     byId("mobileModelInspectorFields").innerHTML = `
       <label class="mobile-model-field">
         <span>连接名称</span>
@@ -945,7 +828,8 @@ export async function openMobileSettings(opener) {
         <input value="${escapeHtml(record.id)}" readonly aria-readonly="true">
         <small>排序或改名不会改变此 ID。</small>
         ${errorMarkup(record.id, "id")}
-      </label>`;
+      </label>
+      ${circuitChip}${unverified}`;
     byId("mobileModelDescriptorFields").innerHTML = descriptor
       ? descriptor.fields.map(
         (field) => renderDescriptorField(record, descriptor, field),
@@ -1348,6 +1232,11 @@ export async function openMobileSettings(opener) {
       return;
     }
     if (!save) return;
+    const unverified = unverifiedConnections(state);
+    if (unverified.length) {
+      const names = unverified.map((item) => item.name).join("、");
+      setModelStatus(`提示：${names} 在上次探测后被修改，正在保存未验证的更改…`);
+    }
     modelResources.invalidateSnapshotRequests();
     setModelEditorLocked(true);
     setModelEditorBusy(true);

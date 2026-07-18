@@ -1118,6 +1118,9 @@
     .model-route-health::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
     .model-route-health[data-tone="success"]::before { background: var(--success); }
     .model-route-health[data-tone="error"]::before { background: var(--danger); }
+    .model-route-health[data-tone="warning"]::before { background: var(--warning, #f4b942); }
+    .model-circuit-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid color-mix(in oklab, var(--warning, #f4b942), var(--border-soft) 40%); color: var(--warning, #f4b942); background: color-mix(in oklab, var(--surface), var(--warning, #f4b942) 10%); }
+    .model-unverified-warning { color: var(--warning, #f4b942); font-size: 12px; }
     .model-inspector { display: grid; gap: var(--space-4); }
     .model-inspector-back { display: none; margin-bottom: var(--space-3); }
     .model-inspector-fields, .model-descriptor-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }

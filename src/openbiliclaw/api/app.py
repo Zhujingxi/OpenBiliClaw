@@ -11307,6 +11307,7 @@ def create_app(
                 (_desktop_dir, "assets/js/app.js"),
                 (_desktop_dir, "assets/js/model-settings.js"),
                 (_desktop_dir.parent, "shared/model-config-state.js"),
+                (_desktop_dir.parent, "shared/model-config-render.js"),
                 (_desktop_dir.parent, "shared/saved-sync-core.js"),
             )
             for root, relative in assets:
