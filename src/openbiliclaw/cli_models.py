@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeAlias, cast
+from typing import Any, Literal, NoReturn, TypeAlias, cast
 
 import click
 import typer
@@ -185,17 +185,14 @@ def _discard_inline_api_key_handle(handle: _InlineApiKeyHandle) -> None:
     _INLINE_API_KEY_VAULT.discard(handle)
 
 
-if TYPE_CHECKING:
-    # Click >= 8.4 makes ``ParamType`` generic; parameterize with the
-    # ``convert`` result type so strict mypy accepts the subclass. At
-    # runtime we fall back to the bare base so Click < 8.4 (where
-    # ``ParamType`` is not subscriptable) keeps working.
-    _InlineApiKeyParamType = click.types.ParamType["_InlineApiKeyHandle | None"]
-else:
-    _InlineApiKeyParamType = click.types.ParamType
-
-
-class _InlineApiKeyHandleType(_InlineApiKeyParamType):
+# Click >= 8.4 makes ``ParamType`` generic, so strict mypy under Click 8.4+
+# reports ``[type-arg]`` on a bare subclass, while Click < 8.4 (the repository
+# lock pins 8.3.1) types it as non-generic and reports ``[type-arg]`` on any
+# parameterization. The dual-code ignore satisfies both type environments:
+# ``[type-arg]`` is the live error under Click 8.4+, and ``[unused-ignore]``
+# keeps the comment valid under Click < 8.4 if ``warn_unused_ignores`` is ever
+# enabled. Runtime behavior is unchanged.
+class _InlineApiKeyHandleType(click.types.ParamType):  # type: ignore[type-arg,unused-ignore]
     """Accept only values protected before Click begins argument parsing."""
 
     name = "text"
