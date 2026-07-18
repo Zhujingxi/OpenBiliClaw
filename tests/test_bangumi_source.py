@@ -276,6 +276,17 @@ def test_subject_author_name_never_ends_on_an_unclosed_bracket() -> None:
     assert _author_of(infobox=[{"key": "导演", "value": "A" * 70 + "[credit" + "B" * 40}]) == (
         "A" * 70
     )
+
+    # A closer only settles an opener of the SAME family. Popping on any
+    # closer declared "(credit]" balanced and kept the dangling "(".
+    for opener, stray in (("(", "]"), ("（", "】"), ("【", ")"), ("《", "」")):
+        credit = "A" * 70 + opener + "credit" + stray + "B" * 40
+        assert _author_of(infobox=[{"key": "导演", "value": credit}]) == "A" * 70
+
+    # A stray closer with no opener at all settles nothing and is harmless.
+    assert _author_of(infobox=[{"key": "导演", "value": "A" * 70 + "]tail" + "B" * 40}]) == (
+        "A" * 70 + "]tail" + "B" * 5
+    )
     balanced = "名" * 60 + "《作品》" + "、" + "字" * 40
     author = _author_of(infobox=[{"key": "导演", "value": balanced}])
     assert author == "名" * 60 + "《作品》"
@@ -293,11 +304,11 @@ def test_subject_author_name_never_ends_on_an_unclosed_bracket() -> None:
     "value",
     [
         # Bare strings that spell absence. A literal "None" in the source data
-        # is exactly as unusable as one we stringified ourselves.
+        # is exactly as unusable as one we stringified ourselves. Only spellings
+        # THIS stack can emit qualify — see the "nil" case in the keep test.
         "None",
         "none",
         "NULL",
-        "nil",
         "NaN",
         "undefined",
         "N/A",
@@ -308,6 +319,18 @@ def test_subject_author_name_never_ends_on_an_unclosed_bracket() -> None:
         "?",
         "（）",
         "   ",
+        # Symbol-shaped placeholders are decided by Unicode category, not by a
+        # hand-written character list — an enumerated list had already missed
+        # U+2026 and would keep missing the next variant an editor types.
+        "\u2026",  # HORIZONTAL ELLIPSIS
+        "\u2025",  # TWO DOT LEADER
+        "\u301c",  # WAVE DASH
+        "\uff0d",  # FULLWIDTH HYPHEN-MINUS
+        "\u2212",  # MINUS SIGN
+        "\u30fb",  # KATAKANA MIDDLE DOT
+        "\u2605\u2606",  # BLACK/WHITE STAR
+        "\u300c\u300d",  # CORNER BRACKETS
+        "\u00a0",  # NO-BREAK SPACE
         # ...and the same values arriving through either list shape.
         [{"v": "None"}],
         [{"k": "总导演", "v": "null"}],
@@ -334,7 +357,9 @@ def test_subject_author_name_keeps_ambiguous_short_credits() -> None:
     characters are ordinary credits, not serialization artifacts — filtering
     them would be semantic cleanup with a false-positive cost.
     """
-    for credit in ("Na", "na", "无", "未知", "暂无", "不明", "0", "X", "N"):
+    # "nil" is a real Japanese rock band, and no Python/JS/JSON path can emit
+    # that spelling (it is Ruby/Lisp), so it was never an artifact we produce.
+    for credit in ("Na", "na", "nil", "NIL", "无", "未知", "暂无", "不明", "0", "X", "N"):
         assert _author_of(infobox=[{"key": "导演", "value": credit}]) == credit
         assert _author_of(infobox=[{"key": "导演", "value": [{"v": credit}]}]) == credit
 

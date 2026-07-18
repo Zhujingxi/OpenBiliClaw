@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -62,25 +63,29 @@ AUTHOR_INFOBOX_KEYS: dict[int, tuple[str, ...]] = {
 # and hard-cap the rendered length.
 MAX_AUTHOR_PARTS = 3
 MAX_AUTHOR_LENGTH = 80
-# Credits that carry no name, only the fact that a name is absent. The boundary
-# is deliberately narrow: a value qualifies only if it is a language-level null
-# literal, an unambiguous "not applicable" marker, or pure punctuation — i.e.
-# something that can ONLY have come from a null being stringified somewhere up
-# the chain, or from an editor typing an explicit blank. Those can never be a
-# real person's or studio's name, and a literal "None" reaching author_name is
-# the dirty-row class COALESCE cannot repair once persisted.
+# Word-shaped credits that carry no name, only the fact that a name is absent.
+# Scope is deliberately narrow: a literal only qualifies if THIS stack can
+# actually emit it — Python ``str(None)`` → "None", JSON/JS ``null`` and
+# ``undefined``, ``float('nan')`` → "NaN" — plus unambiguous "not applicable"
+# spellings. A literal "None" reaching author_name is the dirty-row class
+# COALESCE cannot repair once persisted.
 #
 # Deliberately NOT filtered, because each could be a genuine short credit and
 # over-filtering silently deletes real data:
+#   - "nil" — a real Japanese rock band, and no Python/JS/JSON path produces
+#     it (that spelling is Ruby/Lisp), so it was never an artifact we emit
 #   - bare "na" (romanised 나 / 娜 surname) — only the unambiguous "n/a" form
 #   - 无 / 暂无 / 未知 / 不明 — ordinary characters that can occur in a real
 #     name; these are editor prose, not a serialization artifact, so dropping
 #     them would be semantic cleanup rather than dirty-value defence
 #   - single letters and digits — plausible stage names
+#
+# "none"/"null"/"nan" carry a small false-positive risk (a band could stylise
+# itself that way), accepted knowingly: they are the exact output of the
+# stringification bug this guard exists to stop.
 _PLACEHOLDER_CREDITS = frozenset(
-    {"none", "null", "nil", "nan", "undefined", "n/a", "n.a.", "na.", "(none)", "<none>"}
+    {"none", "null", "nan", "undefined", "n/a", "n.a.", "na.", "(none)", "<none>"}
 )
-_PLACEHOLDER_PUNCTUATION = "-—–_~/\\?？.。·、,，;；:：|｜()（）[]【】<>《》 \t　"
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -165,11 +170,18 @@ def _infobox_value_text(value: object) -> str:
 def _is_placeholder_credit(text: str) -> bool:
     """True when ``text`` spells absence rather than naming anyone.
 
-    Covers the empty string, the null literals and "not applicable" markers in
-    :data:`_PLACEHOLDER_CREDITS`, and values made up purely of punctuation
-    (``"-"``, ``"—"``, ``"/"``, ``"()"``, ``"?"``). Anything else — including
-    single characters and CJK words that merely *mean* "none" — is treated as
-    a real credit, because guessing wrong there deletes genuine data.
+    Two rules. The word-shaped ones are enumerated in
+    :data:`_PLACEHOLDER_CREDITS`. The symbol-shaped ones are decided by Unicode
+    category rather than a hand-written character list: a real name contains at
+    least one letter or digit, so a value made up entirely of punctuation,
+    symbols, separators or format controls (``"-"``, ``"—"``, ``"…"``,
+    ``"()"``, ``"?"``, ``"★"``, a stray no-break space) names nobody. Category
+    coverage is what keeps this from missing the next dash or ellipsis variant
+    an editor happens to type — an enumerated list had already missed U+2026.
+
+    Anything else — including single characters and CJK words that merely
+    *mean* "none" — is treated as a real credit, because guessing wrong there
+    deletes genuine data.
     """
 
     stripped = text.strip()
@@ -177,7 +189,7 @@ def _is_placeholder_credit(text: str) -> bool:
         return True
     if stripped.casefold() in _PLACEHOLDER_CREDITS:
         return True
-    return not stripped.strip(_PLACEHOLDER_PUNCTUATION)
+    return not any(unicodedata.category(char)[0] in {"L", "N"} for char in stripped)
 
 
 def _author_name(subject: Mapping[str, Any], subject_type: int) -> str:
@@ -256,6 +268,10 @@ def _drop_unclosed_bracket(head: str) -> str:
     ``押井守、神山健治（総監督`` reads as if the credit were mangled, so trim to
     ``押井守、神山健治``.
 
+    A closer only settles an opener of the SAME family: in ``(credit]`` the
+    ``]`` does not close the ``(``, so the ``(`` is still open and the cut
+    happens before it. Popping on any closer would have declared that balanced.
+
     Known limitation: when the unmatched opener sits at index 0 the whole
     credit is one long parenthetical, and trimming would erase it entirely.
     Losing a real credit is worse than an unbalanced tail, so the hard cut is
@@ -266,7 +282,14 @@ def _drop_unclosed_bracket(head: str) -> str:
     for index, char in enumerate(head):
         if char in _CREDIT_BRACKETS:
             unclosed.append(index)
-        elif char in _CREDIT_BRACKET_CLOSERS and unclosed:
+        # A closer only settles an opener of its own family. One that matches
+        # nothing is stray punctuation inside the credit and leaves the stack
+        # untouched, so ``(credit]`` still counts the ``(`` as open.
+        elif (
+            char in _CREDIT_BRACKET_CLOSERS
+            and unclosed
+            and head[unclosed[-1]] == _CREDIT_BRACKET_CLOSERS[char]
+        ):
             unclosed.pop()
     if not unclosed:
         return head
