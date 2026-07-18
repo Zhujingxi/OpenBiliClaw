@@ -149,7 +149,12 @@ export async function getBackendOrigin() {
 
 export async function getBackendBaseUrl() {
   const ep = await ensureLoaded();
-  return `${ep.scheme}://${ep.host}:${ep.port}/api/v1`;
+  return `${ep.scheme}://${ep.host}:${ep.port}/api`;
+}
+
+export async function getBackendWsBaseUrl() {
+  const ep = await ensureLoaded();
+  return `${ep.scheme === "https" ? "wss" : "ws"}://${ep.host}:${ep.port}/api`;
 }
 
 export function isPrivateHttpHost(host) {

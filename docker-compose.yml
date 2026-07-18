@@ -1,55 +1,38 @@
 services:
-  litellm-postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: litellm
-      POSTGRES_USER: litellm
-      POSTGRES_PASSWORD: ${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}
-    volumes:
-      - openbiliclaw_litellm_postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-    restart: unless-stopped
-
-  litellm:
-    # Pinned upstream version tag; never pass provider credentials through
-    # Compose. Add them to the persistent LiteLLM database through /ui.
-    image: ghcr.io/berriai/litellm:v1.92.0
-    depends_on:
-      litellm-postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://litellm:${LITELLM_POSTGRES_PASSWORD:?Set LITELLM_POSTGRES_PASSWORD to a generated hex secret}@litellm-postgres:5432/litellm
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
-      STORE_MODEL_IN_DB: "True"
-    command: ["--config=/app/config.yaml"]
-    volumes:
-      - ./litellm/config.yaml:/app/config.yaml:ro
-    ports:
-      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/readiness', timeout=4)"]
-      interval: 15s
-      timeout: 5s
-      retries: 8
-      start_period: 40s
-    restart: unless-stopped
-
-  migrate:
+  # Ollama sidecar — embedding service so users don't need Ollama on their
+  # host. This image BAKES bge-m3 (~1.1GB) at build time and its entrypoint
+  # seeds it into the store before serving, so the container reaches
+  # embedding-ready with ZERO network pull (offline / China-network friendly).
+  # The daemon runs on the internal Docker network at http://ollama:11434;
+  # the backend's [models.embedding.providers] route is seeded here on first bootstrap.
+  #
+  # Disable this entire block by removing it (and the depends_on +
+  # OPENBILICLAW_SEED_OLLAMA_DEFAULTS env in the backend service) if
+  # you'd rather run an embedding API key from a cloud provider — see
+  # docs/docker-deployment.md.
+  ollama:
     build:
       context: .
-      dockerfile: Dockerfile
-    environment:
-      OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
-    command: ["openbiliclaw", "db", "migrate"]
+      dockerfile: docker/ollama-bundled.Dockerfile
+    container_name: openbiliclaw-ollama
     volumes:
-      - openbiliclaw_data:/app/runtime/data
-    restart: "no"
+      - openbiliclaw_ollama:/root/.ollama
+    # No custom entrypoint / runtime pull: the bundled image self-seeds the
+    # baked model on start. Set OPENBILICLAW_OLLAMA_ALLOW_PULL=1 to opt into a
+    # network pull if the baked seed is ever missing/corrupt (default: fail
+    # loud via the healthcheck instead of silently degrading).
+    healthcheck:
+      # Healthy = daemon up AND bge-m3 is locally available. With the baked
+      # seed this greens up in seconds; start_period stays generous only for
+      # the opt-in runtime-pull fallback.
+      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q '^bge-m3'"]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 300s
+    restart: unless-stopped
 
-  api:
+  openbiliclaw-backend:
     build:
       context: .
       dockerfile: Dockerfile
@@ -60,75 +43,63 @@ services:
       # build a release image, use buildx:
       #   docker buildx build --platform linux/amd64,linux/arm64 \
       #     -t openbiliclaw-backend:vX.Y.Z .
+    container_name: openbiliclaw-backend
     depends_on:
-      migrate:
-        condition: service_completed_successfully
-      litellm:
-        condition: service_healthy
+      # service_started (not service_healthy) on purpose: the sidecar is
+      # only "healthy" once bge-m3 finished downloading (~1.1GB). If that
+      # first pull fails or crawls on a slow network, a service_healthy
+      # gate would keep the backend from EVER starting — the user gets a
+      # dead install with no UI to see why. Instead the backend boots
+      # immediately; the /setup/ wizard and init prereq checks surface
+      # "embedding not ready yet" until the pull completes.
+      ollama:
+        condition: service_started
     environment:
       OPENBILICLAW_PROJECT_ROOT: /app/runtime
-      # vNext typed AI calls only these internal proxy settings. Provider
-      # credentials stay in LiteLLM and are never injected into this service.
-      OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
-      OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
-      OPENBILICLAW_LITELLM_ADMIN_URL: ${OPENBILICLAW_LITELLM_ADMIN_URL:-http://127.0.0.1:${LITELLM_PORT:-4000}/ui}
-      OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
-      OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
-      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
-      OPENBILICLAW_ACCESS_TOKEN: ${OPENBILICLAW_ACCESS_TOKEN:?Set OPENBILICLAW_ACCESS_TOKEN to a generated secret}
-      OPENBILICLAW_WEB_PASSWORD_HASH: ${OPENBILICLAW_WEB_PASSWORD_HASH:?Set OPENBILICLAW_WEB_PASSWORD_HASH to the installer-generated scrypt hash}
-      OPENBILICLAW_SESSION_SECRET: ${OPENBILICLAW_SESSION_SECRET:?Set OPENBILICLAW_SESSION_SECRET to a generated secret}
-      OPENBILICLAW_EXTENSION_ACCESS_KEYS: ${OPENBILICLAW_EXTENSION_ACCESS_KEYS:?Set OPENBILICLAW_EXTENSION_ACCESS_KEYS to installer-generated digest records}
-      OPENBILICLAW_API_PORT: ${OPENBILICLAW_API_PORT:-8420}
+      OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
+      OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
+      OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
+      OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
+      # On first config bootstrap, seed one native stable Embedding provider
+      # plus shared [models.embedding.settings] pointing at the sidecar above. Lets
+      # Docker users have local embedding out of the box, even if they
+      # later pick OpenAI / Claude / etc for chat. Existing config.toml
+      # is never overwritten.
+      OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
+      OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
+      OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
       # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
-    command: ["openbiliclaw", "serve", "--host", "0.0.0.0", "--port", "${OPENBILICLAW_API_PORT:-8420}"]
-    # ``host.docker.internal`` resolves the host machine for explicit proxy
-    # configuration through OPENBILICLAW_PROXY_HOST.
+    command:
+      - python
+      - -m
+      - openbiliclaw.docker_runtime
+      - openbiliclaw
+      - serve-api
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8420"
+    # ``host.docker.internal`` resolves the host machine from inside
+    # the container. Used by:
+    #   - HTTP proxy auto-detect (OPENBILICLAW_PROXY_HOST)
+    #   - any user that picks "use my host's Ollama instead of the
+    #     bundled sidecar" by overriding OPENBILICLAW_OLLAMA_BASE_URL
     # Required on Linux Docker; auto-provided by Docker Desktop on
     # Mac / Windows. The ``host-gateway`` magic value tells the engine
     # to inject the right address per platform.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${OPENBILICLAW_API_HOST:-0.0.0.0}:${OPENBILICLAW_API_PORT:-8420}:${OPENBILICLAW_API_PORT:-8420}"
+      - "8420:8420"
     volumes:
+      - openbiliclaw_config:/app/runtime
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
     # Compose-level healthcheck mirrors the Dockerfile HEALTHCHECK so
-    # ``docker compose ps`` shows ``healthy`` only when vNext readiness
+    # ``docker compose ps`` shows ``healthy`` only when /api/health
     # returns 200, not just when the container process is alive.
     healthcheck:
-      test: ["CMD", "python", "-c", "import os,urllib.request,sys; port=os.getenv('OPENBILICLAW_API_PORT','8420'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/api/v1/system/readiness', timeout=4).status==200 else 1)"]
-      interval: 30s
-      timeout: 5s
-      start_period: 20s
-      retries: 3
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      litellm:
-        condition: service_healthy
-    environment:
-      OPENBILICLAW_DATABASE_URL: sqlite:////app/runtime/data/vnext/openbiliclaw.db
-      OPENBILICLAW_HUEY_PATH: /app/runtime/data/vnext/huey.db
-      OPENBILICLAW_LITELLM_BASE_URL: http://litellm:4000
-      OPENBILICLAW_LITELLM_API_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY to a generated sk-prefixed secret}
-      OPENBILICLAW_SECRET_KEY: ${OPENBILICLAW_SECRET_KEY:?Set OPENBILICLAW_SECRET_KEY to a generated secret}
-      OPENBILICLAW_WORKERS: "4"
-      OPENBILICLAW_WORKER_RUNTIME_FACTORY: openbiliclaw.infrastructure.jobs.worker:database_runtime_factory
-    command: ["openbiliclaw", "worker", "--workers", "4"]
-    volumes:
-      - openbiliclaw_data:/app/runtime/data
-    # Running PID 1 is necessary but insufficient: the probe also requires the
-    # application schema at Alembic head and an integrity-readable Huey queue.
-    healthcheck:
-      test: ["CMD", "python", "-m", "openbiliclaw.infrastructure.jobs.health"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health', timeout=4).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -136,6 +107,9 @@ services:
     restart: unless-stopped
 
 volumes:
+  openbiliclaw_config:
   openbiliclaw_data:
   openbiliclaw_logs:
-  openbiliclaw_litellm_postgres:
+  # Persists ollama models across container recreations so users don't
+  # have to re-pull bge-m3 on every rebuild.
+  openbiliclaw_ollama:

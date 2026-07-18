@@ -1,0 +1,78 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+test("popup copy uses a more native bilibili-style voice in key entry points", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const popupHelpers = readFileSync(resolve("popup", "popup-helpers.js"), "utf8");
+
+  assert.match(popupHtml, /首页先放一边，这里是你最近更可能点开的。/);
+  assert.match(popupHtml, /这几条，你大概会点开/);
+  assert.match(popupHtml, /换一批/);
+  assert.match(popupJs, /正在给你换一批/);
+  assert.match(popupHelpers, /这池里还有 .* 条可换，想看就点，不想看就直说。/);
+  assert.match(popupHtml, /还有 0 条可换/);
+  assert.match(popupHtml, /刚补进 0 条/);
+  assert.match(popupHtml, /还在继续摸你的口味/);
+  assert.match(popupHtml, /阿B 最近新记住了什么/);
+  assert.match(popupHtml, /我感觉你大概是这样的/);
+  assert.match(popupHtml, /不是光看你点过啥，我主要在看你会为哪种东西停下来。/);
+  assert.match(popupHtml, /说说你最近怎么想/);
+  assert.match(popupHtml, /你是什么样的人、怎么想、喜欢什么、讨厌什么/);
+  assert.match(popupHtml, /写点你的想法和口味/);
+  assert.match(popupJs, /说说你怎么看内容/);
+  assert.match(popupJs, /聊聊你自己/);
+  assert.match(popupJs, /最近的状态/);
+  assert.match(popupHtml, /class="recommendation-header-card"/);
+  assert.match(popupHtml, /class="recommendation-header-title"/);
+  assert.match(popupHtml, /class="recommendation-status-row"/);
+  assert.doesNotMatch(popupHtml, /按你最近在看的、点过的和聊过的，先排了几条。/);
+  assert.doesNotMatch(popupHtml, /现在的你，大概是这个画风/);
+  assert.doesNotMatch(popupHtml, /不只看你点过啥，也看你会在哪儿停下来。/);
+  assert.match(popupJs, /这对画像的影响/);
+  assert.match(popupJs, /为什么这么判断/);
+  assert.match(popupJs, /这次依据/);
+  assert.match(popupJs, /item\.contextLine/);
+  assert.match(popupJs, /item\.expandLabel/);
+  assert.match(popupJs, /isExpanded \? "收起" : item\.expandLabel/);
+  assert.match(popupHelpers, /仅结论/);
+  assert.match(popupHelpers, /正在往下翻阿B 最近记下的变化。/);
+  assert.match(popupHelpers, /这段历史还没拉下来，可以再试一次。/);
+  assert.match(popupHelpers, /已经看到最近这段时间的变化了。/);
+  assert.doesNotMatch(popupHtml, /class="recommendation-status-grid"/);
+  assert.doesNotMatch(popupJs, /item\.source \|\| "画像观察"/);
+  assert.doesNotMatch(popupJs, /刚补进 .* 条还没看过的新内容/);
+  assert.doesNotMatch(popupHtml, /对个暗号|来，唠一句/);
+});
+
+test("popup avoidance probe contract is wired", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const serviceWorker = readFileSync(resolve("src", "background", "service-worker.ts"), "utf8");
+
+  assert.match(popupHtml, /profileSpeculativeAvoidances/);
+  assert.match(popupJs, /avoidance\.probe/);
+  assert.match(popupJs, /确认避雷/);
+  assert.match(popupJs, /搁置避雷/);
+  assert.match(popupJs, /不是雷点/);
+  assert.match(popupJs, /avoidance_probe/);
+  assert.match(serviceWorker, /avoidance\.probe/);
+});
+
+test("popup probe inbox gives interest challenge and avoidance distinct treatments", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /isChallengeProbe/);
+  assert.match(popupJs, /is-challenge/);
+  assert.match(popupJs, /message-kind-copy/);
+  assert.match(popupJs, /想继续试探/);
+  assert.match(popupJs, /挑战方向/);
+  assert.match(popupJs, /想少看这类/);
+  assert.match(popupHtml, /\.message-item\.is-interest/);
+  assert.match(popupHtml, /\.message-item\.is-challenge/);
+  assert.match(popupHtml, /\.message-item\.is-avoidance/);
+  assert.match(popupHtml, /\.message-item\.is-delight/);
+});

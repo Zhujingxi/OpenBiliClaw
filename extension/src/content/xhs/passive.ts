@@ -232,43 +232,19 @@ export function filterSelfAuthoredNotes(
   );
 }
 
-export function urlsAfterSelfAuthorFilter(
-  urls: readonly string[],
-  notesBeforeFilter: readonly XhsNoteMetadata[],
-  notesAfterFilter: readonly XhsNoteMetadata[],
-): string[] {
-  const accepted = new Set(notesAfterFilter.map((note) => note.url));
-  const removed = new Set(
-    notesBeforeFilter.filter((note) => !accepted.has(note.url)).map((note) => note.url),
-  );
-  return urls.filter((url) => !removed.has(url));
-}
-
 /**
- * Remove URLs already present in ``seen`` and reserve at most ``maxItems``
- * fresh URLs in it. Overflow is intentionally left unreserved for a later
- * passive collection pass.
+ * Remove URLs already present in ``seen`` and record the fresh ones in it.
  *
  * This gives each content-script page-session a monotonic "urls I've
  * already reported" record so we don't re-POST the same batch every time
  * the user scrolls.
  */
-export function dedupeObservedUrls(
-  urls: Iterable<string>,
-  seen: Set<string>,
-  maxItems = Number.POSITIVE_INFINITY,
-): string[] {
+export function dedupeObservedUrls(urls: Iterable<string>, seen: Set<string>): string[] {
   const fresh: string[] = [];
   for (const url of urls) {
-    if (fresh.length >= maxItems) break;
     if (seen.has(url)) continue;
     seen.add(url);
     fresh.push(url);
   }
   return fresh;
-}
-
-/** Release a reserved batch when the durable service-worker handoff is rejected. */
-export function releaseObservedUrls(urls: Iterable<string>, seen: Set<string>): void {
-  for (const url of urls) seen.delete(url);
 }

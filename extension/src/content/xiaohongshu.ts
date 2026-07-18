@@ -12,14 +12,13 @@
 
 import { startCollector } from "./kernel.js";
 import { xiaohongshuAdapter } from "../shared/platforms/xiaohongshu.js";
+import { registerE2EExecutor } from "./e2e-executor.ts";
 import {
   classifyXhsPageType,
   collectInViewportNoteUrls,
   dedupeObservedUrls,
   extractNoteMetadataFromAnchor,
   filterSelfAuthoredNotes,
-  releaseObservedUrls,
-  urlsAfterSelfAuthorFilter,
   type AnchorLike,
   type ViewportRect,
   type XhsNoteMetadata,
@@ -31,9 +30,79 @@ import {
   extractSelfInfoFromState,
 } from "./xhs/bootstrap.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveXiaohongshu, verifyXiaohongshu } from "./native-save/xiaohongshu.ts";
 
 startCollector(xiaohongshuAdapter);
 registerTaskExecutor();
+registerE2EExecutor("xiaohongshu");
+installNativeSaveExecutor("xiaohongshu", saveXiaohongshu, verifyXiaohongshu);
+
+// ── Token sniffer bridge (isolated world receiver) ──────────────────
+//
+// The MAIN-world script at `dist/main/xhs-token-sniffer.js` wraps xhs's
+// own fetch/XHR and postMessages `(note_id, xsec_token)` pairs it finds
+// in API responses. We buffer them here and POST to the backend so the
+// `_backfill_xhs_tokens` path can upgrade cached bare URLs to
+// tokenized ones. Without this, search-page-sourced notes stay bare
+// forever and clicking them hits xhs's 300031 access-denied wall.
+// Debounce is short (250 ms) because background task-executor tabs often
+// close within ~2 s of load — a 1 s+ debounce loses every token to the
+// tab closure. Passive scroll pages keep collecting across the debounce
+// window just fine.
+const TOKEN_FLUSH_DEBOUNCE_MS = 250;
+const TOKEN_BATCH_MAX = 50;
+
+interface TokenPair {
+  note_id: string;
+  xsec_token: string;
+}
+
+const tokenBuffer = new Map<string, string>();
+let tokenFlushTimer: number | null = null;
+
+function flushTokensNow(): void {
+  if (tokenFlushTimer !== null) {
+    window.clearTimeout(tokenFlushTimer);
+    tokenFlushTimer = null;
+  }
+  if (tokenBuffer.size === 0) return;
+  const pairs: TokenPair[] = [];
+  for (const [note_id, xsec_token] of tokenBuffer) {
+    pairs.push({ note_id, xsec_token });
+    if (pairs.length >= TOKEN_BATCH_MAX) break;
+  }
+  for (const { note_id } of pairs) tokenBuffer.delete(note_id);
+  chrome.runtime.sendMessage({ action: "XHS_TOKENS_OBSERVED", data: { pairs } });
+}
+
+function scheduleTokenFlush(): void {
+  if (tokenFlushTimer !== null) window.clearTimeout(tokenFlushTimer);
+  tokenFlushTimer = window.setTimeout(flushTokensNow, TOKEN_FLUSH_DEBOUNCE_MS);
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window) return;
+  const data = event.data as { source?: string; pairs?: TokenPair[] } | null;
+  if (!data || data.source !== "obc-xhs-sniffer") return;
+  if (!Array.isArray(data.pairs) || data.pairs.length === 0) return;
+  for (const pair of data.pairs) {
+    if (pair?.note_id && pair?.xsec_token) {
+      tokenBuffer.set(pair.note_id, pair.xsec_token);
+    }
+  }
+  scheduleTokenFlush();
+});
+
+// When the tab is about to die (navigation, close, or background
+// task-executor tearing down the tab), flush any buffered tokens
+// synchronously. Without this, task-executor tabs lose every token
+// they collected because the debounced flush never fires in time.
+window.addEventListener("pagehide", flushTokensNow);
+window.addEventListener("beforeunload", flushTokensNow);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushTokensNow();
+});
 
 const PASSIVE_SCROLL_DEBOUNCE_MS = 500;
 const PASSIVE_TOLERANCE_BELOW_PX = 400;
@@ -104,7 +173,7 @@ function runPassiveCollection(): void {
     baseUrl: window.location.href,
     toleranceBelowPx: PASSIVE_TOLERANCE_BELOW_PX,
   });
-  const fresh = dedupeObservedUrls(visible, reportedUrls, PASSIVE_MAX_URLS_PER_BATCH);
+  const fresh = dedupeObservedUrls(visible, reportedUrls);
   if (fresh.length === 0) return;
 
   const freshSet = new Set(fresh);
@@ -126,24 +195,15 @@ function runPassiveCollection(): void {
   // search/explore feed echoes back to the logged-in author.
   const selfInfo = readPageSelfInfo();
   const filteredNotes = filterSelfAuthoredNotes(notes, selfInfo);
-  const filteredUrls = urlsAfterSelfAuthorFilter(
-    fresh.slice(0, PASSIVE_MAX_URLS_PER_BATCH),
-    notes,
-    filteredNotes,
-  );
 
   const observation: XhsUrlObservation = {
-    urls: filteredUrls,
+    urls: fresh.slice(0, PASSIVE_MAX_URLS_PER_BATCH),
     notes: filteredNotes,
     page_type: classifyXhsPageType(baseUrl),
     observed_at: Date.now(),
     ...(selfInfo ? { self_info: selfInfo } : {}),
   };
-  void chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation })
-    .then((response: { accepted?: boolean } | undefined) => {
-      if (response?.accepted !== true) releaseObservedUrls(fresh, reportedUrls);
-    })
-    .catch(() => releaseObservedUrls(fresh, reportedUrls));
+  chrome.runtime.sendMessage({ action: "XHS_URLS_OBSERVED", data: observation });
 }
 
 let scrollTimer: number | null = null;

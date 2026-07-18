@@ -34,13 +34,6 @@ Thumbs.db
 
 # Project-specific
 data/
-.openbiliclaw-install-root.lock
-.obc-backup-source-*/
-installer-instance.json.tmp-*
-runtime-processes.json.tmp-*
-.env.lock
-.env.tmp-*
-.backup-*.tmp
 *.db
 *.sqlite
 *.sqlite3

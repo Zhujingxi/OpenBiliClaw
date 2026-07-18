@@ -47,10 +47,11 @@ async function exchangeDeviceKey(fetchImpl: FetchLike): Promise<string | null> {
     return null;
   }
   const payload = (await response.json()) as {
+    ok?: boolean;
     token?: string;
     expires_at?: number;
   };
-  if (!payload.token || !Number.isFinite(payload.expires_at)) {
+  if (!payload.ok || !payload.token || !Number.isFinite(payload.expires_at)) {
     await clearSession();
     return null;
   }
@@ -90,7 +91,7 @@ function withBearer(init: RequestInit, token: string | null): RequestInit {
 }
 
 export async function authenticatedFetch(
-  url: RequestInfo | URL,
+  url: string | URL,
   init: RequestInit = {},
   fetchImpl: FetchLike = globalThis.fetch.bind(globalThis),
 ): Promise<Response> {

@@ -25,8 +25,13 @@ import type {
   DouyinSearchItem,
   DouyinSearchScope,
 } from "../main/dy-fetch-tap.js";
+import { apiUrl } from "../shared/backend-endpoint.ts";
+import { authenticatedFetch } from "../shared/auth.ts";
 import { ASSET_PREFIX } from "../shared/asset-prefix.ts";
 import { douyinAdapter } from "../shared/platforms/douyin.ts";
+import { registerE2EExecutor } from "./e2e-executor.ts";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveDouyin, verifyDouyin } from "./native-save/douyin.ts";
 
 let behaviorCollectorStarted = false;
 
@@ -51,17 +56,32 @@ function startDouyinBehaviorCollector(): void {
 }
 
 startDouyinBehaviorCollector();
+registerE2EExecutor("douyin");
+if (typeof chrome !== "undefined" && chrome.runtime?.onMessage) {
+  installNativeSaveExecutor("douyin", saveDouyin, verifyDouyin);
+}
 
-function debugLog(_event: string, _data?: unknown): void {
-  // Retained executor diagnostics stay local; vNext has no debug-control API.
+// TEMP DEBUG: relay content-script events to daemon (see debug-log.ts).
+function debugLog(event: string, data?: unknown): void {
+  void (async () => {
+    try {
+      await authenticatedFetch(await apiUrl("/sources/_debug/log"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source: "dy-cs", event, data: data ?? null }),
+      });
+    } catch {
+      // ignore — debug relay must not break the content script
+    }
+  })();
 }
 
 /**
  * Re-inject the MAIN-world fetch-tap by appending a <script> element
  * with src pointing at the extension's bundled dy-fetch-tap.js.
  *
- * Why this is needed: the manifest injection runs once at page load.
- * After each click-driven SPA route, Douyin's React app
+ * Why this is needed: chrome.scripting.executeScript runs once at
+ * page load. After each click-driven SPA route, Douyin's React app
  * may re-set window.fetch with its own wrapper — replacing our
  * wrap and silently breaking aweme capture (e2e probe 2026-05-08:
  * install_messages_received=3 but aweme_messages_received=0
@@ -121,7 +141,7 @@ interface ScopeResultPayload {
   error?: string;
   /**
    * Diagnostic counters surfaced through the dispatcher into the
-   * The task result diagnostic field lets us
+   * /api/sources/dy/task-result partial debug field. Lets us
    * disambiguate "scope returned empty because fetch-tap never
    * installed" from "fetch-tap installed but Douyin returned empty
    * 200s (risk control)" without needing the user's browser console.

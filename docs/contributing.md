@@ -51,11 +51,11 @@ pytest --cov=openbiliclaw
 使用 [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat: add a source connector capability
-fix: preserve profile revision conflicts
-docs: update the vNext feed contract
-refactor: split a feature use case
-test: cover task runner usage limits
+feat: add new discovery strategy
+fix: correct preference weight decay
+docs: update memory design document
+refactor: extract common LLM interface
+test: add soul engine unit tests
 ```
 
 ## 浏览器插件开发
@@ -63,10 +63,18 @@ test: cover task runner usage limits
 ```bash
 # 浏览器插件开发
 cd extension
-npm ci
+npm install
 npm run build
 npm test
 ```
+
+## Skill 开发
+
+Skill 定义为 `skills/<skill-name>/SKILL.md` 格式的 Markdown 文件。可参考 `skills/openbiliclaw-adapter/SKILL.md` 作为示例。
+
+仓库 `skills/` 存放 OpenClaw adapter skills；`.claude/skills/` 存放 Claude Code 项目技能，例如 release 发布 runbook 与 writing-specs 规格/计划编写技能。
+
+Skill 文件描述该 Skill 的能力边界、CLI bridge 命令列表，以及与主系统的集成工作流。参见 `skills/` 目录下的内置 Skill 示例，了解如何创建自定义 Skill。
 
 ## 文档更新清单
 

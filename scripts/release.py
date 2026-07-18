@@ -20,7 +20,11 @@ VersionFile = tuple[str, str, str, str]
 VERSION_FILES: tuple[VersionFile, ...] = (
     ("pyproject.toml", "toml", "backend", "enforced"),
     ("src/openbiliclaw/__init__.py", "python", "backend", "enforced"),
+    ("docs/index.html", "html", "backend", "enforced"),
     ("uv.lock", "uv-lock", "backend", "enforced"),
+    ("README.md", "readme-cn", "backend", "enforced"),
+    ("README_EN.md", "readme-en", "backend", "enforced"),
+    ("packaging/openbiliclaw.iss", "iss", "backend", "warn-only"),
     ("extension/manifest.json", "json", "extension", "enforced"),
     ("extension/package.json", "json", "extension", "enforced"),
     ("extension/package-lock.json", "package-lock", "extension", "enforced"),
@@ -35,10 +39,13 @@ _SINGLE_PATTERNS: dict[str, re.Pattern[str]] = {
     "json": re.compile(
         rf'(?m)(^[ \t]*"version"[ \t]*:[ \t]*")(?P<version>{SEMVER})("[ \t]*,?[ \t]*$)'
     ),
+    "html": re.compile(rf'(?m)("softwareVersion"[ \t]*:[ \t]*")(?P<version>{SEMVER})(")'),
     "uv-lock": re.compile(
         rf'(?m)(^\[\[package\]\]\r?\nname = "openbiliclaw"\r?\nversion = ")'
         rf"(?P<version>{SEMVER})(\")"
     ),
+    "readme-cn": re.compile(rf"(?m)(^📌 最新版本：\*\*v)(?P<version>{SEMVER})"),
+    "readme-en": re.compile(rf"(?m)(^📌 Latest: \*\*v)(?P<version>{SEMVER})"),
 }
 
 _PACKAGE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -50,12 +57,27 @@ _PACKAGE_LOCK_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+_ISS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        rf"(?m)(^;     iscc /DMyAppVersion=)(?P<version>{SEMVER})"
+        rf"( packaging\\openbiliclaw\.iss$)"
+    ),
+    re.compile(
+        rf"(?m)(^;     dist\\release\\OpenBiliClaw-windows-)"
+        rf"(?P<version>{SEMVER})(-Setup\.exe$)"
+    ),
+)
+
 _EXPECTED_COUNTS: dict[str, int] = {
     "toml": 1,
     "python": 1,
     "json": 1,
     "package-lock": 2,
+    "iss": 2,
+    "html": 1,
     "uv-lock": 1,
+    "readme-cn": 1,
+    "readme-en": 1,
 }
 
 
@@ -89,6 +111,8 @@ class _EntryState(NamedTuple):
 def _patterns_for_kind(kind: str) -> tuple[re.Pattern[str], ...]:
     if kind == "package-lock":
         return _PACKAGE_LOCK_PATTERNS
+    if kind == "iss":
+        return _ISS_PATTERNS
     try:
         return (_SINGLE_PATTERNS[kind],)
     except KeyError as exc:
@@ -131,9 +155,8 @@ def _expected_group_version(states: list[_EntryState], group: str) -> str | None
     return Counter(versions).most_common(1)[0][0]
 
 
-def _load_entry_states(
-    root: Path,
-) -> tuple[list[_EntryState], dict[str, tuple[str, str]]]:
+def check_versions(root: Path) -> CheckResult:
+    """Report version consistency without modifying the repository at ``root``."""
     states: list[_EntryState] = []
     errors: dict[str, tuple[str, str]] = {}
     for version_file in VERSION_FILES:
@@ -142,15 +165,10 @@ def _load_entry_states(
             states.append(_read_entry(root, version_file))
         except (OSError, UnicodeError, ValueError) as exc:
             errors[relative_path] = (policy, str(exc))
-    return states, errors
 
-
-def _report_group_versions(
-    states: list[_EntryState],
-) -> tuple[dict[str, str], list[str], bool]:
-    expected_by_group: dict[str, str] = {}
     lines: list[str] = []
     failed = False
+    expected_by_group: dict[str, str] = {}
     for group in ("backend", "extension"):
         expected = _expected_group_version(states, group)
         if expected is None:
@@ -159,58 +177,40 @@ def _report_group_versions(
         else:
             expected_by_group[group] = expected
             lines.append(f"{group}: {expected}")
-    return expected_by_group, lines, failed
-
-
-def _entry_diagnostic(
-    state: _EntryState | None,
-    error: tuple[str, str] | None,
-    expected: str | None,
-) -> tuple[str | None, bool]:
-    if error is not None:
-        policy, message = error
-        status = "warning" if policy == "warn-only" else "inconsistent"
-        return f"{status} ({message})", policy != "warn-only"
-    if state is None or expected is None or all(version == expected for version in state.versions):
-        return None, False
-    actual = ", ".join(state.versions)
-    status = "warning" if state.policy == "warn-only" else "inconsistent"
-    return f"{status} ({actual}; expected {expected})", state.policy != "warn-only"
-
-
-def _changelog_warning(root: Path, backend_version: str | None) -> str | None:
-    if backend_version is None:
-        return None
-    try:
-        changelog = (root / "docs/changelog.md").read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return "warning: docs/changelog.md is missing or unreadable"
-    heading = re.compile(rf"(?m)^## v{re.escape(backend_version)}(?:[\s/:：]|$)")
-    if heading.search(changelog) is None:
-        return f"warning: docs/changelog.md has no ## v{backend_version} heading"
-    return None
-
-
-def check_versions(root: Path) -> CheckResult:
-    """Report version consistency without modifying the repository at ``root``."""
-    states, errors = _load_entry_states(root)
-    expected_by_group, lines, failed = _report_group_versions(states)
-    states_by_path = {state.relative_path: state for state in states}
 
     for version_file in VERSION_FILES:
-        relative_path, _kind, group, _policy = version_file
-        diagnostic, entry_failed = _entry_diagnostic(
-            states_by_path.get(relative_path),
-            errors.get(relative_path),
-            expected_by_group.get(group),
-        )
-        if diagnostic is not None:
-            lines.append(f"{relative_path}: {diagnostic}")
-        failed = failed or entry_failed
+        relative_path, _kind, group, policy = version_file
+        if relative_path in errors:
+            _error_policy, message = errors[relative_path]
+            if policy == "warn-only":
+                lines.append(f"{relative_path}: warning ({message})")
+            else:
+                lines.append(f"{relative_path}: inconsistent ({message})")
+                failed = True
+            continue
 
-    warning = _changelog_warning(root, expected_by_group.get("backend"))
-    if warning is not None:
-        lines.append(warning)
+        state = next(item for item in states if item.relative_path == relative_path)
+        expected = expected_by_group.get(group)
+        if expected is None or all(version == expected for version in state.versions):
+            continue
+        actual = ", ".join(state.versions)
+        if policy == "warn-only":
+            lines.append(f"{relative_path}: warning ({actual}; expected {expected})")
+        else:
+            lines.append(f"{relative_path}: inconsistent ({actual}; expected {expected})")
+            failed = True
+
+    backend_version = expected_by_group.get("backend")
+    if backend_version is not None:
+        changelog_path = root / "docs/changelog.md"
+        try:
+            changelog = changelog_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            lines.append("warning: docs/changelog.md is missing or unreadable")
+        else:
+            heading = re.compile(rf"(?m)^## v{re.escape(backend_version)}(?:[\s/:：]|$)")
+            if heading.search(changelog) is None:
+                lines.append(f"warning: docs/changelog.md has no ## v{backend_version} heading")
 
     return CheckResult(int(failed), "\n".join(lines))
 
@@ -255,37 +255,6 @@ def _validate_requested_version(label: str, version: str | None) -> None:
         raise ValueError(f"invalid semantic version for {label}: {version!r}; expected X.Y.Z")
 
 
-def _plan_version_writes(
-    root: Path,
-    selected: list[VersionFile],
-    requested: dict[str, str | None],
-) -> dict[Path, str]:
-    planned_writes: dict[Path, str] = {}
-    for relative_path, kind, group, _policy in selected:
-        if kind == "uv-lock":
-            continue
-        path = root / relative_path
-        text = path.read_text(encoding="utf-8")
-        version = requested[group]
-        if version is None:
-            raise AssertionError("selected version group has no requested version")
-        try:
-            planned_writes[path] = _rewrite_versions(text, kind, version)
-        except ValueError as exc:
-            raise ValueError(f"{relative_path}: {exc}") from exc
-    return planned_writes
-
-
-def _refresh_uv_lock(root: Path, runner: UvLockRunner) -> str | None:
-    try:
-        runner(("uv", "lock"), cwd=root, check=True)
-    except FileNotFoundError as exc:
-        return str(exc)
-    except subprocess.CalledProcessError as exc:
-        return f"exit status {exc.returncode}"
-    return None
-
-
 def bump_versions(
     root: Path,
     *,
@@ -303,13 +272,37 @@ def bump_versions(
 
     # Build every write in memory before changing the first file. uv.lock is validated here
     # but regenerated by uv after the other backend fields have been updated.
+    states: dict[str, _EntryState] = {}
     for entry in selected:
-        _read_entry(root, entry)
-    planned_writes = _plan_version_writes(root, selected, requested)
+        state = _read_entry(root, entry)
+        states[state.relative_path] = state
+    planned_writes: dict[Path, str] = {}
+    for relative_path, kind, group, _policy in selected:
+        if kind == "uv-lock":
+            continue
+        path = root / relative_path
+        text = path.read_text(encoding="utf-8")
+        version = requested[group]
+        if version is None:
+            raise AssertionError("selected version group has no requested version")
+        try:
+            planned_writes[path] = _rewrite_versions(text, kind, version)
+        except ValueError as exc:
+            raise ValueError(f"{relative_path}: {exc}") from exc
+
+    if len(states) != len(selected):
+        raise AssertionError("version target pre-validation was incomplete")
     for path, text in planned_writes.items():
         path.write_text(text, encoding="utf-8")
 
-    uv_failure = _refresh_uv_lock(root, uv_lock_runner) if backend is not None else None
+    uv_failure: str | None = None
+    if backend is not None:
+        try:
+            uv_lock_runner(("uv", "lock"), cwd=root, check=True)
+        except FileNotFoundError as exc:
+            uv_failure = str(exc)
+        except subprocess.CalledProcessError as exc:
+            uv_failure = f"exit status {exc.returncode}"
 
     result = check_versions(root)
     if uv_failure is None:

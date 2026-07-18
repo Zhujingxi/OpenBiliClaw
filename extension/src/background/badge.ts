@@ -21,8 +21,7 @@ export type ActionBadgeView = {
 };
 
 export const BADGE_TITLE_DEFAULT = "OpenBiliClaw";
-export const BADGE_TITLE_UNREACHABLE =
-  "OpenBiliClaw：后端未启动，请启动 Docker Compose，或同时启动 API 与 worker";
+export const BADGE_TITLE_UNREACHABLE = "OpenBiliClaw：后端未启动，先运行 openbiliclaw start";
 export const BADGE_TITLE_UNINITIALIZED = "OpenBiliClaw：后端还没初始化，点击图标开始引导初始化";
 export const BADGE_COLOR_UNREACHABLE = "#9CA3AF";
 export const BADGE_COLOR_UNINITIALIZED = "#F97316";

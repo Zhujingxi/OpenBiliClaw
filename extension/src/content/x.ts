@@ -9,7 +9,7 @@
  *
  *   2. Listen for the MAIN-world GraphQL tap's `postMessage`
  *      (`source: "obc-x-tap"`) and forward each captured engagement as a
- *      BEHAVIOR_EVENT to the service worker for vNext activity ingestion.
+ *      BEHAVIOR_EVENT to the service worker → backend `/api/events`.
  *
  * The MAIN-world tap (`dist/main/x-graphql-tap.js`) runs at
  * document_start in `world: MAIN` (see manifest.json) and observes the
@@ -19,19 +19,23 @@
 
 import { startCollector } from "./kernel.js";
 import { twitterAdapter } from "../shared/platforms/twitter.js";
+import { registerE2EExecutor } from "./e2e-executor.ts";
 import type {
   CapturedXRequest,
   XEngagement,
   XEventType,
 } from "../main/x-graphql-tap.js";
 import type { BehaviorEvent } from "../shared/types.js";
-import { handoffBehaviorEvent } from "./activity-handoff.js";
+import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { saveX } from "./native-save/x.ts";
 
 // Keep CapturedXRequest referenced so the type import survives tree-shaking
 // (the tap and this file share the same engagement contract).
 export type { CapturedXRequest };
 
 startCollector(twitterAdapter);
+registerE2EExecutor("twitter");
+installNativeSaveExecutor("twitter", saveX);
 
 /** Map an engagement to the canonical x.com tweet URL (best effort). */
 function tweetUrl(engagement: XEngagement): string {
@@ -65,7 +69,11 @@ function buildEvent(engagement: XEngagement): BehaviorEvent {
 }
 
 function sendEvent(event: BehaviorEvent): void {
-  void handoffBehaviorEvent(event);
+  try {
+    chrome.runtime.sendMessage({ action: "BEHAVIOR_EVENT", data: event });
+  } catch {
+    // best effort — never break the page
+  }
 }
 
 function isXEngagement(value: unknown): value is XEngagement {

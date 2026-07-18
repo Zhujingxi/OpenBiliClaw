@@ -61,24 +61,20 @@ Review the release-only diff, stage only those files, and commit:
 git commit -m "chore: release X.Y.Z" -- <release-paths>
 ```
 
-Create the applicable `backend-vX.Y.Z` and `extension-vX.Y.Z` channel tags, plus the aggregate
-`openbiliclaw-vX.Y.Z` tag. Push **one tag per `git push`** invocation, with the aggregate tag
-last so its completeness workflow can observe the component releases. A multi-tag push can omit
-GitHub tag events and leave release workflows silently dead; never combine tag refspecs in one
-push.
+Create the aggregate `openbiliclaw-vX.Y.Z` tag and the applicable `backend-vX.Y.Z`,
+`extension-vX.Y.Z`, and `desktop-vX.Y.Z` channel tags. Push **one tag per `git push`**
+invocation. A four-tag push previously emitted no GitHub events, leaving all four release
+workflows silently dead; never combine tag refspecs in one push.
 
 ```bash
-git push origin backend-vX.Y.Z
-# If the extension version changed:
-git push origin extension-vX.Y.Z
-# Push the aggregate tag last:
 git push origin openbiliclaw-vX.Y.Z
+git push origin backend-vX.Y.Z
+# Push each other applicable channel tag in its own invocation.
 ```
 
 ## 6. Verify publication
 
 Run `gh run list --limit 10` and confirm that each pushed tag triggered exactly one run of its
-corresponding backend-container, extension-package, or aggregate-completeness workflow. Inspect
-failures before retrying or pushing another tag. After the container workflow succeeds, confirm
-the GHCR package is public; new packages may require their visibility to be changed to public
-manually.
+corresponding release workflow. Inspect failures before retrying or pushing another tag. After
+the container workflow succeeds, confirm the GHCR package is public; new packages may require
+their visibility to be changed to public manually.

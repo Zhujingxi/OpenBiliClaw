@@ -1,0 +1,3153 @@
+"""Tests for discovery engine orchestration."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import tempfile
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+
+import pytest
+
+from openbiliclaw.discovery.engine import (
+    ContentDiscoveryEngine,
+    DiscoveredContent,
+    DiscoveryConcurrencyController,
+    compact_evaluation_profile_summary,
+    discovery_raw_candidate_mode_enabled,
+    llm_eval_candidate_limit,
+)
+from openbiliclaw.discovery.pool_snapshot import PoolDistributionSnapshot
+from openbiliclaw.llm.service import LLMProviderExecutionError
+from openbiliclaw.soul.profile import AwarenessNote, InterestTag, SoulProfile
+from openbiliclaw.storage.database import Database
+
+from .test_explore_strategy import (
+    FakeBilibiliClient as FakeExploreBilibiliClient,
+)
+from .test_explore_strategy import (
+    FakeLLMService as FakeExploreLLMService,
+)
+from .test_related_chain_strategy import (
+    FakeLLMService as FakeRelatedLLMService,
+)
+from .test_related_chain_strategy import (
+    FakeMemoryManager,
+    FakeRelatedClient,
+    _event,
+)
+from .test_search_strategy import FakeBilibiliClient, FakeLLMService, _build_profile
+from .test_trending_strategy import (
+    FakeLLMService as FakeTrendingLLMService,
+)
+from .test_trending_strategy import (
+    FakeRankingClient,
+    _first_rotating_rids,
+)
+
+
+@dataclass
+class _SlowResponse:
+    content: str
+
+
+class _SlowLLMService:
+    def __init__(self, delay: float = 0.01) -> None:
+        self.delay = delay
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        await asyncio.sleep(self.delay)
+        self.active_calls -= 1
+        return _SlowResponse('{"score": 0.88, "reason": "still relevant"}')
+
+
+class _DynamicBatchLLMService:
+    """Returns one score per item found in the batch prompt."""
+
+    def __init__(self) -> None:
+        self.user_inputs: list[str] = []
+        self.max_tokens: list[int] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.user_inputs.append(user_input)
+        self.max_tokens.append(max_tokens)
+        batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+        items = json.loads(batch_json.strip())
+        payload = [
+            {
+                "content_id": item.get("content_id") or item.get("bvid") or str(index),
+                "score": 0.8,
+                "reason": "ok",
+                "style_key": "deep_dive",
+            }
+            for index, item in enumerate(items)
+        ]
+        return _SlowResponse(json.dumps(payload, ensure_ascii=False))
+
+
+class _ConcurrentBatchLLMService(_DynamicBatchLLMService):
+    def __init__(self, delay: float = 0.01) -> None:
+        super().__init__()
+        self.delay = delay
+        self.active_calls = 0
+        self.max_active_calls = 0
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.active_calls += 1
+        self.max_active_calls = max(self.max_active_calls, self.active_calls)
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().complete_structured_task(
+                system_instruction=system_instruction,
+                user_input=user_input,
+                history=history,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                caller=caller,
+                reasoning_effort=reasoning_effort,
+            )
+        finally:
+            self.active_calls -= 1
+
+
+class _RecordingMultimodalBatchLLMService(_DynamicBatchLLMService):
+    supports_image_input = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.image_inputs: list[list[dict[str, str]]] = []
+
+    async def complete_structured_task(self, **_kwargs: object) -> object:
+        raise AssertionError("multimodal batch should use image-aware LLM method")
+
+    async def complete_multimodal_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        image_inputs: list[dict[str, str]],
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.image_inputs.append(image_inputs)
+        return await super().complete_structured_task(
+            system_instruction=system_instruction,
+            user_input=user_input,
+            history=history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            caller=caller,
+            reasoning_effort=reasoning_effort,
+        )
+
+
+def test_compact_evaluation_profile_summary_keeps_high_signal_context() -> None:
+    profile_summary = {
+        "core_traits": [f"trait-{index}" for index in range(30)],
+        "cognitive_style": [f"style-{index}" for index in range(30)],
+        "values": [f"value-{index}" for index in range(30)],
+        "motivational_drivers": [f"driver-{index}" for index in range(30)],
+        "interest_domains": [
+            {
+                "domain": f"domain-{index}",
+                "weight": 1.0 - index / 100,
+                "specifics": [
+                    {"name": f"specific-{index}-{item}", "weight": 1.0 - item / 100}
+                    for item in range(20)
+                ],
+            }
+            for index in range(40)
+        ],
+        "interests": [
+            {"name": f"interest-{index}", "weight": 1.0 - index / 100} for index in range(100)
+        ],
+        "disliked_topics": [f"avoid-{index}" for index in range(20)],
+        "recent_awareness": [{"observation": f"awareness-{index}"} for index in range(20)],
+        "active_insights": [
+            {
+                "hypothesis": f"insight-{index}",
+                "evidence": [f"evidence-{index}-{item}" for item in range(20)],
+            }
+            for index in range(20)
+        ],
+        "speculative_interests": [
+            {"domain": f"spec-{index}", "reason": "maybe"} for index in range(20)
+        ],
+    }
+
+    compacted = compact_evaluation_profile_summary(profile_summary)
+
+    assert len(compacted["core_traits"]) == 20
+    assert len(compacted["interests"]) == 64
+    assert compacted["interests"][0]["name"] == "interest-0"
+    assert compacted["disliked_topics"] == profile_summary["disliked_topics"]
+    assert len(compacted["interest_domains"]) == 32
+    assert len(compacted["interest_domains"][0]["specifics"]) == 12
+    assert [item["observation"] for item in compacted["recent_awareness"][:2]] == [
+        "awareness-8",
+        "awareness-9",
+    ]
+    assert len(compacted["active_insights"]) == 12
+    assert len(compacted["active_insights"][0]["evidence"]) == 8
+    assert len(compacted["speculative_interests"]) == 12
+
+
+class _RecentViewedDatabase:
+    def __init__(
+        self,
+        viewed_bvids: set[str],
+        *,
+        viewed_content_keys: set[str] | None = None,
+    ) -> None:
+        self.viewed_bvids = set(viewed_bvids)
+        self.viewed_content_keys = set(viewed_content_keys or viewed_bvids)
+
+    def get_recent_viewed_bvids(self) -> set[str]:
+        return set(self.viewed_bvids)
+
+    def get_recent_viewed_content_keys(self) -> set[str]:
+        return set(self.viewed_content_keys)
+
+    def get_latest_event_id(self) -> int:
+        return 0
+
+    def query_events(
+        self,
+        *,
+        satisfaction_modes: frozenset[str] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, object]]:
+        return []
+
+
+class _RecordingCacheDatabase(_RecentViewedDatabase):
+    def __init__(self, viewed_bvids: set[str]) -> None:
+        super().__init__(viewed_bvids)
+        self.cached_bvids: list[str] = []
+
+    def count_pool_by_franchise(self) -> dict[str, int]:
+        return {}
+
+    def cache_content(self, bvid: str, **kwargs: object) -> None:
+        self.cached_bvids.append(bvid)
+
+    def pool_admission_threshold(
+        self,
+        source_strategy: str,
+        requested_threshold: object | None = None,
+    ) -> float:
+        if source_strategy == "explore":
+            return max(0.58, float(requested_threshold or 0.0))
+        return max(0.60, float(requested_threshold or 0.0))
+
+
+class _RawModeAwareStrategy:
+    name = "raw_mode"
+
+    def __init__(self) -> None:
+        self.llm_evaluation = True
+        self.raw_call_entered = asyncio.Event()
+        self.release_raw_call = asyncio.Event()
+        self.calls: list[tuple[bool, bool]] = []
+
+    async def discover(
+        self,
+        profile: SoulProfile,
+        limit: int = 20,
+        *,
+        pool_snapshot: object | None = None,
+    ) -> list[DiscoveredContent]:
+        raw_mode = discovery_raw_candidate_mode_enabled()
+        self.calls.append((raw_mode, self.llm_evaluation))
+        if raw_mode:
+            self.raw_call_entered.set()
+            await self.release_raw_call.wait()
+        return [
+            DiscoveredContent(
+                bvid="BVRAW",
+                title="raw mode candidate",
+                source_strategy=self.name,
+                relevance_score=0.9,
+            )
+        ][:limit]
+
+    def create_backfill_strategy(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_produce_candidates_raw_mode_does_not_mutate_concurrent_discover() -> None:
+    strategy = _RawModeAwareStrategy()
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)  # type: ignore[arg-type]
+    profile = _build_profile()
+
+    produce_task = asyncio.create_task(engine.produce_candidates(profile, limit=1))
+    await strategy.raw_call_entered.wait()
+    await engine.discover(profile, limit=1)
+    strategy.release_raw_call.set()
+    await produce_task
+
+    assert (True, True) in strategy.calls
+    assert (False, True) in strategy.calls
+    assert strategy.llm_evaluation is True
+
+
+async def _contend_llm_semaphore(
+    controller: DiscoveryConcurrencyController,
+    *,
+    delay: float = 0.01,
+) -> None:
+    async def _job() -> str:
+        await asyncio.sleep(delay)
+        return "ok"
+
+    await asyncio.gather(
+        controller.run_llm(_job()),
+        controller.run_llm(_job()),
+    )
+
+
+async def _contend_bilibili_semaphore(
+    controller: DiscoveryConcurrencyController,
+    *,
+    delay: float = 0.01,
+) -> None:
+    async def _job() -> str:
+        await asyncio.sleep(delay)
+        return "ok"
+
+    await asyncio.gather(
+        controller.run_bilibili(_job()),
+        controller.run_bilibili(_job()),
+    )
+
+
+def test_discovery_concurrency_controller_survives_multiple_event_loops() -> None:
+    controller = DiscoveryConcurrencyController(
+        bilibili_request_concurrency=1,
+        llm_evaluation_concurrency=1,
+    )
+
+    asyncio.run(_contend_llm_semaphore(controller))
+    asyncio.run(_contend_bilibili_semaphore(controller))
+    asyncio.run(_contend_llm_semaphore(controller))
+    asyncio.run(_contend_bilibili_semaphore(controller))
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_runs_registered_search_strategy() -> None:
+    from openbiliclaw.discovery.strategies.strategies import SearchStrategy
+
+    engine = ContentDiscoveryEngine()
+    strategy = SearchStrategy(
+        llm_service=FakeLLMService('{"queries": ["纪录片 原理"]}'),
+        bilibili_client=FakeBilibiliClient(
+            {"纪录片 原理": [{"bvid": "BV1A", "title": "纪录片", "author": "UP1", "mid": 1}]}
+        ),
+        llm_evaluation=False,
+    )
+    engine.register_strategy(strategy)
+
+    results = await engine.discover(_build_profile())
+
+    assert len(results) == 1
+    assert results[0].bvid == "BV1A"
+    assert results[0].source_strategy == "search"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_passes_style_preferences_to_prompt() -> None:
+    llm_service = FakeLLMService(
+        '{"score": 0.82, "reason": "匹配", "topic_group": "摄影", "style_key": "light_chat"}'
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    profile = _build_profile()
+    profile.preferences.style.preferred_duration = "short"
+    profile.preferences.style.humor_preference = 0.8
+    profile.preferences.style.depth_preference = 0.25
+
+    await engine.evaluate_content(
+        DiscoveredContent(
+            bvid="BV1STYLE",
+            title="摄影散步 vlog",
+            description="轻松聊拍照",
+            source_strategy="search",
+        ),
+        profile,
+    )
+
+    user_input = str(llm_service.calls[0]["user_input"])
+    assert '"preferred_duration": "short"' in user_input
+    assert '"humor_preference": 0.8' in user_input
+    assert '"depth_preference": 0.25' in user_input
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_passes_disliked_topics_to_prompt() -> None:
+    llm_service = FakeLLMService(
+        '{"score": 0.52, "reason": "命中避雷", "topic_group": "混剪", "style_key": "light_chat"}'
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    profile = _build_profile()
+    profile.preferences.disliked_topics = ["标题党", "低质混剪"]
+
+    await engine.evaluate_content(
+        DiscoveredContent(
+            bvid="BV1DISLIKE",
+            title="震惊体低质混剪",
+            description="标题党式盘点",
+            source_strategy="search",
+        ),
+        profile,
+    )
+
+    user_input = str(llm_service.calls[0]["user_input"])
+    assert '"disliked_topics": [' in user_input
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() -> None:
+    llm_service = FakeLLMService(
+        '{"score": 0.82, "reason": "匹配", "topic_group": "系统", "style_key": "deep_dive"}'
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+
+    await engine.evaluate_content(
+        DiscoveredContent(
+            content_id="tweet-1",
+            title="正文首行",
+            body_text="完整 thread 正文",
+            tags=["systems", "async"],
+            source_platform="twitter",
+            content_type="thread",
+            view_count=1000,
+            like_count=100,
+            favorite_count=90,
+            collect_count=80,
+            comment_count=70,
+            share_count=60,
+            danmaku_count=50,
+            reply_count=40,
+            retweet_count=30,
+            bookmark_count=20,
+            source_strategy="x-search",
+        ),
+        _build_profile(),
+    )
+
+    user_input = str(llm_service.calls[0]["user_input"])
+    assert '"body_text": "完整 thread 正文"' in user_input
+    assert '"tags": [' in user_input
+    assert '"like_count": 100' in user_input
+    assert '"favorite_count": 90' in user_input
+    assert '"collect_count": 80' in user_input
+    assert '"comment_count": 70' in user_input
+    assert '"share_count": 60' in user_input
+    assert '"danmaku_count": 50' in user_input
+    assert '"reply_count": 40' in user_input
+    assert '"retweet_count": 30' in user_input
+    assert '"bookmark_count": 20' in user_input
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_skips_recently_viewed_before_llm() -> None:
+    llm_service = FakeLLMService(
+        json.dumps(
+            [
+                {
+                    "bvid": "BV1FRESH",
+                    "score": 0.88,
+                    "reason": "fresh match",
+                    "topic_group": "AI工具",
+                    "style_key": "practical_guide",
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        database=_RecentViewedDatabase({"BV1VIEWED"}),  # type: ignore[arg-type]
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(bvid="BV1VIEWED", title="已经看过", source_strategy="trending"),
+            DiscoveredContent(bvid="BV1FRESH", title="新内容", source_strategy="trending"),
+        ],
+        _build_profile(),
+    )
+
+    assert scores == [0.0, 0.88]
+    assert len(llm_service.calls) == 1
+    user_input = str(llm_service.calls[0]["user_input"])
+    assert "BV1FRESH" in user_input
+    assert "BV1VIEWED" not in user_input
+    assert "已经看过" not in user_input
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_limits_llm_batch_concurrency_to_two_by_default() -> None:
+    llm_service = _ConcurrentBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    contents = [
+        DiscoveredContent(
+            bvid=f"BV_BATCH_CONCURRENCY_{index}",
+            title=f"候选 {index}",
+            up_name="UP",
+            source_strategy="search",
+        )
+        for index in range(4)
+    ]
+
+    scores = await engine.evaluate_content_batch(contents, _build_profile(), batch_size=1)
+
+    assert scores == [0.8, 0.8, 0.8, 0.8]
+    assert llm_service.max_active_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_skips_recently_viewed_non_bilibili_before_llm() -> None:
+    llm_service = FakeLLMService(
+        json.dumps(
+            [
+                {
+                    "content_id": "fresh-yt",
+                    "score": 0.82,
+                    "reason": "fresh youtube match",
+                    "topic_group": "AI工具",
+                    "style_key": "practical_guide",
+                }
+            ],
+            ensure_ascii=False,
+        )
+    )
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        database=_RecentViewedDatabase(
+            set(),
+            viewed_content_keys={"youtube:seen-yt"},
+        ),  # type: ignore[arg-type]
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id="seen-yt",
+                source_platform="youtube",
+                title="已经看过的 YouTube",
+                source_strategy="youtube_search",
+            ),
+            DiscoveredContent(
+                content_id="fresh-yt",
+                source_platform="youtube",
+                title="新的 YouTube",
+                source_strategy="youtube_search",
+            ),
+        ],
+        _build_profile(),
+    )
+
+    assert scores == [0.0, 0.82]
+    assert len(llm_service.calls) == 1
+    user_input = str(llm_service.calls[0]["user_input"])
+    assert "fresh-yt" in user_input
+    assert "seen-yt" not in user_input
+    assert "已经看过的 YouTube" not in user_input
+
+
+def test_candidate_view_keys_normalize_zhihu_alias() -> None:
+    keys = ContentDiscoveryEngine._candidate_view_keys(
+        DiscoveredContent(
+            content_id="answer:42",
+            source_platform="zh",
+            title="知乎回答",
+            source_strategy="zhihu-hot",
+        )
+    )
+
+    assert "zhihu:answer:42" in keys
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_batch_omits_duplicate_text_description() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    summary = "知乎回答摘要，正文和描述来自同一段插件抓取文本。"
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id="zhihu:answer:1",
+                source_platform="zhihu",
+                content_type="answer",
+                title="知乎问题",
+                description=summary,
+                body_text=summary,
+                source_strategy="zhihu-hot",
+            ),
+            DiscoveredContent(
+                content_id="twitter:tweet:1",
+                source_platform="twitter",
+                content_type="tweet",
+                title="Tweet first line",
+                description="短描述补充",
+                body_text="完整推文正文",
+                source_strategy="x-feed",
+            ),
+        ],
+        _build_profile(),
+        batch_size=2,
+    )
+
+    assert scores == [0.8, 0.8]
+    batch_json = (
+        llm_service.user_inputs[0]
+        .split("<content_batch>", 1)[1]
+        .split(
+            "</content_batch>",
+            1,
+        )[0]
+    )
+    items = json.loads(batch_json.strip())
+    assert items[0]["body_text"] == summary
+    assert items[0]["description"] == ""
+    assert items[1]["body_text"] == "完整推文正文"
+    assert items[1]["description"] == "短描述补充"
+
+
+@pytest.mark.asyncio
+async def test_multimodal_evaluation_uses_configured_smaller_batch_size() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        multimodal_evaluation_enabled=True,
+        multimodal_batch_size=2,
+        multimodal_vision_supported=True,
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id=f"cover-{idx}",
+                title=f"cover item {idx}",
+                cover_url=f"https://example.com/{idx}.jpg",
+                source_platform="youtube",
+                source_strategy="youtube_search",
+            )
+            for idx in range(5)
+        ],
+        _build_profile(),
+        batch_size=30,
+    )
+
+    assert scores == [0.8, 0.8, 0.8, 0.8, 0.8]
+    assert len(llm_service.user_inputs) == 3
+    assert [prompt.count('"content_id"') for prompt in llm_service.user_inputs] == [2, 2, 1]
+    assert engine.multimodal_unavailable_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_text_batch_evaluation_bounds_declared_output_tokens() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id=f"text-{idx}",
+                title=f"text item {idx}",
+                source_platform="bilibili",
+                source_strategy="trending",
+            )
+            for idx in range(8)
+        ],
+        _build_profile(),
+        batch_size=8,
+    )
+
+    assert scores == [0.8] * 8
+    assert llm_service.max_tokens == [4096]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_evaluation_falls_back_to_text_batch_when_vision_unavailable() -> None:
+    llm_service = _DynamicBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        multimodal_evaluation_enabled=True,
+        multimodal_batch_size=2,
+        multimodal_vision_supported=False,
+    )
+
+    scores = await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                content_id=f"cover-{idx}",
+                title=f"cover item {idx}",
+                cover_url=f"https://example.com/{idx}.jpg",
+                source_platform="youtube",
+                source_strategy="youtube_search",
+            )
+            for idx in range(5)
+        ],
+        _build_profile(),
+        batch_size=30,
+    )
+
+    assert scores == [0.8, 0.8, 0.8, 0.8, 0.8]
+    assert len(llm_service.user_inputs) == 1
+    assert "vision-capable" in engine.multimodal_unavailable_reason
+
+
+@pytest.mark.asyncio
+async def test_multimodal_evaluation_sends_prepared_cover_images(monkeypatch) -> None:
+    from openbiliclaw.discovery.multimodal import PreparedCoverImage
+
+    async def fake_prepare_cover_image_inputs(*_args: object, **_kwargs: object) -> list[object]:
+        return [
+            PreparedCoverImage(
+                content_id="cover-0",
+                data_url="data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+                mime_type="image/jpeg",
+            )
+        ]
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.multimodal.prepare_cover_image_inputs",
+        fake_prepare_cover_image_inputs,
+    )
+    llm_service = _RecordingMultimodalBatchLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        multimodal_evaluation_enabled=True,
+        multimodal_batch_size=2,
+    )
+
+    scores = await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                content_id="cover-0",
+                title="with cover",
+                cover_url="https://i.ytimg.com/vi/demo/hqdefault.jpg",
+                source_platform="youtube",
+                source_strategy="youtube_search",
+            )
+        ],
+        _build_profile(),
+    )
+
+    assert scores == [0.8]
+    assert llm_service.image_inputs == [
+        [
+            {
+                "content_id": "cover-0",
+                "data_url": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+                "mime_type": "image/jpeg",
+            }
+        ]
+    ]
+    assert '"cover_image_ref": "cover:cover-0"' in llm_service.user_inputs[0]
+    assert llm_service.max_tokens == [4096]
+
+
+async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from openbiliclaw.llm.base import LLMResponse
+    from openbiliclaw.llm.service import LLMService
+    from openbiliclaw.runtime import image_cache
+
+    cover_url = "https://i.ytimg.com/vi/openbiliclaw-e2e/hqdefault.jpg"
+    image_content_id = "yt-e2e"
+    text_content_id = "x-text"
+
+    monkeypatch.setattr(image_cache, "_CACHE_DIR", tmp_path)
+    image = Image.new("RGB", (640, 360), (18, 104, 166))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=92)
+    image_cache.save_image_bytes(cover_url, buffer.getvalue(), "image/jpeg")
+
+    class _CapturingRoute:
+        connections = (
+            SimpleNamespace(type="openai_compatible", model="gpt-4o-mini"),
+        )
+
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, object]]] = []
+            self.json_modes: list[bool] = []
+
+        async def complete(
+            self,
+            messages: list[dict[str, object]],
+            *,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            json_mode: bool = False,
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            self.calls.append(messages)
+            self.json_modes.append(json_mode)
+            return LLMResponse(
+                content=json.dumps(
+                    [
+                        {
+                            "content_id": image_content_id,
+                            "score": 0.81,
+                            "reason": "封面和标题都指向视觉向内容，和画像匹配。",
+                            "topic_group": "视觉分析",
+                            "style_key": "visual_showcase",
+                            "franchise_key": "",
+                        },
+                        {
+                            "content_id": text_content_id,
+                            "score": 0.42,
+                            "reason": "纯文本候选只有正文线索，匹配度一般。",
+                            "topic_group": "社交动态",
+                            "style_key": "light_chat",
+                            "franchise_key": "",
+                        },
+                    ],
+                    ensure_ascii=False,
+                ),
+                provider="capturing",
+            )
+
+    route = _CapturingRoute()
+    engine = ContentDiscoveryEngine(
+        llm_service=LLMService(registry=route, memory=None),  # type: ignore[arg-type]
+        multimodal_evaluation_enabled=True,
+        multimodal_batch_size=4,
+        multimodal_image_max_px=384,
+        multimodal_image_quality=72,
+        multimodal_image_timeout_seconds=6,
+    )
+
+    scores = await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                content_id=image_content_id,
+                source_platform="youtube",
+                source_strategy="yt_search",
+                content_type="video",
+                title="A visual analysis demo",
+                description="A demo item with a real cached cover image.",
+                cover_url=cover_url,
+                view_count=1234,
+                like_count=56,
+                tags=["visual", "demo"],
+            ),
+            DiscoveredContent(
+                content_id=text_content_id,
+                source_platform="twitter",
+                source_strategy="x-search",
+                content_type="tweet",
+                title="A text-only tweet",
+                body_text="This candidate intentionally has no cover image.",
+                like_count=7,
+            ),
+        ],
+        SoulProfile(
+            core_traits=["偏好视觉细节和结构化分析"],
+            cognitive_style=["喜欢把图像线索和文字线索一起判断"],
+            deep_needs=["快速判断内容是否值得点开"],
+        ),
+        source_context="e2e",
+    )
+
+    assert scores == [0.81, 0.42]
+    assert route.json_modes == [True]
+    assert any(path.stem == image_cache.image_cache_key(cover_url) for path in tmp_path.glob("*.*"))
+
+    messages = route.calls[0]
+    assert len(messages) == 2
+    system_prompt = str(messages[0]["content"])
+    assert "cover_image_ref" in system_prompt
+    assert "没有 cover_image_ref" in system_prompt
+
+    user_parts = messages[1]["content"]
+    assert isinstance(user_parts, list)
+    assert [part.get("type") for part in user_parts if isinstance(part, dict)] == [
+        "text",
+        "text",
+        "image_url",
+    ]
+    user_text = str(user_parts[0]["text"])
+    content_batch = json.loads(
+        user_text.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0].strip()
+    )
+    expected_ref = f"cover:{image_content_id}"
+    assert content_batch[0]["cover_image_ref"] == expected_ref
+    assert "cover_image_ref" not in content_batch[1]
+
+    assert user_parts[1] == {
+        "type": "text",
+        "text": (
+            f"Cover image {expected_ref} maps to the content_batch item whose "
+            f"cover_image_ref is {expected_ref}."
+        ),
+    }
+    assert user_parts[2]["type"] == "image_url"
+    assert user_parts[2]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_cache_results_skips_recently_viewed_items() -> None:
+    database = _RecordingCacheDatabase({"BV1VIEWED"})
+    engine = ContentDiscoveryEngine(database=database)  # type: ignore[arg-type]
+
+    engine._cache_results(
+        [
+            DiscoveredContent(bvid="BV1VIEWED", title="已经看过", relevance_score=0.90),
+            DiscoveredContent(bvid="BV1FRESH", title="新内容", relevance_score=0.90),
+        ]
+    )
+
+    assert database.cached_bvids == ["BV1FRESH"]
+
+
+def test_cache_results_skips_recently_viewed_non_bilibili_items() -> None:
+    database = _RecordingCacheDatabase(set())
+    database.viewed_content_keys = {"xiaohongshu:note-seen"}
+    engine = ContentDiscoveryEngine(database=database)  # type: ignore[arg-type]
+
+    engine._cache_results(
+        [
+            DiscoveredContent(
+                content_id="note-seen",
+                source_platform="xiaohongshu",
+                title="已经看过的小红书",
+                relevance_score=0.90,
+            ),
+            DiscoveredContent(
+                content_id="note-fresh",
+                source_platform="xiaohongshu",
+                title="新小红书",
+                relevance_score=0.90,
+            ),
+        ]
+    )
+
+    assert database.cached_bvids == ["xiaohongshu:note-fresh"]
+
+
+def test_cache_results_rechecks_admission_before_writing() -> None:
+    database = _RecordingCacheDatabase(set())
+    engine = ContentDiscoveryEngine(database=database)  # type: ignore[arg-type]
+
+    engine._cache_results(
+        [
+            DiscoveredContent(
+                bvid="BV1TRENDLOW",
+                title="不匹配的热门内容",
+                source_strategy="trending",
+                relevance_score=0.59,
+                score_threshold=0.20,
+            ),
+            DiscoveredContent(
+                bvid="BV1EXPLORE",
+                title="合格的跨域发现",
+                source_strategy="explore",
+                relevance_score=0.58,
+                score_threshold=0.55,
+            ),
+        ]
+    )
+
+    assert database.cached_bvids == ["BV1EXPLORE"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_handles_empty_strategy_results() -> None:
+    from openbiliclaw.discovery.strategies.strategies import SearchStrategy
+
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        SearchStrategy(
+            llm_service=FakeLLMService('{"queries": []}'),
+            bilibili_client=FakeBilibiliClient({}),
+            llm_evaluation=False,
+        )
+    )
+
+    results = await engine.discover(SoulProfile())
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_runs_registered_trending_strategy() -> None:
+    from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+    from openbiliclaw.discovery.strategies.strategies import TrendingStrategy
+
+    engine = ContentDiscoveryEngine(
+        llm_service=FakeTrendingLLMService(
+            [
+                '{"score": 0.83, "reason": "符合你的深度内容偏好。"}',
+            ]
+        )
+    )
+    rids = _first_rotating_rids()
+    engine.register_strategy(
+        TrendingStrategy(
+            bilibili_client=FakeRankingClient(
+                {
+                    0: [{"bvid": "BV1A", "title": "全站榜", "author": "UP1", "mid": 1}],
+                    rids[1]: [],
+                }
+            ),
+            llm_service=engine._llm_service,
+            score_threshold=0.65,
+        )
+    )
+
+    results = await engine.discover(_build_profile())
+
+    assert len(results) == 1
+    assert results[0].bvid == "BV1A"
+    assert results[0].source_strategy == "trending"
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_runs_related_chain_strategy() -> None:
+    from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+    from openbiliclaw.discovery.strategies.strategies import RelatedChainStrategy
+
+    engine = ContentDiscoveryEngine(
+        llm_service=FakeRelatedLLMService(['{"score": 0.84, "reason": "延续了近期观看兴趣。"}'])
+    )
+    engine.register_strategy(
+        RelatedChainStrategy(
+            bilibili_client=FakeRelatedClient(
+                {
+                    "BV1SEED": [
+                        {
+                            "bvid": "BV1REL",
+                            "title": "相关推荐",
+                            "owner": {"name": "UPR", "mid": 10},
+                        }
+                    ]
+                }
+            ),
+            llm_service=engine._llm_service,
+            memory_manager=FakeMemoryManager(events=[_event("BV1SEED")]),
+        )
+    )
+
+    results = await engine.discover(_build_profile())
+
+    assert len(results) == 1
+    assert results[0].bvid == "BV1REL"
+    assert results[0].source_strategy == "related_chain"
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_runs_explore_strategy() -> None:
+    from openbiliclaw.discovery.engine import ContentDiscoveryEngine
+    from openbiliclaw.discovery.strategies.strategies import ExploreStrategy
+
+    engine = ContentDiscoveryEngine(
+        llm_service=FakeExploreLLMService(
+            [
+                """
+                {
+                  "domains": [
+                    {
+                      "domain": "城市空间与建筑叙事",
+                      "why_it_might_resonate": "你偏好理解复杂系统。",
+                      "novelty_level": 0.7,
+                      "queries": ["城市 建筑 纪录片"]
+                    }
+                  ]
+                }
+                """,
+                '{"score": 0.84, "reason": "这个陌生主题仍然符合你的理解欲。"}',
+            ]
+        )
+    )
+    engine.register_strategy(
+        ExploreStrategy(
+            llm_service=engine._llm_service,
+            bilibili_client=FakeExploreBilibiliClient(
+                {
+                    "城市 建筑 纪录片": [
+                        {"bvid": "BV1EXP", "title": "城市建筑", "author": "UPX", "mid": 9}
+                    ]
+                }
+            ),
+        )
+    )
+
+    results = await engine.discover(_build_profile())
+
+    assert len(results) == 1
+    assert results[0].bvid == "BV1EXP"
+    assert results[0].source_strategy == "explore"
+
+
+class _RecordingStrategy:
+    def __init__(
+        self,
+        name: str,
+        result: list[DiscoveredContent],
+        *,
+        delay: float = 0.0,
+        should_fail: bool = False,
+        started: list[str] | None = None,
+    ) -> None:
+        self._name = name
+        self._result = result
+        self._delay = delay
+        self._should_fail = should_fail
+        self._started = started if started is not None else []
+        self.limits: list[int] = []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
+        self._started.append(self._name)
+        self.limits.append(limit)
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        if self._should_fail:
+            raise RuntimeError(f"boom: {self._name}")
+        return self._result[:limit]
+
+
+class _BackfillAwareStrategy(_RecordingStrategy):
+    def __init__(
+        self,
+        name: str,
+        result: list[DiscoveredContent],
+        *,
+        backfill_result: list[DiscoveredContent],
+        started: list[str] | None = None,
+        backfill_started: list[str] | None = None,
+    ) -> None:
+        super().__init__(name, result, started=started)
+        self._backfill_result = backfill_result
+        self._backfill_started = backfill_started if backfill_started is not None else []
+
+    def create_backfill_strategy(self) -> _RecordingStrategy:
+        return _RecordingStrategy(
+            f"{self.name}-backfill",
+            self._backfill_result,
+            started=self._backfill_started,
+        )
+
+
+class _PoolSnapshotStrategy(_RecordingStrategy):
+    def __init__(self) -> None:
+        super().__init__(
+            "snapshot-aware",
+            [
+                DiscoveredContent(
+                    bvid="BV1SNAP",
+                    relevance_score=0.9,
+                    source_strategy="snapshot-aware",
+                )
+            ],
+        )
+        self.pool_snapshots: list[object | None] = []
+
+    async def discover(
+        self,
+        profile: SoulProfile,
+        limit: int = 20,
+        *,
+        pool_snapshot: object | None = None,
+    ) -> list[DiscoveredContent]:
+        self.pool_snapshots.append(pool_snapshot)
+        return await super().discover(profile, limit=limit)
+
+
+class _PoolSnapshotBackfillStrategy(_RecordingStrategy):
+    def __init__(self, backfill_strategy: _PoolSnapshotStrategy) -> None:
+        super().__init__(
+            "snapshot-primary",
+            [
+                DiscoveredContent(
+                    bvid="BV1PRIMARY",
+                    relevance_score=0.9,
+                    source_strategy="snapshot-primary",
+                )
+            ],
+        )
+        self._backfill_strategy = backfill_strategy
+
+    def create_backfill_strategy(self) -> _PoolSnapshotStrategy:
+        return self._backfill_strategy
+
+
+@pytest.mark.asyncio
+async def test_produce_candidates_does_not_evaluate_or_cache() -> None:
+    strategy = _RecordingStrategy(
+        "search",
+        [DiscoveredContent(bvid="BV1", title="Raw", source_strategy="search")],
+    )
+    strategy.llm_evaluation = True  # type: ignore[attr-defined]
+    db = _RecordingCacheDatabase(set())
+    llm = _SlowLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    engine.register_strategy(strategy)
+
+    items = await engine.produce_candidates(_build_profile(), strategies=["search"], limit=10)
+
+    assert [item.bvid for item in items] == ["BV1"]
+    assert db.cached_bvids == []
+    assert llm.max_active_calls == 0
+    assert strategy.llm_evaluation is True  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_produce_candidates_stamps_strategy_score_threshold() -> None:
+    strategy = _RecordingStrategy(
+        "related_chain",
+        [DiscoveredContent(bvid="BVTHRESH", title="Raw", source_strategy="related_chain")],
+    )
+    strategy.score_threshold = 0.70  # type: ignore[attr-defined]
+    engine = ContentDiscoveryEngine(
+        llm_service=_SlowLLMService(), database=_RecordingCacheDatabase(set())
+    )
+    engine.register_strategy(strategy)
+
+    items = await engine.produce_candidates(
+        _build_profile(),
+        strategies=["related_chain"],
+        limit=10,
+    )
+
+    assert items[0].score_threshold == 0.70
+
+
+@pytest.mark.asyncio
+async def test_register_strategy_replaces_existing_strategy_with_same_name() -> None:
+    started: list[str] = []
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _RecordingStrategy(
+            "douyin_direct",
+            [DiscoveredContent(bvid="dy:old", source_strategy="old")],
+            started=started,
+        )
+    )
+    engine.register_strategy(
+        _RecordingStrategy(
+            "douyin_direct",
+            [DiscoveredContent(bvid="dy:new", source_strategy="new")],
+            started=started,
+        )
+    )
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["douyin_direct"],
+        limit=20,
+    )
+
+    assert started == ["douyin_direct"]
+    assert [item.bvid for item in results] == ["dy:new"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_passes_pool_snapshot_to_supported_strategy() -> None:
+    pool_snapshot = object()
+    strategy = _PoolSnapshotStrategy()
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["snapshot-aware"],
+        limit=1,
+        pool_snapshot=pool_snapshot,
+    )
+
+    assert [item.bvid for item in results] == ["BV1SNAP"]
+    assert strategy.pool_snapshots == [pool_snapshot]
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_keeps_legacy_strategy_signature() -> None:
+    strategy = _RecordingStrategy(
+        "legacy",
+        [
+            DiscoveredContent(
+                bvid="BV1LEGACY",
+                relevance_score=0.9,
+                source_strategy="legacy",
+            )
+        ],
+    )
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["legacy"],
+        limit=1,
+        pool_snapshot=object(),
+    )
+
+    assert [item.bvid for item in results] == ["BV1LEGACY"]
+    assert strategy.limits == [1]
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_passes_pool_snapshot_to_backfill_strategy() -> None:
+    pool_snapshot = object()
+    backfill_strategy = _PoolSnapshotStrategy()
+    engine = ContentDiscoveryEngine(target_primary_count=2)
+    engine.register_strategy(_PoolSnapshotBackfillStrategy(backfill_strategy))
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["snapshot-primary"],
+        limit=2,
+        pool_snapshot=pool_snapshot,
+    )
+
+    assert [item.bvid for item in results] == ["BV1PRIMARY", "BV1SNAP"]
+    assert backfill_strategy.pool_snapshots == [pool_snapshot]
+
+
+@pytest.mark.asyncio
+async def test_pool_snapshot_soft_rerank_prefers_undercovered_topics_without_dropping_strong_matches(  # noqa: E501
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sat = DiscoveredContent(
+        bvid="BVsat",
+        title="AI",
+        topic_group="AI 编程",
+        style_key="deep_dive",
+        relevance_score=0.82,
+    )
+    gap = DiscoveredContent(
+        bvid="BVgap",
+        title="纪录",
+        topic_group="人物纪录",
+        style_key="story_doc",
+        relevance_score=0.79,
+    )
+    strong = DiscoveredContent(
+        bvid="BVstrong",
+        title="AI high",
+        topic_group="AI 编程",
+        relevance_score=0.96,
+    )
+    pool_snapshot = PoolDistributionSnapshot(
+        pool_target_count=10,
+        pool_available_count=10,
+        source_targets={},
+        source_counts={},
+        source_deficits={},
+        saturated_topics=("AI 编程",),
+        undercovered_axes=("人物纪录",),
+    )
+
+    class _ThreeCandidateStrategy(_RecordingStrategy):
+        async def discover(
+            self,
+            profile: SoulProfile,
+            limit: int = 20,
+        ) -> list[DiscoveredContent]:
+            self.limits.append(limit)
+            return [sat, gap, strong]
+
+    strategy = _ThreeCandidateStrategy("search", [sat, gap, strong])
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)
+    monkeypatch.setattr(
+        ContentDiscoveryEngine,
+        "_compress_topic_repeats",
+        staticmethod(lambda results, *, limit: results[:limit]),
+    )
+    monkeypatch.setattr(engine, "_cache_results", lambda results: None)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["search"],
+        limit=2,
+        pool_snapshot=pool_snapshot,
+    )
+
+    assert [item.bvid for item in results] == ["BVstrong", "BVgap"]
+    assert gap.relevance_score == 0.79
+    assert sat.relevance_score == 0.82
+
+
+@pytest.mark.asyncio
+async def test_pool_snapshot_soft_rerank_runs_before_real_compression() -> None:
+    strong = DiscoveredContent(
+        bvid="BVstrong",
+        title="AI high",
+        topic_group="AI 编程",
+        style_key="tech_analysis",
+        source_strategy="search",
+        relevance_score=0.96,
+    )
+    weak_saturated = DiscoveredContent(
+        bvid="BVsatweak",
+        title="AI tool",
+        topic_group="AI 工具",
+        style_key="deep_dive",
+        source_strategy="explore",
+        relevance_score=0.82,
+    )
+    gap = DiscoveredContent(
+        bvid="BVgap",
+        title="人物纪录",
+        topic_group="人物纪录",
+        style_key="story_doc",
+        source_strategy="related_chain",
+        relevance_score=0.79,
+    )
+    pool_snapshot = PoolDistributionSnapshot(
+        pool_target_count=10,
+        pool_available_count=10,
+        source_targets={},
+        source_counts={},
+        source_deficits={},
+        saturated_topics=("AI 编程", "AI 工具"),
+        undercovered_axes=("人物纪录",),
+    )
+
+    class _ThreeSourceStrategy(_RecordingStrategy):
+        async def discover(
+            self,
+            profile: SoulProfile,
+            limit: int = 20,
+        ) -> list[DiscoveredContent]:
+            self.limits.append(limit)
+            return [strong, weak_saturated, gap]
+
+    strategy = _ThreeSourceStrategy("search", [strong, weak_saturated, gap])
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(strategy)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["search"],
+        limit=2,
+        pool_snapshot=pool_snapshot,
+    )
+
+    assert [item.bvid for item in results] == ["BVstrong", "BVgap"]
+    assert "BVsatweak" not in {item.bvid for item in results}
+    assert strong.relevance_score == 0.96
+    assert gap.relevance_score == 0.79
+
+
+def test_llm_eval_candidate_limit_uses_tighter_small_gap_window() -> None:
+    assert llm_eval_candidate_limit(1) == 6
+    assert llm_eval_candidate_limit(3) == 6
+    assert llm_eval_candidate_limit(30) == 60
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_applies_strategy_specific_limits() -> None:
+    started: list[str] = []
+    search = _RecordingStrategy(
+        "search",
+        [
+            DiscoveredContent(
+                bvid=f"BVSEARCH{index}",
+                relevance_score=0.9 - index * 0.01,
+                source_strategy="search",
+            )
+            for index in range(5)
+        ],
+        started=started,
+    )
+    related = _RecordingStrategy(
+        "related_chain",
+        [
+            DiscoveredContent(
+                bvid=f"BVRELATED{index}",
+                relevance_score=0.8 - index * 0.01,
+                source_strategy="related_chain",
+            )
+            for index in range(5)
+        ],
+        started=started,
+    )
+    trending = _RecordingStrategy(
+        "trending",
+        [
+            DiscoveredContent(
+                bvid=f"BVTREND{index}",
+                relevance_score=0.7 - index * 0.01,
+                source_strategy="trending",
+            )
+            for index in range(5)
+        ],
+        started=started,
+    )
+    explore = _RecordingStrategy(
+        "explore",
+        [
+            DiscoveredContent(
+                bvid=f"BVEXPLORE{index}",
+                relevance_score=0.6 - index * 0.01,
+                source_strategy="explore",
+            )
+            for index in range(5)
+        ],
+        started=started,
+    )
+    engine = ContentDiscoveryEngine()
+    for strategy in (search, related, trending, explore):
+        engine.register_strategy(strategy)
+
+    results = await engine.discover(
+        _build_profile(),
+        strategies=["search", "related_chain", "trending", "explore"],
+        limit=5,
+        strategy_limits={
+            "search": 2,
+            "related_chain": 1,
+            "trending": 1,
+            "explore": 1,
+        },
+    )
+
+    assert started == ["search", "related_chain", "trending", "explore"]
+    assert search.limits == [2]
+    assert related.limits == [1]
+    assert trending.limits == [1]
+    assert explore.limits == [1]
+    assert len(results) == 5
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_runs_strategies_concurrently_and_tolerates_failures() -> None:
+    started: list[str] = []
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _RecordingStrategy(
+            "slow-search",
+            [DiscoveredContent(bvid="BV1A", relevance_score=0.72, source_strategy="search")],
+            delay=0.02,
+            started=started,
+        )
+    )
+    engine.register_strategy(
+        _RecordingStrategy(
+            "fast-failing",
+            [],
+            delay=0.0,
+            should_fail=True,
+            started=started,
+        )
+    )
+    engine.register_strategy(
+        _RecordingStrategy(
+            "fast-trending",
+            [DiscoveredContent(bvid="BV1B", relevance_score=0.81, source_strategy="trending")],
+            delay=0.0,
+            started=started,
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=20)
+
+    assert started == ["slow-search", "fast-failing", "fast-trending"]
+    assert [item.bvid for item in results] == ["BV1B", "BV1A"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_keeps_highest_scored_duplicate() -> None:
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _RecordingStrategy(
+            "search",
+            [
+                DiscoveredContent(
+                    bvid="BV1DUP",
+                    title="低分版本",
+                    relevance_score=0.52,
+                    source_strategy="search",
+                )
+            ],
+        )
+    )
+    engine.register_strategy(
+        _RecordingStrategy(
+            "trending",
+            [
+                DiscoveredContent(
+                    bvid="BV1DUP",
+                    title="高分版本",
+                    relevance_score=0.91,
+                    source_strategy="trending",
+                )
+            ],
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=20)
+
+    assert len(results) == 1
+    assert results[0].title == "高分版本"
+    assert results[0].source_strategy == "trending"
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_compresses_repeated_topic_keys_in_pool() -> None:
+    class _UnlimitedStrategy(_RecordingStrategy):
+        async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
+            self._started.append(self._name)
+            return list(self._result)
+
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _UnlimitedStrategy(
+            "search",
+            [
+                DiscoveredContent(
+                    bvid="BV1INTA",
+                    title="中东局势 A",
+                    relevance_score=0.96,
+                    source_strategy="search",
+                    topic_key="国际时事:地缘政治",
+                ),
+                DiscoveredContent(
+                    bvid="BV1INTB",
+                    title="中东局势 B",
+                    relevance_score=0.95,
+                    source_strategy="related_chain",
+                    topic_key="国际时事:地缘政治",
+                ),
+                DiscoveredContent(
+                    bvid="BV1AI",
+                    title="模型能力边界",
+                    relevance_score=0.9,
+                    source_strategy="search",
+                    topic_key="AI:大模型",
+                ),
+                DiscoveredContent(
+                    bvid="BV1DOC",
+                    title="城市纪录片",
+                    relevance_score=0.89,
+                    source_strategy="explore",
+                    topic_key="纪录片:城市",
+                ),
+            ],
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=3)
+
+    assert results[0].bvid == "BV1INTA"
+    assert {item.bvid for item in results} == {"BV1INTA", "BV1AI", "BV1DOC"}
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_limits_explore_dominance_in_pool() -> None:
+    class _UnlimitedStrategy(_RecordingStrategy):
+        async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
+            self._started.append(self._name)
+            return list(self._result)
+
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _UnlimitedStrategy(
+            "search",
+            [
+                DiscoveredContent(
+                    bvid="BV1SEARCH",
+                    title="搜索补进",
+                    relevance_score=0.9,
+                    source_strategy="search",
+                    topic_key="搜索:1",
+                    style_key="practical_guide",
+                ),
+                DiscoveredContent(
+                    bvid="BV1TREND",
+                    title="热榜补进",
+                    relevance_score=0.89,
+                    source_strategy="trending",
+                    topic_key="热榜:1",
+                    style_key="news_brief",
+                ),
+                DiscoveredContent(
+                    bvid="BV1EXP1",
+                    title="探索一",
+                    relevance_score=0.96,
+                    source_strategy="explore",
+                    topic_key="探索:1",
+                    style_key="story_doc",
+                ),
+                DiscoveredContent(
+                    bvid="BV1EXP2",
+                    title="探索二",
+                    relevance_score=0.95,
+                    source_strategy="explore",
+                    topic_key="探索:2",
+                    style_key="deep_dive",
+                ),
+                DiscoveredContent(
+                    bvid="BV1EXP3",
+                    title="探索三",
+                    relevance_score=0.94,
+                    source_strategy="explore",
+                    topic_key="探索:3",
+                    style_key="light_chat",
+                ),
+            ],
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=4)
+
+    picked_sources = [item.source_strategy for item in results]
+
+    assert picked_sources.count("explore") <= 2
+    assert "search" in picked_sources
+    assert "trending" in picked_sources
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_limits_source_and_style_dominance_for_larger_pool() -> None:
+    class _UnlimitedStrategy(_RecordingStrategy):
+        async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
+            self._started.append(self._name)
+            return list(self._result)
+
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _UnlimitedStrategy(
+            "mixed",
+            [
+                DiscoveredContent(
+                    bvid="BVEXP1",
+                    title="探索纪录片 1",
+                    relevance_score=0.99,
+                    source_strategy="explore",
+                    topic_key="探索:1",
+                    style_key="story_doc",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP2",
+                    title="探索深挖 2",
+                    relevance_score=0.98,
+                    source_strategy="explore",
+                    topic_key="探索:2",
+                    style_key="deep_dive",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP3",
+                    title="探索轻聊 3",
+                    relevance_score=0.97,
+                    source_strategy="explore",
+                    topic_key="探索:3",
+                    style_key="light_chat",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP4",
+                    title="探索攻略 4",
+                    relevance_score=0.96,
+                    source_strategy="explore",
+                    topic_key="探索:4",
+                    style_key="practical_guide",
+                ),
+                DiscoveredContent(
+                    bvid="BVREL1",
+                    title="相关推荐机制拆解 1",
+                    relevance_score=0.95,
+                    source_strategy="related_chain",
+                    topic_key="相关:1",
+                    style_key="game_strategy",
+                ),
+                DiscoveredContent(
+                    bvid="BVREL2",
+                    title="相关推荐机制拆解 2",
+                    relevance_score=0.94,
+                    source_strategy="related_chain",
+                    topic_key="相关:2",
+                    style_key="game_strategy",
+                ),
+                DiscoveredContent(
+                    bvid="BVREL3",
+                    title="相关推荐故事向 3",
+                    relevance_score=0.935,
+                    source_strategy="related_chain",
+                    topic_key="相关:3",
+                    style_key="light_chat",
+                ),
+                DiscoveredContent(
+                    bvid="BVSEA1",
+                    title="搜索教程 1",
+                    relevance_score=0.93,
+                    source_strategy="search",
+                    topic_key="搜索:1",
+                    style_key="practical_guide",
+                ),
+                DiscoveredContent(
+                    bvid="BVSEA2",
+                    title="搜索快讯 2",
+                    relevance_score=0.92,
+                    source_strategy="search",
+                    topic_key="搜索:2",
+                    style_key="news_brief",
+                ),
+                DiscoveredContent(
+                    bvid="BVTR1",
+                    title="热榜纪录片 1",
+                    relevance_score=0.91,
+                    source_strategy="trending",
+                    topic_key="热榜:1",
+                    style_key="story_doc",
+                ),
+                DiscoveredContent(
+                    bvid="BVTR2",
+                    title="热榜视觉 2",
+                    relevance_score=0.9,
+                    source_strategy="trending",
+                    topic_key="热榜:2",
+                    style_key="visual_showcase",
+                ),
+            ],
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=10)
+
+    picked_sources = [item.source_strategy for item in results]
+    picked_styles = [item.style_key for item in results]
+
+    assert picked_sources.count("explore") <= 3
+    assert picked_sources.count("related_chain") <= 3
+    assert len(results) == 10
+    assert picked_styles.count("game_strategy") <= 3
+
+
+def test_infer_style_key_classifies_hard_courses_and_documentaries() -> None:
+    assert (
+        ContentDiscoveryEngine.infer_style_key(
+            title="【强化学习的数学原理】课程：从零开始到透彻理解",
+            source_strategy="explore",
+        )
+        == "hands_on"
+    )
+    assert (
+        ContentDiscoveryEngine.infer_style_key(
+            title="精密加工的磨床纪录片",
+            source_strategy="explore",
+        )
+        == "story_immersion"
+    )
+    assert (
+        ContentDiscoveryEngine.infer_style_key(
+            title="CPU芯片经显微镜放大到纳米级别",
+            source_strategy="explore",
+        )
+        == "deep_focus"
+    )
+    assert (
+        ContentDiscoveryEngine.infer_style_key(
+            title="钛制造全过程，一般人没见过，工艺难度超乎你的想象",
+            source_strategy="explore",
+        )
+        == "story_immersion"
+    )
+    assert (
+        ContentDiscoveryEngine.infer_style_key(
+            title="【从零看懂fsf】世界观/伪从者设定解析",
+            source_strategy="explore",
+        )
+        == "deep_focus"
+    )
+    assert (
+        ContentDiscoveryEngine.infer_style_key(
+            title="囚犯盒子问题，史上最烧脑的逻辑谜题，超乎你的想象！",
+            source_strategy="explore",
+        )
+        == "curiosity_spark"
+    )
+
+
+def test_infer_style_key_classifies_viewing_mode_examples() -> None:
+    cases = [
+        ("最新局势快讯，三分钟看懂发生了什么", "quick_scan"),
+        ("耳机购买前必看，五款横向测评", "decision_support"),
+        ("老友访谈：聊聊最近的创作状态", "social_chat"),
+        ("下班后的日常 vlog，一起做饭收拾房间", "daily_wander"),
+        ("高能整活名场面合集", "mood_release"),
+        ("城市雨夜空镜混剪", "aesthetic_browse"),
+        ("专注学习背景音乐 白噪音 两小时", "ambient_companion"),
+        ("演唱会 live 现场高光", "live_pulse"),
+        ("你知道吗？这些冷知识很反直觉", "curiosity_spark"),
+    ]
+
+    for title, expected in cases:
+        assert ContentDiscoveryEngine.infer_style_key(title=title) == expected
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_keeps_non_explore_sources_when_style_repeats() -> None:
+    class _UnlimitedStrategy(_RecordingStrategy):
+        async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
+            self._started.append(self._name)
+            return list(self._result)
+
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _UnlimitedStrategy(
+            "mixed",
+            [
+                DiscoveredContent(
+                    bvid="BVEXP1",
+                    title="探索深挖 1",
+                    relevance_score=0.99,
+                    source_strategy="explore",
+                    topic_key="探索:1",
+                    style_key="deep_dive",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP2",
+                    title="探索深挖 2",
+                    relevance_score=0.98,
+                    source_strategy="explore",
+                    topic_key="探索:2",
+                    style_key="story_doc",
+                ),
+                DiscoveredContent(
+                    bvid="BVEXP3",
+                    title="探索深挖 3",
+                    relevance_score=0.97,
+                    source_strategy="explore",
+                    topic_key="探索:3",
+                    style_key="visual_showcase",
+                ),
+                DiscoveredContent(
+                    bvid="BVSEA1",
+                    title="搜索杂谈 1",
+                    relevance_score=0.96,
+                    source_strategy="search",
+                    topic_key="搜索:1",
+                    style_key="light_chat",
+                ),
+                DiscoveredContent(
+                    bvid="BVTR1",
+                    title="热榜杂谈 1",
+                    relevance_score=0.95,
+                    source_strategy="trending",
+                    topic_key="热榜:1",
+                    style_key="light_chat",
+                ),
+            ],
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=3)
+
+    picked_sources = [item.source_strategy for item in results]
+
+    assert "search" in picked_sources
+    assert "trending" in picked_sources
+    assert picked_sources.count("explore") <= 1
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_caches_final_results() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+
+        engine = ContentDiscoveryEngine(database=db)
+        engine.register_strategy(
+            _RecordingStrategy(
+                "search",
+                [
+                    DiscoveredContent(
+                        bvid="BV1A",
+                        title="缓存内容 A",
+                        up_name="UPA",
+                        relevance_score=0.88,
+                        source_strategy="search",
+                    ),
+                    DiscoveredContent(
+                        bvid="BV1B",
+                        title="缓存内容 B",
+                        up_name="UPB",
+                        relevance_score=0.74,
+                        source_strategy="explore",
+                    ),
+                ],
+            )
+        )
+
+        results = await engine.discover(_build_profile(), limit=20)
+        cached = db.get_cached_content(limit=10)
+
+        assert [item.bvid for item in results] == ["BV1A", "BV1B"]
+        assert [item["bvid"] for item in cached] == ["BV1A", "BV1B"]
+        assert cached[0]["source"] == "search"
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_cache_results_preserves_multi_source_fields() -> None:
+    """Regression: rescoring xhs rows must not overwrite source_platform.
+
+    Previously `_cache_results` dropped `source_platform` / `content_id` /
+    `content_url` on the cache_content call, so the upsert reverted xhs
+    rows to the `bilibili` default — producing rows labeled with
+    `source_platform='bilibili'` even though their bvid was an xhs note id.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+
+        engine = ContentDiscoveryEngine(database=db)
+        engine.register_strategy(
+            _RecordingStrategy(
+                "search",
+                [
+                    DiscoveredContent(
+                        bvid="6613e9ac000000001a015e65",
+                        title="鸡煲复刻",
+                        up_name="作者A",
+                        relevance_score=0.7,
+                        source_strategy="xhs-extension-task",
+                        content_id="6613e9ac000000001a015e65",
+                        content_url="https://www.xiaohongshu.com/explore/6613e9ac000000001a015e65",
+                        source_platform="xiaohongshu",
+                    )
+                ],
+            )
+        )
+
+        await engine.discover(_build_profile(), limit=20)
+
+        row = db.conn.execute(
+            "SELECT source, source_platform, content_id, content_url "
+            "FROM content_cache WHERE item_key=?",
+            ("xiaohongshu:6613e9ac000000001a015e65",),
+        ).fetchone()
+        assert row is not None
+        assert row["source_platform"] == "xiaohongshu"
+        assert row["source"] == "xhs-extension-task"
+        assert row["content_id"] == "6613e9ac000000001a015e65"
+        assert row["content_url"].endswith("/6613e9ac000000001a015e65")
+
+
+def test_merge_duplicates_uses_multi_source_content_identity() -> None:
+    first = DiscoveredContent(
+        content_id="yt-a",
+        source_platform="youtube",
+        title="YouTube A",
+        relevance_score=0.6,
+    )
+    second = DiscoveredContent(
+        content_id="yt-b",
+        source_platform="youtube",
+        title="YouTube B",
+        relevance_score=0.5,
+    )
+    duplicate = DiscoveredContent(
+        content_id="yt-a",
+        source_platform="youtube",
+        title="YouTube A better",
+        relevance_score=0.9,
+    )
+
+    merged = ContentDiscoveryEngine._merge_duplicates([first, second, duplicate])
+
+    assert [item.content_id for item in merged] == ["yt-a", "yt-b"]
+    assert merged[0].title == "YouTube A better"
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_cache_results_preserves_relevance_fields() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+
+        engine = ContentDiscoveryEngine(database=db)
+        engine.register_strategy(
+            _RecordingStrategy(
+                "search",
+                [
+                    DiscoveredContent(
+                        bvid="BV1A",
+                        title="缓存内容 A",
+                        up_name="UPA",
+                        relevance_score=0.88,
+                        relevance_reason="fits profile",
+                        source_strategy="search",
+                    )
+                ],
+            )
+        )
+
+        await engine.discover(_build_profile(), limit=20)
+        cached = db.get_cached_content(limit=1)
+
+        assert cached[0]["relevance_score"] == 0.88
+        assert cached[0]["relevance_reason"] == "fits profile"
+        assert cached[0]["candidate_tier"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_backfills_when_primary_results_too_few() -> None:
+    started: list[str] = []
+    backfill_started: list[str] = []
+    engine = ContentDiscoveryEngine()
+    engine.register_strategy(
+        _BackfillAwareStrategy(
+            "search",
+            [
+                DiscoveredContent(
+                    bvid="BV1PRIMARY",
+                    title="主候选",
+                    relevance_score=0.91,
+                    candidate_tier="primary",
+                    source_strategy="search",
+                )
+            ],
+            backfill_result=[
+                DiscoveredContent(
+                    bvid="BV1BACK1",
+                    title="补货 1",
+                    relevance_score=0.73,
+                    candidate_tier="backfill",
+                    source_strategy="search",
+                ),
+                DiscoveredContent(
+                    bvid="BV1BACK2",
+                    title="补货 2",
+                    relevance_score=0.68,
+                    candidate_tier="backfill",
+                    source_strategy="search",
+                ),
+            ],
+            started=started,
+            backfill_started=backfill_started,
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=18)
+
+    assert started == ["search"]
+    assert backfill_started == ["search-backfill"]
+    assert [item.bvid for item in results] == ["BV1PRIMARY", "BV1BACK1", "BV1BACK2"]
+    assert [item.candidate_tier for item in results] == ["primary", "backfill", "backfill"]
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_skips_backfill_when_primary_results_enough() -> None:
+    started: list[str] = []
+    backfill_started: list[str] = []
+    engine = ContentDiscoveryEngine()
+    primary_results = [
+        DiscoveredContent(
+            bvid=f"BV1{index:02d}",
+            title=f"主候选 {index}",
+            relevance_score=0.95 - index * 0.01,
+            candidate_tier="primary",
+            source_strategy="search",
+        )
+        for index in range(25)
+    ]
+    engine.register_strategy(
+        _BackfillAwareStrategy(
+            "search",
+            primary_results,
+            backfill_result=[
+                DiscoveredContent(
+                    bvid="BV1BACK",
+                    title="补货",
+                    relevance_score=0.5,
+                    candidate_tier="backfill",
+                    source_strategy="search",
+                )
+            ],
+            started=started,
+            backfill_started=backfill_started,
+        )
+    )
+
+    results = await engine.discover(_build_profile(), limit=40)
+
+    assert started == ["search"]
+    assert backfill_started == []
+    assert len(results) == 25
+    assert all(item.candidate_tier == "primary" for item in results)
+
+
+@pytest.mark.asyncio
+async def test_discovery_engine_limits_llm_evaluation_concurrency() -> None:
+    llm_service = _SlowLLMService(delay=0.02)
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        concurrency=DiscoveryConcurrencyController(
+            bilibili_request_concurrency=2,
+            llm_evaluation_concurrency=2,
+        ),
+    )
+
+    items = [
+        DiscoveredContent(
+            bvid=f"BV{i}",
+            title=f"title-{i}",
+            up_name=f"up-{i}",
+            description="desc",
+            source_strategy="test",
+        )
+        for i in range(4)
+    ]
+
+    await asyncio.gather(*(engine.evaluate_content(item, _build_profile()) for item in items))
+
+    assert llm_service.max_active_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_accepts_fenced_json_without_single_eval_fallback() -> None:
+    """Batch responses wrapped in ```json fences should not explode into N calls."""
+
+    class _FencedBatchLLMService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.calls += 1
+            return _SlowResponse(
+                """```json
+[
+  {"score": 0.82, "reason": "ok", "style_key": "deep_dive"},
+  {"score": 0.76, "reason": "ok", "style_key": "story_doc"}
+]
+```"""
+            )
+
+    llm_service = _FencedBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    batch = [
+        DiscoveredContent(bvid="BVF1", title="t1", up_name="u1", source_strategy="trending"),
+        DiscoveredContent(bvid="BVF2", title="t2", up_name="u2", source_strategy="trending"),
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    assert scores == [0.82, 0.76]
+    assert llm_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_propagates_provider_cooldown_without_single_fallback() -> None:
+    class _CooldownLLMService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.calls += 1
+            raise LLMProviderExecutionError(
+                "All providers failed (gemini). Last error: "
+                "Provider gemini is cooling down after rate limit."
+            )
+
+    llm_service = _CooldownLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    batch = [
+        DiscoveredContent(bvid="BV_COOL_A", title="A", source_strategy="trending"),
+        DiscoveredContent(bvid="BV_COOL_B", title="B", source_strategy="trending"),
+    ]
+
+    with pytest.raises(LLMProviderExecutionError):
+        await engine._evaluate_batch(batch, _build_profile())
+
+    assert llm_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_ignores_echoed_prompt_before_result_array() -> None:
+    """Some JSON-mode providers echo input JSON before the actual scored array."""
+
+    class _EchoThenResultLLMService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.calls += 1
+            return _SlowResponse(
+                """{
+  "source_context": "trending",
+  "content_batch": [
+    {"title": "echoed input without score"}
+  ]
+}
+```json
+[
+  {"score": 0.81, "reason": "ok", "style_key": "deep_dive"},
+  {"score": 0.74, "reason": "ok", "style_key": "story_doc"}
+]
+```"""
+            )
+
+    llm_service = _EchoThenResultLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    batch = [
+        DiscoveredContent(bvid="BVE1", title="t1", up_name="u1", source_strategy="trending"),
+        DiscoveredContent(bvid="BVE2", title="t2", up_name="u2", source_strategy="trending"),
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    assert scores == [0.81, 0.74]
+    assert llm_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_matches_results_by_bvid_when_response_reorders() -> None:
+    class _ReorderedBatchLLMService:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "bvid": "BV_EVAL_C",
+                            "score": 0.33,
+                            "reason": "C 自己的理由",
+                            "topic_group": "C 类",
+                            "style_key": "story_doc",
+                        },
+                        {
+                            "bvid": "BV_EVAL_A",
+                            "score": 0.71,
+                            "reason": "A 自己的理由",
+                            "topic_group": "A 类",
+                            "style_key": "deep_dive",
+                        },
+                        {
+                            "bvid": "BV_EVAL_B",
+                            "score": 0.52,
+                            "reason": "B 自己的理由",
+                            "topic_group": "B 类",
+                            "style_key": "light_chat",
+                        },
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+    engine = ContentDiscoveryEngine(llm_service=_ReorderedBatchLLMService())
+    batch = [
+        DiscoveredContent(bvid="BV_EVAL_A", title="A 视频", source_strategy="trending"),
+        DiscoveredContent(bvid="BV_EVAL_B", title="B 视频", source_strategy="trending"),
+        DiscoveredContent(bvid="BV_EVAL_C", title="C 视频", source_strategy="trending"),
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    assert scores == [0.71, 0.52, 0.33]
+    assert batch[0].relevance_reason == "A 自己的理由"
+    assert batch[0].topic_group == "A 类"
+    assert batch[1].relevance_reason == "B 自己的理由"
+    assert batch[1].topic_group == "B 类"
+    assert batch[2].relevance_reason == "C 自己的理由"
+    assert batch[2].topic_group == "C 类"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_retries_only_missing_keyed_members() -> None:
+    class _PartialLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            items = json.loads(raw.strip())
+            ids = tuple(str(item["bvid"]) for item in items)
+            self.request_ids.append(ids)
+            returned = ids[:2] if len(self.request_ids) == 1 else ids
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "bvid": content_id,
+                            "score": 0.8,
+                            "reason": f"ok {content_id}",
+                            "style_key": "deep_dive",
+                        }
+                        for content_id in returned
+                    ]
+                )
+            )
+
+    llm = _PartialLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [
+        DiscoveredContent(bvid=key, title=key, source_strategy="trending")
+        for key in ("A", "B", "C", "D")
+    ]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.8] * 4
+    assert llm.request_ids == [("A", "B", "C", "D"), ("C", "D")]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_retries_duplicate_key_without_overwriting_valid_sibling() -> None:
+    class _DuplicateKeyLLM:
+        def __init__(self) -> None:
+            self.request_ids: list[tuple[str, ...]] = []
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            raw = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+            ids = tuple(str(item["bvid"]) for item in json.loads(raw.strip()))
+            self.request_ids.append(ids)
+            if len(self.request_ids) == 1:
+                payload = [
+                    {"bvid": "A", "score": 0.1, "reason": "bad first"},
+                    {"bvid": "A", "score": 0.2, "reason": "bad last"},
+                    {"bvid": "B", "score": 0.8, "reason": "B once"},
+                ]
+            else:
+                payload = [{"bvid": "A", "score": 0.7, "reason": "A retry"}]
+            return _SlowResponse(json.dumps(payload))
+
+    llm = _DuplicateKeyLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [DiscoveredContent(bvid=key, title=key) for key in ("A", "B")]
+    assert await engine._evaluate_batch(batch, _build_profile()) == [0.7, 0.8]
+    assert llm.request_ids == [("A", "B"), ("A",)]
+    assert batch[0].relevance_reason == "A retry"
+    assert batch[1].relevance_reason == "B once"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_accepts_newline_delimited_json_objects() -> None:
+    """Some providers return one scored JSON object per line instead of an array."""
+
+    class _NdjsonBatchLLMService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.calls += 1
+            return _SlowResponse(
+                "\n".join(
+                    [
+                        '{"score": 0.71, "reason": "ok", "style_key": "practical_guide"}',
+                        '{"score": 0.68, "reason": "ok", "style_key": "story_doc"}',
+                    ]
+                )
+            )
+
+    llm_service = _NdjsonBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    batch = [
+        DiscoveredContent(bvid="BVN1", title="t1", up_name="u1", source_strategy="trending"),
+        DiscoveredContent(bvid="BVN2", title="t2", up_name="u2", source_strategy="trending"),
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    assert scores == [0.71, 0.68]
+    assert llm_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_accepts_identifier_keyed_object_response() -> None:
+    """JSON-object providers may return a bvid-keyed result map instead of an array."""
+
+    class _KeyedObjectBatchLLMService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.calls += 1
+            return _SlowResponse(
+                json.dumps(
+                    {
+                        "BVKEY2": {
+                            "score": 0.42,
+                            "reason": "B reason",
+                            "style_key": "story_doc",
+                        },
+                        "BVKEY1": {
+                            "score": 0.88,
+                            "reason": "A reason",
+                            "style_key": "practical_guide",
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    llm_service = _KeyedObjectBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    batch = [
+        DiscoveredContent(bvid="BVKEY1", title="t1", up_name="u1", source_strategy="trending"),
+        DiscoveredContent(bvid="BVKEY2", title="t2", up_name="u2", source_strategy="trending"),
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    assert scores == [0.88, 0.42]
+    assert batch[0].relevance_reason == "A reason"
+    assert batch[1].relevance_reason == "B reason"
+    assert llm_service.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_intra_batch_franchise_cap() -> None:
+    """v0.3.50: same-franchise items beyond the cap get their scores zeroed.
+
+    Reproduces the production trigger: a single eval batch returning 6
+    张雪机车 entries (or 7 风犬少年的天空, etc.) used to all stay
+    kept=30, flooding the pool with one franchise. Cap is 4 — the top
+    4 by score survive, the rest are zeroed (so the caller's
+    ``score > 0`` filter drops them from the kept list).
+    """
+    import json
+
+    class _FrancheseClumpLLMService:
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            # 6 items, all "张雪机车" franchise, with descending scores.
+            results = [
+                {
+                    "score": 0.95 - i * 0.05,
+                    "reason": "好看",
+                    "topic_group": "机车",
+                    "style_key": "review_roundup",
+                    "franchise_key": "张雪机车",
+                }
+                for i in range(6)
+            ]
+            return _SlowResponse(json.dumps(results, ensure_ascii=False))
+
+    engine = ContentDiscoveryEngine(llm_service=_FrancheseClumpLLMService())
+    batch = [
+        DiscoveredContent(
+            bvid=f"BVZX{i}",
+            title=f"张雪机车第{i}集",
+            up_name="张雪机车",
+            description="d",
+            source_strategy="related_chain",
+        )
+        for i in range(6)
+    ]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    # Cap is 4 — top-4 scoring entries kept (>0), the rest zeroed.
+    nonzero = [s for s in scores if s > 0]
+    assert len(nonzero) == 4
+    assert sum(1 for s in scores if s == 0.0) == 2
+    # Zeroed entries must also have their content's relevance_score reset
+    # so downstream code that reads the content directly gets the same answer.
+    zero_indices = [i for i, s in enumerate(scores) if s == 0.0]
+    for idx in zero_indices:
+        assert batch[idx].relevance_score == 0.0
+
+
+def test_count_pool_by_franchise_returns_lowercased_groups(tmp_path: Path) -> None:
+    """v0.3.50: pool-quota query groups + lowercases franchise_key."""
+    from openbiliclaw.storage.database import Database
+
+    db = Database(tmp_path / "fk.db")
+    db.initialize()
+    # Two items sharing a franchise (case-different), one with empty,
+    # one with a different franchise.
+    db.cache_content(
+        bvid="BV1A",
+        title="A",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="张雪机车",
+        relevance_score=0.90,
+    )
+    db.cache_content(
+        bvid="BV1B",
+        title="B",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="张雪机车",  # exact match
+        relevance_score=0.90,
+    )
+    db.cache_content(
+        bvid="BV1C",
+        title="C",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="风犬少年的天空",
+        relevance_score=0.90,
+    )
+    db.cache_content(
+        bvid="BV1D",
+        title="D",
+        up_name="up",
+        source_platform="bilibili",
+        source="search",
+        franchise_key="",
+        relevance_score=0.90,
+    )
+
+    counts = db.count_pool_by_franchise()
+    assert counts.get("张雪机车") == 2
+    assert counts.get("风犬少年的天空") == 1
+    assert "" not in counts
+
+
+# ----------------------------------------------------------------------
+# v0.3.x eval-batch negative-anchors wiring.
+
+
+class _StubNegativeExemplarsDatabase:
+    """Minimal database stub for the negative-exemplars wiring tests."""
+
+    def __init__(
+        self,
+        rows: list[dict[str, object]],
+        *,
+        latest_event_id: int = 1,
+    ) -> None:
+        self._rows = rows
+        self._latest_event_id = latest_event_id
+        self.query_calls = 0
+
+    def get_latest_event_id(self) -> int:
+        return self._latest_event_id
+
+    def bump_latest_event_id(self) -> None:
+        self._latest_event_id += 1
+
+    def query_events(self, **kwargs: object) -> list[dict[str, object]]:
+        self.query_calls += 1
+        return list(self._rows)
+
+
+def _negative_row(idx: int, title: str) -> dict[str, object]:
+    from datetime import datetime
+
+    return {
+        "id": idx,
+        "title": title,
+        "inferred_satisfaction": "negative",
+        "satisfaction_reason": "quick_exit",
+        "created_at": datetime(2026, 5, 16, 12, 0, 0).isoformat(sep=" "),
+    }
+
+
+class _RecordingBatchLLMService:
+    """Captures the user_input sent to the batch evaluator for assertions."""
+
+    def __init__(
+        self,
+        response: str = '[{"score": 0.7, "reason": "ok", "style_key": "deep_dive"}]',
+    ) -> None:
+        self.response = response
+        self.user_inputs: list[str] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> object:
+        self.user_inputs.append(user_input)
+        return _SlowResponse(self.response)
+
+
+class _RecordingBatchKwargsLLMService(_RecordingBatchLLMService):
+    def __init__(
+        self,
+        response: str = '[{"score": 0.7, "reason": "ok", "style_key": "deep_dive"}]',
+    ) -> None:
+        super().__init__(response)
+        self.call_kwargs: list[dict[str, object]] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+        **kwargs: object,
+    ) -> object:
+        self.call_kwargs.append(dict(kwargs))
+        return await super().complete_structured_task(
+            system_instruction=system_instruction,
+            user_input=user_input,
+            history=history,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            caller=caller,
+            reasoning_effort=reasoning_effort,
+        )
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_sends_per_item_platform_metadata() -> None:
+    llm = _RecordingBatchLLMService(
+        response=json.dumps(
+            [
+                {
+                    "content_id": "BV1",
+                    "score": 0.8,
+                    "reason": "ok",
+                    "topic_group": "tech",
+                    "style_key": "deep_dive",
+                },
+                {
+                    "content_id": "xhs1",
+                    "score": 0.7,
+                    "reason": "ok",
+                    "topic_group": "life",
+                    "style_key": "lifestyle",
+                },
+            ]
+        )
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm)
+
+    await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                bvid="BV1",
+                title="Bili",
+                source_platform="bilibili",
+                source_strategy="search",
+            ),
+            DiscoveredContent(
+                content_id="xhs1",
+                title="XHS",
+                source_platform="xiaohongshu",
+                source_strategy="xhs-extension-search",
+                content_url="https://www.xiaohongshu.com/explore/xhs1",
+            ),
+        ],
+        _build_profile(),
+        source_context="mixed",
+    )
+
+    user = llm.user_inputs[-1]
+    assert '"source_platform": "bilibili"' in user
+    assert '"source_platform": "xiaohongshu"' in user
+    assert '"source_strategy": "xhs-extension-search"' in user
+    assert '"content_type": "note"' in user
+    assert "<source_platform>\n\nmixed\n\n</source_platform>" in user
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_requests_no_core_memory_injection_when_supported() -> None:
+    llm = _RecordingBatchKwargsLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+
+    await engine._evaluate_batch(
+        [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")],
+        _build_profile(),
+    )
+
+    assert llm.call_kwargs == [{"inject_core_memory": False}]
+
+
+def _json_prompt_block(user_input: str, tag: str) -> dict[str, object]:
+    block = user_input.split(f"<{tag}>", 1)[1].split(f"</{tag}>", 1)[0]
+    parsed = json.loads(block.strip())
+    assert isinstance(parsed, dict)
+    return parsed
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_uses_layered_profile_prompt_with_full_interests() -> None:
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    profile = _build_profile()
+    profile.preferences.interests = [
+        InterestTag(name=f"兴趣{index}", category="测试", weight=1.0 - index / 1000)
+        for index in range(80)
+    ]
+
+    await engine._evaluate_batch(
+        [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")],
+        profile,
+    )
+
+    user_input = llm.user_inputs[0]
+    assert "<profile_summary>" not in user_input
+    assert user_input.index("<profile_core>") < user_input.index("<profile_life_context>")
+    assert user_input.index("<profile_life_context>") < user_input.index("<profile_interests>")
+    assert user_input.index("<profile_interests>") < user_input.index("<profile_style_context>")
+    assert user_input.index("<profile_style_context>") < user_input.index(
+        "<profile_recent_context>"
+    )
+    assert user_input.index("<profile_recent_context>") < user_input.index("<content_batch>")
+
+    profile_interests = _json_prompt_block(user_input, "profile_interests")
+    interests = profile_interests["interests"]
+    assert isinstance(interests, list)
+    assert len(interests) == 80
+    assert interests[-1]["name"] == "兴趣79"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_only_updates_changed_profile_layers() -> None:
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    profile = _build_profile()
+
+    await engine._evaluate_batch(
+        [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")],
+        profile,
+    )
+    profile.recent_awareness.append(
+        AwarenessNote(
+            date="2026-06-27",
+            observation="最近只改变近期觉察",
+            trend="短期上下文变化",
+            emotion_guess="专注",
+        )
+    )
+    await engine._evaluate_batch(
+        [DiscoveredContent(bvid="BVy", title="候选2", up_name="u", source_strategy="search")],
+        profile,
+    )
+
+    first_input, second_input = llm.user_inputs
+    for stable_tag in (
+        "profile_core",
+        "profile_life_context",
+        "profile_interests",
+        "profile_style_context",
+    ):
+        assert _json_prompt_block(first_input, stable_tag) == _json_prompt_block(
+            second_input,
+            stable_tag,
+        )
+    assert _json_prompt_block(first_input, "profile_recent_context") != _json_prompt_block(
+        second_input,
+        "profile_recent_context",
+    )
+
+    assert engine.evaluation_profile_prompt_cache_stats()["profile_core"]["hits"] == 1
+    assert engine.evaluation_profile_prompt_cache_stats()["profile_recent_context"]["misses"] == 2
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_sends_metrics_and_tags() -> None:
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+
+    await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                bvid="BV1metrics",
+                title="Metrics",
+                tags=["tag-a", "tag-b"],
+                source_strategy="search",
+                view_count=1000,
+                like_count=100,
+                favorite_count=90,
+                collect_count=80,
+                comment_count=70,
+                share_count=60,
+                danmaku_count=50,
+                reply_count=40,
+                retweet_count=30,
+                bookmark_count=20,
+            )
+        ],
+        _build_profile(),
+    )
+
+    user = llm.user_inputs[0]
+    assert '"tags": [' in user
+    assert '"like_count": 100' in user
+    assert '"favorite_count": 90' in user
+    assert '"collect_count": 80' in user
+    assert '"comment_count": 70' in user
+    assert '"share_count": 60' in user
+    assert '"danmaku_count": 50' in user
+    assert '"reply_count": 40' in user
+    assert '"retweet_count": 30' in user
+    assert '"bookmark_count": 20' in user
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_includes_negative_exemplars_in_user_prompt() -> None:
+    """When the event store has negative rows, the eval batch user
+    message must include the <negative_examples> block."""
+    db = _StubNegativeExemplarsDatabase(rows=[_negative_row(1, "震惊！我刚发现的神器")])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    batch = [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")]
+
+    await engine._evaluate_batch(batch, _build_profile())
+
+    assert llm.user_inputs, "LLM should have been called once"
+    user = llm.user_inputs[0]
+    assert "<negative_examples>" in user
+    assert "震惊！我刚发现的神器" in user
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_omits_block_with_no_negative_rows() -> None:
+    db = _StubNegativeExemplarsDatabase(rows=[])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    batch = [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")]
+
+    await engine._evaluate_batch(batch, _build_profile())
+
+    user = llm.user_inputs[0]
+    assert "<negative_examples>" not in user
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_runs_when_exemplar_helper_raises() -> None:
+    """Storage failure inside _get_negative_exemplars must not abort the batch."""
+
+    class _BrokenDatabase:
+        def get_latest_event_id(self) -> int:
+            raise RuntimeError("database is locked")
+
+        def query_events(self, **kwargs: object) -> list[dict[str, object]]:
+            raise RuntimeError("database is locked")
+
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=_BrokenDatabase())
+    batch = [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")]
+
+    scores = await engine._evaluate_batch(batch, _build_profile())
+
+    assert scores == [0.7], "batch should still produce a score"
+    assert "<negative_examples>" not in llm.user_inputs[0]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_caches_exemplars_across_back_to_back_calls() -> None:
+    """Two batches with the same latest_event_id should share one query."""
+    db = _StubNegativeExemplarsDatabase(rows=[_negative_row(1, "震惊！我刚发现的神器")])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    batch = [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")]
+
+    await engine._evaluate_batch(batch, _build_profile())
+    first_query_count = db.query_calls
+
+    await engine._evaluate_batch(batch, _build_profile())
+    assert db.query_calls == first_query_count, "cache hit, no second query"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_batch_refreshes_exemplars_on_new_event_id() -> None:
+    """A new negative classified row should bust the cache on the next batch."""
+    db = _StubNegativeExemplarsDatabase(rows=[_negative_row(1, "震惊！我刚发现的神器")])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    batch = [DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")]
+
+    await engine._evaluate_batch(batch, _build_profile())
+    db.bump_latest_event_id()
+    await engine._evaluate_batch(batch, _build_profile())
+
+    assert db.query_calls >= 2, "new event id must invalidate the cache"
+
+
+@pytest.mark.asyncio
+async def test_eval_cache_rechecks_content_when_negative_exemplars_change() -> None:
+    """Cached relevance scores must not bypass newly available negative anchors."""
+    db = _StubNegativeExemplarsDatabase(rows=[])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    profile = _build_profile()
+    content = DiscoveredContent(bvid="BVx", title="候选", up_name="u", source_strategy="search")
+
+    await engine.evaluate_content_batch([content], profile)
+    assert len(llm.user_inputs) == 1
+    assert "<negative_examples>" not in llm.user_inputs[0]
+
+    db._rows = [_negative_row(1, "震惊！我刚发现的神器")]  # noqa: SLF001
+    db.bump_latest_event_id()
+    await engine.evaluate_content_batch([content], profile)
+
+    assert len(llm.user_inputs) == 2, "negative-anchor revision must invalidate eval cache"
+    assert "<negative_examples>" in llm.user_inputs[1]
+
+
+@pytest.mark.asyncio
+async def test_eval_cache_hits_for_equivalent_profile_objects() -> None:
+    """Equivalent profile content should reuse the same local eval result.
+
+    The cache key must not depend on Python object identity, or every profile
+    reload/rebuild turns into a cache miss.
+    """
+    db = _StubNegativeExemplarsDatabase(rows=[])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    content = DiscoveredContent(
+        bvid="BVstable",
+        title="候选",
+        up_name="u",
+        source_strategy="search",
+    )
+
+    await engine.evaluate_content_batch([content], _build_profile())
+    await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                bvid="BVstable",
+                title="候选",
+                up_name="u",
+                source_strategy="search",
+            )
+        ],
+        _build_profile(),
+    )
+
+    assert len(llm.user_inputs) == 1
+
+
+@pytest.mark.asyncio
+async def test_eval_cache_survives_unrelated_event_id_change() -> None:
+    """A non-negative event should not invalidate exact eval results.
+
+    Negative exemplar content changes still invalidate the cache; merely moving
+    the global event waterline should not.
+    """
+    db = _StubNegativeExemplarsDatabase(rows=[])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    profile = _build_profile()
+
+    await engine.evaluate_content_batch(
+        [DiscoveredContent(bvid="BVsame", title="候选", up_name="u", source_strategy="search")],
+        profile,
+    )
+    db.bump_latest_event_id()
+    await engine.evaluate_content_batch(
+        [DiscoveredContent(bvid="BVsame", title="候选", up_name="u", source_strategy="search")],
+        profile,
+    )
+
+    assert len(llm.user_inputs) == 1

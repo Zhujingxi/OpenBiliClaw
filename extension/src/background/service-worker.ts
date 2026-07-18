@@ -1,304 +1,767 @@
-/** Lean vNext extension runtime: passive activity ingestion plus generic browser tasks. */
+/**
+ * OpenBiliClaw — Background Service Worker
+ *
+ * Receives behavior events from content scripts,
+ * buffers them, and forwards to the backend API.
+ *
+ * Delight (surprise) notifications are delivered via WebSocket push
+ * from the runtime-stream, not HTTP polling.
+ */
 
-import { computeActionBadge } from "./badge.ts";
-import { deliverActivityEvent } from "./activity-delivery.ts";
-import { shouldFlushImmediately } from "./buffer.ts";
+import { computeActionBadge, flushResponseReportsUninitialized } from "./badge.js";
+import { enqueueBufferedEvent, shouldFlushImmediately } from "./buffer.js";
 import {
-  browserOperationsFromManifests,
-  executeBrowserSourceTask,
-} from "./browser-source-executor.ts";
+  startXhsTaskPolling,
+  handleXhsTaskAlarm,
+  handleTaskResult,
+  pollXhsTaskNow,
+  type XhsTaskResult,
+} from "./xhs-task-dispatcher.js";
 import {
-  createSourceTaskDispatcher,
-  type SourceTaskDispatcher,
-  type SourceTaskTransport,
-} from "./generic-source-task-dispatcher.ts";
-import { createDurableOutbox } from "./durable-outbox.ts";
-import { xhsObservationEvents } from "./xhs-observation-events.ts";
+  startDyTaskPolling,
+  handleDyTaskAlarm,
+  handleDyTaskResult,
+  handleDyScopeResult,
+  handleDySearchTaskResult,
+  handleDyHotTaskResult,
+  handleDyFeedTaskResult,
+  pollDyTaskNow,
+  type DyFeedResult,
+  type DyHotResult,
+  type DyScopeResult,
+  type DySearchResult,
+  type DyTaskResult,
+} from "./dy-task-dispatcher.js";
 import {
-  deliverTaskCompletion,
-  type PendingTaskCompletion,
-} from "./task-completion.ts";
+  startYtTaskPolling,
+  handleYtTaskAlarm,
+  handleYtScopeResult,
+  pollYtTaskNow,
+} from "./yt-task-dispatcher.js";
 import {
-  createApiClient,
-  type ActivityEvent,
-  type ReadinessResponse,
-  type SourceId,
-  type SourceManifest,
-} from "../shared/api-client.ts";
+  startZhihuTaskPolling,
+  handleZhihuTaskAlarm,
+  handleZhihuTaskResult,
+  pollZhihuTaskNow,
+} from "./zhihu-task-dispatcher.js";
 import {
-  normalizeActivityEvent,
-  type IdentifiedActivityEvent,
-} from "../shared/activity-event.ts";
-import { authenticatedFetch, clearSession, ensureSession } from "../shared/auth.ts";
-import { getBackendOrigin, onBackendEndpointChange } from "../shared/backend-endpoint.ts";
-import type { BehaviorEvent } from "../shared/types.ts";
+  startRedditTaskPolling,
+  handleRedditTaskAlarm,
+  handleRedditTaskResult,
+  pollRedditTaskNow,
+} from "./reddit-task-dispatcher.ts";
+import {
+  startXTaskPolling,
+  handleXTaskAlarm,
+  pollXTaskNow,
+} from "./x-task-dispatcher.ts";
+import { ensureNativeSaveTaskRecovery } from "./native-save-task-runner.ts";
+import {
+  startBiliTaskPolling,
+  handleBiliTaskAlarm,
+  handleBiliTaskResult,
+  pollBiliTaskNow,
+  type BiliTaskResult,
+} from "./bili-task-dispatcher.js";
+import type { YtScopeResult } from "../content/yt/task-executor.js";
+import type { ZhihuTaskResult } from "../content/zhihu/task-executor.js";
+import type { RedditTaskResult } from "../content/reddit/task-executor.ts";
+import {
+  openExtensionUi,
+  parseDelightBvid,
+  parseNotificationBvid,
+  parseCognitionUpdateId,
+} from "./notifications.js";
+import {
+  startCookieSync,
+  handleCookieSyncAlarm,
+  handleCookieSyncRuntimeEvent,
+} from "./cookie-sync.js";
+import { handleE2ERuntimeEvent } from "./e2e-runner.ts";
+// Use .ts extension so node:test's --experimental-strip-types resolver
+// (which doesn't rewrite .js → .ts for source-only modules) can follow
+// the import when test files load these dispatchers directly. esbuild
+// bundles either extension, so production builds are unaffected.
+import { apiUrl, onBackendEndpointChange, wsUrl } from "../shared/backend-endpoint.ts";
+import {
+  authenticatedFetch,
+  clearSession,
+  ensureSession,
+} from "../shared/auth.ts";
+import type { BehaviorEvent } from "../shared/types.js";
 
-const FLUSH_ALARM = "openbiliclaw-v1-flush";
-const SOURCE_TASK_ALARM = "openbiliclaw-v1-source-tasks";
-const FLUSH_PERIOD_MINUTES = 0.5;
-const SOURCE_TASK_PERIOD_MINUTES = 0.5;
+let eventBuffer: BehaviorEvent[] = [];
+const BUFFER_FLUSH_INTERVAL = 30_000;
+const BUFFER_MAX_SIZE = 50;
+const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
+const E2E_CAPTURE_SETTLE_MS = 1_000;
+// v0.3.22+: health probe before WS prevents extension-only installs
+// from flooding chrome://extensions "Errors" with browser-level
+// WebSocket connection failures. A failed fetch caught here is just a
+// rejected promise; the WS path went through Chrome's network logger
+// at error severity and got counted toward the error badge.
+const HEALTH_PROBE_TIMEOUT_MS = 2_000;
+// Fallback /health probe budget for pre-/api/ping backends: /health blocks on
+// a live embedding probe that can take seconds when cold, so the 2s ping
+// budget would misread a healthy-but-cold backend as down.
+const HEALTH_FALLBACK_TIMEOUT_MS = 12_000;
+// Keep backend recovery prompt. The HTTP /api/ping gate below absorbs the
+// backend-down case without opening a failing WebSocket, so a fixed 1s cadence
+// is cheap and avoids stale "offline" extension state after the daemon starts.
+const WS_RECONNECT_DELAY = 1_000;
+type PendingNotification = import("./notifications.js").PendingNotification;
+type PendingCognitionUpdate = import("./notifications.js").PendingCognitionUpdate;
 
-let flushInFlight: Promise<void> | null = null;
-let pollInFlight: Promise<void> | null = null;
-let backendReachable: boolean | null = null;
-let nextDispatcherIndex = 0;
+// ---------------------------------------------------------------------------
+// HTTP helpers (recommendation & cognition — still polled)
+// ---------------------------------------------------------------------------
 
-const activityOutbox = createDurableOutbox<IdentifiedActivityEvent>({
-  storage: chrome.storage.local,
-  storageKey: "vnext_activity_outbox",
-});
-
-type DeadLetterActivity = {
-  readonly id: string;
-  readonly event: IdentifiedActivityEvent;
-  readonly status: number;
-  readonly deadLetteredAt: string;
-};
-
-const activityDeadLetters = createDurableOutbox<DeadLetterActivity>({
-  storage: chrome.storage.local,
-  storageKey: "vnext_activity_dead_letters",
-});
-
-const taskCompletionOutbox = createDurableOutbox<PendingTaskCompletion>({
-  storage: chrome.storage.local,
-  storageKey: "vnext_source_task_completion_outbox",
-});
-
-type DeadLetterTaskCompletion = {
-  readonly id: string;
-  readonly completion: PendingTaskCompletion;
-  readonly status: number;
-  readonly deadLetteredAt: string;
-};
-
-const taskCompletionDeadLetters = createDurableOutbox<DeadLetterTaskCompletion>({
-  storage: chrome.storage.local,
-  storageKey: "vnext_source_task_completion_dead_letters",
-});
-
-async function getApiClient() {
-  return createApiClient({
-    baseUrl: await getBackendOrigin(),
-    fetchImpl: authenticatedFetch,
+async function acknowledgeNotificationSent(bvid: string): Promise<void> {
+  if (!bvid) return;
+  await authenticatedFetch(await apiUrl("/notifications/sent"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bvid }),
   });
 }
 
-const taskTransport: SourceTaskTransport = {
-  async claim(sourceId) {
-    return (await getApiClient()).request("v1_source_tasks_claim", {
-      query: { source_id: sourceId, wait_seconds: 0 },
-    });
-  },
-  async complete(taskId, leaseToken, result) {
-    await taskCompletionOutbox.enqueue({ id: taskId, leaseToken, outcome: { result } });
-    await flushTaskCompletions();
-  },
-  async fail(taskId, leaseToken, failure) {
-    await taskCompletionOutbox.enqueue({ id: taskId, leaseToken, outcome: { failure } });
-    await flushTaskCompletions();
-  },
-};
+async function fetchPendingNotification(): Promise<PendingNotification | null> {
+  const response = await authenticatedFetch(await apiUrl("/notifications/pending"), {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw new Error(`pending notifications failed: ${response.status}`);
+  }
+  const payload = (await response.json()) as { item?: PendingNotification | null };
+  return payload.item ?? null;
+}
 
-async function flushTaskCompletions(): Promise<void> {
-  await taskCompletionOutbox.flush(async (completion) => {
-    await deliverTaskCompletion(completion, async (body) => {
-      await (await getApiClient()).request("v1_source_tasks_complete", {
-        path: { task_id: completion.id },
-        body,
-      });
-    }, async (terminalCompletion, status) => {
-      await taskCompletionDeadLetters.enqueue({
-        id: terminalCompletion.id,
-        completion: terminalCompletion,
-        status,
-        deadLetteredAt: new Date().toISOString(),
-      });
-    });
+async function fetchPendingCognitionUpdate(): Promise<PendingCognitionUpdate | null> {
+  const response = await authenticatedFetch(await apiUrl("/cognition-updates/pending"), {
+    method: "GET",
+  });
+  if (!response.ok) {
+    throw new Error(`pending cognition updates failed: ${response.status}`);
+  }
+  const payload = (await response.json()) as { item?: PendingCognitionUpdate | null };
+  return payload.item ?? null;
+}
+
+async function acknowledgeCognitionUpdateSeen(id: string): Promise<void> {
+  if (!id) return;
+  await authenticatedFetch(await apiUrl("/cognition-updates/seen"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
   });
 }
 
-let sourceTaskDispatchers: SourceTaskDispatcher[] = [];
+// ---------------------------------------------------------------------------
+// Delight ACK (HTTP POST after WS push triggers notification)
+// ---------------------------------------------------------------------------
 
-async function refreshSourceTaskDispatchers(): Promise<void> {
-  const manifests = await (await getApiClient()).request<ReadonlyArray<SourceManifest>>(
-    "v1_sources_list",
-  );
-  const operationsBySource = browserOperationsFromManifests(manifests);
-  sourceTaskDispatchers = Object.entries(operationsBySource)
-    .filter((entry): entry is [SourceId, NonNullable<(typeof entry)[1]>] => Boolean(entry[1]))
-    .map(([sourceId, operations]) => createSourceTaskDispatcher({
-    sourceId,
-    operations,
-    transport: taskTransport,
-    execute: executeBrowserSourceTask,
-    }));
-  if (sourceTaskDispatchers.length === 0) nextDispatcherIndex = 0;
-  else nextDispatcherIndex %= sourceTaskDispatchers.length;
-}
-
-async function ingestActivity(event: ActivityEvent): Promise<void> {
-  await (await getApiClient()).request("v1_events_ingest", { body: event });
-}
-
-async function flushEvents(): Promise<void> {
-  if (flushInFlight) return flushInFlight;
-  flushInFlight = (async () => {
-    try {
-      await activityOutbox.flush((event) => deliverActivityEvent(
-        event,
-        ingestActivity,
-        async (terminalEvent, status) => {
-          await activityDeadLetters.enqueue({
-            id: terminalEvent.id,
-            event: terminalEvent,
-            status,
-            deadLetteredAt: new Date().toISOString(),
-          });
-        },
-      ));
-      backendReachable = true;
-    } catch {
-      backendReachable = false;
-    }
-    renderBadge();
-  })().finally(() => {
-    flushInFlight = null;
+async function acknowledgeDelightSent(bvid: string): Promise<void> {
+  if (!bvid) return;
+  await authenticatedFetch(await apiUrl("/delight/sent"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bvid }),
   });
-  return flushInFlight;
 }
 
-async function pollSourceTasks(): Promise<void> {
-  if (pollInFlight) return pollInFlight;
-  pollInFlight = (async () => {
-    try {
-      await flushTaskCompletions();
-    } catch {
-      backendReachable = false;
-      renderBadge();
-      return;
-    }
-    try {
-      await refreshSourceTaskDispatchers();
-      backendReachable = true;
-    } catch {
-      sourceTaskDispatchers = [];
-      backendReachable = false;
-      return;
-    }
-    for (let offset = 0; offset < sourceTaskDispatchers.length; offset += 1) {
-      const index = (nextDispatcherIndex + offset) % sourceTaskDispatchers.length;
-      const dispatcher = sourceTaskDispatchers[index]!;
-      try {
-        const handled = await dispatcher.pollOnce();
-        backendReachable = true;
-        if (handled) {
-          nextDispatcherIndex = (index + 1) % sourceTaskDispatchers.length;
-          break;
-        }
-      } catch (error) {
-        console.warn(
-          `[OpenBiliClaw] ${dispatcher.sourceId} browser task failed:`,
-          error instanceof Error ? error.name : "UnknownError",
-        );
-      }
-    }
-    renderBadge();
-  })().finally(() => {
-    pollInFlight = null;
-  });
-  return pollInFlight;
-}
+// ---------------------------------------------------------------------------
+// Polling — recommendation & cognition only (delight is WS-pushed)
+// ---------------------------------------------------------------------------
 
-async function probeBackend(): Promise<void> {
+/**
+ * v0.3.16+: OS-level Chrome toasts are disabled by user request.
+ *
+ * The popup / side panel already surfaces every recommendation,
+ * cognition update, delight candidate and interest probe — duplicating
+ * them as Chrome toasts at the bottom-right of the screen is intrusive
+ * (and tripped a recurring "Unable to download all specified images"
+ * Chromium bug that polluted the service-worker console for weeks).
+ *
+ * We still poll ``/api/notifications/pending`` and call the ack
+ * endpoints so the backend's pending queue drains. Functionally this
+ * just hides the OS toast surface; popup state is unchanged.
+ */
+async function checkPendingNotification(): Promise<void> {
   try {
-    const readiness = await (await getApiClient()).request<ReadinessResponse>(
-      "v1_system_readiness",
+    const item = await fetchPendingNotification();
+    if (item?.bvid) {
+      await acknowledgeNotificationSent(item.bvid);
+      return;
+    }
+    const cognition = await fetchPendingCognitionUpdate();
+    if (cognition?.id) {
+      await acknowledgeCognitionUpdateSeen(cognition.id);
+    }
+  } catch (err) {
+    console.warn(
+      "[OpenBiliClaw] Pending notification ack failed:",
+      err instanceof Error ? err.message : String(err),
     );
-    backendReachable = readiness.ready;
-  } catch {
-    backendReachable = false;
   }
-  renderBadge();
 }
 
-function renderBadge(): void {
-  const view = computeActionBadge(backendReachable, false);
-  void chrome.action.setBadgeText({ text: view.text }).catch(() => undefined);
-  if (view.color) {
-    void chrome.action.setBadgeBackgroundColor({ color: view.color }).catch(() => undefined);
+// ---------------------------------------------------------------------------
+// WebSocket — runtime stream for delight push notifications
+// ---------------------------------------------------------------------------
+
+let runtimeSocket: WebSocket | null = null;
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let runtimeConnectInFlight = false;
+
+async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void> {
+  if (handleCookieSyncRuntimeEvent(event)) return;
+
+  try {
+    if (await handleE2ERuntimeEvent(event, flushCapturedEventsForE2E)) return;
+  } catch (err) {
+    console.warn(
+      "[OpenBiliClaw] Extension E2E runtime event failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return;
   }
-  void chrome.action.setTitle({ title: view.title }).catch(() => undefined);
+
+  const eventType = String(event.type ?? "");
+
+  // Guided init finished (started from any surface) → the uninitialized
+  // toolbar badge must clear without waiting for the next WS reconnect.
+  // refresh.pool_updated implies an initialized backend too.
+  if (
+    backendUninitialized &&
+    (eventType === "init_completed" || eventType === "refresh.pool_updated")
+  ) {
+    backendUninitialized = false;
+    renderActionBadge();
+  }
+
+  // Task-kick events: the backend broadcasts these from
+  // /api/sources/{xhs,dy}/kick when the CLI enqueues a bootstrap
+  // task. Poking the dispatcher here cuts the worst-case
+  // enqueue→pickup latency from ~60s (alarm interval) to ~50ms,
+  // which is what makes init's 30s collect window reliable.
+  // The chrome.alarms 60s poll stays as fallback for the
+  // WS-down case.
+  if (eventType === "xhs_task_available") {
+    pollXhsTaskNow();
+    return;
+  }
+  if (eventType === "dy_task_available") {
+    pollDyTaskNow();
+    return;
+  }
+  if (eventType === "yt_task_available") {
+    pollYtTaskNow();
+    return;
+  }
+  if (eventType === "zhihu_task_available") {
+    pollZhihuTaskNow();
+    return;
+  }
+  if (eventType === "reddit_task_available") {
+    await pollRedditTaskNow();
+    return;
+  }
+  if (eventType === "x_task_available") {
+    await pollXTaskNow();
+    return;
+  }
+  if (eventType === "bili_task_available") {
+    pollBiliTaskNow();
+    return;
+  }
+
+  // Dev-only: lets `curl -X POST /api/extension/reload` (or the
+  // openbiliclaw extension-reload CLI shim) reload the entire
+  // extension after a build, so the user doesn't have to click the
+  // reload icon in chrome://extensions every iteration.
+  // chrome.runtime.reload() is the MV3 native API for this; no
+  // permission needed.
+  if (eventType === "extension_reload") {
+    if (chrome?.runtime?.reload) {
+      // eslint-disable-next-line no-console
+      console.debug("[OpenBiliClaw] runtime-stream → chrome.runtime.reload()");
+      chrome.runtime.reload();
+    }
+    return;
+  }
+
+  // v0.3.16+: OS-level Chrome toasts are disabled by user request.
+  // Probe and delight events surface inside the
+  // popup via its own runtime-stream WS handler — no chrome
+  // notification toast at the bottom-right of the screen.
+  if (eventType === "interest.probe" || eventType === "avoidance.probe") {
+    return;
+  }
+
+  if (eventType !== "delight.candidate") return;
+
+  const bvid = String(event.bvid ?? "");
+  if (!bvid) return;
+
+  // Still ack the backend so the same bvid isn't re-pushed forever.
+  void acknowledgeDelightSent(bvid);
 }
 
-function ensureAlarms(): void {
-  chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: FLUSH_PERIOD_MINUTES });
-  chrome.alarms.create(SOURCE_TASK_ALARM, { periodInMinutes: SOURCE_TASK_PERIOD_MINUTES });
-}
-
-async function startRuntime(): Promise<void> {
-  ensureAlarms();
-  await ensureSession();
-  await Promise.all([flushEvents(), probeBackend(), pollSourceTasks()]);
-}
-
-chrome.runtime.onInstalled.addListener(() => {
-  void startRuntime();
-});
-
-chrome.runtime.onStartup.addListener(() => {
-  void startRuntime();
-});
-
-chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === FLUSH_ALARM) void flushEvents();
-  if (alarm.name === SOURCE_TASK_ALARM) void pollSourceTasks();
-});
-
-chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender, sendResponse) => {
-  if (message.action === "BEHAVIOR_EVENT") {
-    const event = message.data as BehaviorEvent;
-    const normalized = normalizeActivityEvent(event);
-    if (!normalized?.id) return false;
-    void activityOutbox.enqueue(normalized)
-      .then(() => shouldFlushImmediately(event) ? flushEvents() : undefined)
-      .then(() => sendResponse({ accepted: true }))
-      .catch(() => {
-        backendReachable = false;
-        renderBadge();
-        sendResponse({ accepted: false });
-      });
-    return true;
-  }
-  if (message.action === "XHS_URLS_OBSERVED") {
-    void ingestXhsObservations(message.data)
-      .then(() => sendResponse({ accepted: true }))
-      .catch(() => sendResponse({ accepted: false }));
-    return true;
-  }
-  return false;
-});
-
-async function ingestXhsObservations(value: unknown): Promise<void> {
-  for (const event of xhsObservationEvents(value)) await activityOutbox.enqueue(event);
+async function flushCapturedEventsForE2E(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, E2E_CAPTURE_SETTLE_MS));
   await flushEvents();
 }
 
+async function isBackendAlive(): Promise<boolean> {
+  // Gate the WS attempt on a cheap HTTP probe. A caught fetch rejection
+  // doesn't get logged at error severity, so chrome://extensions stays
+  // clean when the user installs the extension before starting the
+  // daemon. Once the probe passes, we open the WS as before.
+  //
+  // Probe /api/ping, not /api/health: health awaits a live embedding probe
+  // that can take seconds when cold, which used to blow the 2s budget here
+  // and badge the backend as offline while it was up. A 404 means an older
+  // backend without /api/ping — fall back to /health with a longer leash.
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), HEALTH_PROBE_TIMEOUT_MS);
+    try {
+      const resp = await fetch(await apiUrl("/ping"), {
+        method: "GET",
+        signal: ctrl.signal,
+      });
+      if (resp.status !== 404) return resp.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), HEALTH_FALLBACK_TIMEOUT_MS);
+    try {
+      const resp = await fetch(await apiUrl("/health"), {
+        method: "GET",
+        signal: ctrl.signal,
+      });
+      return resp.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+}
+
+let backendReachable: boolean | null = null;
+let backendUninitialized = false;
+
+function renderActionBadge(): void {
+  // Subtle "!" badge so a fresh-install user (or anyone whose daemon
+  // crashed) sees the toolbar icon flag the issue without opening the
+  // popup. Gray = backend unreachable; orange = reachable but guided init
+  // never completed — previously that state cleared the badge and was
+  // visually identical to a healthy backend, so fresh installs got zero
+  // proactive signal to initialize.
+  try {
+    const view = computeActionBadge(backendReachable, backendUninitialized);
+    void chrome.action.setBadgeText({ text: view.text });
+    if (view.color) void chrome.action.setBadgeBackgroundColor({ color: view.color });
+    void chrome.action.setTitle({ title: view.title });
+  } catch {
+    // chrome.action is missing in some contexts (e.g. tests) — best-effort.
+  }
+}
+
+function setBackendBadge(reachable: boolean): void {
+  backendReachable = reachable;
+  // A down backend's init state is unknown; drop the stale flag so the
+  // gray unreachable badge (and its hint) wins.
+  if (!reachable) backendUninitialized = false;
+  renderActionBadge();
+}
+
+async function refreshInitBadge(): Promise<void> {
+  // /api/runtime-status carries `initialized` without running any billable
+  // prereq probes (unlike an uninitialized /api/init-status read), so it is
+  // the right cheap source for the toolbar signal. Best-effort: on any
+  // failure keep the last known state.
+  try {
+    const response = await authenticatedFetch(await apiUrl("/runtime-status"), { method: "GET" });
+    if (!response.ok) return;
+    const payload = (await response.json()) as Record<string, unknown>;
+    backendUninitialized = payload.initialized === false;
+    renderActionBadge();
+  } catch {
+    // Keep the last rendered state.
+  }
+}
+
+async function connectRuntimeStream(): Promise<void> {
+  if (runtimeSocket !== null || runtimeConnectInFlight) return;
+  runtimeConnectInFlight = true;
+
+  try {
+    if (!(await isBackendAlive())) {
+      setBackendBadge(false);
+      scheduleWsReconnect();
+      return;
+    }
+
+    try {
+      const url = await wsUrl("/runtime-stream?client=background", await ensureSession());
+      runtimeSocket = new WebSocket(url);
+    } catch {
+      setBackendBadge(false);
+      scheduleWsReconnect();
+      return;
+    }
+
+    runtimeSocket.onopen = () => {
+      setBackendBadge(true);
+      void refreshInitBadge();
+    };
+
+    runtimeSocket.onmessage = (msg) => {
+      try {
+        const payload = JSON.parse(String(msg.data)) as Record<string, unknown>;
+        void handleRuntimeEvent(payload).catch((err) => {
+          console.warn(
+            "[OpenBiliClaw] Runtime stream event failed:",
+            err instanceof Error ? err.message : String(err),
+          );
+        });
+      } catch {
+        // Ignore malformed payloads.
+      }
+    };
+
+    runtimeSocket.onclose = () => {
+      runtimeSocket = null;
+      scheduleWsReconnect();
+    };
+
+    runtimeSocket.onerror = () => {
+      runtimeSocket?.close();
+    };
+  } finally {
+    runtimeConnectInFlight = false;
+  }
+}
+
+function scheduleWsReconnect(): void {
+  if (wsReconnectTimer !== null) return;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    void connectRuntimeStream();
+  }, WS_RECONNECT_DELAY);
+}
+
+// ---------------------------------------------------------------------------
+// Event buffer flush
+// ---------------------------------------------------------------------------
+
+async function flushEvents(): Promise<void> {
+  if (eventBuffer.length === 0) return;
+
+  const events = [...eventBuffer];
+  eventBuffer = [];
+
+  try {
+    const response = await authenticatedFetch(await apiUrl("/events"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ events }),
+    });
+
+    if (!response.ok) {
+      console.warn("[OpenBiliClaw] Backend returned", response.status);
+      eventBuffer.unshift(...events);
+      return;
+    }
+    try {
+      // Pre-init the backend consumes-and-drops events (200 + rejected:
+      // not_initialized). Don't re-buffer — init refetches history wholesale —
+      // but surface the state on the toolbar badge instead of staying silent.
+      if (flushResponseReportsUninitialized(await response.json())) {
+        if (!backendUninitialized) {
+          backendUninitialized = true;
+          renderActionBadge();
+        }
+        console.debug("[OpenBiliClaw] Events dropped: backend not initialized yet");
+      }
+    } catch {
+      // Non-JSON response — nothing to inspect.
+    }
+    await checkPendingNotification();
+  } catch {
+    console.warn("[OpenBiliClaw] Backend not available, buffering events");
+    eventBuffer.unshift(...events);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Alarm & lifecycle
+// ---------------------------------------------------------------------------
+
+function ensureFlushAlarm(): void {
+  chrome.alarms.create(FLUSH_ALARM_NAME, {
+    periodInMinutes: BUFFER_FLUSH_INTERVAL / 60_000,
+  });
+}
+
+function startPlatformTaskPolling(): void {
+  startXhsTaskPolling();
+  startDyTaskPolling();
+  startYtTaskPolling();
+  startZhihuTaskPolling();
+  startRedditTaskPolling();
+  startXTaskPolling();
+  startBiliTaskPolling();
+}
+
+async function startServiceWorkerAfterRecovery(): Promise<void> {
+  // MV3 workers can stop between tab creation and cleanup. Session storage records
+  // only the runner-owned numeric tab ID, so recovery must finish before polling
+  // can create a new task tab and never scans or closes arbitrary Reddit/X tabs.
+  await ensureNativeSaveTaskRecovery();
+  await ensureSession();
+  await connectRuntimeStream();
+  startPlatformTaskPolling();
+  startCookieSync();
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  ensureFlushAlarm();
+  void startServiceWorkerAfterRecovery();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  ensureFlushAlarm();
+  void startServiceWorkerAfterRecovery();
+});
+
 chrome.action.onClicked.addListener((tab) => {
-  const chromeApi = chrome as unknown as Record<string, unknown>;
-  const sidePanel = chromeApi[["side", "Panel"].join("")] as
-    | { open?: (options: { windowId: number }) => Promise<void> }
-    | undefined;
-  if (sidePanel?.open && typeof tab.windowId === "number") {
-    void sidePanel.open({ windowId: tab.windowId });
+  void openExtensionUi(chrome, {
+    windowId: tab.windowId,
+    tab: "recommend",
+  });
+});
+
+async function postXhsObservedUrls(payload: Record<string, unknown>): Promise<void> {
+  try {
+    await authenticatedFetch(await apiUrl("/sources/xhs/observed-urls"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // Best-effort — missing a batch just means less enrichment coverage.
+  }
+}
+
+async function postXhsTokens(
+  payload: { pairs: Array<{ note_id: string; xsec_token: string }> },
+): Promise<void> {
+  if (!payload?.pairs || payload.pairs.length === 0) return;
+  try {
+    await authenticatedFetch(await apiUrl("/sources/xhs/tokens"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // Best-effort — tokens that don't land just stay as bare URLs for now.
+  }
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.action === "XHS_URLS_OBSERVED") {
+    void postXhsObservedUrls(message.data as Record<string, unknown>);
+    return;
+  }
+  if (message.action === "XHS_TOKENS_OBSERVED") {
+    void postXhsTokens(
+      message.data as { pairs: Array<{ note_id: string; xsec_token: string }> },
+    );
+    return;
+  }
+  if (message.action === "XHS_TASK_RESULT") {
+    void handleTaskResult(message.data as XhsTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "DY_TASK_RESULT") {
+    void handleDyTaskResult(message.data as DyTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "DY_SCOPE_RESULT") {
+    void handleDyScopeResult(message.data as DyScopeResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "DY_SEARCH_RESULT") {
+    void handleDySearchTaskResult(message.data as DySearchResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "DY_HOT_RESULT") {
+    void handleDyHotTaskResult(message.data as DyHotResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "DY_FEED_RESULT") {
+    void handleDyFeedTaskResult(message.data as DyFeedResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "YT_SCOPE_RESULT") {
+    void handleYtScopeResult(message.data as YtScopeResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "ZHIHU_TASK_RESULT") {
+    void handleZhihuTaskResult(message.data as ZhihuTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+    });
+    return true;
+  }
+  if (message.action === "REDDIT_TASK_RESULT") {
+    void handleRedditTaskResult(message.data as RedditTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "BILI_TASK_RESULT") {
+    void handleBiliTaskResult(message.data as BiliTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action !== "BEHAVIOR_EVENT") return;
+
+  eventBuffer = enqueueBufferedEvent(eventBuffer, message.data as BehaviorEvent, BUFFER_MAX_SIZE);
+
+  if (eventBuffer.length >= BUFFER_MAX_SIZE || shouldFlushImmediately(message.data as BehaviorEvent)) {
+    void flushEvents();
   }
 });
 
-onBackendEndpointChange(() => {
-  void clearSession().then(startRuntime);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  handleXhsTaskAlarm(alarm.name);
+  handleDyTaskAlarm(alarm.name);
+  handleYtTaskAlarm(alarm.name);
+  handleZhihuTaskAlarm(alarm.name);
+  void handleRedditTaskAlarm(alarm.name);
+  void handleXTaskAlarm(alarm.name);
+  handleBiliTaskAlarm(alarm.name);
+  if (handleCookieSyncAlarm(alarm.name)) {
+    return;
+  }
+  if (alarm.name === FLUSH_ALARM_NAME) {
+    if (eventBuffer.length > 0) {
+      void flushEvents();
+      return;
+    }
+    void checkPendingNotification();
+  }
 });
 
-ensureAlarms();
-void startRuntime();
+chrome.notifications.onClicked.addListener((notificationId) => {
+  if (notificationId.startsWith("openbiliclaw-probe:")) {
+    void openExtensionUi(chrome, { tab: "profile" });
+    void chrome.notifications.clear(notificationId);
+    return;
+  }
+  const bvid = parseNotificationBvid(notificationId);
+  if (bvid) {
+    void openExtensionUi(chrome, { tab: "recommend" });
+    void chrome.notifications.clear(notificationId);
+    return;
+  }
+  const delightBvid = parseDelightBvid(notificationId);
+  if (delightBvid) {
+    void openExtensionUi(chrome, { tab: "recommend", delightBvid });
+    void chrome.notifications.clear(notificationId);
+    return;
+  }
+  const cognitionId = parseCognitionUpdateId(notificationId);
+  if (!cognitionId) {
+    return;
+  }
+  void openExtensionUi(chrome, { tab: "profile" });
+  void chrome.notifications.clear(notificationId);
+});
 
-console.log("[OpenBiliClaw] vNext service worker initialized");
+ensureFlushAlarm();
+void startServiceWorkerAfterRecovery();
+
+// Popup writes a new backend port → chrome.storage.onChanged fires here.
+// Close the existing runtime-stream WS so the next connect attempt opens
+// against the new origin. All HTTP callers resolve apiUrl() at call time,
+// so no further bookkeeping is needed for polled requests.
+onBackendEndpointChange(() => {
+  try {
+    runtimeSocket?.close();
+  } catch {
+    // close() shouldn't throw, but we don't want a stray reset to crash
+    // the service worker.
+  }
+  runtimeSocket = null;
+  if (wsReconnectTimer !== null) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  void clearSession().then(() => connectRuntimeStream());
+});
+
+console.log("[OpenBiliClaw] Service worker initialized");

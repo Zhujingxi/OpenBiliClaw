@@ -4,7 +4,7 @@
  * The kernel calls `enter(url, durationSeconds)` when the user lands on a
  * video page and `flush(reason)` on SPA navigation away (`pushState` /
  * `replaceState` / `popstate`) or `pagehide`. The tracker emits one
- * synthesised `dwell` BehaviorEvent for the previous page with
+ * synthesised `click` BehaviorEvent for the previous page with
  * `metadata.watch_seconds` (and `metadata.video_duration_seconds` if
  * known) so the storage classifier can mark the visit as a quick-exit,
  * meaningful_dwell, or unknown.
@@ -93,10 +93,9 @@ export class VideoDwellTracker {
       metadata.video_duration_seconds = this.session.videoDurationSeconds;
     }
 
-    const built = this.options.buildEvent(this.session.url, metadata);
+    const event = this.options.buildEvent(this.session.url, metadata);
     this.session = null;
-    if (built === null) return null;
-    const event = { ...built, type: "dwell" };
+    if (event === null) return null;
     this.options.emit(event);
     return event;
   }

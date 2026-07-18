@@ -1,7 +1,7 @@
 name: Verify Release Completeness
 
 # Guards against the "forgot to push a component tag" failure mode: a release
-# is cut by pushing backend-v* / extension-v* / openbiliclaw-v*
+# is cut by pushing backend-v* / extension-v* / desktop-v* / openbiliclaw-v*
 # tags one by one (GitHub drops events when >3 tags are pushed at once), and
 # the aggregate sync silently tolerates a missing component ("Not published
 # yet."). In v0.3.159/v0.3.160 the extension-v* tag was never pushed, so the
@@ -101,6 +101,7 @@ jobs:
           }
 
           wait_tag "backend tag"      "backend-v${VERSION}"                                                      || missing+=("backend-v${VERSION} tag")
+          wait_for "desktop release"  "desktop-v${VERSION}"  ""                                                  || missing+=("desktop-v${VERSION} release")
           wait_for "extension chrome" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}.zip"           || missing+=("extension-v${VERSION} chrome zip")
           wait_for "extension firefox" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}-firefox.zip"  || missing+=("extension-v${VERSION} firefox zip")
           # The aggregate release must carry the extension zip (sync-aggregate-release pulls it in).
@@ -114,4 +115,4 @@ jobs:
             echo "then re-run this workflow (workflow_dispatch) with version=${VERSION}."
             exit 1
           fi
-          echo "Release v${VERSION} is COMPLETE: backend and extension tags, extension zips, and aggregate assets all present."
+          echo "Release v${VERSION} is COMPLETE: backend + extension + desktop tags, extension zips, and aggregate assets all present."

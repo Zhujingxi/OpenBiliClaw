@@ -1,65 +1,34 @@
 # Repository Guidelines
 
-## 项目结构
+## 项目结构与模块组织
+主代码位于 `src/openbiliclaw/`：`agent/` 负责编排，`bilibili/` 负责站点接入，`memory/`、`soul/`、`discovery/`、`recommendation/` 分别承载理解、发现与推荐链路。测试位于 `tests/`，命名采用 `test_*.py`。设计和路线文档集中在 `docs/`，其中 `docs/v0.1-todolist.md` 是当前 v0.1 的开发主线。浏览器插件代码单独放在 `extension/`，其中 `extension/src/` 为脚本源码，`extension/popup/` 为弹窗页面。
 
-权威后端位于 `src/openbiliclaw/`：
-
-- `features/`：按 activity、profile、feed、library、chat、sources、system 拆分的领域与应用用例；
-- `infrastructure/`：SQLAlchemy、Huey、LiteLLM/PydanticAI、来源 transport、加密等 adapter；
-- `api/`：薄 FastAPI `/api/v1` feature routers 与 composition；
-- `web/`：现有静态 Web；
-- `extension/`：Chrome/Chromium 与 Firefox 扩展。
-
-测试位于 `tests/`，vNext 合同测试位于 `tests/vnext/`。架构计划的唯一保留版本是 `docs/superpowers/plans/2026-07-17-backend-first-architecture-rebuild.md`。
-
-## 构建与验证
+## 构建、测试与开发命令
+先创建虚拟环境并安装开发依赖：`pip install -e ".[dev]"`。常用检查命令如下：
 
 ```bash
-uv sync --frozen
-uv run ruff format --check src tests
-uv run ruff check src tests
-uv run mypy src
-uv run lint-imports
-uv run pytest --cov=openbiliclaw
+ruff format src/ tests/
+ruff check src/ tests/
+mypy src/
+pytest
+pytest --cov=openbiliclaw
 ```
 
-扩展修改还需运行：
+本地体验 CLI 可使用 `openbiliclaw start`、`openbiliclaw profile`、`openbiliclaw recommend`。如修改配置相关逻辑，请同步验证 `openbiliclaw config-show`。`extension/` 当前未声明独立包管理脚本；若修改插件，请在 PR 中写明手动验证步骤。
 
-```bash
-cd extension
-npm run api:check
-npm run typecheck
-npm test
-npm run build
-npm run build:firefox
-```
+## 开发顺序与配置约定
+v0.1 开发建议以 `docs/v0.1-todolist.md` 为准，按“连接 -> 理解 -> 发现 -> 推荐 -> 学习 -> 插件 -> 稳定交付”的里程碑顺序推进，避免跳过底层依赖直接做上层体验。配置样例使用 `config.example.toml`；本地调试时基于它生成 `config.toml`，并仅在本机保存 API Key、Cookie 等敏感信息。
 
-运维 CLI 仅包含 `serve`、`worker`、`doctor`、`eval`、`db migrate`、`db backup`。产品工作流使用 Web、扩展或 `/api/v1`。
+## 编码风格与命名约定
+Python 统一使用 4 空格缩进、类型注解和清晰的模块边界；公开 API 与核心数据结构应补充简洁 docstring。格式化与 lint 由 Ruff 管理，静态类型检查使用 MyPy 严格模式。模块文件名使用小写下划线风格，如 `openai_provider.py`；测试函数采用 `test_<behavior>` 命名。
 
-## 架构约束
+## 测试要求
+新增功能默认同时补充单元测试；涉及真实 B 站或模型服务的流程，优先拆成可 mock 的单元测试，并将真实调用保留为手动或集成测试。v0.1 目标覆盖率参考 `docs/v0.1-todolist.md`，保持在 70% 以上。提交前至少运行 `pytest`，改动接口、配置或类型定义时同时运行 `mypy src/` 和 `ruff check src/ tests/`。
 
-- feature/domain 不依赖 FastAPI、SQLAlchemy、Huey 或 provider SDK。
-- 平台条件只出现在对应 source package；connector 只返回规范化领域对象。
-- AI feature 只通过 typed `TaskRunner` 或 embedding service 使用三个 LiteLLM alias。
-- 可变产品设置存储在 vNext SQLite，并由设置 UI 与 `/api/v1/settings` 管理。
-- 来源 credential 加密存储；provider credential 只在 LiteLLM。
-- 不新增兼容 API、旧数据导入器、桌面应用、动态 source plugin 或平台账号写入。
+## 提交与 Pull Request 要求
+提交信息遵循 Conventional Commits，例如 `feat: add bilibili auth status command`、`fix: validate missing api key`。PR 说明应包含：变更摘要、测试命令与结果、关联任务或文档入口；如改动 CLI 输出或插件页面，请附终端输出或截图。不要提交真实 `config.toml`、Cookie、API Key 或其他本地敏感数据。
 
-## 编码与提交
+## 文档更新要求（强制）
+每次提交、合回 main 或发版，以及任何改动接口、模块边界、数据流、配置、CLI、依赖或对外集成的变更，均强制按范围同步模块文档、变更日志、架构图、CLI 与配置文档、安装器文档；权威逐项清单见 [CLAUDE.md「Documentation Requirements」](CLAUDE.md#documentation-requirements)。
 
-Python 使用 4 空格、完整类型注解和简洁 docstring。Ruff complexity 上限为 12，MyPy 为 strict。测试命名 `test_<behavior>`。提交信息遵循 Conventional Commits。
-
-不要提交 `.env`、Cookie、API key、device key、数据库或其他本地敏感数据。真实来源或模型调用必须显式标记和报告；默认测试使用 mock transport 或 PydanticAI test model。
-
-## 文档要求
-
-接口、模块边界、数据流、配置、CLI、依赖或外部集成变化必须同步：
-
-- 相关 `docs/modules/*.md`；
-- `docs/changelog.md`；
-- 架构变化时同步 `docs/architecture.md`、`docs/spec.md`、README CN/EN 图；
-- CLI 或设置变化时同步 `docs/modules/cli.md`、`docs/modules/config.md`；
-- 安装变化时同步 `docs/installation.md`、`docs/agent-install.md`、`docs/docker-deployment.md` 和安装器输出；
-- 旅程变化时同步 `docs/manual-e2e.md` 与 `docs/e2e/` runbook。
-
-历史 v0.3 设计通过 Git 历史和 changelog 查阅，不在 active docs 中保留可执行旧命令或 endpoint。
+AGENTS.md 面向可能不会自动加载 CLAUDE.md 的非 Claude agent，因此本义务在此独立生效：即使未自动读取 CLAUDE.md，也必须打开上述链接并遵循清单，缺少相应文档更新的分支不得合入。

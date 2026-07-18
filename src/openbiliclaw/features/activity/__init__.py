@@ -1,1 +1,0 @@
-"""Activity ingestion feature."""

@@ -1,0 +1,575 @@
+import {
+  isAllowedNativeSavePageUrl,
+  isNativeSaveTask,
+  sanitizeNativeSaveResult,
+  type NativeSavePlatform,
+  type NativeSaveResult,
+  type NativeSaveSlug,
+  type NativeSaveTask,
+  type SanitizedNativeSaveOutcome,
+} from "../shared/native-save.ts";
+import { releaseDispatcherMutex, tryAcquireDispatcherMutex } from "./dispatcher-mutex.ts";
+
+const DEFAULT_TIMEOUT_MS = 240_000;
+const DEFAULT_READINESS_RETRY_MS = 250;
+const DEFAULT_MUTEX_RETRY_MS = 50;
+const NATIVE_SAVE_TAB_SESSION_KEY = "openbiliclaw_native_save_task_tab_id";
+
+export interface NativeSaveRunnerOptions {
+  timeoutMs?: number;
+  readinessRetryMs?: number;
+  mutexRetryMs?: number;
+}
+
+interface ActiveTask {
+  task: NativeSaveTask;
+  tabId: number;
+  platform: NativeSavePlatform;
+  complete: (outcome: unknown) => void;
+  settled: boolean;
+}
+
+class NativeSaveDeadlineError extends Error {}
+
+const activeTasks = new Map<string, ActiveTask>();
+let nativeSaveRecoveryPromise: Promise<void> | null = null;
+let sessionRecordMutation: Promise<void> = Promise.resolve();
+
+function timeoutOutcome(): SanitizedNativeSaveOutcome {
+  return sanitizeNativeSaveResult({ status: "failed", error_code: "native_save_timeout" });
+}
+
+function failedOutcome(): SanitizedNativeSaveOutcome {
+  return sanitizeNativeSaveResult({ status: "failed", error_code: "native_save_failed" });
+}
+
+function remainingMs(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+async function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const timeoutMs = remainingMs(deadline);
+  if (timeoutMs <= 0) throw new NativeSaveDeadlineError("native-save task timed out");
+  let timer: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new NativeSaveDeadlineError("native-save task timed out")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(finish, ms);
+    function finish(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    }
+    signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
+async function acquireMutexBefore(
+  owner: string,
+  deadline: number,
+  retryMs: number,
+): Promise<boolean> {
+  while (Date.now() < deadline) {
+    if (tryAcquireDispatcherMutex(owner)) return true;
+    await delay(Math.min(retryMs, remainingMs(deadline)));
+  }
+  return false;
+}
+
+async function waitForTabLoad(tabId: number, deadline: number): Promise<chrome.tabs.Tab> {
+  let revision = 0;
+  let wake: (() => void) | null = null;
+  const listener = (updatedId: number): void => {
+    if (updatedId !== tabId) return;
+    revision += 1;
+    wake?.();
+  };
+  let registrationAttempted = false;
+  try {
+    registrationAttempted = true;
+    chrome.tabs.onUpdated.addListener(listener);
+    while (Date.now() < deadline) {
+      const observedRevision = revision;
+      const tab = await beforeDeadline(chrome.tabs.get(tabId), deadline);
+      if (tab.status === "complete") return tab;
+      if (revision !== observedRevision) continue;
+      await new Promise<void>((resolve, reject) => {
+        const timeoutMs = remainingMs(deadline);
+        if (timeoutMs <= 0) {
+          reject(new NativeSaveDeadlineError("native-save tab load timed out"));
+          return;
+        }
+        const timer = setTimeout(() => {
+          wake = null;
+          reject(new NativeSaveDeadlineError("native-save tab load timed out"));
+        }, timeoutMs);
+        wake = () => {
+          clearTimeout(timer);
+          wake = null;
+          resolve();
+        };
+        if (revision !== observedRevision) wake();
+      });
+    }
+    throw new NativeSaveDeadlineError("native-save tab load timed out");
+  } finally {
+    if (registrationAttempted) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          chrome.tabs.onUpdated.removeListener(listener);
+          break;
+        } catch {
+          // Retry one transient failure, then let the runner continue teardown.
+        }
+      }
+    }
+  }
+}
+
+async function waitForExecutableTab(
+  task: NativeSaveTask,
+  tabId: number,
+  deadline: number,
+): Promise<chrome.tabs.Tab> {
+  // Xiaohongshu keeps document-level requests open for minutes. Its content
+  // executor already has bounded SPA-readiness polling, so waiting for Chrome's
+  // coarse `complete` state only delays an otherwise ready, correlated control.
+  return task.platform === "xiaohongshu"
+    ? await beforeDeadline(chrome.tabs.get(tabId), deadline)
+    : await waitForTabLoad(tabId, deadline);
+}
+
+function observedTabUrl(task: NativeSaveTask, tab: chrome.tabs.Tab): string | undefined {
+  return tab.pendingUrl ?? tab.url ?? (
+    task.platform === "xiaohongshu" ? taskNavigationUrl(task) : undefined
+  );
+}
+
+async function removeTabBestEffort(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.remove(tabId);
+  } catch {
+    // The user may have closed the tab, or Chrome cleanup may fail.
+  }
+}
+
+function sessionStorageArea(): chrome.storage.StorageArea | null {
+  try {
+    return typeof chrome === "undefined" ? null : chrome.storage?.session ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function serializedSessionMutation(mutation: () => Promise<void>): Promise<void> {
+  const current = sessionRecordMutation.then(mutation, mutation);
+  sessionRecordMutation = current.catch(() => {});
+  return current;
+}
+
+async function recordNativeSaveTaskTab(tabId: number): Promise<void> {
+  await serializedSessionMutation(async () => {
+    const storage = sessionStorageArea();
+    if (!storage) return;
+    try {
+      const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
+      const value = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+      const tabIds = typeof value === "number"
+        ? [value]
+        : Array.isArray(value)
+          ? value.filter((item): item is number => typeof item === "number")
+          : [];
+      if (!tabIds.includes(tabId)) tabIds.push(tabId);
+      await storage.set({
+        [NATIVE_SAVE_TAB_SESSION_KEY]: tabIds.length === 1 ? tabIds[0] : tabIds,
+      });
+    } catch {
+      // Session persistence is an optional recovery enhancement, not an execution prerequisite.
+    }
+  });
+}
+
+async function clearRecordedNativeSaveTaskTab(tabId: number): Promise<void> {
+  await serializedSessionMutation(async () => {
+    const storage = sessionStorageArea();
+    if (!storage) return;
+    try {
+      const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
+      const value = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+      const tabIds = (typeof value === "number" ? [value] : Array.isArray(value) ? value : [])
+        .filter((item): item is number => typeof item === "number" && item !== tabId);
+      if (tabIds.length === 0) {
+        await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+      } else {
+        await storage.set({
+          [NATIVE_SAVE_TAB_SESSION_KEY]: tabIds.length === 1 ? tabIds[0] : tabIds,
+        });
+      }
+    } catch {
+      // A closed tab is safe even if best-effort session cleanup fails.
+    }
+  });
+}
+
+/** Close only the runner-owned tab recorded before a previous MV3 worker stopped. */
+export async function recoverRecordedNativeSaveTaskTab(): Promise<void> {
+  const storage = sessionStorageArea();
+  if (!storage) return;
+  let value: unknown;
+  try {
+    const stored = await storage.get(NATIVE_SAVE_TAB_SESSION_KEY);
+    value = stored[NATIVE_SAVE_TAB_SESSION_KEY];
+  } catch {
+    return;
+  }
+  const tabIds = (typeof value === "number" ? [value] : Array.isArray(value) ? value : [])
+    .filter((item): item is number => typeof item === "number" && Number.isInteger(item) && item >= 0);
+  if (tabIds.length === 0) {
+    try {
+      await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+    } catch {
+      // Invalid runner metadata is safe to discard best-effort.
+    }
+    return;
+  }
+  for (const tabId of new Set(tabIds)) await removeTabBestEffort(tabId);
+  try {
+    await storage.remove(NATIVE_SAVE_TAB_SESSION_KEY);
+  } catch {
+    // Orphan tabs are already closed; record cleanup remains best-effort.
+  }
+}
+
+/** One MV3-lifetime barrier shared by startup, alarms, wakes, and direct execution. */
+export function ensureNativeSaveTaskRecovery(): Promise<void> {
+  nativeSaveRecoveryPromise ??= recoverRecordedNativeSaveTaskTab();
+  return nativeSaveRecoveryPromise;
+}
+
+export function resetNativeSaveTaskRecoveryForTest(): void {
+  nativeSaveRecoveryPromise = null;
+  sessionRecordMutation = Promise.resolve();
+}
+
+async function createTabBeforeDeadline(
+  url: string,
+  deadline: number,
+): Promise<chrome.tabs.Tab> {
+  const creation = chrome.tabs.create({ active: true, url });
+  try {
+    return await beforeDeadline(creation, deadline);
+  } catch (error) {
+    if (error instanceof NativeSaveDeadlineError) {
+      void creation.then(
+        async (lateTab) => {
+          if (lateTab.id !== undefined) await removeTabBestEffort(lateTab.id);
+        },
+        () => {},
+      );
+    }
+    throw error;
+  }
+}
+
+function taskNavigationUrl(task: NativeSaveTask): string {
+  if (task.platform === "douyin") {
+    return `https://www.douyin.com/jingxuan?modal_id=${encodeURIComponent(task.content_id)}`;
+  }
+  if (task.platform !== "reddit") return task.content_url;
+  try {
+    const url = new URL(task.content_url);
+    if (url.hostname === "reddit.com" || url.hostname.endsWith(".reddit.com")) {
+      url.hostname = "old.reddit.com";
+      return url.toString();
+    }
+  } catch {
+    // The shared task validator already rejects malformed URLs; fail closed to the original.
+  }
+  return task.content_url;
+}
+
+function xiaohongshuRouteId(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+    if (url.hostname !== "xiaohongshu.com" && !url.hostname.endsWith(".xiaohongshu.com")) {
+      return null;
+    }
+    return /^\/(?:explore|discovery\/item)\/([A-Za-z0-9_-]+)\/?$/
+      .exec(url.pathname)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function reuseExactXiaohongshuTab(
+  task: NativeSaveTask,
+  deadline: number,
+): Promise<chrome.tabs.Tab | null> {
+  if (task.platform !== "xiaohongshu") return null;
+  try {
+    const tabs = await beforeDeadline(chrome.tabs.query({
+      url: ["https://xiaohongshu.com/*", "https://*.xiaohongshu.com/*"],
+    }), deadline);
+    const matches = tabs.filter((tab) =>
+      tab.id !== undefined && xiaohongshuRouteId(tab.url) === task.content_id
+    );
+    const match = matches[0];
+    if (matches.length !== 1 || match?.id === undefined) return null;
+    return await beforeDeadline(chrome.tabs.update(match.id, { active: true }), deadline) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function contentResultForActiveTask(
+  message: unknown,
+  sender?: chrome.runtime.MessageSender,
+): boolean {
+  if (typeof message !== "object" || message === null) return false;
+  const result = message as Record<string, unknown>;
+  const active = typeof result.task_id === "string" ? activeTasks.get(result.task_id) : undefined;
+  if (!active || active.settled) return false;
+  const senderUrl = typeof sender?.url === "string" ? sender.url : sender?.tab?.url;
+  if (
+    result.type !== "NATIVE_SAVE_RESULT" ||
+    result.platform !== active.platform ||
+    result.task_id !== active.task.id ||
+    result.item_key !== active.task.item_key ||
+    sender?.tab?.id !== active.tabId ||
+    !isAllowedNativeSavePageUrl(active.platform, senderUrl)
+  ) {
+    return false;
+  }
+  active.settled = true;
+  active.complete(result);
+  return true;
+}
+
+export function handleNativeSaveContentResult(
+  message: unknown,
+  sender?: chrome.runtime.MessageSender,
+): boolean {
+  return contentResultForActiveTask(message, sender);
+}
+
+async function sendExecuteWhenReady(
+  tabId: number,
+  task: NativeSaveTask,
+  deadline: number,
+  retryMs: number,
+  signal: AbortSignal,
+  verificationOnly: boolean = false,
+): Promise<void> {
+  while (!signal.aborted && Date.now() < deadline) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        type: "NATIVE_SAVE_EXECUTE",
+        task,
+        ...(verificationOnly ? { verification_only: true } : {}),
+      });
+      if (response !== undefined) return;
+    } catch {
+      // MV3 can expose the loaded tab before its content listener is registered.
+    }
+    await delay(Math.min(retryMs, remainingMs(deadline)), signal);
+  }
+}
+
+async function executeBeforeDeadline(
+  task: NativeSaveTask,
+  tabId: number,
+  deadline: number,
+  retryMs: number,
+  readinessController: AbortController,
+  verificationOnly: boolean = false,
+): Promise<SanitizedNativeSaveOutcome> {
+  const timeoutMs = remainingMs(deadline);
+  if (timeoutMs <= 0) return timeoutOutcome();
+  let timer: ReturnType<typeof setTimeout>;
+  const terminal = new Promise<unknown>((resolve) => {
+    const active: ActiveTask = {
+      task,
+      tabId,
+      platform: task.platform,
+      complete: resolve,
+      settled: false,
+    };
+    const complete = (outcome: unknown): void => {
+      active.settled = true;
+      resolve(outcome);
+    };
+    active.complete = complete;
+    activeTasks.set(task.id, active);
+    timer = setTimeout(
+      () => complete({ status: "failed", error_code: "native_save_timeout" }),
+      timeoutMs,
+    );
+  });
+  void sendExecuteWhenReady(
+    tabId,
+    task,
+    deadline,
+    retryMs,
+    readinessController.signal,
+    verificationOnly,
+  );
+  try {
+    return sanitizeNativeSaveResult(await terminal);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+export async function runNativeSaveTask(
+  task: NativeSaveTask,
+  platformSlug: NativeSaveSlug,
+  postResult: (result: NativeSaveResult) => Promise<void>,
+  options: NativeSaveRunnerOptions = {},
+): Promise<void> {
+  if (!isNativeSaveTask(task) || task.platform_slug !== platformSlug) {
+    throw new Error("native-save task does not match the platform slug");
+  }
+  await ensureNativeSaveTaskRecovery();
+  const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
+
+  const owner = `native-save:${platformSlug}`;
+  const readinessController = new AbortController();
+  let mutexAcquired = false;
+  let runtimeListenerRegistrationAttempted = false;
+  let tabId: number | null = null;
+  let ownsTab = false;
+  let reusableTab: chrome.tabs.Tab | null = null;
+  let outcome = failedOutcome();
+  const listener = (message: unknown, sender: chrome.runtime.MessageSender): void => {
+    handleNativeSaveContentResult(message, sender);
+  };
+
+  try {
+    reusableTab = await reuseExactXiaohongshuTab(task, deadline);
+    // A user-triggered XHS save is fully correlated to the exact note route and
+    // control. Let it open that route even while background discovery owns the
+    // shared tab mutex; otherwise a long bootstrap can strand an already
+    // claimed native-save job for minutes. Other platforms keep the mutex
+    // because their page executors do not have the same exact-route boundary.
+    if (reusableTab === null && task.platform !== "xiaohongshu") {
+      mutexAcquired = await acquireMutexBefore(
+        owner,
+        deadline,
+        Math.max(1, options.mutexRetryMs ?? DEFAULT_MUTEX_RETRY_MS),
+      );
+    }
+    if (reusableTab === null && task.platform !== "xiaohongshu" && !mutexAcquired) {
+      outcome = timeoutOutcome();
+    } else {
+      try {
+        const tab = reusableTab ?? await createTabBeforeDeadline(taskNavigationUrl(task), deadline);
+        ownsTab = reusableTab === null;
+        if (tab.id === undefined) throw new Error("native-save task tab has no ID");
+        tabId = tab.id;
+        if (ownsTab) await recordNativeSaveTaskTab(tabId);
+        const loadedTab = await waitForExecutableTab(task, tabId, deadline);
+        if (!isAllowedNativeSavePageUrl(task.platform, observedTabUrl(task, loadedTab))) {
+          throw new Error("native-save task tab left its allow-listed platform");
+        }
+        if (mutexAcquired) {
+          releaseDispatcherMutex(owner);
+          mutexAcquired = false;
+        }
+        runtimeListenerRegistrationAttempted = true;
+        chrome.runtime.onMessage.addListener(listener);
+        outcome = await executeBeforeDeadline(
+          task,
+          tabId,
+          deadline,
+          Math.max(1, options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS),
+          readinessController,
+        );
+        if (
+          (task.platform === "douyin" || task.platform === "xiaohongshu") &&
+          outcome.status === "failed" &&
+          outcome.error_code === "native_confirmation_not_observed" &&
+          remainingMs(deadline) > 0
+        ) {
+          const verificationUrl = taskNavigationUrl(task);
+          await beforeDeadline(chrome.tabs.update(tabId, {
+            active: true,
+            url: verificationUrl,
+          }), deadline);
+          const verificationTab = await waitForExecutableTab(task, tabId, deadline);
+          if (!isAllowedNativeSavePageUrl(
+            task.platform,
+            observedTabUrl(task, verificationTab),
+          )) {
+            throw new Error("native-save verification tab left its allow-listed platform");
+          }
+          outcome = await executeBeforeDeadline(
+            task,
+            tabId,
+            deadline,
+            Math.max(1, options.readinessRetryMs ?? DEFAULT_READINESS_RETRY_MS),
+            readinessController,
+            true,
+          );
+        }
+      } catch (error) {
+        outcome = error instanceof NativeSaveDeadlineError || Date.now() >= deadline
+          ? timeoutOutcome()
+          : failedOutcome();
+      }
+    }
+    await postResult({ task_id: task.id, item_key: task.item_key, ...outcome });
+  } finally {
+    try {
+      readinessController.abort();
+    } catch {
+      // Continue independent cleanup.
+    }
+    const active = activeTasks.get(task.id);
+    if (active) {
+      active.settled = true;
+      activeTasks.delete(task.id);
+    }
+    if (runtimeListenerRegistrationAttempted) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          chrome.runtime.onMessage.removeListener(listener);
+          break;
+        } catch {
+          // Retry one transient Chrome failure, then continue independent cleanup.
+        }
+      }
+    }
+    if (tabId !== null && ownsTab) {
+      await removeTabBestEffort(tabId);
+      await clearRecordedNativeSaveTaskTab(tabId);
+    }
+    if (mutexAcquired) {
+      try {
+        releaseDispatcherMutex(owner);
+      } catch {
+        // Do not let mutex cleanup mask the authenticated callback result.
+      }
+    }
+  }
+}

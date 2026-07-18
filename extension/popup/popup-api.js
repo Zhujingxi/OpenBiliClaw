@@ -1,38 +1,835 @@
-import { createApiClient } from "./api-client.js";
+import { normalizeRecommendation, normalizeSavedItem } from "./popup-helpers.js";
 import { getBackendBaseUrl } from "./popup-backend-config.js";
-import { popupAuthenticatedFetch } from "./popup-device-auth.js";
+import {
+  ensurePopupSession,
+  popupAuthenticatedFetch,
+} from "./popup-device-auth.js";
 
-let cachedBaseUrl = "";
-let cachedClient = null;
+export const CONFIG_CACHE_KEY = "openbiliclaw.config_cache";
+export const CONFIG_GET_TIMEOUT_MS = 12_000;
+export const CONFIG_PUT_TIMEOUT_MS = 60_000;
+export const MODEL_CONFIG_GET_TIMEOUT_MS = 12_000;
+export const MODEL_CONFIG_PUT_TIMEOUT_MS = 60_000;
+export const MODEL_CONFIG_PROBE_TIMEOUT_MS = 60_000;
+const HEALTH_SUCCESS_CACHE_TTL_MS = 3_000;
+const HEALTH_FAILURE_CACHE_TTL_MS = 1_000;
 
-function apiOrigin(baseUrl) {
-  return String(baseUrl).replace(/\/api\/v1\/?$/, "");
+let healthCacheBaseUrl = "";
+let healthCacheCheckedAt = 0;
+let healthCacheHasValue = false;
+let healthCachePayload = null;
+let healthProbeInFlight = null;
+
+function abortError(message = "Request aborted") {
+  if (typeof DOMException === "function") {
+    return new DOMException(message, "AbortError");
+  }
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
 }
 
-async function client() {
-  const backendBaseUrl = await getBackendBaseUrl();
-  const baseUrl = apiOrigin(backendBaseUrl);
-  if (!cachedClient || cachedBaseUrl !== baseUrl) {
-    cachedBaseUrl = baseUrl;
-    cachedClient = createApiClient({
-      baseUrl,
-      fetchImpl: popupAuthenticatedFetch,
+function withTimeout(signal, timeoutMs) {
+  const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+  if (!hasTimeout && !signal) {
+    return { signal: undefined, cleanup: () => {} };
+  }
+  if (!hasTimeout) {
+    return { signal, cleanup: () => {} };
+  }
+
+  const controller = new AbortController();
+  let timeoutId = null;
+  const abortFrom = (reason) => {
+    if (!controller.signal.aborted) {
+      controller.abort(reason || abortError());
+    }
+  };
+  const onCallerAbort = () => abortFrom(signal?.reason);
+
+  if (signal?.aborted) {
+    abortFrom(signal.reason);
+  } else if (signal) {
+    signal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  timeoutId = setTimeout(() => abortFrom(abortError("Request timed out")), timeoutMs);
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (signal) signal.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+function awaitWithAbort(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason || abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason || abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+export async function requestJson(path, options = {}) {
+  const { timeoutMs, signal, ...fetchOptions } = options;
+  const timeout = withTimeout(signal, timeoutMs);
+  try {
+    const fetchImpl = globalThis.fetch.bind(globalThis);
+    const backendUrl = await awaitWithAbort(getBackendBaseUrl(), timeout.signal);
+    const sessionToken = await awaitWithAbort(ensurePopupSession({
+      fetchImpl,
+      signal: timeout.signal,
+    }), timeout.signal);
+    const requestOptions = { ...fetchOptions };
+    if (timeout.signal) requestOptions.signal = timeout.signal;
+    const response = await awaitWithAbort(popupAuthenticatedFetch(
+      `${backendUrl}${path}`,
+      requestOptions,
+      fetchImpl,
+      { sessionToken, signal: timeout.signal },
+    ), timeout.signal);
+    if (!response.ok) {
+      let details = null;
+      try {
+        details = await awaitWithAbort(response.json(), timeout.signal);
+      } catch (error) {
+        if (timeout.signal?.aborted) throw error;
+        details = null;
+      }
+      const error = new Error(`${path} request failed: ${response.status}`);
+      error.status = response.status;
+      error.details = details;
+      throw error;
+    }
+    return await awaitWithAbort(response.json(), timeout.signal);
+  } finally {
+    timeout.cleanup();
+  }
+}
+
+function getChromeStorageLocal() {
+  return globalThis.chrome?.storage?.local || null;
+}
+
+function storageGet(key) {
+  const local = getChromeStorageLocal();
+  if (!local?.get) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    try {
+      const maybePromise = local.get(key, (items) => resolve(items || {}));
+      if (maybePromise?.then) {
+        maybePromise.then((items) => resolve(items || {})).catch(() => resolve(null));
+      }
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function storageSet(items) {
+  const local = getChromeStorageLocal();
+  if (!local?.set) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    try {
+      const maybePromise = local.set(items, () => resolve(true));
+      if (maybePromise?.then) {
+        maybePromise.then(() => resolve(true)).catch(() => resolve(false));
+      }
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+export async function cacheConfigSnapshot(config) {
+  if (!config || !getChromeStorageLocal()) return null;
+  const snapshot = {
+    config,
+    cached_at: new Date().toISOString(),
+  };
+  const ok = await storageSet({ [CONFIG_CACHE_KEY]: snapshot });
+  return ok ? snapshot : null;
+}
+
+export async function readCachedConfigSnapshot() {
+  const items = await storageGet(CONFIG_CACHE_KEY);
+  const snapshot = items?.[CONFIG_CACHE_KEY];
+  if (!snapshot || typeof snapshot !== "object" || !snapshot.config) {
+    return null;
+  }
+  return snapshot;
+}
+
+// Liveness probe budget. /api/ping answers in milliseconds when the backend
+// is up; anything slower than this means "treat as offline and let the next
+// poll/WS event flip the badge back".
+const PING_TIMEOUT_MS = 3_000;
+
+export async function checkBackendStatus() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PING_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${backendUrl}/ping`, { method: "GET", signal: ctrl.signal });
+      // Any response from /ping settles liveness — except a 404, which means
+      // an older backend without the route; fall through to /health below.
+      if (response.status !== 404) return response.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+  // Older backend without /api/ping: fall back to the full health payload.
+  // (/health can stall seconds on a cold embedding probe — that latency is
+  // exactly why the badge prefers /ping.)
+  return (await fetchHealth()) !== null;
+}
+
+// Full /health payload (status, profile_ready, embedding_ready, ...).
+// Returns null when the backend is unreachable so callers can no-op
+// instead of throwing on startup.
+export async function fetchHealth() {
+  const backendUrl = await getBackendBaseUrl();
+  const now = Date.now();
+  const cacheTtlMs =
+    healthCachePayload === null ? HEALTH_FAILURE_CACHE_TTL_MS : HEALTH_SUCCESS_CACHE_TTL_MS;
+  if (
+    healthCacheHasValue &&
+    healthCacheBaseUrl === backendUrl &&
+    now - healthCacheCheckedAt < cacheTtlMs
+  ) {
+    return healthCachePayload;
+  }
+  if (healthProbeInFlight && healthProbeInFlight.baseUrl === backendUrl) {
+    return healthProbeInFlight.promise;
+  }
+
+  const promise = (async () => {
+    try {
+      const response = await fetch(`${backendUrl}/health`, { method: "GET" });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch {
+      return null;
+    }
+  })()
+    .then((payload) => {
+      healthCacheBaseUrl = backendUrl;
+      healthCacheCheckedAt = Date.now();
+      healthCacheHasValue = true;
+      healthCachePayload = payload;
+      return payload;
+    })
+    .finally(() => {
+      if (healthProbeInFlight?.promise === promise) {
+        healthProbeInFlight = null;
+      }
+    });
+  healthProbeInFlight = { baseUrl: backendUrl, promise };
+  return promise;
+}
+
+export function __resetPopupHealthCacheForTests() {
+  healthCacheBaseUrl = "";
+  healthCacheCheckedAt = 0;
+  healthCacheHasValue = false;
+  healthCachePayload = null;
+  healthProbeInFlight = null;
+}
+
+// One-click embedding repair (v0.3.155+): POST asks the backend to
+// (re-)pull the configured Ollama embedding model; GET reports progress.
+// Returns {status, ...payload} — callers branch on status/error instead of
+// throwing, because each 409 flavor gets its own user-facing hint. A 404
+// status means an older backend without the route.
+export async function startEmbeddingRepair() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "POST",
+    });
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+    return { status: response.status, ...payload };
+  } catch {
+    return { status: 0 };
+  }
+}
+
+// Progress of the in-flight (or last finished) repair; null when unreachable.
+export async function fetchEmbeddingRepairStatus() {
+  const backendUrl = await getBackendBaseUrl();
+  try {
+    const response = await popupAuthenticatedFetch(`${backendUrl}/embedding/repair`, {
+      method: "GET",
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchRecommendations() {
+  const payload = await requestJson("/recommendations", { method: "GET" });
+  return Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [];
+}
+
+export async function refreshRecommendations() {
+  return requestJson("/recommendations/refresh", { method: "POST" });
+}
+
+export async function reshuffleRecommendations() {
+  const payload = await requestJson("/recommendations/reshuffle", { method: "POST" });
+  return {
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
+  };
+}
+
+export async function appendRecommendations(excludedBvids = []) {
+  const payload = await requestJson("/recommendations/append", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ excluded_bvids: excludedBvids }),
+  });
+  return {
+    ...payload,
+    items: Array.isArray(payload.items) ? payload.items.map(normalizeRecommendation) : [],
+  };
+}
+
+export async function fetchRuntimeStatus() {
+  return requestJson("/runtime-status", { method: "GET" });
+}
+
+export async function fetchInitStatus() {
+  return requestJson("/init-status", { method: "GET" });
+}
+
+export async function fetchXSourceStatus() {
+  return requestJson("/sources/x/status", { method: "GET" });
+}
+
+export async function fetchSourcesStatus() {
+  return requestJson("/sources/status", { method: "GET" });
+}
+
+export async function startInit({ force = false, sources } = {}) {
+  const payload = { force };
+  // Only attach an explicit per-run platform selection when given; omitting it
+  // lets the backend fall back to all config-enabled sources (legacy behaviour).
+  if (Array.isArray(sources)) {
+    payload.sources = sources;
+  }
+  return requestJson("/init", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function cancelInit() {
+  return requestJson("/init/cancel", { method: "POST" });
+}
+
+export async function fetchUpdateStatus() {
+  return requestJson("/update-status", { method: "GET" });
+}
+
+export async function checkBackendUpdate() {
+  return requestJson("/update/check", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ include_backend: true }),
+  });
+}
+
+export async function applyBackendUpdate(tag = "") {
+  return requestJson("/update/apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target: "backend", tag }),
+  });
+}
+
+export async function fetchActivityFeed({ limit, before } = {}) {
+  const params = new URLSearchParams();
+  if (typeof limit === "number") params.set("limit", String(limit));
+  if (before) params.set("before", before);
+  const qs = params.toString();
+  return requestJson(`/activity-feed${qs ? `?${qs}` : ""}`, { method: "GET" });
+}
+
+export async function fetchPendingNotification() {
+  return requestJson("/notifications/pending", { method: "GET" });
+}
+
+export async function fetchPendingDelight() {
+  const payload = await requestJson("/delight/pending", { method: "GET" });
+  return payload?.item ?? null;
+}
+
+export async function fetchPendingDelightBatch(limit = null) {
+  const params = new URLSearchParams();
+  if (typeof limit === "number" && Number.isFinite(limit)) {
+    params.set("limit", String(Math.max(1, Math.min(100, Math.floor(limit)))));
+  }
+  const qs = params.toString();
+  const payload = await requestJson(
+    `/delight/pending-batch${qs ? `?${qs}` : ""}`,
+    { method: "GET" },
+  );
+  return Array.isArray(payload?.items) ? payload.items : [];
+}
+
+export async function markDelightSent(bvid) {
+  return requestJson("/delight/sent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bvid }),
+  });
+}
+
+export async function acknowledgeNotificationSent(bvid) {
+  return requestJson("/notifications/sent", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ bvid }),
+  });
+}
+
+export async function fetchProfileSummary({ limit, cursor } = {}) {
+  const params = new URLSearchParams();
+  if (typeof limit === "number" && Number.isFinite(limit)) {
+    params.set("limit", String(limit));
+  }
+  if (typeof cursor === "string" && cursor.trim()) {
+    params.set("cursor", cursor.trim());
+  }
+  const query = params.toString();
+  return requestJson(`/profile-summary${query ? `?${query}` : ""}`, { method: "GET" });
+}
+
+export async function fetchEditState() {
+  return requestJson("/profile/edit-state", { method: "GET" });
+}
+
+export async function submitProfileEdit({ target, op, value = null, parent = "", weight = null }) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
+    return await requestJson("/profile/edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target, op, value, parent, weight }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function submitFeedback(payload) {
+  return requestJson("/feedback", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Confirm or reject a specific insight hypothesis. confirm → the hypothesis is
+ * validated + its confidence raised; reject → unvalidated + confidence capped
+ * low (soft-invalidated in recommendation scoring). Routes to
+ * ``POST /api/insights/feedback``.
+ *
+ * @param {string} hypothesis
+ * @param {"confirm" | "reject"} signal
+ */
+export async function submitInsightFeedback(hypothesis, signal) {
+  return requestJson("/insights/feedback", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ hypothesis, signal }),
+  });
+}
+
+/**
+ * Report a click-through on a recommendation card. Best-effort: errors are
+ * swallowed so UI navigation is never blocked by a slow or offline backend.
+ *
+ * @param {{
+ *   bvid: string,
+ *   content_id?: string,
+ *   content_url?: string,
+ *   source_platform?: string,
+ *   title?: string,
+ *   recommendation_id?: number | null,
+ *   topic_label?: string,
+ *   up_name?: string,
+ * }} payload
+ * @returns {Promise<boolean>} true if the click was reported successfully
+ */
+export async function reportRecommendationClick(payload) {
+  try {
+    await requestJson("/recommendation-click", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    return true;
+  } catch (error) {
+    // Best-effort reporting — do not disrupt the user's click.
+    return false;
+  }
+}
+
+export async function sendChatMessage(message) {
+  const controller = new AbortController();
+  // Bumped from 35s to 150s. Backend's chat dialogue can take ~120s under
+  // deepseek reasoning_effort=max; we give a small headroom for HTTP
+  // round-trip + serialization beyond the backend's own 120s wait_for.
+  const timeout = setTimeout(() => controller.abort(), 150_000);
+  try {
+    return await requestJson("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function startChatTurn({
+  turnId = "",
+  session = "popup",
+  scope = "chat",
+  subjectId = "",
+  subjectTitle = "",
+  message,
+}) {
+  return requestJson("/chat/turns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      turn_id: turnId,
+      session,
+      scope,
+      subject_id: subjectId,
+      subject_title: subjectTitle,
+      message,
+    }),
+  });
+}
+
+export async function fetchChatTurn(turnId) {
+  return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, { method: "GET" });
+}
+
+export async function fetchChatTurns({ session = "popup", scope = "", limit = 50 } = {}) {
+  const params = new URLSearchParams();
+  params.set("session", session);
+  if (scope) params.set("scope", scope);
+  if (typeof limit === "number" && Number.isFinite(limit)) {
+    params.set("limit", String(Math.max(1, Math.floor(limit))));
+  }
+  return requestJson(`/chat/turns?${params.toString()}`, { method: "GET" });
+}
+
+export async function respondToInterestProbe(domain, responseType, message = "") {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
+    return await requestJson("/interest-probes/respond", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain, response: responseType, message }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function respondToAvoidanceProbe(domain, responseType, message = "") {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
+    return await requestJson("/avoidance-probes/respond", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain, response: responseType, message }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function respondToDelight(bvid, responseType, title = "", message = "") {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 35_000);
+  try {
+    return await requestJson("/delight/respond", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bvid, response: responseType, title, message }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function fetchConfig(timeoutMs = CONFIG_GET_TIMEOUT_MS) {
+  const config = await requestJson("/config?reveal_keys=true", { method: "GET", timeoutMs });
+  await cacheConfigSnapshot(config);
+  return config;
+}
+
+/** Read the secret-safe, revisioned model route snapshot. */
+export async function fetchModelConfig(timeoutMs = MODEL_CONFIG_GET_TIMEOUT_MS) {
+  return requestJson("/model-config", { method: "GET", timeoutMs });
+}
+
+/** Read JSON-safe model connection descriptors; provider rules stay server-owned. */
+export async function fetchModelConnectionTypes(timeoutMs = MODEL_CONFIG_GET_TIMEOUT_MS) {
+  return requestJson("/model-connection-types", { method: "GET", timeoutMs });
+}
+
+/** Commit a complete model route against the revision returned by fetchModelConfig. */
+export async function updateModelConfig(data, timeoutMs = MODEL_CONFIG_PUT_TIMEOUT_MS) {
+  return requestJson("/model-config", {
+    method: "PUT",
+    timeoutMs,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/** Probe exactly one revision-bound Chat connection or Embedding provider draft. */
+export async function probeModelConnection(data, timeoutMs = MODEL_CONFIG_PROBE_TIMEOUT_MS) {
+  return requestJson("/model-config/probe", {
+    method: "POST",
+    timeoutMs,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+export async function fetchSourceShareSuggestion(overrides = null) {
+  if (overrides && typeof overrides === "object") {
+    return requestJson("/config/source-share-suggestion", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(overrides),
     });
   }
-  return cachedClient;
+  return requestJson("/config/source-share-suggestion", { method: "GET" });
 }
 
-/** Call one generated OpenAPI operation by its stable operation id. */
-export async function requestV1(operationId, input = {}) {
-  return (await client()).request(operationId, input);
+export async function probeConfigService(kind, config) {
+  return requestJson("/config/probe-service", {
+    method: "POST",
+    timeoutMs: 35_000,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ kind, config }),
+  });
 }
 
-/** Consume one generated OpenAPI SSE operation. */
-export async function readV1Sse(operationId, input, onEvent) {
-  return (await client()).readSse(operationId, input, onEvent);
+export async function updateConfig(data, timeoutMs = CONFIG_PUT_TIMEOUT_MS) {
+  return requestJson("/config", {
+    method: "PUT",
+    timeoutMs,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+  });
 }
 
-export function resetPopupApiClient() {
-  cachedBaseUrl = "";
-  cachedClient = null;
+export async function updateRuntimeToggle(name, value) {
+  const enabled = Boolean(value);
+  if (name === "pause_llm") {
+    return updateConfig({ scheduler: { enabled: !enabled } });
+  }
+  if (name === "pause_on_disconnect") {
+    return updateConfig({ scheduler: { pause_on_extension_disconnect: enabled } });
+  }
+  throw new Error(`Unknown runtime toggle: ${name}`);
+}
+
+// ── Watch-later ──────────────────────────────────────────────────
+
+// Saved-item mutations are tiny local-DB writes server-side, but the popup
+// fires dozens of cover/status requests at the same origin on open — Chrome's
+// 6-connections-per-origin limit can queue a DELETE behind slow image-proxy
+// fetches. A bounded timeout turns "hangs forever, button stuck disabled"
+// into a visible, retryable failure.
+const SAVED_MUTATION_TIMEOUT_MS = 10_000;
+const SAVED_READ_TIMEOUT_MS = 10_000;
+
+function savedListPath(listKind) {
+  if (listKind !== "favorite" && listKind !== "watch_later") {
+    throw new TypeError(`Unknown saved list: ${listKind}`);
+  }
+  return `/saved/${listKind}`;
+}
+
+/** Keep platform routing on the backend; clients only normalize identity fields. */
+export function normalizeSavedItemInput(item = {}) {
+  const sourcePlatform = String(item.source_platform || item.platform || "bilibili").trim();
+  const legacyId = String(item.bvid || "").trim();
+  const contentId = String(
+    item.content_id || (legacyId && !legacyId.includes(":") ? legacyId : ""),
+  ).trim();
+  return {
+    source_platform: sourcePlatform,
+    content_id: contentId,
+    content_url: String(item.content_url || item.url || "").trim(),
+    content_type: String(
+      item.content_type || (sourcePlatform === "bilibili" && contentId ? "video" : ""),
+    ).trim(),
+    title: String(item.title || "").trim(),
+    author_name: String(item.author_name || item.up_name || item.author || "").trim(),
+    cover_url: String(item.cover_url || "").trim(),
+    note: String(item.note || "").trim(),
+  };
+}
+
+export async function saveItem(listKind, item, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(savedListPath(listKind), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(normalizeSavedItemInput(item)),
+    timeoutMs,
+  });
+}
+
+export async function removeSavedItem(listKind, itemKey, timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ item_key: String(itemKey || "").trim() }),
+    timeoutMs,
+  });
+}
+
+export async function fetchSavedItems(listKind, limit = 50, offset = 0, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  const payload = await requestJson(
+    `${savedListPath(listKind)}?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    { timeoutMs },
+  );
+  return {
+    ...payload,
+    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
+  };
+}
+
+export async function savedItemStatus(listKind, itemKey, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  const query = new URLSearchParams({ item_key: String(itemKey || "").trim() });
+  return requestJson(`${savedListPath(listKind)}/status?${query}`, { timeoutMs });
+}
+
+export async function syncSavedItems(listKind, itemKeys = [], timeoutMs = SAVED_MUTATION_TIMEOUT_MS) {
+  return requestJson(`${savedListPath(listKind)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      item_keys: Array.from(new Set(itemKeys.map((key) => String(key || "").trim()).filter(Boolean))),
+    }),
+    timeoutMs,
+  });
+}
+
+export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_MS) {
+  return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
+    timeoutMs,
+  });
+}
+
+export async function addToWatchLater(bvid) {
+  return requestJson("/watch-later", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bvid }),
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function removeFromWatchLater(bvid) {
+  return requestJson(`/watch-later/${encodeURIComponent(bvid)}`, {
+    method: "DELETE",
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function watchLaterStatus(bvid) {
+  return requestJson(`/watch-later/${encodeURIComponent(bvid)}`);
+}
+
+export async function fetchWatchLater(limit = 50, offset = 0) {
+  const payload = await requestJson(`/watch-later?limit=${limit}&offset=${offset}`);
+  return {
+    ...payload,
+    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
+  };
+}
+
+// ── Favorites (收藏夹) ────────────────────────────────────────────
+
+export async function addToFavorite(bvid) {
+  return requestJson("/favorites", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bvid }),
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function removeFromFavorite(bvid) {
+  return requestJson(`/favorites/${encodeURIComponent(bvid)}`, {
+    method: "DELETE",
+    timeoutMs: SAVED_MUTATION_TIMEOUT_MS,
+  });
+}
+
+export async function favoriteStatus(bvid) {
+  return requestJson(`/favorites/${encodeURIComponent(bvid)}`);
+}
+
+export async function fetchFavorites(limit = 50, offset = 0) {
+  const payload = await requestJson(`/favorites?limit=${limit}&offset=${offset}`);
+  return {
+    ...payload,
+    items: Array.isArray(payload?.items) ? payload.items.map(normalizeSavedItem) : [],
+  };
 }

@@ -4,8 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "api:generate": "node ../openapi/generate-client.mjs --write",
-    "api:check": "node ../openapi/generate-client.mjs --check",
     "build": "npm run clean && npm run build:types && npm run build:bundle",
     "build:bundle": "node scripts/build.mjs",
     "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",

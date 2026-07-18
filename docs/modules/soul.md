@@ -1,0 +1,1105 @@
+# 灵魂引擎
+
+> `SoulEngine` 接受 runtime-owned gate，内部服务与主服务共享同一对象；`SocraticDialogue` 优先复用 Soul 服务。Prompt、token 与成本语义未变。
+
+> 用户深度理解核心 — 从行为数据到人格画像的推理引擎。
+
+## 概述
+
+`soul/` 包实现了用户理解的核心逻辑，包括：
+
+- **SoulEngine** — 编排器，从事件出发驱动各层分析
+- **PreferenceAnalyzer** — LLM 驱动的偏好提取和合并
+- **AwarenessAnalyzer** — 基于近期事件生成结构化觉察笔记
+- **InsightAnalyzer** — 基于觉察、偏好和画像生成洞察假设
+- **DialogueInsightAnalyzer** — 从聊天中提取候选长期理解信号
+- **ToneProfile** — 从画像、偏好和近期反馈推断语气风格，用于推荐、画像总结和对话
+- **SocraticDialogue** — 苏格拉底式用户对话，通过追问深化理解
+- **AvoidanceSpeculator** — 主动确认用户可能想避开的内容方向
+- **SoulProfile** — 用户灵魂画像数据结构
+
+## 已实现功能
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| OnionProfile 五层重构 | ✅ | 将 SoulProfile 重构为五层洋葱模型（CoreLayer → ValuesLayer → InterestLayer → RoleLayer → SurfaceLayer） |
+| MBTI 人格类型 | ✅ | Core 层新增 MBTI 类型与维度强度（E/I, S/N, T/F, J/P），支持置信度标注 |
+| 树形兴趣结构 | ✅ | InterestLayer 改为领域树结构 (domain → specifics)，支持”国际时事 → 中东局势 / 欧洲政治”的多层级兴趣 |
+| 双存储（JSON + Markdown） | ✅ | soul_profile.json 存储结构化数据，soul_profile.md 提供人类可读镜像 |
+| 画像变更日志 | ✅ | 新增 soul_changelog.md 记录每次画像更新的时间、来源、变化摘要和影响 |
+| 向后兼容垫片属性 | ✅ | OnionProfile 提供 `core_traits / deep_needs / cognitive_style / motivational_drivers / values` 等垫片属性，兼容旧代码渐进迁移 |
+| 自动格式迁移 | ✅ | `from_legacy()` 支持将 v1 flat SoulProfile 自动迁移到 v2 OnionProfile，SoulEngine 透明处理版本升级 |
+| SoulEngine.analyze_events() | ✅ | 事件 → PreferenceAnalyzer → 偏好层更新；v0.3.162+ 新增可选 `progress_callback: Callable[[int, int], Awaitable[None]]`（透传给 `PreferenceAnalyzer.analyze_events`），分片路径每完成一个 chunk 回调一次 `(done, total)`（并发 gather 下 done 仍严格递增）、单发路径回调一次 `(1, 1)`；回调异常吞掉 log WARNING，观测者绝不影响分析结果，也不触碰任何 prompt 构造 / 分片方式 / 序列化（prompt-cache 约定不变）。guided init 阶段 2 用它驱动 GUI 分片进度与 CLI 逐批打印 |
+| SoulEngine 全局模型路由 | ✅ | API、CLI 与 OpenClaw 构造时都接收同一 production `RuntimeModelBundle` 的 `chat_route`、`embedding_service` 与稳定 gate；preference / awareness / insight / profile_builder / speculator / dialogue_insight 全部遵循同一 ordered route，caller tag 只用于并发与 usage。manual dislike 与 avoidance confirm 的候选池语义清理复用该精确 embedding service |
+| PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；偏好分析 system prompt 注入 `CATEGORY_VOCAB`（静态常量、缓存安全），代码侧在 `(name, category)` 合并键生成前执行 `resolve_category()`：词表外 → embedding 最近邻（≥0.55）→「其他」，任何路径都不会把词表外一级分类写入 preference 层；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据；偏好分析调用前有 prompt 预算保护，超长 chunk 会递归二分，单条超长事件会 compact，`n_keep >= n_ctx` / `context length` 等上下文错误会用更小 chunk 重试；chunked 分析遇到 LLM 拒答 / 非 JSON 时会对单条事件追加 title / URL / source-only 安全压缩重试，避免长网页 context 触发安全拒答后直接丢失该条画像信号；偏好归一化对 LLM 输出做 schema 校验（`_normalize_style` / `_normalize_context_dict` / `_finalize_taste`）——`preferred_duration`(short/medium/long) / `preferred_pace`(fast/moderate/slow) 越界重置为 ""、非数值口味字段与 `exploration_openness` 回落字段默认 0.5（合法字面 0 保留）、数值 clamp 到 [0,1]、context 占位符（unknown/none/n/a/未知）清空，任一字段被纠偏即打一行列出字段名的 WARNING（避免画像面板静默全 unknown/0%）|
+| Init chunk cognition context | ✅ | 初始化偏好分片可顺带输出 `awareness_candidates` / `insight_candidates`；`PreferenceAnalyzer` 去重合并为私有 `_init_cognition_context`，`SoulEngine` 只在紧接着的 `build_initial_profile()` 中作为 prompt 上下文消费，不写入长期 `preference.json`、`awareness.json` 或 `insight.json` |
+| filter_events_by_satisfaction | ✅ | `soul/event_filters.py` 中的纯函数，按 `inferred_satisfaction` 过滤事件，`"unknown"` 同时匹配缺失 / `None`，使 pre-migration 老行可被显式 opt-in 保留 |
+| recent_negative_exemplars | ✅ | `soul/negative_exemplars.py` 中的纯函数，从事件层拉最近 negative 标题做 recency 加权（半衰期默认 14d）+ 前缀去重 + 80 字截断，最多返回 16 条 `{title, reason, age_days}`。下游消费者是 `discovery/engine.ContentDiscoveryEngine._evaluate_batch` 和 `recommendation/engine.RecommendationEngine._classify_batch`，二者都会把列表作为 `negative_examples` 透传给 batch evaluator prompt——这是 [inferred_satisfaction 信号](#) 的第二个消费方（第一个是上面的 `filter_events_by_satisfaction`） |
+| SocraticDialogue.respond() | ✅ | 通过 LLMService 调用 LLM，自动注入画像；同一 dialogue 实例逐轮串行执行普通与工具调用，用户 turn 在真实回复完成前仅为临时历史，异常/取消只回滚本轮且不触发学习 |
+| ProfileBuilder | ✅ | 结构化 prompt + JSON 校验 + `OnionProfile` 构建；`build_soul_profile_prompt()` 的 system prompt 保持静态，user prompt 按 `<tone_profile>` → `<preference_summary>` → `<recent_awareness>` → `<active_insights>` → `<history_summary>` 排列并使用确定性 JSON，让超大的历史摘要位于 provider cache 前缀末端 |
+| SoulEngine.build_initial_profile() | ✅ | 从 history + preference 生成并持久化 `soul.json` |
+| SoulEngine.get_profile() | ✅ | 从 soul 层读取画像并叠加用户覆盖层返回**有效画像**，未初始化时抛明确异常 |
+| SoulEngine.get_raw_profile() / get_overrides() | ✅ | 返回不叠加覆盖的纯 AI 画像 / 当前 `ProfileOverrides`，供编辑态与 AI 漂移比对 |
+| 用户画像覆盖层 (`soul/overrides.py`) | ✅ | `ProfileOverrides` + 纯函数 `apply_overrides`（文本/标量固定、列表增删、兴趣树 domain 增删/权重与 specifics 增删）+ 带校验的 `apply_edit` 归约器 + `build_edit_state`；兴趣二级项通过 `/api/profile/edit` 的 `parent` 字段定位父 domain，`edit-state` 同步暴露 `specific_edits` 供三端编辑 UI 标注；同一二级项新增后再删除会归约为空覆盖，避免留下伪编辑痕迹；用户手动编辑存独立 `profile_overrides.json`，读时叠加到 AI 画像之上，画像重建不覆盖；列表 remove 持续抑制 AI 再次推断出的同项 |
+| 分类词表 + 一次性迁移 | ✅ | `soul/taxonomy.py` 定义 19 项固定一级分类词表 `CATEGORY_VOCAB`（含「其他」，代码常量非 config），`resolve_category()` 按精确命中 → embedding 最近邻（≥0.55）→「其他」解析；`CategoryMigrator` 用一次 LLM 映射把存量自由分类迁移到词表，代码校验完整覆盖且目标必须在词表内，失败零写入；应用前写 `consolidation_runs/<run_id>.json`（`kind=category_migration`）并追加 `soul_changelog.md`，复用 `profile-consolidate --revert` 回滚 |
+| ProfileConsolidator（12h 画像整理） | ✅ | LLM 整理合并重复的喜欢 / 讨厌主题：规则层同名同类合并（零成本）；同名异类不再规则合并，而是构造强制嫌疑簇送 LLM 裁决（同名异义防护，no-merge 记忆用 `name::category` 限定键）→ embedding 聚类（默认 ≥0.85；active likes 超过上限时按 `upper -> soft` 水位压力动态降到最低 0.75；无 embedding 退子串聚类）→ no-merge 记忆过滤已判簇 → 分批 LLM 裁决输出 merge/keep 操作（每批 32 簇，单批失败只丢本批、其余照常应用；逻辑运行结束会输出一次 `profile consolidation run completed` 汇总，区分真实 run 和 LLM batch 调用）→ 代码校验执行（members 逐字存在、簇内全覆盖、canonical 禁裸大词、likes / dislikes 均拒绝明显过泛的新 canonical，避雷严禁向上泛化）→ active likes 库存水位归档。LLM canonical 是合并后的代表性 item 名：可选最准确成员，也可为多个部分兴趣起一个更能覆盖整组的具体组合概念；写回 active interest 时保留原成员词到 `aliases`，后续增量偏好命中 alias 会强化 canonical item 而不是重新生成重复兴趣。覆盖范围默认为 likes 权重 top-512 + 全量避雷主题；当 active likes 超过 `profile_consolidation_like_target_upper` 时，定时路径会临时开 full boundary，并用动态阈值召回更多候选；合并后仍超上限则把低权重且非用户保护的长尾兴趣移入 `archived_interests`，后续新信号命中同名同类时自动复活；`profile-consolidate --full` 仍可手动把 likes 边界开到全量标签库。likes judge payload 带 `category`，system prompt 含同名异义 keep 规则，并支持用 `{name, category}` 精确引用同名异类成员。改 flat preference 后经 `populate_from_flat_preference` 重建 Onion 树；rename map 穿透 `profile_overrides.json`；应用即备份 `consolidation_runs/<run_id>.json` + 追加 `soul_changelog.md`；`revert(run_id)` 整体回滚 active / archived inventory，并把被回滚合并对记入 no-merge。由 pipeline tick 调度（默认 12h，`[scheduler].profile_consolidation_*`），应用后发 `profile_consolidation` 认知更新卡片 |
+| SoulEngine.get_effective_disliked_topics() | ✅ | base（raw soul.interest.dislikes ∪ raw preference.disliked_topics）再套覆盖层 remove/add（remove 最后生效），供 delight 硬过滤，用户移除项不被 raw 反向打穿 |
+| SoulEngine.apply_user_edit() | ✅ | 折叠一次确定性编辑：存覆盖层 → 同步正向/避雷两套 speculator → 记 `source=manual` cognition → 重渲染有效画像镜像并通知两端 → 新增 dislike 按编辑前后差集把 `purge_pool_for_new_dislikes` 清池**调度为 `asyncio` 后台 detached 任务**（embedding 召回 + LLM 分类耗时数十秒，绝不能阻塞编辑响应，否则前端看着像「加了没保存」；`_schedule_dislike_purge` 派发，`wait_for_pending_edits()` 供测试 / 优雅关闭等待） |
+| AwarenessAnalyzer | ✅ | 近期事件 → `AwarenessNote` 列表，支持同日去重；解析 LLM 响应时复用 `llm.json_utils.extract_llm_json_list()`，兼容 `results/items/notes/data/observations/recent_observations/latest/latest_observations` 等 object-wrapped array、reasoning 模型 bare singular-note dict、wrapper-key 下单 note、fenced JSON、JSONL 和 MiMo malformed `{ [ ... ] }`；prompt 按画像 → 偏好 → 近期事件排序以保留缓存前缀，并把近期 `dislike` / `thumbs_down` / negative 事件视为“最近开始避开 X”的保守观察信号 |
+| InsightAnalyzer | ✅ | 觉察 + 偏好 + 画像 → `InsightHypothesis` 列表，支持假设合并；解析 LLM 响应时复用共享 JSON helper，能兼容 object wrapper、schema echo 后最终结果和 MiMo malformed array root |
+| CognitionCycle | ✅ | 半日节流生成 awareness + insight 并同步到 `OnionProfile`；仅在 preference 与 soul 都为空的早期初始化状态跳过，已有任一层时仍会运行，避免已初始化画像因 preference 暂空而长期不产出觉察；awareness 失败时单次重试（间隔 2s），仍失败则记 WARNING 且**不推进** `last_awareness_at`，下一 tick 立即重试而不是空等 12h |
+| CognitionCycle 游标增量取数 | ✅ | 觉察/洞察改**内容游标 + 大批量**取数，取代旧固定窗口（觉察曾 `query_events(limit=50)`、洞察曾全量读觉察）。觉察按 `last_awareness_event_id`（写进 `cognition_cycle_state.json`）只读 `id > 水位` 的事件，无新事件即跳过不调 LLM；单批容量 `_AWARENESS_EVENT_BATCH_SIZE=300`（按 256k+ 长上下文模型设计，~100 token/事件，正常 12h 窗口单次调用即可，**不为几十个事件强行分批**），仅积压超 300 才分批、作为防超大积压的安全网；每批成功后**逐批推进水位**（中途失败不丢已处理批），首批附 10 条已处理事件作趋势上下文；积压超 `_AWARENESS_BACKLOG_CAP=900` 时水位跳到最新窗口并记 WARNING（不静默丢）。洞察按 `last_insight_awareness_index`（觉察 append-only 的位置游标）只读新觉察、单批 `_INSIGHT_NOTE_BATCH_SIZE=150`（cap 450），并把当前活跃假设作 `existing_hypotheses` 上下文透传（`build_insight_prompt` 新增形参，system 仍静态、缓存不破）。批量 LLM 调用用更大的 `_COGNITION_MAX_TOKENS=32768`，两个 analyzer 的 `analyze()` 新增 `max_tokens` 形参 |
+| SoulEngine.generate_awareness_note() | ✅ | 生成并持久化 `awareness.json` |
+| SoulEngine.generate_insight() | ✅ | 生成并持久化 `insight.json` |
+| SoulEngine.update_from_feedback() | ✅ | feedback 事件落库，并校准匹配的洞察假设——确认→`validated=True`+置信度抬到 ≥0.75；推翻→`validated=False`+压到 ≤0.35（软作废：不删除、靠 delight 置信度加权降权）。**已接线**到 `POST /api/insights/feedback`（插件 + web/桌面三端洞察卡片「准/不准」按钮驱动），返回 `{matched, validated, confidence}`；此前实现但无生产调用方。命中后经 `_sync_insight_to_soul_snapshot` **同步把校准写回 soul 层 `active_insights` 快照**（`get_profile` / profile-summary / delight 读的是该快照，不是 insight 层），否则校准要等下一次 12h 认知 sync 才对 UI / 推荐生效 |
+| SoulEngine.process_feedback_batch_if_needed() | ✅ | 达到反馈阈值后重分析偏好，并在变化明显时重建画像；批处理入口带 single-flight 锁，已有任务在跑时直接返回 `feedback_batch_in_progress`，避免多个 `/api/feedback` 后台任务用同一旧游标重复分析未处理反馈；传给 LLM 前会瘦身 feedback 事件，只保留标题、上下文和偏好相关 metadata；若本批新增 `disliked_topics`，会按新旧差集调度 `purge_pool_for_new_dislikes` 后台清理 fresh 候选池，保持普通推荐卡片 `dislike` 学到长期避雷项后的清池行为与手动编辑 / 避雷探针一致 |
+| SoulEngine.record_immediate_feedback_cognition() | ✅ | 单条 `dislike/comment` 可即时写入结构化 cognition card，供插件画像页展示；评论类更新会带上对应内容标题，并以中性直接反馈记录，不预设正负向 |
+| 卡片反馈纠偏边界 | ✅ | 卡片 like/dislike 是可撤销的软信号并由后台批处理学习；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，或在原有对话页用自由文本说明偏好；推荐区不新增纠偏引导入口。单次 dislike 不会直接永久屏蔽主题 |
+| DialogueInsightAnalyzer | ✅ | 从聊天轮次提取 `goal/value/interest/dislike/state` 候选信号 |
+| SoulEngine.learn_from_dialogue() | ✅ | 聊天落 `dialogue` 事件、累计 insight candidate；单条 `interest/value/goal/dislike` 聊天信号到中高置信度时会先写入轻量 cognition update，高置信度或重复出现达阈值后再驱动偏好/画像更新 |
+| 兴趣探针聊天情绪判断 | ✅ | `/api/interest-probes/respond` 的 chat 分支会先让对话引擎回复，再用非 JSON 的单词分类 LLM 调用判断 `strong_positive / weak_positive / neutral_deferred / neutral / negative`（系统提示是 `llm/prompts.py:build_probe_sentiment_prompt` 的静态常量，走 prompt 缓存），失败时回退关键词；强正向直接确认，弱正向进入短期探索 buffer，`neutral_deferred`（用户主动说「先放着」「稍后再看」）走 defer 搁置状态机，`neutral`（态度模糊，如「再看看」）不改状态，避免一句“有点意思”立刻写成长期兴趣 |
+| 账户同步事件分析 | ✅ | 后台低频同步导入的 `view/favorite/follow` 事件会复用 `analyze_events()` 进入偏好与画像链 |
+| 小红书初始化画像信号 | ✅ | `openbiliclaw init` 会把插件解析到的小红书 `saved/liked/xhs_history` 转成 `favorite/like/view` 事件，并与 B 站历史、收藏、关注一起进入 `analyze_events()` 和初始画像 history |
+| 抖音初始化画像信号 | ✅ | `openbiliclaw init --yes-douyin` 会把插件解析到的抖音 `dy_post/dy_collect/dy_like/dy_follow` 转成 `view/favorite/like/follow` 事件，并进入偏好分析和初始画像 history |
+| 普通行为事件增量画像 | ✅ | profile 已存在时，`POST /api/events` accepted 的浏览器行为事件会先落 memory，再通过 `signals_from_events()` 进入 `ProfileUpdatePipeline.ingest_batch()`；rejected / not_initialized 事件不进入 pipeline |
+| 小红书 / 抖音 / YouTube / 知乎增量画像事件 | ✅ | profile 已存在时，带画像更新语义的 bootstrap task-result 新增事件会在落 memory 后进入 `ProfileUpdatePipeline`，参与后续分层画像更新；知乎任务需在 payload 中显式设置 `profile_update=true`，普通 `fetch-zhihu` smoke 不触发 |
+| 普通行为事件增量画像 | ✅ | profile 已存在时，`POST /api/events` accepted 的浏览器行为事件会先落 memory，再通过 `signals_from_events()` 进入 `ProfileUpdatePipeline.ingest_batch()`；rejected / not_initialized 事件不进入 pipeline |
+| ToneProfile | ✅ | 从 `OnionProfile`、偏好摘要和近期反馈推断 `density/warmth/playfulness/directness`，统一驱动推荐、画像和聊天语气 |
+| Cognition updates | ✅ | 在反馈刷新和聊天学习后生成 `interest_added / dislike_added / profile_shift` 结构化 cognition card，包含 `summary / context_line / source_label / expand_hint / impact / reasoning / evidence / source / created_at`，供插件提醒与画像页展开展示；即时反馈和聊天会尽量指出具体内容或本轮聊天，聚合判断则保守回退到”基于最近几条相关内容” |
+| Layered profile cognition | ✅ | `OnionProfile` 新增 MBTI / Values / Interest 等分层，画像生成会同时消费 `history + preference + awareness + insights`，避免把兴趣 topic 堆成整段画像 |
+| 猜测兴趣系统 | ✅ | `InterestSpeculator` 定期通过 LLM 过采样生成猜测兴趣方向，并按 `[scheduler]` 的 generation interval、TTL、cooldown、确认阈值和上限运行；候选带 `probe_mode=near/lateral/bridge/wildcard` 四档距离，普通 `near` 池最多 5 条，`lateral/bridge/wildcard` 挑战池单独最多 3 条；通过事件或用户确认后按来源权重转正为正式兴趣，未确认则拒绝并冷却；`tick/force_tick` 会读取最新 `probe_feedback_history`，确认/拒绝/探针聊天后的 domain 不会被旧快照重新生成 |
+| 探针「暂时忽略」（defer/搁置） | ✅ | 用户对探针点「暂时忽略」（或聊天说「先放着」）时，`user_defer_speculation` 把探针置为 `status="deferred"` 并按阶梯隐藏：第 1 次 7 天、第 2 次 14 天（`PROBE_DEFER_DAYS`），第 3 次（`PROBE_MAX_DEFERS`）耗尽转 `rejected` + 30 天 cooldown（走 TTL 过期语义，记 `defer_exhausted`，**不**进 handled 集，冷却后可重新猜——区别于显式 reject 的永久拉黑）。`deferred` 探针从所有读侧（pending 端点 / WS 推送 / `get_active_speculations`）消失；`tick/force_tick` 维护段的最后一步 `revive_deferred` 在 `deferred_until` 到期后把它复活为 `active`（重置 `created_at` 给新 TTL 窗口、`confirmation_count` 夹到阈值-1，保证复活后先以探针形式再露面而非静默转正）。避雷探针有对称的 `user_defer_avoidance` / `revive_deferred_avoidances`（复活排在 compaction 之后） |
+| 桌面 Web 探针即时反馈与撤销 | ✅ | 正向兴趣和避雷探针的 `confirm / reject / defer` 在消息抽屉与画像页复用同一稳定 action key，先即时隐藏或更新卡片，再保留 10 秒撤销窗口；撤销不调用 respond API，提交失败恢复原卡。`chat` 需要对话回复和情绪分类，继续直接调用后端，不进入可撤销屏障。 |
+| 短期探索 buffer | ✅ | `exploration_buffer.py` 把弱正向聊天、推荐喜欢、惊喜喜欢、普通点击和负反馈汇总到 `discovery_runtime_state["short_term_exploration_buffer"]`；7 天内显式弱证据累计到阈值后以 `buffer_promoted` 写回兴趣，负向反馈会进入 48h 冷却并抵消分数 |
+| 不喜欢领域探针系统 | ✅ | `AvoidanceSpeculator` 与正向兴趣探针并行运行，最多 5 条 active 避雷假设；只在用户确认或显式负向证据达到阈值后写入 `disliked_topics`，未确认前不参与 discovery / recommendation 过滤；生成前会读取最新 `avoidance_probe_feedback_history`，确认/否认/探针聊天处理过的方向不再作为 active 避雷探针重复出现 |
+| ROLE/VALUES/CORE 增量更新器 | ✅ | `_update_role`（`build_role_delta_prompt`，基于信号证据 + LLM diff-protection）、`_update_values`（LLM delta，每周期最多 add/remove 1 条，注入完整画像上下文）、`_update_core`（`build_core_delta_prompt`，更新 traits/needs/MBTI，强 diff-protection）均已完整实现 |
+| v0.3.74 Soul 结构化 JSON 容错统一 | ✅ | ProfileBuilder、PreferenceAnalyzer、DialogueInsightAnalyzer、AwarenessAnalyzer、InsightAnalyzer、LayerUpdaters 和 InterestSpeculator 都收敛到 `llm.json_utils`，每个任务用 predicate 约束自己需要的 schema；MiMo / 非 OpenAI wrapper 不再只修 awareness 一处 |
+| v0.3.147 画像上下文缓存前缀保护 | ✅ | PreferenceAnalyzer、ProfileBuilder、AwarenessAnalyzer、InsightAnalyzer、InterestSpeculator 和 AvoidanceSpeculator 的结构化 prompt 已经把 history / preference / soul_profile / profile_summary 放在 user message；调用 `LLMService` 时在支持路径上关闭额外 core memory 注入，避免把同一份动态画像再次拼进 system prompt |
+
+## 猜测兴趣系统 (Speculative Interest Lifecycle)
+
+系统会主动探索用户可能感兴趣但尚未接触的领域。通过心理学桥接推理，从已有兴趣模式中推断新方向。
+
+### 生命周期
+
+```
+生成 (Generate) — LLM 根据画像猜测 3-5 个新方向（每 10min / init / 启动时）
+    ↓  受活跃猜测数上限限制，到达上限则跳过
+活跃 (Active) — 每次事件 ingest 做关键词匹配观测
+    ├→ confirmation_count >= threshold → 转正 (Promote)
+    │    创建 InterestDomain(source="speculated", weight=0.3)
+    │    合并入 OnionProfile.interest.likes
+    └→ TTL 到期未确认 → 拒绝 (Reject)
+         加入冷却列表 (cooldown_days=7)
+         冷却期间不再猜测该方向
+```
+
+### 数据结构
+
+- **SpeculativeInterest**: domain, category, reason(心理学桥接), experience_mode, entry_load, `probe_mode`, confidence, ttl_days, confirmation_count/threshold, `confirmation_source`, `confirmed_at`, status(`active/confirmed/promoted/rejected/deferred`), `deferred_at`, `deferred_until`, `defer_count`
+- **CooldownEntry**: 被拒绝的方向 + 冷却到期时间
+- **SpeculativeState**: 活跃猜测 + 冷却列表，存储在 `data/memory/speculative_state.json`
+
+### 两个猜测来源
+
+1. **周期性生成**（默认每 10min）：专用 prompt `build_speculation_generation_prompt()` 深度推理，并额外标注 `experience_mode` / `entry_load`。Init 和进程启动时强制触发一次
+2. **偏好分析附带**：`PreferenceAnalyzer` 每次分析事件时产出 `speculative_interests`，作为种子注入
+
+### Active Pool 多样性
+
+- generation 不再把 LLM 返回的前几条候选直接塞进 active pool，而是先过一层本地 balanced selector
+- selector 会把既有 active pool 也作为选择上下文，优先补缺失的 `experience_mode` / `entry_load`，再按 confidence / weight 补齐剩余槽位
+- selector 还会执行 distance-band quota：当存在挑战候选时 `near` 最多约占 40%，并尽量保证 `lateral/bridge/wildcard` 至少有一条进入 active pool
+- 当模型没有提供足够丰富的候选时，会自动降级回普通排序，不阻塞 speculative 生成
+
+### Probe Distance Bands
+
+`probe_mode` 是探针距离，不直接作为用户文案：
+
+| probe_mode | 语义 |
+|------------|------|
+| `near` | 靠近已知兴趣的低风险确认 |
+| `lateral` | 同一能力 / 审美 / 需求下的横向相邻方向 |
+| `bridge` | 从已知兴趣桥接到另一个内容域，挑战但可解释 |
+| `wildcard` | 更远的探索项，用于打破短期口味收窄 |
+
+`SpeculativeInterest.challenge` 对 `lateral/bridge/wildcard` 返回 `True`。`GET /api/profile-summary`、`GET /api/interest-probes/pending` 和 `interest.probe` runtime event 都会暴露 `probe_mode` 与 `challenge`，让 UI 可以区分普通确认和挑战探针。挑战探针有独立 active 额度：普通 `near` 继续使用 `scheduler.speculation_max_active`（默认 5），挑战池固定最多 3 条，不再被 5 个普通探针占满后挤掉。
+
+### Probe Novelty Guard
+
+- LLM 生成候选和 `PreferenceAnalyzer` seed 注入都会经过 `ProbeNoveltyGuard`
+- guard 会收集画像 `interest.likes[*].domain`、画像 `specifics[*].name`、active speculation、cooldown speculation、近期 probe history 和已处理 probe feedback
+- 第一版使用规范化字符串和中文 bigram overlap 做本地判重，不引入 embedding 成本
+- 与已有画像 domain / specific、active / cooldown、近期 `probed_domains`、`probe_feedback_history` 中 `confirm/reject/chat_positive/chat_negative/chat_rejected` 等已处理记录明显重复的候选会被丢弃；候选 specifics 若部分重复，会先移除重复细项，剩余不足 2 条时丢弃候选
+
+### 配置项
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `scheduler.speculation_interval_minutes` | 10 | 生成间隔（分钟） |
+| `scheduler.speculation_ttl_days` | 3 | 猜测存活期。注意：`SpeculativeInterest` 数据类本身的 `ttl_days` 字段默认值为 14，仅作为反序列化不含该字段的历史数据时的兜底值；实际新产生的猜测兴趣均使用此配置项的 3 天 |
+| `scheduler.speculation_cooldown_days` | 7 | 拒绝后冷却期 |
+| `scheduler.speculation_confirmation_threshold` | 3 | 转正所需确认数 |
+| `scheduler.speculation_max_active` | 5 | 最大活跃普通 `near` 猜测数；挑战探针 `lateral/bridge/wildcard` 另有固定 3 条 active 额度 |
+| `scheduler.speculation_max_primary_interests` | 15 | 活跃猜测一级上限；不再把已确认兴趣计入，避免画像丰富后探针系统永久停摆 |
+| `scheduler.speculation_max_secondary_interests` | 60 | 活跃猜测二级上限；不再把已确认细项计入，避免画像丰富后探针系统永久停摆 |
+| `scheduler.speculator_idle_interval_minutes` | 30 | `ProfileUpdatePipeline` 空闲时检查猜测兴趣生命周期的间隔；`speculation_interval_minutes` 仍作为 speculator 内部生成间隔 gate |
+
+### 触发时机
+
+| 场景 | 方法 | 说明 |
+|------|------|------|
+| 定时 | `tick()` via Pipeline | 空闲 pipeline 默认每 30min 检查一次猜测兴趣生命周期；真正生成新猜测还受 `speculation_interval_minutes` 默认 10min gate 和兴趣上限约束 |
+| Init | `force_tick()` via `build_initial_profile()` | 画像初始化后立即生成猜测 |
+| 进程启动 | `force_tick()` via `startup_refresh_loop()` | API 启动时确保有活跃猜测 |
+| 偏好分析 | `ingest_seeds()` via `_update_interest()` | PreferenceAnalyzer 附带的推测兴趣注入 |
+
+`force_tick()` 忽略间隔计时器，但仍尊重普通 `near` 上限和独立挑战上限；即使 5 条普通探针已满，只要挑战池未满，仍会尝试生成挑战探针。生成 prompt 会根据空位写入动态 `probe_mode_request`：near 池满时明确要求只输出 `lateral/bridge/wildcard`，挑战池满时只输出 `near`，最终入池仍由本地 slot selector 硬约束。
+
+### 兴趣上限机制
+
+当活跃猜测达到上限时，跳过生成。已确认兴趣不再计入生成上限，否则画像越丰富越容易让探针系统永久停摆：
+
+| 级别 | 计算方式 | 上限 |
+|------|---------|------|
+| 一级 | 活跃猜测数 | 15 |
+| 二级 | 活跃猜测数 | 60 |
+
+### Pipeline 集成
+
+- `ingest_batch()` 时调用 `speculator.observe()` 做轻量级关键词匹配
+- `tick()` 时调用 `speculator.tick()` 处理过期/转正/生成
+- 转正后自动创建 `InterestDomain` 并记录 changelog
+
+### Discovery 集成
+
+- `SoulEngine.get_profile()` 自动将活跃猜测附加到 `profile._active_speculations`
+- `build_profile_summary()` 读取 `_active_speculations` 并包含在画像摘要中
+- `SearchStrategy` / `ExploreStrategy` / `TrendingStrategy` 均可在 LLM prompt 中看到猜测兴趣
+
+### API 集成
+
+- `GET /api/profile-summary` 返回 `speculative_interests` 字段（`SpeculativeInterestOut` 列表），包含 `probe_mode` 与 `challenge`
+- 从 `speculative_state.json` 直接加载，最多返回 6 条活跃猜测
+- `POST /api/interest-probes/respond` 的 profile 页面确认会传 `surface="profile"` 并记录为 `profile_confirmed`；runtime/inbox 卡片确认默认仍是 `probe_confirmed`；聊天强确认记录为 `chat_confirmed`，buffer 晋升记录为 `buffer_promoted`
+- `POST /api/interest-probes/respond` 与 `POST /api/avoidance-probes/respond` 的 `response` 取值：`confirm` / `reject` / `defer` / `chat`。`defer`（暂时忽略）返回 `{ok, action: "deferred"|"defer_exhausted", deferred_until, defer_count}`，并发 `interest.deferred` / `avoidance.deferred` runtime event（耗尽时复用 `*.rejected` event）。`deferred` 不改画像，桌面 Web 因此不对这两个 event 触发 profile 刷新
+- 桌面 Web 对 `confirm / reject / defer` 使用 10 秒客户端提交屏障，并以 `probe:<messageType>:<normalizedDomain>` 作为跨消息抽屉/画像页的稳定动作键；同一探针不会在两个 surface 产生两次待提交写入。`chat` 不走该屏障
+
+### Probe 选择
+
+- runtime push 和 OpenClaw `get_next_probe()` 共用同一套 probe selection 规则
+- `confirmation_count` 仍然是第一优先级；当验证压力相同，会优先选择最近没推过的 `experience_mode + entry_load` 组合
+- probe 去重状态写入并持久化到 `discovery_runtime_state["probed_domains"]`、`discovery_runtime_state["probed_axes"]` 和 `discovery_runtime_state["probed_distance_bands"]`；runtime push 只有在 `interest.probe` 实际投递到至少一个 runtime stream 订阅者后才记录，避免前端离线时误消耗探针
+- `/api/interest-probes/respond` 会把真实命中 active 探针的 confirm / reject，以及 chat classification 写入 `discovery_runtime_state["probe_feedback_history"]`；stale / 已处理卡片返回 `ok=false` 时不写历史，避免重复点击污染 novelty 依据。classification 保留 `raw_text_excerpt / classifier / resulting_action` 等审计字段。后续生成会降低 reject / chat_rejected 体验轴的入池优先级，选择会跳过明显重复的 domain，并在同等压力下避开负向反馈过的体验轴与 probe distance
+- runtime push 成功投递后、OpenClaw `get_next_probe()` 成功返回后，都会记录本次 domain / axis / probe_mode，连续调用不会重复返回同一条 active probe
+
+### 短期探索 Buffer
+
+弱正向不是长期偏好确认。`short_term_exploration_buffer` 用 10 天 TTL 存储近期探索证据，7 天 promotion window 内满足 `score >= 4.0` 且显式弱正向证据足够时才晋升：
+
+| source_event | 权重 | 来源 |
+|--------------|------|------|
+| `weak_positive_chat` | `+1.5` | 兴趣探针聊天里的弱正向表达 |
+| `card_like` | `+1.5` | 普通推荐卡片喜欢 |
+| `card_more_like` | `+1.5` | 惊喜推荐喜欢 |
+| `long_watch` | `+0.5` | 预留长观看弱证据 |
+| `plain_click` | `+0.25` | 普通推荐点击，只能作为弱辅助 |
+| `negative` | `-3.0` | dislike / 不感兴趣，触发 48h 冷却 |
+
+晋升时调用 `merge_confirmed_interest(source="buffer_promoted")`，与手动确认使用同一套兴趣合并逻辑，不重复插入同名 domain。
+
+### 关键文件
+
+- `src/openbiliclaw/soul/speculator.py` — 核心引擎（生成/观测/转正/过期/force_tick）
+- `src/openbiliclaw/llm/prompts.py` — `build_speculation_generation_prompt()`
+- `tests/test_speculator.py` — speculative lifecycle / novelty / probe selection 单元测试
+
+## 不喜欢领域探针系统 (Avoidance Probe Lifecycle)
+
+系统会主动探索用户可能想避开的内容形态、质量边界或表达方式。它和正向 `InterestSpeculator` 分开存储、分开配额，默认最多 5 条 active，不占正向兴趣探针的 5 条配额。
+
+### 生命周期
+
+```
+生成 (Generate) — LLM 根据 dislike、正向边界和风格画像生成 2-4 个细分避雷假设
+    ↓  受独立 active 上限限制，到达 5 条则跳过
+活跃 (Active) — 只观测显式负向证据
+    ├→ 用户 confirm 或 confirmation_count >= threshold
+    │    → 标记 confirmed/promoted
+    │    → Pipeline/API 调用 apply_new_dislikes()
+    │    → 写入 preference.disliked_topics + 同步 soul layer + 清理候选池
+    └→ 用户 reject 或 TTL 到期
+         → 进入 cooldown，不写画像，不过滤推荐
+```
+
+`AvoidanceSpeculator.tick()` 和 `force_tick()` 会在生成、转正、拒绝时输出 INFO 级摘要；active 已满或无 LLM 服务导致 `force_tick()` 无变化时只输出 DEBUG。LLM 返回的候选若被 novelty / quality gate 丢弃，会记录丢弃原因，方便排查“post-reload 已触发但没有新避雷探针”的生产问题。
+
+active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻止明显重复，source/topic guard 额外阻止同一 `source_mode` 下围绕同一粗主题连续换皮（例如多个 AI positive_boundary 只留一条）。如果历史 active 已经重复，下一轮 tick 会保留更具体 / 置信度更高的一条，其余写入 cooldown；新生成候选也会参考当前 active 的 `source_mode`、`source_signal`、体验轴和 specifics，避免一批避雷探针都围绕同一个证据源。
+
+### 确认语义
+
+- `confirm` 表示“确实不喜欢 / 需要避开”。写回时优先写 `specifics[*].name`；只有 specifics 为空时才兜底写 domain，避免把子方向扩大成整个领域。
+- `reject` 表示“我并不排斥这个方向”。它只进入 cooldown 和 `avoidance_probe_feedback_history`，用于后续去重。
+- `chat` 使用 `scope="avoidance_probe"` 的 durable chat。用户在多聊中表达“对，这类不喜欢”会走 confirm-like 反馈；表达“不是，我其实可以看”会走 reject-like 反馈；中立只留审计记录。
+
+### 写回路径
+
+确认后的持久化源头是 flat preference：
+
+`apply_new_dislikes()` → `preference_layer.data["disliked_topics"]` → `OnionProfile.populate_from_flat_preference()` → `soul` layer / profile files → pool purge。
+
+`AvoidanceSpeculator` 只维护自己的 `avoidance_state.json`，不直接跨模块修改 `disliked_topics`、`soul` layer 或候选池。API confirm 和 pipeline 自动 promote 都调用 `soul.dislike_writeback.apply_new_dislikes()`，因此手动确认和观察驱动确认走同一条写回与清池路径。
+
+### 观察规则
+
+自动确认只消费高确信负向信号：`feedback_type=dislike`、`reaction=thumbs_down`、`event_type=dislike` 或避雷探针聊天里明确的负向表达。`quick_exit` / `inferred_satisfaction=negative` 这类被动信号不会增加 confirmation count；这是有意严于 preference 层 dislike 抽取的规则，因为避雷探针确认会写入长期过滤偏好。
+
+### 配置项
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `scheduler.avoidance_speculation_interval_minutes` | 10 | 负向探针生成间隔（分钟） |
+| `scheduler.avoidance_speculation_ttl_days` | 3 | 负向探针存活期 |
+| `scheduler.avoidance_speculation_cooldown_days` | 7 | 否认或过期后的冷却期 |
+| `scheduler.avoidance_speculation_confirmation_threshold` | 3 | 自动确认所需显式负向证据数 |
+| `scheduler.avoidance_speculation_max_active` | 5 | 最大活跃避雷假设数 |
+
+### 集成边界
+
+- `GET /api/profile-summary` 返回 `speculative_avoidances`，供移动 Web、桌面 Web 和插件画像页展示。
+- `GET /api/avoidance-probes/pending` / `POST /api/avoidance-probes/respond` / `POST /api/avoidance-probes/trigger` 提供前端与 OpenClaw 的操作入口。
+- `POST /api/avoidance-probes/respond` 只有在 active 避雷探针真实命中时才写入 `avoidance_probe_feedback_history`；已确认、已拒绝或被刷新替换的 stale 卡片会返回 `ok=false`，不会再追加矛盾的 confirm / reject 历史。
+- runtime stream 推送 `avoidance.probe`，确认、否认和聊天分别广播 `avoidance.confirmed` / `avoidance.rejected` / `avoidance.chat`。
+- 配置热重载后，`RuntimeContext.restart_background_tasks()` 会 detached 调度避雷 speculator 的 `force_tick()`，并传入 `discovery_runtime_state["avoidance_probe_feedback_history"]`；这条 one-shot 与正向兴趣 speculator 共用 `_safe_post_reload_speculate()`，避免阻塞 `/api/config` 响应。
+- `ProfileUpdatePipeline.tick()` 调用避雷 speculator 时会捕获并记录 warning，避免 refresh loop 外层的 broad suppress 把异常静默吞掉。
+- 未确认避雷探针不会挂到 `profile._active_speculations`，也不会进入 discovery、curator、delight 或 recommendation prompt。
+
+### 关键文件
+
+- `src/openbiliclaw/soul/avoidance_speculator.py` — 负向探针状态机、novelty guard、候选选择
+- `src/openbiliclaw/soul/dislike_writeback.py` — confirmed dislike 写回、profile 同步和候选池清理
+- `src/openbiliclaw/llm/prompts.py` — `build_avoidance_generation_prompt()`
+- `tests/test_avoidance_speculator.py` — avoidance lifecycle / novelty / probe selection 单元测试
+
+## 画像更新逻辑详解
+
+当前实现里，“画像更新”不是一次单点写文件，而是一条分层链路：
+
+`事件/Event` → `偏好/Preference` → `觉察/Awareness` → `洞察/Insight` → `画像/SoulProfile`
+
+但这条链路并不是每次都从底层一路跑到顶层。系统会根据信号类型、强度和累计程度，决定这次更新只停在偏好层，还是继续推进到 `SoulProfile` 重建。
+
+### 如果只看最终 `SoulProfile` 本身，可以把它读成 3 个层次
+
+很多人会把“画像”理解成一段自然语言描述，但当前 `SoulProfile` 实际上至少包含 3 层信息：
+
+1. **总述层**
+   这是最像“人物小传”的部分，回答“这个人大致是什么样的人”。
+   主要字段：
+   - `personality_portrait`
+   - `core_traits`
+
+2. **解释层**
+   这是画像真正变得立体的部分，回答“他是怎么理解世界的、在被什么驱动、最近处于什么阶段”。
+   主要字段：
+   - `cognitive_style`
+   - `motivational_drivers`
+   - `current_phase`
+   - `values`
+   - `life_stage`
+   - `deep_needs`
+
+3. **上下文层**
+   这层不是为了给用户直接读“人格总结”，而是为了让后续 LLM 和产品逻辑知道这个画像最近是基于什么上下文形成的。
+   主要字段：
+   - `preferences`
+   - `recent_awareness`
+   - `active_insights`
+
+可以把它理解成：
+
+- **总述层**：你是谁
+- **解释层**：你为什么会这样
+- **上下文层**：最近哪些证据在支撑这个判断
+
+### 一个简单例子
+
+如果系统最近对你的理解是“你不满足于知道结果，更想把结构看明白”，那么在 `SoulProfile` 里可能会长成这样：
+
+- `personality_portrait`
+  “这是一个会主动追问复杂问题底层逻辑的人，不太满足于结论本身，更在意因果链和结构感。”
+- `core_traits`
+  `["理性", "重结构", "谨慎"]`
+- `cognitive_style`
+  `["会先找框架", "喜欢把问题讲透", "对证据比较敏感"]`
+- `motivational_drivers`
+  `["建立判断确定性", "持续扩展理解边界"]`
+- `current_phase`
+  “最近更像在一边吸收高密度信息，一边整理自己的判断框架。”
+- `preferences.top_interests`
+  `国际时事 / 历史 / 纪录片`
+- `recent_awareness`
+  “最近连续浏览高信息密度国际议题内容”
+- `active_insights`
+  “用户可能在通过深度内容建立更稳定的判断框架”
+
+所以最终画像并不只是那段 `personality_portrait`，而是一整组“总述 + 解释 + 上下文”的组合。
+
+### 先说结论：哪些东西会真的影响画像
+
+当前会进入画像更新链路的主要有 4 类信号：
+
+- **行为事件**：`view / search / favorite / like / follow` 等，通常先更新偏好层
+- **推荐反馈**：`like / dislike / comment / dismiss`，会先记事件，再按批量阈值决定是否重分析偏好和重建画像；其中 `comment` 是中性直接反馈，不预设正负向
+- **聊天信号**：用户在对话里明确表达的 `interest / dislike / goal / value / state`
+- **人工生成的中间理解**：`awareness` 和 `insight` 不直接改偏好，但会在画像重建时作为输入材料参与描述
+
+真正持久化到“你是谁”的，是 `soul.json`；但驱动它变化的，不只是 `soul/` 自己，还包括 `memory/` 中的事件、反馈状态、聊天候选和认知更新文件。
+
+### 1. 初始化画像：第一次把人“立起来”
+
+首次初始化时，走的是 `SoulEngine.build_initial_profile(history)`：
+
+1. 先读取已有 `preference` 层。
+2. `openbiliclaw init` 已经先把 B 站历史 / 收藏 / 关注，以及显式启用的小红书 / 抖音 bootstrap signals 汇总成事件批次，调用 `analyze_events()` 更新偏好层。
+3. 再加载历史 `awareness_notes` 和 `active_insights`。首次新装通常为空；如果第 2 步的初始化分片输出了临时 `awareness_candidates` / `insight_candidates`，`SoulEngine` 会把它们追加到本次 profile-build prompt 的 awareness / insights 输入中。
+4. `ProfileBuilder.build()` 把 `history_summary + preference_summary + awareness + insights` 一起送给 LLM。临时 chunk cognition 只参与这次 prompt，不持久化到 awareness / insight 层。
+5. LLM 返回结构化 JSON，必须包含：
+   - `personality_portrait`
+   - `core_traits`
+   - `cognitive_style`
+   - `motivational_drivers`
+   - `current_phase`
+   - `values`
+   - `life_stage`
+   - `deep_needs`
+6. `ProfileBuilder` 校验字段完整性和画像长度，成功后才写入 `soul.json`。
+
+小红书 bootstrap signals 的来源是浏览器插件在小红书页面中解析出的 notes，不是后端爬虫，也不是 Chrome 浏览器历史。scope 映射为：
+
+| 小红书 scope | 事件类型 | 用途 |
+|-------------|----------|------|
+| `saved` | `favorite` | 高强度收藏/想回看信号 |
+| `liked` | `like` | 中高强度偏好信号 |
+| `xhs_history` | `view` | 小红书页面明确暴露时的浏览/足迹 state，强度较弱；普通推荐流不计入 |
+
+抖音 bootstrap signals 的来源是浏览器插件在抖音页面中解析出的 videos / creators，不是后端爬虫，也不读取 Chrome 浏览器历史。scope 映射为：
+
+| 抖音 scope | 事件类型 | 用途 |
+|-----------|----------|------|
+| `dy_post` | `view` | 用户自己发布内容，作为弱口味信号 |
+| `dy_collect` | `favorite` | 收藏/想回看信号，强度最高 |
+| `dy_like` | `like` | 中高强度偏好信号 |
+| `dy_follow` | `follow` | 对创作者长期内容的兴趣信号 |
+
+这里有两个重要约束：
+
+- `personality_portrait` prompt 目标为 150-260 字，后端校验容忍 120-500 字；超出范围认为画像无效
+- 如果 LLM 返回坏 JSON 或空内容，旧画像不会被覆盖；初始化大批量 history 触发风控 / 坏 JSON 时会移除原始标题和 context，用结构化偏好、来源分布、觉察和洞察重试一次
+- 辅助字段（如 `motivational_drivers`、`values`、`deep_needs`）缺失或轻微格式不符时会补空值并记录 warning，避免真实 provider 少吐一个列表字段导致首次初始化失败
+
+所以初始化不是“随便生成一段描述”，而是一次严格结构化的建档。
+
+### 2. 行为事件路径：大多数变化先停在偏好层
+
+日常行为事件先由 `MemoryManager.propagate_event()` 写入 SQLite 事件层。它当前只负责**落事实**，不会自动一路向上刷新五层。
+
+初始化建档或手动 `rebuild-profile` 这类批量重建路径，才会由 `SoulEngine.analyze_events(events)` 直接触发偏好分析：
+
+1. 读取当前 `preference` 层。
+2. 调用 `PreferenceAnalyzer.analyze_events()`。
+3. 里面会用 `build_preference_analysis_prompt()` 把：
+   - 本批 `events`
+   - `existing_preference`
+   一起发给 LLM，提取结构化偏好。
+4. 返回结果会进入 `merge_preferences()`，与旧偏好合并。
+5. 合并后的偏好写回 `preference.json`。
+
+初始化这类大批量事件会按分片并发分析，但初始 chunk 调度会按最多 16 个一批推进；一批处理完再处理下一批，避免拉全量历史时一次性创建所有 prompt 任务和等待队列。真实 provider 并发仍由 `LLMService` 控制，不通过这里调高。偏好分析的事件批次和 existing preference 已经完整放在 user prompt 中，因此单批 / 分片 LLM 调用会在 `LLMService` 支持时传 `inject_core_memory=False`，避免把动态 core memory 再拼进 system prompt、打穿 provider prompt-cache 前缀。初始化 chunk 的 LLM schema 还允许返回少量 `awareness_candidates` / `insight_candidates`：它们不是长期认知层产物，只是本轮初始画像的临时上下文；`SoulEngine.analyze_events()` 会从持久化 preference 中剥离私有 `_init_cognition_context`，随后 `build_initial_profile()` 一次性消费并清空。偏好分析还会在每次 LLM 调用前检查 prompt 体积：`event_chunk_size` 只是第一层按条数粗分片；如果某个 chunk 的 `system_instruction + user_input` 超过本地保守预算，`PreferenceAnalyzer` 会继续递归二分该 chunk。若单条事件本身过长，会只保留 `event_type / title / context / inferred_satisfaction / satisfaction_reason` 和 `metadata.source_platform / up_name / bvid / feedback_type` 等偏好提取关键字段，截断长文本并丢弃 `raw_context`、字幕、评论、原始 payload 等大字段。compact 后仍超预算的单条事件会被跳过并记录 warning，其他事件继续参与合并。
+
+若某个分片被 LLM 风控拒绝或返回非 JSON，`PreferenceAnalyzer` 仍会递归拆小该分片；最终只有仍失败的单条事件会被跳过。若 provider 返回明确的 context-window 错误（例如 `n_keep >= n_ctx`、`context length`、`prompt is too long`），偏好分析会按同一套拆分 / compact 逻辑重试；认证、网络、限流、模型不存在等非上下文错误仍会让调用失败，避免把服务不可用伪装成成功。
+
+`satisfaction_filter_enabled` 默认开启后，偏好分析会先把 `quick_exit` 等被动 negative 事件从 prompt 中移除，避免误把标题党点击学成兴趣。显式负反馈不走这条丢弃路径：`feedback_type=dislike` 或 `reaction=thumbs_down` 会保留在 prompt 里，但只能贡献 `disliked_topics`、风格避让或置信度下调，不能贡献正向 `interests` / `favorite_up_users`。`feedback_type=comment` 会被分类为 `neutral/direct_feedback`：它只表示“用户对推荐内容给了直接文字反馈”，PreferenceAnalyzer prompt 明确要求根据 `feedback_note` / 备注 / `context` 内容判断喜欢、不喜欢或中性说明，不能因为它是 comment 就默认当正向。
+
+这一层真正做的不是“生成画像”，而是把近期行为压缩成结构化偏好状态，例如：
+
+- `interests`
+- `style.preferred_duration / depth_preference / humor_preference`
+- `context.session_type`
+- `exploration_openness`
+- `disliked_topics`
+- `favorite_up_users`
+
+#### 偏好层合并规则
+
+`PreferenceAnalyzer.merge_preferences()` 当前有几条很具体的规则：
+
+- 兴趣按 `(name, category)` 作为唯一键合并
+- 老兴趣会先做时间衰减：`weight × 0.9^weeks`
+- 衰减后若低于 `0.05`，该兴趣会被丢弃
+- 同名兴趣再次出现时：
+  - `first_seen` 保留最早值
+  - `last_seen` 更新到现在
+  - `weight` 取旧值和新值的较大者
+- `favorite_up_users` 走旧 ∪ 新集合并集累积，不会丢历史值（修正了此前「本批一旦提到任意创作者就整体替换历史列表」的 bug）
+- `disliked_topics` 走**近因有序并集**：本轮避雷项排在前，与历史去重后再截到 `_DISLIKED_TOPICS_STORE_CAP`（128）。每轮被重新标记的雷点会冒到前面，长期不再出现的雷点滑出尾部衰减掉。下游 prompt 上限（discovery + 推荐摘要）与存储上限同为 128，存进来的避雷项全部进 LLM 画像输入，不再有任何截断（近因并集修复前的存量条目仍是字典序，任何小于存储上限的截断都会按码点而非相关性丢雷点）
+- `style/context` 先继承默认值，再叠加旧状态，再叠加新状态
+
+这意味着行为事件对画像的第一影响，通常不是直接改 `personality_portrait`，而是先慢慢把偏好层往一个更稳定的方向推。
+
+普通浏览器事件和插件 bootstrap 任务结果都有一条增量路径：当 `soul_engine.is_profile_ready()` 已经为真时，`POST /api/events` 中 accepted 的事件，以及小红书 / 抖音 / YouTube / 知乎等 task-result 新增事件，会先写入 memory，再通过 `signals_from_events()` 转成 `ProfileSignal` 进入 `ProfileUpdatePipeline.ingest_batch()`。也就是说，初始化后的普通增量画像不由 `MemoryManager.propagate_event()` 隐式触发，也不直接复用 `analyze_events()`，而是在 API/runtime 层显式把已落库事件喂给 pipeline。`/api/events` 会先用独立 `last_profile_pipeline_event_id` 游标补喂旧版本遗留在 discovery 水位后的行为事件，再喂当前 accepted 事件，随后通过 `request_replenishment(reason="event_ingest")` 只提交补货需求；真正补货由定时 tick 或用户刷新后的低库存检查统一触发。这个画像 backfill 游标不推进 discovery 的 `last_processed_event_id`。画像 backfill 有进程内 single-flight 保护：当前一批旧 pending 行正在喂给 pipeline 时，并发 `/api/events` 请求会跳过重复 backfill，只处理自身 accepted 事件，避免多个请求读到同一个旧 cursor 后重复分析同一批 200 条信号。rejected / not_initialized 事件不会进入 pipeline。首次 init 期间不会走这条增量更新，避免同一批初始化事件同时被 `analyze_events()` 和 pipeline 重复学习。知乎为了保留 `fetch-zhihu` 的 smoke 语义，只有任务 payload 显式带 `profile_update=true` 时才走 API 自动传播路径；CLI 手动回填使用 `fetch-zhihu --write-memory` / `--rebuild-profile`。
+
+### 3. 推荐反馈路径：分成“即时记住”和“批量学习”两档
+
+推荐反馈是当前画像更新里最细的一条链。它不是每点一次 `like/dislike` 都立刻重建画像，而是分成两层处理。
+
+卡片 like/dislike 属于可撤销的软信号，并由后台批处理学习。单次 dislike 不会直接把某个
+主题永久写成硬屏蔽；需要确定性修正时，用户仍可主动前往原有画像页写入持久 override，
+或在原有对话页用自由文本说明偏好。本 Issue 不在推荐区新增纠偏引导入口。
+
+#### 第一层：即时认知更新，不重建画像
+
+`record_immediate_feedback_cognition()` 处理的是单条强反馈，目的是让系统“先记住这件事”，但不马上改整张画像。
+
+当前支持：
+
+- `comment` 且有文字：写入一条中性的 `profile_shift` 风格 cognition card，提示后续结合评论内容判断喜欢 / 不喜欢 / 补充说明，不默认当成正向偏好
+- `dislike`：写入一条 `dislike_added`
+- `like`：写入一条 `interest_added`
+
+它会生成这些字段并写进 `cognition_updates.json`：
+
+- `summary`
+- `context_line`
+- `impact`
+- `reasoning`
+- `evidence`
+- `source = "feedback"`
+- `source_label = "推荐反馈"`
+- `confidence`
+
+这条路径的特征是：
+
+- 很快，适合 UI 立刻展示“阿B 刚记住了什么”
+- 会去重，避免同一 summary 重复写
+- **不会**直接触发偏好重分析
+- **不会**直接重建 `SoulProfile`
+
+所以单条反馈的主要作用，是先形成一条“认知变化记录”，而不是立刻把人格描述大改一遍。
+
+#### 第二层：批量学习，必要时重建画像
+
+真正会动到偏好层和画像的是 `process_feedback_batch_if_needed()`：
+
+生产 API 入口不会每条反馈都立即新起画像重分析任务；`/api/feedback` 会先交给 runtime 的 `FeedbackBatchScheduler` 做短窗口 debounce / coalesce，再进入这里的批量学习。
+
+1. 如果已有反馈批处理在跑，立即返回 `skipped=true, reason="feedback_batch_in_progress"`
+2. 读取 `feedback_state.json` 中的 `last_processed_feedback_event_id`
+3. 从事件层按 `id ASC` 找出这个游标之后的全部新 `feedback` 事件；不再用 newest-first `limit=500` 截断，避免大积压时跳过较早但未处理的 feedback
+4. 如果新增反馈少于 `3` 条，直接返回，不做重分析
+5. 达到阈值后，先把反馈事件瘦身为偏好分析需要的字段：`id/event_type/url/title/context/inferred_satisfaction/satisfaction_reason/created_at`，以及 `recommendation_id/bvid/content_id/source_platform/feedback_type/feedback_note/reaction/topic_label/signal_strength` 等白名单 metadata；插件原始字段如 `targetText`、`raw_context`、`href` 不进入 LLM prompt
+6. 调用 `PreferenceAnalyzer.analyze_events()` 用这批瘦身后的反馈重跑偏好提取
+7. 偏好写回 `preference.json`
+8. 再比较“这次偏好变化是否足够明显”
+9. 如果明显，才调用 `ProfileBuilder.build()` 重建画像并写回 `soul.json`
+10. 同时生成聚合层的 cognition updates
+11. 最后更新 `feedback_state.json` 的游标和处理时间
+
+#### 什么叫“变化明显”
+
+当前 `_preference_changed_significantly()` 的判定很明确：
+
+- 只看 `weight >= 0.6` 的高权重兴趣
+- 如果旧偏好里没有高权重兴趣，而新偏好有，算明显变化
+- 如果高权重兴趣集合的增删差异达到 `2` 个以上，算明显变化
+- 如果同一个高权重兴趣的权重变化绝对值 `>= 0.2`，算明显变化
+- 如果新增了至少 `1` 个 `disliked_topics`，算明显变化
+
+只有满足这些条件，系统才会认为“这不是局部波动，而是值得重写画像的变化”。
+
+### 4. 聊天学习路径：先记候选，再看是否够格进入长期画像
+
+聊天信号的处理路径是 `learn_from_dialogue()`，它比反馈更保守，因为聊天里更容易出现一次性情绪或随口表达。
+
+完整链路如下：
+
+1. 先把这轮对话写成一条 `dialogue` 事件进事件层。
+2. 调用 `DialogueInsightAnalyzer.extract()`。
+3. LLM 从这轮对话里提取候选信号，限定在：
+   - `interest`
+   - `dislike`
+   - `goal`
+   - `value`
+   - `state`
+4. 每条候选都带：
+   - `content`
+   - `confidence`
+   - `evidence`
+5. 候选先和历史 `insight_candidates.json` 合并，不直接写进偏好层。
+
+#### 候选如何合并
+
+`_merge_insight_candidates()` 会按 `kind + content` 合并：
+
+- 新候选首次出现时，创建一条记录
+- 重复出现时：
+  - `occurrences + 1`
+  - `confidence` 取更高值
+  - `evidence` 更新为最新非空值
+  - `updated_at` 刷新
+
+所以聊天学习不是“听见一次就信”，而是把聊天信号当作待确认的长期候选。
+
+#### 哪些聊天候选会立刻出现在画像页上
+
+有一条更轻的 UI 路径：`_record_immediate_dialogue_cognition()`。
+
+如果候选满足即时展示条件，就会先生成一张 cognition card：
+
+- `goal / dislike / interest / value` 要求 `confidence >= 0.8`
+- `state` 更保守，要求 `confidence >= 0.9`
+
+这一步只影响 `cognition_updates.json`，不等于正式改画像。
+
+#### 哪些聊天候选会真正进入偏好层
+
+要进入长期学习，候选必须满足 `_candidate_ready_for_learning()`：
+
+- `applied == False`
+- `confidence >= 0.8` 或 `occurrences >= 2`
+
+也就是说，**单次非常明确的高置信聊天信号**，或**同一个方向至少重复出现两次**，都会被转成一条 `dialogue_insight` 事件，再送进 `PreferenceAnalyzer.analyze_events()`。
+
+之后的流程和反馈批量学习相同：
+
+1. 用这些合格候选更新偏好层
+2. 比较偏好是否显著变化
+3. 只有显著变化时才重建 `SoulProfile`
+4. 生成 cognition updates
+5. 把这些候选标记为 `applied = True`
+
+### 5. 觉察层与洞察层：不直接触发重建，但会影响下次画像重建长什么样
+
+`generate_awareness_note()` 和 `generate_insight()` 本身不做“显著变化判定”，也不直接调用重建画像。
+
+它们的作用更像是**给下一次画像重建准备解释材料**：
+
+- `AwarenessAnalyzer` 从最近事件里生成保守的观察笔记
+- `InsightAnalyzer` 从 `awareness + preference + soul_profile` 里生成解释性假设
+
+这些结果分别写进：
+
+- `awareness.json`
+- `insight.json`
+
+当下一次 `build_initial_profile()` 或后续重建画像时，`ProfileBuilder.build()` 会把：
+
+- `history_summary`
+- `preference_summary`
+- `recent_awareness`
+- `active_insights`
+
+一起喂给 LLM。
+
+所以可以把它们理解为：**觉察层和洞察层不是更新闸门，而是画像重建时的“叙述素材层”**。它们决定画像写得是否更像“这个人怎么理解世界”，而不是只像一堆兴趣标签。
+
+### 6. 画像重建时，LLM 实际拿到什么
+
+真正重建画像时，走的是 `ProfileBuilder.build()` + `build_soul_profile_prompt()`。
+
+system prompt 的核心约束是：
+
+- 只能根据给定材料推断
+- 必须输出严格 JSON
+- 人格描述目标 150-260 字，后端校验容忍 120-500 字
+- 先写“怎么处理信息”，再写“长期在找什么”，最后写“最近处于什么阶段”
+- 不要把兴趣 topic 堆成画像主体
+
+输入则包括四块：
+
+- `history_summary`
+- `preference_summary`
+- `recent_awareness`
+- `active_insights`
+
+这意味着当前画像重建不是只看最近 3 条反馈，也不是只看几句聊天，而是把：
+
+- 长期历史
+- 最近行为聚合出的偏好
+- 近期观察
+- 解释性假设
+
+一起当作“重新描述这个人”的上下文。
+
+### 7. 认知变化是怎么生成的
+
+除了 `soul.json` 本身，系统还会生成一条独立的“你最近被记住了什么”的轨迹，这就是 `cognition_updates.json`。
+
+聚合路径的 cognition update 由 `_build_cognition_updates()` 生成，主要有三类：
+
+- `interest_added`
+  触发条件：新出现的兴趣不在旧偏好里，且 `weight >= 0.75`
+- `dislike_added`
+  触发条件：新出现的 `disliked_topics` 不在旧偏好里
+- `profile_shift`
+  触发条件：`_profile_shifted(previous_profile, current_profile)` 为真，也就是画像文本或关键列表字段发生变化
+
+这些 update 会附带：
+
+- `summary`
+- `context_line`
+- `impact`
+- `reasoning`
+- `evidence`
+- `source` / `source_label`
+- `confidence`
+
+这层的定位很重要：它不是替代画像，而是补一条“这次为什么变了”的可读解释，方便前端展示最近的认知变化。
+
+### 8. 哪些文件会被更新
+
+一次完整的“画像相关更新”可能涉及这些文件：
+
+- `data/memory/preference.json`
+  保存结构化偏好层
+- `data/memory/soul.json`
+  保存最终画像
+- `data/memory/awareness.json`
+  保存近期观察
+- `data/memory/insight.json`
+  保存解释性假设
+- `data/memory/feedback_state.json`
+  保存反馈批处理游标
+- `data/memory/insight_candidates.json`
+  保存聊天候选长期信号
+- `data/memory/cognition_updates.json`
+  保存“最近记住了什么”的结构化变化记录
+
+这也说明：当前画像更新是一个“主数据 + 中间状态 + 可解释回显”并存的体系，不是单文件覆盖。
+
+### 9. 一个完整例子：从一句话到画像变化
+
+假设你最近连续发生这些事情：
+
+1. 看了 3 条“国际局势深度解读”
+2. 搜索了“国际新闻 因果链”
+3. 聊天里说“我想把国际新闻背后的结构看明白”
+4. 对一条“浅层热点复读”点了 `dislike`
+5. 又在另一轮聊天里再次提到“我现在更想看讲透逻辑的内容”
+
+系统大致会这样处理：
+
+1. `view/search/dialogue/feedback` 先全部落入事件层。
+2. `analyze_events()` 把观看和搜索提炼成偏好层，例如：
+   - `国际局势`
+   - `历史`
+   - 更高的 `depth_preference`
+3. 单次 `dislike` 先生成一条即时 cognition card，告诉你“这类内容被记成避雷方向了”。
+4. 第一轮聊天会生成一个候选 `goal` 或 `interest`，但因为只出现一次，还不会正式写进偏好层。
+5. 第二轮相似聊天出现后，候选的 `occurrences` 到了 2，且 `confidence >= 0.8`，于是进入长期学习。
+6. 聊天候选和反馈批量一起推动偏好层出现显著变化，例如：
+   - 高权重兴趣新增/强化
+   - `disliked_topics` 新增了“浅层热点复读”
+7. `_preference_changed_significantly()` 返回真，触发画像重建。
+8. 重建时，LLM 会同时看到：
+   - 历史标题摘要
+   - 当前偏好层
+   - 近期 awareness
+   - active insights
+9. 新 `soul.json` 可能不只是说“喜欢国际新闻”，而会写成：
+   - “这个人会主动追问复杂事件背后的结构，更偏好能把因果链讲透的高信息密度内容”
+10. 同时生成一条或多条 cognition updates，告诉前端：
+   - 新兴趣更明确了
+   - 新避雷方向出现了
+   - 画像整体发生了一次可见转向
+
+### 10. 当前实现的边界
+
+为了避免画像抖动过快，当前实现刻意保守：
+
+- `propagate_event()` 只落事件；普通 `/api/events` 的增量画像由 API 层在 accepted 后显式喂给 `ProfileUpdatePipeline`，不会由 memory 层隐式触发全链路刷新
+- 单条反馈只做即时认知记录，不直接重建画像
+- 聊天信号必须高置信且重复出现，才能进入长期学习
+- 画像重建必须跨过“显著变化阈值”
+- `awareness` 和 `insight` 会影响画像内容，但不会独立触发重建
+
+换句话说，系统当前追求的是：**先把“你最近说了什么、做了什么”记稳，再在足够证据累计后，谨慎地改写“你是谁”**。
+
+## 公开 API
+
+### SoulEngine
+
+```python
+from openbiliclaw.soul.engine import SoulEngine
+engine = SoulEngine(
+    llm=runtime_bundle.chat_route,
+    memory=memory_manager,
+    embedding_service=runtime_bundle.embedding_service,
+    llm_concurrency=config.models.chat.concurrency,
+    llm_concurrency_gate=runtime_gate,
+)
+
+# 分析事件批次 → 更新偏好层
+await engine.analyze_events([
+    {"event_type": "view", "title": "世界史解说"},
+    {"event_type": "search", "title": "纪录片推荐"},
+])
+# 执行后 memory_manager.get_layer("preference").data 已更新并持久化
+
+result = await engine.process_feedback_batch_if_needed()
+# {
+#   "triggered": True,
+#   "feedback_count": 3,
+#   "preference_updated": True,
+#   "profile_rebuilt": True,
+# }
+
+learning = await engine.learn_from_dialogue(
+    user_message="我最近更想把国际新闻背后的结构看明白。",
+    assistant_reply="听起来你在追求一种能把复杂事件看清楚的框架。",
+    session="cli",
+)
+# {
+#   "event_logged": True,
+#   "candidate_count": 1,
+#   "preference_updated": False,
+#   "profile_rebuilt": False,
+# }
+
+updates = memory_manager.load_cognition_updates()
+# [
+#   {
+#     "kind": "interest_added",
+#     "summary": "阿B 刚记下了你对《这视频讲透了中东局势》的评论。",
+#     "context_line": "来自：《这视频讲透了中东局势》",
+#     "impact": "画像里“喜欢高信息密度、有人文关怀的内容”这条偏好会更明确。",
+#     "reasoning": "这次反馈不只是喜欢/不喜欢，而是主动说清了你在意的内容气质。",
+#     "evidence": "你评论《这视频讲透了中东局势》时说：这个很好看，有创意，我很喜欢，还有一些不油腻的人文关怀",
+#     "source": "feedback",
+#     "source_label": "推荐反馈",
+#     "expand_hint": "expandable",
+#     "created_at": "2026-03-15T10:30:00",
+#     "notified": False,
+#     ...
+#   }
+# ]
+```
+
+### SocraticDialogue
+
+```python
+from openbiliclaw.soul.dialogue import SocraticDialogue
+
+dialogue = SocraticDialogue(
+    llm=None,
+    soul_engine=engine,
+    llm_service=service,
+    session="cli",
+)
+
+reply = await dialogue.respond("我最近很喜欢看讲得很透的纪录片")
+# reply: "我猜你喜欢的是那种能慢慢展开逻辑的讲述方式..."
+
+print(dialogue.history)  # [DialogueTurn(role="user", ...), DialogueTurn(role="agent", ...)]
+dialogue.clear_history()
+```
+
+`respond()` 只在得到非空的真实回复后才追加 agent turn，并将完整的 user+agent 对交给 `learn_from_dialogue()`。每个 `SocraticDialogue` 实例用独立异步锁串行执行完整 turn 事务，普通回复与工具调用共享同一顺序；等待锁时取消不会改动历史，持锁期间的 LLM 异常、超时或取消只删除本轮临时 user turn 并原样重抛，失败内容不进入历史或长期学习。
+
+### PreferenceAnalyzer
+
+```python
+from openbiliclaw.soul.preference_analyzer import (
+    DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
+    MAX_CONCURRENT_PREFERENCE_CHUNKS,
+    PreferenceAnalyzer,
+)
+
+analyzer = PreferenceAnalyzer(
+    registry=llm_registry,
+    max_prompt_chars=24_000,  # 默认值：发送 LLM 前的保守 prompt 字符预算
+)
+updated_pref = await analyzer.analyze_events(
+    events=[...],
+    existing_preference=current_pref,
+    event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,  # 默认初始化粗分片：200 条
+)
+# 初始化路径每批最多推进 200 * 16 = 3200 条事件的粗分片；
+# 单个 chunk 超过 max_prompt_chars 时仍会继续按 prompt 预算拆小。
+# 偏好提取的 user prompt 已含事件批次和 existing_preference；
+# 使用 LLMService 时会关闭额外 core memory 注入，保护 provider prompt-cache 前缀。
+# 初始化调用的 chunk response 还可能带 `_init_cognition_context` 私有键；
+# SoulEngine 会在写 preference.json 前剥离，并只喂给紧接着的 profile build。
+assert DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE * MAX_CONCURRENT_PREFERENCE_CHUNKS == 3200
+# 返回:
+# {
+#   "interests": [{"name": "历史", "category": "知识", "weight": 0.82, ...}],
+#   "style": {"preferred_duration": "long", "depth_preference": 0.91},
+#   "exploration_openness": 0.66,
+#   "favorite_up_users": ["小约翰可汗"],
+#   "disliked_topics": ["低质标题党"],
+# }
+```
+
+### 分类词表与一次性迁移
+
+```python
+from openbiliclaw.soul.category_migration import CategoryMigrator
+from openbiliclaw.soul.taxonomy import CATEGORY_VOCAB, resolve_category
+
+# 一级分类闭集：19 项，含「其他」；不是 config，变更词表等同代码变更。
+assert "其他" in CATEGORY_VOCAB
+
+# 源头或运维工具可把任意分类收敛到词表：
+category = await resolve_category("技术", embedding_service)
+# category == "科技"；无 embedding 或相似度不足时返回 "其他"
+
+migrator = CategoryMigrator(memory=memory_manager, llm_service=llm_service)
+preview = await migrator.run(dry_run=True)
+# preview.mapping: {"泛娱乐": "娱乐", "宠物": "萌宠", ...}
+
+applied = await migrator.run(dry_run=False)
+# applied.run_id 可通过 ProfileConsolidator.revert(applied.run_id) 回滚。
+```
+
+迁移校验是强约束：现存非空分类必须被映射恰好一次，目标必须逐字来自 `CATEGORY_VOCAB`；任一失败时不写 `preference.json`，也不产生 run 记录。已有词表内分类由代码强制恒等映射，避免 LLM 把干净分类改脏。
+
+### 分类迁移与全量清理运维顺序
+
+推荐顺序：
+
+```bash
+openbiliclaw profile-consolidate --migrate-categories
+openbiliclaw profile-consolidate --migrate-categories --apply
+openbiliclaw profile-consolidate --full
+openbiliclaw profile-consolidate --full --apply
+```
+
+先做一级分类迁移，再做 `--full` 二级全量清理。迁移后，同名同类的精确重复会被阶段 0 规则层免费消化，能显著减少后续送 LLM 裁决的簇数；同名异类则保留为强制嫌疑簇，由带 `category` 的 judge payload 判断是同名异义（keep）还是误标（merge）。完成一次全量清理后，稳态交给 12h 定时任务：默认只看 likes top-512，配合输入 digest 与 no-merge 记忆，稳定画像不产生 LLM 调用。
+
+### OnionProfile（五层洋葱模型）
+
+```python
+from openbiliclaw.soul.profile import (
+    OnionProfile,
+    CoreLayer,
+    ValuesLayer,
+    InterestLayer,
+    RoleLayer,
+    SurfaceLayer,
+    MBTI,
+    MBTIDimension,
+)
+
+# OnionProfile 包含五个内嵌层，从内到外：
+# 1. CoreLayer - 最稳定的核心特质与深层需求
+# 2. ValuesLayer - 价值观与内在驱动力
+# 3. InterestLayer - 树形兴趣结构（domain → specifics）
+# 4. RoleLayer - 生活阶段与当前处境
+# 5. SurfaceLayer - 可观察的认知风格与内容偏好
+
+profile = OnionProfile(
+    core=CoreLayer(
+        core_traits=["理性", "重结构"],
+        deep_needs=["建立判断确定性"],
+        mbti=MBTI(
+            type="INTJ",
+            dimensions={
+                "EI": MBTIDimension(pole="I", strength=0.85),
+                "SN": MBTIDimension(pole="N", strength=0.78),
+                "TF": MBTIDimension(pole="T", strength=0.81),
+                "JP": MBTIDimension(pole="J", strength=0.72),
+            },
+            confidence=0.72,
+        ),
+    ),
+    values_layer=ValuesLayer(
+        values=["理解本质", "逻辑严谨"],
+        motivational_drivers=["追求确定性", "建立框架"],
+    ),
+    interest=InterestLayer(
+        likes=[
+            InterestDomain(
+                domain="国际时事",
+                weight=0.88,
+                specifics=[
+                    InterestSpecific(name="中东局势", weight=0.85),
+                    InterestSpecific(name="欧洲政治", weight=0.80),
+                    InterestSpecific(name="经济动向", weight=0.75),
+                ],
+            ),
+            InterestDomain(
+                domain="历史",
+                weight=0.82,
+                specifics=[
+                    InterestSpecific(name="冷战历史", weight=0.80),
+                ],
+            ),
+        ],
+        dislikes=[
+            InterestDomain(domain="浅层热点复读", weight=0.9),
+            InterestDomain(domain="标题党", weight=0.85),
+        ],
+        favorite_up_users=["小约翰可汗", "不知所云"],
+    ),
+    role=RoleLayer(
+        life_stage="职业早期，追求知识深度",
+        current_phase="最近在系统地补齐国际事务背景知识",
+    ),
+    surface=SurfaceLayer(
+        cognitive_style=[
+            "会先找框架",
+            "喜欢把问题讲透",
+            "对证据比较敏感",
+        ],
+        exploration_openness=0.65,
+    ),
+    personality_portrait="这是一个会主动追问复杂问题底层逻辑的人...",
+)
+
+# 向后兼容垫片属性（支持旧代码渐进迁移）
+assert profile.core_traits == profile.core.core_traits
+assert profile.deep_needs == profile.core.deep_needs
+assert profile.values == profile.values_layer.values
+assert profile.motivational_drivers == profile.values_layer.motivational_drivers
+assert profile.cognitive_style == profile.surface.cognitive_style
+assert profile.life_stage == profile.role.life_stage
+assert profile.current_phase == profile.role.current_phase
+
+# 自动迁移：从旧版 SoulProfile (v1) 转换到新 OnionProfile (v2)
+legacy_soul = SoulProfile.from_dict(old_v1_data)
+onion = OnionProfile.from_legacy(legacy_soul)
+assert onion.version == 2
+assert onion.core_traits == legacy_soul.core_traits
+```
+
+### ProfileBuilder / OnionProfile 构建
+
+```python
+from openbiliclaw.soul.profile_builder import ProfileBuilder
+
+builder = ProfileBuilder(registry=llm_registry)
+profile = await builder.build(
+    history=[
+        {"title": "AI 工具实测", "author": "科技UP主"},
+        {"title": "效率系统分享", "author": "知识UP主"},
+    ],
+    preference=current_pref,
+    awareness_notes=[
+        {
+            "date": "2026-03-20",
+            "observation": "最近更常停在高信息密度内容里。",
+            "trend": "明显更偏向讲透结构而不是只看结论。",
+        }
+    ],
+    active_insights=[
+        {
+            "hypothesis": "用户可能在通过深度内容建立判断确定性。",
+            "confidence": 0.71,
+        }
+    ],
+)
+# 返回 OnionProfile，自动填充五层结构
+
+assert 120 <= len(profile.personality_portrait) <= 500
+assert len(profile.core_traits) >= 3
+assert profile.core.mbti.type  # MBTI 现已包含
+assert profile.values_layer.motivational_drivers
+assert profile.role.current_phase
+assert profile.interest.likes  # 树形兴趣结构
+```
+
+```python
+profile = await engine.build_initial_profile(history=[...])
+loaded = await engine.get_profile()
+assert loaded.core.core_traits == profile.core.core_traits
+```
+
+### AwarenessAnalyzer / InsightAnalyzer
+
+```python
+from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
+from openbiliclaw.soul.insight_analyzer import InsightAnalyzer
+
+awareness = AwarenessAnalyzer(registry=llm_registry)
+notes = await awareness.analyze(
+    events=recent_events,
+    preference=current_pref,
+    soul_profile=current_soul,
+)
+# 兼容模型把数组包在 {"results": [...]} / {"items": [...]} 等对象里的 JSON mode 输出
+
+insight = InsightAnalyzer(registry=llm_registry)
+hypotheses = await insight.analyze(
+    awareness_notes=notes,
+    preference=current_pref,
+    soul_profile=current_soul,
+)
+```
+
+### DialogueInsightAnalyzer
+
+```python
+from openbiliclaw.soul.dialogue_insight_analyzer import DialogueInsightAnalyzer
+
+analyzer = DialogueInsightAnalyzer(registry=llm_service)
+candidates = await analyzer.extract(
+    user_message="我其实更想知道国际事件背后的因果链。",
+    assistant_reply="你像是在找一种更稳定的理解框架。",
+    core_memory=memory.get_core_memory(),
+)
+# [
+#   {
+#     "kind": "goal",
+#     "content": "想更系统地理解国际局势",
+#     "confidence": 0.84,
+#     "evidence": "用户明确表达想看清背后的因果链。"
+#   }
+# ]
+```
+
+### ToneProfile
+
+```python
+from openbiliclaw.soul.tone import build_tone_profile
+
+tone = build_tone_profile(
+    profile=current_profile,
+    preference_summary=memory.get_core_memory()["preference_summary"],
+    recent_feedback=[
+        {"feedback_type": "dislike", "feedback_note": "太油了"},
+        {"feedback_type": "dislike", "feedback_note": "话有点满"},
+    ],
+)
+# {
+#   "density": "dense",
+#   "warmth": "companion",
+#   "playfulness": "medium",
+#   "directness": "soft",
+# }
+```
+
+## 设计决策
+
+1. **偏好提取用 json_mode**：确保 LLM 返回结构化 JSON，便于程序处理
+2. **标量分类不用 json_mode**：兴趣探针聊天情绪只需要 `strong_positive / weak_positive / neutral / negative` 单词，走普通文本调用；只有真正返回 JSON 的任务才启用 structured task
+3. **对话事务按实例串行**：`SocraticDialogue` 用实例级异步锁覆盖 user turn 暂存、普通/工具 LLM 调用、agent turn 提交或回滚以及学习任务调度；异常与取消只回滚自己的临时 turn 并透明重抛，API / CLI / OpenClaw 公共边界再转换为安全中文错因
+4. **`_build_service()` 回退**：未注入 LLMService 时从 SoulEngine 自动构建
+5. **历史格式转换**：`agent` → `assistant` 角色映射，适配 OpenAI 消息格式
+6. **画像生成独立为 `ProfileBuilder`**：避免把 prompt/JSON 校验逻辑塞进 `SoulEngine`
+7. **认知变化解释由 soul 层生成**：`impact / reasoning / evidence` 都在后端认知链路里一次性产出，前端只负责展示，不在 UI 层脑补推理
+8. **默认态上下文也由 soul 层负责**：`context_line / source_label / expand_hint` 由后端统一生成，保证“这是对哪条内容或哪组信号的判断”与详情口径一致
+9. **评论型认知必须带内容上下文**：用户对“这条内容”的评论如果不带标题，认知卡片会失去可读性，因此即时反馈路径优先把标题写进 `summary`、`context_line` 和 `evidence`
+10. **聚合判断宁可保守也不伪造对象**：拿不到可信标题时，回退为“基于最近几条相关内容”，避免看起来丰富但实际不准
+11. **灵魂层失败不覆盖旧画像**：坏 JSON、空响应、缺字段时直接报错，已有 `soul.json` 保留
+12. **觉察层保守去重**：同日 observation 标准化后相同则跳过，避免流水账堆积
+13. **洞察层按假设文本合并**：相同 hypothesis 合并 evidence，confidence 取较高值
+14. **验证状态只由代码更新**：LLM 只生成 hypothesis/evidence/confidence，`validated` 不信任模型输出
+15. **反馈达到阈值后再学习**：默认累计 3 条新反馈才触发偏好重分析，避免单次噪声反馈频繁扰动画像
+16. **画像重建走显著变化阈值**：只有高权重兴趣明显变化或新增 `disliked_topics` 时才重建 `SoulProfile`
+17. **聊天信号受控生效**：聊天先落 `dialogue` 事件和 `insight_candidates.json`，高置信度候选或重复出现的候选才会进入偏好更新
+18. **语气不单独持久化**：`ToneProfile` 是从画像、偏好和近期反馈实时推断出的派生层，避免把易调参的表达风格绑死在 `soul.json`
+19. **“老B友”是基础人格，不是固定模板**：聊天、推荐和画像总结共用同一套语气维度，但会随着用户画像和近期反馈在信息密度、温度、梗感和直给程度上细调
+20. **认知变化只在关键时刻生成**：只有新增高权重兴趣、明确避雷方向或画像明显转向时，才会形成 `cognition update`，避免把普通波动都做成提醒
+21. **账户同步只补事件，不单独改画像**：history / favorites / following 统一先转成事件，再复用现有偏好分析与画像更新链，避免出现第二套理解逻辑
+22. **画像先写“怎么理解世界”，再写“看了什么”**：`personality_portrait` 必须先围绕认知风格、驱动力和当前阶段组织，兴趣 topic 最多只作为少量证据出现，避免退化成偏好标签润色稿

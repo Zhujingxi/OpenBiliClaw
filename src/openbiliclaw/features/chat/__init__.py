@@ -1,1 +1,0 @@
-"""Persisted chat feature."""

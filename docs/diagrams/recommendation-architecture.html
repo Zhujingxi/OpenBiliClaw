@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recommendation Module Architecture</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 40px;
+    min-width: 1200px;
+  }
+  h1 { color: #58a6ff; font-size: 28px; margin-bottom: 8px; }
+  .subtitle { color: #8b949e; font-size: 14px; margin-bottom: 8px; }
+  .stamp { color: #6e7681; font-size: 12px; margin-bottom: 32px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .diagram-section { margin-bottom: 60px; }
+  .section-title {
+    color: #f0883e; font-size: 18px; font-weight: 600;
+    margin-bottom: 20px; padding-left: 12px;
+    border-left: 3px solid #f0883e;
+  }
+
+  svg text { font-family: -apple-system, "PingFang SC", "Noto Sans SC", monospace; }
+
+  .legend {
+    display: flex; gap: 24px; flex-wrap: wrap;
+    margin-bottom: 32px; padding: 12px 16px;
+    background: #161b22; border-radius: 8px; border: 1px solid #30363d;
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .legend-swatch { width: 16px; height: 16px; border-radius: 3px; flex-shrink: 0; }
+
+  /* ── Explanatory prose (中文讲解) ── */
+  .lead { color: #8b949e; font-size: 13.5px; margin-bottom: 18px; line-height: 1.7; }
+  .src-card { margin-bottom: 16px; border: 1px solid #30363d; border-radius: 10px; overflow: hidden; background: #0f141a; }
+  .src-head { padding: 12px 16px; font-size: 16px; font-weight: 700; border-bottom: 1px solid #30363d; background: #161b22; }
+  .src-head .pill { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; margin-left: 8px; vertical-align: middle; }
+  .pill-on  { background: #0d2818; color: #3fb950; border: 1px solid #238636; }
+  .pill-off { background: #2a0d0d; color: #f0883e; border: 1px solid #8b3a1f; }
+  .pill-path{ background: #161b22; color: #8b949e; border: 1px solid #30363d; }
+  .src-body { padding: 6px 20px 14px; }
+  .src-body ol { margin: 0; padding-left: 22px; }
+  .src-body li { margin: 9px 0; font-size: 13.5px; line-height: 1.8; color: #c9d1d9; }
+  .src-body li > b { color: #e6edf3; }
+  .src-body .sub { display: block; color: #8b949e; font-size: 12.5px; margin-top: 4px; line-height: 1.85; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #79c0ff; font-size: 0.9em; background: #161b22; padding: 1px 5px; border-radius: 4px; }
+  .gloss-wrap { overflow-x: auto; border: 1px solid #30363d; border-radius: 8px; }
+  table.gloss { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.gloss th, table.gloss td { border-bottom: 1px solid #21262d; padding: 9px 14px; text-align: left; vertical-align: top; line-height: 1.65; }
+  table.gloss th { background: #1c2128; color: #58a6ff; font-weight: 600; }
+  table.gloss td.term { color: #79c0ff; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; width: 1%; }
+  table.gloss tr.grp td { background: #15110a; color: #f0883e; font-weight: 700; font-size: 12.5px; letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+
+<h1>推荐模块架构全景</h1>
+<p class="subtitle">`recommendation/` 与 Discovery 完全解耦，只消费 `content_cache` 候选池：先补分类与文案、预算 delight，再经 PoolCurator 评分、topic supergroup、MMR 与放大保护挑出可展示推荐。</p>
+<p class="stamp">docs/diagrams/recommendation-architecture.html &middot; 对齐 v0.3.97 (2026-05-31) 主干代码</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-swatch" style="background:#0891b2"></div>候选池 / SQLite</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#f0883e"></div>LLM 分类 / 文案 / delight</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#3fb950"></div>多样性 / MMR / Pipeline</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#bc8cff"></div>RecommendationEngine 编排</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#f778ba"></div>评分 (PoolCurator)</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#da3633"></div>反馈 / 避雷 / 放大保护</div>
+  <div class="legend-item"><div class="legend-swatch" style="background:#58a6ff"></div>外部输入 / 输出</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 1: Architecture overview                              -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">1. 架构全景 &mdash; Discovery 填池，Recommendation 独立消费</div>
+
+<svg width="1140" height="640" viewBox="0 0 1140 640">
+  <defs>
+    <marker id="s1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#484f58"/></marker>
+    <marker id="s1-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#0891b2"/></marker>
+    <marker id="s1-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/></marker>
+    <marker id="s1-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/></marker>
+    <marker id="s1-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#da3633"/></marker>
+  </defs>
+
+  <text x="135" y="26" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="700" letter-spacing="1">候选池输入</text>
+  <text x="570" y="26" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="700" letter-spacing="1">RECOMMENDATION CORE (engine.py)</text>
+  <text x="1005" y="26" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="700" letter-spacing="1">输出与回流</text>
+
+  <!-- ── Pool inputs (left) ── -->
+  <rect x="20" y="42" width="230" height="86" rx="8" fill="#0c2a30" stroke="#0891b2" stroke-width="2"/>
+  <text x="135" y="64" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="600">content_cache (候选池)</text>
+  <text x="135" y="81" text-anchor="middle" fill="#8b949e" font-size="9">pool_status=fresh 来自 B站策略 /</text>
+  <text x="135" y="94" text-anchor="middle" fill="#8b949e" font-size="9">XHS / 抖音 / YouTube producer / Web</text>
+  <text x="135" y="110" text-anchor="middle" fill="#8b949e" font-size="9">携 topic_group/style_key/relevance</text>
+  <text x="135" y="122" text-anchor="middle" fill="#6e7681" font-size="8.5">pool_expression / delight_score</text>
+
+  <rect x="20" y="138" width="230" height="76" rx="8" fill="#0c2a30" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="135" y="160" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="600">Readiness gates (SQL)</text>
+  <text x="135" y="177" text-anchor="middle" fill="#8b949e" font-size="9">可换候选须：分类 + 文案</text>
+  <text x="135" y="190" text-anchor="middle" fill="#8b949e" font-size="9">+ 可跳转 URL + 不在近期已看</text>
+  <text x="135" y="204" text-anchor="middle" fill="#8b949e" font-size="9">+ 非 dislike + XHS 自著排除</text>
+
+  <rect x="20" y="224" width="230" height="64" rx="8" fill="#0c2a30" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="135" y="246" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="600">count_pool_readiness()</text>
+  <text x="135" y="263" text-anchor="middle" fill="#8b949e" font-size="9">三态拆分 available / raw / pending</text>
+  <text x="135" y="277" text-anchor="middle" fill="#8b949e" font-size="9">前端不把 pending 误显示为可换</text>
+
+  <!-- Discovery / refresh fills pool note -->
+  <rect x="20" y="320" width="230" height="86" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="135" y="342" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">填池 = Discovery / Refresh</text>
+  <text x="135" y="359" text-anchor="middle" fill="#8b949e" font-size="9">ContinuousRefreshController 补货</text>
+  <text x="135" y="372" text-anchor="middle" fill="#8b949e" font-size="9">pool_target 300 (可至 600)</text>
+  <text x="135" y="385" text-anchor="middle" fill="#8b949e" font-size="9">source_shares B/XHS/抖/YT = 8/1/1/1</text>
+  <text x="135" y="399" text-anchor="middle" fill="#6e7681" font-size="8.5">详见 discovery-architecture §2</text>
+
+  <line x1="250" y1="170" x2="288" y2="200" stroke="#0891b2" stroke-width="1.5" marker-end="url(#s1-cyan)"/>
+  <line x1="250" y1="360" x2="270" y2="360" stroke="#3fb950" stroke-width="1.3" stroke-dasharray="5,3"/>
+  <line x1="270" y1="360" x2="270" y2="85" stroke="#3fb950" stroke-width="1.3" stroke-dasharray="5,3"/>
+  <line x1="270" y1="85" x2="18" y2="85" stroke="#3fb950" stroke-width="1.3" stroke-dasharray="5,3" marker-end="url(#s1)"/>
+
+  <!-- ── Engine container (center) ── -->
+  <rect x="290" y="42" width="560" height="540" rx="12" fill="#140d24" stroke="#bc8cff" stroke-width="2" stroke-dasharray="7,4"/>
+
+  <rect x="305" y="58" width="530" height="60" rx="8" fill="#1c1536" stroke="#bc8cff" stroke-width="1.8"/>
+  <text x="570" y="80" text-anchor="middle" fill="#bc8cff" font-size="13" font-weight="600">RecommendationEngine.serve()</text>
+  <text x="570" y="98" text-anchor="middle" fill="#8b949e" font-size="9.5">generate_recommendations / reshuffle_recommendations / append_recommendations 全部委托此处</text>
+  <text x="570" y="111" text-anchor="middle" fill="#6e7681" font-size="9">仅读候选池，不触发 Discovery</text>
+
+  <!-- background precompute row -->
+  <text x="315" y="142" fill="#f0883e" font-size="11" font-weight="600">后台预计算 (refresh tick 驱动，互不阻塞锁)</text>
+
+  <rect x="305" y="150" width="172" height="74" rx="6" fill="#1a1208" stroke="#f0883e" stroke-width="1.3"/>
+  <text x="391" y="170" text-anchor="middle" fill="#f0883e" font-size="10.5" font-weight="600">classify_pool_backlog</text>
+  <text x="391" y="186" text-anchor="middle" fill="#8b949e" font-size="8.5">源无关分类 (同 discovery prompt)</text>
+  <text x="391" y="199" text-anchor="middle" fill="#8b949e" font-size="8.5">补 style_key/topic_group</text>
+  <text x="391" y="212" text-anchor="middle" fill="#8b949e" font-size="8.5">/relevance_score · 含负例</text>
+
+  <rect x="484" y="150" width="172" height="74" rx="6" fill="#1a1208" stroke="#f0883e" stroke-width="1.3"/>
+  <text x="570" y="170" text-anchor="middle" fill="#f0883e" font-size="10.5" font-weight="600">precompute_pool_copy</text>
+  <text x="570" y="186" text-anchor="middle" fill="#8b949e" font-size="8.5">并发批生成 pool_expression</text>
+  <text x="570" y="199" text-anchor="middle" fill="#8b949e" font-size="8.5">/ pool_topic_label</text>
+  <text x="570" y="212" text-anchor="middle" fill="#8b949e" font-size="8.5">限流→留空，下轮重试</text>
+
+  <rect x="663" y="150" width="172" height="74" rx="6" fill="#1a1208" stroke="#f0883e" stroke-width="1.3"/>
+  <text x="749" y="170" text-anchor="middle" fill="#f0883e" font-size="10.5" font-weight="600">precompute_delight_scores</text>
+  <text x="749" y="186" text-anchor="middle" fill="#8b949e" font-size="8.5">复用 Evo relevance</text>
+  <text x="749" y="199" text-anchor="middle" fill="#8b949e" font-size="8.5">动态阈值：floor + Top10%</text>
+  <text x="749" y="212" text-anchor="middle" fill="#8b949e" font-size="8.5">→ delight_score/reason/hook</text>
+
+  <!-- ranking row -->
+  <text x="315" y="250" fill="#3fb950" font-size="11" font-weight="600">serve() 排序与多样性</text>
+
+  <rect x="305" y="258" width="172" height="68" rx="6" fill="#2a1525" stroke="#f778ba" stroke-width="1.3"/>
+  <text x="391" y="278" text-anchor="middle" fill="#f778ba" font-size="10.5" font-weight="600">PoolCurator</text>
+  <text x="391" y="294" text-anchor="middle" fill="#8b949e" font-size="8.5">五维 rec_score 叠加</text>
+  <text x="391" y="307" text-anchor="middle" fill="#8b949e" font-size="8.5">fresh/fatigue/monotony</text>
+  <text x="391" y="319" text-anchor="middle" fill="#8b949e" font-size="8.5">/serendipity/feedback</text>
+
+  <rect x="484" y="258" width="172" height="68" rx="6" fill="#0d2818" stroke="#3fb950" stroke-width="1.3"/>
+  <text x="570" y="278" text-anchor="middle" fill="#3fb950" font-size="10.5" font-weight="600">topic supergroup</text>
+  <text x="570" y="294" text-anchor="middle" fill="#8b949e" font-size="8.5">prewarm 出 canonical map</text>
+  <text x="570" y="307" text-anchor="middle" fill="#8b949e" font-size="8.5">serve 时纯字典查表</text>
+  <text x="570" y="319" text-anchor="middle" fill="#8b949e" font-size="8.5">合并近义 topic_group</text>
+
+  <rect x="663" y="258" width="172" height="68" rx="6" fill="#0d2818" stroke="#3fb950" stroke-width="1.3"/>
+  <text x="749" y="278" text-anchor="middle" fill="#3fb950" font-size="10.5" font-weight="600">MMR + caps</text>
+  <text x="749" y="294" text-anchor="middle" fill="#8b949e" font-size="8.5">embedding 优先 (cache-only)</text>
+  <text x="749" y="307" text-anchor="middle" fill="#8b949e" font-size="8.5">无 embedding → 字符串 cap</text>
+  <text x="749" y="319" text-anchor="middle" fill="#8b949e" font-size="8.5">topic/style/broad/amp cap</text>
+
+  <!-- embedding warm note -->
+  <rect x="305" y="346" width="530" height="44" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1.2"/>
+  <text x="570" y="365" text-anchor="middle" fill="#3fb950" font-size="10.5" font-weight="600">MMR / supergroup embedding 预热</text>
+  <text x="570" y="380" text-anchor="middle" fill="#8b949e" font-size="9">discovery 入池 / 分类补评 / refresh tick / 冷启动 best-effort 预热 L2 cache</text>
+
+  <!-- write + mark shown -->
+  <rect x="305" y="404" width="255" height="62" rx="6" fill="#1c1536" stroke="#bc8cff" stroke-width="1.3"/>
+  <text x="432" y="425" text-anchor="middle" fill="#bc8cff" font-size="10.5" font-weight="600">batch_insert_recommendations</text>
+  <text x="432" y="440" text-anchor="middle" fill="#8b949e" font-size="8.5">唯一同步关键写 (单事务/单 fsync)</text>
+  <text x="432" y="453" text-anchor="middle" fill="#8b949e" font-size="8.5">返回 IDs 回填 recommendation_id</text>
+
+  <rect x="568" y="404" width="267" height="62" rx="6" fill="#161b22" stroke="#8b949e" stroke-width="1.3"/>
+  <text x="701" y="425" text-anchor="middle" fill="#c9d1d9" font-size="10.5" font-weight="600">mark pool 'shown' (脱离式)</text>
+  <text x="701" y="440" text-anchor="middle" fill="#8b949e" font-size="8.5">loop.create_task 不占响应关键路径</text>
+  <text x="701" y="453" text-anchor="middle" fill="#8b949e" font-size="8.5">会话内去重靠 _last_served_bvids</text>
+
+  <!-- expression fork -->
+  <rect x="305" y="486" width="530" height="42" rx="6" fill="#1a1208" stroke="#f0883e" stroke-width="1.2"/>
+  <text x="570" y="505" text-anchor="middle" fill="#f0883e" font-size="10.5" font-weight="600">expression_mode 分叉</text>
+  <text x="570" y="520" text-anchor="middle" fill="#8b949e" font-size="9">realtime (generate)：插库后逐条 LLM 生成文案  ·  precomputed (reshuffle/append)：直接读池内文案</text>
+
+  <text x="570" y="552" text-anchor="middle" fill="#8b949e" font-size="9">candidate 过取倍数 = 4 (有 excluded_bvids) 否则 3 · 窗口 max(limit×mult, 40)</text>
+  <text x="570" y="570" text-anchor="middle" fill="#6e7681" font-size="9">放大保护 (amplification guard) 见 §3：serve() 当前未注入 newly-confirmed keys，默认 dormant</text>
+
+  <!-- arrows engine → outputs -->
+  <line x1="850" y1="435" x2="888" y2="120" stroke="#bc8cff" stroke-width="1.3" marker-end="url(#s1-purple)"/>
+  <line x1="850" y1="300" x2="888" y2="250" stroke="#bc8cff" stroke-width="1" marker-end="url(#s1-purple)" stroke-dasharray="4,3"/>
+
+  <!-- ── Outputs (right) ── -->
+  <rect x="890" y="42" width="230" height="70" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.8"/>
+  <text x="1005" y="64" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">recommendations 表</text>
+  <text x="1005" y="80" text-anchor="middle" fill="#8b949e" font-size="9">presented / feedback_type</text>
+  <text x="1005" y="93" text-anchor="middle" fill="#8b949e" font-size="9">/ feedback_note / feedback_at</text>
+  <text x="1005" y="106" text-anchor="middle" fill="#6e7681" font-size="8.5">对应池行标记 shown</text>
+
+  <rect x="890" y="122" width="230" height="76" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="1005" y="144" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">Web / 插件 / OpenClaw</text>
+  <text x="1005" y="161" text-anchor="middle" fill="#8b949e" font-size="9">/api/recommendations</text>
+  <text x="1005" y="174" text-anchor="middle" fill="#8b949e" font-size="9">reshuffle · append · 主动 delight</text>
+  <text x="1005" y="188" text-anchor="middle" fill="#8b949e" font-size="9">共享同一候选池语义</text>
+
+  <rect x="890" y="208" width="230" height="84" rx="8" fill="#2a0d0d" stroke="#da3633" stroke-width="1.8"/>
+  <text x="1005" y="230" text-anchor="middle" fill="#da3633" font-size="12" font-weight="600">反馈闭环</text>
+  <text x="1005" y="247" text-anchor="middle" fill="#8b949e" font-size="9">click / like / dislike</text>
+  <text x="1005" y="260" text-anchor="middle" fill="#8b949e" font-size="9">/ comment / dismiss → 事件层</text>
+  <text x="1005" y="274" text-anchor="middle" fill="#8b949e" font-size="9">避雷确认写 disliked_topics</text>
+  <text x="1005" y="287" text-anchor="middle" fill="#8b949e" font-size="9">并清池 (§5)</text>
+
+  <!-- feedback loops back to pool/soul -->
+  <line x1="1005" y1="292" x2="1005" y2="430" stroke="#da3633" stroke-width="1.3" marker-end="url(#s1-red)"/>
+  <line x1="1005" y1="430" x2="252" y2="430" stroke="#da3633" stroke-width="1.3" stroke-dasharray="5,3"/>
+  <line x1="252" y1="430" x2="135" y2="290" stroke="#da3633" stroke-width="1.3" stroke-dasharray="5,3" marker-end="url(#s1-red)"/>
+  <text x="600" y="424" text-anchor="middle" fill="#da3633" font-size="9">反馈 → Soul (process_feedback_batch) → 偏好/避雷 → 回写池</text>
+</svg>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 2: serve() hot path                                   -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">2. serve() 热路径 &mdash; 三入口统一委托的 10 步</div>
+
+<svg width="1140" height="700" viewBox="0 0 1140 700">
+  <defs>
+    <marker id="s2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#484f58"/></marker>
+    <marker id="s2-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#bc8cff"/></marker>
+    <marker id="s2-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/></marker>
+    <marker id="s2-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/></marker>
+    <marker id="s2-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f0883e"/></marker>
+  </defs>
+
+  <!-- Three entry points -->
+  <rect x="20" y="20" width="330" height="44" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="185" y="39" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">generate_recommendations (limit=10)</text>
+  <text x="185" y="55" text-anchor="middle" fill="#8b949e" font-size="9">realtime · discovered 参数被忽略，永远从池取</text>
+
+  <rect x="405" y="20" width="330" height="44" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="570" y="39" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">reshuffle_recommendations (limit=5)</text>
+  <text x="570" y="55" text-anchor="middle" fill="#8b949e" font-size="9">precomputed · "换一批" 即时取</text>
+
+  <rect x="790" y="20" width="330" height="44" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="955" y="39" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">append_recommendations (limit=10)</text>
+  <text x="955" y="55" text-anchor="middle" fill="#8b949e" font-size="9">precomputed + excluded_bvids (续页排重)</text>
+
+  <line x1="185" y1="64" x2="520" y2="86" stroke="#58a6ff" stroke-width="1.2" marker-end="url(#s2-blue)"/>
+  <line x1="570" y1="64" x2="570" y2="86" stroke="#58a6ff" stroke-width="1.2" marker-end="url(#s2-blue)"/>
+  <line x1="955" y1="64" x2="620" y2="86" stroke="#58a6ff" stroke-width="1.2" marker-end="url(#s2-blue)"/>
+
+  <rect x="390" y="88" width="360" height="44" rx="8" fill="#1c1536" stroke="#bc8cff" stroke-width="2"/>
+  <text x="570" y="108" text-anchor="middle" fill="#bc8cff" font-size="13" font-weight="700">serve(profile, limit, excluded_bvids, expression_mode)</text>
+  <text x="570" y="124" text-anchor="middle" fill="#8b949e" font-size="9">async → list[Recommendation] · mult = 4 if excluded else 3</text>
+
+  <line x1="570" y1="132" x2="570" y2="158" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#s2-purple)"/>
+
+  <!-- Step rows: each full-width band -->
+  <!-- Step 1 -->
+  <rect x="60" y="160" width="1020" height="40" rx="6" fill="#0c2a30" stroke="#0891b2" stroke-width="1.3"/>
+  <circle cx="86" cy="180" r="13" fill="#0891b2"/><text x="86" y="184" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">1</text>
+  <text x="112" y="177" fill="#56d4dd" font-size="11" font-weight="600">_pool_readiness_counts() → count_pool_readiness()</text>
+  <text x="112" y="192" fill="#8b949e" font-size="9">读 available / raw / pending 三态 (日志 + UI 诊断；available = count_pool_candidates 全门)</text>
+
+  <line x1="570" y1="200" x2="570" y2="212" stroke="#484f58" stroke-width="1.3" marker-end="url(#s2)"/>
+
+  <!-- Step 2 -->
+  <rect x="60" y="214" width="1020" height="52" rx="6" fill="#0c2a30" stroke="#0891b2" stroke-width="1.3"/>
+  <circle cx="86" cy="240" r="13" fill="#0891b2"/><text x="86" y="244" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">2</text>
+  <text x="112" y="233" fill="#56d4dd" font-size="11" font-weight="600">_load_pool_candidates() → get_pool_candidates() — 门控全在 SQL 内</text>
+  <text x="112" y="248" fill="#8b949e" font-size="9">fresh · feedback_type≠dislike · pool_expression≠'' · pool_topic_label≠'' · style_key≠'' · topic_group≠'' · XHS 需 xsec_token · XHS 自著排除 · NOT EXISTS in recommendations</text>
+  <text x="112" y="261" fill="#8b949e" font-size="9">窗口：每 topic_group ROW_NUMBER ≤3 · fetch_limit=max(limit×8,80) → _balance_pool_rows · limit=max(limit×mult,40)</text>
+
+  <line x1="570" y1="266" x2="570" y2="278" stroke="#484f58" stroke-width="1.3" marker-end="url(#s2)"/>
+
+  <!-- Steps 3 & 4 side by side -->
+  <rect x="60" y="280" width="500" height="44" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1.3"/>
+  <circle cx="86" cy="302" r="13" fill="#bc8cff"/><text x="86" y="306" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">3</text>
+  <text x="112" y="299" fill="#bc8cff" font-size="11" font-weight="600">排除当前页 (仅 append)</text>
+  <text x="112" y="314" fill="#8b949e" font-size="9">excluded_bvids 非空时过滤 popup 已展示项</text>
+
+  <rect x="580" y="280" width="500" height="44" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1.3"/>
+  <circle cx="606" cy="302" r="13" fill="#bc8cff"/><text x="606" y="306" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">4</text>
+  <text x="632" y="299" fill="#bc8cff" font-size="11" font-weight="600">_exclude_recently_viewed()</text>
+  <text x="632" y="314" fill="#8b949e" font-size="9">get_recent_viewed_bvids(2000) Python 二次过滤</text>
+
+  <line x1="570" y1="324" x2="570" y2="336" stroke="#484f58" stroke-width="1.3" marker-end="url(#s2)"/>
+
+  <!-- Step 5 -->
+  <rect x="60" y="338" width="1020" height="44" rx="6" fill="#0d2818" stroke="#3fb950" stroke-width="1.3"/>
+  <circle cx="86" cy="360" r="13" fill="#3fb950"/><text x="86" y="364" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">5</text>
+  <text x="112" y="357" fill="#3fb950" font-size="11" font-weight="600">_merge_topic_supergroups() — 纯字典查表 (无 serve 时 embedding 调用)</text>
+  <text x="112" y="372" fill="#8b949e" font-size="9">查 prewarm 出的 canonical map (strict cos 0.90 / loose 0.80+2字前缀)，把近义 topic_group 改写为同一桶；map 空或候选&lt;2 时 no-op</text>
+
+  <line x1="570" y1="382" x2="570" y2="394" stroke="#3fb950" stroke-width="1.3" marker-end="url(#s2-green)"/>
+
+  <!-- Step 6 -->
+  <rect x="60" y="396" width="1020" height="44" rx="6" fill="#2a1525" stroke="#f778ba" stroke-width="1.3"/>
+  <circle cx="86" cy="418" r="13" fill="#f778ba"/><text x="86" y="422" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">6</text>
+  <text x="112" y="415" fill="#f778ba" font-size="11" font-weight="600">PoolCurator.score_candidates() — 可选二次评分 (仅当注入 _curator)</text>
+  <text x="112" y="430" fill="#8b949e" font-size="9">build_context() → score_override{bvid→rec_score} 替换 relevance 排序；同时给出 amplification_guard (over-budget keys)</text>
+
+  <line x1="570" y1="440" x2="570" y2="452" stroke="#f778ba" stroke-width="1.3" marker-end="url(#s2)"/>
+
+  <!-- Step 7 -->
+  <rect x="60" y="454" width="1020" height="44" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1.3"/>
+  <circle cx="86" cy="476" r="13" fill="#3fb950"/><text x="86" y="480" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">7</text>
+  <text x="112" y="473" fill="#3fb950" font-size="11" font-weight="600">_fetch_candidate_embeddings() — CACHE-ONLY (lookup_cached)</text>
+  <text x="112" y="488" fill="#8b949e" font-size="9">key = _mmr_embedding_text = (title + desc[:160])[:200]；只取 L2 命中项，miss 落到字符串-cap 路径；绝不在热路径调 provider</text>
+
+  <line x1="570" y1="498" x2="570" y2="510" stroke="#484f58" stroke-width="1.3" marker-end="url(#s2)"/>
+
+  <!-- Step 8 fork -->
+  <rect x="60" y="512" width="1020" height="62" rx="6" fill="#0d2818" stroke="#3fb950" stroke-width="1.5"/>
+  <circle cx="86" cy="543" r="13" fill="#3fb950"/><text x="86" y="547" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">8</text>
+  <text x="112" y="533" fill="#3fb950" font-size="11" font-weight="600">_select_diversified_batch()</text>
+  <rect x="370" y="520" width="340" height="46" rx="5" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
+  <text x="540" y="538" text-anchor="middle" fill="#3fb950" font-size="9.5" font-weight="600">有 embedding → _select_with_mmr</text>
+  <text x="540" y="552" text-anchor="middle" fill="#8b949e" font-size="8.5">argmax(α·rel − β·max_cos)，α=β=0.5</text>
+  <rect x="724" y="520" width="340" height="46" rx="5" fill="#161b22" stroke="#8b949e" stroke-width="1"/>
+  <text x="894" y="538" text-anchor="middle" fill="#c9d1d9" font-size="9.5" font-weight="600">无 embedding → 字符串 cap 贪心</text>
+  <text x="894" y="552" text-anchor="middle" fill="#8b949e" font-size="8.5">topic/style/broad/amp cap + 渐进放宽</text>
+
+  <line x1="570" y1="574" x2="570" y2="586" stroke="#3fb950" stroke-width="1.3" marker-end="url(#s2-green)"/>
+
+  <!-- Step 9 -->
+  <rect x="60" y="588" width="1020" height="44" rx="6" fill="#1c1536" stroke="#bc8cff" stroke-width="1.3"/>
+  <circle cx="86" cy="610" r="13" fill="#bc8cff"/><text x="86" y="614" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">9</text>
+  <text x="112" y="607" fill="#bc8cff" font-size="11" font-weight="600">构建 list[Recommendation] + batch_insert_recommendations() (唯一同步写)</text>
+  <text x="112" y="622" fill="#8b949e" font-size="9">_ensure_accessible_entry + _interleave_by_topic 收尾；precomputed 用 pool_expression/label；空文案兜底 _fallback_expression (告警，v0.3.57 后不应触发)</text>
+
+  <line x1="570" y1="632" x2="570" y2="644" stroke="#bc8cff" stroke-width="1.3" marker-end="url(#s2-purple)"/>
+
+  <!-- Step 10 -->
+  <rect x="60" y="646" width="500" height="44" rx="6" fill="#1a1208" stroke="#f0883e" stroke-width="1.3"/>
+  <circle cx="86" cy="668" r="13" fill="#f0883e"/><text x="86" y="672" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">10a</text>
+  <text x="112" y="665" fill="#f0883e" font-size="10.5" font-weight="600">realtime: generate_expression()</text>
+  <text x="112" y="680" fill="#8b949e" font-size="9">插库后逐条 LLM → update_recommendation_content</text>
+
+  <rect x="580" y="646" width="500" height="44" rx="6" fill="#161b22" stroke="#8b949e" stroke-width="1.3"/>
+  <circle cx="606" cy="668" r="13" fill="#8b949e"/><text x="606" y="672" text-anchor="middle" fill="#0d1117" font-size="11" font-weight="700">10b</text>
+  <text x="632" y="665" fill="#c9d1d9" font-size="10.5" font-weight="600">_mark_pool_shown_async() (脱离式)</text>
+  <text x="632" y="680" fill="#8b949e" font-size="9">create_task 标记 pool_status='shown' (off 关键路径)</text>
+</svg>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 3: Ranking & diversity                                -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">3. 排序与多样性 &mdash; PoolCurator 五维评分 + MMR + 放大保护</div>
+
+<svg width="1140" height="560" viewBox="0 0 1140 560">
+  <defs>
+    <marker id="s3-pink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f778ba"/></marker>
+    <marker id="s3-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/></marker>
+    <marker id="s3-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#da3633"/></marker>
+  </defs>
+
+  <!-- rec_score formula -->
+  <rect x="20" y="20" width="1100" height="52" rx="8" fill="#2a1525" stroke="#f778ba" stroke-width="2"/>
+  <text x="570" y="42" text-anchor="middle" fill="#f778ba" font-size="13" font-weight="700">rec_score = relevance·0.30 + freshness·0.20 − topic_fatigue·0.25 − source_monotony·0.15 + serendipity·0.20</text>
+  <text x="570" y="62" text-anchor="middle" fill="#8b949e" font-size="10">+ feedback 调整 (权重体系之外，加性) − 0.35 (若放大 key 超预算) → floor 到 0.0</text>
+
+  <!-- 5 dimension cards -->
+  <rect x="20" y="92" width="212" height="118" rx="8" fill="#161b22" stroke="#f778ba" stroke-width="1.3"/>
+  <rect x="20" y="92" width="212" height="6" rx="3" fill="#f778ba"/>
+  <text x="126" y="118" text-anchor="middle" fill="#f778ba" font-size="11" font-weight="600">relevance</text>
+  <text x="126" y="135" text-anchor="middle" fill="#8b949e" font-size="9">权重 0.30</text>
+  <text x="126" y="152" text-anchor="middle" fill="#8b949e" font-size="9">discovery relevance_score</text>
+  <text x="126" y="175" text-anchor="middle" fill="#6e7681" font-size="9">基础相关度</text>
+
+  <rect x="244" y="92" width="212" height="118" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.3"/>
+  <rect x="244" y="92" width="212" height="6" rx="3" fill="#3fb950"/>
+  <text x="350" y="118" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">freshness</text>
+  <text x="350" y="135" text-anchor="middle" fill="#8b949e" font-size="9">权重 0.20</text>
+  <text x="350" y="152" text-anchor="middle" fill="#8b949e" font-size="9">sigmoid 半衰 3d</text>
+  <text x="350" y="169" text-anchor="middle" fill="#8b949e" font-size="9">1/(1+e^((age−3)/1))</text>
+  <text x="350" y="190" text-anchor="middle" fill="#6e7681" font-size="9">缺时间戳 → 0.5</text>
+
+  <rect x="468" y="92" width="212" height="118" rx="8" fill="#161b22" stroke="#da3633" stroke-width="1.3"/>
+  <rect x="468" y="92" width="212" height="6" rx="3" fill="#da3633"/>
+  <text x="574" y="118" text-anchor="middle" fill="#da3633" font-size="11" font-weight="600">topic_fatigue (减)</text>
+  <text x="574" y="135" text-anchor="middle" fill="#8b949e" font-size="9">权重 0.25 (由 0.15 上调)</text>
+  <text x="574" y="152" text-anchor="middle" fill="#8b949e" font-size="9">min(1, cnt^1.5/len×5)</text>
+  <text x="574" y="169" text-anchor="middle" fill="#8b949e" font-size="9">取 topic_key / topic_group</text>
+  <text x="574" y="186" text-anchor="middle" fill="#6e7681" font-size="9">两轴最大值</text>
+
+  <rect x="692" y="92" width="212" height="118" rx="8" fill="#161b22" stroke="#da3633" stroke-width="1.3"/>
+  <rect x="692" y="92" width="212" height="6" rx="3" fill="#da3633"/>
+  <text x="798" y="118" text-anchor="middle" fill="#da3633" font-size="11" font-weight="600">source_monotony (减)</text>
+  <text x="798" y="135" text-anchor="middle" fill="#8b949e" font-size="9">权重 0.15</text>
+  <text x="798" y="152" text-anchor="middle" fill="#8b949e" font-size="9">min(1, cnt/len×2.5)</text>
+  <text x="798" y="175" text-anchor="middle" fill="#6e7681" font-size="9">惩罚过多同 source_strategy</text>
+
+  <rect x="916" y="92" width="204" height="118" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.3"/>
+  <rect x="916" y="92" width="204" height="6" rx="3" fill="#3fb950"/>
+  <text x="1018" y="118" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">serendipity (加)</text>
+  <text x="1018" y="135" text-anchor="middle" fill="#8b949e" font-size="9">权重 0.20</text>
+  <text x="1018" y="152" text-anchor="middle" fill="#8b949e" font-size="9">explore→1.0</text>
+  <text x="1018" y="169" text-anchor="middle" fill="#8b949e" font-size="9">trending→0.5 · 其它 0</text>
+  <text x="1018" y="190" text-anchor="middle" fill="#6e7681" font-size="9">奖励跨域/新源</text>
+
+  <!-- feedback adjustments -->
+  <rect x="20" y="226" width="540" height="96" rx="8" fill="#1f0c0c" stroke="#da3633" stroke-width="1.5"/>
+  <text x="290" y="248" text-anchor="middle" fill="#da3633" font-size="12" font-weight="700">_feedback_adjustment() (加性，权重体系外)</text>
+  <text x="40" y="270" fill="#8b949e" font-size="10">dislike-UP −0.20　·　dislike-topic −0.10</text>
+  <text x="40" y="288" fill="#8b949e" font-size="10">dislike-franchise −0.07 (一次 dislike 传播到同 franchise_key)</text>
+  <text x="40" y="306" fill="#8b949e" font-size="10">like/save-topic +0.05　·　信号取 get_feedback_signals(30)</text>
+  <text x="40" y="319" fill="#6e7681" font-size="9">async 路径用 embedding cos≥阈 匹配 disliked/liked topic</text>
+
+  <!-- amplification guard -->
+  <rect x="580" y="226" width="540" height="96" rx="8" fill="#2a0d0d" stroke="#da3633" stroke-width="1.5"/>
+  <text x="850" y="248" text-anchor="middle" fill="#da3633" font-size="12" font-weight="700">放大保护 (新确认兴趣)</text>
+  <text x="600" y="270" fill="#8b949e" font-size="10">build_context: 24h 滚动窗内某 key 占比 ≥0.25 → over-budget</text>
+  <text x="600" y="288" fill="#8b949e" font-size="10">curator 软降权 −0.35　·　selector 硬上限 max(1, floor(limit×0.25))</text>
+  <text x="600" y="306" fill="#f0883e" font-size="9.5" font-weight="600">⚠ serve() 当前未传 newly_confirmed keys → guard 集为空 (dormant)</text>
+  <text x="600" y="319" fill="#6e7681" font-size="9">需由其它 build_context 调用方注入新确认 key 才会生效</text>
+
+  <line x1="290" y1="210" x2="290" y2="224" stroke="#da3633" stroke-width="1.2" marker-end="url(#s3-red)"/>
+  <line x1="850" y1="210" x2="850" y2="224" stroke="#da3633" stroke-width="1.2" marker-end="url(#s3-red)"/>
+
+  <line x1="570" y1="322" x2="570" y2="340" stroke="#f778ba" stroke-width="1.5" marker-end="url(#s3-pink)"/>
+
+  <!-- MMR + caps row -->
+  <rect x="20" y="344" width="540" height="120" rx="8" fill="#0d2818" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="290" y="366" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">_select_with_mmr() (embedding 优先)</text>
+  <text x="40" y="388" fill="#8b949e" font-size="10">每步 pick = argmax(α·relevance − β·max_cos_to_picked)</text>
+  <text x="40" y="406" fill="#8b949e" font-size="10">α = β = 0.5　·　relevance = score_override 或 item.relevance_score</text>
+  <text x="40" y="424" fill="#8b949e" font-size="10">用 embedding 余弦，抓同题不同标签的重复</text>
+  <text x="40" y="442" fill="#8b949e" font-size="10">字符串 cap 仍门控每次 pick；违规者 defer 后用放宽 cap 重选</text>
+  <text x="40" y="458" fill="#6e7681" font-size="9">冷/缺 cache 时静默退回纯字符串-cap 贪心 (无 embedding 去重)</text>
+
+  <rect x="580" y="344" width="540" height="120" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="850" y="366" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="700">多样性 cap (随 limit)</text>
+  <text x="600" y="388" fill="#8b949e" font-size="10">per_topic_cap：1 (limit≤5) 否则 2　·　soft_topic_cap：2 / 3</text>
+  <text x="600" y="406" fill="#8b949e" font-size="10">style_cap：max(1, min(3, (limit+1)//3))</text>
+  <text x="600" y="424" fill="#8b949e" font-size="10">broad_topic_cap：2 (≤5) / 3 (≤10) / 4　— 始终硬，除最终兜底 ×2</text>
+  <text x="600" y="442" fill="#8b949e" font-size="10">amplification_cap：max(1, floor(limit×0.25)) (仅 guard key)</text>
+  <text x="600" y="458" fill="#6e7681" font-size="9">token：topic_group→topic_key→tags→标题/作者关键词 (不含 source_strategy)</text>
+
+  <line x1="570" y1="464" x2="570" y2="480" stroke="#3fb950" stroke-width="1.5" marker-end="url(#s3-green)"/>
+
+  <!-- finalize -->
+  <rect x="20" y="484" width="1100" height="56" rx="8" fill="#1c1536" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="570" y="506" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">收尾：_ensure_accessible_entry() + _interleave_by_topic()</text>
+  <text x="570" y="525" text-anchor="middle" fill="#8b949e" font-size="9.5">满批 (limit≥5) 且无轻量 style 项 → 换入 1 条更易入门项 (距最弱分 ≤0.10)；再按 broad_topic_token 轮转打散同题</text>
+</svg>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 4: Background precompute                              -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">4. 后台预计算 &mdash; 分类 → 文案 → delight (refresh tick 驱动)</div>
+
+<svg width="1140" height="460" viewBox="0 0 1140 460">
+  <defs>
+    <marker id="s4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#484f58"/></marker>
+    <marker id="s4-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f0883e"/></marker>
+    <marker id="s4-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#0891b2"/></marker>
+    <marker id="s4-loop" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#f0883e"/></marker>
+  </defs>
+
+  <!-- pool -->
+  <rect x="440" y="20" width="260" height="58" rx="8" fill="#0c2a30" stroke="#0891b2" stroke-width="2"/>
+  <text x="570" y="42" text-anchor="middle" fill="#56d4dd" font-size="12" font-weight="600">content_cache (候选池)</text>
+  <text x="570" y="60" text-anchor="middle" fill="#8b949e" font-size="9">跨源行可能 style_key/topic_group/relevance 为空</text>
+
+  <!-- precompute_pool_copy orchestrator -->
+  <rect x="340" y="100" width="460" height="50" rx="8" fill="#1c1536" stroke="#bc8cff" stroke-width="1.8"/>
+  <text x="570" y="120" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">precompute_pool_copy() — 后台编排</text>
+  <text x="570" y="137" text-anchor="middle" fill="#8b949e" font-size="9">把 classify + delight 作为脱离式 task 触发，自己只跑文案；三把独立锁 (v0.3.62+)</text>
+
+  <line x1="570" y1="78" x2="570" y2="98" stroke="#0891b2" stroke-width="1.3" marker-end="url(#s4-cyan)"/>
+
+  <!-- three branches -->
+  <line x1="450" y1="150" x2="220" y2="180" stroke="#f0883e" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#s4-orange)"/>
+  <line x1="570" y1="150" x2="570" y2="180" stroke="#f0883e" stroke-width="1.3" marker-end="url(#s4-orange)"/>
+  <line x1="690" y1="150" x2="920" y2="180" stroke="#f0883e" stroke-width="1.2" stroke-dasharray="4,3" marker-end="url(#s4-orange)"/>
+
+  <!-- classify -->
+  <rect x="40" y="184" width="360" height="150" rx="8" fill="#1a1208" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="220" y="206" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">classify_pool_backlog() (_classify_lock)</text>
+  <text x="60" y="228" fill="#8b949e" font-size="9.5">源无关分类门：跨源 (xhs/web) 走与 discovery</text>
+  <text x="60" y="243" fill="#8b949e" font-size="9.5">同一 build_batch_content_evaluation_prompt</text>
+  <text x="60" y="258" fill="#8b949e" font-size="9.5">batch_size=10 · 传 source_platform + source_context</text>
+  <text x="60" y="273" fill="#8b949e" font-size="9.5">含 recent_negative_exemplars (Rule 11)</text>
+  <text x="60" y="291" fill="#3fb950" font-size="9.5">写 relevance(0..1, 失败=0.01) / reason /</text>
+  <text x="60" y="306" fill="#3fb950" font-size="9.5">topic_group / style_key (须 ∈ VALID_STYLE_KEYS)</text>
+  <text x="60" y="324" fill="#6e7681" font-size="9">topic_key 空时取 topic_group · 之后推荐层只看内容特征</text>
+
+  <!-- copy -->
+  <rect x="420" y="184" width="300" height="150" rx="8" fill="#1a1208" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="570" y="206" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">_precompute_batch() (_expression_lock)</text>
+  <text x="440" y="228" fill="#8b949e" font-size="9.5">get_pool_candidates_needing_copy</text>
+  <text x="440" y="243" fill="#8b949e" font-size="9.5">batch_size=30，2 worker 并发</text>
+  <text x="440" y="258" fill="#8b949e" font-size="9.5">build_batch_expression_prompt</text>
+  <text x="440" y="273" fill="#3fb950" font-size="9.5">→ update_pool_copy: pool_expression</text>
+  <text x="440" y="288" fill="#3fb950" font-size="9.5">/ pool_topic_label</text>
+  <text x="440" y="306" fill="#da3633" font-size="9.5">限流 → return 0，留空，下轮重试</text>
+  <text x="440" y="324" fill="#6e7681" font-size="9">解析失败先拆半重试；重复文案拆分后兜底</text>
+
+  <!-- delight -->
+  <rect x="740" y="184" width="360" height="150" rx="8" fill="#1a1208" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="920" y="206" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">precompute_delight_scores() (_delight_lock)</text>
+  <text x="760" y="228" fill="#8b949e" font-size="9.5">粗筛：relevance≥0.55，DESC top 50</text>
+  <text x="760" y="243" fill="#8b949e" font-size="9.5">复用 Evo：delight_score = relevance_score</text>
+  <text x="760" y="258" fill="#8b949e" font-size="9.5">reason 优先复用 pool_expression；hook 来自 topic labels</text>
+  <text x="760" y="276" fill="#3fb950" font-size="9.5">阈值 max(profile floor, pool Top10%)</text>
+  <text x="760" y="291" fill="#3fb950" font-size="9.5">→ delight_score / delight_reason / delight_hook</text>
+  <text x="760" y="309" fill="#6e7681" font-size="9">无独立 Delight LLM scorer；只复用已有结果</text>
+  <text x="760" y="324" fill="#6e7681" font-size="9">低于阈值 → 存分 (≥0.01) 但 reason/hook 空</text>
+
+  <!-- write back to pool -->
+  <line x1="220" y1="334" x2="440" y2="80" stroke="#3fb950" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#s4)"/>
+  <line x1="570" y1="334" x2="570" y2="80" stroke="#3fb950" stroke-width="1" stroke-dasharray="4,3"/>
+  <line x1="920" y1="334" x2="700" y2="80" stroke="#3fb950" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#s4)"/>
+
+  <!-- proactive delight loop -->
+  <rect x="40" y="360" width="1060" height="80" rx="10" fill="#161b22" stroke="#f778ba" stroke-width="1.5"/>
+  <text x="64" y="384" fill="#f778ba" font-size="12" font-weight="700">主动 delight 推送 — _loop_proactive_push (每 120s)</text>
+  <text x="64" y="406" fill="#8b949e" font-size="10">prepare_delight_candidates (precompute_pool_copy limit=0) → get_pending_delight：动态 min_score · 4h cooldown · 硬过滤 disliked 短语</text>
+  <text x="64" y="424" fill="#8b949e" font-size="10">→ WebSocket 发 delight.candidate (单条，cooldown 门) + delight.refreshed (净新增数) → 插件重取 /api/delight/pending-batch</text>
+</svg>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 5: Feedback loop                                      -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">5. 反馈闭环 &mdash; 点击 / like / dislike / dismiss 与推荐池回流</div>
+
+<svg width="1140" height="540" viewBox="0 0 1140 540">
+  <defs>
+    <marker id="s5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#484f58"/></marker>
+    <marker id="s5-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/></marker>
+    <marker id="s5-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#3fb950"/></marker>
+    <marker id="s5-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#da3633"/></marker>
+  </defs>
+
+  <!-- extension -->
+  <rect x="440" y="20" width="260" height="50" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.8"/>
+  <text x="570" y="40" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">浏览器插件 popup / WebSocket</text>
+  <text x="570" y="58" text-anchor="middle" fill="#8b949e" font-size="9">三端 (popup / 桌面 Web / 移动 Web) 同一反馈语义</text>
+
+  <!-- three API entries -->
+  <line x1="490" y1="70" x2="210" y2="98" stroke="#58a6ff" stroke-width="1.2" marker-end="url(#s5-blue)"/>
+  <line x1="570" y1="70" x2="570" y2="98" stroke="#58a6ff" stroke-width="1.2" marker-end="url(#s5-blue)"/>
+  <line x1="650" y1="70" x2="930" y2="98" stroke="#58a6ff" stroke-width="1.2" marker-end="url(#s5-blue)"/>
+
+  <!-- click -->
+  <rect x="40" y="102" width="340" height="96" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="210" y="124" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">POST /api/recommendation-click</text>
+  <text x="60" y="146" fill="#8b949e" font-size="9.5">优先用 payload content_url + source_platform</text>
+  <text x="60" y="161" fill="#8b949e" font-size="9.5">(避免跨源 ID 被套成 B站 URL)</text>
+  <text x="60" y="176" fill="#8b949e" font-size="9.5">缺失时才推断平台 + 重建 canonical URL</text>
+  <text x="60" y="191" fill="#3fb950" font-size="9.5">强信号 → pipeline.ingest + plain_click buffer</text>
+
+  <!-- feedback -->
+  <rect x="400" y="102" width="340" height="96" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="570" y="124" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">POST /api/feedback</text>
+  <text x="420" y="146" fill="#8b949e" font-size="9.5">like / dislike / comment / dismiss</text>
+  <text x="420" y="161" fill="#8b949e" font-size="9.5">update_recommendation_feedback →</text>
+  <text x="420" y="176" fill="#8b949e" font-size="9.5">pool_status='feedbacked' (软移除)</text>
+  <text x="420" y="191" fill="#3fb950" font-size="9.5">propagate_event + 即时认知卡</text>
+
+  <!-- delight respond -->
+  <rect x="760" y="102" width="340" height="96" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="930" y="124" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">POST /api/delight/respond</text>
+  <text x="780" y="146" fill="#8b949e" font-size="9.5">view / like / dislike / chat / dismiss</text>
+  <text x="780" y="161" fill="#8b949e" font-size="9.5">like → relevance +0.15 · card_more_like buffer</text>
+  <text x="780" y="176" fill="#da3633" font-size="9.5">dislike → pool_status='purged_by_dislike'</text>
+  <text x="780" y="191" fill="#8b949e" font-size="9.5">dismiss → mark_delight_consumed (仅通知位)</text>
+
+  <!-- middle: targets -->
+  <line x1="210" y1="198" x2="210" y2="240" stroke="#484f58" stroke-width="1.2" marker-end="url(#s5)"/>
+  <line x1="570" y1="198" x2="570" y2="240" stroke="#484f58" stroke-width="1.2" marker-end="url(#s5)"/>
+  <line x1="930" y1="198" x2="930" y2="240" stroke="#484f58" stroke-width="1.2" marker-end="url(#s5)"/>
+
+  <!-- exploration buffer -->
+  <rect x="40" y="244" width="340" height="80" rx="8" fill="#1a1a24" stroke="#8b949e" stroke-width="1.5"/>
+  <text x="210" y="266" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="600">short_term_exploration_buffer</text>
+  <text x="210" y="285" text-anchor="middle" fill="#8b949e" font-size="9">click → plain_click(+0.25) · like → card_like(+1.5)</text>
+  <text x="210" y="300" text-anchor="middle" fill="#8b949e" font-size="9">dislike → negative(−3.0, 48h cooldown)</text>
+  <text x="210" y="315" text-anchor="middle" fill="#6e7681" font-size="9">dismiss → 不记 buffer 事件</text>
+
+  <!-- pref batch -->
+  <rect x="400" y="244" width="340" height="80" rx="8" fill="#1a1208" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="570" y="266" text-anchor="middle" fill="#f0883e" font-size="11" font-weight="600">SoulEngine.process_feedback_batch_if_needed</text>
+  <text x="570" y="285" text-anchor="middle" fill="#8b949e" font-size="9">≥3 新反馈 → 偏好重析；显著变化才重建画像</text>
+  <text x="570" y="300" text-anchor="middle" fill="#8b949e" font-size="9">like/comment → 偏好 + 短期 buffer</text>
+  <text x="570" y="315" text-anchor="middle" fill="#8b949e" font-size="9">dislike → negative exemplar + 偏好避让</text>
+
+  <!-- pool / purge -->
+  <rect x="760" y="244" width="340" height="80" rx="8" fill="#2a0d0d" stroke="#da3633" stroke-width="1.5"/>
+  <text x="930" y="266" text-anchor="middle" fill="#da3633" font-size="11" font-weight="600">候选池避让 / 清池</text>
+  <text x="930" y="285" text-anchor="middle" fill="#8b949e" font-size="9">dismiss → 软移除 (feedbacked / notified)，不改画像</text>
+  <text x="930" y="300" text-anchor="middle" fill="#8b949e" font-size="9">delight dislike → 该 bvid 直接 purged_by_dislike</text>
+  <text x="930" y="315" text-anchor="middle" fill="#8b949e" font-size="9">新避雷主题 → purge_pool_for_new_dislikes</text>
+
+  <!-- dismiss distinction callout -->
+  <rect x="40" y="346" width="1060" height="58" rx="10" fill="#161b22" stroke="#da3633" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="64" y="368" fill="#da3633" font-size="11" font-weight="700">两条 dismiss 路径 (都不更新画像、不升级为话题级负反馈)</text>
+  <text x="64" y="389" fill="#8b949e" font-size="10">/api/feedback dismiss：仍 propagate_event + 标 pool_status='feedbacked' (软移除，发出反馈事件)　|　/api/delight/respond dismiss：仅 mark_delight_consumed (delight_notified=1)</text>
+
+  <!-- loop back to soul + pool -->
+  <line x1="570" y1="324" x2="570" y2="430" stroke="#3fb950" stroke-width="1.3" marker-end="url(#s5-green)"/>
+  <rect x="340" y="434" width="460" height="56" rx="8" fill="#1c1536" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="570" y="456" text-anchor="middle" fill="#bc8cff" font-size="11.5" font-weight="600">Soul 偏好 / 避雷更新 → 回写 content_cache</text>
+  <text x="570" y="475" text-anchor="middle" fill="#8b949e" font-size="9.5">新 disliked_topics 清掉匹配的 fresh/未推荐行 (历史保留)，关闭闭环</text>
+
+  <line x1="800" y1="284" x2="855" y2="284" stroke="#da3633" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="930" y="438" text-anchor="middle" fill="#6e7681" font-size="9">recommendations 表保留 presented / feedback_type / feedback_note / feedback_at 可追踪</text>
+</svg>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 6: Parameter reference                                -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">6. 参数速查 &mdash; 当前默认值</div>
+
+<svg width="1140" height="400" viewBox="0 0 1140 400">
+  <!-- serve / window -->
+  <rect x="20" y="20" width="360" height="360" rx="10" fill="#161b22" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="200" y="46" text-anchor="middle" fill="#56d4dd" font-size="13" font-weight="600">serve / 候选窗口</text>
+  <line x1="36" y1="56" x2="364" y2="56" stroke="#30363d" stroke-width="1"/>
+  <text x="40" y="80" fill="#56d4dd" font-size="10">limit (generate/append)</text><text x="360" y="80" text-anchor="end" fill="#8b949e" font-size="10">10</text>
+  <text x="40" y="104" fill="#56d4dd" font-size="10">limit (reshuffle/serve)</text><text x="360" y="104" text-anchor="end" fill="#8b949e" font-size="10">5</text>
+  <text x="40" y="128" fill="#56d4dd" font-size="10">过取倍数 multiplier</text><text x="360" y="128" text-anchor="end" fill="#8b949e" font-size="10">4 (excluded) / 3</text>
+  <text x="40" y="152" fill="#56d4dd" font-size="10">候选窗口请求量</text><text x="360" y="152" text-anchor="end" fill="#8b949e" font-size="10">max(limit×mult, 40)</text>
+  <text x="40" y="176" fill="#56d4dd" font-size="10">每 topic_group 窗口</text><text x="360" y="176" text-anchor="end" fill="#8b949e" font-size="10">ROW_NUMBER ≤ 3</text>
+  <text x="40" y="200" fill="#56d4dd" font-size="10">DB fetch_limit</text><text x="360" y="200" text-anchor="end" fill="#8b949e" font-size="10">max(limit×8, 80)</text>
+  <text x="40" y="224" fill="#56d4dd" font-size="10">近期已看排除集</text><text x="360" y="224" text-anchor="end" fill="#8b949e" font-size="10">2000 bvid</text>
+  <text x="40" y="248" fill="#3fb950" font-size="10">supergroup strict / loose</text><text x="360" y="248" text-anchor="end" fill="#8b949e" font-size="10">0.90 / 0.80 (+2 字前缀)</text>
+  <text x="40" y="272" fill="#3fb950" font-size="10">MMR α / β</text><text x="360" y="272" text-anchor="end" fill="#8b949e" font-size="10">0.5 / 0.5</text>
+  <text x="40" y="296" fill="#3fb950" font-size="10">MMR embedding key</text><text x="360" y="296" text-anchor="end" fill="#8b949e" font-size="10">(title+desc[:160])[:200]</text>
+  <text x="40" y="320" fill="#3fb950" font-size="10">topic / soft / broad cap</text><text x="360" y="320" text-anchor="end" fill="#8b949e" font-size="10">1·2 / 2·3 / 2·3·4</text>
+  <text x="40" y="344" fill="#3fb950" font-size="10">style cap</text><text x="360" y="344" text-anchor="end" fill="#8b949e" font-size="10">max(1,min(3,(limit+1)//3))</text>
+  <text x="40" y="368" fill="#3fb950" font-size="10">accessible-entry 触发</text><text x="360" y="368" text-anchor="end" fill="#8b949e" font-size="10">limit≥5 且满批</text>
+
+  <!-- curator -->
+  <rect x="396" y="20" width="360" height="360" rx="10" fill="#161b22" stroke="#f778ba" stroke-width="1.5"/>
+  <text x="576" y="46" text-anchor="middle" fill="#f778ba" font-size="13" font-weight="600">PoolCurator 评分</text>
+  <line x1="412" y1="56" x2="740" y2="56" stroke="#30363d" stroke-width="1"/>
+  <text x="416" y="80" fill="#f778ba" font-size="10">relevance 权重</text><text x="736" y="80" text-anchor="end" fill="#8b949e" font-size="10">0.30</text>
+  <text x="416" y="104" fill="#f778ba" font-size="10">freshness 权重</text><text x="736" y="104" text-anchor="end" fill="#8b949e" font-size="10">0.20 (半衰 3d)</text>
+  <text x="416" y="128" fill="#f778ba" font-size="10">topic_fatigue 权重</text><text x="736" y="128" text-anchor="end" fill="#8b949e" font-size="10">0.25 (由 0.15 上调)</text>
+  <text x="416" y="152" fill="#f778ba" font-size="10">source_monotony 权重</text><text x="736" y="152" text-anchor="end" fill="#8b949e" font-size="10">0.15</text>
+  <text x="416" y="176" fill="#f778ba" font-size="10">serendipity 权重</text><text x="736" y="176" text-anchor="end" fill="#8b949e" font-size="10">0.20</text>
+  <text x="416" y="200" fill="#da3633" font-size="10">dislike UP / topic / franchise</text><text x="736" y="200" text-anchor="end" fill="#8b949e" font-size="10">−0.20 / −0.10 / −0.07</text>
+  <text x="416" y="224" fill="#3fb950" font-size="10">like/save topic 加成</text><text x="736" y="224" text-anchor="end" fill="#8b949e" font-size="10">+0.05</text>
+  <text x="416" y="248" fill="#da3633" font-size="10">over-budget 惩罚</text><text x="736" y="248" text-anchor="end" fill="#8b949e" font-size="10">−0.35</text>
+  <text x="416" y="272" fill="#da3633" font-size="10">放大滚动窗 / 阈</text><text x="736" y="272" text-anchor="end" fill="#8b949e" font-size="10">24h / 占比 ≥0.25</text>
+  <text x="416" y="296" fill="#da3633" font-size="10">放大硬上限</text><text x="736" y="296" text-anchor="end" fill="#8b949e" font-size="10">max(1, floor(limit×0.25))</text>
+  <text x="416" y="320" fill="#f778ba" font-size="10">history_window</text><text x="736" y="320" text-anchor="end" fill="#8b949e" font-size="10">30</text>
+  <text x="416" y="344" fill="#8b949e" font-size="10">low-watermark (健康)</text><text x="736" y="344" text-anchor="end" fill="#8b949e" font-size="10">50</text>
+  <text x="416" y="368" fill="#8b949e" font-size="10">token 归一化长度</text><text x="736" y="368" text-anchor="end" fill="#8b949e" font-size="10">24 字</text>
+
+  <!-- precompute / delight -->
+  <rect x="772" y="20" width="348" height="360" rx="10" fill="#161b22" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="946" y="46" text-anchor="middle" fill="#f0883e" font-size="13" font-weight="600">分类 / 文案 / delight</text>
+  <line x1="788" y1="56" x2="1104" y2="56" stroke="#30363d" stroke-width="1"/>
+  <text x="792" y="80" fill="#f0883e" font-size="10">classify limit / batch</text><text x="1104" y="80" text-anchor="end" fill="#8b949e" font-size="10">30 / 10</text>
+  <text x="792" y="104" fill="#f0883e" font-size="10">classify 失败哨兵</text><text x="1104" y="104" text-anchor="end" fill="#8b949e" font-size="10">relevance=0.01</text>
+  <text x="792" y="128" fill="#f0883e" font-size="10">copy limit / batch</text><text x="1104" y="128" text-anchor="end" fill="#8b949e" font-size="10">20 / 30</text>
+  <text x="792" y="152" fill="#f0883e" font-size="10">copy 限流策略</text><text x="1104" y="152" text-anchor="end" fill="#8b949e" font-size="10">return 0 → 下轮重试</text>
+  <text x="792" y="176" fill="#f778ba" font-size="10">delight limit / batch</text><text x="1104" y="176" text-anchor="end" fill="#8b949e" font-size="10">30 / 5</text>
+  <text x="792" y="200" fill="#f778ba" font-size="10">delight 粗筛</text><text x="1104" y="200" text-anchor="end" fill="#8b949e" font-size="10">relevance≥0.55, top 50</text>
+  <text x="792" y="224" fill="#f778ba" font-size="10">delight 阈值</text><text x="1104" y="224" text-anchor="end" fill="#8b949e" font-size="10">floor 0.70/0.80 + Top10%</text>
+  <text x="792" y="248" fill="#f778ba" font-size="10">delight 推送冷却</text><text x="1104" y="248" text-anchor="end" fill="#8b949e" font-size="10">4h</text>
+  <text x="792" y="272" fill="#f778ba" font-size="10">主动推送间隔</text><text x="1104" y="272" text-anchor="end" fill="#8b949e" font-size="10">120s</text>
+  <text x="792" y="296" fill="#3fb950" font-size="10">delight like 加成</text><text x="1104" y="296" text-anchor="end" fill="#8b949e" font-size="10">+0.15 (cap 1.0)</text>
+  <text x="792" y="320" fill="#8b949e" font-size="10">neg exemplars 上限/半衰</text><text x="1104" y="320" text-anchor="end" fill="#8b949e" font-size="10">8 / 14d</text>
+  <text x="792" y="344" fill="#8b949e" font-size="10">reasoning_effort</text><text x="1104" y="344" text-anchor="end" fill="#8b949e" font-size="10">'' (分类/文案 关)</text>
+  <text x="792" y="368" fill="#8b949e" font-size="10">锁 (互不串行)</text><text x="1104" y="368" text-anchor="end" fill="#8b949e" font-size="10">classify / expr / delight</text>
+</svg>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 7: Walkthrough (Chinese)                              -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">7. 流程详解 &mdash; 逐步中文说明</div>
+<p class="lead">推荐模块<b>不自己发现内容</b>，只消费 Discovery 填好的候选池 <code>content_cache</code>。下面把它的主要流程拆成步骤讲清楚。英文术语首次出现时用 <code>等宽蓝字</code> 标出并就地加中文解释，完整对照见 §8。一句话总览：<b>先在后台把候选补好分类、文案、惊喜分</b>，要展示时再<b>二次评分 + 多样性选取</b>挑出一批，写进历史并标记「已展示」。</p>
+
+<div class="src-card">
+  <div class="src-head" style="color:#bc8cff">A. serve() 热路径 &mdash; 怎么从候选池挑出一批推荐（10 步）</div>
+  <div class="src-body">
+    <p class="sub" style="margin:4px 0 8px">三个入口（生成 generate / 换一批 reshuffle / 续页 append）都委托给同一个 <code>serve()</code>。</p>
+    <ol>
+      <li><b>读库存</b>：<code>count_pool_readiness</code> 给出 可用(available) / 原始(raw) / 待补(pending) 三态，避免把还没准备好的算成「可换」。</li>
+      <li><b>取候选窗口</b>：<code>get_pool_candidates</code>，所有门槛都写在 SQL 里 —— 必须 fresh、非 dislike、<b>有分类、有文案、有可跳转 URL</b>、不在近期已看、排除小红书你自己发的。</li>
+      <li><b>排除当前页</b>（仅续页）：传入 <code>excluded_bvids</code>，避免续页重复展示已经在屏幕上的内容。</li>
+      <li><b>排除近期已看</b>：按最近看过的 <code>bvid</code> 再过滤一遍。</li>
+      <li><b>合并近义话题</b>：<code>_merge_topic_supergroups</code> 查一张预热好的「话题超组」映射表，把「动漫 / 动漫产业 / 动漫文化」合成一个桶。<span class="sub">纯查表，热路径不现算向量。</span></li>
+      <li><b>二次评分</b>（可选）：<code>PoolCurator</code> 给每条算综合分覆盖原排序（见 C）。</li>
+      <li><b>取向量</b>：<code>_fetch_candidate_embeddings</code>，<b>只读缓存</b>，绝不在这一步调向量接口；缓存没命中就退回字符串方案。</li>
+      <li><b>多样性选取</b>：有向量走 <code>MMR</code>（在「相关度高」和「与已选不重复」之间权衡），没向量退回字符串限量贪心；两条路都受 话题 / 风格 / 广义话题 / 放大 上限约束。</li>
+      <li><b>写历史</b>：<code>batch_insert_recommendations</code> 单事务插入（唯一的同步写，要拿到 ID 才能返回）。</li>
+      <li><b>文案 + 标记</b>：生成模式逐条 LLM 写文案；换一批 / 续页直接用池内预生成文案。最后<b>脱离式</b>地把选中项标记为 <code>shown</code>（已展示），不占用响应时间。</li>
+    </ol>
+  </div>
+</div>
+
+<div class="src-card">
+  <div class="src-head" style="color:#f0883e">B. 后台预计算 &mdash; 分类 / 文案 / 惊喜</div>
+  <div class="src-body"><ol>
+    <li><b>源无关分类</b> <code>classify_pool_backlog</code>：给跨源（小红书 / 抖音扩展）那些没分类的内容补上 风格 / 话题 / 相关度，用的是和发现侧一样的评估提示（含「近期反例」）。每批 10 条。<span class="sub">补完之后，推荐层就只看内容特征、对来源平台透明。</span></li>
+    <li><b>预生成文案</b> <code>precompute_pool_copy</code>：后台批量写「推荐语 / 话题标签」，默认每批 30 条、2 worker 并发；解析失败先拆半重试，遇到限流就<b>留空、下一轮重试</b>，不卡住。</li>
+    <li><b>惊喜打分</b> <code>precompute_delight_scores</code>：先免费粗筛相关度≥0.55 取前 50，然后直接复用 Evo 的 <code>relevance_score</code> 写入 <code>delight_score</code>，优先复用 <code>pool_expression</code> 写入 <code>delight_reason</code>，并用 topic 标签生成 <code>delight_hook</code>；过动态阈值（profile floor 与池内 Top 10% 取高）才留下理由和钩子，不再单独调用 LLM scorer。</li>
+    <li><span class="sub">三者各自独立加锁，互不阻塞 —— 文案队列短不会饿死惊喜打分。</span></li>
+  </ol></div>
+</div>
+
+<div class="src-card">
+  <div class="src-head" style="color:#f778ba">C. 排序与多样性 &mdash; PoolCurator 五维 + MMR + 放大保护</div>
+  <div class="src-body"><ol>
+    <li><b>五维综合分</b> rec_score = 相关度×0.30 + 新鲜度×0.20 − 话题疲劳×0.25 − 来源单调×0.15 + 惊喜度×0.20，再叠加反馈调整（踩 UP −0.20 / 踩话题 −0.10 / 喜欢话题 +0.05…），最后超预算方向 −0.35，分数下限 0。</li>
+    <li><b>MMR 多样性</b>：每一步都选「相关度高 <b>且</b> 和已选内容不太像」的，两者各占 0.5；相似度用<b>向量余弦</b>，能抓到字符串看不出的「同题不同标签」重复。</li>
+    <li><b>数量上限</b>：每话题 1~2 条、每风格 max(1,min(3,…))、广义话题 2/3/4（最硬，几乎不放宽）。</li>
+    <li><b>放大保护</b>：刚确认的新兴趣，若 24 小时内占比≥0.25 算「超预算」，每批最多 floor(limit×0.25) 条，防止一个新方向刷屏。<span class="sub">⚠ 注意：当前 <code>serve()</code> 没有注入「新确认方向」，所以这道保护默认是<b>休眠</b>的，需由别处显式注入才生效。</span></li>
+  </ol></div>
+</div>
+
+<div class="src-card">
+  <div class="src-head" style="color:#58a6ff">D. 三个入口的区别</div>
+  <div class="src-body"><ol>
+    <li><b><code>generate_recommendations</code>（生成，limit 10）</b>：<code>realtime</code> 模式 —— 插库后逐条调大模型写文案，质量高但慢。</li>
+    <li><b><code>reshuffle_recommendations</code>（换一批，limit 5）</b>：<code>precomputed</code> 模式 —— 直接用池里预生成的文案，秒出。</li>
+    <li><b><code>append_recommendations</code>（续页，limit 10）</b>：precomputed + 传入「当前页 bvid」避免重复。</li>
+  </ol></div>
+</div>
+
+<div class="src-card">
+  <div class="src-head" style="color:#da3633">E. 反馈闭环 &mdash; 点击 / like / dislike / dismiss</div>
+  <div class="src-body"><ol>
+    <li><b>点击</b> <code>/api/recommendation-click</code>：优先用回传的真实 URL + 平台（避免跨源 ID 被错拼成 B 站链接）；点击是「强信号」，进画像 + 进短期探索缓冲。</li>
+    <li><b>like / comment</b>：进偏好与短期缓冲；攒够阈值会触发偏好重析（→ Soul）。</li>
+    <li><b>dislike</b>：作为强负样本进「近期反例」+ 偏好避让；delight 的 dislike 会直接把该条标记为 <code>purged_by_dislike</code>（从池里清掉）。</li>
+    <li><b>dismiss（忽略）</b>：软移除 —— 只标 <code>feedbacked</code>，<b>不更新画像、不升级成话题级负反馈</b>。<span class="sub">两条 dismiss 路径略有差别：普通反馈的 dismiss 会发一条反馈事件并标 feedbacked；delight 的 dismiss 只标「已通知」。</span></li>
+  </ol></div>
+</div>
+
+<div class="src-card">
+  <div class="src-head" style="color:#f778ba">F. delight 主动惊喜推送</div>
+  <div class="src-body"><ol>
+    <li><b>每 120 秒</b>一轮：备好惊喜候选 → <code>get_pending_delight</code>（要求分≥动态阈值、距上次推送≥4 小时冷却、硬过滤掉你已讨厌的话题）。</li>
+    <li><b>推送</b>：通过 WebSocket 给插件发一条 <code>delight.candidate</code>（单条，受冷却约束）和 <code>delight.refreshed</code>（净新增数）。</li>
+    <li><span class="sub">delight = 主动「惊喜」推荐：不是常规相关推荐，而是跨域、可能戳中你隐藏需求的内容。</span></li>
+  </ol></div>
+</div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SECTION 8: Glossary                                           -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="diagram-section">
+<div class="section-title">8. 术语对照表 &mdash; 本页英文速查</div>
+<p class="lead">下表解释本页出现的主要英文标识，按用途分组。看图时遇到看不懂的英文，对照这里即可。</p>
+<div class="gloss-wrap">
+<table class="gloss">
+  <tr><th>英文标识</th><th>中文含义 / 作用</th></tr>
+
+  <tr class="grp"><td colspan="2">① 候选池与就绪</td></tr>
+  <tr><td class="term">content_cache</td><td>候选池：一张 SQLite 表，存放所有等待推荐的内容（由 Discovery 与各来源填充）。</td></tr>
+  <tr><td class="term">pool_status</td><td>池中每行的状态：fresh 新鲜 / shown 已展示 / feedbacked 已反馈 / purged_by_dislike 被避雷清除。</td></tr>
+  <tr><td class="term">count_pool_readiness</td><td>库存三态统计：available 可用 / raw 原始 / pending 待补。</td></tr>
+  <tr><td class="term">get_pool_candidates</td><td>取候选窗口，所有过滤门槛都写在 SQL 里。</td></tr>
+  <tr><td class="term">readiness gates 就绪门槛</td><td>可换候选必须：有分类 + 有文案 + 有可跳转 URL + 不在近期已看 + 非 dislike。</td></tr>
+  <tr><td class="term">bvid / content_id</td><td>B 站视频 ID；跨源内容用 content_id 标识。</td></tr>
+
+  <tr class="grp"><td colspan="2">② serve 热路径</td></tr>
+  <tr><td class="term">RecommendationEngine.serve()</td><td>推荐主入口，三个入口都委托给它。</td></tr>
+  <tr><td class="term">generate / reshuffle / append</td><td>生成 / 换一批 / 续页 三种调用。</td></tr>
+  <tr><td class="term">expression_mode realtime / precomputed</td><td>文案模式：实时逐条调大模型 / 直接用池内预生成。</td></tr>
+  <tr><td class="term">excluded_bvids</td><td>续页时传入「当前页已展示的 ID」，避免重复。</td></tr>
+  <tr><td class="term">_merge_topic_supergroups</td><td>合并近义话题（查预热好的映射表，热路径不现算向量）。</td></tr>
+  <tr><td class="term">_fetch_candidate_embeddings</td><td>取候选向量：只读缓存，绝不在热路径调接口。</td></tr>
+  <tr><td class="term">_select_with_mmr / MMR</td><td>多样性选取：在「相关度」和「与已选的相似度」之间权衡。</td></tr>
+  <tr><td class="term">batch_insert_recommendations</td><td>批量写推荐历史（唯一的同步写，要拿 ID 返回）。</td></tr>
+  <tr><td class="term">mark shown</td><td>把选中项标记为「已展示」，脱离式后台执行、不占响应时间。</td></tr>
+
+  <tr class="grp"><td colspan="2">③ 评分与多样性</td></tr>
+  <tr><td class="term">PoolCurator</td><td>候选池二次评分器：综合五维算 rec_score 覆盖排序。</td></tr>
+  <tr><td class="term">rec_score</td><td>综合推荐分 = 相关 0.30 + 新鲜 0.20 − 话题疲劳 0.25 − 来源单调 0.15 + 惊喜 0.20，再加反馈调整。</td></tr>
+  <tr><td class="term">topic_fatigue / source_monotony / serendipity</td><td>话题疲劳（同话题看多了降权）/ 来源单调（同来源太多降权）/ 惊喜度（跨域加分）。</td></tr>
+  <tr><td class="term">topic / style / broad cap</td><td>每话题 / 每风格 / 每广义话题在一批里的数量上限，保证多样性。</td></tr>
+  <tr><td class="term">amplification guard 放大保护</td><td>新确认的兴趣每批限量（floor(limit×0.25)），防止一个方向刷屏；当前 serve() 里默认休眠。</td></tr>
+  <tr><td class="term">topic supergroup 话题超组</td><td>把近义话题归并成一桶后再做多样性控制。</td></tr>
+
+  <tr class="grp"><td colspan="2">④ 后台预计算</td></tr>
+  <tr><td class="term">classify_pool_backlog</td><td>源无关补分类：给跨源、没经发现引擎的内容补话题 / 风格 / 相关度。</td></tr>
+  <tr><td class="term">precompute_pool_copy</td><td>预生成推荐文案 / 话题标签；限流则留空下轮重试。</td></tr>
+  <tr><td class="term">precompute_delight_scores</td><td>惊喜打分：复用 Evo 的相关性分数与解释生成 delight 字段，不再为惊喜单独打一遍 LLM。</td></tr>
+  <tr><td class="term">delight</td><td>主动「惊喜」推荐：跨域、可能戳中隐藏需求的内容（非常规相关推荐）。</td></tr>
+  <tr><td class="term">warm / prewarm embeddings</td><td>预热向量缓存，让 serve() 的 MMR 能直接命中缓存。</td></tr>
+
+  <tr class="grp"><td colspan="2">⑤ 反馈与回流</td></tr>
+  <tr><td class="term">recommendation-click</td><td>推荐点击事件入口（优先用回传的真实 URL + 平台）。</td></tr>
+  <tr><td class="term">like / dislike / comment / dismiss</td><td>喜欢 / 不喜欢 / 评论 / 忽略。</td></tr>
+  <tr><td class="term">dismiss 忽略</td><td>软移除：不更新画像、不升级成话题级负反馈。</td></tr>
+  <tr><td class="term">get_pending_delight</td><td>取一条可推送的惊喜候选（分≥动态阈值、4 小时冷却、过滤已讨厌话题）。</td></tr>
+  <tr><td class="term">process_feedback_batch_if_needed</td><td>（Soul 侧）攒够反馈后重跑偏好分析 —— 推荐反馈最终回流到画像。</td></tr>
+</table>
+</div>
+</div>
+
+</body>
+</html>
