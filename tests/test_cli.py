@@ -8139,3 +8139,72 @@ def test_recommendation_card_keeps_up_label_for_bilibili(monkeypatch) -> None:
     assert "UP 主" in out
     assert "城市观察局" in out
     assert "作者" not in out
+
+
+def test_recommendation_card_labels_non_bilibili_id_neutrally(monkeypatch) -> None:
+    """A Bangumi subject id must not be announced as a "BV号".
+
+    ``bangumi_subject_to_content`` stores the subject id in the universal
+    ``bvid`` column, so the old unconditional label rendered ``BV号  8``.
+    """
+    item = Recommendation(
+        recommendation_id=13,
+        content=DiscoveredContent(
+            content_id="8",
+            bvid="8",
+            title="攻壳机动队",
+            source_platform="bangumi",
+            author_name="押井守",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "内容 ID" in out
+    assert "BV号" not in out
+    assert "8" in out
+
+
+def test_recommendation_card_keeps_bv_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili rows keep the native "BV号" wording."""
+    item = Recommendation(
+        recommendation_id=14,
+        content=DiscoveredContent(
+            bvid="BV1REC",
+            title="讲透城市与建筑的空间叙事",
+            up_name="城市观察局",
+            source_platform="bilibili",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "BV号" in out
+    assert "BV1REC" in out
+    assert "内容 ID" not in out
+
+
+def test_recommendation_card_falls_back_to_bv_label_for_legacy_rows(monkeypatch) -> None:
+    """No ``source_platform`` keeps the old "BV号" label, like the author row."""
+    item = Recommendation(
+        recommendation_id=15,
+        content=DiscoveredContent(bvid="BV1LEGACY", title="老数据行为", up_name="旧的观察局"),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "BV号" in out
+    assert "BV1LEGACY" in out
+    assert "内容 ID" not in out

@@ -549,6 +549,27 @@ def _content_author_row(content: Any) -> tuple[str, str]:
     return (label, name or "（未知）")
 
 
+def _content_id_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) identifier row for one content-like object.
+
+    ``bvid`` is the universal identifier column, not a Bilibili-only one:
+    every non-Bilibili mapper stores its own id there (``bangumi.py``'s
+    ``bangumi_subject_to_content`` sets ``bvid=content_id``, i.e. the bgm
+    subject id). Labelling it "BV号" unconditionally printed rows like
+    ``BV号  8`` for Bangumi — 8 is a subject id, not a BV number.
+
+    Same two rules as :func:`_content_author_row`: Bilibili keeps its native
+    term, every other platform gets a neutral "内容 ID", and a missing /
+    unknown ``source_platform`` falls back to bilibili so legacy rows keep
+    their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "BV号" if (platform or "bilibili") == "bilibili" else "内容 ID"
+    return (label, str(getattr(content, "bvid", "") or "") or "（暂无）")
+
+
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
     published = format_published_time(
@@ -566,7 +587,7 @@ def _print_recommendation_card(item: Any, index: int) -> None:
     rows.extend(
         [
             ("推荐理由", item.expression or "（暂无）"),
-            ("BV号", item.content.bvid or "（暂无）"),
+            _content_id_row(item.content),
         ]
     )
     _print_key_value_table(f"推荐 {index}", rows)
