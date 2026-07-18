@@ -399,21 +399,35 @@ class NetworkConfig:
     """Outbound proxy for OVERSEAS clients only.
 
     Applies to the LLM SDKs (OpenAI/Claude/Gemini/DeepSeek/OpenRouter/
-    openai_compatible chat+embedding), YouTube (yt-dlp), the GitHub updater,
-    and Codex OAuth token refresh. CN-direct clients (bilibili / douyin /
+    openai_compatible chat+embedding), YouTube (yt-dlp), Bangumi (api.bgm.tv
+    is Cloudflare-fronted and resolves overseas), the GitHub updater, and
+    Codex OAuth token refresh. Bangumi's cover CDN (lain.bgm.tv) is overseas
+    too but rides the image cache's own ``trust_env`` path rather than this
+    setting. CN-direct clients (bilibili / douyin /
     ollama / CN-CDN image cache) never consume it — that isolation is pinned
     by tests/test_network_proxy_isolation.py. This is deliberately distinct
     from ``[bilibili].proxy`` (which routes B站 requests and is rarely set).
 
-    ``mode`` is one of ``direct`` (default; ignore env/system proxies),
-    ``system`` (inherit HTTP(S)_PROXY / OS settings), or ``custom`` (use
+    ``mode`` is one of ``system`` (default; inherit HTTP(S)_PROXY / OS
+    settings), ``direct`` (ignore env/system proxies), or ``custom`` (use
     ``proxy`` explicitly). Accepted proxy schemes: http / https / socks5 /
     socks5h.
+
+    The default is ``system`` because every consumer listed above is an
+    overseas-only service. Under ``direct`` a mainland-China user's first
+    run dies on an opaque timeout — before they could plausibly find this
+    setting — even though their machine already has a working proxy. With
+    no proxy configured, ``system`` behaves exactly like a direct
+    connection, so users outside that situation lose nothing.
+
+    Only the "never configured" case moves. An explicit ``mode`` on disk is
+    always honored verbatim, including ``mode = "direct"``; the explicit /
+    defaulted split is decided by key presence in ``_build_network_config``.
 
     See docs/plans/2026-07-11-network-proxy-config-spec.md.
     """
 
-    mode: str = "direct"
+    mode: str = "system"
     proxy: str = ""
 
 
@@ -846,8 +860,8 @@ class Config:
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     bilibili: BilibiliConfig = field(default_factory=BilibiliConfig)
-    # Overseas-outbound proxy (LLM SDKs / YouTube / updater). CN-direct clients
-    # never use it — see NetworkConfig docstring.
+    # Overseas-outbound proxy (LLM SDKs / YouTube / Bangumi / updater).
+    # CN-direct clients never use it — see NetworkConfig docstring.
     network: NetworkConfig = field(default_factory=NetworkConfig)
     sources: SourcesConfig = field(default_factory=SourcesConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -1040,9 +1054,22 @@ def normalize_outbound_proxy(value: str) -> str:
 def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
     """Assemble ``NetworkConfig`` from the raw ``[network]`` table.
 
+    The ``mode`` **key's presence** — not its resolved value — separates a
+    deliberate choice from an unset one. Absent means the user never
+    configured overseas routing, so it takes the ``system`` default (see
+    :class:`NetworkConfig`); present is honored verbatim, so an explicit
+    ``mode = "direct"`` keeps ignoring env/system proxies. ``mode`` reaches
+    here from ``config.toml`` and from ``OPENBILICLAW_NETWORK_MODE``, which
+    ``_apply_env_overrides`` injects into this same table — an env var is
+    an explicit choice too, and lands on the present branch for free.
+
     Invalid on-disk values are logged at WARNING and dropped to the empty
     default rather than crashing load (pitfall rule 4 clamp-to-default); the
-    save-time API guard is what rejects invalid *writes* with a 400.
+    save-time API guard is what rejects invalid *writes* with a 400. Both
+    invalid-value clamps below deliberately land on ``direct`` rather than
+    on the ``system`` field default: the user did write *something* there,
+    and refusing to silently start routing their traffic through an
+    inherited env proxy is the conservative reading of a broken value.
     """
     network_raw = raw.get("network", {})
     if not isinstance(network_raw, dict):
@@ -1058,7 +1085,8 @@ def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
     if not mode_present:
         # Backward-compatible migration: legacy non-empty [network].proxy was
         # explicitly configured by the user and therefore remains custom.
-        mode = "custom" if proxy else "direct"
+        # Everything else is genuinely unconfigured and takes the default.
+        mode = "custom" if proxy else "system"
     else:
         try:
             mode = normalize_outbound_proxy_mode(mode_raw)
@@ -2656,9 +2684,9 @@ def _render_config_toml(
             f"headed = {_toml_bool(config.bilibili.browser_headed)}",
             "",
             "[network]",
-            "# Overseas routing mode: direct (ignore env proxy), system (inherit",
-            "# HTTP(S)_PROXY / OS proxy), custom (use proxy below). Applies to",
-            "# LLM SDKs, YouTube,",
+            "# Overseas routing mode: system (default; inherit HTTP(S)_PROXY /",
+            "# OS proxy), direct (ignore env proxy), custom (use proxy below).",
+            "# Applies to LLM SDKs, YouTube, Bangumi,",
             "# the GitHub updater, Codex OAuth. B站/抖音/Ollama 等国内直连请求",
             "# 始终直连,不受此项影响。",
             "# 支持 http:// | https:// | socks5:// | socks5h://",

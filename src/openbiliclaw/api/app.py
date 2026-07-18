@@ -186,10 +186,13 @@ from openbiliclaw.soul.dislike_writeback import (
     topics_for_confirmed_avoidance,
 )
 from openbiliclaw.sources.platforms import (
-    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
+    CANONICAL_SOURCE_FAMILIES,
+    normalize_source_platform,
+    overseas_network_hint,
+    requires_overseas_network,
 )
 from openbiliclaw.sources.platforms import (
-    normalize_source_platform,
+    infer_source_platform_from_url as _registry_infer_source_platform_from_url,
 )
 
 if TYPE_CHECKING:
@@ -1312,12 +1315,25 @@ def create_app(
     # Mirror the overseas-outbound proxy into the process-level source of truth
     # before any LLM/updater client is built. CN-direct clients never read it.
     # getattr-guarded so a partial config object never hard-crashes app boot.
+    #
+    # The guard falls back to ``system``, not ``direct``. A config object missing
+    # ``network`` / ``mode`` is the in-memory analogue of an *absent* key, not of
+    # an invalid one: there is no user-written value here to disrespect, so it
+    # takes the same default an absent key takes in ``_build_network_config``.
+    # (``direct`` is reserved for present-but-broken values, where the user did
+    # write something and silently inheriting an env proxy would override it.)
+    # ``direct`` is also not the neutral choice — it actively sets
+    # ``trust_env=False`` and overrides the user's environment, whereas ``system``
+    # defers to it. When the config is too damaged to state a preference,
+    # deferring beats overriding, and matching the normal default keeps an
+    # already-degraded boot from growing a second, invisible failure mode
+    # (opaque overseas timeouts on a machine that has a working proxy).
     from openbiliclaw.network import set_outbound_proxy
 
     network_config = getattr(config, "network", None)
     set_outbound_proxy(
         getattr(network_config, "proxy", "") or "",
-        mode=getattr(network_config, "mode", "direct") or "direct",
+        mode=getattr(network_config, "mode", "system") or "system",
     )
 
     # Auto-generate the session signing secret on first enable so login state
@@ -8794,8 +8810,9 @@ def create_app(
         - Network / upstream failure → accept the DOM username best-effort but
           mark it UNVERIFIED and log WARNING with the real cause. Staying
           fail-open keeps zero-config users working when bgm.tv is unreachable
-          (the default ``[network] mode = direct`` cannot reach it from CN at
-          all), so the guard's honesty has to come from the flag + log rather
+          (bgm.tv sits behind overseas CF, and the default ``[network] mode =
+          system`` only reaches it when the machine already has a working
+          proxy), so the guard's honesty has to come from the flag + log rather
           than from rejecting the report.
         """
         from openbiliclaw.sources.bangumi_client import (
@@ -9839,7 +9856,7 @@ def create_app(
             token_state=str(bgm_status.get("token_state") or ""),
         )
 
-        return SourcesStatusResponse(
+        statuses = SourcesStatusResponse(
             bilibili=bilibili,
             xiaohongshu=xiaohongshu,
             douyin=douyin,
@@ -9849,6 +9866,18 @@ def create_app(
             reddit=reddit,
             bangumi=bangumi,
         )
+        # Single place where the overseas-egress advisory is attached. The
+        # platform list AND both wordings live in sources.platforms; the
+        # settings surfaces render `network_hint` verbatim and never learn a
+        # platform name (tests/test_source_network_hints.py pins that).
+        network_mode = str(getattr(getattr(cfg, "network", None), "mode", "") or "")
+        for family in CANONICAL_SOURCE_FAMILIES:
+            item = getattr(statuses, family, None)
+            if not isinstance(item, SourceStatusItem):
+                continue
+            item.requires_overseas_network = requires_overseas_network(family)
+            item.network_hint = overseas_network_hint(family, network_mode=network_mode)
+        return statuses
 
     def _mask_source_credential(value: str, *, reveal: bool) -> str:
         if reveal or not value:
@@ -11524,10 +11553,15 @@ def create_app(
                 mode_raw = str(network_data.get("mode", ""))
             try:
                 proxy = normalize_outbound_proxy(proxy_raw)
+                # A payload without ``mode`` is the "never configured" case, so it
+                # resolves the same way ``_build_network_config`` resolves an absent
+                # key: legacy proxy-only clients stay ``custom``, everything else
+                # takes the ``system`` default. Probing ``direct`` here would report
+                # on a policy the runtime would not actually use.
                 mode = (
                     normalize_outbound_proxy_mode(mode_raw)
                     if mode_raw.strip()
-                    else ("custom" if proxy else "direct")
+                    else ("custom" if proxy else "system")
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -12217,7 +12251,10 @@ def create_app(
                     setattr(cfg.logging, key, int(ldata[key]))
 
         # Apply the overseas routing policy. Proxy-only payloads from older UI
-        # versions retain their historical meaning: non-empty = custom, empty = direct.
+        # versions carry no opinion about ``mode``, so they resolve exactly as an
+        # absent ``[network].mode`` key does in ``_build_network_config``: a
+        # non-empty proxy is still custom, and clearing the proxy falls back to
+        # the ``system`` default rather than pinning the user to direct.
         if "network" in update:
             ndata = update["network"]
             if isinstance(ndata, dict):
@@ -12236,7 +12273,7 @@ def create_app(
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc
                         if not mode_supplied:
-                            cfg.network.mode = "custom" if cfg.network.proxy else "direct"
+                            cfg.network.mode = "custom" if cfg.network.proxy else "system"
                 if cfg.network.mode == "custom" and not cfg.network.proxy:
                     raise HTTPException(status_code=400, detail="自定义代理模式必须填写代理地址")
 

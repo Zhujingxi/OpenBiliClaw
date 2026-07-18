@@ -7290,6 +7290,29 @@ function bindSettings() {
     bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   };
 
+  // The overseas-egress advisory is authored by the backend
+  // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+  // verbatim. This function must never learn a platform name nor read
+  // [network].mode: adding a platform must stay a one-line backend change.
+  // Only the `enabled` gate lives here — a disabled source makes no requests,
+  // so warning about its egress would be noise.
+  function applySourceNetworkHint(row, hint, enabled) {
+    const text = enabled ? String(hint || "") : "";
+    // The status row is a <p>; the hint is a sibling, never a nested <p>.
+    let node = row.nextElementSibling;
+    if (!node || !node.classList.contains("source-network-hint")) node = null;
+    if (!text) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("p");
+      node.className = "settings-hint source-network-hint";
+      row.insertAdjacentElement("afterend", node);
+    }
+    node.textContent = text;
+  }
+
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
     let data = null;
@@ -7307,6 +7330,7 @@ function bindSettings() {
       if (!item) {
         if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
         if (dot) dot.style.color = "#9aa0a6";
+        applySourceNetworkHint(row, "", false);
         row.style.opacity = "1";
         continue;
       }
@@ -7319,6 +7343,7 @@ function bindSettings() {
         detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
       }
       if (dot) dot.style.color = tokenRejected ? "#e74c3c" : (SOURCE_STATUS_DOT[item.state] || "#9aa0a6");
+      applySourceNetworkHint(row, item.network_hint, Boolean(item.enabled));
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
   }
@@ -7490,7 +7515,9 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
-    setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
+    // Mirrors the [network].mode backend default (system since v0.3.175);
+    // only reached if /api/config omits the field.
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "system");
     setVal("cfgNetworkProxy", cfg.network?.proxy || "");
     const savedAutoSync = document.getElementById("cfgSavedAutoSync");
     if (savedAutoSync instanceof HTMLInputElement) {

@@ -5880,6 +5880,27 @@ ${cardFeedbackBarHtml()}`;
       badge.dataset.tone = tone;
     }
 
+    // The overseas-egress advisory is authored by the backend
+    // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+    // verbatim. This function must never learn a platform name nor read
+    // [network].mode: adding a platform must stay a one-line backend change.
+    // Only the `enabled` gate lives here, because "is this row live right now"
+    // is a UI fact the backend cannot see (the desktop select can be pending).
+    function applySourceNetworkHint(row, hint, enabled) {
+      const text = enabled ? String(hint || "") : "";
+      let node = row.querySelector(".source-network-hint");
+      if (!text) {
+        if (node) node.remove();
+        return;
+      }
+      if (!node) {
+        node = document.createElement("p");
+        node.className = "source-network-hint";
+        row.appendChild(node);
+      }
+      node.textContent = text;
+    }
+
     function getPendingSourceEnabled(key, item) {
       const select = document.getElementById(SOURCE_ENABLE_SELECT_IDS[key]);
       const currentEnabled = select ? select.value === "on" : Boolean(item?.enabled);
@@ -5905,6 +5926,7 @@ ${cardFeedbackBarHtml()}`;
           setSourceBadge(sourceBadge, "来源：状态未知", "muted");
           setSourceBadge(accessBadge, "接入：后端未连接", "muted");
           if (detail) detail.textContent = "暂时无法读取来源接入状态，请确认后端服务可用。";
+          applySourceNetworkHint(row, "", false);
           row.classList.remove("source-row-unsaved");
           row.dataset.sourceEnabled = "unknown";
           row.dataset.accessTone = "muted";
@@ -5922,6 +5944,7 @@ ${cardFeedbackBarHtml()}`;
         setSourceBadge(accessBadge, `接入：${accessState.label}`, accessState.tone);
         const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
         if (detail) detail.textContent = detailPrefix + (item.detail || "暂无更多状态细节。");
+        applySourceNetworkHint(row, item.network_hint, enableState.currentEnabled);
         row.classList.toggle("source-row-unsaved", enableState.pending);
         row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
         row.dataset.accessTone = accessState.tone;
@@ -6199,7 +6222,9 @@ ${cardFeedbackBarHtml()}`;
       setSelect("language", config.language || "zh");
       setInput("dataDir", config.data_dir);
       setInput("storageDbPath", config.storage?.db_path);
-      setSelect("networkProxyMode", config.network?.mode || "direct");
+      // Mirrors the [network].mode backend default (system since v0.3.175);
+      // only reached if /api/config omits the field.
+      setSelect("networkProxyMode", config.network?.mode || "system");
       setInput("networkProxy", config.network?.proxy || "");
       const savedAutoSync = $("#savedAutoSync");
       if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;

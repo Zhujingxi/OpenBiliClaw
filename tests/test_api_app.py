@@ -13140,11 +13140,12 @@ class TestGuidedInitEndpoints:
     ) -> None:
         """Upstream unavailability degrades to best-effort, never a hard fail.
 
-        Staying fail-open is deliberate (the default ``[network] mode=direct``
-        cannot reach bgm.tv from CN, so fail-closed would break every
-        zero-config user). The honesty has to come from elsewhere: a WARNING
-        carrying the real cause, and a ``verified: false`` flag on the stored
-        record so no consumer mistakes it for a checked identity.
+        Staying fail-open is deliberate (bgm.tv sits behind overseas CF, and
+        under the default ``[network] mode=system`` a CN machine without a
+        working proxy still cannot reach it, so fail-closed would break every
+        such zero-config user). The honesty has to come from elsewhere: a
+        WARNING carrying the real cause, and a ``verified: false`` flag on the
+        stored record so no consumer mistakes it for a checked identity.
         """
         import logging
 

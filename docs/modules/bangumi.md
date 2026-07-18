@@ -2,7 +2,7 @@
 
 > Bangumi 是只读的正式内容来源。实现使用官方 `https://api.bgm.tv/v0`，不读取 Cookie、不申请 OAuth，也不提供任何站内写操作。默认匿名；可选配置个人令牌（Personal Access Token，Bearer）以自动识别当前用户并读取本人私密收藏。
 
-> **网络要求**：Bangumi API（`api.bgm.tv`）与封面 CDN（`lain.bgm.tv`）都是**海外服务**（Cloudflare）。国内网络在默认 `[network].mode = "direct"` 下会连接超时（实测 2026-07-18），需把 `[network]` 配为 `system` 或 `custom` 代理才能正常抓取；Bangumi 出口复用统一的 `[network]` outbound policy。
+> **网络要求**：Bangumi API（`api.bgm.tv`）与封面 CDN（`lain.bgm.tv`）都是**海外服务**（Cloudflare），国内网络直连会连接超时（实测 2026-07-18），必须经代理出网；Bangumi 出口复用统一的 `[network]` outbound policy。`[network].mode` 的默认值自 v0.3.175 起是 `system`（继承环境 / 系统代理），机器上已有可用代理时开箱即可抓取；显式配了 `mode = "direct"` 的用户仍会超时，需改为 `system` 或 `custom`。
 
 ## 已实现功能
 
@@ -24,6 +24,7 @@
 | 作者字段（制作方署名） | ✅ | `bangumi_subject_to_content` 从 subject 行内 `infobox` 解析 `author_name`，按 SubjectType 走优先级阶梯（书籍 作者→原作→作画→出版社，动画 导演→原作→动画制作→製作，音乐 艺术家→作曲→厂牌，游戏 开发→发行→游戏开发商，三次元 导演→编剧→主演）。两个 discovery 端点（`POST /v0/search/subjects`、`GET /v0/subjects`）本就内联返回 `infobox`（2026-07-18 实测 250/250 行均带，`GET /v0/subjects/{id}` 无额外字段），因此**零额外请求**；缺失 / schema 漂移 / 非法值、以及本栈能产出的 null 字面量（`None`/`null`/`undefined`/`nan`）一律解析为 `""`，不落库字面量 `"None"`；纯标点值**刻意不过滤**（见「公开 API」一节）。收藏路径例外见「已知限制」 |
 | 设置与状态 | ✅ | 桌面 Web、扩展设置页和 `/api/sources/status` 支持开关、用户名、**个人令牌**、分支、类型、预算、节流和 pool share；令牌为 password 输入 + 生成链接，GET config 只回传 `access_token_set` 布尔（绝不回传明文），留空保存则保持已配置令牌不变 |
 | CLI smoke | ✅ | 公开收藏、搜索、排名和日期浏览默认只读；正式 `discover --source bangumi` 才写待评估池 |
+| 直连模式下的超时给出真因 | ✅ | `[network].mode = direct` 时 `BangumiClient` 在超时 / 网络失败处就地补上出网提示（`OVERSEAS_DIRECT_MODE_ERROR_SUFFIX`），原本只有一句无头无尾的 "Bangumi API network request failed"。提示挂在**失败点**而非各调用方，所以 `discover-bangumi{,-ranked,-latest}` 三条 CLI smoke、API 与 discovery 链路同时受益，谁都不用自己再判一遍（铁律 7）。注入的 httpx client 不加（那是调用方自己的传输，`[network].mode` 说明不了它） |
 | 账号写回 | 不支持 | 本地收藏/稍后再看仍可用；首版不修改 Bangumi 收藏、评分或进度 |
 
 ## 数据流
@@ -227,7 +228,7 @@ openbiliclaw discover --source bangumi --limit 30
 
 后端把身份持久化到 `discovery_runtime_state["bangumi_self_info"]`（`data/memory/discovery_runtime.json`；非正整数 uid 422 拒绝、非法用户名降为缺失）。**持久化前做权威校验**（匿名公开端点 `GET /v0/users/{username}`，`trust_env=False`，不缓存失败结果）：API 实测（2026-07-18）路径参数只认 username slug（`/v0/users/1` 404），但未设自定义 slug 的用户 `username == str(uid)`（`/v0/users/474349` → `id=474349`），故 uid-only 上报对默认 slug 用户也能解析。规则：API `id` 与上报 uid 一致 → 持久化 API 返回的 username（权威值）；username 属于其他 uid 或不存在 → **只存 uid、丢弃 username 并 log WARNING**（plausible-but-wrong 防线）；网络/上游失败 → best-effort 接受 DOM 值，下次上报再校验。
 
-**校验诚实性（`verified` 标记）**：fail-open 是刻意保留的——默认 `[network] mode = direct` 根本连不上 bgm.tv，改成 fail-closed 会让「零配置、不用令牌」这批目标用户直接不可用，于是这条护栏在默认配置下必然为空。诚实性因此不靠拒绝，而靠两件事：(1) 校验失败从 DEBUG **升为 WARNING**，带真实原因（`code`/异常类型 + 消息 + `UNVERIFIED` 字样），可诊断（铁律 7）；(2) 记录写成 `{uid, username, verified}`。
+**校验诚实性（`verified` 标记）**：fail-open 是刻意保留的——连不上 bgm.tv 时改成 fail-closed 会让「零配置、不用令牌」这批目标用户直接不可用（该结论标定于 v0.3.175 之前，当时默认 `[network] mode = direct` 根本连不上 bgm.tv，这条护栏在默认配置下必然为空；默认改为 `system` 后，有可用系统代理的机器会真的跑到校验，没有代理的仍然走 fail-open）。诚实性因此不靠拒绝，而靠两件事：(1) 校验失败从 DEBUG **升为 WARNING**，带真实原因（`code`/异常类型 + 消息 + `UNVERIFIED` 字样），可诊断（铁律 7）；(2) 记录写成 `{uid, username, verified}`。
 
 **`verified` 的定义**：`verified: true` ⟺ **bgm.tv 正面确认了这个 uid↔username 配对**，即 `get_user` 成功返回、其 `id` 与上报 uid 一致、且得到非空用户名。其余一律 `false`——包括 bgm.tv 明确答复的情形：404 是**否定**用户名，并没有告诉我们这个 uid 属于谁；uid-only 查询 404 更是压根没确认过任何东西。把「bgm.tv 答复了」当成「身份已确认」，会让 sticky-true 把一个从未确认过的身份永久钉成 `true`。逐路径取值见下表：
 
@@ -252,7 +253,7 @@ guided init 与 CLI init 的用户名解析按优先级取值：**令牌 `/v0/me
 
 ## 已知限制
 
-- **海外网络依赖**：见顶部「网络要求」——`api.bgm.tv` / `lain.bgm.tv` 均为海外服务，CN 网络默认 `direct` 会超时，需 `[network]` 走 `system`/`custom` 代理。
+- **海外网络依赖**：见顶部「网络要求」——`api.bgm.tv` / `lain.bgm.tv` 均为海外服务，CN 网络直连会超时，需 `[network]` 走 `system`（v0.3.175 起的默认值）或 `custom` 代理。
 - **收藏路径作者字段恒空**：discovery 两个端点已能填 `author_name`（见上表），但用户收藏 `GET /v0/users/{username}/collections` 内嵌的是 **SlimSubject**，本身不带 `infobox`，故经该路径进来的条目 `author_name` 仍恒为 `""`。补齐需对每个 subject 额外请求 `/v0/subjects/{id}`，成本与收益待评估，本版不做；限制同时记在 `bangumi_subject_to_content` 的 docstring 里。
 - **`DelightScorer` 的 gem 信号对 bangumi 恒不满足（但不影响线上排序）**：`DelightScorer._quality_indicator` 的质量分要求 `view_count ≥ 100`，而 Bangumi 归一化从不写 `view_count`（无播放量语义），该门对 bangumi 恒不满足。**但这不影响实际推荐**——`DelightScorer` 在生产链路上零调用点（`src/` 内没有任何实例化，只有 `effective_delight_threshold` / `DEFAULT_DELIGHT_THRESHOLD` 被引用），线上 `delight_score` 由 `recommendation/engine.py` 的 `precompute_delight_scores` 复用 Evo 的 `relevance_score` 产出。Bangumi 的目录评分实际是经 `discovery/engine.py` 的 `_prompt_visible_content_fields` 在非零时进入 evaluator prompt（`rating_score` / `rating_count` / `source_rank`），由 LLM 在语境中权衡后体现在 `relevance_score` 上——评分**是**被计入的，只是不经过 scorer 的公式。改动 scorer 内部信号属推荐质量改动、须过推荐质量门，不在本分支动。
 

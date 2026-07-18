@@ -385,7 +385,7 @@ model    = "deepseek-v4-flash"
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `mode` | string | `"direct"` | `direct` 显式忽略环境 / 系统代理；`system` 明确继承 `HTTP(S)_PROXY` / OS 代理；`custom` 只使用下方 `proxy` |
+| `mode` | string | `"system"`（v0.3.175 起；此前为 `"direct"`） | `system` 继承 `HTTP(S)_PROXY` / OS 代理（macOS 还含系统偏好设置里的代理）；`direct` 显式忽略环境 / 系统代理；`custom` 只使用下方 `proxy` |
 | `proxy` | string | `""` | `custom` 模式的代理 URL。支持 `http://` / `https://` / `socks5://` / `socks5h://`，如 `"socks5://127.0.0.1:1080"` |
 
 > 与 `[bilibili].proxy` 的区别：`[network].proxy` 是「海外出口」，`[bilibili].proxy` 是「B站专用」，两者语义相反、互不影响。
@@ -394,7 +394,11 @@ model    = "deepseek-v4-flash"
 >
 > **国内大模型网关豁免（v0.3.166）**：即使 `mode` 为 `system` / `custom`，指向国内网关的 LLM 请求也会被识别并**强制直连**——DeepSeek（`api.deepseek.com`）、商汤 SenseNova（`.cn`）、通义千问（`aliyuncs.com`）、智谱、文心千帆、混元、火山方舟、Kimi、MiniMax、阶跃、百川、硅基流动、无问芯穹、PPIO 等，以及 `localhost` / 内网自建端点（cpa、vLLM 等）。识别覆盖 `.cn` 顶级域、已知厂商的非 `.cn` 域名白名单、loopback / 私有 / link-local IP，由 `openbiliclaw.network.is_domestic_endpoint` 裁决。避免「为连墙外模型开了代理 → 国内模型请求被绕道境外 → 总是超时」。豁免按 endpoint 生效，genuine 墙外网关仍走上面的代理策略。
 >
-> 旧配置只有非空 `proxy` 而没有 `mode` 时自动迁移为 `custom`；空旧配置迁移为 `direct`。保存时校验模式、协议与主机，`custom` 缺地址或非法值经 `PUT /api/config` 返回 400、不落盘。桌面 Web 与扩展 popup 都提供模式选择、地址输入和按当前模式真实探测；CLI `config-show` 分别显示模式与地址；移动 Web 无设置页。
+> **默认值为什么是 `system`（v0.3.175）**：本节列出的全是海外服务，`direct` 下国内网络必然超时；而这是开箱默认值，新用户配好令牌、启用来源，然后撞上一句没头没尾的网络错误。`system` 即 `trust_env=True`，读取环境变量 `HTTP(S)_PROXY`，macOS 上还会读系统偏好设置里的代理；**没有配代理时 `system` 与直连完全等价**，所以海外用户无损失。国内直连隔离与国内网关豁免（上面两条）不受影响，改的只是「海外那一侧」的缺省出口。
+>
+> **只有「从没写过」才吃新默认值**：`_build_network_config` 按 `mode` **键是否存在**判定，不看解析后的值。`config.toml` 里显式写了 `mode = "direct"` 的照旧直连，`OPENBILICLAW_NETWORK_MODE=direct` 同理（env override 注入的是同一张表，也算显式）。因此凡是通过设置页保存过配置的用户，磁盘上已有显式 `mode`，升级后行为一律不变；受益的是全新安装与从未配置过 `[network]` 的老配置。非法值（未知模式、`custom` 但 `proxy` 为空）仍然回退 `direct` 而不是新默认值——用户确实写了东西，不该因为写错就悄悄开始继承环境代理。
+>
+> 旧配置只有非空 `proxy` 而没有 `mode` 时自动迁移为 `custom`；空旧配置取默认值 `system`。**API 侧同一套判定**：`PUT /api/config` 与 `POST /api/config/probe-service` 收到只带 `proxy`、不带 `mode` 的 payload（旧版 UI、第三方客户端）时，与磁盘上缺 `mode` 键走同一条路——非空 `proxy` 仍是 `custom`，清空 `proxy` 则落到 `system` 而不是 `direct`；显式送了 `mode` 的一律照送的值处理。保存时校验模式、协议与主机，`custom` 缺地址或非法值经 `PUT /api/config` 返回 400、不落盘。桌面 Web 与扩展 popup 都提供模式选择、地址输入和按当前模式真实探测；CLI `config-show` 分别显示模式与地址；移动 Web 无设置页。
 
 ### `[sources.browser]`
 

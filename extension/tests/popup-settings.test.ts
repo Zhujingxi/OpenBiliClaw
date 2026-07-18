@@ -602,7 +602,9 @@ test("settings general tab exposes and wires the network proxy field (aligned wi
   assert.match(popupHtml, /国内请求始终直连/);
 
   // Restore mode + proxy, collect both into payload.network, probe wired.
-  assert.match(popupJs, /setVal\("cfgNetworkProxyMode", cfg\.network\?\.mode \|\| "direct"\)/);
+  // The fallback literal must track the backend [network].mode default
+  // (system since v0.3.175), else an omitted field renders the wrong mode.
+  assert.match(popupJs, /setVal\("cfgNetworkProxyMode", cfg\.network\?\.mode \|\| "system"\)/);
   assert.match(popupJs, /setVal\("cfgNetworkProxy", cfg\.network\?\.proxy \|\| ""\)/);
   assert.match(popupJs, /network:\s*\{\s*mode: getVal\("cfgNetworkProxyMode"\),\s*proxy: getVal\("cfgNetworkProxy"\),/);
   assert.match(popupJs, /probeConfigService\("network_proxy", \{ network: \{ mode, proxy \} \}\)/);
