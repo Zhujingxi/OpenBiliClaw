@@ -83,13 +83,16 @@ async function amoGet(url) {
  * already-signed file it holds.
  */
 async function recoverSignedXpiFromAmo(geckoId) {
+  // AMO stores the raw manifest version ("0.3.174"); `version` carries the
+  // archive-name normalization ("v0.3.174"), so strip the prefix for lookup.
+  const amoVersion = version.replace(/^v/, "");
   const listUrl =
     "https://addons.mozilla.org/api/v5/addons/addon/" +
     `${encodeURIComponent(geckoId)}/versions/?filter=all_with_unlisted&page_size=50`;
   const maxAttempts = 10;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const page = await amoGet(listUrl);
-    const match = (page.results ?? []).find((entry) => entry.version === version);
+    const match = (page.results ?? []).find((entry) => entry.version === amoVersion);
     const file = match?.file;
     if (file?.url && file.status === "public") {
       console.log(`AMO already holds signed build for ${version}; downloading...`);
