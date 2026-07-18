@@ -21,6 +21,12 @@
 
 ---
 
+## 架构清单与增量式重构计划
+
+- **新增仓库架构清单与增量式重构实施计划**：`docs/plans/2026-07-19-repository-inventory.md` 为时点性盘点快照，`docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` 为实施基线。计划定义了五层边界模型与窄依赖 router 工厂契约、存储兼容门面、迁移去重 2A（`PRAGMA table_info` + `ALTER TABLE ... ADD COLUMN`，保留惰性调用点；schema 版本账推迟）、生产者 protocol（两个生产者迁移后才考虑基类）、Must/Should/Could 交付切片、测试门禁与回滚策略。CI/CD 边界同步明确：验证统一由 `.github/workflows/ci.yml` 拥有，渠道工作流只负责打包/签名/发布；既有 pytest/mypy 诊断将按结构化身份 allowlist 而非计数容忍，诊断输出缺失或不可解析一律判失败。本条仅新增文档，不改变运行时代码。
+
+---
+
 ## 前端契约对齐与轻结构收口
 
 - **四端配置读取全部脱敏，凭据输入改为只写占位**：桌面 Web、移动 Web 与插件 popup 都只读 masked `GET /api/config`，任何前端不再请求 `reveal_keys=true`，也不再消费 `GET /api/sources/credentials`（该路由保留在服务端）；`/setup/` 向导不调用 `/api/config`，其模型与前置检查改走 `/api/model-config`、`/api/model-config/probe` 与 `/api/init-status`。B 站 / 抖音 / X / Reddit Cookie 等凭据输入框渲染为空，仅用 placeholder 显示「已保存 Cookie（留空保持不变，粘贴新值覆盖）/ 未保存」状态；空输入在 `PUT /api/config` 里整键省略，保存永不覆盖已存 secret。桌面设置页只读「当前 Cookie / 登录凭据」折叠列表（details + 只读 textarea + 复制按钮）的 markup、JS 与 CSS 一并删除，各源只保留写-only 覆盖输入框。
