@@ -20,6 +20,7 @@
 | 扩展自动识别 | ✅ | 浏览器扩展在 bgm.tv/bangumi.tv 上读取公开的 `CHOBITS_UID`（MAIN-world 桥）+ 导航栏 `/user/<username>` 链接，上报 `POST /api/sources/bangumi/identity` 持久化；guided init/CLI 在既无令牌又无显式用户名时自动回退使用；只采集 uid+username（公开信息），不碰 Cookie，不采集浏览行为 |
 | 统一候选池 | ✅ | Subject 归一化后只进入 `discovery_candidates`，由共享 evaluator/admission 决定是否进入 `content_cache` |
 | 目录指标 | ✅ | `rating_score`、`rating_count`、`source_rank` 与真实 `favorite_count` 贯穿候选池、推荐/惊喜 API 和三端卡片 |
+| 作者字段（制作方署名） | ✅ | `bangumi_subject_to_content` 从 subject 行内 `infobox` 解析 `author_name`，按 SubjectType 走优先级阶梯（书籍 作者→原作→作画→出版社，动画 导演→原作→动画制作→製作，音乐 艺术家→作曲→厂牌，游戏 开发→发行→游戏开发商，三次元 导演→编剧→主演）。两个 discovery 端点（`POST /v0/search/subjects`、`GET /v0/subjects`）本就内联返回 `infobox`（2026-07-18 实测 250/250 行均带，`GET /v0/subjects/{id}` 无额外字段），因此**零额外请求**；缺失 / schema 漂移 / 非法值一律解析为 `""`，绝不落库字面量 `"None"`。收藏路径例外见「已知限制」 |
 | 设置与状态 | ✅ | 桌面 Web、扩展设置页和 `/api/sources/status` 支持开关、用户名、**个人令牌**、分支、类型、预算、节流和 pool share；令牌为 password 输入 + 生成链接，GET config 只回传 `access_token_set` 布尔（绝不回传明文），留空保存则保持已配置令牌不变 |
 | CLI smoke | ✅ | 公开收藏、搜索、排名和日期浏览默认只读；正式 `discover --source bangumi` 才写待评估池 |
 | 账号写回 | 不支持 | 本地收藏/稍后再看仍可用；首版不修改 Bangumi 收藏、评分或进度 |
@@ -98,6 +99,8 @@ content = bangumi_subject_to_content(row, strategy="bangumi-ranked")
 
 Subject identity 使用 `bangumi:<decimal subject id>`，页面 URL 为 `https://bgm.tv/subject/<id>`，`content_type="subject"`。首选中文名、再回落原名；封面按官方 image variants 回落；`nsfw=true` 始终丢弃。评分不会冒充点赞或评论：只有官方收藏人数进入 `favorite_count`，其它缺失 engagement 字段保持 0。
 
+`author_name` 由行内 `infobox` 解析，不额外请求上游：`AUTHOR_INFOBOX_KEYS` 存 SubjectType → 有序 credit key 的优先级阶梯（Bangumi 没有统一作者字段，书籍叫「作者」、动画叫「导演」、游戏叫「开发」），阶梯顺序与各 key 的填充率由 2026-07-18 的 250 行实测标定并写在代码注释里，schema 变化后需重跑该调查。`_infobox_value_text` 兼容官方三种 `value` 形态（裸字符串 / `[{v}]` / `[{k,v}]`，后两者都只读 `v`，`k` 是「总导演/副导演」这类子标签而非人名）；同一 key 重复出现时取**首个非空**值，多名字最多保留 3 个以 `、` 连接，渲染长度硬限 `MAX_AUTHOR_LENGTH=80` 且优先切在名字分隔符上，不会断在半个名字或未闭合括号里。`infobox` 缺失、类型漂移（裸字符串 / 字典 / 标量）、条目非映射、阶梯 key 全缺等情况一律返回 `""`——绝不字符串化成 `"None"` / `"[]"`，即历史上 `COALESCE` 无法自愈的那类脏行。
+
 公开收藏通过 `bangumi_collection_to_event()` 转成统一事件：想看/看过/在看/搁置/抛弃使用不同信号强度，私有行丢弃，短评清洗后截断；官方 `updated_at` 不被当作可靠收藏时间或增量 cursor。令牌认证路径下（`include_private=True`，仅在读取令牌所有者本人收藏时传入），私密行同样转为画像信号；匿名路径行为不变。`fetch_bangumi_public_collection_events(..., include_private=...)` 逐 lane 透传该开关。
 
 ## 配置与状态
@@ -174,13 +177,13 @@ openbiliclaw discover --source bangumi --limit 30
 ## 已知限制
 
 - **海外网络依赖**：见顶部「网络要求」——`api.bgm.tv` / `lain.bgm.tv` 均为海外服务，CN 网络默认 `direct` 会超时，需 `[network]` 走 `system`/`custom` 代理。
-- **作者字段恒空**：Subject 无「制作方 / 出版社」结构化字段，`sources/bangumi.py` 未填 `author_name`（归一化后恒为 `""`）。补制作方需对每个 subject 额外请求 `/v0/subjects/{id}` 的 `infobox`，成本与收益待后续评估，本版不做。
-- **delight 惊喜信号不适配 bangumi**：`recommendation/delight.py:443-449` 的 gem 信号要求 `view_count ≥ 100`，而 Bangumi 归一化从不写 `view_count`（无播放量语义），故该门对 bangumi 恒不满足；`rating_score` 目前也未纳入 delight。Bangumi 的惊喜因此依赖语义新颖 / 跨域信号而非播放量 gem。调整这些阈值属推荐质量改动、须过推荐质量门，列为已知限制不在本分支动。
+- **收藏路径作者字段恒空**：discovery 两个端点已能填 `author_name`（见上表），但用户收藏 `GET /v0/users/{username}/collections` 内嵌的是 **SlimSubject**，本身不带 `infobox`，故经该路径进来的条目 `author_name` 仍恒为 `""`。补齐需对每个 subject 额外请求 `/v0/subjects/{id}`，成本与收益待评估，本版不做；限制同时记在 `bangumi_subject_to_content` 的 docstring 里。
+- **`DelightScorer` 的 gem 信号对 bangumi 恒不满足（但不影响线上排序）**：`DelightScorer._quality_indicator` 的质量分要求 `view_count ≥ 100`，而 Bangumi 归一化从不写 `view_count`（无播放量语义），该门对 bangumi 恒不满足。**但这不影响实际推荐**——`DelightScorer` 在生产链路上零调用点（`src/` 内没有任何实例化，只有 `effective_delight_threshold` / `DEFAULT_DELIGHT_THRESHOLD` 被引用），线上 `delight_score` 由 `recommendation/engine.py` 的 `precompute_delight_scores` 复用 Evo 的 `relevance_score` 产出。Bangumi 的目录评分实际是经 `discovery/engine.py` 的 `_prompt_visible_content_fields` 在非零时进入 evaluator prompt（`rating_score` / `rating_count` / `source_rank`），由 LLM 在语境中权衡后体现在 `relevance_score` 上——评分**是**被计入的，只是不经过 scorer 的公式。改动 scorer 内部信号属推荐质量改动、须过推荐质量门，不在本分支动。
 
 ## 测试
 
 - `tests/test_bangumi_client.py`：请求契约、节流、分页、错误与 schema drift；令牌分支（Bearer 头、`get_me`、401→`unauthorized`、`disable_access_token` 降级、`me_username`/token 校验）。
-- `tests/test_bangumi_source.py`：subject/collection 归一化、NSFW、指标和信号矩阵；`include_private` 透传（匿名跳过私密行、认证保留）。
+- `tests/test_bangumi_source.py`：subject/collection 归一化、NSFW、指标和信号矩阵；`include_private` 透传（匿名跳过私密行、认证保留）；`author_name` 的每类型 credit key、阶梯逐级回落、两种 list value 形态与去重、首个非空 occurrence 生效、长 roster 截断（含带括号人名不截在半个括号里），以及 16 例缺失/漂移/脏值输入恒为 `""` 且绝不产出 `"None"` / `"[]"`（`infobox` fixture 取自真实 v0 响应切片）。
 - `tests/test_bangumi_producer.py`：预算、cursor、cooldown、关键词生命周期和本地状态；401 令牌降级（丢 Bearer 继续匿名发现）；拒绝标记持久化（指纹非明文）、同指纹重启即匿名不发 Bearer、换新令牌成功清标记，以及 `token_state` 三态。
 - `tests/test_bangumi_web_surfaces.py` 与扩展 Node tests：设置、身份、URL、目录指标和 guided init 契约（含 setup/popup 令牌输入与 `source_options.bangumi.access_token` 发送规则）；桌面与 popup 的「清除令牌」控件、`access_token:""` 发送与 `token_state==='rejected'` 警示渲染。
 - `tests/test_cli.py` / `tests/test_api_app.py`（`-k bangumi`）：init 令牌→用户名自动解析、坏令牌 400 拒绝、令牌+用户名持久化、`invalid_token` 状态与仅 Bangumi 无凭据的报错文案；`/api/sources/bangumi/identity` 校验/幂等/脏值降级、guided init 扩展身份回退与三级优先级、CLI `_load_extension_bangumi_username` 读取与脏值容错；`/api/sources/status` 的 `token_state` 三态、`PUT /api/config` 新令牌 401→400 拒绝 / 成功清标记且回写 `/v0/me` 用户名 / `access_token:""` 离线清空+清标记 / masked echo 与省略 key 零网络。
