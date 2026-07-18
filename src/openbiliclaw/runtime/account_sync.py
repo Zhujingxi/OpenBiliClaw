@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
@@ -129,6 +130,9 @@ class AccountSyncService:
     # session. Reset path is via fresh AccountSyncService instance,
     # which is what ``rebuild_from_config`` already produces.
     _last_seen_authenticated: bool = False
+    # Shared in-flight sync so overlapping callers reuse one result instead of
+    # queueing a second, redundant run behind the first.
+    _inflight_sync: asyncio.Task[dict[str, object]] | None = None
 
     async def sync_if_due(self) -> dict[str, object]:
         """Run one account sync only when the configured interval has elapsed."""
@@ -167,10 +171,67 @@ class AccountSyncService:
                 "new_event_count": 0,
                 "reason": "not_due",
             }
+        # Re-read the cursor after joining the single-flight: a concurrent sync
+        # may have finished between the check above and our turn, which would
+        # otherwise make this tick sync again immediately.
+        inflight = self._inflight_sync
+        if inflight is not None and not inflight.done():
+            await asyncio.shield(inflight)
+            state = self.memory_manager.load_account_sync_state()
+            if not self._is_due(str(state.get("last_account_sync_at", ""))):
+                return {
+                    "synced": False,
+                    "new_event_count": 0,
+                    "reason": "not_due",
+                }
         return await self.sync_now()
 
     async def sync_now(self) -> dict[str, object]:
-        """Run one immediate incremental account sync."""
+        """Run one immediate incremental account sync.
+
+        Single-flight in two layers. Within the process, overlapping callers
+        await the same task rather than each running a sync; across processes
+        (the API daemon and an OpenClaw adapter each build their own service
+        over the same data dir) a non-blocking OS lock makes the loser return
+        ``already_running``. Without this, both could load the same state and
+        the last writer would clobber the other's cursors and error kind.
+        """
+        inflight = self._inflight_sync
+        if inflight is not None and not inflight.done():
+            return await asyncio.shield(inflight)
+        task = asyncio.ensure_future(self._sync_now_guarded())
+        self._inflight_sync = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if self._inflight_sync is task:
+                self._inflight_sync = None
+
+    async def _sync_now_guarded(self) -> dict[str, object]:
+        """Hold the cross-process run lock for one sync, if it is free."""
+        lock_path = self._run_lock_path()
+        if lock_path is None:
+            return await self._sync_now_locked()
+        from openbiliclaw.memory.json_state import exclusive_file_lock
+
+        with exclusive_file_lock(lock_path, blocking=False) as acquired:
+            if not acquired:
+                logger.info("account_sync: another process holds the run lock; skipping")
+                return {
+                    "synced": False,
+                    "new_event_count": 0,
+                    "reason": "already_running",
+                }
+            return await self._sync_now_locked()
+
+    def _run_lock_path(self) -> Path | None:
+        """Sit beside the state file so every process resolves the same path."""
+        state_path = getattr(self.memory_manager, "_account_sync_state_path", None)
+        if state_path is None:
+            return None
+        return Path(state_path).with_name("account_sync.run.lock")
+
+    async def _sync_now_locked(self) -> dict[str, object]:
         # v0.3.57+: cookie race short-circuit. Daemon often starts before
         # the extension cookie sync arrives; without this gate, the first
         # tick fetches with empty cookies, gets 0 items, stamps
@@ -303,7 +364,7 @@ class AccountSyncService:
                 raise
 
         state["last_account_sync_at"] = self._now().isoformat()
-        state["last_sync_error"] = " | ".join(errors)
+        state["last_sync_error"] = self._merge_stage_errors(errors)
         state["last_sync_error_kind"] = error_kind
         self.memory_manager.save_account_sync_state(state)
         return {
@@ -311,6 +372,22 @@ class AccountSyncService:
             "new_event_count": len(events),
             "errors": errors,
         }
+
+    @staticmethod
+    def _merge_stage_errors(errors: list[str]) -> str:
+        """Join stage errors, dropping repeats of the same message.
+
+        One expired cookie fails several stages: the history stage hits
+        /x/web-interface/history/cursor, while favorites and following each
+        call get_nav_info() for the mid. All three raised the same -101, so
+        the joined string repeated one cause three times.
+        """
+        merged: list[str] = []
+        for error in errors:
+            message = error.strip()
+            if message and message not in merged:
+                merged.append(message)
+        return " | ".join(merged)
 
     @staticmethod
     def _record_stage_error(stage: str, exc: Exception, current_kind: str) -> str:
@@ -621,11 +698,36 @@ class AccountSyncService:
     def get_runtime_status(self) -> dict[str, object]:
         """Expose lightweight account sync runtime fields."""
         state = self.memory_manager.load_account_sync_state()
+        kind = str(state.get("last_sync_error_kind", ""))
+        detail = str(state.get("last_sync_error", ""))
         return {
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
-            "last_account_sync_error": str(state.get("last_sync_error", "")),
-            "last_account_sync_error_kind": str(state.get("last_sync_error_kind", "")),
+            # Raw provider text — diagnostics only, never the display string.
+            "last_account_sync_error": detail,
+            "last_account_sync_error_kind": kind,
+            # Display copy lives here so all four surfaces render the same
+            # sentence instead of each formatting the raw error themselves.
+            "last_account_sync_message": self._user_facing_sync_message(kind, detail),
+            "last_account_sync_severity": "warning"
+            if kind == "auth_expired"
+            else ("error" if detail else ""),
         }
+
+    @staticmethod
+    def _user_facing_sync_message(kind: str, detail: str) -> str:
+        """Render the user-visible sentence for a sync error.
+
+        An expired cookie is a normal lifecycle event, not a fault, so it gets
+        an actionable instruction rather than the provider's English error.
+        """
+        if kind == "auth_expired":
+            return (
+                "B 站登录已失效，账号同步已停止。"
+                "请在浏览器重新登录 B 站，或保持扩展在线以同步新的 Cookie。"
+            )
+        if detail:
+            return "账号同步出错，稍后会自动重试。"
+        return ""
 
     async def _auto_bootstrap_soul_profile(self, event_count: int) -> None:
         """Build the first soul profile after account sync learns preferences.

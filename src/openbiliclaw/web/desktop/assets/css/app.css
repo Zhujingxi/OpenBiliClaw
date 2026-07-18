@@ -481,7 +481,9 @@
     .hero-status-grid strong, .hero-topics span { min-width: 0; color: var(--surface); font-weight: 650; overflow-wrap: anywhere; }
     .hero-topics { padding-top: var(--space-1); }
     .account-sync-status { margin-top: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
-    .account-sync-status.is-auth-expired { color: var(--surface); background: color-mix(in oklab, var(--danger, #e5484d), transparent 12%); border: 1px solid color-mix(in oklab, var(--danger, #e5484d), transparent 40%); }
+    /* An expired cookie is an expected lifecycle event with a clear next step,
+       so it reads as a warning with instructions, not a red failure. */
+    .account-sync-status.is-auth-expired { color: var(--warn-fg, var(--surface)); background: color-mix(in oklab, var(--warn, #e5a11d), transparent 82%); border: 1px solid color-mix(in oklab, var(--warn, #e5a11d), transparent 55%); }
     .account-sync-status.is-error { color: color-mix(in oklab, var(--surface), var(--meta) 18%); background: color-mix(in oklab, var(--surface), transparent 90%); border: 1px solid color-mix(in oklab, var(--surface), transparent 82%); font-weight: 500; }
     .metric-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
     .metric { padding: var(--space-3); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), transparent 90%); border: 1px solid color-mix(in oklab, var(--surface), transparent 85%); }

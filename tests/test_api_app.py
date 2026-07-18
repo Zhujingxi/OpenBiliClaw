@@ -4809,6 +4809,10 @@ class TestBackendAPI:
             "last_account_sync_at": "2026-03-14T18:00:00+00:00",
             "last_account_sync_error": "",
             "last_account_sync_error_kind": "",
+            # Display copy is rendered backend-side so every surface shows the
+            # same sentence; the raw error above stays for diagnostics.
+            "last_account_sync_message": "",
+            "last_account_sync_severity": "",
             "auto_update_enabled": False,
             # The shared fixture points OPENBILICLAW_PROJECT_ROOT at a tmp dir
             # without .git, so the real AutoUpdateService reports unsupported.
@@ -4839,6 +4843,8 @@ class TestBackendAPI:
                     "last_account_sync_at": "2026-03-14T18:00:00+00:00",
                     "last_account_sync_error": "logged out",
                     "last_account_sync_error_kind": "auth_expired",
+                    "last_account_sync_message": "B 站登录已失效，请重新登录。",
+                    "last_account_sync_severity": "warning",
                 }
 
         app = create_app(
@@ -4853,7 +4859,11 @@ class TestBackendAPI:
         response = client.get("/api/runtime-status")
 
         assert response.status_code == 200
-        assert response.json()["last_account_sync_error_kind"] == "auth_expired"
+        payload = response.json()
+        assert payload["last_account_sync_error_kind"] == "auth_expired"
+        # Surfaces render this instead of the provider's raw English error.
+        assert payload["last_account_sync_message"] == "B 站登录已失效，请重新登录。"
+        assert payload["last_account_sync_severity"] == "warning"
 
     def test_runtime_status_endpoint_includes_backend_update_summary(self) -> None:
         from fastapi.testclient import TestClient
@@ -6362,9 +6372,7 @@ class TestBackendAPI:
         assert response.json()["item_key"] == "bangumi:326"
         assert database.get_saved_membership("favorite", "bangumi:326") is not None
 
-        status = client.get(
-            "/api/saved/favorite/status", params={"item_key": "bangumi:326"}
-        )
+        status = client.get("/api/saved/favorite/status", params={"item_key": "bangumi:326"})
         assert status.status_code == 200, status.text
         assert status.json()["saved"] is True
 
@@ -10589,9 +10597,7 @@ class TestBackendAPI:
         # A rejected token is never persisted.
         assert cfg.sources.bangumi.access_token == ""
 
-    def test_put_config_bangumi_token_check_failed_on_network(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_config_bangumi_token_check_failed_on_network(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.sources.bangumi_client import BangumiAPIError
 
         cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
