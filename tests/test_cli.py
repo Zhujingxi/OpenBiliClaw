@@ -8016,3 +8016,126 @@ async def test_run_with_progress_heartbeat_reports_status_and_honest_eta(monkeyp
     assert "已超预估" in out
     assert "已完成 2/5 批" in out
     assert "预计还需 ~0s" not in out
+
+
+def _render_cli_console(monkeypatch, render) -> str:
+    """Run ``render()`` against a captured CLI console and return the text."""
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+    render()
+    return buf.getvalue()
+
+
+def test_discovered_content_preview_shows_non_bilibili_author_as_neutral_label(
+    monkeypatch,
+) -> None:
+    """Bangumi rows carry only ``author_name`` — show it, and call it 作者.
+
+    Regression for the CLI half of the four-surface contract: the three GUI
+    surfaces already read the universal ``author_name``, but the CLI read the
+    Bilibili-only ``up_name``, so every non-Bilibili source printed "（未知）"
+    (real smoke: ``discover-bangumi 攻壳机动队`` hid 押井守). "UP 主" is also
+    wrong for a film director / Zhihu answerer / YouTube channel.
+    """
+    content = DiscoveredContent(
+        content_id="8",
+        title="攻壳机动队",
+        source_platform="bangumi",
+        author_name="押井守",
+        source_strategy="bangumi-search",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "押井守" in out
+    assert "作者" in out
+    assert "UP 主" not in out
+    assert "（未知）" not in out
+
+
+def test_discovered_content_preview_keeps_up_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili keeps its native "UP 主" label and still resolves the name."""
+    content = DiscoveredContent(
+        bvid="BV1AUTHOR",
+        title="城市与建筑的空间叙事",
+        up_name="城市观察局",
+        source_platform="bilibili",
+        source_strategy="search",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "UP 主" in out
+    assert "城市观察局" in out
+    assert "作者" not in out
+
+
+def test_discovered_content_preview_falls_back_to_bilibili_label_for_legacy_rows(
+    monkeypatch,
+) -> None:
+    """A row with no ``source_platform`` keeps the old "UP 主" label.
+
+    Matches ``formatRecommendationAuthorLine``'s ``|| "bilibili"`` default so
+    pre-multi-source rows do not silently re-label themselves.
+    """
+    content = DiscoveredContent(title="老数据行为", up_name="旧的观察局")
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "UP 主" in out
+    assert "旧的观察局" in out
+    assert "作者" not in out
+
+
+def test_recommendation_card_shows_non_bilibili_author_as_neutral_label(monkeypatch) -> None:
+    """The recommendation card reads the same universal author field."""
+    item = Recommendation(
+        recommendation_id=11,
+        content=DiscoveredContent(
+            content_id="8",
+            title="攻壳机动队",
+            source_platform="bangumi",
+            author_name="押井守",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "押井守" in out
+    assert "作者" in out
+    assert "UP 主" not in out
+
+
+def test_recommendation_card_keeps_up_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili recommendation cards are untouched by the author-row fix."""
+    item = Recommendation(
+        recommendation_id=12,
+        content=DiscoveredContent(
+            bvid="BV1REC",
+            title="讲透城市与建筑的空间叙事",
+            up_name="城市观察局",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "UP 主" in out
+    assert "城市观察局" in out
+    assert "作者" not in out

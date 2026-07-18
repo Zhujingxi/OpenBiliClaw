@@ -521,6 +521,34 @@ async def _run_with_progress(
     return result
 
 
+def _content_author_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) author row for one content-like object.
+
+    Two source-agnostic rules, shared with the three GUI surfaces:
+
+    * **Value** — ``author_name`` is the universal author field and
+      ``up_name`` is the Bilibili-only legacy one. ``DiscoveredContent``
+      back-fills ``author_name`` from ``up_name`` but never the reverse,
+      so non-Bilibili sources (Bangumi, Zhihu, YouTube, …) populate only
+      ``author_name`` and reading ``up_name`` alone rendered "（未知）"
+      for all of them. Prefer ``author_name``, keep ``up_name`` as the
+      fallback for legacy rows — same order as the backend's
+      ``content.author_name or content.up_name``.
+    * **Label** — mirrors ``formatRecommendationAuthorLine`` in
+      ``extension/popup/popup-helpers.js``: Bilibili keeps the native
+      "UP 主", every other platform gets the neutral "作者" (a Bangumi
+      director or a Zhihu answerer is not an UP). A missing / unknown
+      ``source_platform`` falls back to bilibili so legacy rows keep
+      their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    name = str(getattr(content, "author_name", "") or getattr(content, "up_name", "") or "").strip()
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "UP 主" if (platform or "bilibili") == "bilibili" else "作者"
+    return (label, name or "（未知）")
+
+
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
     published = format_published_time(
@@ -529,7 +557,7 @@ def _print_recommendation_card(item: Any, index: int) -> None:
     )
     rows = [
         ("标题", item.content.title or "（暂无）"),
-        ("UP 主", item.content.up_name or "（未知）"),
+        _content_author_row(item.content),
     ]
     if published:
         rows.append(("发布时间", published))
@@ -550,7 +578,7 @@ def _print_discovered_content_preview(item: Any, index: int) -> None:
         f"发现 {index}",
         [
             ("标题", item.title or "（暂无）"),
-            ("UP 主", item.up_name or "（未知）"),
+            _content_author_row(item),
             ("来源策略", item.source_strategy or "（未知）"),
             ("相关性分数", f"{float(item.relevance_score or 0.0):.2f}"),
         ],
