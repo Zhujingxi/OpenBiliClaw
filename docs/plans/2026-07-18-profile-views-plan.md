@@ -181,16 +181,22 @@ carries only `stable_block`.
 
 **Steps:**
 
-- [ ] Write failing test (a): apply `apply_user_edit` portrait override → rendered stable block
+- [x] Write failing test (a): apply `apply_user_edit` portrait override → rendered stable block
       contains the edited text (today FAILS — raw layer read at `manager.py:599`).
-- [ ] Write failing test (b): mutate awareness notes between two renders → system-bound block
+- [x] Write failing test (b): mutate awareness notes between two renders → system-bound block
       byte-identical, user-bound block differs (today FAILS — both live in one block).
-- [ ] Write golden test (c): stable sections (portrait / traits / values / needs / MBTI /
+- [x] Write golden test (c): stable sections (portrait / traits / values / needs / MBTI /
       top-5 interests / top-5 dislikes / favorite UPs) match the pre-change render
-      field-for-field on the same profile.
-- [ ] Implement the view + injection split; keep `render_core_memory_prompt()` as a
+      field-for-field on the same profile. *(Golden asserts no-loss of the pre-change
+      sections; identity fields — 核心特质/价值观/深层需求/MBTI — are additive enrichment
+      per the stable-block spec, placed between 用户画像 and 偏好摘要.)*
+- [x] Implement the view + injection split; keep `render_core_memory_prompt()` as a
       compatibility wrapper returning stable+volatile concatenated for non-chat readers.
-- [ ] Rerun focused tests → PASS; full suite, ruff, mypy.
+      *(Overrides landed in `MemoryManager._effective_soul_data`: sync round-trip
+      from_dict→apply_overrides→to_dict, short-circuited when overrides empty. Service uses a
+      getattr-guarded `_core_memory_blocks` so pre-split memory doubles keep single-block
+      injection.)*
+- [x] Rerun focused tests → PASS; full suite, ruff, mypy.
 
 **Acceptance:**
 

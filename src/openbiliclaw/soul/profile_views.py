@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from openbiliclaw.soul.profile import InterestDomain, OnionProfile, SoulProfile
 
@@ -109,6 +109,124 @@ def _format_profile_timestamp(value: object) -> str:
     if isinstance(value, SupportsIsoformat):
         return value.isoformat()
     return str(value)
+
+
+_CHAT_EMPTY_PROFILE = "（尚未建立完整画像）"
+
+
+@dataclass(frozen=True)
+class ChatCoreMemory:
+    """Chat core-memory split into a cache-stable prefix + a volatile tail.
+
+    ``stable_block`` (portrait / identity / preference) is byte-stable across
+    awareness churn, so it belongs in the system prompt where provider prompt
+    caching keys on a byte-identical prefix. ``volatile_block`` (recent
+    awareness + active insights) is rewritten every cognition cycle and moves to
+    the user message, ahead of the turn content (most-stable-first ordering).
+    """
+
+    stable_block: str
+    volatile_block: str
+
+
+def _chat_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _chat_mapping(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _chat_dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def chat_core_memory(core_memory: Mapping[str, object]) -> ChatCoreMemory:
+    """Render the chat core-memory dict into stable + volatile prompt blocks.
+
+    Consumes the ``MemoryManager.get_core_memory()`` shape (``soul_summary`` /
+    ``preference_summary`` / ``recent_awareness`` / ``active_insights``). That
+    dict already reflects the *effective* profile (AI ⊕ user overrides): the
+    manager applies overrides before calling this view (see
+    ``MemoryManager.get_core_memory``), so chat honours manual profile edits.
+
+    The stable block reproduces the pre-split render's portrait + 偏好摘要 verbatim
+    and additionally surfaces the stable identity fields (核心特质 / 价值观 /
+    深层需求 / MBTI) that are safe to cache; the volatile block carries exactly the
+    近期观察 / 当前洞察 sections the pre-split render placed inline. Section titles
+    match the historical ``## …`` headings to minimise model-visible drift.
+    """
+    soul = _chat_mapping(core_memory.get("soul_summary"))
+    preference = _chat_mapping(core_memory.get("preference_summary"))
+    recent_awareness = _chat_dict_list(core_memory.get("recent_awareness"))
+    active_insights = _chat_dict_list(core_memory.get("active_insights"))
+
+    top_interests = _chat_dict_list(preference.get("top_interests"))
+    disliked_topics = _chat_str_list(preference.get("disliked_topics"))
+    favorite_up_users = _chat_str_list(preference.get("favorite_up_users"))
+
+    has_soul = any(soul.values())
+    has_preference = bool(top_interests or disliked_topics or favorite_up_users)
+    if not has_soul and not has_preference and not recent_awareness and not active_insights:
+        return ChatCoreMemory(stable_block=_CHAT_EMPTY_PROFILE, volatile_block="")
+
+    stable_sections: list[str] = []
+
+    portrait = soul.get("personality_portrait")
+    if portrait:
+        stable_sections.append(f"## 用户画像\n{portrait}")
+
+    identity_lines: list[str] = []
+    core_traits = _chat_str_list(soul.get("core_traits"))
+    if core_traits:
+        identity_lines.append(f"核心特质: {', '.join(core_traits)}")
+    values = _chat_str_list(soul.get("values"))
+    if values:
+        identity_lines.append(f"价值观: {', '.join(values)}")
+    deep_needs = _chat_str_list(soul.get("deep_needs"))
+    if deep_needs:
+        identity_lines.append(f"深层需求: {', '.join(deep_needs)}")
+    mbti_type = str(soul.get("mbti_type") or "").strip()
+    if mbti_type:
+        identity_lines.append(f"MBTI: {mbti_type}")
+    if identity_lines:
+        stable_sections.append("## 核心特质\n" + "\n".join(identity_lines))
+
+    preference_lines: list[str] = []
+    if top_interests:
+        interest_text = ", ".join(str(item["name"]) for item in top_interests if item.get("name"))
+        if interest_text:
+            preference_lines.append(f"兴趣标签: {interest_text}")
+    if disliked_topics:
+        preference_lines.append(f"不喜欢: {', '.join(disliked_topics)}")
+    if favorite_up_users:
+        preference_lines.append(f"常看UP主: {', '.join(favorite_up_users)}")
+    if preference_lines:
+        stable_sections.append("## 偏好摘要\n" + "\n".join(preference_lines))
+
+    volatile_sections: list[str] = []
+    if recent_awareness:
+        awareness_text = "\n".join(
+            f"- [{item.get('date', '')}] {item.get('observation', '')}".strip()
+            for item in recent_awareness
+        )
+        volatile_sections.append(f"## 近期观察\n{awareness_text}")
+    if active_insights:
+        insights_text = "\n".join(
+            f"- {item.get('hypothesis', '')} "
+            f"(置信度: {_coerce_profile_float(item.get('confidence', 0.0)):.0%})"
+            for item in active_insights
+        )
+        volatile_sections.append(f"## 当前洞察\n{insights_text}")
+
+    return ChatCoreMemory(
+        stable_block="\n\n".join(stable_sections),
+        volatile_block="\n\n".join(volatile_sections),
+    )
 
 
 def _coerce_profile_float(value: object, default: float = 0.0) -> float:

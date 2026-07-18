@@ -651,13 +651,50 @@ class MemoryManager:
 
     # --- Core Memory (always in context) ---
 
+    def _effective_soul_data(self) -> dict[str, Any]:
+        """Soul layer with user overrides applied (AI ⊕ ``profile_overrides.json``).
+
+        Chat core memory must speak from the *effective* profile, exactly like
+        ``SoulEngine.get_profile()`` (``soul/engine.py``) does for every other
+        consumer — otherwise a user's manual portrait/trait edits are silently
+        ignored on the highest-frequency interactive path.
+
+        This mirrors the engine's AI ⊕ overrides merge *synchronously* (all of
+        ``from_dict`` / ``apply_overrides`` / ``load_profile_overrides`` are sync)
+        so the sync ``get_core_memory`` / ``render_core_memory_prompt`` contract
+        — called synchronously from the async LLM service — is preserved without
+        wiring the engine into the manager.
+
+        When there are no overrides (the common case, and every pre-edit run) the
+        raw layer is returned untouched: behaviour is unchanged and the legacy
+        flat-``SoulProfile`` code path in ``get_core_memory`` is not disturbed by
+        a round-trip through the onion structure. The round-trip only runs once a
+        user has actually edited their profile, so its cost lands on interactive
+        chat turns, never in the discovery hot loop.
+        """
+        soul_data = self._layers["soul"].data
+        if not soul_data:
+            return soul_data
+        overrides = self.load_profile_overrides()
+        if overrides.is_empty():
+            return soul_data
+        from openbiliclaw.soul.overrides import apply_overrides
+        from openbiliclaw.soul.profile import OnionProfile
+
+        effective = apply_overrides(OnionProfile.from_dict(soul_data), overrides)
+        return effective.to_dict()
+
     def get_core_memory(self) -> dict[str, Any]:
         """Get core memory for LLM context injection.
 
         Core memory includes the Soul layer and a summary of the Preference layer.
         This is always provided to the LLM as part of the system prompt.
+
+        The soul layer is read through ``_effective_soul_data`` so user profile
+        edits (``profile_overrides.json``) are honoured, matching every other
+        profile consumer.
         """
-        soul = self._layers["soul"].data
+        soul = self._effective_soul_data()
         preference = self._layers["preference"].data
         awareness = self._layers["awareness"].data.get("notes", [])
         insights = self._layers["insight"].data.get("hypotheses", [])
@@ -735,62 +772,31 @@ class MemoryManager:
             "active_insights": self._active_insights(insights),
         }
 
+    def render_core_memory_blocks(self) -> tuple[str, str]:
+        """Render core memory into a ``(stable_block, volatile_block)`` pair.
+
+        ``stable_block`` (portrait / identity / preference) is prompt-cache-safe
+        and belongs in the system prompt; ``volatile_block`` (recent awareness +
+        active insights) churns every cognition cycle and belongs in the user
+        message. The split is owned by ``profile_views.chat_core_memory`` so the
+        rendering lives in the single serializer façade.
+        """
+        from openbiliclaw.soul.profile_views import chat_core_memory
+
+        blocks = chat_core_memory(self.get_core_memory())
+        return blocks.stable_block, blocks.volatile_block
+
     def render_core_memory_prompt(self) -> str:
-        """Render core memory into stable prompt text."""
-        core_memory = self.get_core_memory()
-        soul = core_memory["soul_summary"]
-        preference_summary = core_memory["preference_summary"]
-        recent_awareness = core_memory["recent_awareness"]
-        active_insights = core_memory["active_insights"]
+        """Render core memory into a single prompt string (stable + volatile).
 
-        has_soul = any(soul.values())
-        has_preference = bool(
-            preference_summary.get("top_interests")
-            or preference_summary.get("disliked_topics")
-            or preference_summary.get("favorite_up_users")
-        )
-        if not has_soul and not has_preference and not recent_awareness and not active_insights:
-            return "（尚未建立完整画像）"
-
-        sections: list[str] = []
-        portrait = soul.get("personality_portrait")
-        if portrait:
-            sections.append(f"## 用户画像\n{portrait}")
-
-        preference_lines: list[str] = []
-        top_interests = preference_summary.get("top_interests", [])
-        if top_interests:
-            interest_text = ", ".join(
-                item["name"]
-                for item in top_interests
-                if isinstance(item, dict) and item.get("name")
-            )
-            if interest_text:
-                preference_lines.append(f"兴趣标签: {interest_text}")
-        disliked_topics = preference_summary.get("disliked_topics", [])
-        if disliked_topics:
-            preference_lines.append(f"不喜欢: {', '.join(disliked_topics)}")
-        favorite_up_users = preference_summary.get("favorite_up_users", [])
-        if favorite_up_users:
-            preference_lines.append(f"常看UP主: {', '.join(favorite_up_users)}")
-        if preference_lines:
-            sections.append("## 偏好摘要\n" + "\n".join(preference_lines))
-
-        if recent_awareness:
-            awareness_text = "\n".join(
-                f"- [{item.get('date', '')}] {item.get('observation', '')}".strip()
-                for item in recent_awareness
-            )
-            sections.append(f"## 近期观察\n{awareness_text}")
-
-        if active_insights:
-            insights_text = "\n".join(
-                f"- {item.get('hypothesis', '')} (置信度: {float(item.get('confidence', 0.0)):.0%})"
-                for item in active_insights
-            )
-            sections.append(f"## 当前洞察\n{insights_text}")
-
-        return "\n\n".join(sections)
+        Retained for non-chat readers and backward compatibility: the LLM service
+        now injects ``render_core_memory_blocks`` separately (stable → system,
+        volatile → user), but callers that want the concatenated block still get
+        the same section set as before.
+        """
+        stable_block, volatile_block = self.render_core_memory_blocks()
+        parts = [part for part in (stable_block, volatile_block) if part]
+        return "\n\n".join(parts) if parts else "（尚未建立完整画像）"
 
     @staticmethod
     def _as_str_list(raw_value: object) -> list[str]:
