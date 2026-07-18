@@ -20,7 +20,7 @@ so every legacy import path stays valid):
 | `build_profile_summary` | `soul/profile_views.py:360` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Canonical structured profile; portrait deliberately excluded (`profile_views.py:371-375`). `favorite_up_users` also excluded (`profile_views.py:392`). |
 | `compact_content_prompt_profile_summary` | `soul/profile_views.py:512` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Caps a `build_profile_summary` dict for high-volume content prompts. Aliased as `compact_evaluation_profile_summary` (`discovery/engine.py:102`). Dislike floor preserved (`profile_views.py:46-50`). |
 | `build_query_generation_profile_summary` | `soul/profile_views.py:914` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Query-trimmed taste shape; drops awareness/insights/timestamps. Interests cap 64, domains ≤16. |
-| `OnionProfile.to_llm_context(include_portrait=False)` | `soul/profile.py:720` | str | **No** (opted out) | Divergent string fork used only by the speculators. `include_portrait=True` default keeps the portrait for eval/persona rendering. Task 7 folds this into a `speculation` view. |
+| `speculation` (→ `to_llm_context(include_portrait=False)`) | `soul/profile_views.py` (`speculation`); renderer `soul/profile.py:720` (onion) / `:115` (flat) | str | **No** (opted out) | String view for the two speculator prompts. Task 7 collected the former in-line `to_llm_context(include_portrait=False)` fork into a façade view that delegates to the profile's own renderer (zero behaviour change). `include_portrait=True` default still keeps the portrait for eval/persona rendering (not this path). |
 | `chat_core_memory` / `render_core_memory_blocks` | `soul/profile_views.py` (`chat_core_memory`), `memory/manager.py` (`render_core_memory_blocks` / `render_core_memory_prompt`) | `(stable, volatile)` str pair | **Yes** (stable block) | Chat core-memory view. Reads the **effective** profile (AI ⊕ overrides via `_effective_soul_data`, `manager.py`), so manual edits show. `complete_with_core_memory` injects `stable_block` (portrait/identity/preference) into system and `volatile_block` (awareness/insights) ahead of the user turn — awareness churn no longer breaks the cached system prefix (Task 6). `render_core_memory_prompt` kept as the concatenated compat wrapper for non-chat readers. |
 | `ProfileResponse` (openclaw) | `integrations/openclaw/operations.py:105` | dataclass | **Yes** (intentional) | External API surface; portrait re-exposed at `operations.py:113`, each list capped `[:5]` (`operations.py:114-120`). |
 
@@ -40,8 +40,8 @@ so every legacy import path stays valid):
 | X keyword gen | Per discovery cycle | `build_query_generation_profile_summary` — `discovery/strategies/x.py:247` | query-trimmed | No | Yes |
 | Xiaohongshu keyword gen | Per discovery cycle | `build_query_generation_profile_summary` — `sources/xhs_keyword_gen.py:49` | query-trimmed | No | Yes |
 | Pool snapshot / diagnostics | On snapshot | `build_profile_summary` — `discovery/pool_snapshot.py:114` | full dict | No | No |
-| Speculative interest generation | 12h speculation | `OnionProfile.to_llm_context(include_portrait=False)` — `soul/speculator.py:1386` | string, portrait excluded | No | Yes |
-| Avoidance speculation | 12h speculation | `OnionProfile.to_llm_context(include_portrait=False)` — `soul/avoidance_speculator.py:1271` (via getattr) | string, portrait excluded | No | Yes |
+| Speculative interest generation | 12h speculation | `profile_views.speculation(profile)` — `soul/speculator.py:1386` | string, portrait excluded | No | Yes |
+| Avoidance speculation | 12h speculation | `profile_views.speculation(profile)` — `soul/avoidance_speculator.py:1271` (getattr guard keeps `{}` fallback for non-object profiles) | string, portrait excluded | No | Yes |
 | Page extractor | Per fetched page | none — profile not read; `inject_core_memory=False` — `sources/llm_extractor.py:85` | (none) | No | Yes |
 | Chat (Socratic dialogue) | Per chat turn | `chat_core_memory` via `render_core_memory_blocks` → `complete_with_core_memory` — `llm/service.py` | effective core memory, split: system = portrait + 核心特质/价值观/深层需求/MBTI + 偏好摘要 (stable); user = 近期观察 + 当前洞察 (volatile) | Yes | Yes |
 | Consolidator judge | 12h consolidation | inherits `inject_core_memory=True` — `soul/consolidator.py:809` | core memory (unaudited; Task 8) | Yes | Yes |
@@ -66,6 +66,6 @@ so every legacy import path stays valid):
 
 Every content-pipeline serializer (`build_profile_summary`,
 `compact_content_prompt_profile_summary`,
-`build_query_generation_profile_summary`, speculator
+`build_query_generation_profile_summary`, the `speculation` view →
 `to_llm_context(include_portrait=False)`) MUST exclude it. Enforced by
 `tests/test_profile_views_guards.py`.

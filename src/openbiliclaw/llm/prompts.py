@@ -2089,7 +2089,7 @@ _AVOIDANCE_GENERATION_SYSTEM_PROMPT = """
 
 def build_avoidance_generation_prompt(
     *,
-    profile_summary: dict[str, object],
+    profile_summary: str | dict[str, object],
     existing_avoidances: list[str],
     existing_avoidance_details: list[dict[str, object]] | None = None,
     cooldown_domains: list[str],

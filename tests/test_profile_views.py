@@ -337,6 +337,44 @@ def test_profile_views_match_pre_move_golden() -> None:
         assert actual == expected, f"byte mismatch for {key}"
 
 
+def _render_speculation() -> dict[str, str]:
+    """Render the ``speculation`` view for every fixture (Task 7).
+
+    Keyed ``speculation__{fixture}`` → the string block the speculator /
+    avoidance-speculator prompts embed. The frozen goldens were generated from
+    the pre-move ``to_llm_context(include_portrait=False)`` call, so matching
+    them proves the façade view reproduces the fork output section-for-section.
+    """
+    from openbiliclaw.soul import profile_views
+
+    out: dict[str, str] = {}
+    for fixture_name, factory in _FIXTURES.items():
+        profile = factory()  # type: ignore[operator]
+        out[f"speculation__{fixture_name}"] = profile_views.speculation(profile)
+    return out
+
+
+def test_speculation_view_matches_pre_move_golden() -> None:
+    """The ``speculation`` view reproduces the pre-move prompt block byte-for-byte.
+
+    Also pins the delegation contract: the façade view is section-identical to
+    the profile's own ``to_llm_context(include_portrait=False)`` renderer that
+    the two speculator call sites used before Task 7.
+    """
+    rendered = _render_speculation()
+    assert len(rendered) == len(_FIXTURES)
+
+    for fixture_name, factory in _FIXTURES.items():
+        key = f"speculation__{fixture_name}"
+        golden_path = _GOLDEN_DIR / f"{key}.txt"
+        assert golden_path.exists(), f"missing golden snapshot: {golden_path}"
+        expected = golden_path.read_text(encoding="utf-8")
+        assert rendered[key] == expected, f"byte mismatch for {key}"
+        # Delegation is exact — no re-rendering drift vs the profile's own method.
+        profile = factory()  # type: ignore[operator]
+        assert rendered[key] == profile.to_llm_context(include_portrait=False)
+
+
 def test_utils_reexports_are_the_facade_objects() -> None:
     """The legacy ``_utils`` names must resolve to the façade's objects."""
     from openbiliclaw.discovery.strategies import _utils
@@ -415,4 +453,9 @@ if __name__ == "__main__":  # pragma: no cover — golden generation helper
         _GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
         for _key, _payload in _render_all(_utils).items():
             (_GOLDEN_DIR / f"{_key}.json").write_text(_payload, encoding="utf-8")
-        print(f"wrote {len(_FIXTURES) * 3} goldens to {_GOLDEN_DIR}")
+        # Speculation goldens: the pre-move source is the profile's own renderer
+        # (the view did not exist yet), so freeze that output directly.
+        for _name, _factory in _FIXTURES.items():
+            _block = _factory().to_llm_context(include_portrait=False)  # type: ignore[operator]
+            (_GOLDEN_DIR / f"speculation__{_name}.txt").write_text(_block, encoding="utf-8")
+        print(f"wrote {len(_FIXTURES) * 4} goldens to {_GOLDEN_DIR}")

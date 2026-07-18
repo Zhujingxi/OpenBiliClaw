@@ -164,3 +164,24 @@ def test_query_generation_summary_is_deterministic() -> None:
 def test_onion_to_llm_context_is_deterministic() -> None:
     p1, p2 = _onion_profile(), _onion_profile()
     assert p1.to_llm_context(include_portrait=False) == p2.to_llm_context(include_portrait=False)
+
+
+# --- speculation view (Task 7): same boundary + determinism as the fork -------
+
+
+def test_speculation_view_excludes_portrait() -> None:
+    """The façade ``speculation`` view keeps the portrait out on both shapes."""
+    from openbiliclaw.soul import profile_views
+
+    assert _PORTRAIT_SENTINEL not in profile_views.speculation(_onion_profile())
+    assert _PORTRAIT_SENTINEL not in profile_views.speculation(_soul_profile())
+
+
+def test_speculation_view_is_deterministic() -> None:
+    """Two calls on equal input render byte-identically (cache-safe prompts)."""
+    from openbiliclaw.soul import profile_views
+
+    assert profile_views.speculation(_onion_profile()) == profile_views.speculation(
+        _onion_profile()
+    )
+    assert profile_views.speculation(_soul_profile()) == profile_views.speculation(_soul_profile())

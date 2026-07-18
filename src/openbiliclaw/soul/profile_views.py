@@ -1083,3 +1083,23 @@ def build_query_generation_profile_summary(
             "dimensions": mbti.get("dimensions", {}),
         }
     return summary
+
+
+def speculation(profile: SoulProfile | OnionProfile) -> str:
+    """String-rendered profile context for the speculation-generation prompts.
+
+    The interest speculator (``soul/speculator.py``) and the avoidance
+    speculator (``soul/avoidance_speculator.py``) feed the profile to their LLM
+    prompts as a natural-language ``## 段落`` block, not the structured dict the
+    content pipeline consumes. This view collects that entry point into the
+    façade (Task 7 / plan Wave C2): it delegates to the profile's own
+    ``to_llm_context(include_portrait=False)`` renderer, so the output is
+    section-for-section identical to the prior in-line call — a pure move with
+    zero behaviour change. ``include_portrait=False`` keeps the free-form
+    ``personality_portrait`` narrative out (portrait boundary, spec invariant
+    V2); the guard suite pins both the exclusion and the byte-determinism.
+
+    Both call sites pass an ``OnionProfile``; the flat legacy ``SoulProfile``
+    renderer is covered too so the fork stays guarded across profile shapes.
+    """
+    return profile.to_llm_context(include_portrait=False)

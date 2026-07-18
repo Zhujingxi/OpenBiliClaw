@@ -121,6 +121,12 @@
 - `build_query_generation_profile_summary` — discovery 关键词 / 领域生成用的查询瘦身
   口味 view（MMR 多样化、embedding 可选）。
 
+另有两个字符串 view：`chat_core_memory`（聊天核心记忆拆 stable/volatile 两块，Task 6）
+与 `speculation`（猜测器 prompt 的画像段，Task 7）。`speculation` 委托画像自身的
+`to_llm_context(include_portrait=False)`，把兴趣猜测器 / 避雷猜测器此前各自内联的字符串
+分支收口进门面（零行为变化、排除画像），由 `tests/test_profile_views_guards.py` 的 sentinel
+排除 + 两次调用字节一致守护，并对拍 `tests/golden/profile_views/speculation__*.txt`。
+
 两个仅供 discovery 侧调用的叶子工具（`normalize_match_text` /
 `_coerce_query_embedding_vector`）也落在本模块并由 `_utils` re-export：查询生成 view
 依赖它们，而 `soul` 层**不得** import `discovery`，因此它们下沉到 soul 后再回流。

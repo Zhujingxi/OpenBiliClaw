@@ -218,11 +218,23 @@ call sites.
 
 **Steps:**
 
-- [ ] Snapshot current speculator prompt sections on a fixture profile (golden file).
-- [ ] Write failing test: both call sites consume `profile_views.speculation`; sentinel
+- [x] Snapshot current speculator prompt sections on a fixture profile (golden file).
+      *(Frozen pre-move `to_llm_context(include_portrait=False)` output at
+      `tests/golden/profile_views/speculation__{young,mature,legacy_flat}.txt`; the
+      three fixtures reuse `tests/test_profile_views.py`, covering both the onion
+      and flat-`SoulProfile` renderers.)*
+- [x] Write failing test: both call sites consume `profile_views.speculation`; sentinel
       portrait absent.
-- [ ] Implement; normalize section order only if the golden diff stays section-equivalent.
-- [ ] Rerun `tests/test_speculator*.py -q` → PASS; ruff, mypy.
+      *(Guard suite extended in `tests/test_profile_views_guards.py` — sentinel
+      exclusion + two-call byte-equality on both shapes; golden byte-parity + a
+      delegation-identity assertion in `tests/test_profile_views.py`.)*
+- [x] Implement; normalize section order only if the golden diff stays section-equivalent.
+      *(Chose option (a): the `speculation` view delegates to the profile's own
+      `to_llm_context(include_portrait=False)` — a pure entry-point move, zero
+      section/order change. Avoidance keeps its getattr `{}` fallback; the
+      `build_avoidance_generation_prompt` param widened to `str | dict` to make the
+      long-standing string-at-runtime type honest.)*
+- [x] Rerun `tests/test_speculator*.py -q` → PASS; ruff, mypy.
 
 **Acceptance:**
 
