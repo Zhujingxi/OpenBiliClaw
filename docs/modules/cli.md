@@ -577,7 +577,7 @@ YouTube 导入依赖浏览器插件在用户已登录的 `https://www.youtube.co
 
 Reddit 导入也复用 `bootstrap_events` 任务。后端入队 `reddit_tasks(type="bootstrap_events")`，插件在用户已登录的 `https://www.reddit.com` 页面里先读取 `/api/me.json` 识别当前用户，再读取 saved、upvoted 和 subscribed subreddit，同步回写 `/api/sources/reddit/task-result`。`init --yes-reddit` 会把 saved → `favorite`、upvoted → `like`、subscribed → `follow` 的统一事件加入 `analyze_events()` / `build_initial_profile()`，同时把 `[sources.reddit].enabled=true` 写回配置；Reddit 可以作为唯一初始化来源，只要真实拉到至少一条信号。后台会复用 6 小时内近期 Reddit `bootstrap_events` 任务；三个分支各自独立使用单分支上限 300。
 
-Bangumi 初始化不依赖插件或登录态。`init --yes-bangumi --bangumi-username <name>` 会通过官方匿名 API 读取该用户名的公开收藏，转换为统一事件后纳入 `analyze_events()` / `build_initial_profile()`，并写回 `[sources.bangumi].enabled=true` 与用户名。Bangumi 作为唯一来源时用户名必填；与其它画像来源混用但不提供用户名时，初始化会明确警告并只启用后续 Bangumi discovery。私有收藏不可见，`updated_at` 不作为收藏行为时间。
+Bangumi 初始化不依赖插件或登录态。`init --yes-bangumi --bangumi-username <name>` 会通过官方匿名 API 读取该用户名的公开收藏，转换为统一事件后纳入 `analyze_events()` / `build_initial_profile()`，并写回 `[sources.bangumi].enabled=true` 与用户名。`init --yes-bangumi --bangumi-token <token>` 走个人令牌通道：令牌先经 `GET /v0/me` 实测校验（被拒绝时当场退出并指引到 https://next.bgm.tv/demo/access-token 重新生成），解析出的用户名覆盖显式填写值（不一致时提示），随后带 Bearer 读取该账号收藏（含私密行）；校验通过的令牌与用户名一并写回 `[sources.bangumi]`。令牌与显式用户名皆缺时，init 会回退浏览器扩展自动识别的账号（扩展在已登录的 bgm.tv 页面读取公开 `CHOBITS_UID` + 导航 `/user/<username>` 链接并上报后端持久化；优先级：令牌 `/v0/me` > 显式用户名 > 扩展上报用户名），命中时输出"使用浏览器扩展识别到的账号"。Bangumi 作为唯一来源时三者至少满足一个（报错文案："提供 --bangumi-token（推荐，自动识别当前用户）或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别"）；与其它画像来源混用但全部缺失时，初始化会明确警告并只启用后续 Bangumi discovery。匿名路径私有收藏不可见，`updated_at` 不作为收藏行为时间。
 
 X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**。X 的发现走服务端 cookie 重放，行为采集走浏览器扩展 MAIN-world tap，两者都在 init 之后才生效，所以 `init --yes-x` **只翻转 `[sources.twitter].enabled = true`**，不会在 init 期间打开 x.com 前台 tab 或拉取数据。启用后，用户登录 x.com → 扩展自动把 `auth_token` + `ct0` 同步到 `data/x_cookie.json` → 后台 `XDiscoveryProducer` 在下一个 refresh tick 按预算补 X 候选。非交互式终端默认跳过 X。
 
@@ -592,6 +592,7 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--yes-reddit` / `--no-reddit`：跳过 Reddit 交互式提问，直接启用或跳过。`--yes-reddit` 会执行 `bootstrap_events` 并把 saved / upvoted / subscribed 结果纳入本轮首版画像，同时开启后续 Reddit discovery；非交互式终端默认跳过 Reddit。
 - `--yes-bangumi` / `--no-bangumi`：跳过 Bangumi 交互式提问，直接启用或跳过；非交互式终端默认跳过 Bangumi。
 - `--bangumi-username <name>`：本次初始化读取的公开用户名，并在启用时写回配置；不提供时可回退 `[sources.bangumi].username`。
+- `--bangumi-token <token>`：Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；不提供时可回退 `[sources.bangumi].access_token`。经 `/v0/me` 校验通过后写回配置；坏令牌当场拒绝。
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
 - `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
@@ -1032,20 +1033,22 @@ openbiliclaw discover-reddit-related https://www.reddit.com/r/LocalLLaMA/comment
 
 ### `openbiliclaw fetch-bangumi`
 
-通过 Bangumi 官方匿名 API 读取指定用户的公开收藏。默认只打印统计，不写 memory、不重建画像、也不调用 LLM：
+通过 Bangumi 官方 API 读取收藏。默认只打印统计，不写 memory、不重建画像、也不调用 LLM：
 
 ```bash
 openbiliclaw fetch-bangumi --username sai --limit 20
+openbiliclaw fetch-bangumi --token <personal-access-token> --limit 20
 openbiliclaw fetch-bangumi --username sai --limit 100 --write-memory
 openbiliclaw fetch-bangumi --username sai --limit 100 --write-memory --rebuild-profile
 ```
 
 - `--username, -u`：公开用户名；省略时读取 `[sources.bangumi].username`。
+- `--token`：个人令牌；省略时读取 `[sources.bangumi].access_token`。命中令牌时优先于用户名：先经 `GET /v0/me` 自动识别当前用户，再带 Bearer 读取该账号收藏（含私密行）；令牌被拒绝（401）时报"个人令牌被拒绝（缺失、错误或已过期）"并指引到 https://next.bgm.tv/demo/access-token 重新生成。
 - `--limit, -n`：最多读取条目数；`0` 使用配置的 `bootstrap_limit`。
-- `--write-memory`：显式把转换后的公开收藏事件写入本地 memory。
+- `--write-memory`：显式把转换后的收藏事件写入本地 memory。
 - `--rebuild-profile`：在写入后用本批事件重建画像，会真实调用当前 LLM；该选项会隐含启用 `--write-memory`。
 
-该命令只读取公开行。它没有 token 参数，也不会修改用户的 Bangumi 收藏、评分或进度。
+令牌与用户名皆缺时报错提示"通过 --token（推荐，自动识别当前用户）或 --username 提供访问方式"。该命令始终只读，不会修改用户的 Bangumi 收藏、评分或进度。
 
 ### `openbiliclaw discover-bangumi*`
 

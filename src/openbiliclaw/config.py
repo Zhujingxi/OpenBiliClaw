@@ -674,6 +674,11 @@ class BangumiSourceConfig:
 
     enabled: bool = False
     username: str = ""
+    # Optional Bangumi personal access token (https://next.bgm.tv/demo/access-token).
+    # When set, discovery/init resolve the account via /v0/me and read private
+    # collections with a Bearer header. Empty means the historical anonymous
+    # public-username path. Never log the value — only presence/length.
+    access_token: str = ""
     subject_types: tuple[str, ...] = ("anime", "book", "game")
     source_modes: tuple[str, ...] = ("search", "ranked", "latest")
     daily_search_budget: int = 300
@@ -1231,6 +1236,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
         bangumi=BangumiSourceConfig(
             enabled=bool(bangumi_raw.get("enabled", False)),
             username=str(bangumi_raw.get("username", "") or "").strip(),
+            access_token=str(bangumi_raw.get("access_token", "") or "").strip(),
             subject_types=tuple(
                 value
                 for value in _coerce_str_list(
@@ -1950,6 +1956,19 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    try:
+        from openbiliclaw.sources.bangumi_client import validate_bangumi_access_token
+
+        validate_bangumi_access_token(config.sources.bangumi.access_token)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.bangumi.access_token",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+
     if config.api.auth.enabled and not config.api.auth.password_hash.strip():
         issues.append(
             ConfigIssue(
@@ -2523,10 +2542,16 @@ def save_config(
     autostart_authoritative: bool = False,
 ) -> Path:
     """Persist a Config dataclass to TOML."""
-    from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+    from openbiliclaw.sources.bangumi_client import (
+        validate_bangumi_access_token,
+        validate_bangumi_username,
+    )
 
     _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
     config.sources.bangumi.username = validate_bangumi_username(config.sources.bangumi.username)
+    config.sources.bangumi.access_token = validate_bangumi_access_token(
+        config.sources.bangumi.access_token
+    )
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -2705,6 +2730,7 @@ def _render_config_toml(
             "[sources.bangumi]",
             f"enabled = {_toml_bool(config.sources.bangumi.enabled)}",
             f"username = {_toml_string(config.sources.bangumi.username)}",
+            f"access_token = {_toml_string(config.sources.bangumi.access_token)}",
             f"subject_types = {_toml_str_list(list(config.sources.bangumi.subject_types))}",
             f"source_modes = {_toml_str_list(list(config.sources.bangumi.source_modes))}",
             f"daily_search_budget = {config.sources.bangumi.daily_search_budget}",

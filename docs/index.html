@@ -1307,7 +1307,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
           <div class="note">
             <h3 data-i18n="pluginNoteTitle">插件是主要入口</h3>
             <p data-i18n="pluginNoteText">
-              插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 登录态任务桥；它也能展示和配置 Bangumi，但不申请 `bgm.tv` host permission。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
+              插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 登录态任务桥；在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别（读取页面公开的 CHOBITS_UID 与导航栏用户名），不读 Cookie、不采集浏览行为。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
             </p>
           </div>
 
@@ -1440,7 +1440,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 	          <article class="source-card reveal">
 	            <span>Bangumi</span>
 	            <h3 data-i18n="sourceBangumiTitle">Bangumi</h3>
-	            <p data-i18n="sourceBangumiText">官方匿名只读 API 提供条目搜索、排名和按日期浏览；可选公开用户名只用于读取公开收藏初始化画像。</p>
+	            <p data-i18n="sourceBangumiText">官方匿名只读 API 提供条目搜索、排名和按日期浏览；填个人令牌可自动识别当前用户并读取私密收藏，或用公开用户名读取公开收藏来初始化画像。</p>
 	          </article>
 	          <article class="source-card reveal">
 	            <span>Web</span>
@@ -1630,7 +1630,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
         desktopNoteTitle: "桌面安装包（最省事）",
         desktopNoteText: "macOS Apple 芯片下载 OpenBiliClaw-macos-v*-arm64.dmg，Intel 下载 x64 包（如发布页提供），Windows 下载 OpenBiliClaw-windows-*-Setup.exe；可用安装包都附在 openbiliclaw-v* 聚合 Latest Release 里。当前为 ad-hoc signed、未公证的实验性预发布：Mac 首次打开请先右键 / Control-click → 打开，或到系统设置 → 隐私与安全性点仍要打开；若提示“已损坏”，确认来源后执行 xattr -dr com.apple.quarantine /Applications/OpenBiliClaw.app。",
         pluginNoteTitle: "插件是主要入口",
-        pluginNoteText: "插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 登录态任务桥；它也能展示和配置 Bangumi，但不申请 bgm.tv host permission。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
+        pluginNoteText: "插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 登录态任务桥；在 bgm.tv / bangumi.tv 上它仅做身份识别（读取页面公开的 CHOBITS_UID 与导航栏用户名），不读 Cookie、不采集浏览行为。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
         mobileInstallNoteTitle: "手机桌面快捷入口",
         mobileInstallNoteText: "后端允许局域网访问后，点击插件顶部手机图标扫码打开 /m/。iPhone / iPad 用 Safari「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；HTTPS 反代下完整 PWA 安装提示更稳定。",
         whyEyebrow: "Why it matters",
@@ -1675,7 +1675,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 	        sourceRedditTitle: "Reddit",
 	        sourceRedditText: "saved / upvoted / subscribed 初始化信号走已登录浏览器插件任务；search / hot / subreddit / related discovery 默认走随后端安装的 rdt-cli，插件自动同步 reddit_session，未登录 / 不可用时自动 fallback 到插件。",
 	        sourceBangumiTitle: "Bangumi",
-	        sourceBangumiText: "官方匿名只读 API 提供条目搜索、排名和按日期浏览；可选公开用户名只用于读取公开收藏初始化画像。",
+	        sourceBangumiText: "官方匿名只读 API 提供条目搜索、排名和按日期浏览；填个人令牌可自动识别当前用户并读取私密收藏，或用公开用户名读取公开收藏来初始化画像。",
 	        sourceWebTitle: "通用 Web",
         sourceWebText: "通过浏览器与 LLM 内容抽取接入更多站点，让非平台内容也进入画像。",
         screensEyebrow: "Product",
@@ -1777,7 +1777,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
         desktopNoteTitle: "Desktop installer (easiest)",
         desktopNoteText: "For macOS, Apple silicon uses OpenBiliClaw-macos-v*-arm64.dmg and Intel uses the x64 package when a release provides one; Windows uses OpenBiliClaw-windows-*-Setup.exe. Installers are attached to the openbiliclaw-v* aggregate Latest Release. The Mac build is ad-hoc signed but not notarized: first launch with right-click / Control-click -> Open, or allow it in System Settings -> Privacy & Security. If macOS says the app is damaged, verify the release source and run xattr -dr com.apple.quarantine /Applications/OpenBiliClaw.app.",
         pluginNoteTitle: "The extension is the main entry point",
-        pluginNoteText: "The extension powers sidebar recommendations, behavior capture, feedback, chat, and logged-in task bridges for Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit. It also displays and configures Bangumi without requesting bgm.tv host permission. For the newest build, download openbiliclaw-extension-v*.zip from the openbiliclaw-v* aggregate GitHub Latest Release and load it manually (Firefox: use the -firefox.zip); the Chrome Web Store one-click install auto-updates but can lag by days to a couple of weeks due to review scheduling.",
+        pluginNoteText: "The extension powers sidebar recommendations, behavior capture, feedback, chat, and logged-in task bridges for Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit. On bgm.tv / bangumi.tv it only performs identity recognition (reading the page's public CHOBITS_UID and nav username); it never reads cookies or collects browsing behavior. For the newest build, download openbiliclaw-extension-v*.zip from the openbiliclaw-v* aggregate GitHub Latest Release and load it manually (Firefox: use the -firefox.zip); the Chrome Web Store one-click install auto-updates but can lag by days to a couple of weeks due to review scheduling.",
         mobileInstallNoteTitle: "Phone home-screen shortcut",
         mobileInstallNoteText: "After enabling LAN access for the backend, click the phone icon in the extension header and scan the QR code for /m/. On iPhone / iPad, open Safari's Share menu and choose Add to Home Screen; on Android Chrome / Chromium browsers, use Install app or Add to Home screen. LAN HTTP may only create a shortcut in some Android browsers; full PWA install prompts are more reliable behind an HTTPS reverse proxy.",
         whyEyebrow: "Why it matters",
@@ -1822,7 +1822,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
 	        sourceRedditTitle: "Reddit",
 	        sourceRedditText: "Saved / upvoted / subscribed init signals run through logged-in browser extension tasks; search / hot / subreddit / related discovery defaults to backend-installed rdt-cli with extension-synced reddit_session, and falls back to extension tasks when unauthenticated or unavailable.",
 	        sourceBangumiTitle: "Bangumi",
-	        sourceBangumiText: "The official anonymous read-only API provides subject search, ranked, and date browsing; an optional public username is used only to read public collections for profile init.",
+	        sourceBangumiText: "The official anonymous read-only API provides subject search, ranked, and date browsing; a personal access token auto-identifies the current user and reads private collections, or an optional public username reads public collections to init the profile.",
 	        sourceWebTitle: "Generic Web",
         sourceWebText: "Browser access plus LLM extraction bring more sites into the profile and candidate pool.",
         screensEyebrow: "Product",

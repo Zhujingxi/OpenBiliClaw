@@ -165,6 +165,7 @@ const state = {
   initBangumiUsername: "",
   initBangumiUsernameTouched: false,
   initBangumiUsernamePrefilled: false,
+  initBangumiToken: "",
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -1385,8 +1386,39 @@ function _renderInitSources() {
   });
   bangumiRow.append(bangumiLabel, bangumiInput);
   elements.initSources.append(bangumiRow);
+
+  // Optional personal access token: identifies the account via /v0/me and reads
+  // private collections. When set, the username above is auto-resolved.
+  const bangumiTokenRow = document.createElement("label");
+  bangumiTokenRow.className = "init-source-row";
+  const bangumiTokenLabel = document.createElement("span");
+  bangumiTokenLabel.textContent = "Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）";
+  const bangumiTokenInput = document.createElement("input");
+  bangumiTokenInput.id = "initBangumiToken";
+  bangumiTokenInput.type = "password";
+  bangumiTokenInput.maxLength = 512;
+  bangumiTokenInput.autocomplete = "off";
+  bangumiTokenInput.disabled = true;
+  bangumiTokenInput.value = state.initBangumiToken;
+  bangumiTokenInput.addEventListener("input", () => {
+    state.initBangumiToken = bangumiTokenInput.value;
+  });
+  bangumiTokenRow.append(bangumiTokenLabel, bangumiTokenInput);
+  elements.initSources.append(bangumiTokenRow);
+  const bangumiTokenHint = document.createElement("p");
+  bangumiTokenHint.className = "init-sources-hint";
+  const bangumiTokenLink = document.createElement("a");
+  bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
+  bangumiTokenLink.target = "_blank";
+  bangumiTokenLink.rel = "noopener noreferrer";
+  bangumiTokenLink.textContent = "生成个人令牌";
+  bangumiTokenHint.append(bangumiTokenLink, document.createTextNode("（约 1 年有效，视同密码保管）"));
+  elements.initSources.append(bangumiTokenHint);
+
   elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
-    bangumiInput.disabled = !event.currentTarget.checked;
+    const checked = Boolean(event.currentTarget.checked);
+    bangumiInput.disabled = !checked;
+    bangumiTokenInput.disabled = !checked;
   });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
@@ -1413,6 +1445,13 @@ function _readInitBangumiUsername() {
     document.getElementById("initBangumiUsername")?.value || "",
   ).trim();
   return state.initBangumiUsername;
+}
+
+function _readInitBangumiToken() {
+  state.initBangumiToken = String(
+    document.getElementById("initBangumiToken")?.value || "",
+  ).trim();
+  return state.initBangumiToken;
 }
 
 // Decide what Bangumi username (if any) guided init should send, delegating the
@@ -1631,6 +1670,10 @@ async function handleStartInitClick() {
   const selectedSources = _readSelectedInitSources();
   const bangumiUsername = _readInitBangumiUsername();
   const bangumiUsernameOption = _resolveInitBangumiUsernameForSubmit(bangumiUsername);
+  const bangumiToken = _readInitBangumiToken();
+  // Only send a token when the user typed one; omit otherwise so the backend
+  // keeps any configured token (empty string would clear a stored token).
+  const bangumiTokenOption = bangumiToken ? bangumiToken : null;
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
@@ -1639,10 +1682,11 @@ async function handleStartInitClick() {
   if (
     selectedSources.length === 1 &&
     selectedSources[0] === "bangumi" &&
-    !bangumiUsername
+    !bangumiUsername &&
+    !bangumiToken
   ) {
     _setInitStartButton("开始初始化", true);
-    _setInitReason("只选择 Bangumi 时，请填写公开用户名以读取公开收藏。");
+    _setInitReason("只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。");
     return;
   }
   _setInitStartButton("检查中…", false);
@@ -1701,6 +1745,7 @@ async function handleStartInitClick() {
       force: false,
       sources: selectedSources,
       bangumiUsername: bangumiUsernameOption,
+      bangumiToken: bangumiTokenOption,
     });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
@@ -7222,6 +7267,11 @@ function bindSettings() {
     disabled: "来源未启用",
   };
   const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
+  const BANGUMI_SAVE_ERROR_MESSAGES = {
+    invalid_bangumi_access_token:
+      "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+    bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
+  };
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -7243,12 +7293,15 @@ function bindSettings() {
         row.style.opacity = "1";
         continue;
       }
+      // A rejected personal token (Bangumi) overrides the run-derived state so
+      // the user sees an actionable warning + a red dot, not a green chip.
+      const tokenRejected = item.token_state === "rejected";
       if (detail) {
-        const label = SOURCE_STATUS_LABEL[item.state] || "";
+        const label = tokenRejected ? "令牌已失效" : (SOURCE_STATUS_LABEL[item.state] || "");
         const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
         detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
       }
-      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
+      if (dot) dot.style.color = tokenRejected ? "#e74c3c" : (SOURCE_STATUS_DOT[item.state] || "#9aa0a6");
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
   }
@@ -7386,6 +7439,25 @@ function bindSettings() {
     const bangumiEnabled = document.getElementById("cfgBangumiEnabled");
     if (bangumiEnabled) bangumiEnabled.checked = cfg.sources?.bangumi?.enabled === true;
     setVal("cfgBangumiUsername", cfg.sources?.bangumi?.username);
+    {
+      // Token is a secret and never returned by GET; access_token_set only
+      // signals whether one is stored. Keep the field empty and reflect the
+      // stored state in the placeholder so an untouched save never clobbers it.
+      const bangumiToken = document.getElementById("cfgBangumiAccessToken");
+      if (bangumiToken) {
+        bangumiToken.value = "";
+        bangumiToken.placeholder = cfg.sources?.bangumi?.access_token_set
+          ? "已配置（留空保持不变；填写新令牌以替换）"
+          : "填写以自动识别当前用户并读取私密收藏";
+      }
+      // Clear-token is a per-save action; never leave it pre-checked after a
+      // reload, and disable it when nothing is stored to clear.
+      const bangumiClearToken = document.getElementById("cfgBangumiClearToken");
+      if (bangumiClearToken) {
+        bangumiClearToken.checked = false;
+        bangumiClearToken.disabled = cfg.sources?.bangumi?.access_token_set !== true;
+      }
+    }
     setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, cfg.sources?.bangumi?.source_modes);
     setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, cfg.sources?.bangumi?.subject_types);
     setVal("cfgBangumiDailySearchBudget", cfg.sources?.bangumi?.daily_search_budget);
@@ -7630,6 +7702,16 @@ function bindSettings() {
         bangumi: {
           enabled: checked("cfgBangumiEnabled"),
           username: getVal("cfgBangumiUsername"),
+          // Precedence: an explicit "clear token" checkbox sends access_token:""
+          // (backend clears the stored token + rejection marker). Otherwise send
+          // the token only when the user typed one; an empty field means "leave
+          // the stored token unchanged", so omit the key rather than clobbering
+          // the saved token with "".
+          ...(checked("cfgBangumiClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgBangumiAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgBangumiAccessToken") }
+              : {}),
           subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
           source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
           daily_search_budget: getInt("cfgBangumiDailySearchBudget", 300),
@@ -8058,6 +8140,12 @@ function bindSettings() {
         showToast("未授予该后端地址的访问权限，地址未保存。", "error");
       } else if (err?.message === "invalid_backend_scheme") {
         showToast("后端协议无效。", "error");
+      } else if (BANGUMI_SAVE_ERROR_MESSAGES[err?.details?.error]) {
+        // Config PUT rejects a bad/expired Bangumi token live via /v0/me.
+        showToast(
+          err.details.message || BANGUMI_SAVE_ERROR_MESSAGES[err.details.error],
+          "error",
+        );
       } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -23,6 +26,12 @@ BANGUMI_SOURCE_STRATEGIES = {
     "ranked": "bangumi-ranked",
     "latest": "bangumi-latest",
 }
+# Persisted marker key for "the configured personal token was rejected".
+_TOKEN_REJECTED_STATE_KEY = "token_rejected"
+_BANGUMI_TOKEN_REJECTED_DETAIL = (
+    "个人令牌已被拒绝（可能过期），已降级为匿名公开发现；"
+    "请到 https://next.bgm.tv/demo/access-token 重新生成。"
+)
 
 
 class _PartialSearchError(Exception):
@@ -42,6 +51,9 @@ class BangumiDiscoveryProducer:
     soul_engine: Any
     client: Any
     enabled: bool = False
+    # Presence flag only (never the token value): when the injected client
+    # carries a personal access token, a 401 degrades it to anonymous discovery.
+    access_token: str = ""
     subject_types: tuple[str, ...] = ("anime", "book", "game")
     source_modes: tuple[str, ...] = BANGUMI_SOURCE_MODES
     daily_search_budget: int = 300
@@ -64,6 +76,7 @@ class BangumiDiscoveryProducer:
         if not self.enabled:
             return self._skip("disabled")
         self._ensure_tables()
+        self._reconcile_token_rejection()
         cooldown_until = _read_cooldown_until(self.database)
         if cooldown_until is not None and cooldown_until > datetime.now(UTC):
             return self._skip("rate_limited")
@@ -110,12 +123,16 @@ class BangumiDiscoveryProducer:
                 if partial_error.code == "rate_limited":
                     self._set_cooldown(partial_error.retry_after_seconds or 300)
                     break
+                if partial_error.code == "unauthorized":
+                    self._degrade_access_token()
                 continue
             except BangumiAPIError as exc:
                 mode_results[mode] = exc.code
                 errors.append(exc.code)
                 if exc.code == "rate_limited":
                     self._set_cooldown(exc.retry_after_seconds or 300)
+                elif exc.code == "unauthorized":
+                    self._degrade_access_token()
                 self._record_run(mode, units=0, discovered=0, reason="error", error_code=exc.code)
                 if exc.code == "rate_limited":
                     break
@@ -131,6 +148,17 @@ class BangumiDiscoveryProducer:
             reason = "ok" if unique_items else "empty"
             mode_results[mode] = reason
             successful_runs[mode] = (len(unique_items), reason, "")
+
+        # A token-bearing request that completed without a 401/403 proves the
+        # token still works — clear any stale rejection marker so the account
+        # re-arms. Only trust this when the client is still authenticated (a
+        # degraded/anonymous cycle proves nothing about the token).
+        if (
+            "unauthorized" not in errors
+            and successful_runs
+            and bool(getattr(self.client, "has_access_token", False))
+        ):
+            self._clear_token_rejection()
 
         items = _dedupe_items(all_items)[:requested_limit]
         enqueued = 0
@@ -400,6 +428,72 @@ class BangumiDiscoveryProducer:
         )
         self.database.conn.commit()
 
+    def _degrade_access_token(self) -> None:
+        """Drop the client's Bearer token after Bangumi rejects it (401/403).
+
+        Public discovery endpoints need no auth, so a token likely expired or
+        revoked must not brick every future cycle. Log a clear, actionable
+        diagnostic (never the token value), persist a rejection marker so a
+        restart does not re-arm the same dead token, and fall back to anonymous
+        requests.
+        """
+
+        fingerprint = _token_fingerprint(self.access_token)
+        self.access_token = ""
+        disable = getattr(self.client, "disable_access_token", None)
+        already_anonymous = getattr(self.client, "has_access_token", True) is False
+        if callable(disable):
+            disable()
+        # Persist the rejection keyed by a token fingerprint (never the token
+        # itself). The fingerprint is a SHA-256 prefix: it is not reversible to
+        # the secret but still lets a restart tell "same dead token" (stay
+        # anonymous) from "user rotated the token" (try the fresh one).
+        if fingerprint:
+            with suppress(Exception):
+                _persist_token_rejection(self.database, fingerprint)
+        if not already_anonymous:
+            logger.warning(
+                "bangumi producer: access token rejected (401/403); it may have "
+                "expired or been revoked. Falling back to anonymous public "
+                "discovery. Regenerate a token at "
+                "https://next.bgm.tv/demo/access-token and update "
+                "[sources.bangumi].access_token."
+            )
+
+    def _reconcile_token_rejection(self) -> None:
+        """Honor a persisted token-rejection marker before making requests.
+
+        If a prior cycle recorded that this exact token (matching fingerprint)
+        was rejected, start anonymous instead of re-triggering a 401 on every
+        restart. A changed token (different fingerprint) means the user rotated
+        it, so leave the token armed and try it once: a success clears the stale
+        marker (end of cycle), and a fresh 401 re-marks with the new fingerprint.
+        """
+
+        token = str(self.access_token or "").strip()
+        if not token:
+            return
+        try:
+            marker = _read_token_rejection(self.database)
+        except Exception:
+            return
+        if marker is None:
+            return
+        if str(marker.get("fingerprint") or "") == _token_fingerprint(token):
+            disable = getattr(self.client, "disable_access_token", None)
+            if callable(disable):
+                disable()
+            logger.info(
+                "bangumi producer: personal token was previously rejected; "
+                "starting this cycle anonymous. Regenerate at "
+                "https://next.bgm.tv/demo/access-token to re-enable authenticated "
+                "discovery."
+            )
+
+    def _clear_token_rejection(self) -> None:
+        with suppress(Exception):
+            _clear_token_rejection(self.database)
+
     def _candidate_pool_full(self) -> bool:
         pool_full = getattr(self.candidate_pipeline, "pool_full", None)
         if not callable(pool_full):
@@ -429,10 +523,22 @@ class BangumiDiscoveryProducer:
                 cursor INTEGER NOT NULL DEFAULT 0,
                 total INTEGER NOT NULL DEFAULT 0,
                 cooldown_until TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
+        # ``note`` is a later addition (token-rejection marker). CREATE TABLE IF
+        # NOT EXISTS never adds a column to a pre-existing table, so migrate old
+        # databases idempotently.
+        columns = {
+            str(row[1])
+            for row in self.database.conn.execute("PRAGMA table_info(bangumi_discovery_state)")
+        }
+        if "note" not in columns:
+            self.database.conn.execute(
+                "ALTER TABLE bangumi_discovery_state ADD COLUMN note TEXT NOT NULL DEFAULT ''"
+            )
         self.database.conn.commit()
 
     def _skip(self, reason: str) -> dict[str, object]:
@@ -442,21 +548,49 @@ class BangumiDiscoveryProducer:
         return {"discovered": 0, "reason": reason}
 
 
-def bangumi_source_status(database: Any, *, enabled: bool) -> dict[str, object]:
-    """Return local-only discovery status without contacting Bangumi."""
+def bangumi_source_status(
+    database: Any, *, enabled: bool, token_configured: bool = False
+) -> dict[str, object]:
+    """Return local-only discovery status without contacting Bangumi.
+
+    When ``token_configured`` is set, a ``token_state`` dimension is added:
+    ``"rejected"`` if a persisted rejection marker exists (the personal token
+    was denied and discovery degraded to anonymous), else ``"ok"``. The field is
+    omitted entirely when no token is configured, so anonymous deployments keep
+    their historical shape.
+    """
 
     if not enabled:
         return {"state": "disabled", "detail": "Bangumi 来源未启用。"}
+
+    token_state: str | None = None
+    if token_configured:
+        try:
+            token_state = "rejected" if _read_token_rejection(database) is not None else "ok"
+        except Exception:
+            token_state = "ok"
+
+    def _finish(payload: dict[str, object]) -> dict[str, object]:
+        if token_state is not None:
+            payload["token_state"] = token_state
+            if token_state == "rejected":
+                # The rejection is the most actionable fact — surface it over the
+                # generic per-state detail so the settings page shows the warning.
+                payload["detail"] = _BANGUMI_TOKEN_REJECTED_DETAIL
+        return payload
+
     try:
         cooldown = _read_cooldown_until(database)
     except Exception:
-        return {"state": "unverified", "detail": "尚未运行 Bangumi 内容发现。"}
+        return _finish({"state": "unverified", "detail": "尚未运行 Bangumi 内容发现。"})
     if cooldown is not None and cooldown > datetime.now(UTC):
-        return {
-            "state": "rate_limited",
-            "detail": "Bangumi API 正在退避冷却，到期后自动重试。",
-            "cooldown_until": cooldown.isoformat(),
-        }
+        return _finish(
+            {
+                "state": "rate_limited",
+                "detail": "Bangumi API 正在退避冷却，到期后自动重试。",
+                "cooldown_until": cooldown.isoformat(),
+            }
+        )
     try:
         rows = database.conn.execute(
             """
@@ -468,9 +602,9 @@ def bangumi_source_status(database: Any, *, enabled: bool) -> dict[str, object]:
             """
         ).fetchall()
     except Exception:
-        return {"state": "unverified", "detail": "尚未运行 Bangumi 内容发现。"}
+        return _finish({"state": "unverified", "detail": "尚未运行 Bangumi 内容发现。"})
     if not rows:
-        return {"state": "unverified", "detail": "尚未运行 Bangumi 内容发现。"}
+        return _finish({"state": "unverified", "detail": "尚未运行 Bangumi 内容发现。"})
     successes = sum(1 for row in rows if str(row["reason"]) in {"ok", "empty"})
     partials = sum(1 for row in rows if str(row["reason"]) == "partial")
     failures = len(rows) - successes - partials
@@ -480,17 +614,91 @@ def bangumi_source_status(database: Any, *, enabled: bool) -> dict[str, object]:
         state = "ready"
     else:
         state = "error"
-    return {
-        "state": state,
-        "detail": "Bangumi 使用官方公开 API，无需登录。",
-        "modes": {
-            str(row["mode"]): {
-                "reason": str(row["reason"]),
-                "error_code": str(row["error_code"]),
-            }
-            for row in rows
-        },
-    }
+    # A configured, non-rejected token means the account is authenticated; do not
+    # claim "无需登录" in that case.
+    if token_state == "ok":
+        detail = "Bangumi 使用官方公开 API；个人令牌有效，可读取你的私密收藏。"
+    else:
+        detail = "Bangumi 使用官方公开 API，无需登录。"
+    return _finish(
+        {
+            "state": state,
+            "detail": detail,
+            "modes": {
+                str(row["mode"]): {
+                    "reason": str(row["reason"]),
+                    "error_code": str(row["error_code"]),
+                }
+                for row in rows
+            },
+        }
+    )
+
+
+def _token_fingerprint(token: object) -> str:
+    """Return a short, non-reversible SHA-256 fingerprint of a token.
+
+    Twelve hex chars are enough to distinguish "same dead token" from "user
+    rotated the token" without ever persisting the secret itself.
+    """
+
+    raw = str(token or "").strip()
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _read_token_rejection(database: Any) -> dict[str, Any] | None:
+    """Read the persisted token-rejection marker (``None`` when absent)."""
+
+    try:
+        row = database.conn.execute(
+            "SELECT note FROM bangumi_discovery_state WHERE state_key = ?",
+            (_TOKEN_REJECTED_STATE_KEY,),
+        ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    raw = str(row[0] or "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _persist_token_rejection(database: Any, fingerprint: str) -> None:
+    """Persist that the token with ``fingerprint`` was rejected (never the token)."""
+
+    payload = json.dumps(
+        {"fingerprint": fingerprint, "rejected_at": datetime.now(UTC).isoformat()},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    database.conn.execute(
+        """
+        INSERT INTO bangumi_discovery_state(state_key, note, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(state_key) DO UPDATE SET
+            note = excluded.note,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (_TOKEN_REJECTED_STATE_KEY, payload),
+    )
+    database.conn.commit()
+
+
+def _clear_token_rejection(database: Any) -> None:
+    """Drop any persisted token-rejection marker (token re-armed / cleared)."""
+
+    database.conn.execute(
+        "DELETE FROM bangumi_discovery_state WHERE state_key = ?",
+        (_TOKEN_REJECTED_STATE_KEY,),
+    )
+    database.conn.commit()
 
 
 def _read_cooldown_until(database: Any) -> datetime | None:

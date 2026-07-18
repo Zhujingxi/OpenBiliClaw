@@ -388,8 +388,9 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │   Reddit bootstrap_events: saved/upvoted/subscribed -> 首版画像信号 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ BangumiDiscoveryProducer: 官方匿名 API search/ranked/latest -> pending eval │ │
-│  │   显式公开 username collections -> 首版画像信号；无 Cookie/token/站内写入 │ │
+│  │ BangumiDiscoveryProducer: 默认匿名 API search/ranked/latest；可选个人令牌读私密收藏(401降级) │ │
+│  │   显式公开 username collections -> 首版画像信号；无 Cookie、无站内写入 │ │
+│  │   扩展身份桥(bgm.tv/bangumi.tv): 上报公开 uid+用户名做零配置账号识别，非任务桥/无行为采集 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │

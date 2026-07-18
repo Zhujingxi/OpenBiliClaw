@@ -9,7 +9,10 @@ from openbiliclaw.sources.bangumi_client import (
     BANGUMI_USER_AGENT,
     BangumiAPIError,
     BangumiClient,
+    me_username,
+    resolve_access_token_identity,
     subject_type_id,
+    validate_bangumi_access_token,
     validate_bangumi_username,
 )
 
@@ -159,3 +162,118 @@ def test_subject_type_and_username_validation() -> None:
         subject_type_id("movie")
     with pytest.raises(ValueError):
         validate_bangumi_username("bad/name")
+
+
+def test_access_token_validation() -> None:
+    assert validate_bangumi_access_token("  tok-123  ") == "tok-123"
+    assert validate_bangumi_access_token(None) == ""
+    assert validate_bangumi_access_token("") == ""
+    with pytest.raises(ValueError):
+        validate_bangumi_access_token("has space\nnewline")
+    with pytest.raises(ValueError):
+        validate_bangumi_access_token("x" * 513)
+
+
+def test_me_username_defensive_parsing() -> None:
+    assert me_username({"username": "  sai  ", "nickname": "Sai"}) == "sai"
+    with pytest.raises(BangumiAPIError) as exc_info:
+        me_username({"nickname": "Sai"})
+    assert exc_info.value.code == "schema_changed"
+
+
+@pytest.mark.asyncio
+async def test_token_client_sends_bearer_on_every_request() -> None:
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("Authorization"))
+        if request.url.path == "/v0/me":
+            return httpx.Response(200, json={"username": "sai", "nickname": "Sai"})
+        return httpx.Response(200, json={"data": [], "total": 0})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.bgm.tv", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = BangumiClient(
+            http_client=http_client, access_token="  tok-123  ", request_interval_seconds=0
+        )
+        assert client.has_access_token is True
+        assert me_username(await client.get_me()) == "sai"
+        await client.get_user_collections("sai", limit=5)
+
+    assert seen_auth == ["Bearer tok-123", "Bearer tok-123"]
+
+
+@pytest.mark.asyncio
+async def test_anonymous_client_sends_no_bearer_and_get_me_requires_token() -> None:
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("Authorization"))
+        return httpx.Response(200, json={"data": [], "total": 0})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.bgm.tv", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = BangumiClient(http_client=http_client, request_interval_seconds=0)
+        assert client.has_access_token is False
+        await client.browse_subjects("anime", sort="rank", limit=1)
+        with pytest.raises(BangumiAPIError) as exc_info:
+            await client.get_me()
+
+    assert seen_auth == [None]
+    assert exc_info.value.code == "unauthorized"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_get_me_maps_unauthorized(status: int) -> None:
+    transport = httpx.MockTransport(lambda request: httpx.Response(status, text="denied"))
+    async with httpx.AsyncClient(base_url="https://api.bgm.tv", transport=transport) as http_client:
+        client = BangumiClient(
+            http_client=http_client, access_token="tok", request_interval_seconds=0
+        )
+        with pytest.raises(BangumiAPIError) as exc_info:
+            await client.get_me()
+    assert exc_info.value.code == "unauthorized"
+    assert "denied" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_disable_access_token_degrades_to_anonymous() -> None:
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("Authorization"))
+        return httpx.Response(200, json={"data": [], "total": 0})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.bgm.tv", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = BangumiClient(
+            http_client=http_client, access_token="tok", request_interval_seconds=0
+        )
+        await client.browse_subjects("anime", sort="rank", limit=1)
+        client.disable_access_token()
+        assert client.has_access_token is False
+        await client.browse_subjects("anime", sort="rank", limit=1)
+
+    assert seen_auth == ["Bearer tok", None]
+
+
+@pytest.mark.asyncio
+async def test_resolve_access_token_identity_returns_username_or_raises() -> None:
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v0/me"
+        return httpx.Response(200, json={"username": "sai"})
+
+    async with httpx.AsyncClient(
+        base_url="https://api.bgm.tv", transport=httpx.MockTransport(ok_handler)
+    ) as http_client:
+        client = BangumiClient(
+            http_client=http_client, access_token="tok", request_interval_seconds=0
+        )
+        assert me_username(await client.get_me()) == "sai"
+
+    with pytest.raises(ValueError):
+        await resolve_access_token_identity("")

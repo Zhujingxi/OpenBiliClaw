@@ -53,6 +53,7 @@
       initBangumiUsername: "",
       initBangumiUsernameTouched: false,
       initBangumiUsernamePrefilled: false,
+      initBangumiToken: "",
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -123,7 +124,9 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
-      no_profile_signal_sources: "只选择 Bangumi 时，请填写公开用户名以读取公开收藏。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。",
+      invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+      bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -555,6 +558,7 @@
     const APPEND_SKELETON_COUNT = 4;
     let autoLoadObserver = null;
     let autoLoadCheckRaf = 0;
+    let autoLoadCheckFallbackTimer = 0;
     let autoLoadCooldownTimer = 0;
     let appendMoreInFlight = false;
     let lastAutoLoadAt = 0;
@@ -1590,7 +1594,11 @@
         ? state.initBangumiUsername
         : state.config?.sources?.bangumi?.username || state.initBangumiUsername || "";
       const bangumiInput = `<label class="init-source-row"><span>Bangumi 公开用户名（可留空，仅启用发现）</span><input id="initBangumiUsername" maxlength="128" autocomplete="off" value="${escapeHtml(bangumiUsername)}"${bangumiDisabled}></label>`;
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      // Optional personal access token: identifies the account via /v0/me and
+      // reads private collections; when set, the username above is auto-resolved.
+      const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
+      const bangumiTokenHint = `<p class="init-sources-hint"><a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）</p>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
@@ -1738,8 +1746,11 @@
       grid.querySelectorAll("input[data-init-source]").forEach((input) => {
         input.addEventListener("change", () => {
           state.initSelectedSources = selectedInitSourcesFromDom();
+          const bangumiChecked = state.initSelectedSources.includes("bangumi");
           const bangumiUsername = grid.querySelector("#initBangumiUsername");
-          if (bangumiUsername) bangumiUsername.disabled = !state.initSelectedSources.includes("bangumi");
+          if (bangumiUsername) bangumiUsername.disabled = !bangumiChecked;
+          const bangumiToken = grid.querySelector("#initBangumiToken");
+          if (bangumiToken) bangumiToken.disabled = !bangumiChecked;
           // Refresh just the checklist so the B 站 row flips between hard
           // prerequisite and skippable hint as the checkbox changes.
           const checklist = grid.querySelector(".init-onboarding .init-checklist");
@@ -1751,6 +1762,9 @@
       grid.querySelector("#initBangumiUsername")?.addEventListener("input", (event) => {
         state.initBangumiUsername = event.currentTarget.value || "";
         state.initBangumiUsernameTouched = true;
+      });
+      grid.querySelector("#initBangumiToken")?.addEventListener("input", (event) => {
+        state.initBangumiToken = event.currentTarget.value || "";
       });
     }
 
@@ -1870,7 +1884,10 @@
       const sendBangumiUsername =
         state.initBangumiUsernameTouched &&
         (bangumiUsername !== "" || state.initBangumiUsernamePrefilled);
-      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername) {
+      const bangumiToken = String(
+        $("#initBangumiToken")?.value || state.initBangumiToken || ""
+      ).trim();
+      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername && !bangumiToken) {
         state.initReason = INIT_REASON_TEXT.no_profile_signal_sources;
         state.initBusy = false;
         renderAll();
@@ -1890,8 +1907,13 @@
       }
       try {
         const payload = { sources: selected };
-        if (selected.includes("bangumi") && sendBangumiUsername) {
-          payload.source_options = { bangumi: { username: bangumiUsername } };
+        if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
+          const bangumi = {};
+          if (sendBangumiUsername) bangumi.username = bangumiUsername;
+          // Only send a token the user actually typed; omit otherwise so the
+          // backend keeps any configured token.
+          if (bangumiToken) bangumi.access_token = bangumiToken;
+          payload.source_options = { bangumi };
         }
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
@@ -2716,16 +2738,28 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     function scheduleAutoLoadCheck() {
-      if (!state.autoLoadOnScroll || autoLoadCheckRaf) return;
+      if (!state.autoLoadOnScroll || autoLoadCheckRaf || autoLoadCheckFallbackTimer) return;
+      let settled = false;
       const run = () => {
+        if (settled) return;
+        settled = true;
+        const rafId = autoLoadCheckRaf;
+        const fallbackTimer = autoLoadCheckFallbackTimer;
         autoLoadCheckRaf = 0;
+        autoLoadCheckFallbackTimer = 0;
+        if (rafId && typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
         if (!refreshAutoLoadSentinelVisibility()) return;
         void autoLoadMoreIfNeeded().catch(() => {});
       };
       if (typeof requestAnimationFrame === "function") {
         autoLoadCheckRaf = requestAnimationFrame(run);
+        // Intersection/scroll loading is functional work, not just paint polish.
+        // A backgrounded or busy browser may throttle rAF indefinitely, so keep
+        // a short watchdog that runs the same coalesced geometry check once.
+        autoLoadCheckFallbackTimer = setTimeout(run, 120);
       } else {
-        autoLoadCheckRaf = setTimeout(run, 0);
+        autoLoadCheckFallbackTimer = setTimeout(run, 0);
       }
     }
 
@@ -3558,18 +3592,19 @@ ${cardFeedbackBarHtml()}`;
       scheduleActivityRailHeightSync();
     }
 
-    // 用户是否正在惊喜卡上互动：聊天输入框展开 / 有焦点 / 有未发送草稿。
-    // 后台推送（新候选、队列刷新）在此期间不得切卡或重渲染——setActiveDelight
-    // 会 closeDelightComposer 收起输入框（field report 2026-07-05「打着打着惊喜
-    // 推荐突然变了」），切卡更会让随后的发送把这条反馈记到换上来的新卡上。
-    // 有未发送草稿也算互动中：草稿属于当前这张卡，换卡同样会串。
+    // 用户是否正在首页内容上互动：惊喜聊天框展开 / 有焦点 / 有未发送草稿，
+    // 或正在普通推荐卡上悬停、输入、提交可撤销反馈。后台推送与惊喜自动轮播
+    // 在此期间不得切卡或重渲染——否则会让下方卡片在点击中途发生位移，或把
+    // 惊喜聊天反馈记到换上来的新卡上。
     function delightUserEngaged() {
       const input = document.getElementById("delightCommentInput");
-      if (!input) return false;
       const composing = Boolean(document.querySelector(".delight-main-actions.is-composing"));
       const focused = document.activeElement === input;
-      const hasDraft = Boolean(String(input.value || "").trim());
-      return composing || focused || hasDraft;
+      const hasDraft = Boolean(String(input?.value || "").trim());
+      const recommendationEngaged = Boolean(document.querySelector(
+        "#videoGrid:hover, #videoGrid:focus-within, #videoGrid .is-feedback-pending, #videoGrid .card-actions.is-composing"
+      ));
+      return composing || focused || hasDraft || recommendationEngaged;
     }
 
     // 互动中新候选静默入队时只刷新右上角计数，不触碰卡片 DOM。
@@ -5875,7 +5910,10 @@ ${cardFeedbackBarHtml()}`;
           return;
         }
         const enableState = getPendingSourceEnabled(key, item);
-        const accessState = SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" };
+        const tokenRejected = item.token_state === "rejected";
+        const accessState = tokenRejected
+          ? { tone: "danger", label: "令牌已失效" }
+          : (SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" });
         const sourceLabel = enableState.pending
           ? `来源：${enableState.currentEnabled ? "将启用" : "将停用"}，保存后生效`
           : `来源：${enableState.savedEnabled ? "启用" : "停用"}`;
@@ -6278,6 +6316,25 @@ ${cardFeedbackBarHtml()}`;
       setInput("redditMinInterval", config.sources?.reddit?.min_interval_minutes);
       setSelect("bangumiEnabled", config.sources?.bangumi?.enabled === true ? "on" : "off");
       setInput("bangumiUsername", config.sources?.bangumi?.username);
+      {
+        // The token itself is never returned by GET (secret); access_token_set
+        // only tells us whether one is stored. Keep the field empty and signal
+        // the stored state via placeholder so an untouched save never clobbers it.
+        const bangumiToken = document.getElementById("bangumiAccessToken");
+        if (bangumiToken) {
+          bangumiToken.value = "";
+          bangumiToken.placeholder = config.sources?.bangumi?.access_token_set
+            ? "已配置（留空保持不变；填写新令牌以替换）"
+            : "可留空；填写以自动识别当前用户并读取私密收藏";
+        }
+        // Clear-token is a per-save action; never leave it pre-checked after a
+        // reload, and hide it when nothing is stored to clear.
+        const bangumiClearToken = document.getElementById("bangumiClearToken");
+        if (bangumiClearToken) {
+          bangumiClearToken.checked = false;
+          bangumiClearToken.disabled = !config.sources?.bangumi?.access_token_set;
+        }
+      }
       setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, config.sources?.bangumi?.source_modes);
       setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, config.sources?.bangumi?.subject_types);
       setInput("bangumiDailySearchBudget", config.sources?.bangumi?.daily_search_budget);
@@ -6502,11 +6559,12 @@ ${cardFeedbackBarHtml()}`;
         scheduleActivityRailHeightSync();
         return;
       }
+      const shouldAnimateTransition = Boolean(state.delight);
       state.delightIndex = Math.max(0, Math.min(index, state.delights.length - 1));
       state.delight = state.delights[state.delightIndex];
       // 锁定容器高度防止下方布局跳变
       const banner = $("#delightBanner");
-      if (banner) {
+      if (banner && shouldAnimateTransition) {
         banner.style.height = `${banner.offsetHeight}px`;
         banner.classList.add("is-height-locked");
         banner.classList.remove("is-height-settling");
@@ -6540,7 +6598,7 @@ ${cardFeedbackBarHtml()}`;
         if (copy) copy.classList.remove("is-exiting");
         if (thumb) thumb.classList.remove("is-exiting");
         // 用 requestAnimationFrame 手动驱动高度动画（避免 CSS transition 启动时序问题）
-        if (banner) {
+        if (banner && shouldAnimateTransition) {
           if (banner._heightRaf) cancelAnimationFrame(banner._heightRaf);
           const startH = parseFloat(banner.style.height) || banner.offsetHeight;
           banner.style.height = `${startH}px`;
@@ -6572,11 +6630,14 @@ ${cardFeedbackBarHtml()}`;
             }
           };
           banner._heightRaf = requestAnimationFrame(step);
+        } else if (banner) {
+          banner.style.removeProperty("height");
+          banner.classList.remove("is-height-locked", "is-height-settling");
         }
       };
-      if (copy) copy.classList.add("is-exiting");
-      if (thumb) thumb.classList.add("is-exiting");
-      if (copy || thumb) {
+      if (copy && shouldAnimateTransition) copy.classList.add("is-exiting");
+      if (thumb && shouldAnimateTransition) thumb.classList.add("is-exiting");
+      if (shouldAnimateTransition && (copy || thumb)) {
         setTimeout(applyContent, 250);
       } else {
         applyContent();
@@ -7272,6 +7333,16 @@ ${cardFeedbackBarHtml()}`;
           bangumi: {
             enabled: $("#bangumiEnabled").value === "on",
             username: getInput("bangumiUsername"),
+            // Precedence: an explicit "clear token" checkbox sends access_token:""
+            // (backend clears the stored token + rejection marker). Otherwise
+            // send the token only when the user typed one; an empty field means
+            // "leave the stored token unchanged", so omit the key rather than
+            // clobbering it with "".
+            ...(document.getElementById("bangumiClearToken")?.checked
+              ? { access_token: "" }
+              : (getInput("bangumiAccessToken") || "") !== ""
+                ? { access_token: getInput("bangumiAccessToken") }
+                : {}),
             subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
             source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
             daily_search_budget: getIntInput("bangumiDailySearchBudget", 300),

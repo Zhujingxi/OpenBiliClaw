@@ -539,6 +539,9 @@
           <p class="settings-section-title">Bangumi</p>
           <p class="settings-note-inline">使用 Bangumi 官方公开只读 API，无需 Cookie。用户名仅用于导入主动公开的收藏；留空仍可使用搜索、排名和按日期浏览。按日期浏览可能包含尚未播出的条目。</p>
           <label class="settings-field"><span>公开用户名</span><input id="bangumiUsername" maxlength="128" autocomplete="off" placeholder="例如 sai（可留空）"></label>
+          <label class="settings-field"><span>个人令牌</span><input id="bangumiAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；填写以自动识别当前用户并读取私密收藏"></label>
+          <label class="settings-field"><span>清除已保存的令牌</span><input id="bangumiClearToken" type="checkbox"></label>
+          <p class="settings-note-inline">个人令牌可自动识别当前登录账号（含私密收藏），比公开用户名更完整。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变；勾选「清除已保存的令牌」则本次保存清空令牌并降级为匿名公开发现）。</p>
           <div class="inline-row">
             <label class="settings-field"><span>搜索分支</span><input id="bangumiModeSearch" type="checkbox"></label>
             <label class="settings-field"><span>排名分支</span><input id="bangumiModeRanked" type="checkbox"></label>

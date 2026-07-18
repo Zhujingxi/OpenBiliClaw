@@ -119,6 +119,7 @@ def test_autoload_geometry_fallback_refreshes_sentinel_visibility() -> None:
     assert "AUTO_LOAD_ROOT_MARGIN_PX" in in_view
     assert "sentinelInView = isAutoLoadSentinelInView();" in refresh
     assert "requestAnimationFrame" in schedule
+    assert "autoLoadCheckFallbackTimer = setTimeout(run, 120);" in schedule
     assert "refreshAutoLoadSentinelVisibility()" in schedule
 
 

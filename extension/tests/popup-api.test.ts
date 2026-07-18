@@ -88,6 +88,54 @@ test("startInit sends an empty username to clear the configured value", async ()
   });
 });
 
+test("startInit sends a Bangumi access token in scoped source_options", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiToken: "  tok-123  " });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { access_token: "tok-123" } },
+  });
+});
+
+test("startInit sends both Bangumi username and access token when supplied", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: "sai", bangumiToken: "tok-1" });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "sai", access_token: "tok-1" } },
+  });
+});
+
+test("startInit omits the token when none is supplied (keep configured)", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["bangumi"], bangumiUsername: "sai", bangumiToken: null });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi"],
+    source_options: { bangumi: { username: "sai" } },
+  });
+});
+
 test("popup resolves the Bangumi username omit-vs-clear before sending guided init", () => {
   const source = readFileSync(resolve("popup/popup.js"), "utf8");
 

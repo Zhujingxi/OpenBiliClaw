@@ -641,6 +641,10 @@ class SourceStatusItem(BaseModel):
     detail: str = ""
     logged_in: bool = False
     feed_paused: bool = False
+    # Optional personal-token dimension (currently Bangumi only): ``"ok"`` when a
+    # token is configured and not rejected, ``"rejected"`` when Bangumi denied it
+    # and discovery degraded to anonymous, ``""`` when no token is configured.
+    token_state: str = ""
 
 
 class SourcesStatusResponse(BaseModel):
@@ -1716,6 +1720,10 @@ class RedditSourceConfigOut(BaseModel):
 class BangumiSourceConfigOut(BaseModel):
     enabled: bool = False
     username: str = ""
+    # The personal access token itself is a secret and is NEVER echoed back;
+    # this flag only tells the settings UI whether one is stored so it can show
+    # a "已配置（留空保持不变）" affordance instead of a bare empty field.
+    access_token_set: bool = False
     subject_types: list[str] = Field(default_factory=lambda: ["anime", "book", "game"])
     source_modes: list[str] = Field(default_factory=lambda: ["search", "ranked", "latest"])
     daily_search_budget: int = 300

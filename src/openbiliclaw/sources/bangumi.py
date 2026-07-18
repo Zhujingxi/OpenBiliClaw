@@ -22,6 +22,16 @@ COLLECTION_TYPES = {
     4: "on_hold",
     5: "dropped",
 }
+# Human-readable SubjectType labels so the profile LLM sees "动画/书籍/游戏"
+# instead of the bare integer id. Mirrors ``SUBJECT_TYPE_IDS`` in
+# ``bangumi_client`` (book=1, anime=2, music=3, game=4, real=6).
+SUBJECT_TYPE_LABELS = {
+    1: "书籍",
+    2: "动画",
+    3: "音乐",
+    4: "游戏",
+    6: "三次元",
+}
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -58,17 +68,38 @@ def _cover_url(subject: Mapping[str, Any]) -> str:
     return ""
 
 
+def _meta_tags(subject: Mapping[str, Any]) -> list[str]:
+    """Extract a subject's ``meta_tags`` (e.g. TV / 剧场版) defensively.
+
+    ``meta_tags`` must be a JSON array. A schema drift that hands back a bare
+    string (e.g. "TV") would otherwise be walked character-by-character, so only
+    iterate genuine lists and de-duplicate while preserving order.
+    """
+
+    raw_meta_tags = subject.get("meta_tags")
+    if not isinstance(raw_meta_tags, list):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in raw_meta_tags:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def _subject_tags(subject: Mapping[str, Any]) -> list[str]:
     candidates: list[tuple[int, str]] = []
     # ``meta_tags`` must be a JSON array. A schema drift that hands back a bare
     # string (e.g. "TV") would otherwise be walked character-by-character, so
     # only iterate genuine lists — mirroring the ``tags`` guard below.
-    meta_tags = subject.get("meta_tags")
-    if isinstance(meta_tags, list):
-        for raw in meta_tags:
-            text = str(raw or "").strip()
-            if text:
-                candidates.append((2**31 - 1, text))
+    for text in _meta_tags(subject):
+        candidates.append((2**31 - 1, text))
     raw_tags = subject.get("tags") or []
     if isinstance(raw_tags, list):
         for raw in raw_tags:
@@ -150,10 +181,17 @@ def bangumi_collection_to_event(
     row: Mapping[str, Any],
     *,
     username: str,
+    include_private: bool = False,
 ) -> dict[str, Any] | None:
-    """Map one public user collection row into a canonical profile event."""
+    """Map one user collection row into a canonical profile event.
 
-    if row.get("private") is True:
+    Private rows are skipped unless ``include_private`` is set, which the
+    authenticated (personal-access-token) path passes because a Bearer request
+    returns the token owner's own private collections — legitimate signal for
+    their profile.
+    """
+
+    if row.get("private") is True and not include_private:
         return None
     subject = _mapping(row.get("subject"))
     subject_id = _non_negative_int(row.get("subject_id") or subject.get("id"))
@@ -170,12 +208,19 @@ def bangumi_collection_to_event(
         "source_platform": "bangumi",
         "subject_id": str(subject_id),
         "subject_type": subject_type,
+        # Readable label so the profile LLM knows 动画/书籍/游戏 directly instead
+        # of decoding the bare integer id.
+        "subject_type_label": SUBJECT_TYPE_LABELS.get(subject_type, ""),
         "collection_type": collection_type,
         "collection_status": collection_name,
         "user_rate": rate,
         "collection_tags": [
             str(value).strip() for value in (row.get("tags") or []) if str(value or "").strip()
         ][:20],
+        # Subject-level meta tags (TV / 剧场版 / …) when the collection row
+        # carries embedded subject data; mirrors the discovery path's parse and
+        # stays empty when the row omits subject or ships a drifted schema.
+        "meta_tags": _meta_tags(subject),
         "ep_status": _non_negative_int(row.get("ep_status")),
         "vol_status": _non_negative_int(row.get("vol_status")),
         "rating_score": _rating(subject.get("score")),
@@ -240,6 +285,7 @@ async def fetch_bangumi_public_collection_events(
     username: str,
     subject_types: tuple[str, ...],
     limit: int,
+    include_private: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch a fair, bounded sample from one user's public collection.
 
@@ -289,7 +335,9 @@ async def fetch_bangumi_public_collection_events(
         while scope.buffer and examined < per_pair and len(events) < target:
             row = scope.buffer.popleft()
             examined += 1
-            event = bangumi_collection_to_event(row, username=username)
+            event = bangumi_collection_to_event(
+                row, username=username, include_private=include_private
+            )
             if event is None:
                 continue
             subject_id = str((event.get("metadata") or {}).get("subject_id") or "")

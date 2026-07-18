@@ -591,9 +591,10 @@ class RuntimeContext:
             from openbiliclaw.sources.bangumi_client import BangumiClient
 
             new_bangumi_client = BangumiClient(
+                access_token=str(getattr(bangumi_cfg, "access_token", "") or "") or None,
                 request_interval_seconds=float(
                     getattr(bangumi_cfg, "request_interval_seconds", 1.0)
-                )
+                ),
             )
         new_saved_sync_service = SavedSyncService(
             self.database,
@@ -981,6 +982,7 @@ class RuntimeContext:
                     database=self.database,
                     soul_engine=new_soul_engine,
                     client=new_bangumi_client,
+                    access_token=str(getattr(bangumi_cfg, "access_token", "") or ""),
                     enabled=bool(getattr(bangumi_cfg, "enabled", False))
                     and bool(getattr(sched_cfg, "enabled", True)),
                     subject_types=tuple(

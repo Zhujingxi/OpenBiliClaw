@@ -7294,13 +7294,18 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
         raising=False,
     )
 
-    async def _fetch_bangumi(*, username: str):
+    async def _fetch_bangumi(*, username: str, token: str = ""):
+        state["bangumi_fetch_token"] = token
         events = list(state.get("bangumi_events", []))
         counts: dict[str, int] = {}
         for event in events:
             status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
             counts[status] = counts.get(status, 0) + 1
-        return events, counts, "ok" if events else ("missing_username" if not username else "empty")
+        if events:
+            return events, counts, "ok"
+        if token or username:
+            return events, counts, "empty"
+        return events, counts, "missing_username"
 
     monkeypatch.setattr(cli_module, "_fetch_bangumi_init_data", _fetch_bangumi)
     monkeypatch.setattr(cli_module, "_maybe_update_init_source_shares", lambda counts: None)
@@ -7563,6 +7568,93 @@ def test_init_command_rejects_no_sources_at_all(monkeypatch) -> None:
     assert "至少需要一个数据来源" in result.output
 
 
+def test_fetch_bangumi_init_data_token_resolves_me_and_reads_private(monkeypatch) -> None:
+    """With a token, /v0/me decides the account and private rows are included."""
+    import asyncio
+
+    from openbiliclaw.config import Config
+
+    cfg = Config()
+    cfg.sources.bangumi.access_token = "tok-123"
+    cfg.sources.bangumi.username = "typed-name"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+
+    fetch_calls: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            fetch_calls["access_token"] = kwargs.get("access_token")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_me(self):
+            return {"username": "token-owner"}
+
+    async def _fake_fetch(client, *, username, subject_types, limit, include_private=False):
+        fetch_calls["username"] = username
+        fetch_calls["include_private"] = include_private
+        return [
+            {
+                "event_type": "like",
+                "title": "t",
+                "url": "u",
+                "metadata": {"collection_status": "done"},
+            }
+        ]
+
+    monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+    monkeypatch.setattr(
+        "openbiliclaw.sources.bangumi.fetch_bangumi_public_collection_events", _fake_fetch
+    )
+
+    events, counts, status = asyncio.run(cli_module._fetch_bangumi_init_data(username="typed-name"))
+
+    assert status == "ok"
+    assert len(events) == 1
+    assert counts == {"done": 1}
+    assert fetch_calls["access_token"] == "tok-123"
+    # /v0/me wins over the differing configured username; private rows included.
+    assert fetch_calls["username"] == "token-owner"
+    assert fetch_calls["include_private"] is True
+
+
+def test_fetch_bangumi_init_data_reports_invalid_token(monkeypatch) -> None:
+    """A 401 from /v0/me surfaces as invalid_token instead of a silent skip."""
+    import asyncio
+
+    from openbiliclaw.config import Config
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+    cfg = Config()
+    cfg.sources.bangumi.access_token = "expired"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+
+    class _FakeClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_me(self):
+            raise BangumiAPIError("unauthorized", "denied", status_code=401)
+
+    monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+
+    events, counts, status = asyncio.run(cli_module._fetch_bangumi_init_data(username=""))
+
+    assert status == "invalid_token"
+    assert events == []
+    assert counts == {}
+
+
 def test_init_command_rejects_bangumi_only_without_username(monkeypatch) -> None:
     from openbiliclaw.config import Config
 
@@ -7599,7 +7691,190 @@ def test_init_command_rejects_bangumi_only_without_username(monkeypatch) -> None
     )
 
     assert result.exit_code == 1
-    assert "Bangumi 缺少公开用户名" in result.output
+    assert "Bangumi 缺少令牌或用户名" in result.output
+
+
+def _patch_bangumi_init_fetch(monkeypatch, *, me_username_value="token-owner", token_error=None):
+    """Wire fake Bangumi client + collection fetch for _fetch_bangumi_init_data."""
+    import openbiliclaw.sources.bangumi as bangumi_mod
+    import openbiliclaw.sources.bangumi_client as bc_mod
+
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __init__(self, *, access_token=None, **kwargs):
+            captured["access_token"] = access_token
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get_me(self):
+            if token_error is not None:
+                raise token_error
+            return {"username": me_username_value}
+
+    async def _fake_fetch(client, *, username, subject_types, limit, include_private=False):
+        captured["username"] = username
+        captured["include_private"] = include_private
+        return [
+            {
+                "event_type": "like",
+                "title": "X",
+                "url": "https://bgm.tv/subject/1",
+                "metadata": {"collection_status": "collect"},
+            }
+        ]
+
+    monkeypatch.setattr(bc_mod, "BangumiClient", _FakeClient)
+    monkeypatch.setattr(bangumi_mod, "fetch_bangumi_public_collection_events", _fake_fetch)
+    return captured
+
+
+def test_fetch_bangumi_init_data_token_resolves_username_and_reads_private(monkeypatch) -> None:
+    import asyncio
+
+    cfg = config_module.Config()
+    cfg.sources.bangumi.access_token = "tok-1"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    captured = _patch_bangumi_init_fetch(monkeypatch, me_username_value="token-owner")
+
+    events, counts, status = asyncio.run(
+        cli_module._fetch_bangumi_init_data(username="typed-name", token="")
+    )
+
+    assert status == "ok"
+    assert len(events) == 1
+    # Token wins: username auto-resolved from /v0/me and private rows included.
+    assert captured["access_token"] == "tok-1"
+    assert captured["username"] == "token-owner"
+    assert captured["include_private"] is True
+
+
+def test_fetch_bangumi_init_data_without_token_uses_public_username(monkeypatch) -> None:
+    import asyncio
+
+    cfg = config_module.Config()
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    captured = _patch_bangumi_init_fetch(monkeypatch)
+
+    events, _counts, status = asyncio.run(
+        cli_module._fetch_bangumi_init_data(username="sai", token="")
+    )
+
+    assert status == "ok"
+    assert captured["access_token"] is None
+    assert captured["username"] == "sai"
+    assert captured["include_private"] is False
+
+
+def test_fetch_bangumi_init_data_missing_username_without_token(monkeypatch) -> None:
+    import asyncio
+
+    cfg = config_module.Config()
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    _patch_bangumi_init_fetch(monkeypatch)
+
+    events, counts, status = asyncio.run(cli_module._fetch_bangumi_init_data(username="", token=""))
+
+    assert (events, counts, status) == ([], {}, "missing_username")
+
+
+def test_load_extension_bangumi_username_reads_runtime_state(monkeypatch, tmp_path) -> None:
+    import json
+
+    cfg = config_module.Config()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+
+    # No state file yet → "".
+    assert cli_module._load_extension_bangumi_username() == ""
+
+    state_dir = tmp_path / "memory"
+    state_dir.mkdir(parents=True)
+    state_path = state_dir / "discovery_runtime.json"
+
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user"}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_username() == "ext-user"
+
+    # Malformed values are treated as missing, never propagated.
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "bad/name"}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_username() == ""
+    state_path.write_text("not-json", encoding="utf-8")
+    assert cli_module._load_extension_bangumi_username() == ""
+
+
+def test_fetch_bangumi_init_data_expired_token_returns_invalid_token(monkeypatch) -> None:
+    import asyncio
+
+    from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+    cfg = config_module.Config()
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    _patch_bangumi_init_fetch(
+        monkeypatch,
+        token_error=BangumiAPIError("unauthorized", "denied", status_code=401),
+    )
+
+    events, counts, status = asyncio.run(
+        cli_module._fetch_bangumi_init_data(username="", token="expired-tok")
+    )
+
+    assert status == "invalid_token"
+    assert events == []
+
+
+def test_fetch_bangumi_rebuild_profile_skips_bilibili_auth_gate(monkeypatch) -> None:
+    """``fetch-bangumi --rebuild-profile`` rebuilds from Bangumi events alone, so
+    it must NOT go through the Bilibili auth gate. On a non-interactive terminal
+    the old ``_prepare_init_runtime()`` would abort with '请先执行 auth login';
+    the rebuild now passes ``require_bili_auth=False`` and proceeds without ever
+    building a Bilibili auth manager."""
+    runner = CliRunner()
+
+    cfg = config_module.Config()
+    cfg.sources.bangumi.username = "sai"
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+    _patch_bangumi_init_fetch(monkeypatch)
+
+    # Runtime config is fine; the auth manager must never be built for a
+    # Bangumi-only rebuild — trip it to prove the B站 auth gate is bypassed.
+    monkeypatch.setattr(cli_module, "_load_runtime_config_error", lambda render=False: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_auth_manager",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Bangumi rebuild must not touch the Bilibili auth gate")
+        ),
+    )
+    monkeypatch.setattr(cli_module, "_write_events_to_memory", lambda events, source="": (1, 0))
+
+    analyzed: dict[str, object] = {}
+
+    class _Soul:
+        async def analyze_events(self, events, **kwargs):
+            analyzed["events"] = list(events)
+
+        async def build_initial_profile(self, history):
+            analyzed["history"] = list(history)
+            return {"ok": True}
+
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: _Soul())
+
+    result = runner.invoke(app, ["fetch-bangumi", "--rebuild-profile"])
+
+    assert result.exit_code == 0, result.output
+    assert "完成" in result.output and "画像重建" in result.output
+    assert analyzed.get("events")  # analyze ran on the fetched Bangumi events
+    assert analyzed.get("history")  # profile builder consumed the history items
 
 
 def test_init_command_allows_reddit_as_only_profile_signal_source(monkeypatch) -> None:

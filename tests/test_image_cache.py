@@ -311,14 +311,23 @@ async def test_fetch_routes_cn_cdn_direct_and_overseas_via_env_proxy(
     same failure mode as the Bilibili login probe); overseas CDNs keep
     trust_env so users who NEED the proxy to reach YouTube still fetch them."""
     yt = "https://i.ytimg.com/vi/abc/hqdefault.jpg"
+    # Bangumi covers live on lain.bgm.tv, which is Cloudflare-fronted (cf-ray
+    # …-SIN edge, IP resolves overseas). A 2026-07-18 curl showed direct fetch
+    # timing out while the env/system proxy returned 200 in ~0.5s — the ytimg
+    # overseas pattern, NOT the CN-CDN risk-control pattern — so it stays on
+    # trust_env (proxy) and out of _DIRECT_FETCH_HOST_SUFFIXES.
+    bgm = "https://lain.bgm.tv/pic/cover/l/65/12/11_bsxG3.jpg"
     fake_httpx.add(XHS, status_code=200, headers={"content-type": "image/webp"}, chunks=[b"a"])
     fake_httpx.add(yt, status_code=200, headers={"content-type": "image/jpeg"}, chunks=[b"b"])
+    fake_httpx.add(bgm, status_code=200, headers={"content-type": "image/jpeg"}, chunks=[b"c"])
 
     await fetch_cover_bytes(XHS)
     await fetch_cover_bytes(yt)
+    await fetch_cover_bytes(bgm)
 
     assert fake_httpx.client_kwargs[0]["trust_env"] is False  # xhscdn → direct
     assert fake_httpx.client_kwargs[1]["trust_env"] is True  # ytimg → env proxy ok
+    assert fake_httpx.client_kwargs[2]["trust_env"] is True  # lain.bgm.tv → env proxy ok
 
 
 async def test_fetch_cover_bytes_rejects_non_whitelisted() -> None:

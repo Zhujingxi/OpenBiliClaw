@@ -82,6 +82,40 @@ def validate_bangumi_username(value: object) -> str:
     return username
 
 
+def validate_bangumi_access_token(value: object) -> str:
+    """Validate an explicitly configured Bangumi personal access token.
+
+    Structural-only (no network): confirms the token is a single-line ASCII
+    string of a sane length. Live validity is confirmed separately via
+    :meth:`BangumiClient.get_me`. Never log the token itself — only its
+    presence or length (privacy: personal tokens read private collections).
+    """
+
+    token = str(value or "").strip()
+    if not token:
+        return ""
+    if len(token) > 512:
+        raise ValueError("Bangumi access token must be at most 512 characters")
+    if any(ord(char) < 32 or ord(char) == 127 or ord(char) > 126 for char in token):
+        raise ValueError("Bangumi access token contains an unsupported character")
+    return token
+
+
+def me_username(payload: Mapping[str, Any]) -> str:
+    """Defensively extract the username from a ``/v0/me`` response.
+
+    Bangumi returns ``username`` (the stable URL slug) alongside a display
+    ``nickname``. Only ``username`` addresses ``/v0/users/{username}``. Missing
+    or malformed values raise so callers surface a diagnosable failure rather
+    than silently querying an empty path.
+    """
+
+    username = str(payload.get("username") or "").strip()
+    if not username:
+        raise BangumiAPIError("schema_changed", "Bangumi /v0/me response is missing a username")
+    return username
+
+
 def _clamp_page(limit: int, offset: int) -> tuple[int, int]:
     return min(50, max(1, int(limit))), max(0, int(offset))
 
@@ -104,16 +138,22 @@ def _retry_after_seconds(value: str | None) -> int | None:
 
 
 class BangumiClient:
-    """Minimal anonymous client for discovery and public collections.
+    """Minimal client for discovery, public collections, and self-identity.
 
-    The public API surface intentionally has no collection write or OAuth
-    helpers. An injected ``httpx.AsyncClient`` remains owned by its caller.
+    Read-only: the public API surface has no collection write or OAuth
+    helpers. When an ``access_token`` (a user's personal access token) is
+    supplied, every request carries ``Authorization: Bearer <token>`` so the
+    caller can resolve their own identity via :meth:`get_me` and read their
+    private collections. With ``access_token=None`` the client behaves exactly
+    like the historical anonymous client. An injected ``httpx.AsyncClient``
+    remains owned by its caller.
     """
 
     def __init__(
         self,
         *,
         http_client: httpx.AsyncClient | None = None,
+        access_token: str | None = None,
         request_interval_seconds: float = 1.0,
         transient_retry_delay_seconds: float = 0.25,
     ) -> None:
@@ -123,6 +163,8 @@ class BangumiClient:
             timeout=15.0,
             **outbound_httpx_kwargs(),
         )
+        # Structural validation only; keep the token in memory, never log it.
+        self._access_token = validate_bangumi_access_token(access_token) or None
         self._request_interval_seconds = max(0.0, float(request_interval_seconds))
         self._transient_retry_delay_seconds = max(0.0, float(transient_retry_delay_seconds))
         self._request_lock = asyncio.Lock()
@@ -137,6 +179,50 @@ class BangumiClient:
     async def aclose(self) -> None:
         if self._owns_http_client:
             await self._http.aclose()
+
+    @property
+    def has_access_token(self) -> bool:
+        """Whether this client authenticates requests with a Bearer token."""
+
+        return self._access_token is not None
+
+    def disable_access_token(self) -> None:
+        """Drop the Bearer token so subsequent requests go anonymous.
+
+        Used to degrade a discovery client to the public path after Bangumi
+        rejects the token (expired/revoked) — public discovery endpoints need
+        no auth, so the client keeps working instead of failing every cycle.
+        """
+
+        self._access_token = None
+
+    async def get_me(self) -> dict[str, Any]:
+        """Return the account for the configured access token (``GET /v0/me``).
+
+        Requires an ``access_token``. A 401/403 raises ``BangumiAPIError`` with
+        code ``unauthorized`` (never swallowed) so callers can tell the user
+        their token is missing, wrong, or expired.
+        """
+
+        if self._access_token is None:
+            raise BangumiAPIError("unauthorized", "Bangumi /v0/me requires a personal access token")
+        return await self._request_json("GET", "/v0/me")
+
+    async def get_user(self, username: str) -> dict[str, Any]:
+        """Fetch one user's public profile (``GET /v0/users/{username}``).
+
+        Anonymous endpoint — no token required. The path parameter is the
+        username slug; users who never set a custom slug keep the default
+        ``str(uid)`` slug, so a numeric uid resolves exactly for them (verified
+        2026-07-18: ``/v0/users/474349`` → ``id=474349``, while ``/v0/users/1``
+        404s because uid 1 uses the custom slug ``sai``). The response's ``id``
+        field enables authoritative uid↔username cross-checks.
+        """
+
+        normalized = validate_bangumi_username(username)
+        if not normalized:
+            raise ValueError("Bangumi username is required")
+        return await self._request_json("GET", f"/v0/users/{quote(normalized, safe='')}")
 
     async def search_subjects(
         self,
@@ -240,6 +326,8 @@ class BangumiClient:
             "User-Agent": BANGUMI_USER_AGENT,
             "Accept": "application/json",
         }
+        if self._access_token is not None:
+            headers["Authorization"] = f"Bearer {self._access_token}"
         response: httpx.Response | None = None
         for attempt in range(2):
             async with self._request_lock:
@@ -277,6 +365,12 @@ class BangumiClient:
                 status_code=status,
                 retry_after_seconds=_retry_after_seconds(response.headers.get("Retry-After")),
             )
+        if status in (401, 403):
+            raise BangumiAPIError(
+                "unauthorized",
+                "Bangumi rejected the access token (missing, invalid, or expired)",
+                status_code=status,
+            )
         if status == 404:
             raise BangumiAPIError("not_found", "Bangumi resource was not found", status_code=status)
         if status == 400:
@@ -312,3 +406,26 @@ class BangumiClient:
         if not all(isinstance(row, dict) for row in rows):
             raise BangumiAPIError("schema_changed", "Bangumi API returned a malformed row")
         return BangumiPage(list(rows), max(0, total), limit, offset)
+
+
+async def resolve_access_token_identity(
+    token: object,
+    *,
+    request_interval_seconds: float = 1.0,
+) -> str:
+    """Validate a personal access token via ``/v0/me`` and return its username.
+
+    Raises :class:`ValueError` for a structurally empty/invalid token (before
+    any network) and :class:`BangumiAPIError` (code ``unauthorized``) when the
+    live token is rejected. Callers surface the real cause rather than silently
+    persisting an unusable token.
+    """
+
+    normalized = validate_bangumi_access_token(token)
+    if not normalized:
+        raise ValueError("Bangumi access token is required")
+    async with BangumiClient(
+        access_token=normalized,
+        request_interval_seconds=request_interval_seconds,
+    ) as client:
+        return me_username(await client.get_me())

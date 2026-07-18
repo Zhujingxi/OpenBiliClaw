@@ -139,6 +139,7 @@ def test_public_collection_signal_matrix(
                 "name": "Title",
                 "score": 9.2,
                 "rank": 1,
+                "meta_tags": ["TV", "剧场版"],
             },
         },
         username="sai",
@@ -148,9 +149,66 @@ def test_public_collection_signal_matrix(
     assert event["metadata"]["signal_strength"] == strength
     assert event["metadata"].get("feedback_type") == feedback_type
     assert event["metadata"]["source_updated_at"] == "2026-01-01T00:00:00Z"
+    # Subject-type id 2 → readable "动画" so the profile LLM never decodes ints.
+    assert event["metadata"]["subject_type"] == 2
+    assert event["metadata"]["subject_type_label"] == "动画"
+    # Subject-level meta tags travel with the collection event too.
+    assert event["metadata"]["meta_tags"] == ["TV", "剧场版"]
     assert "timestamp" not in event["metadata"]
     assert "\u0000" not in event["metadata"]["collection_comment"]
     assert len(event["metadata"]["collection_comment"]) <= 200
+
+
+@pytest.mark.parametrize(
+    ("subject_type", "label"),
+    [(1, "书籍"), (2, "动画"), (3, "音乐"), (4, "游戏"), (6, "三次元")],
+)
+def test_collection_event_maps_subject_type_label(subject_type: int, label: str) -> None:
+    event = bangumi_collection_to_event(
+        {
+            "subject_id": 42,
+            "type": 1,
+            "subject": {"id": 42, "type": subject_type, "name": "Title"},
+        },
+        username="sai",
+    )
+    assert event is not None
+    assert event["metadata"]["subject_type"] == subject_type
+    assert event["metadata"]["subject_type_label"] == label
+
+
+@pytest.mark.parametrize("meta_tags", ["TVA", {"TV": 1}, 42, True, None])
+def test_collection_event_ignores_non_list_meta_tags(meta_tags: object) -> None:
+    # Schema drift on the embedded subject must yield an empty list, never a
+    # character-by-character walk of a bare string.
+    event = bangumi_collection_to_event(
+        {
+            "subject_id": 42,
+            "type": 1,
+            "subject": {"id": 42, "type": 2, "name": "Title", "meta_tags": meta_tags},
+        },
+        username="sai",
+    )
+    assert event is not None
+    assert event["metadata"]["meta_tags"] == []
+
+
+def test_collection_event_meta_tags_dedupe_and_strip() -> None:
+    event = bangumi_collection_to_event(
+        {
+            "subject_id": 42,
+            "type": 1,
+            "subject": {
+                "id": 42,
+                "type": 2,
+                "name": "Title",
+                "meta_tags": ["TV", " TV ", "剧场版", ""],
+            },
+        },
+        username="sai",
+    )
+    assert event is not None
+    assert event["metadata"]["meta_tags"] == ["TV", "剧场版"]
 
 
 def test_private_collection_is_never_imported() -> None:
@@ -166,6 +224,21 @@ def test_private_collection_is_never_imported() -> None:
         )
         is None
     )
+
+
+def test_private_collection_is_imported_when_authenticated() -> None:
+    row = {
+        "subject_id": 1,
+        "type": 1,
+        "private": True,
+        "subject": {"id": 1, "type": 2, "name": "Private"},
+    }
+    # Anonymous callers still skip private rows; the token owner reading their
+    # own collection (include_private=True) keeps them as legitimate signal.
+    assert bangumi_collection_to_event(row, username="sai") is None
+    event = bangumi_collection_to_event(row, username="sai", include_private=True)
+    assert event is not None
+    assert event["metadata"]["subject_id"] == "1"
 
 
 @pytest.mark.asyncio
@@ -218,6 +291,36 @@ async def test_public_collection_fetch_balances_status_and_subject_type() -> Non
         for collection_type in range(1, 6)
         for subject_type in ("anime", "book")
     }
+
+
+@pytest.mark.asyncio
+async def test_collection_fetch_threads_include_private() -> None:
+    class _PrivateClient:
+        async def get_user_collections(
+            self, username: str, *, collection_type: int, subject_type: str, limit: int, offset: int
+        ) -> BangumiPage:
+            return BangumiPage(
+                [
+                    {
+                        "subject_id": collection_type,
+                        "type": collection_type,
+                        "private": True,
+                        "subject": {"id": collection_type, "type": 2, "name": "priv"},
+                    }
+                ],
+                total=1,
+                limit=limit,
+                offset=offset,
+            )
+
+    anon = await fetch_bangumi_public_collection_events(
+        _PrivateClient(), username="sai", subject_types=("anime",), limit=5
+    )
+    assert anon == []
+    authed = await fetch_bangumi_public_collection_events(
+        _PrivateClient(), username="sai", subject_types=("anime",), limit=5, include_private=True
+    )
+    assert len(authed) > 0
 
 
 @pytest.mark.asyncio

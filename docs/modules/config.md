@@ -381,7 +381,7 @@ model    = "deepseek-v4-flash"
 
 ### `[network]` (v0.3.164+，v0.3.165 路由模式补强，v0.3.166 国内网关豁免)
 
-海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、GitHub 自动更新、Codex OAuth 令牌刷新。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 自动更新、Codex OAuth 令牌刷新。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -525,12 +525,13 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 
 ### `[sources.bangumi]`
 
-Bangumi 使用官方 `https://api.bgm.tv/v0` 匿名只读 API，不需要 Cookie、token 或浏览器登录态。启用后，`BangumiDiscoveryProducer` 按 `search / ranked / latest` 抓取 Subject，只写入统一待评估池；用户显式填写公开用户名后，guided init 还可以读取该账号的公开收藏作为画像信号。首版不调用任何 Bangumi 站内写接口。
+Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需要 Cookie 或浏览器登录态。启用后，`BangumiDiscoveryProducer` 按 `search / ranked / latest` 抓取 Subject，只写入统一待评估池；用户显式填写公开用户名后，guided init 还可以读取该账号的公开收藏作为画像信号。可选配置个人令牌（Personal Access Token）：设置后 init/discovery 经 `GET /v0/me` 自动识别账号并带 `Authorization: Bearer` 读取本人收藏（含私密）。首版不调用任何 Bangumi 站内写接口。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让 Bangumi 参与候选池配比和后台 discovery；默认关闭，关闭时保留配置值但从有效 share 中剔除 |
 | `username` | string | `""` | 可选公开 Bangumi 用户名，仅用于公开收藏初始化；匿名 discovery 不需要。保存时裁剪首尾空白，并拒绝路径分隔符、控制字符和超长值 |
+| `access_token` | string | `""` | 可选个人令牌，在 https://next.bgm.tv/demo/access-token 自助生成（约 1 年有效）。设置后所有 Bangumi 请求带 Bearer，init/同步经 `/v0/me` 自动识别用户名并可读私密收藏；留空保持匿名公开用户名老路。保存时做结构校验（单行 ASCII、≤512 字符），guided init 提交的令牌先经 `/v0/me` 实测通过才落盘，坏令牌当场拒绝。令牌视同密码：只存 gitignored 的 `config.toml`，日志与设置 GET 响应不回传明文 |
 | `subject_types` | list[str] | `["anime", "book", "game"]` | 允许的条目类型：`book / anime / music / game / real`；桌面 Web 与扩展设置页提供全部五类，默认勾选核心三类 |
 | `source_modes` | list[str] | `["search", "ranked", "latest"]` | producer 分支；`latest` 的真实语义是官方 `sort=date`，可能包含未播条目 |
 | `daily_search_budget` | int | `300` | 每 UTC 日最多抓取的搜索条目数；`0` 表示不设每日上限，本轮仍受平台缺口和 `discovery_limit` 控制 |
@@ -540,7 +541,7 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 匿名只读 API，不需要 Cookie
 | `min_interval_minutes` | int | `60` | producer 两次执行之间的最小间隔；`--force` 可跳过本次检查，但不能绕过上游 `429` cooldown |
 | `bootstrap_limit` | int | `300` | guided init / `fetch-bangumi` 默认公开收藏上限，保存范围 `1..1000` |
 
-用户名不是登录凭据。Bangumi-only guided init 必须有有效用户名；混合初始化没有用户名时只跳过 Bangumi 画像分支并提示“仍可用于 discovery”。init 请求显式发送空 username 时会覆盖并清除旧配置值；只有 username 字段缺失的旧客户端才回退已保存值。完整边界见 [Bangumi 来源文档](bangumi.md)。
+用户名不是登录凭据。guided init 的账号解析按三级优先取值：个人令牌 `/v0/me` > 显式/已配置公开用户名 > 浏览器扩展在已登录 bgm.tv 页面自动识别并上报的用户名（`discovery_runtime_state["bangumi_self_info"]`，见 extension 文档）；Bangumi-only guided init 三者至少满足一个，混合初始化全部缺失时只跳过 Bangumi 画像分支并提示“仍可用于 discovery”。init 请求显式发送空 username 时会覆盖并清除旧配置值；只有 username 字段缺失的旧客户端才回退已保存值。令牌存在时以 `/v0/me` 解析出的用户名为准（与显式用户名不一致会 WARNING 并覆盖）；同步期令牌被拒绝（401）时记 WARNING 并降级到匿名公开路径，不静默失败。完整边界见 [Bangumi 来源文档](bangumi.md)。
 
 #### 配置页来源状态契约
 

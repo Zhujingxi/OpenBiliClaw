@@ -2329,14 +2329,24 @@ def _interactive_auth_setup(auth_manager: Any) -> Any:
             raise typer.Exit(code=1)
 
 
-def _prepare_init_runtime() -> Any:
-    """Ensure runtime config and auth are ready before init proceeds."""
+def _prepare_init_runtime(*, require_bili_auth: bool = True) -> Any:
+    """Ensure runtime config and auth are ready before init proceeds.
+
+    ``require_bili_auth`` gates the Bilibili-authentication step. Bilibili init
+    needs it, but off-platform profile rebuilds (e.g. Bangumi collections feed
+    only ``soul_engine.analyze_events`` + ``build_initial_profile``) never touch
+    Bilibili, so they pass ``False`` to keep the runtime-config validation while
+    skipping the B 站 auth gate that would otherwise abort a non-interactive run.
+    """
     error = _load_runtime_config_error(render=False)
     if error is not None:
         if not _is_interactive_terminal():
             _print_runtime_config_error(error)
             raise typer.Exit(code=1)
         _interactive_runtime_config_setup()
+
+    if not require_bili_auth:
+        return None
 
     auth_manager = _build_auth_manager()
     status = asyncio.run(auth_manager.get_status())
@@ -5556,6 +5566,7 @@ def _persist_init_source_enabled_flags(
     include_reddit: bool = False,
     include_bangumi: bool = False,
     bangumi_username: str = "",
+    bangumi_token: str = "",
 ) -> None:
     """Persist init source choices so background discovery obeys them."""
 
@@ -5605,6 +5616,13 @@ def _persist_init_source_enabled_flags(
             and str(getattr(bangumi_cfg, "username", "")) != bangumi_username
         ):
             bangumi_cfg.username = bangumi_username
+            changed = True
+        if (
+            bangumi_cfg is not None
+            and bangumi_token
+            and str(getattr(bangumi_cfg, "access_token", "")) != bangumi_token
+        ):
+            bangumi_cfg.access_token = bangumi_token
             changed = True
         if changed:
             save_config(cfg)
@@ -5987,17 +6005,104 @@ async def _fetch_x_init_data(
     return likes, bookmarks
 
 
+def _load_extension_bangumi_username() -> str:
+    """Read the extension-reported Bangumi username from runtime state.
+
+    The Bangumi content script reports the logged-in account's public uid +
+    username to ``POST /api/sources/bangumi/identity``, which persists
+    ``bangumi_self_info`` into ``data/memory/discovery_runtime.json``. Returns
+    ``""`` on any miss or malformed value — the caller falls through to its
+    normal error path.
+    """
+    import json as _json
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+
+    try:
+        state_path = load_config().data_path / "memory" / "discovery_runtime.json"
+        if not state_path.exists():
+            return ""
+        with open(state_path, encoding="utf-8") as file:
+            state = _json.load(file)
+        info = state.get("bangumi_self_info") if isinstance(state, dict) else None
+        if not isinstance(info, dict):
+            return ""
+        return validate_bangumi_username(info.get("username"))
+    except Exception:
+        return ""
+
+
 async def _fetch_bangumi_init_data(
     *,
     username: str,
+    token: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, int], str]:
-    """Fetch one bounded, public-only Bangumi bootstrap sample."""
+    """Fetch one bounded Bangumi bootstrap sample.
+
+    With a personal access token (arg or ``[sources.bangumi].access_token``),
+    the account is resolved via ``/v0/me`` and its collections — including
+    private ones — are read with a Bearer header. Without a token, the
+    historical anonymous public-username path is used unchanged. A token
+    rejected at fetch time (e.g. expired since the pre-flight check) returns
+    status ``invalid_token`` rather than silently degrading.
+    """
+    import logging
+
     from openbiliclaw.config import load_config
     from openbiliclaw.sources.bangumi import fetch_bangumi_public_collection_events
-    from openbiliclaw.sources.bangumi_client import BangumiClient
+    from openbiliclaw.sources.bangumi_client import (
+        BangumiAPIError,
+        BangumiClient,
+        me_username,
+        validate_bangumi_access_token,
+    )
 
+    logger = logging.getLogger("openbiliclaw.cli")
     config = load_config()
     bangumi_cfg = config.sources.bangumi
+    effective_token = validate_bangumi_access_token(token or bangumi_cfg.access_token)
+
+    def _summarize(events: list[dict[str, Any]]) -> tuple[dict[str, int], str]:
+        counts: dict[str, int] = {}
+        for event in events:
+            status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        return counts, "ok" if events else "empty"
+
+    if effective_token:
+        async with BangumiClient(
+            access_token=effective_token,
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds),
+        ) as bangumi_client:
+            try:
+                resolved_username = me_username(await bangumi_client.get_me())
+            except BangumiAPIError as exc:
+                if exc.code == "unauthorized":
+                    logger.warning(
+                        "bangumi init: access token rejected by /v0/me "
+                        "(token present, length=%d); likely expired or revoked",
+                        len(effective_token),
+                    )
+                    return [], {}, "invalid_token"
+                raise
+            if username.strip() and username.strip() != resolved_username:
+                logger.warning(
+                    "bangumi init: configured username %r differs from /v0/me %r; "
+                    "using the token owner's account",
+                    username.strip(),
+                    resolved_username,
+                )
+            events = await fetch_bangumi_public_collection_events(
+                bangumi_client,
+                username=resolved_username,
+                subject_types=tuple(bangumi_cfg.subject_types),
+                limit=int(bangumi_cfg.bootstrap_limit),
+                include_private=True,
+            )
+        counts, status = _summarize(events)
+        return events, counts, status
+
     if not username.strip():
         return [], {}, "missing_username"
     async with BangumiClient(
@@ -6009,11 +6114,8 @@ async def _fetch_bangumi_init_data(
             subject_types=tuple(bangumi_cfg.subject_types),
             limit=int(bangumi_cfg.bootstrap_limit),
         )
-    counts: dict[str, int] = {}
-    for event in events:
-        status = str((event.get("metadata") or {}).get("collection_status") or "unknown")
-        counts[status] = counts.get(status, 0) + 1
-    return events, counts, "ok" if events else "empty"
+    counts, status = _summarize(events)
+    return events, counts, status
 
 
 async def run_guided_init(
@@ -6033,6 +6135,7 @@ async def run_guided_init(
     include_reddit: bool = False,
     include_bangumi: bool = False,
     bangumi_username: str = "",
+    bangumi_token: str = "",
     target_pool_count: int,
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
     coordinator: Any = None,
@@ -6364,7 +6467,7 @@ async def run_guided_init(
         await _stage1_begin_source("Bangumi", wait_hint="仅读取公开收藏")
         try:
             bangumi_result, bangumi_timed_out = await _await_stage1_operation(
-                lambda: _fetch_bangumi_init_data(username=bangumi_username),
+                lambda: _fetch_bangumi_init_data(username=bangumi_username, token=bangumi_token),
                 label="Bangumi",
                 max_wait_seconds=_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS,
             )
@@ -6390,6 +6493,11 @@ async def run_guided_init(
             console.print(
                 "  [yellow]Bangumi 来源已启用，但未配置公开用户名；"
                 "本次只启用后续内容发现，不导入收藏信号。[/yellow]"
+            )
+        elif bangumi_status == "invalid_token":
+            console.print(
+                "  [yellow]Bangumi 个人令牌被拒绝（可能已过期或撤销）；"
+                "请到 https://next.bgm.tv/demo/access-token 重新生成。[/yellow]"
             )
         elif bangumi_status == "empty":
             console.print("  [yellow]Bangumi 用户存在，但没有读到公开收藏。[/yellow]")
@@ -7187,6 +7295,15 @@ def init(
         "--bangumi-username",
         help="用于初始化的公开 Bangumi 用户名；留空则读配置或交互输入。",
     ),
+    bangumi_token: str = typer.Option(
+        "",
+        "--bangumi-token",
+        help=(
+            "Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；"
+            "留空则读 [sources.bangumi].access_token。生成: "
+            "https://next.bgm.tv/demo/access-token"
+        ),
+    ),
     bilibili_history_limit: int | None = typer.Option(
         None,
         "--bilibili-history-limit",
@@ -7356,25 +7473,73 @@ def init(
         include_bangumi = _ask_bangumi_inclusion()
 
     selected_bangumi_username = ""
+    selected_bangumi_token = ""
     if include_bangumi:
         from openbiliclaw.config import load_config
-        from openbiliclaw.sources.bangumi_client import validate_bangumi_username
+        from openbiliclaw.sources.bangumi_client import (
+            BangumiAPIError,
+            resolve_access_token_identity,
+            validate_bangumi_access_token,
+            validate_bangumi_username,
+        )
 
-        configured_username = str(load_config().sources.bangumi.username or "").strip()
-        raw_username = str(bangumi_username or configured_username).strip()
-        if not raw_username and _is_interactive_terminal():
-            raw_username = str(
-                typer.prompt(
-                    "公开 Bangumi 用户名(留空则只启用内容发现)",
-                    default="",
-                    show_default=False,
-                )
-                or ""
-            ).strip()
+        bangumi_cfg = load_config().sources.bangumi
+        configured_username = str(bangumi_cfg.username or "").strip()
+        configured_token = str(bangumi_cfg.access_token or "").strip()
         try:
-            selected_bangumi_username = validate_bangumi_username(raw_username)
+            selected_bangumi_token = validate_bangumi_access_token(
+                bangumi_token or configured_token
+            )
         except ValueError as exc:
-            raise typer.BadParameter(str(exc), param_hint="--bangumi-username") from exc
+            raise typer.BadParameter(str(exc), param_hint="--bangumi-token") from exc
+        raw_username = str(bangumi_username or configured_username).strip()
+        if selected_bangumi_token:
+            # Validate the token live and resolve the account before persisting
+            # anything: reject a bad/expired token with its real cause (project
+            # rule 7) instead of writing an unusable secret.
+            try:
+                resolved = asyncio.run(resolve_access_token_identity(selected_bangumi_token))
+            except BangumiAPIError as exc:
+                if exc.code == "unauthorized":
+                    _print_status_panel(
+                        "error",
+                        "Bangumi 个人令牌无效",
+                        "令牌被 Bangumi 拒绝（缺失、错误或已过期）。请到 "
+                        "https://next.bgm.tv/demo/access-token 重新生成后重试。",
+                    )
+                    raise typer.Exit(code=1) from exc
+                _print_status_panel("error", "Bangumi 令牌校验失败", str(exc))
+                raise typer.Exit(code=1) from exc
+            if raw_username and raw_username != resolved:
+                console.print(
+                    f"[dim]  Bangumi 令牌对应用户为 {resolved}，已覆盖填写的 {raw_username}。[/dim]"
+                )
+            selected_bangumi_username = resolved
+        else:
+            if not raw_username and _is_interactive_terminal():
+                raw_username = str(
+                    typer.prompt(
+                        "公开 Bangumi 用户名(留空则只启用内容发现)",
+                        default="",
+                        show_default=False,
+                    )
+                    or ""
+                ).strip()
+            if not raw_username:
+                # Zero-config fallback: the browser extension reports the
+                # logged-in bgm.tv account's public username into runtime
+                # state. Priority: token /v0/me > explicit username >
+                # extension-reported username.
+                extension_username = _load_extension_bangumi_username()
+                if extension_username:
+                    raw_username = extension_username
+                    console.print(
+                        f"[dim]  Bangumi 使用浏览器扩展识别到的账号 {extension_username}。[/dim]"
+                    )
+            try:
+                selected_bangumi_username = validate_bangumi_username(raw_username)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--bangumi-username") from exc
 
     selected_sources = (
         include_bili,
@@ -7401,8 +7566,9 @@ def init(
     if include_bangumi and not selected_bangumi_username and not any(profile_signal_sources):
         _print_status_panel(
             "error",
-            "Bangumi 缺少公开用户名",
-            "只选择 Bangumi 初始化时，需用 --bangumi-username 提供公开用户名；"
+            "Bangumi 缺少令牌或用户名",
+            "只选择 Bangumi 初始化时，需提供 --bangumi-token（推荐，自动识别当前用户）"
+            "或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别；"
             "如果只想启用内容发现，请先保存来源配置而不是运行 init。",
         )
         raise typer.Exit(code=1)
@@ -7422,6 +7588,7 @@ def init(
         include_reddit=include_reddit,
         include_bangumi=include_bangumi,
         bangumi_username=selected_bangumi_username,
+        bangumi_token=selected_bangumi_token,
     )
 
     # gui-init (B2): the four init stages now run inside the shared async
@@ -7446,6 +7613,7 @@ def init(
                 include_reddit=include_reddit,
                 include_bangumi=include_bangumi,
                 bangumi_username=selected_bangumi_username,
+                bangumi_token=selected_bangumi_token,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
             )
@@ -8437,6 +8605,14 @@ def fetch_bangumi(
         "-u",
         help="公开 Bangumi 用户名；不提供时读取 [sources.bangumi].username。",
     ),
+    token: str = typer.Option(
+        "",
+        "--token",
+        help=(
+            "Bangumi 个人令牌（自动识别当前用户并可读私密收藏）；"
+            "不提供时读取 [sources.bangumi].access_token。"
+        ),
+    ),
     limit: int = typer.Option(0, "--limit", "-n", min=0, help="最多读取的公开收藏条目数。"),
     write_memory: bool = typer.Option(
         False,
@@ -8455,42 +8631,63 @@ def fetch_bangumi(
     from openbiliclaw.sources.bangumi_client import (
         BangumiAPIError,
         BangumiClient,
+        me_username,
+        validate_bangumi_access_token,
         validate_bangumi_username,
     )
 
     config = load_config()
     bangumi_cfg = config.sources.bangumi
     try:
-        selected_username = validate_bangumi_username(username or bangumi_cfg.username)
+        selected_token = validate_bangumi_access_token(token or bangumi_cfg.access_token)
     except ValueError as exc:
-        raise typer.BadParameter(str(exc), param_hint="--username") from exc
-    if not selected_username:
-        raise typer.BadParameter(
-            "请通过 --username 或 [sources.bangumi].username 提供公开 Bangumi 用户名。",
-            param_hint="--username",
-        )
+        raise typer.BadParameter(str(exc), param_hint="--token") from exc
+    selected_username = ""
+    if not selected_token:
+        try:
+            selected_username = validate_bangumi_username(username or bangumi_cfg.username)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--username") from exc
+        if not selected_username:
+            raise typer.BadParameter(
+                "请通过 --token（推荐，自动识别当前用户）或 --username / "
+                "[sources.bangumi].username 提供访问方式。",
+                param_hint="--username",
+            )
     selected_limit = limit or int(bangumi_cfg.bootstrap_limit)
     write_memory = write_memory or rebuild_profile
+    auth_subtitle = "官方只读 API · 个人令牌" if selected_token else "官方只读 API · anonymous"
 
-    async def _fetch() -> list[dict[str, Any]]:
+    async def _fetch() -> tuple[str, list[dict[str, Any]]]:
         async with BangumiClient(
-            request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+            access_token=selected_token or None,
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds),
         ) as client:
-            return await fetch_bangumi_public_collection_events(
+            resolved = selected_username
+            if selected_token:
+                resolved = me_username(await client.get_me())
+            events = await fetch_bangumi_public_collection_events(
                 client,
-                username=selected_username,
+                username=resolved,
                 subject_types=tuple(bangumi_cfg.subject_types),
                 limit=selected_limit,
+                include_private=bool(selected_token),
             )
+            return resolved, events
 
-    _print_page_title("Bangumi 公开收藏", "官方只读 API · anonymous")
+    _print_page_title("Bangumi 公开收藏", auth_subtitle)
     try:
-        events = asyncio.run(_fetch())
+        selected_username, events = asyncio.run(_fetch())
     except BangumiAPIError as exc:
         if exc.code == "not_found":
             body = "用户不存在，或该用户没有可公开读取的收藏。"
         elif exc.code == "rate_limited":
             body = "Bangumi API 正在限流，请等待冷却后重试。"
+        elif exc.code == "unauthorized":
+            body = (
+                "个人令牌被拒绝（缺失、错误或已过期）。请到 "
+                "https://next.bgm.tv/demo/access-token 重新生成后重试。"
+            )
         else:
             body = str(exc)
         _print_status_panel("warning", "Bangumi 读取失败", body)
@@ -8523,7 +8720,10 @@ def fetch_bangumi(
             f"{f'，跳过重复 {skipped} 条。' if skipped else '。'}"
         )
     if rebuild_profile:
-        _prepare_init_runtime()
+        # Bangumi profile rebuild only consumes bangumi collection events; it
+        # never calls Bilibili, so skip the B 站 auth gate (still validates the
+        # runtime config) to keep non-interactive rebuilds from aborting.
+        _prepare_init_runtime(require_bili_auth=False)
         soul_engine = _build_soul_engine()
         _print_section_title("1/2 分析 Bangumi 偏好")
         asyncio.run(
@@ -10640,12 +10840,14 @@ def _run_bangumi_discovery(*, limit: int, force: bool = False) -> None:
 
     async def _produce() -> dict[str, object]:
         async with BangumiClient(
-            request_interval_seconds=float(bangumi_cfg.request_interval_seconds)
+            access_token=str(bangumi_cfg.access_token or "") or None,
+            request_interval_seconds=float(bangumi_cfg.request_interval_seconds),
         ) as client:
             producer = BangumiDiscoveryProducer(
                 database=database,
                 soul_engine=soul_engine,
                 client=client,
+                access_token=str(bangumi_cfg.access_token or ""),
                 enabled=bool(bangumi_cfg.enabled),
                 subject_types=tuple(bangumi_cfg.subject_types),
                 source_modes=tuple(bangumi_cfg.source_modes),

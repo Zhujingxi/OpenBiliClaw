@@ -427,6 +427,49 @@ async def test_rate_limit_persists_cooldown(db: Database) -> None:
 
 
 @pytest.mark.asyncio
+async def test_unauthorized_degrades_token_and_keeps_working(db: Database) -> None:
+    """A 401 on a token-bearing discovery client drops the token, not the run."""
+
+    class _TokenClient(_Client):
+        def __init__(self) -> None:
+            self._token: str | None = "tok"
+            self.saw_token_on_search = True
+
+        @property
+        def has_access_token(self) -> bool:
+            return self._token is not None
+
+        def disable_access_token(self) -> None:
+            self._token = None
+
+        async def search_subjects(self, keyword: str, **kwargs: Any) -> BangumiPage:
+            # The token expired: the very first authenticated call is rejected.
+            if self._token is not None:
+                self.saw_token_on_search = True
+                raise BangumiAPIError("unauthorized", "denied", status_code=401)
+            return await super().search_subjects(keyword, **kwargs)
+
+    client = _TokenClient()
+    producer = BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=client,
+        access_token="tok",
+        enabled=True,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due(limit=6)
+
+    # Search reported the unauthorized error but the browse modes still produced
+    # candidates anonymously, and the token was dropped from client + producer.
+    assert result["mode_results"]["search"] == "unauthorized"
+    assert result["discovered"] > 0
+    assert client.has_access_token is False
+    assert producer.access_token == ""
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_releases_current_and_unattempted_keywords(db: Database) -> None:
     class _TwoKeywords(_Keywords):
         def claim(self, platform: str, n: int | None = None) -> list[ClaimedKeyword]:
@@ -518,6 +561,163 @@ def test_source_status_is_local_and_reports_last_runs(db: Database) -> None:
     status = bangumi_source_status(db, enabled=True)
     assert status["state"] == "ready"
     assert status["modes"]["search"]["reason"] == "ok"
+
+
+class _AuthTrackingClient(_Client):
+    """A token-bearing client that records whether it made authenticated calls.
+
+    ``reject`` simulates an expired token that 401s on the first authed request;
+    otherwise authed requests succeed like the base client.
+    """
+
+    def __init__(self, token: str = "tok", *, reject: bool = False) -> None:
+        self._token: str | None = token or None
+        self.reject = reject
+        self.authed_calls = 0
+
+    @property
+    def has_access_token(self) -> bool:
+        return self._token is not None
+
+    def disable_access_token(self) -> None:
+        self._token = None
+
+    async def search_subjects(self, keyword: str, **kwargs: Any) -> BangumiPage:
+        if self._token is not None:
+            self.authed_calls += 1
+            if self.reject:
+                raise BangumiAPIError("unauthorized", "denied", status_code=401)
+        return await super().search_subjects(keyword, **kwargs)
+
+    async def browse_subjects(self, subject_type: str, *, sort: str, **kwargs: Any) -> BangumiPage:
+        if self._token is not None:
+            self.authed_calls += 1
+            if self.reject:
+                raise BangumiAPIError("unauthorized", "denied", status_code=401)
+        return await super().browse_subjects(subject_type, sort=sort, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_persists_token_rejection_marker(db: Database) -> None:
+    """A 401 records a durable fingerprint-keyed marker (never the token)."""
+
+    client = _AuthTrackingClient(token="tok", reject=True)
+    producer = BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=client,
+        access_token="tok",
+        enabled=True,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due(limit=6)
+
+    marker = bangumi_producer_module._read_token_rejection(db)
+    assert marker is not None
+    assert marker["fingerprint"] == bangumi_producer_module._token_fingerprint("tok")
+    # The token itself is never persisted anywhere in the marker.
+    assert "tok" not in str(marker)
+    assert result["discovered"] > 0
+    assert producer.access_token == ""
+    assert client.has_access_token is False
+
+
+@pytest.mark.asyncio
+async def test_persisted_rejection_starts_anonymous_without_bearer(db: Database) -> None:
+    """A restart with the same rejected token must not re-send the Bearer."""
+
+    # First cycle: a rejecting client persists the marker and creates the table.
+    seeder = _AuthTrackingClient(token="tok", reject=True)
+    BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=seeder,
+        access_token="tok",
+        enabled=True,
+        min_interval_minutes=0,
+    )
+    await BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=seeder,
+        access_token="tok",
+        enabled=True,
+        min_interval_minutes=0,
+    ).produce_if_due(limit=6)
+    assert bangumi_producer_module._read_token_rejection(db) is not None
+
+    # Simulated restart: a fresh producer with the same (unchanged) token starts
+    # anonymous — never carrying the Bearer — so it cannot eat another 401.
+    fresh_client = _AuthTrackingClient(token="tok", reject=False)
+    producer = BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=fresh_client,
+        access_token="tok",
+        enabled=True,
+        min_interval_minutes=0,
+    )
+
+    result = await producer.produce_if_due(limit=6, force=True)
+
+    assert fresh_client.authed_calls == 0
+    assert fresh_client.has_access_token is False
+    assert result["discovered"] > 0
+    # The marker persists (the unchanged token was never re-validated).
+    assert bangumi_producer_module._read_token_rejection(db) is not None
+
+
+@pytest.mark.asyncio
+async def test_rotated_token_success_clears_marker(db: Database) -> None:
+    """A new token that works clears the stale marker so the account re-arms."""
+
+    client = _AuthTrackingClient(token="newtok", reject=False)
+    producer = BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=client,
+        access_token="newtok",
+        enabled=True,
+        min_interval_minutes=0,
+    )
+    producer._ensure_tables()
+    # Marker left by a *different* (old) token — the user has since rotated it.
+    bangumi_producer_module._persist_token_rejection(
+        db, bangumi_producer_module._token_fingerprint("oldtok")
+    )
+
+    result = await producer.produce_if_due(limit=6, force=True)
+
+    assert client.authed_calls > 0
+    assert client.has_access_token is True
+    assert result["discovered"] > 0
+    assert bangumi_producer_module._read_token_rejection(db) is None
+
+
+def test_source_status_reports_token_state(db: Database) -> None:
+    # No token configured: the dimension is omitted (historical shape).
+    status = bangumi_source_status(db, enabled=True, token_configured=False)
+    assert "token_state" not in status
+
+    # Token configured, no marker: ok, and detail drops "无需登录".
+    status = bangumi_source_status(db, enabled=True, token_configured=True)
+    assert status["token_state"] == "ok"
+    assert "无需登录" not in str(status["detail"])
+
+    # A persisted rejection marker surfaces the actionable warning.
+    BangumiDiscoveryProducer(
+        database=db,
+        soul_engine=_Soul(),
+        client=_Client(),
+        enabled=True,
+    )._ensure_tables()
+    bangumi_producer_module._persist_token_rejection(
+        db, bangumi_producer_module._token_fingerprint("tok")
+    )
+    status = bangumi_source_status(db, enabled=True, token_configured=True)
+    assert status["token_state"] == "rejected"
+    assert "已被拒绝" in str(status["detail"])
 
 
 def test_source_status_does_not_construct_a_producer(

@@ -400,6 +400,22 @@ test("settings page round-trips Bangumi discovery config", () => {
   assert.match(popupJs, /if \(shares\.bangumi !== undefined\) setVal\("cfgPoolShareBangumi", shares\.bangumi\)/);
 });
 
+test("settings page exposes Bangumi clear-token control and rejected status", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // C: an explicit "clear token" checkbox that sends access_token:"".
+  assert.match(popupHtml, /id="cfgBangumiClearToken"/);
+  assert.match(popupJs, /checked\("cfgBangumiClearToken"\)/);
+  assert.match(popupJs, /access_token: ""/);
+  // A: a rejected personal token renders an actionable warning + red dot.
+  assert.match(popupJs, /item\.token_state === "rejected"/);
+  assert.match(popupJs, /令牌已失效/);
+  // B: config-save maps the live-validation error codes to friendly text.
+  assert.match(popupJs, /invalid_bangumi_access_token/);
+  assert.match(popupJs, /bangumi_token_check_failed/);
+});
+
 test("settings page round-trips multimodal discovery evaluation controls", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");

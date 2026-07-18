@@ -67,6 +67,14 @@ const entrypoints = [
     entry: resolve(root, "src/main/x-graphql-tap.ts"),
     outfile: resolve(root, `${outDir}/main/x-graphql-tap.js`),
   },
+  {
+    entry: resolve(root, "src/content/bangumi.ts"),
+    outfile: resolve(root, `${outDir}/content/bangumi.js`),
+  },
+  {
+    entry: resolve(root, "src/main/bgm-identity-bridge.ts"),
+    outfile: resolve(root, `${outDir}/main/bgm-identity-bridge.js`),
+  },
 ];
 
 for (const target of entrypoints) {

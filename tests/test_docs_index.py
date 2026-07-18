@@ -18,7 +18,10 @@ def test_docs_homepage_mentions_reddit_and_bangumi_sources() -> None:
     assert "sourceBangumiText" in html
     assert "知乎 / Reddit 登录态任务桥" in html
     assert "Zhihu, Reddit, Bangumi, and Web sources" in html
-    assert "不申请 `bgm.tv` host permission" in html
+    # Bangumi host permission IS requested now, for identity-only recognition.
+    # The homepage must describe it truthfully: no cookies, no browsing capture.
+    assert "在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别" in html
+    assert "不读 Cookie、不采集浏览行为" in html
     assert f'"softwareVersion": "{project_version}"' in html
 
 
