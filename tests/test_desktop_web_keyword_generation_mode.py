@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 _HTML = ROOT / "src/openbiliclaw/web/desktop/index.html"
 _JS = ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js"
+_FRONTEND_ROOTS = (
+    ROOT / "src/openbiliclaw/web/js",
+    ROOT / "src/openbiliclaw/web/desktop",
+    ROOT / "src/openbiliclaw/web/setup",
+    ROOT / "extension/popup",
+    ROOT / "extension/src",
+)
 
 
 def test_desktop_web_html_wires_keyword_generation_mode_select() -> None:
@@ -42,3 +50,15 @@ def test_desktop_web_js_saves_keyword_generation_mode_after_spread() -> None:
 def test_desktop_web_option_values_match_backend(value: str) -> None:
     html = _HTML.read_text(encoding="utf-8")
     assert f'<option value="{value}">' in html
+
+
+def test_frontend_has_no_removed_inspiration_config_controls() -> None:
+    inspiration_keys: set[str] = set()
+    for root in _FRONTEND_ROOTS:
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix in {".css", ".html", ".js", ".json", ".mjs", ".ts"}:
+                inspiration_keys.update(
+                    re.findall(r"\binspiration_[a-z0-9_]+\b", path.read_text(encoding="utf-8"))
+                )
+
+    assert inspiration_keys <= {"inspiration_breadth"}

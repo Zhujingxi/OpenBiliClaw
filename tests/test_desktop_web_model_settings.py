@@ -63,9 +63,7 @@ def test_deepseek_disabled_thinking_uses_an_empty_wire_value_on_every_web_surfac
     surfaces = (
         MODEL_JS_PATH.read_text(encoding="utf-8"),
         (ROOT / "extension/popup/popup-model-settings.js").read_text(encoding="utf-8"),
-        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(
-            encoding="utf-8"
-        ),
+        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(encoding="utf-8"),
         (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8"),
     )
 
@@ -78,11 +76,50 @@ def test_route_rows_support_drag_buttons_keyboard_and_focus_restoration() -> Non
 
     assert "draggable" in model_js
     assert "model-route-drag-handle" in model_js
-    assert "Move Up" in INDEX
-    assert "Move Down" in INDEX
+    assert ">上移</button>" in INDEX
+    assert ">下移</button>" in INDEX
+    assert "Move Up" not in INDEX
+    assert "Move Down" not in INDEX
     assert "ArrowUp" in model_js
     assert "ArrowDown" in model_js
     assert ".focus()" in model_js
+
+
+def test_visible_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -> None:
+    model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+
+    for copy in (
+        'aria-label="拖拽排序"',
+        '"顺序由只读覆盖配置提供"',
+        '"未命名连接"',
+        '"未设置模型"',
+        '"API 协议"',
+        '"本地 Runtime"',
+        '"OAuth 连接"',
+        "<strong>已导入 OAuth 凭据</strong>",
+        '"保留现有凭据"',
+        '"设置 API Key"',
+        '"当前未配置凭据。"',
+        "<span>稳定 ID</span>",
+        "<span>Chat 路由</span>",
+        "<span>Embedding 路由</span>",
+        "<span>当前健康状态</span>",
+    ):
+        assert copy in model_js
+    for old_copy in (
+        "Drag to reorder",
+        "Unnamed connection",
+        "No model",
+        "API protocols",
+        "Local runtimes",
+        "OAuth connections",
+        "Imported OAuth credential",
+        "Keep existing",
+        "Credential source",
+        "Current health",
+        "Probe failed",
+    ):
+        assert old_copy not in model_js
 
 
 def test_legacy_provider_fallback_and_module_override_fields_are_absent() -> None:
@@ -118,7 +155,7 @@ def test_narrow_detail_moves_focus_and_back_restores_the_selected_row_control() 
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
 
     assert 'matchMedia("(max-width: 820px)")' in model_js
-    assert 'layout.getBoundingClientRect().width <= 940' in model_js
+    assert "layout.getBoundingClientRect().width <= 940" in model_js
     assert "function focusNarrowDetail" in model_js
     assert 'byId("modelInspectorBack")?.focus()' in model_js
     assert "function focusSelectedRouteControl" in model_js
