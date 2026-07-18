@@ -10,7 +10,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from typing import Any, Literal, NoReturn, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeAlias, cast
 
 import click
 import typer
@@ -185,7 +185,17 @@ def _discard_inline_api_key_handle(handle: _InlineApiKeyHandle) -> None:
     _INLINE_API_KEY_VAULT.discard(handle)
 
 
-class _InlineApiKeyHandleType(click.types.ParamType):
+if TYPE_CHECKING:
+    # Click >= 8.4 makes ``ParamType`` generic; parameterize with the
+    # ``convert`` result type so strict mypy accepts the subclass. At
+    # runtime we fall back to the bare base so Click < 8.4 (where
+    # ``ParamType`` is not subscriptable) keeps working.
+    _InlineApiKeyParamType = click.types.ParamType["_InlineApiKeyHandle | None"]
+else:
+    _InlineApiKeyParamType = click.types.ParamType
+
+
+class _InlineApiKeyHandleType(_InlineApiKeyParamType):
     """Accept only values protected before Click begins argument parsing."""
 
     name = "text"
