@@ -281,20 +281,27 @@ def test_setup_preset_and_type_changes_preserve_touched_fields_and_stable_name()
             "const record = state.selectedRecord(modelState, 'chat');",
             # User edits: model, base_url, reasoning_effort (the latter only
             # applies to deepseek preset)
-            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'model', 'user-edited-model');",
-            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'base_url', 'https://user-edited.example/v1');",
-            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'reasoning_effort', 'high');",
+            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'model',",
+            "    'user-edited-model');",
+            "modelState = state.updateRouteField(modelState, 'chat', record.id, 'base_url',",
+            "    'https://user-edited.example/v1');",
+            "modelState = state.updateRouteField(modelState, 'chat', record.id,",
+            "    'reasoning_effort', 'high');",
             # Apply the openai preset — must NOT clobber user-edited fields.
-            "const openaiPreset = descriptors[0].preset_definitions.find((p) => p.id === 'openai');",
+            "const openaiPreset = descriptors[0].preset_definitions.find(",
+            "    (p) => p.id === 'openai');",
             "modelState = state.applyPreset(modelState, 'chat', record.id, openaiPreset);",
-            "const afterPreset = JSON.parse(JSON.stringify(state.selectedRecord(modelState, 'chat')));",
+            "const afterPreset = JSON.parse(JSON.stringify(",
+            "    state.selectedRecord(modelState, 'chat')));",
             # Change type to ollama — type-specific fields reset, stable
             # name + user-entered model/base_url survive (matching the
             # shared module's confirmed-change semantics).
             "const ollamaDescriptor = descriptors[1];",
-            "const outcome = state.changeConnectionType(modelState, 'chat', record.id, ollamaDescriptor, { confirmed: true });",
+            "const outcome = state.changeConnectionType(modelState, 'chat', record.id,",
+            "    ollamaDescriptor, { confirmed: true });",
             "modelState = outcome.state;",
-            "const afterType = JSON.parse(JSON.stringify(state.selectedRecord(modelState, 'chat')));",
+            "const afterType = JSON.parse(JSON.stringify(",
+            "    state.selectedRecord(modelState, 'chat')));",
             "process.stdout.write(JSON.stringify({ afterPreset, afterType }));",
         ]
     )
