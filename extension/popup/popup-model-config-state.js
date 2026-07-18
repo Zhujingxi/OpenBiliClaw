@@ -1,5 +1,6 @@
 // GENERATED FILE — DO NOT EDIT DIRECTLY.
-// Source of truth: src/openbiliclaw/web/shared/model-config-state.js
+// Source of truth: model-config-state.js in the web app's shared modules
+// (see src/openbiliclaw/web for the canonical copy).
 // Regenerate with: node extension/scripts/sync-model-config-state.mjs
 // Drift guard: tests/js/model-config-parity.test.mjs
 

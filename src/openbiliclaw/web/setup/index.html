@@ -152,6 +152,15 @@
       <section class="panel active" data-panel="0">
         <h2>设置 Chat 模型路由</h2>
         <p class="sub">先选连接类型，再选对应 preset。OpenAI、DeepSeek 和 OpenRouter 统一归入 OpenAI-compatible；OAuth 登录单独列出。</p>
+
+        <!-- Decision 3: migration interstitial — old-format configs must be
+             resolved in the full settings page; the wizard stays linear. -->
+        <div id="migrationInterstitial" class="msg show" hidden style="background:var(--panel-2);border:1px solid var(--line);color:var(--text);padding:14px;border-radius:10px;margin-bottom:14px">
+          <b>检测到旧版模型配置</b>
+          <p class="hint" style="margin:6px 0 10px">当前配置来自旧版本，需要先完成迁移。为避免破坏现有配置，向导不在此处处理迁移。</p>
+          <p style="margin:0"><a href="/web#settings-model">打开 设置 → 模型 完成迁移 →</a>，完成后刷新本页。</p>
+        </div>
+
         <div id="modelSetupLayout" class="model-setup-layout" data-narrow-view="list">
           <div class="model-connection-list-pane">
             <label>连接类型</label>
@@ -167,6 +176,30 @@
             <div id="modelDescriptorFields" class="model-descriptor-fields"></div>
             <div id="modelCredentialEditor"></div>
           </div>
+        </div>
+        <!-- Decision 2: fallback disclosure (preservation, not silent carry) -->
+        <p id="preservedFallbacks" class="hint" hidden style="margin-top:8px"></p>
+
+        <!-- Step 0.5: optional embedding route -->
+        <div id="embeddingSection" style="margin-top:18px;border-top:1px solid var(--line);padding-top:14px">
+          <b>Embedding 向量模型（可选）</b>
+          <p class="hint" style="margin:6px 0 10px">用于推荐去重和多样性。本地 Ollama bge-m3 已随包就绪；也可跳过，稍后在 设置 → 模型 → Embedding 路由 中配置。</p>
+          <div class="credential-actions" style="margin-bottom:10px">
+            <button type="button" id="embeddingEnable">启用并配置</button>
+            <button type="button" id="embeddingSkip">跳过</button>
+          </div>
+          <p id="embeddingSkipHint" class="hint" hidden>已跳过 — Embedding 未启用，可在设置中随时开启。</p>
+          <div id="embeddingFields" hidden>
+            <div id="embeddingTypeList" class="connection-type-list" role="listbox" aria-label="Embedding 连接类型"></div>
+            <div id="embeddingDescriptorFields" class="model-descriptor-fields" style="margin-top:10px"></div>
+            <div class="model-field full" style="margin-top:8px">
+              <label>Embedding 模型名</label>
+              <input type="text" id="embeddingModel" placeholder="例如 bge-m3" autocomplete="off">
+            </div>
+            <div id="embeddingCredential" style="margin-top:8px"></div>
+            <p id="embeddingProbeStatus" class="hint" style="color:var(--ok);margin-top:6px"></p>
+          </div>
+          <div class="msg" id="msgEmbedding"></div>
         </div>
 
         <div class="msg" id="msg0"></div>
@@ -223,7 +256,7 @@
         <p class="sub">基础配置和首轮初始化已完成,本地引擎可以开始为你工作了。</p>
         <ul class="check-list">
           <li><span class="tick">✓</span><div><b>AI 大脑</b><br><span class="hint" id="doneLlm">已连接</span></div></li>
-          <li><span class="tick">✓</span><div><b>本地语义引擎</b><br><span class="hint">Ollama bge-m3 已随包就绪,推荐去重 / 多样性已开启</span></div></li>
+          <li><span class="tick">✓</span><div><b>Embedding 向量模型</b><br><span class="hint" id="doneEmbedding">按上方选择配置</span></div></li>
           <li id="biliDone" class="pending"><span class="tick">…</span><div><b>平台账号</b><br><span class="hint" id="doneBili">B 站可稍后连接；Reddit 等来源按初始化勾选项检查</span></div></li>
           <li><span class="tick">✓</span><div><b>首轮初始化</b><br><span class="hint">画像和推荐池已就绪</span></div></li>
         </ul>
@@ -236,7 +269,20 @@
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    import {
+      applyPreset as sharedApplyPreset,
+      appendRouteItem,
+      changeConnectionType as sharedChangeConnectionType,
+      createProbeSignature,
+      createSingleConnectionDraft,
+      hydrateModelConfig,
+      selectedRecord,
+      toModelConfigPayload,
+      updateRouteField,
+      updateRouteSetting,
+    } from "/web/shared/model-config-state.js";
+
     const $ = (s) => document.querySelector(s);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -278,15 +324,16 @@
     const API_WRITE_TIMEOUT_MS = Number(window.__OBC_TEST_API_WRITE_TIMEOUT_MS) || 60000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let initPollInFlight = false, initPollPending = false;
-    let modelSnapshot = null;
+    // Model-route state lives in the shared DOM-free module; the wizard keeps
+    // only flow state here (which step, save-in-flight, narrow-layout view).
+    let modelState = null;
     let modelDescriptors = [];
-    let draftConnection = null;
+    let embeddingDescriptors = [];
     let modelSaveInFlight = false;
     let modelNarrowView = "list";
-    let modelTouchedFields = new Set();
-    const MODEL_VALUE_FIELDS = [
-      "model", "base_url", "api_mode", "reasoning_effort", "http_referer", "x_title", "num_ctx",
-    ];
+    let embeddingEnabledChoice = null; // null = undecided, true/false after step 0.5
+    let embeddingProbeOk = false;
+    let draft = null; // createSingleConnectionDraft lens over modelState (chat)
 
     function setStep(n) {
       step = n;
@@ -341,49 +388,26 @@
       return modelDescriptors.find((descriptor) => descriptor.id === type) || null;
     }
 
-    function safeCredentialStatus(credential) {
-      return {
-        source: ["none", "inline", "env", "oauth"].includes(credential?.source) ? credential.source : "none",
-        configured: Boolean(credential?.configured),
-        env_name: String(credential?.env_name || ""),
-        credential_ref: String(credential?.credential_ref || ""),
-        oauth_logged_in: Boolean(credential?.oauth_logged_in),
-      };
+    function chatDraft() {
+      return selectedRecord(modelState, "chat");
     }
 
-    function hydrateDraftConnection(connection) {
-      const credential = connection?.credential || {};
-      const descriptor = descriptorFor(String(connection?.type || ""));
-      const status = safeCredentialStatus(credential);
-      const hasCredentialField = Boolean(descriptor?.fields?.some((field) => field.name === "credential"));
-      return {
-        id: String(connection?.id || "chat-primary"),
-        name: String(connection?.name || descriptor?.label || "Primary Chat"),
-        type: String(connection?.type || modelDescriptors[0]?.id || ""),
-        model: String(connection?.model || ""),
-        preset: String(connection?.preset || ""),
-        base_url: String(connection?.base_url || ""),
-        credential: {
-          action: status.configured || descriptor?.category === "oauth"
-            ? "keep"
-            : hasCredentialField ? "set" : "clear",
-          value: "",
-          status,
-        },
-        api_mode: String(connection?.api_mode || ""),
-        reasoning_effort: String(connection?.reasoning_effort || ""),
-        http_referer: String(connection?.http_referer || ""),
-        x_title: String(connection?.x_title || ""),
-        num_ctx: Number(connection?.num_ctx || 0),
-      };
+    // The wizard edits exactly one primary chat connection through the shared
+    // single-connection lens; every other route item (existing fallbacks,
+    // embedding providers) round-trips untouched through toModelConfigPayload
+    // (decision 2: preservation + disclosure, never silent carry).
+    function refreshDraftLens() {
+      const record = chatDraft();
+      draft = record ? createSingleConnectionDraft(modelState, "chat", record.id) : null;
+      return draft;
     }
 
     function createFirstChatDraft() {
       const descriptor = modelDescriptors[0];
       if (!descriptor) throw new Error("后端没有可用的 Chat 连接类型。");
       const usedIds = new Set([
-        ...(modelSnapshot?.models?.chat?.connections || []),
-        ...(modelSnapshot?.models?.embedding?.providers || []),
+        ...modelState.models.chat.connections,
+        ...modelState.models.embedding.providers,
       ].map((record) => String(record?.id || "")).filter(Boolean));
       let stableId = "chat-primary";
       let suffix = 2;
@@ -392,132 +416,81 @@
         suffix += 1;
       }
       const firstPreset = (descriptor.preset_definitions || []).find(
-        (preset) => preset.capabilities?.includes("chat"),
+        (preset) => !preset.capabilities?.length || preset.capabilities.includes("chat"),
       );
-      const hasCredentialField = descriptor.fields.some((field) => field.name === "credential");
-      draftConnection = {
+      modelState = appendRouteItem(modelState, "chat", {
         id: stableId,
         name: descriptor.label,
         type: descriptor.id,
-        model: "",
         preset: firstPreset?.id || "",
-        base_url: "",
-        credential: {
-          action: descriptor.category === "oauth" ? "keep" : hasCredentialField ? "set" : "clear",
-          value: "",
-          status: safeCredentialStatus(null),
-        },
-        api_mode: "",
-        reasoning_effort: "",
-        http_referer: "",
-        x_title: "",
-        num_ctx: 0,
-      };
-      if (firstPreset) applyPresetDefaults(descriptor, firstPreset, true);
-      return draftConnection;
+        credential: { action: descriptor.category === "oauth" ? "keep" : "set" },
+      });
+      refreshDraftLens();
+      if (firstPreset) {
+        modelState = sharedApplyPreset(modelState, "chat", stableId, firstPreset);
+        refreshDraftLens();
+      }
     }
 
     function currentPreset(descriptor) {
+      const record = chatDraft();
       return (descriptor?.preset_definitions || []).find(
-        (preset) => preset.id === draftConnection?.preset && preset.capabilities?.includes("chat"),
+        (preset) => preset.id === record?.preset
+          && (!preset.capabilities?.length || preset.capabilities.includes("chat")),
       ) || null;
     }
 
-    function applicableModelFields(descriptor, presetId) {
-      return new Set(
-        (descriptor?.fields || [])
-          .filter((field) => (
-            (!field.capabilities?.length || field.capabilities.includes("chat"))
-            && (!field.presets?.length || field.presets.includes(presetId))
-          ))
-          .map((field) => field.name),
-      );
-    }
-
-    function clearInvalidModelFields(descriptor, presetId) {
-      const applicable = applicableModelFields(descriptor, presetId);
-      for (const field of MODEL_VALUE_FIELDS) {
-        if (applicable.has(field)) continue;
-        draftConnection[field] = field === "num_ctx" ? 0 : "";
-        modelTouchedFields.delete(field);
-      }
-      return applicable;
-    }
-
-    function applyPresetDefaults(descriptor, preset, force = false) {
-      if (!draftConnection || !preset) return;
-      draftConnection.preset = preset.id;
-      const applicable = applicableModelFields(descriptor, preset.id);
-      for (const [field, value] of Object.entries(preset.defaults || {})) {
-        const current = draftConnection[field];
-        const empty = current === "" || current === null || current === undefined
-          || (field === "num_ctx" && Number(current) === 0);
-        if (applicable.has(field) && (!modelTouchedFields.has(field) || empty)) {
-          draftConnection[field] = value;
-        }
-      }
-      clearInvalidModelFields(descriptor, preset.id);
-    }
-
     function selectConnectionType(type) {
-      if (modelSaveInFlight) return;
+      if (modelSaveInFlight || !draft) return;
       const descriptor = descriptorFor(type);
-      if (!descriptor || !draftConnection) return;
-      if (draftConnection.type !== type) {
-        const previous = draftConnection;
-        const firstPreset = (descriptor.preset_definitions || []).find(
-          (preset) => preset.capabilities?.includes("chat"),
+      if (!descriptor) return;
+      const record = chatDraft();
+      if (record.type !== type) {
+        // The wizard starts each draft from a blank slate, so there are no
+        // populated incompatible fields to confirm — force the change.
+        const outcome = sharedChangeConnectionType(
+          modelState, "chat", record.id, descriptor, { confirmed: true },
         );
-        const hasCredentialField = descriptor.fields.some((field) => field.name === "credential");
-        draftConnection = {
-          ...previous,
-          id: previous.id,
-          name: previous.name || descriptor.label,
-          type,
-          preset: firstPreset?.id || "",
-          credential: {
-            action: descriptor.category === "oauth" ? "keep" : hasCredentialField ? "set" : "clear",
-            value: "",
-            status: safeCredentialStatus(null),
-          },
-        };
-        const applicable = clearInvalidModelFields(descriptor, draftConnection.preset);
-        for (const field of MODEL_VALUE_FIELDS) {
-          if (applicable.has(field) && !modelTouchedFields.has(field)) {
-            draftConnection[field] = field === "num_ctx" ? 0 : "";
-          }
+        modelState = outcome.state;
+        refreshDraftLens();
+        const preset = currentPreset(descriptor);
+        if (preset) {
+          modelState = sharedApplyPreset(modelState, "chat", record.id, preset);
+          refreshDraftLens();
         }
-        if (firstPreset) applyPresetDefaults(descriptor, firstPreset, true);
       }
       setModelNarrowView("detail");
       renderModelSetup();
     }
 
     function renderConnectionTypes() {
+      const record = chatDraft();
       const disabled = modelSaveInFlight ? " disabled" : "";
       $("#connectionTypeList").innerHTML = modelDescriptors.map((descriptor) => `
         <button type="button" class="connection-type-option" role="option"
-          data-connection-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === draftConnection?.type}"${disabled}>
+          data-connection-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record?.type}"${disabled}>
           <span>${escapeHtml(descriptor.label)}</span><small>${escapeHtml(descriptor.category === "oauth" ? "OAuth 登录" : descriptor.help)}</small>
         </button>`).join("");
     }
 
     function renderDescriptorField(descriptor, field) {
+      const record = chatDraft();
+      if (!record) return "";
       if (field.name === "credential") return "";
       if (field.capabilities?.length && !field.capabilities.includes("chat")) return "";
-      if (field.presets?.length && !field.presets.includes(draftConnection.preset)) return "";
+      if (field.presets?.length && !field.presets.includes(record.preset)) return "";
       const required = field.required ? " required" : "";
       const disabled = modelSaveInFlight ? " disabled" : "";
       const help = field.help ? `<div class="hint">${escapeHtml(field.help)}</div>` : "";
       if (field.name === "preset") {
         const options = (descriptor.preset_definitions || [])
-          .filter((preset) => preset.capabilities?.includes("chat"));
+          .filter((preset) => !preset.capabilities?.length || preset.capabilities.includes("chat"));
         return `<div class="model-field full"><label>Preset</label><select data-model-field="preset"${required}${disabled}>${options.map(
-          (preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === draftConnection.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`,
+          (preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === record.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`,
         ).join("")}</select>${currentPreset(descriptor)?.help ? `<div class="hint">${escapeHtml(currentPreset(descriptor).help)}</div>` : help}</div>`;
       }
       if (field.input_type === "select") {
-        const current = String(draftConnection[field.name] || "");
+        const current = String(record[field.name] || "");
         const hasBlankChoice = (field.choices || []).includes("");
         const blank = !field.required && !current && !hasBlankChoice
           ? '<option value="" selected>默认</option>'
@@ -527,29 +500,36 @@
         ).join("")}</select>${help}</div>`;
       }
       const inputType = field.input_type === "number" ? "number" : "text";
-      const value = draftConnection[field.name] ?? "";
+      const value = record[field.name] ?? "";
       const full = field.name === "base_url" ? " full" : "";
       return `<div class="model-field${full}"><label>${escapeHtml(field.label)}</label><input type="${inputType}" data-model-field="${escapeHtml(field.name)}" value="${escapeHtml(value)}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>${help}</div>`;
     }
 
     function renderCredential(descriptor) {
       const host = $("#modelCredentialEditor");
+      const record = chatDraft();
       const definition = descriptor.fields.find((field) => field.name === "credential");
-      if (!definition) {
+      if (!definition || !record) {
         host.innerHTML = '<p class="hint">此连接类型不需要凭据。</p>';
         return;
       }
-      const status = draftConnection.credential.status;
+      const status = record.credential.status || {};
       if (descriptor.category === "oauth") {
-        draftConnection.credential = { ...draftConnection.credential, action: "keep", value: "" };
-        host.innerHTML = `<label>${escapeHtml(definition.label)}</label><div class="hint">${escapeHtml(status.oauth_logged_in ? "已检测到登录" : "将导入本机登录")} · ${escapeHtml(status.credential_ref || definition.choices?.[0] || descriptor.label)}</div>`;
+        if (record.credential.action !== "keep") {
+          modelState = updateRouteField(modelState, "chat", record.id, "credential", { action: "keep" });
+          refreshDraftLens();
+        }
+        const oauthNote = status.oauth_logged_in
+          ? "已检测到登录"
+          : "尚未检测到登录 — 如需重新登录，请在终端运行 openbiliclaw auth codex";
+        host.innerHTML = `<label>${escapeHtml(definition.label)}</label><div class="hint">${escapeHtml(oauthNote)} · ${escapeHtml(status.credential_ref || definition.choices?.[0] || descriptor.label)}</div>`;
         return;
       }
       const disabled = modelSaveInFlight ? " disabled" : "";
       const sourceText = status.configured
         ? `已配置（${status.source}${status.env_name ? ` · ${status.env_name}` : ""}）`
         : "尚未配置";
-      const action = draftConnection.credential.action;
+      const action = record.credential.action;
       const needsValue = action === "set" || action === "env";
       host.innerHTML = `
         <label>${escapeHtml(definition.label)}</label>
@@ -560,116 +540,73 @@
           <button type="button" data-credential-action="env" aria-pressed="${action === "env"}"${disabled}>环境变量</button>
           <button type="button" data-credential-action="clear" aria-pressed="${action === "clear"}"${disabled}>清除</button>
         </div>
-        ${needsValue ? `<input id="modelCredentialValue" type="${action === "set" ? "password" : "text"}" value="${escapeHtml(draftConnection.credential.value || "")}" placeholder="${action === "env" ? "例如 OPENAI_API_KEY" : "输入新 API Key"}" autocomplete="new-password"${disabled}>` : ""}`;
+        ${needsValue ? `<input id="modelCredentialValue" type="${action === "set" ? "password" : "text"}" value="${escapeHtml(record.credential.value || "")}" placeholder="${action === "env" ? "例如 OPENAI_API_KEY" : "输入新 API Key"}" autocomplete="new-password"${disabled}>` : ""}`;
+    }
+
+    // Decision 2: disclose preserved fallbacks instead of silently carrying.
+    function renderPreservedFallbacks() {
+      const host = $("#preservedFallbacks");
+      if (!host) return;
+      const count = Math.max(0, modelState.models.chat.connections.length - 1);
+      host.hidden = count === 0;
+      if (count) {
+        host.textContent = `已检测到现有配置：除主连接外还有 ${count} 个备用连接，保存后将继续保留，可在 设置 → 模型 中管理。`;
+      }
     }
 
     function renderModelSetup() {
       setModelNarrowView(modelNarrowView);
       renderConnectionTypes();
-      const descriptor = descriptorFor(draftConnection?.type);
-      if (!descriptor || !draftConnection) return;
+      const record = chatDraft();
+      const descriptor = descriptorFor(record?.type);
+      if (!descriptor || !record) return;
       $("#connectionTypeTitle").textContent = descriptor.label;
-      $("#connectionStableId").textContent = `ID: ${draftConnection.id}`;
+      $("#connectionStableId").textContent = `ID: ${record.id}`;
       $("#connectionTypeHelp").textContent = descriptor.help;
       $("#modelDescriptorFields").innerHTML = descriptor.fields
         .map((field) => renderDescriptorField(descriptor, field))
         .join("");
       renderCredential(descriptor);
+      renderPreservedFallbacks();
     }
 
     function updateModelField(field, value) {
-      if (!draftConnection || modelSaveInFlight) return;
+      const record = chatDraft();
+      if (!record || modelSaveInFlight) return;
       if (field === "preset") {
-        const descriptor = descriptorFor(draftConnection.type);
+        const descriptor = descriptorFor(record.type);
         const preset = (descriptor?.preset_definitions || []).find((item) => item.id === value);
-        if (preset) applyPresetDefaults(descriptor, preset);
+        if (preset) {
+          modelState = sharedApplyPreset(modelState, "chat", record.id, preset);
+          refreshDraftLens();
+        }
         renderModelSetup();
         return;
       }
-      modelTouchedFields.add(field);
-      draftConnection[field] = field === "num_ctx" ? Number(value || 0) : value;
-    }
-
-    function credentialActionPayload(credential) {
-      const action = ["keep", "set", "clear", "env"].includes(credential?.action)
-        ? credential.action : "keep";
-      return action === "set" || action === "env"
-        ? { action, value: String(credential?.value || "") }
-        : { action };
-    }
-
-    function chatConnectionPayload(connection, credential = { action: "keep" }) {
-      return {
-        id: String(connection?.id || ""),
-        name: String(connection?.name || ""),
-        type: String(connection?.type || ""),
-        model: String(connection?.model || ""),
-        preset: String(connection?.preset || ""),
-        base_url: String(connection?.base_url || ""),
-        credential: credentialActionPayload(credential),
-        api_mode: String(connection?.api_mode || ""),
-        reasoning_effort: String(connection?.reasoning_effort || ""),
-        http_referer: String(connection?.http_referer || ""),
-        x_title: String(connection?.x_title || ""),
-        num_ctx: Math.max(0, Number(connection?.num_ctx || 0)),
-      };
-    }
-
-    function embeddingProviderPayload(provider) {
-      return {
-        id: String(provider?.id || ""),
-        name: String(provider?.name || ""),
-        type: String(provider?.type || ""),
-        preset: String(provider?.preset || ""),
-        base_url: String(provider?.base_url || ""),
-        credential: { action: "keep" },
-      };
-    }
-
-    function buildModelConfigPayload(primaryDraft) {
-      const models = modelSnapshot.models;
-      return {
-        revision: modelSnapshot.revision,
-        models: {
-          schema_version: 1,
-          chat: {
-            concurrency: Number(models.chat.concurrency),
-            timeout_seconds: Number(models.chat.timeout_seconds),
-            connections: [
-              primaryDraft,
-              ...models.chat.connections.slice(1).map((connection) => chatConnectionPayload(connection)),
-            ],
-          },
-          embedding: {
-            enabled: Boolean(models.embedding.enabled),
-            settings: {
-              model: String(models.embedding.settings.model || ""),
-              output_dimensionality: Number(models.embedding.settings.output_dimensionality || 0),
-              similarity_threshold: Number(models.embedding.settings.similarity_threshold),
-              multimodal_enabled: Boolean(models.embedding.settings.multimodal_enabled),
-            },
-            providers: models.embedding.providers.map(embeddingProviderPayload),
-          },
-        },
-        migration_resolutions: {},
-      };
+      modelState = updateRouteField(
+        modelState, "chat", record.id, field,
+        field === "num_ctx" ? Number(value || 0) : value,
+      );
+      refreshDraftLens();
     }
 
     function validateModelDraft(descriptor) {
+      const record = chatDraft();
+      if (!record) return "缺少主连接草稿。";
       for (const field of descriptor.fields || []) {
         if (field.name === "credential") continue;
         if (field.capabilities?.length && !field.capabilities.includes("chat")) continue;
-        if (field.presets?.length && !field.presets.includes(draftConnection.preset)) continue;
-        if (field.required && !String(draftConnection[field.name] ?? "").trim()) {
+        if (field.presets?.length && !field.presets.includes(record.preset)) continue;
+        if (field.required && !String(record[field.name] ?? "").trim()) {
           return `请填写${field.label}。`;
         }
       }
       const credentialField = descriptor.fields.find((field) => field.name === "credential");
       if (
         credentialField?.required
-        && ["set", "env"].includes(draftConnection.credential.action)
-        && !String(draftConnection.credential.value || "").trim()
-      ) return draftConnection.credential.action === "env" ? "请填写环境变量名。" : "请填写 API Key。";
+        && ["set", "env"].includes(record.credential.action)
+        && !String(record.credential.value || "").trim()
+      ) return record.credential.action === "env" ? "请填写环境变量名。" : "请填写 API Key。";
       return "";
     }
 
@@ -722,35 +659,261 @@
       if (!snapshot?.models?.chat || !snapshot?.models?.embedding) {
         throw new Error("模型配置快照结构不完整。");
       }
-      modelSnapshot = clone(snapshot);
-      modelTouchedFields = new Set();
+      modelState = hydrateModelConfig(snapshot);
       setModelNarrowView("list");
-      const connections = Array.isArray(snapshot.models.chat.connections)
-        ? snapshot.models.chat.connections : [];
-      draftConnection = connections.length
-        ? hydrateDraftConnection(connections[0])
-        : createFirstChatDraft();
+      if (!modelState.models.chat.connections.length) createFirstChatDraft();
+      refreshDraftLens();
       renderModelSetup();
     }
 
+    // Decision 3: a non-"none" migration state routes the user to the full
+    // configuration page's migration flow — the wizard stays linear and never
+    // attempts inline resolution.
+    function migrationBlocksWizard() {
+      return modelState && modelState.migration && modelState.migration.state !== "none";
+    }
+
+    function renderMigrationInterstitial() {
+      const panel = $("#migrationInterstitial");
+      if (!panel) return;
+      panel.hidden = !migrationBlocksWizard();
+      $("#modelSetupLayout").style.display = migrationBlocksWizard() ? "none" : "";
+      $("#saveModel").disabled = migrationBlocksWizard() || modelSaveInFlight;
+    }
+
     function handleModelConflict(details) {
+      // Decision 5: hydrate from details.latest but surface the conflict in a
+      // banner; the wizard draft is small, so re-confirm is acceptable, but
+      // the banner must make the overwrite explicit.
       if (details?.latest) hydrateModelSetup(details.latest);
       showMsg("#msg0", "模型配置已在另一个窗口更新。已载入最新版本，请重新确认后点击重试。", "warn");
     }
 
     async function loadModelSetup() {
-      const [descriptors, snapshot] = await Promise.all([
+      const [descriptors, embeddingDescriptorResponse, snapshot] = await Promise.all([
         apiFetch("/api/model-connection-types?capability=chat"),
+        apiFetch("/api/model-connection-types?capability=embedding"),
         apiFetch("/api/model-config"),
       ]);
       modelDescriptors = Array.isArray(descriptors.connection_types) ? descriptors.connection_types : [];
       if (!modelDescriptors.length) throw new Error("后端没有可用的 Chat 连接类型。");
+      embeddingDescriptors = Array.isArray(embeddingDescriptorResponse.connection_types)
+        ? embeddingDescriptorResponse.connection_types
+        : [];
       hydrateModelSetup(snapshot);
+      renderMigrationInterstitial();
+    }
+
+    // ── Step 0.5: optional embedding route ──────────────────────────────
+    // Decision: the wizard offers a single optional embedding provider with
+    // shared settings; skipping discloses that it can be enabled later.
+    function embeddingDescriptorFor(type) {
+      return embeddingDescriptors.find((descriptor) => descriptor.id === type) || null;
+    }
+
+    function embeddingProvider() {
+      return modelState?.models.embedding.providers[0] || null;
+    }
+
+    function ensureEmbeddingDraft() {
+      if (!modelState.models.embedding.providers.length) {
+        const descriptor = embeddingDescriptors[0];
+        if (!descriptor) throw new Error("后端没有可用的 Embedding 连接类型。");
+        const firstPreset = (descriptor.preset_definitions || []).find(
+          (preset) => !preset.capabilities?.length || preset.capabilities.includes("embedding"),
+        );
+        modelState = appendRouteItem(modelState, "embedding", {
+          id: "embedding-primary",
+          name: descriptor.label,
+          type: descriptor.id,
+          preset: firstPreset?.id || "",
+          credential: { action: descriptor.category === "oauth" ? "keep" : "clear" },
+        });
+        if (firstPreset) {
+          modelState = sharedApplyPreset(modelState, "embedding", "embedding-primary", firstPreset);
+        }
+      }
+      modelState = updateRouteSetting(modelState, "embedding", "enabled", true);
+      return embeddingProvider();
+    }
+
+    function renderEmbeddingStep() {
+      const enabled = embeddingEnabledChoice === true;
+      $("#embeddingFields").hidden = !enabled;
+      $("#embeddingSkipHint").hidden = embeddingEnabledChoice !== false;
+      if (!enabled) return;
+      let provider;
+      try {
+        provider = ensureEmbeddingDraft();
+      } catch (error) {
+        showTextMsg("#msgEmbedding", error.message, "err");
+        return;
+      }
+      const descriptor = embeddingDescriptorFor(provider.type);
+      const disabled = modelSaveInFlight ? " disabled" : "";
+      $("#embeddingTypeList").innerHTML = embeddingDescriptors.map((item) => `
+        <button type="button" class="connection-type-option" role="option"
+          data-embedding-type="${escapeHtml(item.id)}" aria-selected="${item.id === provider.type}"${disabled}>
+          <span>${escapeHtml(item.label)}</span><small>${escapeHtml(item.category === "oauth" ? "OAuth 登录" : item.help)}</small>
+        </button>`).join("");
+      const presetOptions = (descriptor?.preset_definitions || [])
+        .filter((preset) => !preset.capabilities?.length || preset.capabilities.includes("embedding"));
+      $("#embeddingDescriptorFields").innerHTML = (descriptor?.fields || [])
+        .filter((field) => field.name !== "credential")
+        .filter((field) => !field.capabilities?.length || field.capabilities.includes("embedding"))
+        .filter((field) => !field.presets?.length || field.presets.includes(provider.preset))
+        .map((field) => {
+          const required = field.required ? " required" : "";
+          const help = field.help ? `<div class="hint">${escapeHtml(field.help)}</div>` : "";
+          if (field.name === "preset") {
+            return `<div class="model-field full"><label>Preset</label><select data-embedding-field="preset"${required}${disabled}>${presetOptions.map(
+              (preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === provider.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`,
+            ).join("")}</select>${help}</div>`;
+          }
+          return `<div class="model-field full"><label>${escapeHtml(field.label)}</label><input type="text" data-embedding-field="${escapeHtml(field.name)}" value="${escapeHtml(provider[field.name] ?? "")}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>${help}</div>`;
+        }).join("");
+      $("#embeddingModel").value = modelState.models.embedding.settings.model || "";
+      $("#embeddingCredential").innerHTML = renderEmbeddingCredential(descriptor, provider);
+      $("#embeddingProbeStatus").textContent = embeddingProbeOk ? "✓ 已探测通过" : "";
+    }
+
+    function renderEmbeddingCredential(descriptor, provider) {
+      const definition = descriptor?.fields?.find((field) => field.name === "credential");
+      if (!definition) return '<p class="hint">此连接类型不需要凭据。</p>';
+      const status = provider.credential.status || {};
+      const disabled = modelSaveInFlight ? " disabled" : "";
+      const sourceText = status.configured
+        ? `已配置（${status.source}${status.env_name ? ` · ${status.env_name}` : ""}）`
+        : "尚未配置（本地 Ollama 通常不需要 Key）";
+      const action = provider.credential.action;
+      const needsValue = action === "set" || action === "env";
+      return `
+        <label>${escapeHtml(definition.label)}</label>
+        <div class="hint">${escapeHtml(sourceText)}</div>
+        <div class="credential-actions">
+          ${status.configured ? `<button type="button" data-embedding-credential-action="keep" aria-pressed="${action === "keep"}"${disabled}>沿用已保存</button>` : ""}
+          <button type="button" data-embedding-credential-action="set" aria-pressed="${action === "set"}"${disabled}>输入 API Key</button>
+          <button type="button" data-embedding-credential-action="env" aria-pressed="${action === "env"}"${disabled}>环境变量</button>
+          <button type="button" data-embedding-credential-action="clear" aria-pressed="${action === "clear"}"${disabled}>无 / 清除</button>
+        </div>
+        ${needsValue ? `<input id="embeddingCredentialValue" type="${action === "set" ? "password" : "text"}" value="${escapeHtml(provider.credential.value || "")}" autocomplete="new-password"${disabled}>` : ""}`;
+    }
+
+    function updateEmbeddingField(field, value) {
+      const provider = embeddingProvider();
+      if (!provider || modelSaveInFlight) return;
+      if (field === "preset") {
+        const descriptor = embeddingDescriptorFor(provider.type);
+        const preset = (descriptor?.preset_definitions || []).find((item) => item.id === value);
+        if (preset) {
+          modelState = sharedApplyPreset(modelState, "embedding", provider.id, preset);
+        }
+      } else {
+        modelState = updateRouteField(modelState, "embedding", provider.id, field, value);
+      }
+      embeddingProbeOk = false;
+      renderEmbeddingStep();
+    }
+
+    function selectEmbeddingType(type) {
+      const provider = embeddingProvider();
+      if (!provider || modelSaveInFlight) return;
+      const descriptor = embeddingDescriptorFor(type);
+      if (!descriptor || provider.type === type) return;
+      const outcome = sharedChangeConnectionType(
+        modelState, "embedding", provider.id, descriptor, { confirmed: true },
+      );
+      modelState = outcome.state;
+      const preset = (descriptor.preset_definitions || []).find(
+        (item) => !item.capabilities?.length || item.capabilities.includes("embedding"),
+      );
+      if (preset) {
+        modelState = sharedApplyPreset(modelState, "embedding", provider.id, preset);
+      }
+      embeddingProbeOk = false;
+      renderEmbeddingStep();
+    }
+
+    function setEmbeddingEnabled(enabled) {
+      embeddingEnabledChoice = Boolean(enabled);
+      embeddingProbeOk = false;
+      if (embeddingEnabledChoice) {
+        try {
+          ensureEmbeddingDraft();
+        } catch (error) {
+          showTextMsg("#msgEmbedding", error.message, "err");
+        }
+      } else {
+        // Skip: disable the route but keep any existing providers preserved
+        // verbatim in the payload (shared state never drops route items).
+        modelState = updateRouteSetting(modelState, "embedding", "enabled", false);
+      }
+      renderEmbeddingStep();
+    }
+
+    async function probeEmbeddingDraft() {
+      const provider = embeddingProvider();
+      if (!provider) return false;
+      const settings = modelState.models.embedding.settings;
+      if (!String(settings.model || "").trim()) {
+        showTextMsg("#msgEmbedding", "请填写 Embedding 模型名（如 bge-m3）。", "err");
+        return false;
+      }
+      const probe = await apiFetch("/api/model-config/probe", {
+        method: "POST",
+        timeoutMs: API_WRITE_TIMEOUT_MS,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "embedding",
+          revision: modelState.revision,
+          provider: {
+            id: provider.id,
+            name: provider.name,
+            type: provider.type,
+            preset: provider.preset,
+            base_url: provider.base_url,
+            credential: provider.credential.action === "set" || provider.credential.action === "env"
+              ? { action: provider.credential.action, value: provider.credential.value || "" }
+              : { action: provider.credential.action },
+          },
+          settings: {
+            model: String(settings.model || ""),
+            output_dimensionality: Number(settings.output_dimensionality) || 0,
+            similarity_threshold: Number(settings.similarity_threshold),
+            multimodal_enabled: Boolean(settings.multimodal_enabled),
+          },
+        }),
+      });
+      if (!probe.ok) {
+        showTextMsg("#msgEmbedding", `Embedding 连接测试未通过：${probe.message || probe.error_code || "未知错误"}`, "err");
+        return false;
+      }
+      embeddingProbeOk = true;
+      renderEmbeddingStep();
+      return true;
+    }
+
+    function updateEmbeddingSummary() {
+      const el = $("#doneEmbedding");
+      if (!el) return;
+      if (embeddingEnabledChoice === true && embeddingProbeOk) {
+        const provider = embeddingProvider();
+        const descriptor = embeddingDescriptorFor(provider?.type);
+        el.textContent = `已启用 · ${descriptor?.label || provider?.type || ""} · ${modelState.models.embedding.settings.model}`;
+      } else if (modelState?.models.embedding.enabled) {
+        el.textContent = "使用现有 Embedding 配置";
+      } else {
+        el.textContent = "未启用 — 可稍后在 设置 → 模型 → Embedding 路由 中配置";
+      }
     }
 
     async function saveModelRoute() {
-      if (!modelSnapshot || !draftConnection || modelSaveInFlight) return;
-      const descriptor = descriptorFor(draftConnection.type);
+      if (!modelState || !chatDraft() || modelSaveInFlight) return;
+      if (migrationBlocksWizard()) {
+        showTextMsg("#msg0", "检测到旧版模型配置需要迁移，请先完成迁移。", "err");
+        return;
+      }
+      const descriptor = descriptorFor(chatDraft().type);
       if (!descriptor) return;
       const validationError = validateModelDraft(descriptor);
       if (validationError) {
@@ -758,8 +921,8 @@
         return;
       }
 
-      const primaryDraft = chatConnectionPayload(draftConnection, draftConnection.credential);
-      const payload = buildModelConfigPayload(primaryDraft);
+      const payload = toModelConfigPayload(modelState);
+      const chatConnectionDraft = payload.models.chat.connections[0];
       const btn = $("#saveModel");
       modelSaveInFlight = true;
       btn.disabled = true;
@@ -772,13 +935,18 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             kind: "chat",
-            revision: modelSnapshot.revision,
-            connection: primaryDraft,
+            revision: modelState.revision,
+            connection: chatConnectionDraft,
           }),
         });
         if (!probe.ok) {
           showTextMsg("#msg0", `连接测试未通过：${probe.message || probe.error_code || "未知错误"}`, "err");
           return;
+        }
+        // Optional embedding route (step 0.5): probe-and-proceed gate.
+        if (embeddingEnabledChoice === true && !embeddingProbeOk) {
+          const embeddingOk = await probeEmbeddingDraft();
+          if (!embeddingOk) return;
         }
         btn.innerHTML = '<span class="spin"></span>测试通过，正在保存…';
         const result = await apiFetch("/api/model-config", {
@@ -788,8 +956,10 @@
           body: JSON.stringify(payload),
         });
         hydrateModelSetup(result.snapshot);
-        const preset = currentPreset(descriptorFor(draftConnection.type));
+        renderMigrationInterstitial();
+        const preset = currentPreset(descriptorFor(chatDraft().type));
         $("#doneLlm").textContent = `已连接 · ${preset?.label || descriptor.label}`;
+        updateEmbeddingSummary();
         setStep(1);
       } catch (error) {
         if (error.status === 401) {
@@ -804,7 +974,7 @@
         }
       } finally {
         modelSaveInFlight = false;
-        btn.disabled = false;
+        btn.disabled = migrationBlocksWizard();
         btn.innerHTML = "测试、保存并继续 →";
         renderModelSetup();
       }
@@ -1599,14 +1769,61 @@
     });
     $("#modelCredentialEditor").addEventListener("click", (event) => {
       const button = event.target.closest("[data-credential-action]");
-      if (!button || !draftConnection || modelSaveInFlight) return;
-      draftConnection.credential.action = button.dataset.credentialAction;
-      draftConnection.credential.value = "";
-      renderCredential(descriptorFor(draftConnection.type));
+      const record = chatDraft();
+      if (!button || !record || modelSaveInFlight) return;
+      modelState = updateRouteField(modelState, "chat", record.id, "credential", {
+        action: button.dataset.credentialAction,
+        value: "",
+      });
+      refreshDraftLens();
+      renderCredential(descriptorFor(record.type));
     });
     $("#modelCredentialEditor").addEventListener("input", (event) => {
-      if (event.target.id === "modelCredentialValue" && draftConnection && !modelSaveInFlight) {
-        draftConnection.credential.value = event.target.value;
+      const record = chatDraft();
+      if (event.target.id === "modelCredentialValue" && record && !modelSaveInFlight) {
+        modelState = updateRouteField(modelState, "chat", record.id, "credential", {
+          value: event.target.value,
+        });
+        refreshDraftLens();
+      }
+    });
+    // Step 0.5 embedding listeners
+    $("#embeddingEnable").addEventListener("click", () => setEmbeddingEnabled(true));
+    $("#embeddingSkip").addEventListener("click", () => setEmbeddingEnabled(false));
+    $("#embeddingTypeList").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-embedding-type]");
+      if (button) selectEmbeddingType(button.dataset.embeddingType);
+    });
+    $("#embeddingDescriptorFields").addEventListener("input", (event) => {
+      const field = event.target.dataset.embeddingField;
+      if (field && event.target.tagName !== "SELECT") updateEmbeddingField(field, event.target.value);
+    });
+    $("#embeddingDescriptorFields").addEventListener("change", (event) => {
+      const field = event.target.dataset.embeddingField;
+      if (field) updateEmbeddingField(field, event.target.value);
+    });
+    $("#embeddingModel").addEventListener("input", (event) => {
+      modelState = updateRouteSetting(modelState, "embedding", "model", event.target.value);
+      embeddingProbeOk = false;
+    });
+    $("#embeddingCredential").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-embedding-credential-action]");
+      const provider = embeddingProvider();
+      if (!button || !provider || modelSaveInFlight) return;
+      modelState = updateRouteField(modelState, "embedding", provider.id, "credential", {
+        action: button.dataset.embeddingCredentialAction,
+        value: "",
+      });
+      embeddingProbeOk = false;
+      renderEmbeddingStep();
+    });
+    $("#embeddingCredential").addEventListener("input", (event) => {
+      const provider = embeddingProvider();
+      if (event.target.id === "embeddingCredentialValue" && provider && !modelSaveInFlight) {
+        modelState = updateRouteField(modelState, "embedding", provider.id, "credential", {
+          value: event.target.value,
+        });
+        embeddingProbeOk = false;
       }
     });
     $("#saveModel").addEventListener("click", saveModelRoute);
