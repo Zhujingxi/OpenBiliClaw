@@ -83,3 +83,24 @@ explicitly NOT adopted, so admitted-item reasons must stay presentable.
   evaluation section (reason contract); `docs/changelog.md` bullet under the
   current version block; `docs/profile-usage.md` untouched (no profile-surface
   change).
+
+## Gate results (2026-07-18, supervisor-run)
+
+Method: relative gate (absolute thresholds are unusable on this gateway — the
+same-day A/A control alone flips 21%). Sample: 100 real evaluated candidates
+from the production DB (read-only), sensenova `deepseek-v4-flash`,
+temperature 0, replay `max_tokens=16384` headroom on both arms.
+
+| Metric | A/A envelope | A/B (reason-diet) | Verdict |
+| --- | --- | --- | --- |
+| Mean signed delta (B−A) | −0.0383 | +0.0303 | within envelope |
+| Admission-rate delta | −15.0pp | +5.0pp | within envelope |
+| Flip rate | 21% | 17% | below noise |
+| Per-platform signed delta | ±0.007…0.074 | +0.004…0.054 | within envelope |
+
+**PASS** — the reason contract change is statistically indistinguishable from
+same-day gateway noise; residual drift is mildly positive (no admission
+shrinkage). Harness: `--arm-b reason-diet` added to
+`scripts/run_profile_diet_ab.py` (arm A surgically restores the legacy
+instruction; staleness guard raises if the live prompt diverges from the
+recorded snippets).

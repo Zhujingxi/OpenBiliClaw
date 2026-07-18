@@ -225,3 +225,23 @@ def test_replay_report_mentions_when_compact_recall_is_unavailable(
 
     output = capsys.readouterr().out
     assert "related_interests recall disabled: embedding service unavailable" in output
+
+
+def test_legacy_reason_prompts_swaps_and_restores() -> None:
+    """reason-diet arm A must really restore the legacy prompts, then undo."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import run_profile_diet_ab as script
+
+    from openbiliclaw.llm import prompts as prompts_module
+
+    before_single = prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
+    before_batch = prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+    with script.legacy_reason_prompts():
+        assert "只写一句中文" in prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
+        assert "3a. reason" not in prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+        assert "reason(一句中文)" in prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+    assert before_single == prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
+    assert before_batch == prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT

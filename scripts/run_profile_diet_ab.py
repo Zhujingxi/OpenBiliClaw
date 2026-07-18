@@ -20,7 +20,8 @@ import logging
 import math
 import sqlite3
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -210,6 +211,69 @@ def cap_body_text(
     if tail == 0:
         return text[:head] + joiner
     return text[:head] + joiner + text[-tail:]
+
+
+# ``--arm-b reason-diet``: arm A restores the pre-2689d412 reason instruction
+# (unconditional one-sentence reasons) by surgically swapping the exact new
+# snippets back to the legacy text inside the current prompt constants; arm B
+# runs the production reason contract (skip <0.5, ≤30字). Each (current, legacy)
+# pair must match the live constant verbatim — the guard below fails loudly if
+# a later prompt edit breaks the swap, instead of silently comparing A to A.
+_REASON_DIET_SWAPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '3. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 ""'
+        "(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);"
+        "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
+        "不超过 30 个字,说明为什么这个人会喜欢或不喜欢这个内容。\n",
+        "3. reason 只写一句中文,解释为什么这个人会喜欢或不喜欢这个内容。\n",
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        "、reason、topic_group(2-4词粗分类)、style_key(13选1)、",
+        "、reason(一句中文)、topic_group(2-4词粗分类)、style_key(13选1)、",
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '3a. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 ""'
+        "(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);"
+        "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
+        "不超过 30 个字,说明为什么这个人会喜欢这个内容。\n",
+        "",
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '"score": 0.45, "reason": ""',
+        '"score": 0.45, "reason": "..."',
+    ),
+)
+
+
+@contextmanager
+def legacy_reason_prompts() -> Iterator[None]:
+    """Temporarily restore the pre-reason-diet evaluation prompts (arm A)."""
+
+    from openbiliclaw.llm import prompts as prompts_module
+
+    originals: dict[str, str] = {}
+    patched: dict[str, str] = {}
+    for constant_name, current_snippet, legacy_snippet in _REASON_DIET_SWAPS:
+        base = patched.get(constant_name, getattr(prompts_module, constant_name))
+        if constant_name not in originals:
+            originals[constant_name] = getattr(prompts_module, constant_name)
+        if current_snippet not in base:
+            raise RuntimeError(
+                "reason-diet arm is stale: expected snippet not found in "
+                f"{constant_name}; update _REASON_DIET_SWAPS to match the live prompt."
+            )
+        patched[constant_name] = base.replace(current_snippet, legacy_snippet, 1)
+    for constant_name, text in patched.items():
+        setattr(prompts_module, constant_name, text)
+    try:
+        yield
+    finally:
+        for constant_name, text in originals.items():
+            setattr(prompts_module, constant_name, text)
 
 
 def parse_model_override(raw_arm: str) -> ModelOverride | None:
@@ -452,6 +516,12 @@ class _DeterministicLLMService:
 
     async def complete_structured_task(self, **kwargs: Any) -> object:
         kwargs["temperature"] = 0.0
+        # Replay-only headroom: the sensenova gateway sometimes reasons even
+        # with reasoning_effort="" and eats the production 4096 budget before
+        # emitting content (finish_reason=length, observed 2026-07-18). Both
+        # arms share the same ceiling, so comparability is unaffected;
+        # production keeps its own 4096 setting.
+        kwargs["max_tokens"] = 16384
         result = self._inner.complete_structured_task(**kwargs)  # type: ignore[attr-defined]
         return await result
 
@@ -712,14 +782,15 @@ async def run(args: argparse.Namespace) -> int:
     model_override = parse_model_override(str(args.arm_b))
     compact_profile = str(args.arm_b) == "compact"
     body_cap = str(args.arm_b) == "body-cap"
+    legacy_reason = str(args.arm_b) == "reason-diet"
     if body_cap:
         raise ValueError(
             "--arm-b body-cap is obsolete: body_text head+tail capping became production "
             "behavior for both arms (Task 7); pre-capping again only corrupts the "
             "description-dedup relation and skews the comparison."
         )
-    if not compact_profile and model_override is None:
-        raise ValueError("--arm-b must be compact or model=<provider:model>")
+    if not compact_profile and model_override is None and not legacy_reason:
+        raise ValueError("--arm-b must be compact, reason-diet, or model=<provider:model>")
 
     database = _load_read_only_database(db_path)
     rows = _fetch_replay_rows(database, sample=int(args.sample), platform=args.platform)
@@ -765,12 +836,22 @@ async def run(args: argparse.Namespace) -> int:
         embedding_service=embedding_service,
     )
 
-    scores_a = await _score_contents(
-        arm_a_engine,
-        _rows_to_contents(rows, body_cap=False),
-        profile,
-        source_context="profile_diet_ab.arm_a",
-    )
+    if legacy_reason:
+        # Arm A replays the pre-reason-diet prompts; arm B keeps production.
+        with legacy_reason_prompts():
+            scores_a = await _score_contents(
+                arm_a_engine,
+                _rows_to_contents(rows, body_cap=False),
+                profile,
+                source_context="profile_diet_ab.arm_a",
+            )
+    else:
+        scores_a = await _score_contents(
+            arm_a_engine,
+            _rows_to_contents(rows, body_cap=False),
+            profile,
+            source_context="profile_diet_ab.arm_a",
+        )
     scores_b = await _score_contents(
         arm_b_engine,
         _rows_to_contents(rows, body_cap=body_cap),
@@ -820,7 +901,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--arm-b",
         required=True,
-        help="Arm B transform: compact, body-cap, or model=<provider:model>",
+        help="Arm B transform: compact, reason-diet, or model=<provider:model>",
     )
     return parser.parse_args()
 
