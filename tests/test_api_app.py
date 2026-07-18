@@ -10086,7 +10086,11 @@ class TestConfigApiE2E:
         assert data["logging"]["file_level"] == "WARNING"
         assert data["logging"]["directory"] == "runtime-logs"
         assert data["logging"]["filename"] == "backend.log"
-        assert data["logging"]["file_path"] == str(tmp_path / "runtime-logs" / "backend.log")
+        # /api/config must not leak resolved absolute host paths.
+        # The exposed form is the configured "<directory>/<filename>".
+        assert data["logging"]["file_path"] == "runtime-logs/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert str(tmp_path) not in data["logging"]["file_path"]
         assert data["logging"]["max_file_size_mb"] == 123
         assert data["logging"]["aggregate_budget_mb"] == 456
         assert data["logging"]["unmanaged_truncate_mb"] == 78

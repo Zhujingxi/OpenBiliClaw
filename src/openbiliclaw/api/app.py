@@ -10327,7 +10327,10 @@ def create_app(
                 file_level=cfg.logging.file_level,
                 directory=cfg.logging.directory,
                 filename=cfg.logging.filename,
-                file_path=str(cfg.logging.file_path),
+                # Redact resolved absolute path: expose only the configured
+                # relative form (directory/filename). Absolute paths leak host
+                # filesystem layout when the API is bound beyond loopback.
+                file_path=f"{cfg.logging.directory}/{cfg.logging.filename}",
                 max_file_size_mb=cfg.logging.max_file_size_mb,
                 backup_count=cfg.logging.backup_count,
                 aggregate_budget_mb=cfg.logging.aggregate_budget_mb,
