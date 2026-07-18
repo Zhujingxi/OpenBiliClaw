@@ -303,7 +303,7 @@ class AccountSyncService:
                 raise
 
         state["last_account_sync_at"] = self._now().isoformat()
-        state["last_sync_error"] = " | ".join(errors)
+        state["last_sync_error"] = self._merge_stage_errors(errors)
         state["last_sync_error_kind"] = error_kind
         self.memory_manager.save_account_sync_state(state)
         return {
@@ -311,6 +311,22 @@ class AccountSyncService:
             "new_event_count": len(events),
             "errors": errors,
         }
+
+    @staticmethod
+    def _merge_stage_errors(errors: list[str]) -> str:
+        """Join stage errors, dropping repeats of the same message.
+
+        One expired cookie fails several stages: the history stage hits
+        /x/web-interface/history/cursor, while favorites and following each
+        call get_nav_info() for the mid. All three raised the same -101, so
+        the joined string repeated one cause three times.
+        """
+        merged: list[str] = []
+        for error in errors:
+            message = error.strip()
+            if message and message not in merged:
+                merged.append(message)
+        return " | ".join(merged)
 
     @staticmethod
     def _record_stage_error(stage: str, exc: Exception, current_kind: str) -> str:
@@ -621,11 +637,36 @@ class AccountSyncService:
     def get_runtime_status(self) -> dict[str, object]:
         """Expose lightweight account sync runtime fields."""
         state = self.memory_manager.load_account_sync_state()
+        kind = str(state.get("last_sync_error_kind", ""))
+        detail = str(state.get("last_sync_error", ""))
         return {
             "last_account_sync_at": str(state.get("last_account_sync_at", "")),
-            "last_account_sync_error": str(state.get("last_sync_error", "")),
-            "last_account_sync_error_kind": str(state.get("last_sync_error_kind", "")),
+            # Raw provider text — diagnostics only, never the display string.
+            "last_account_sync_error": detail,
+            "last_account_sync_error_kind": kind,
+            # Display copy lives here so all four surfaces render the same
+            # sentence instead of each formatting the raw error themselves.
+            "last_account_sync_message": self._user_facing_sync_message(kind, detail),
+            "last_account_sync_severity": "warning"
+            if kind == "auth_expired"
+            else ("error" if detail else ""),
         }
+
+    @staticmethod
+    def _user_facing_sync_message(kind: str, detail: str) -> str:
+        """Render the user-visible sentence for a sync error.
+
+        An expired cookie is a normal lifecycle event, not a fault, so it gets
+        an actionable instruction rather than the provider's English error.
+        """
+        if kind == "auth_expired":
+            return (
+                "B 站登录已失效，账号同步已停止。"
+                "请在浏览器重新登录 B 站，或保持扩展在线以同步新的 Cookie。"
+            )
+        if detail:
+            return "账号同步出错，稍后会自动重试。"
+        return ""
 
     async def _auto_bootstrap_soul_profile(self, event_count: int) -> None:
         """Build the first soul profile after account sync learns preferences.

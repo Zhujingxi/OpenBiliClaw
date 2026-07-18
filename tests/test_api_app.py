@@ -6362,9 +6362,7 @@ class TestBackendAPI:
         assert response.json()["item_key"] == "bangumi:326"
         assert database.get_saved_membership("favorite", "bangumi:326") is not None
 
-        status = client.get(
-            "/api/saved/favorite/status", params={"item_key": "bangumi:326"}
-        )
+        status = client.get("/api/saved/favorite/status", params={"item_key": "bangumi:326"})
         assert status.status_code == 200, status.text
         assert status.json()["saved"] is True
 
@@ -10589,9 +10587,7 @@ class TestBackendAPI:
         # A rejected token is never persisted.
         assert cfg.sources.bangumi.access_token == ""
 
-    def test_put_config_bangumi_token_check_failed_on_network(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_config_bangumi_token_check_failed_on_network(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.sources.bangumi_client import BangumiAPIError
 
         cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)

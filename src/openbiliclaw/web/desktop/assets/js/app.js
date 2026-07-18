@@ -5666,17 +5666,20 @@ ${cardFeedbackBarHtml()}`;
         return;
       }
       el.hidden = false;
-      if (runtime.last_account_sync_error_kind === "auth_expired") {
+      // The backend renders the sentence so every surface says the same thing;
+      // the literals here are only a fallback for an older backend.
+      const message = String(runtime?.last_account_sync_message || "");
+      if (kind === "auth_expired") {
         el.classList.add("is-auth-expired");
         el.classList.remove("is-error");
-        el.textContent = "B 站登录已失效，账号同步已停止 — 请重新登录";
+        el.textContent = message || "B 站登录已失效，账号同步已停止 — 请重新登录";
         return;
       }
       el.classList.add("is-error");
       el.classList.remove("is-auth-expired");
-      const when = String(runtime?.last_account_sync_at || "");
-      const detail = error || "账号同步出错";
-      el.textContent = when ? `账号同步出错：${detail}（上次同步 ${when}）` : `账号同步出错：${detail}`;
+      const when = formatLocalTime(String(runtime?.last_account_sync_at || ""));
+      const detail = message || "账号同步出错";
+      el.textContent = when ? `${detail}（上次同步 ${when}）` : detail;
     }
 
     function applyRuntimeStatus(payload) {
@@ -7434,7 +7437,9 @@ ${cardFeedbackBarHtml()}`;
       already_applying: "正在更新中"
     };
 
-    function formatUpdateCheckTime(iso) {
+    // Shared by update checks and account-sync status: the backend hands out
+    // raw ISO strings (UTC, microseconds), which are unreadable as-is.
+    function formatLocalTime(iso) {
       if (!iso) return "";
       const date = new Date(iso);
       if (Number.isNaN(date.getTime())) return "";
@@ -7446,7 +7451,7 @@ ${cardFeedbackBarHtml()}`;
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "disabled":
@@ -7492,7 +7497,7 @@ ${cardFeedbackBarHtml()}`;
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":
@@ -7520,7 +7525,7 @@ ${cardFeedbackBarHtml()}`;
       const reasonText = UPDATE_REASON_TEXT[reasonKey] || reasonKey;
       const current = backend.current_version ? `v${backend.current_version}` : "";
       const latest = backend.latest_version ? `v${backend.latest_version}` : "";
-      const checkedAt = formatUpdateCheckTime(backend.last_check_at);
+      const checkedAt = formatLocalTime(backend.last_check_at);
       const suffix = checkedAt ? `（${checkedAt} 检查）` : "";
       switch (backend.state) {
         case "checking":

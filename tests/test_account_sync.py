@@ -1725,3 +1725,39 @@ async def test_account_sync_following_partial_page_failure_still_imports() -> No
     assert memory.state["last_sync_error_kind"] == "auth_expired"
     assert "logged out" in str(memory.state["last_sync_error"])
     assert memory.state["last_account_sync_at"]
+
+
+def test_merge_stage_errors_drops_repeated_cause() -> None:
+    """One expired cookie fails three stages with the same message.
+
+    history hits /x/web-interface/history/cursor; favorites and following each
+    call get_nav_info() for the mid, so users saw one cause joined three times.
+    """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    expired = "Bilibili session expired on /x/web-interface/nav (-101)."
+    cursor = "Bilibili session expired on /x/web-interface/history/cursor (-101)."
+
+    merged = AccountSyncService._merge_stage_errors([cursor, expired, expired])
+
+    assert merged == f"{cursor} | {expired}"
+
+
+def test_user_facing_sync_message_guides_relogin_for_expired_cookie() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    message = AccountSyncService._user_facing_sync_message(
+        "auth_expired",
+        "Bilibili session expired on /x/web-interface/nav (-101).",
+    )
+
+    # Actionable Chinese copy, not the provider's English error.
+    assert "重新登录" in message
+    assert "-101" not in message
+    assert "expired" not in message
+
+
+def test_user_facing_sync_message_empty_when_healthy() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    assert AccountSyncService._user_facing_sync_message("", "") == ""
