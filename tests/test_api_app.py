@@ -13187,6 +13187,131 @@ class TestGuidedInitEndpoints:
         }
         assert len(saved_states) == 2  # the flag change is a real write
 
+    def test_bangumi_identity_verified_flag_survives_a_later_network_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: a flaky re-report must not erase proof we already hold.
+
+        ``verified`` used to be overwritten with whatever this round produced,
+        so one bgm.tv timeout downgraded a genuinely cross-checked identity to
+        ``false`` — and guided init then told the user their real account was
+        "未经 bgm.tv 校验". Network flapping also rewrote the file on every
+        flip. The flag is evidence about a uid↔username pair; it ratchets up
+        and is never downgraded for the same identity.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.json()["verified"] is True
+            assert len(saved_states) == 1
+
+            # bgm.tv goes down; the extension re-reports the same identity.
+            self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+            resp2 = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp2.json()["verified"] is True, "a timeout must not downgrade the flag"
+
+        assert state["bangumi_self_info"] == {
+            "uid": "123456",
+            "username": "sai",
+            "verified": True,
+        }
+        # Nothing changed, so nothing was written — no flag flapping on disk.
+        assert len(saved_states) == 1
+
+    def test_bangumi_identity_verified_flag_does_not_carry_to_a_different_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sticky-true is per identity: a new uid/username starts from scratch.
+
+        The old evidence says nothing about a pair we have never checked, so
+        carrying the flag across would be exactly the plausible-but-wrong claim
+        the whole guard exists to prevent.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+        with TestClient(app) as client:
+            client.post("/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"})
+            assert state["bangumi_self_info"]["verified"] is True
+
+            # Same uid, DIFFERENT username, and bgm.tv is unreachable.
+            self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "someone-else"}
+            )
+            assert resp.json() == {
+                "ok": True,
+                "uid": "123456",
+                "username": "someone-else",
+                "verified": False,
+            }
+            assert state["bangumi_self_info"]["verified"] is False
+
+            # A different uid under a previously verified username, likewise.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 999, "username": "sai"}
+            )
+            assert resp2.json()["verified"] is False
+
+        assert state["bangumi_self_info"] == {"uid": "999", "username": "sai", "verified": False}
+        assert len(saved_states) == 3  # each identity change is a real write
+
+    def test_bangumi_identity_sticky_flag_reads_the_live_state_under_the_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The merge must use the value seen INSIDE the atomic update.
+
+        ``update_json_state`` takes a process + file lock and re-reads from
+        disk before invoking the mutator, so a concurrent report that verified
+        this identity between our pre-read and our write is visible there. If
+        the record were built from the stale pre-read instead, that concurrent
+        verification would be clobbered.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        manager = app.state.runtime_context.runtime_controller.memory_manager
+        original_update = manager.update_discovery_runtime_state
+
+        # The pre-read sees nothing; by the time the mutator runs, a concurrent
+        # request has landed a verified record for the very same identity.
+        manager.load_discovery_runtime_state = dict
+
+        def _update_after_race(mutator):  # type: ignore[no-untyped-def]
+            state["bangumi_self_info"] = {
+                "uid": "123456",
+                "username": "sai",
+                "verified": True,
+            }
+            return original_update(mutator)
+
+        manager.update_discovery_runtime_state = _update_after_race
+
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            # Built from the stale pre-read, this would have clobbered it.
+            assert resp.json()["verified"] is True
+
+        assert state["bangumi_self_info"]["verified"] is True
+        assert saved_states[-1]["bangumi_self_info"]["verified"] is True
+
     def test_bangumi_identity_persisted_during_active_init(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
