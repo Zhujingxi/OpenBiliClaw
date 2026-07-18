@@ -6,6 +6,7 @@ content cache, and recommendation history.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -82,6 +83,36 @@ if TYPE_CHECKING:
     from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
+
+
+# Cap the probe so a long legitimate blurb never costs a full parse. Real
+# copy is a sentence or two; a serialized batch payload is far longer than
+# this, but the prefix alone is enough to identify one.
+_LLM_PAYLOAD_PROBE_MAX_CHARS = 512
+_LLM_PAYLOAD_MARKERS = ("expression", "topic_label", "reason", "topic_group")
+
+
+def _looks_like_serialized_llm_payload(value: str) -> bool:
+    """True when ``value`` is a serialized dict/list of LLM result fields.
+
+    Prefix matching alone both over- and under-fires: legitimate copy may open
+    with a code snippet, while a poisoned value may carry leading whitespace or
+    use JSON rather than Python repr. Parse instead, and only reject when the
+    result is a container carrying the fields the pipeline emits.
+    """
+    probe = value.strip()[:_LLM_PAYLOAD_PROBE_MAX_CHARS]
+    if not probe.startswith(("{", "[")):
+        return False
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            parsed = parse(probe)
+        except (ValueError, SyntaxError, TypeError, RecursionError, MemoryError):
+            continue
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            if isinstance(item, dict) and any(marker in item for marker in _LLM_PAYLOAD_MARKERS):
+                return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -6220,6 +6251,12 @@ class Database:
         topic_label: str,
     ) -> None:
         """Persist precomputed popup copy for one pooled candidate."""
+        if _looks_like_serialized_llm_payload(expression):
+            # Sink defense only — the upstream validators are what actually
+            # keep repr'd payloads out. This exists so a future parsing
+            # regression cannot silently reach users as card copy again.
+            logger.error("Refusing to persist serialized LLM payload as pool copy for %s", bvid)
+            return
         self._execute_write(
             """
             UPDATE content_cache

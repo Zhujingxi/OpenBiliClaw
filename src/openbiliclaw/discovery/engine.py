@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 from openbiliclaw.discovery.admission import effective_admission_threshold
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
-from openbiliclaw.llm.json_utils import extract_llm_json_list, parse_llm_json_tolerant
+from openbiliclaw.llm.json_utils import (
+    extract_llm_json_list,
+    parse_llm_json_tolerant,
+    validated_text_field,
+)
 from openbiliclaw.llm.prompt_cache import (
     PromptLayerRenderCache,
     profile_prompt_layers,
@@ -1321,10 +1325,24 @@ class ContentDiscoveryEngine:
             if not isinstance(payload, dict):
                 return 0.0
             score = self._clamp_score(payload.get("score", 0.0))
-            reason = str(payload.get("reason", "")).strip()
-            topic_group = str(payload.get("topic_group", "")).strip()
+            checked_reason = validated_text_field(
+                payload.get("reason", ""), field="reason", content_key=content.bvid
+            )
+            checked_topic_group = validated_text_field(
+                payload.get("topic_group", ""), field="topic_group", content_key=content.bvid
+            )
+            checked_franchise = validated_text_field(
+                payload.get("franchise_key", ""), field="franchise_key", content_key=content.bvid
+            )
+            if checked_reason is None or checked_topic_group is None or checked_franchise is None:
+                # _clamp_score() silently coerces a bad score to 0.0 instead of
+                # raising, so a non-string reason would otherwise be repr'd into
+                # relevance_reason and surface as delight copy.
+                raise ValueError("Non-string field in content evaluation response")
+            reason = checked_reason
+            topic_group = checked_topic_group
+            franchise_key = checked_franchise
             style_key = normalize_style_key(payload.get("style_key", ""))
-            franchise_key = str(payload.get("franchise_key", "")).strip()
         except Exception:
             logger.exception("Failed to evaluate discovered content: %s", content.bvid)
             return 0.0
@@ -1894,10 +1912,23 @@ class ContentDiscoveryEngine:
                 continue
             item_result: dict[str, Any] = raw_item
             score = self._clamp_score(item_result.get("score", 0.0))
-            reason = str(item_result.get("reason", "")).strip()
-            topic_group = str(item_result.get("topic_group", "")).strip()
+            reason = validated_text_field(
+                item_result.get("reason", ""), field="reason", content_key=content.bvid
+            )
+            topic_group = validated_text_field(
+                item_result.get("topic_group", ""), field="topic_group", content_key=content.bvid
+            )
+            franchise_key = validated_text_field(
+                item_result.get("franchise_key", ""),
+                field="franchise_key",
+                content_key=content.bvid,
+            )
+            if reason is None or topic_group is None or franchise_key is None:
+                # Treat a non-string field as a missing result so the item is
+                # retried instead of persisting a repr as relevance_reason.
+                results.append(None)
+                continue
             style_key = normalize_style_key(item_result.get("style_key", ""))
-            franchise_key = str(item_result.get("franchise_key", "")).strip()
 
             content.relevance_score = score
             content.relevance_reason = reason

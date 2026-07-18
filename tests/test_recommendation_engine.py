@@ -4599,3 +4599,67 @@ def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
         assert kwargs["published_at"] == "2026-07-08T06:30:00Z"
         assert kwargs["published_label"] == "3 天前"
         db.close()
+
+
+class _PoisonExpressionLLM:
+    """Answers with the whole batch nested under ``expression`` (real shape)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def complete_structured_task(
+        self,
+        *,
+        system_instruction: str,
+        user_input: str,
+        history: list[dict[str, str]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        caller: str = "",
+        reasoning_effort: str | None = None,
+    ) -> LLMResponse:
+        self.calls.append({"user_input": user_input})
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "expression": [
+                        {"expression": "文案A", "topic_label": "标签A"},
+                        {"expression": "文案B", "topic_label": "标签B"},
+                    ],
+                    "topic_label": "游戏AI应用",
+                },
+                ensure_ascii=False,
+            ),
+            model="dummy",
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_expression_rejects_nested_batch_payload() -> None:
+    """A list-valued expression must never be str()'d into card copy.
+
+    Regression: users saw ``[{'expression': ..., 'topic_label': ...}]`` as the
+    recommendation text because the repr passed the non-empty check.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_PoisonExpressionLLM(), database=db)
+
+        result = await engine.generate_expression(
+            DiscoveredContent(
+                bvid="BV1POISON",
+                title="用 AI 做游戏原型",
+                up_name="独立开发",
+                description="从零搭一个原型。",
+                relevance_score=0.8,
+                style_key="hands_on",
+            ),
+            _build_profile(),
+        )
+
+        expression, topic_label = result if isinstance(result, tuple) else (result, "")
+        for value in (expression, topic_label):
+            assert "topic_label" not in value
+            assert "expression" not in value
+            assert not value.lstrip().startswith(("[", "{"))
