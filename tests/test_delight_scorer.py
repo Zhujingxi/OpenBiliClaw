@@ -1,72 +1,16 @@
-"""Tests for the proactive delight scoring module."""
+"""Tests for the delight threshold policy and the delight storage queries."""
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 
-from openbiliclaw.discovery.engine import DiscoveredContent
-from openbiliclaw.recommendation.delight import (
-    DelightScorer,
-    DelightSignals,
-    DelightWeights,
-)
 from openbiliclaw.storage.database import Database
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
-
-
-def _make_candidate(**overrides: object) -> DiscoveredContent:
-    defaults = dict(
-        bvid="BV1TEST",
-        title="复杂系统的底层逻辑",
-        up_name="系统观察者",
-        up_mid=12345,
-        duration=600,
-        description="从控制论到信息论，一次讲透复杂系统的核心原理",
-        cover_url="https://example.com/cover.jpg",
-        view_count=50000,
-        like_count=3000,
-        tags=["科普", "系统论"],
-        topic_key="复杂系统",
-        topic_group="科学方法",
-        style_key="deep_dive",
-        source_strategy="explore",
-        relevance_score=0.85,
-        relevance_reason="deep resonance",
-        pool_expression="",
-        pool_topic_label="",
-        candidate_tier="primary",
-        discovered_at="2026-04-08T12:00:00",
-        last_scored_at="2026-04-08T12:00:00",
-    )
-    defaults.update(overrides)
-    return DiscoveredContent(**defaults)
-
-
-def _make_profile(**overrides: object) -> SimpleNamespace:
-    prefs = SimpleNamespace(
-        interests=[],
-        exploration_openness=overrides.pop("exploration_openness", 0.6),
-    )
-    defaults = dict(
-        personality_portrait="你会反复追问问题背后的结构。",
-        core_traits=["深究", "克制"],
-        deep_needs=["对事物运作原理的深层理解", "不受干扰的个人空间与自由"],
-        active_insights=[
-            SimpleNamespace(
-                hypothesis="这个人在试图理解复杂系统如何自组织",
-                confidence=0.8,
-            ),
-        ],
-        preferences=prefs,
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
 
 
 def _make_database(tmp_path: Path) -> Database:
@@ -76,104 +20,15 @@ def _make_database(tmp_path: Path) -> Database:
 
 
 # ---------------------------------------------------------------------------
-# Unit tests — DelightSignals
-# ---------------------------------------------------------------------------
-
-
-def test_delight_signals_defaults_to_zero() -> None:
-    signals = DelightSignals()
-    assert signals.deep_need_alignment == 0.0
-    assert signals.insight_resonance == 0.0
-    assert signals.novelty_factor == 0.0
-    assert signals.quality_indicator == 0.0
-    assert signals.exploration_match == 0.0
-
-
-def test_delight_weights_defaults_sum_to_one() -> None:
-    w = DelightWeights()
-    total = w.deep_need + w.insight + w.likes + w.novelty + w.quality + w.exploration
-    assert abs(total - 1.0) < 0.01
-
-
-# ---------------------------------------------------------------------------
-# DelightScorer — no embedding (fallback behavior)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_scorer_without_embedding_returns_valid_score(tmp_path: Path) -> None:
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
-    candidate = _make_candidate()
-    profile = _make_profile()
-
-    score, signals, reason_stub = await scorer.score(candidate, profile)
-
-    assert 0.0 <= score <= 1.0
-    assert isinstance(signals, DelightSignals)
-    assert isinstance(reason_stub, str)
-    # Without embeddings, deep_need and insight should be 0
-    assert signals.deep_need_alignment == 0.0
-    assert signals.insight_resonance == 0.0
-
-
-@pytest.mark.asyncio
-async def test_novelty_factor_explore_scores_higher_than_search(tmp_path: Path) -> None:
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
-    profile = _make_profile()
-
-    explore_candidate = _make_candidate(source_strategy="explore")
-    search_candidate = _make_candidate(source_strategy="search", bvid="BV2TEST")
-
-    _, explore_signals, _ = await scorer.score(explore_candidate, profile)
-    _, search_signals, _ = await scorer.score(search_candidate, profile)
-
-    assert explore_signals.novelty_factor > search_signals.novelty_factor
-
-
-@pytest.mark.asyncio
-async def test_quality_indicator_uses_like_ratio(tmp_path: Path) -> None:
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
-    profile = _make_profile()
-
-    high_quality = _make_candidate(view_count=100000, like_count=8000)
-    low_quality = _make_candidate(view_count=100000, like_count=100, bvid="BV2TEST")
-
-    _, high_signals, _ = await scorer.score(high_quality, profile)
-    _, low_signals, _ = await scorer.score(low_quality, profile)
-
-    assert high_signals.quality_indicator > low_signals.quality_indicator
-
-
-@pytest.mark.asyncio
-async def test_exploration_match_scales_with_openness(tmp_path: Path) -> None:
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
-
-    candidate = _make_candidate(source_strategy="explore")
-    open_profile = _make_profile(exploration_openness=0.9)
-    conservative_profile = _make_profile(exploration_openness=0.2)
-
-    _, open_signals, _ = await scorer.score(candidate, open_profile)
-    _, conservative_signals, _ = await scorer.score(candidate, conservative_profile)
-
-    # Open users should get higher exploration_match for novel content
-    assert open_signals.exploration_match > conservative_signals.exploration_match
-
-
-# ---------------------------------------------------------------------------
 # Threshold behavior
 # ---------------------------------------------------------------------------
 
 
-def test_effective_threshold_raises_for_conservative_users(tmp_path: Path) -> None:
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database, threshold=0.70)
+def test_effective_threshold_raises_for_conservative_users() -> None:
+    from openbiliclaw.recommendation.delight import effective_delight_threshold
 
-    assert scorer.effective_threshold(0.6) == 0.70
-    assert scorer.effective_threshold(0.2) == 0.80  # Conservative user
+    assert effective_delight_threshold(0.6, threshold=0.70) == 0.70
+    assert effective_delight_threshold(0.2, threshold=0.70) == 0.80  # Conservative user
 
 
 def test_default_thresholds_keep_evo_delight_bar_high() -> None:
@@ -189,46 +44,15 @@ def test_default_thresholds_keep_evo_delight_bar_high() -> None:
     assert CONSERVATIVE_DELIGHT_THRESHOLD > DEFAULT_DELIGHT_THRESHOLD
 
 
-def test_score_065_rejected_at_default_threshold(tmp_path: Path) -> None:
+def test_score_065_rejected_at_default_threshold() -> None:
     """A 0.65 Evo relevance score must NOT receive proactive delight copy."""
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
+    from openbiliclaw.recommendation.delight import effective_delight_threshold
 
-    threshold = scorer.effective_threshold(exploration_openness=0.5)
+    threshold = effective_delight_threshold(exploration_openness=0.5)
     assert threshold > 0.65, (
         f"effective_threshold={threshold} would admit score=0.65, but that is below "
         "the proactive delight copy bar."
     )
-
-
-def test_reason_stub_includes_relevance_fallback(tmp_path: Path) -> None:
-    from openbiliclaw.recommendation.delight import DelightScorer
-
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
-
-    signals = DelightSignals()  # All zeros
-    candidate = _make_candidate(relevance_score=0.88)
-    profile = _make_profile()
-
-    stub = scorer._build_reason_stub(signals, candidate, profile)
-
-    assert "relevance:0.88" in stub
-
-
-def test_reason_stub_includes_deep_need_when_alignment_high(tmp_path: Path) -> None:
-    from openbiliclaw.recommendation.delight import DelightScorer
-
-    database = _make_database(tmp_path)
-    scorer = DelightScorer(embedding_service=None, database=database)
-
-    signals = DelightSignals(deep_need_alignment=0.8)
-    candidate = _make_candidate()
-    profile = _make_profile()
-
-    stub = scorer._build_reason_stub(signals, candidate, profile)
-
-    assert "deep_need:" in stub
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +627,7 @@ def test_database_get_pool_candidates_needing_delight_score_includes_shown_histo
 
 
 # ---------------------------------------------------------------------------
-# v0.3.64+ — Delight no longer exposes an LLM scoring compatibility API
+# Delight owns the threshold policy only — no scorer of its own
 # ---------------------------------------------------------------------------
 
 
@@ -813,6 +637,31 @@ def test_delight_module_no_longer_exposes_llm_score_compat_api() -> None:
     assert not hasattr(delight, "LLMDelightScorer")
     assert not hasattr(delight, "DelightLLMResult")
     assert not hasattr(delight, "_extract_delight_entries")
+
+
+def test_delight_module_exposes_threshold_policy_only() -> None:
+    """v0.3.174+: the standalone embedding scorer is gone for good.
+
+    ``delight_score`` is produced by ``precompute_delight_scores()`` reusing
+    Evo's ``relevance_score``; catalogue signals reach the score through the
+    shared evaluator prompt. A parallel weighted scorer here drifted out of
+    the pipeline and sat unreferenced — don't resurrect it.
+    """
+    import openbiliclaw.recommendation.delight as delight
+
+    for removed in (
+        "DelightScorer",
+        "DelightSignals",
+        "DelightWeights",
+        "SupportsDelightCandidate",
+        "SupportsRecommendationSignalStore",
+    ):
+        assert not hasattr(delight, removed), f"{removed} was removed as dead code"
+
+    # The threshold policy is the module's whole public surface.
+    assert callable(delight.effective_delight_threshold)
+    assert isinstance(delight.DEFAULT_DELIGHT_THRESHOLD, float)
+    assert isinstance(delight.CONSERVATIVE_DELIGHT_THRESHOLD, float)
 
 
 def test_get_pool_candidates_filters_by_min_relevance(tmp_path: Path) -> None:
