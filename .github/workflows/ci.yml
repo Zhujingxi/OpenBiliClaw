@@ -33,11 +33,37 @@ jobs:
       - name: Run Ruff
         run: python -m ruff check src/ tests/
 
-      - name: Run MyPy
-        run: python -m mypy src/
+      - name: Run MyPy (capture output for baseline comparator)
+        # `continue-on-error` so the baseline comparator decides whether the
+        # diagnostics are acceptable; new diagnostics fail the next step.
+        continue-on-error: true
+        run: |
+          mkdir -p build
+          python -m mypy src/ | tee build/mypy.txt
 
-      - name: Run pytest
-        run: python -m pytest -q
+      - name: Run pytest (single run, emits JUnit XML + coverage)
+        # Single-run collection per the refactor plan: JUnit XML and coverage
+        # are emitted in the same pass that produces pass/fail, so the
+        # baseline comparator never re-runs the suite. The known release-
+        # workflow failure is expected to fail here; the comparator below
+        # recognizes it via tests/contracts/quality-baseline.json.
+        continue-on-error: true
+        run: |
+          mkdir -p build
+          python -m pytest -q \
+            --junitxml=build/pytest-junit.xml \
+            --cov=openbiliclaw --cov-report=xml:build/coverage.xml
+
+      - name: Check quality baseline (fail-closed)
+        # Compares the live pytest/mypy/coverage outputs against the
+        # normalized baseline in tests/contracts/quality-baseline.json.
+        # New pytest failures, new mypy diagnostics, new skips, missing
+        # files, or unparseable output all fail the job here.
+        run: |
+          python scripts/check_quality_baseline.py \
+            --junit-xml build/pytest-junit.xml \
+            --mypy-output build/mypy.txt \
+            --coverage-xml build/coverage.xml
 
   extension-firefox-build:
     name: Smoke-build Firefox extension

@@ -21,6 +21,17 @@
 
 ---
 
+## 增量式架构重构 Must 切片实施
+
+- **落地 Must 切片的全部六项内容**（依据 `docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` §6.0）：Phase 0 安全网（`tests/contracts/api-route-contract.json` 路由契约清单、`tests/test_api_pilot_endpoints_contract.py` `/api/ping` 与 `/api/qr-info` 精确响应测试、`tests/contracts/quality-baseline.json` + `scripts/check_quality_baseline.py` 归一化质量基线比较器、`tests/fixtures/storage_schema.py` 程序化 schema fixture、`tests/test_architecture.py` 窄架构棘轮）；试点路由提取；迁移去重 2A；CI 接线；文档更新。
+- **试点路由提取（Phase 1）**：`/api/ping` 与 `/api/qr-info` 从 `api/app.py` 内联装饰器迁移到 `api/routes/system.py` 的 `build_system_router(deps)` 工厂；新 `api/dependencies.py` 定义冻结的 `SystemRouteDeps(get_lan_ip: Callable[[], str | None])` 窄数据包，`create_app()` 在原注册位置通过 `include_router` 装配，路由匹配顺序与对外行为完全不变（由路由契约测试机械验证，134 条路由 / 121 个 OpenAPI 操作的清单字节级一致）。明确**不引入** `ApiServices` 服务定位器；`api/app.py` 中其余端点保持原状，留待后续切片。
+- **迁移去重 2A**：新 `storage/migrations.py` 提供数据驱动 `ensure_columns(conn, table, columns)` 工具，集中承载纯增量列迁移（先 `PRAGMA table_info` 再 `ALTER TABLE ... ADD COLUMN`）。表名与列名对照静态白名单校验并做标识符形态防御；不引入 schema 版本账（2B 显式推迟），不改变惰性调用点、事务时机或 `:memory:` 行为。9 个纯增量 `_ensure_*_columns` 方法迁移到 helper；带数据回填 / 索引联动 / 合并逻辑的 `_ensure_content_cache_multisource_columns`、`_ensure_content_identity_columns` 等保留手写并登记为例外。
+- **CI 接线**：`.github/workflows/ci.yml` 的既有 pytest 调用改为单次运行同时输出 JUnit XML 与 coverage XML（不为基线再跑一遍完整测试），mypy 输出经 `tee` 落盘；新增 `scripts/check_quality_baseline.py` 收尾步骤，对新增 pytest 失败、新增 mypy 诊断、新增 skip、缺失或不可解析的输出**一律 fail-closed**。发布工作流（`release-*.yml`、`verify-release-completeness.yml`）零改动。
+- **文档同步**：`docs/modules/storage.md` 新增 `storage/migrations.py` 模块组成说明；`docs/architecture.md` Storage 一节明确 `ensure_columns` 的承载边界。架构图与对外 API 表面无变化（试点为内部代码搬移，路由契约已机械锁定），`README` 与 `docs/spec.md` 无需改动。
+- **兼容性**：对外 HTTP 路由、方法、响应体与 content-type 完全不变；schema 终态与 `Database.initialize()` 不变量保持。回滚路径为单 PR revert。已知基线弱点：pytest allowlist 当前以 node ID 键控，未含异常指纹（见 planner 风险附录 #1）；如该测试未来以新原因失败，比较器会判定通过——留给评审裁决，不在本切片内扩展。
+
+---
+
 ## 架构清单与增量式重构计划
 
 - **新增仓库架构清单与增量式重构实施计划**：`docs/plans/2026-07-19-repository-inventory.md` 为时点性盘点快照，`docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` 为实施基线。计划定义了五层边界模型与窄依赖 router 工厂契约、存储兼容门面、迁移去重 2A（`PRAGMA table_info` + `ALTER TABLE ... ADD COLUMN`，保留惰性调用点；schema 版本账推迟）、生产者 protocol（两个生产者迁移后才考虑基类）、Must/Should/Could 交付切片、测试门禁与回滚策略。CI/CD 边界同步明确：验证统一由 `.github/workflows/ci.yml` 拥有，渠道工作流只负责打包/签名/发布；既有 pytest/mypy 诊断将按结构化身份 allowlist 而非计数容忍，诊断输出缺失或不可解析一律判失败。本条仅新增文档，不改变运行时代码。
