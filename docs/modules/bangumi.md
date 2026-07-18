@@ -20,7 +20,7 @@
 | 扩展自动识别 | ✅ | 浏览器扩展在 bgm.tv/bangumi.tv 上读取公开的 `CHOBITS_UID`（MAIN-world 桥）+ 导航栏 `/user/<username>` 链接，上报 `POST /api/sources/bangumi/identity` 持久化；guided init/CLI 在既无令牌又无显式用户名时自动回退使用；只采集 uid+username（公开信息），不碰 Cookie，不采集浏览行为 |
 | 统一候选池 | ✅ | Subject 归一化后只进入 `discovery_candidates`，由共享 evaluator/admission 决定是否进入 `content_cache` |
 | 目录指标 | ✅ | `rating_score`、`rating_count`、`source_rank` 与真实 `favorite_count` 贯穿候选池、推荐/惊喜 API 和三端卡片 |
-| 作者字段（制作方署名） | ✅ | `bangumi_subject_to_content` 从 subject 行内 `infobox` 解析 `author_name`，按 SubjectType 走优先级阶梯（书籍 作者→原作→作画→出版社，动画 导演→原作→动画制作→製作，音乐 艺术家→作曲→厂牌，游戏 开发→发行→游戏开发商，三次元 导演→编剧→主演）。两个 discovery 端点（`POST /v0/search/subjects`、`GET /v0/subjects`）本就内联返回 `infobox`（2026-07-18 实测 250/250 行均带，`GET /v0/subjects/{id}` 无额外字段），因此**零额外请求**；缺失 / schema 漂移 / 非法值、以及只是「拼写出缺席」的占位串（`None`/`null`/`N/A`/纯标点）一律解析为 `""`，绝不落库字面量 `"None"`。收藏路径例外见「已知限制」 |
+| 作者字段（制作方署名） | ✅ | `bangumi_subject_to_content` 从 subject 行内 `infobox` 解析 `author_name`，按 SubjectType 走优先级阶梯（书籍 作者→原作→作画→出版社，动画 导演→原作→动画制作→製作，音乐 艺术家→作曲→厂牌，游戏 开发→发行→游戏开发商，三次元 导演→编剧→主演）。两个 discovery 端点（`POST /v0/search/subjects`、`GET /v0/subjects`）本就内联返回 `infobox`（2026-07-18 实测 250/250 行均带，`GET /v0/subjects/{id}` 无额外字段），因此**零额外请求**；缺失 / schema 漂移 / 非法值、以及本栈能产出的 null 字面量（`None`/`null`/`undefined`/`nan`）一律解析为 `""`，不落库字面量 `"None"`；纯标点值**刻意不过滤**（见「公开 API」一节）。收藏路径例外见「已知限制」 |
 | 设置与状态 | ✅ | 桌面 Web、扩展设置页和 `/api/sources/status` 支持开关、用户名、**个人令牌**、分支、类型、预算、节流和 pool share；令牌为 password 输入 + 生成链接，GET config 只回传 `access_token_set` 布尔（绝不回传明文），留空保存则保持已配置令牌不变 |
 | CLI smoke | ✅ | 公开收藏、搜索、排名和日期浏览默认只读；正式 `discover --source bangumi` 才写待评估池 |
 | 账号写回 | 不支持 | 本地收藏/稍后再看仍可用；首版不修改 Bangumi 收藏、评分或进度 |
@@ -101,7 +101,13 @@ Subject identity 使用 `bangumi:<decimal subject id>`，页面 URL 为 `https:/
 
 `author_name` 由行内 `infobox` 解析，不额外请求上游：`AUTHOR_INFOBOX_KEYS` 存 SubjectType → 有序 credit key 的优先级阶梯（Bangumi 没有统一作者字段，书籍叫「作者」、动画叫「导演」、游戏叫「开发」），阶梯顺序与各 key 的填充率由 2026-07-18 的 250 行实测标定并写在代码注释里，schema 变化后需重跑该调查。`_infobox_value_text` 兼容官方三种 `value` 形态（裸字符串 / `[{v}]` / `[{k,v}]`，后两者都只读 `v`，`k` 是「总导演/副导演」这类子标签而非人名）；列表元素的 `v` **只在其本身是字符串时才采用**（不做 `str()` 兜底，否则 schema 漂移的 `{"v": ["押井守"]}` 会被制造成字面量 `"['押井守']"`）；同一 key 重复出现时取**首个非空**值，多名字最多保留 3 个以 `、` 连接，渲染长度硬限 `MAX_AUTHOR_LENGTH=80` 且优先切在名字分隔符上。`infobox` 缺失、类型漂移（裸字符串 / 字典 / 标量）、条目非映射、阶梯 key 全缺等情况一律返回 `""`——绝不字符串化成 `"None"` / `"[]"`，即历史上 `COALESCE` 无法自愈的那类脏行。
 
-`_is_placeholder_credit` 负责「值本身拼写出缺席」这一类：空串、**本栈真能产出的** null 字面量（Python `str(None)` → `none`、JSON/JS `null` 与 `undefined`、`float('nan')` → `nan`）、无歧义的 `n/a` 形式，以及**不含任何字母或数字**的值（按 Unicode 类别判定，覆盖 `-`/`——`/`…`/`（）`/`?`/`★`/不换行空格等，不靠手写字符表——手写表已经漏过 U+2026）归一为 `""`；裸字符串与两种 list 形态都过这道。边界是刻意收窄的——**不**过滤 `nil`（真实存在的日本摇滚乐队，且 Python/JS/JSON 都产不出这个拼写，本就不是我们会造的脏值）、裸 `na`（可能是罗马音姓氏）、`无`/`未知`/`暂无`/`不明`（普通汉字，可能出现在真名里，且属编辑填写的散文而非序列化产物）、单字母与数字（可能是艺名），因为误杀会静默删掉真实数据；`none`/`null`/`nan` 保留了已知的小概率误杀风险（乐队可能这样起名），理由连同名单写在代码注释里。截断后若切口留下未闭合括号（`…（総監督`），回退到该括号之前再切（闭括号**只结算同族开括号**，`(credit]` 里的 `]` 不算闭合 `(`）；**已知取舍**：当未闭合括号就在第 0 位（整条 credit 是一个长括号块）时回退会把 credit 整个抹掉，宁可保留硬切结果也不丢真实署名，该分支有测试钉住以保持取舍可见。
+`_is_placeholder_credit` 只负责一类：**本技术栈真能产出的 null 字面量**——空串，以及 `none`/`null`/`undefined`/`nan`（分别对应 Python `str(None)`、JSON/JS `null` 与 `undefined`、`float('nan')`）；裸字符串与两种 list 形态都过这道。
+
+**纯标点/符号值刻意完全不过滤**，这条负面知识比代码值钱：过滤范围被放大过三次，每次都删掉了真实数据——(1) 手写标点表漏了 U+2026 `…`；(2) 为了多抓一个 null 而加入 `nil`，删掉了真实存在的日本摇滚乐队 **nil**（且 Python/JS/JSON 根本产不出这个拼写，那是 Ruby/Lisp）；(3) 改成「真实名字至少含一个字母或数字」的 Unicode 类别判据，删掉了偶像组合 **・・・・・・・・・**（全部 U+30FB）和乐队 **!!!**（chk chk chk）——这两个反而是粗糙的手写表保住的。代价并不对等：纯标点的作者名显示在卡片上只是观感怪，而删错一个真实艺名是**数据丢失**。原始契约要防的是「`COALESCE` 救不了的脏行」，即序列化产物，标点从来不属于那一类。因此现在宁可让卡片偶尔显示 `……`，也不再加判据。
+
+同理**不**过滤：`n/a` / `(none)` / `<none>`（编辑填写的散文，本栈产不出，与已经保留的 `无`/`未知`/`暂无`/`不明` 属同一类，过滤它们既有风险又不自洽）、裸 `na`（可能是罗马音姓氏）、单字母与数字（可能是艺名）。保留在名单里的 `none`/`null`/`nan` 仍有小概率误杀风险（乐队可能这样起名），属知情接受——它们正是历史上把 `"None"` 写进 `author_name` 那个 bug 的字面输出。理由连同名单写在代码注释里。
+
+截断后若切口留下未闭合括号（`…（総監督`），回退到该括号之前再切（闭括号**只结算同族开括号**，`(credit]` 里的 `]` 不算闭合 `(`）；**已知取舍**：当未闭合括号就在第 0 位（整条 credit 是一个长括号块）时回退会把 credit 整个抹掉，宁可保留硬切结果也不丢真实署名，该分支有测试钉住以保持取舍可见。
 
 公开收藏通过 `bangumi_collection_to_event()` 转成统一事件：想看/看过/在看/搁置/抛弃使用不同信号强度，私有行丢弃，短评清洗后截断；官方 `updated_at` 不被当作可靠收藏时间或增量 cursor。令牌认证路径下（`include_private=True`，仅在读取令牌所有者本人收藏时传入），私密行同样转为画像信号；匿名路径行为不变。`fetch_bangumi_public_collection_events(..., include_private=...)` 逐 lane 透传该开关。
 
@@ -191,7 +197,9 @@ openbiliclaw discover --source bangumi --limit 30
 
 `POST /api/sources/bangumi/identity` 的响应体**整体读自实际写入的那条记录**，所以 200 描述的一定是后续读取会拿到的状态；**落库失败则返回 500**（写异常或运行时没有 memory manager），绝不回传一个没能存下的状态（铁律 7）——扩展本就把上报当 best-effort，下次页面访问会重报。**向后兼容**：升级前写入的旧记录没有该键，读取端一律按**未校验**处理（无法证明校验跑过，宁可保守），用户下次访问 bgm.tv 页面时扩展重报即就地升级为已校验。
 
-**`verified` 对同一身份是单调的（sticky-true）**：一次成功的交叉校验是关于某个 uid↔username 配对的**证据**，不会因为我们后来连不上 bgm.tv 就失效。因此落盘时只允许把标记**往上抬**：本轮成功 → 写 `true`；本轮失败但已有记录的 uid **与** username 与本轮完全相同且已是 `true` → 保持 `true`；uid 或 username 任一不同 → 是另一个从未验证过的主张，旧证据不适用，按本轮结果写。没有这条，一次网络抖动就会把已校验身份降级成 `false`，让 guided init 对用户的真实账号谎报「未经 bgm.tv 校验」，并且每抖一次翻一次标记、写一次盘。合并逻辑**只**跑在 `update_discovery_runtime_state` 的回调内部——`update_json_state` 会先取进程锁 + 文件锁再从磁盘重读，回调看到的是权威最新值，所以并发上报不会互相覆盖。**刻意没有锁外快路径**：`update_json_state` 无条件写盘，因此重复上报同一身份要付一次幂等重写；接受这个代价，是因为不加锁判断「没变化」只能依赖一份并发写入者随时可能作废的快照，而按那份快照作答会和下一次读取自相矛盾（曾经就是这样把并发确认答没了）。
+**`verified` 对同一身份是单调的（sticky-true）**：一次成功的交叉校验是关于某个 uid↔username 配对的**证据**，不会因为我们后来连不上 bgm.tv 就失效。因此落盘时只允许把标记**往上抬**：本轮成功 → 写 `true`；本轮失败但已有记录的 uid **与** username 与本轮完全相同、已是 `true`、**且该记录本身在现行规则下合法（username 非空）** → 保持 `true`；uid 或 username 任一不同 → 是另一个从未验证过的主张，旧证据不适用，按本轮结果写。没有这条，一次网络抖动就会把已校验身份降级成 `false`，让 guided init 对用户的真实账号谎报「未经 bgm.tv 校验」，并且每抖一次翻一次标记、写一次盘。合并逻辑**只**跑在 `update_discovery_runtime_state` 的回调内部——`update_json_state` 会先取进程锁 + 文件锁再从磁盘重读，回调看到的是权威最新值，所以并发上报不会互相覆盖。**刻意没有锁外快路径**：`update_json_state` 无条件写盘，因此重复上报同一身份要付一次幂等重写；接受这个代价，是因为不加锁判断「没变化」只能依赖一份并发写入者随时可能作废的快照，而按那份快照作答会和下一次读取自相矛盾（曾经就是这样把并发确认答没了）。
+
+**旧版坏记录不被继承，且读取时归一（自愈）**：「合法」这一条是必需的：旧版 404 路径会写下 `{"username":"","verified":true}`，再次上报同一个 404 用户时 uid 与 username（都是 `""`）双双相等，纯 sticky 会把这条继承下去，永久违反「`verified` ⟹ username 非空」。该类记录**在读取侧也归一为未确认**（`_load_bangumi_identity` 与 CLI 的 `_load_extension_bangumi_identity` 同步处理），这样即使用户再也不访问 bgm.tv、没有新上报来覆盖，也不会继续读到旧断言。
 
 guided init 与 CLI init 的用户名解析按优先级取值：**令牌 `/v0/me` > 显式/已配置用户名 > 扩展上报用户名 > 报错**；命中扩展身份时在 202 warnings/CLI 输出中明示来源，且**按 `verified` 分叉文案**——已校验保持"Bangumi 使用浏览器扩展识别到的账号 X。"，未校验则追加"（未经 bgm.tv 校验，可能不准）"并给出改用用户名/令牌的出路，避免把一次没跑成的校验说成既成事实。
 
@@ -210,7 +218,7 @@ guided init 与 CLI init 的用户名解析按优先级取值：**令牌 `/v0/me
 - `tests/test_bangumi_producer.py`：预算、cursor、cooldown、关键词生命周期和本地状态；401 令牌降级（丢 Bearer 继续匿名发现）；拒绝标记持久化（指纹非明文）、同指纹重启即匿名不发 Bearer、换新令牌成功清标记，以及 `token_state` 三态。
 - `tests/test_bangumi_web_surfaces.py` 与扩展 Node tests：设置、身份、URL、目录指标和 guided init 契约（含 setup/popup 令牌输入与 `source_options.bangumi.access_token` 发送规则）；桌面与 popup 的「清除令牌」控件、`access_token:""` 发送与 `token_state==='rejected'` 警示渲染；三端 reason 文案必须点名扩展这条腿，setup/desktop 不得重实现后端准入判定（popup 的同款判断以 `strict=True` xfail 钉住）。
 - `tests/test_web_guided_init_e2e.py`（`-k bangumi`，Playwright 真页面，setup + 桌面两面参数化）：仅选 Bangumi 且不填用户名/令牌时 `/api/init` **必须真的发出**（回归——回插旧判断后 4 条全部超时失败），以及后端 409 的拒绝文案在两面如实渲染且按钮可重试。
-- `tests/test_cli.py` / `tests/test_api_app.py`（`-k bangumi`）：init 令牌→用户名自动解析、坏令牌 400 拒绝、令牌+用户名持久化、`invalid_token` 状态与仅 Bangumi 无凭据的报错文案；`/api/sources/bangumi/identity` 校验/幂等/脏值降级、校验失败的 WARNING 级别与真因、`verified` 标记（成功/404 为 true，网络与非 API 异常为 false，复校成功就地升级）、guided init 扩展身份回退与三级优先级、未校验身份的 warning 文案分叉、CLI `_load_extension_bangumi_identity` 读取与脏值容错（含旧记录缺 `verified` 键按未校验处理）；`/api/sources/status` 的 `token_state` 三态、`PUT /api/config` 新令牌 401→400 拒绝 / 成功清标记且回写 `/v0/me` 用户名 / `access_token:""` 离线清空+清标记 / masked echo 与省略 key 零网络。
+- `tests/test_cli.py` / `tests/test_api_app.py`（`-k bangumi`）：init 令牌→用户名自动解析、坏令牌 400 拒绝、令牌+用户名持久化、`invalid_token` 状态与仅 Bangumi 无凭据的报错文案；`/api/sources/bangumi/identity` 校验/幂等/脏值降级、校验失败的 WARNING 级别与真因、`verified` 标记（仅正面确认为 true；404 / uid 不匹配 / 网络失败均为 false；复校成功就地升级；旧版写下的空用户名 `verified:true` 记录不被继承且读取时归一为未确认）、guided init 扩展身份回退与三级优先级、未校验身份的 warning 文案分叉、CLI `_load_extension_bangumi_identity` 读取与脏值容错（含旧记录缺 `verified` 键按未校验处理）；`/api/sources/status` 的 `token_state` 三态、`PUT /api/config` 新令牌 401→400 拒绝 / 成功清标记且回写 `/v0/me` 用户名 / `access_token:""` 离线清空+清标记 / masked echo 与省略 key 零网络。
 - `extension/tests/bangumi-identity.test.ts`：`CHOBITS_UID` 解析、`/user/<username>` 提取（本人专属选择器与登出空值）、匿名首页路人头像不泄漏进用户名的回归（真实 E2E DOM 场景）、桥消息过滤，及双 manifest 的 host/content-script 注册契约。后端侧另有 uid↔username 不一致丢弃、uid-only 权威解析、自定义 slug 404 保持 uid-only、API 失败降级四条 `-k bangumi_identity` 测试。
 
 完整设计与验收边界见 [Bangumi 来源 Spec](../plans/2026-07-17-bangumi-source-spec.md)。
