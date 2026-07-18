@@ -32,6 +32,15 @@ _BANGUMI_TOKEN_REJECTED_DETAIL = (
     "个人令牌已被拒绝（可能过期），已降级为匿名公开发现；"
     "请到 https://next.bgm.tv/demo/access-token 重新生成。"
 )
+_BANGUMI_DISABLED_DETAIL = "Bangumi 来源未启用。"
+# Deliberately free of the words "未启用": both renderers already prefix this
+# detail with their own state label ("来源未启用"), and the popup adds another
+# "(未启用)" on top, so repeating it here printed the same phrase three times in
+# one line. The detail carries only what the label cannot — which credential is
+# stored, that it is idle, and the one step left.
+_BANGUMI_DISABLED_CREDENTIAL_DETAIL = (
+    "已保存{credential}，但它现在不会被使用；把 Bangumi 来源开关切到「启用」并保存后才会生效。"
+)
 
 
 class _PartialSearchError(Exception):
@@ -548,8 +557,38 @@ class BangumiDiscoveryProducer:
         return {"discovered": 0, "reason": reason}
 
 
+def bangumi_disabled_detail(*, token_state: str = "", username_configured: bool = False) -> str:
+    """Describe a *disabled* Bangumi source, naming any credential already saved.
+
+    Saving a credential and forgetting the enable switch is an easy miss: the
+    settings page validates the token via ``/v0/me`` and echoes the resolved
+    account name back, which reads like "done". A bare "未启用" then hides the
+    fact that the stored credential is sitting idle. Saying it here — rather
+    than in each front end — keeps the remaining step visible without asking
+    the desktop / popup renderers to grow per-platform branches.
+    """
+
+    if token_state == "rejected":
+        return (
+            "已保存的个人令牌此前被 Bangumi 拒绝（可能过期）；请到 "
+            "https://next.bgm.tv/demo/access-token 重新生成，"
+            "并把 Bangumi 来源开关切到「启用」并保存。"
+        )
+    if token_state:
+        # A token supersedes the username (the account is resolved through
+        # /v0/me), so naming the token alone is accurate even when both are set.
+        return _BANGUMI_DISABLED_CREDENTIAL_DETAIL.format(credential="个人令牌")
+    if username_configured:
+        return _BANGUMI_DISABLED_CREDENTIAL_DETAIL.format(credential="公开用户名")
+    return _BANGUMI_DISABLED_DETAIL
+
+
 def bangumi_source_status(
-    database: Any, *, enabled: bool, token_configured: bool = False
+    database: Any,
+    *,
+    enabled: bool,
+    token_configured: bool = False,
+    username_configured: bool = False,
 ) -> dict[str, object]:
     """Return local-only discovery status without contacting Bangumi.
 
@@ -558,10 +597,14 @@ def bangumi_source_status(
     was denied and discovery degraded to anonymous), else ``"ok"``. The field is
     omitted entirely when no token is configured, so anonymous deployments keep
     their historical shape.
-    """
 
-    if not enabled:
-        return {"state": "disabled", "detail": "Bangumi 来源未启用。"}
+    A disabled source reports ``token_state`` too, and ``username_configured``
+    folds a saved public username into its ``detail``: a stored credential that
+    is not in use is a state the user must be able to see. ``state`` stays
+    ``"disabled"`` in that case — it tracks discovery health, not the
+    credential — so the front ends keep rendering it in their neutral tone
+    unless the token itself is ``rejected``.
+    """
 
     token_state: str | None = None
     if token_configured:
@@ -569,6 +612,18 @@ def bangumi_source_status(
             token_state = "rejected" if _read_token_rejection(database) is not None else "ok"
         except Exception:
             token_state = "ok"
+
+    if not enabled:
+        disabled: dict[str, object] = {
+            "state": "disabled",
+            "detail": bangumi_disabled_detail(
+                token_state=token_state or "",
+                username_configured=username_configured,
+            ),
+        }
+        if token_state is not None:
+            disabled["token_state"] = token_state
+        return disabled
 
     def _finish(payload: dict[str, object]) -> dict[str, object]:
         if token_state is not None:

@@ -9792,21 +9792,39 @@ def create_app(
                 logged_in=False,
             )
 
-        from openbiliclaw.runtime.bangumi_producer import bangumi_source_status
+        from openbiliclaw.runtime.bangumi_producer import (
+            bangumi_disabled_detail,
+            bangumi_source_status,
+        )
 
         bgm_enabled = bool(getattr(getattr(srcs, "bangumi", None), "enabled", False))
         bgm_token_configured = bool(
             str(getattr(getattr(srcs, "bangumi", None), "access_token", "") or "").strip()
         )
+        bgm_username_configured = bool(
+            str(getattr(getattr(srcs, "bangumi", None), "username", "") or "").strip()
+        )
         bgm_status = (
             bangumi_source_status(
-                ctx.database, enabled=bgm_enabled, token_configured=bgm_token_configured
+                ctx.database,
+                enabled=bgm_enabled,
+                token_configured=bgm_token_configured,
+                username_configured=bgm_username_configured,
             )
             if hasattr(ctx.database, "conn")
             else {
                 "state": "unverified" if bgm_enabled else "disabled",
-                "detail": "Bangumi 使用官方公开 API，尚未运行内容发现。",
-                **({"token_state": "ok"} if bgm_enabled and bgm_token_configured else {}),
+                # No ledger to read here, so a saved token can only be reported
+                # as "ok" — but the disabled wording still has to name it.
+                "detail": (
+                    "Bangumi 使用官方公开 API，尚未运行内容发现。"
+                    if bgm_enabled
+                    else bangumi_disabled_detail(
+                        token_state="ok" if bgm_token_configured else "",
+                        username_configured=bgm_username_configured,
+                    )
+                ),
+                **({"token_state": "ok"} if bgm_token_configured else {}),
             }
         )
         bgm_state = str(bgm_status.get("state") or "unverified")

@@ -2386,6 +2386,50 @@ class TestBackendAPI:
         assert rejected["token_state"] == "rejected"
         assert "已被拒绝" in rejected["detail"]
 
+    def test_bangumi_disabled_status_surfaces_a_saved_credential(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A saved-but-unused credential is a state, not silence.
+
+        The settings page validates the token and echoes the resolved account
+        back, so the user believes Bangumi is configured; only the enable
+        switch is still off. ``/api/sources/status`` has to say so.
+        """
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = False
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-disabled-credential.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        bare = client.get("/api/sources/status").json()["bangumi"]
+        assert bare["state"] == "disabled"
+        assert bare["token_state"] == ""
+        assert bare["detail"] == "Bangumi 来源未启用。"
+
+        cfg.sources.bangumi.access_token = "tok"
+        with_token = client.get("/api/sources/status").json()["bangumi"]
+        assert with_token["state"] == "disabled"
+        assert with_token["enabled"] is False
+        assert with_token["logged_in"] is False
+        # "ok" (not "rejected") so the desktop / popup renderers keep the
+        # neutral "来源未启用" tone instead of the red token warning.
+        assert with_token["token_state"] == "ok"
+        assert "已保存个人令牌" in with_token["detail"]
+
+        cfg.sources.bangumi.access_token = ""
+        cfg.sources.bangumi.username = "215952"
+        with_username = client.get("/api/sources/status").json()["bangumi"]
+        assert with_username["token_state"] == ""
+        assert "已保存公开用户名" in with_username["detail"]
+
     def test_sources_credentials_returns_current_local_credentials(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
