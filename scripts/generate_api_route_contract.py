@@ -37,6 +37,38 @@ def _build_app() -> Any:
     return create_app()
 
 
+def _flatten_routes(app: Any) -> list[tuple[int, Any, str | None]]:
+    """Walk ``app.routes`` and flatten lazy ``_IncludedRouter`` wrappers.
+
+    FastAPI's ``include_router()`` wraps the included APIRouter in a lazy
+    ``_IncludedRouter`` marker (instead of copying each child route into
+    ``app.routes``). The wrapper preserves matching order semantics, but
+    enumeration shape differs from inline ``@app.get`` decorators. For the
+    route contract to be invariant across extraction, we flatten wrappers
+    into their child routes and record the extraction site so a refactor
+    that *changes dispatch order* still trips the diff.
+
+    Yields ``(effective_index, route, parent_wrapper_path)`` triples.
+    """
+    out: list[tuple[int, Any, str | None]] = []
+    effective_index = 0
+    for raw in app.routes:
+        if type(raw).__name__ == "_IncludedRouter":
+            original = getattr(raw, "original_router", None)
+            if original is None:
+                # Unknown wrapper — record it as-is so the diff still catches it.
+                out.append((effective_index, raw, None))
+                effective_index += 1
+                continue
+            for child in original.routes:
+                out.append((effective_index, child, None))
+                effective_index += 1
+        else:
+            out.append((effective_index, raw, None))
+            effective_index += 1
+    return out
+
+
 def _route_entry(index: int, route: Any) -> dict[str, Any]:
     """Normalize one ``app.routes`` entry into a stable, comparable shape."""
     cls = type(route).__name__
@@ -97,7 +129,8 @@ def _openapi_operations(app: Any) -> list[dict[str, Any]]:
 
 
 def build_manifest(app: Any) -> dict[str, Any]:
-    routes = [_route_entry(i, r) for i, r in enumerate(app.routes)]
+    flattened = _flatten_routes(app)
+    routes = [_route_entry(i, r) for (i, r, _parent) in flattened]
     return {
         "version": 1,
         "app_routes": routes,
