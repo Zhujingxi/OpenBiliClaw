@@ -263,6 +263,98 @@ def test_subject_author_name_bounds_a_long_credit_roster() -> None:
     assert author == "名" * 80
 
 
+def test_subject_author_name_never_ends_on_an_unclosed_bracket() -> None:
+    # A hard cut with no separator in range used to stop inside a bracket and
+    # render "…（総監督" on the card. Trim back to before the open bracket.
+    credit = "名" * 70 + "（総監督" + "字" * 40
+    author = _author_of(infobox=[{"key": "导演", "value": credit}])
+    assert author == "名" * 70
+    assert author.count("（") == author.count("）")
+
+    # Same for ASCII and other bracket families, and a nested pair only counts
+    # as open when it really is unbalanced.
+    assert _author_of(infobox=[{"key": "导演", "value": "A" * 70 + "[credit" + "B" * 40}]) == (
+        "A" * 70
+    )
+    balanced = "名" * 60 + "《作品》" + "、" + "字" * 40
+    author = _author_of(infobox=[{"key": "导演", "value": balanced}])
+    assert author == "名" * 60 + "《作品》"
+
+    # Deliberate limitation: when the whole credit is one long parenthetical the
+    # opener sits at index 0, so trimming would erase a real credit entirely.
+    # The hard cut is kept instead — asserted so the trade-off stays visible.
+    whole = "（" + "甲" * 90 + "）"
+    author = _author_of(infobox=[{"key": "导演", "value": whole}])
+    assert author == "（" + "甲" * 79
+    assert len(author) == 80
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Bare strings that spell absence. A literal "None" in the source data
+        # is exactly as unusable as one we stringified ourselves.
+        "None",
+        "none",
+        "NULL",
+        "nil",
+        "NaN",
+        "undefined",
+        "N/A",
+        "n/a",
+        "-",
+        "——",
+        "/",
+        "?",
+        "（）",
+        "   ",
+        # ...and the same values arriving through either list shape.
+        [{"v": "None"}],
+        [{"k": "总导演", "v": "null"}],
+        [{"v": "-"}],
+        # Non-string ``v``: str() would have manufactured "['押井守']" / "42".
+        [{"v": ["押井守"]}],
+        [{"v": {"name": "押井守"}}],
+        [{"v": 42}],
+        [{"v": True}],
+    ],
+)
+def test_subject_author_name_rejects_absence_spellings_and_non_string_values(
+    value: object,
+) -> None:
+    author = _author_of(infobox=[{"key": "导演", "value": value}])
+    assert author == ""
+    assert "押井守" not in author  # never reconstructed via str() on a drift
+
+
+def test_subject_author_name_keeps_ambiguous_short_credits() -> None:
+    """The placeholder filter must not delete plausible real names.
+
+    "na" (romanised 나 / 娜), CJK words that merely *mean* absence, and single
+    characters are ordinary credits, not serialization artifacts — filtering
+    them would be semantic cleanup with a false-positive cost.
+    """
+    for credit in ("Na", "na", "无", "未知", "暂无", "不明", "0", "X", "N"):
+        assert _author_of(infobox=[{"key": "导演", "value": credit}]) == credit
+        assert _author_of(infobox=[{"key": "导演", "value": [{"v": credit}]}]) == credit
+
+
+def test_subject_author_name_skips_placeholder_entries_within_a_list() -> None:
+    # One junk entry must not poison the rest of the roster, and a key whose
+    # value is entirely placeholders still falls through to the next ladder key.
+    value = [{"v": "None"}, {"v": "今敏"}, {"v": "-"}, {"v": "湯浅政明"}]
+    assert _author_of(infobox=[{"key": "导演", "value": value}]) == "今敏、湯浅政明"
+    assert (
+        _author_of(
+            infobox=[
+                {"key": "导演", "value": [{"v": "None"}, {"v": None}]},
+                {"key": "原作", "value": "士郎正宗"},
+            ]
+        )
+        == "士郎正宗"
+    )
+
+
 @pytest.mark.parametrize(
     ("rate", "collection_type", "event_type", "strength", "feedback_type"),
     [

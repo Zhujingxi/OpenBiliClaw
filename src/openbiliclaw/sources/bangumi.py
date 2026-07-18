@@ -62,6 +62,25 @@ AUTHOR_INFOBOX_KEYS: dict[int, tuple[str, ...]] = {
 # and hard-cap the rendered length.
 MAX_AUTHOR_PARTS = 3
 MAX_AUTHOR_LENGTH = 80
+# Credits that carry no name, only the fact that a name is absent. The boundary
+# is deliberately narrow: a value qualifies only if it is a language-level null
+# literal, an unambiguous "not applicable" marker, or pure punctuation — i.e.
+# something that can ONLY have come from a null being stringified somewhere up
+# the chain, or from an editor typing an explicit blank. Those can never be a
+# real person's or studio's name, and a literal "None" reaching author_name is
+# the dirty-row class COALESCE cannot repair once persisted.
+#
+# Deliberately NOT filtered, because each could be a genuine short credit and
+# over-filtering silently deletes real data:
+#   - bare "na" (romanised 나 / 娜 surname) — only the unambiguous "n/a" form
+#   - 无 / 暂无 / 未知 / 不明 — ordinary characters that can occur in a real
+#     name; these are editor prose, not a serialization artifact, so dropping
+#     them would be semantic cleanup rather than dirty-value defence
+#   - single letters and digits — plausible stage names
+_PLACEHOLDER_CREDITS = frozenset(
+    {"none", "null", "nil", "nan", "undefined", "n/a", "n.a.", "na.", "(none)", "<none>"}
+)
+_PLACEHOLDER_PUNCTUATION = "-—–_~/\\?？.。·、,，;；:：|｜()（）[]【】<>《》 \t　"
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -111,23 +130,54 @@ def _infobox_value_text(value: object) -> str:
     drifted schema — yields ``""``. Returning the empty string rather than a
     stringified value is what keeps literal ``"None"`` / ``"[]"`` out of
     ``author_name``, the dirty-row class that ``COALESCE`` cannot repair.
+
+    That guarantee needs two things beyond shape checks, both learned the hard
+    way: ``v`` is only read when it is genuinely a ``str`` (``str()`` on a
+    drifted value manufactures ``"['押井守']"`` out of a nested list), and a
+    value that merely *spells* absence is normalised to ``""`` — a bare
+    ``"None"`` in the source data is just as unusable as one we produced
+    ourselves. See :data:`_PLACEHOLDER_CREDITS` for where that line is drawn.
     """
 
     if isinstance(value, str):
-        return value.strip()
+        text = value.strip()
+        return "" if _is_placeholder_credit(text) else text
     if not isinstance(value, list):
         return ""
     parts: list[str] = []
     for entry in value:
         if not isinstance(entry, Mapping):
             continue
-        text = str(entry.get("v") or "").strip()
-        if not text or text in parts:
+        raw = entry.get("v")
+        # Only real strings: no str() fallback, which would turn a drifted
+        # ``{"v": ["押井守"]}`` into the literal text "['押井守']".
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if _is_placeholder_credit(text) or text in parts:
             continue
         parts.append(text)
         if len(parts) >= MAX_AUTHOR_PARTS:
             break
     return "、".join(parts)
+
+
+def _is_placeholder_credit(text: str) -> bool:
+    """True when ``text`` spells absence rather than naming anyone.
+
+    Covers the empty string, the null literals and "not applicable" markers in
+    :data:`_PLACEHOLDER_CREDITS`, and values made up purely of punctuation
+    (``"-"``, ``"—"``, ``"/"``, ``"()"``, ``"?"``). Anything else — including
+    single characters and CJK words that merely *mean* "none" — is treated as
+    a real credit, because guessing wrong there deletes genuine data.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if stripped.casefold() in _PLACEHOLDER_CREDITS:
+        return True
+    return not stripped.strip(_PLACEHOLDER_PUNCTUATION)
 
 
 def _author_name(subject: Mapping[str, Any], subject_type: int) -> str:
@@ -171,7 +221,8 @@ def _truncate_credit(credit: str) -> str:
     Some credits are a single string holding a whole roster (a 猫和老鼠 entry
     runs past 200 characters). A blind slice can end mid-name or inside an
     unclosed bracket, so prefer the last separator that still keeps at least
-    half the budget and fall back to a hard cut only when there is none.
+    half the budget and fall back to a hard cut only when there is none — then
+    drop any bracket the cut left open.
     """
 
     if len(credit) <= MAX_AUTHOR_LENGTH:
@@ -180,7 +231,46 @@ def _truncate_credit(credit: str) -> str:
     cut = max(head.rfind(separator) for separator in ("、", "，", ",", "/"))
     if cut >= MAX_AUTHOR_LENGTH // 2:
         head = head[:cut]
-    return head.rstrip(" 、,，/|·")
+    return _drop_unclosed_bracket(head).rstrip(" 、,，/|·")
+
+
+# Bracket pairs seen in real credits: 押井守（総監督）, [監修], 《攻殻機動隊》.
+_CREDIT_BRACKETS = {
+    "（": "）",
+    "(": ")",
+    "【": "】",
+    "[": "]",
+    "《": "》",
+    "〈": "〉",
+    "「": "」",
+    "『": "』",
+    "〔": "〕",
+    "｢": "｣",
+}
+_CREDIT_BRACKET_CLOSERS = {closer: opener for opener, closer in _CREDIT_BRACKETS.items()}
+
+
+def _drop_unclosed_bracket(head: str) -> str:
+    """Cut ``head`` back to before the first bracket the truncation left open.
+
+    ``押井守、神山健治（総監督`` reads as if the credit were mangled, so trim to
+    ``押井守、神山健治``.
+
+    Known limitation: when the unmatched opener sits at index 0 the whole
+    credit is one long parenthetical, and trimming would erase it entirely.
+    Losing a real credit is worse than an unbalanced tail, so the hard cut is
+    kept there — deliberate, and covered by a test so the choice stays visible.
+    """
+
+    unclosed: list[int] = []
+    for index, char in enumerate(head):
+        if char in _CREDIT_BRACKETS:
+            unclosed.append(index)
+        elif char in _CREDIT_BRACKET_CLOSERS and unclosed:
+            unclosed.pop()
+    if not unclosed:
+        return head
+    return head[: unclosed[0]].rstrip() or head
 
 
 def _meta_tags(subject: Mapping[str, Any]) -> list[str]:
