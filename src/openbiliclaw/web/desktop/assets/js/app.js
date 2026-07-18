@@ -1,3 +1,8 @@
+// app.js loads as a classic deferred script while the saved-sync core is an
+// ES module; the dependency must be explicit in code, never assumed from
+// script-tag ordering. All startup is gated on window.OBCSavedSyncCore.
+(() => {
+    const startDesktopApp = () => {
 (() => {
     const DEFAULT_API_BASE = "http://127.0.0.1:8420/api";
     const ENDPOINTS = {
@@ -24,15 +29,12 @@
       avoidanceProbeRespond: "/avoidance-probes/respond",
       insightFeedback: "/insights/feedback",
       sourceShareSuggestion: "/config/source-share-suggestion",
-      sourceCredentials: "/sources/credentials?reveal_keys=true",
       configProbe: "/config/probe-service",
       updateStatus: "/update-status",
       updateCheck: "/update/check",
       updateApply: "/update/apply",
       embeddingRepair: "/embedding/repair",
-      config: "/config?reveal_keys=true",
-      watchLater: "/watch-later",
-      favorites: "/favorites",
+      config: "/config",
       profileEdit: "/profile/edit",
       profileEditState: "/profile/edit-state"
     };
@@ -59,7 +61,6 @@
       delight: null,
       config: null,
       sourceStatus: null,
-      sourceCredentials: null,
       runtimeStatus: null,
       runtimeSocket: null,
       videos: [],
@@ -966,7 +967,7 @@
     }
 
     function normalizeRecommendation(item) {
-      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      const canonical = window.OBCSavedSyncCore.normalizeSavedItem(item);
       const contentId = canonical.content_id;
       const contentType = canonical.content_type.toLowerCase();
       const bodyText = decodeHtmlEntities(item?.body_text ?? "");
@@ -1887,7 +1888,6 @@
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
       void renderSourcesStatus();
-      void renderSourceCredentials();
       void lanAuthControl?.reload();
       void bootAutostartControl?.reload();
       void refreshUpdateStatus();
@@ -1903,13 +1903,47 @@
       rate_limited: ["同步失败", "error", true], extension_required: ["需要连接插件", "warning", true],
       failed: ["同步失败", "error", true]
     };
+    // Desktop copy for the canonical surface-neutral presentation keys; the
+    // shared core never embeds surface text, so labels/details stay here.
+    const SAVED_SYNC_LABEL_COPY = {
+      pending: "待同步", syncing: "同步中", synced: "已同步",
+      login_required: "需要登录", local_only: "仅本地保存",
+      sync_failed: "同步失败", extension_required: "需要连接插件",
+      upgrade_required: "待升级重试", sync_unavailable: "同步暂不可用"
+    };
+    const SAVED_SYNC_ACTION_COPY = { syncing: "同步中…", retry: "重试同步", sync: "同步" };
+    const SAVED_SYNC_DETAIL_FALLBACK = {
+      login_required: "请登录对应平台后重试。",
+      rate_limited: "平台请求过于频繁，请稍后重试。",
+      extension_required: "请连接已安装 OpenBiliClaw 插件的登录态浏览器后重试。",
+      failed: "平台同步失败，请重试；若持续失败请检查连接或登录状态。"
+    };
+    function desktopSavedSyncPresentation(item) {
+      const presentation = window.OBCSavedSyncCore.getSavedSyncPresentation(item);
+      const errorMessage = String(item?.error_message || "").trim();
+      const resolvedTarget = String(item?.resolved_target || "").trim();
+      let detail;
+      if (presentation.localOnly) detail = "此内容类型暂不支持平台同步，仅保存在本地。";
+      else if (presentation.detailKey === "unsupported_adapter_missing") detail = "同步能力可能正在滚动升级，请更新后端与插件后重试。";
+      else if (presentation.detailKey === "unsupported") detail = errorMessage || "当前同步能力暂不可用，请更新后重试。";
+      else if (presentation.status === "synced" || presentation.status === "already_synced") detail = resolvedTarget || "平台已确认同步完成。";
+      else if (presentation.busy) detail = resolvedTarget || "平台同步任务已提交，请稍候。";
+      else if (presentation.status === "pending") detail = resolvedTarget || "已保存在本地，可手动同步到平台。";
+      else detail = errorMessage || resolvedTarget || SAVED_SYNC_DETAIL_FALLBACK[presentation.status] || "平台目标将在同步时确认";
+      return {
+        ...presentation,
+        label: SAVED_SYNC_LABEL_COPY[presentation.labelKey] || SAVED_SYNC_LABEL_COPY.sync_failed,
+        detail,
+        actionLabel: SAVED_SYNC_ACTION_COPY[presentation.actionKey] || SAVED_SYNC_ACTION_COPY.sync
+      };
+    }
     function safeSavedText(value, maxLength = 240) {
       return String(value || "").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "").trim().slice(0, maxLength);
     }
 
     function desktopSavedItem(itemOrBvid = {}) {
       const item = typeof itemOrBvid === "object" && itemOrBvid ? itemOrBvid : { bvid: itemOrBvid };
-      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      const canonical = window.OBCSavedSyncCore.normalizeSavedItem(item);
       return {
         ...item,
         item_key: safeSavedText(canonical.item_key, 2048),
@@ -1927,25 +1961,28 @@
       };
     }
 
-    const desktopSavedApi = window.OpenBiliClawSavedSync.createStrictSavedApi(requestJsonStrict);
-    const desktopSavedMutations = window.OpenBiliClawSavedSync.createSavedMutationRegistry();
+    const desktopSavedApi = window.OBCSavedSyncCore.createStrictSavedApi(requestJsonStrict);
+    const desktopSavedMutations = window.OBCSavedSyncCore.createSavedMutationRegistry();
     const desktopSavedListStates = {
-      watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
-      favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
+      watch_later: window.OBCSavedSyncCore.createRetainedSavedListState(),
+      favorite: window.OBCSavedSyncCore.createRetainedSavedListState()
     };
     const desktopSyncingKeys = {
-      watch_later: window.OpenBiliClawSavedSync.createSavedSubmissionFence(),
-      favorite: window.OpenBiliClawSavedSync.createSavedSubmissionFence()
+      watch_later: window.OBCSavedSyncCore.createSavedSubmissionFence(),
+      favorite: window.OBCSavedSyncCore.createSavedSubmissionFence()
     };
     const desktopSavedPendingFocus = { watch_later: null, favorite: null };
     function createDesktopSavedTaskRuntime() {
-      const tracker = window.OpenBiliClawSavedSync.createDurableTaskTracker({
+      const tracker = window.OBCSavedSyncCore.createDurableTaskTracker({
         poll: (taskId) => desktopSavedApi.pollTask(taskId),
+        now: Date.now,
+        schedule: (run, delay) => window.setTimeout(run, delay),
+        cancel: (handle) => window.clearTimeout(handle),
         isVisible: () => !document.hidden
       });
       return {
         tracker,
-        coordinator: window.OpenBiliClawSavedSync.createSavedTaskCoordinator({
+        coordinator: window.OBCSavedSyncCore.createSavedTaskCoordinator({
           tracker,
           fetchTask: (taskId) => desktopSavedApi.pollTask(taskId)
         })
@@ -1993,7 +2030,7 @@
     }
 
     function savedSyncEligible(item, listKind = "") {
-      return window.OpenBiliClawSavedSync.isSavedSyncEligibleStatus(
+      return window.OBCSavedSyncCore.isSavedSyncEligibleStatus(
         item.sync_status,
         item.error_code,
         item.sync_task_id
@@ -2019,13 +2056,13 @@
       const empty = document.getElementById(emptyId);
       if (!grid) return;
       const focusRoot = grid.closest(".saved-page") || grid;
-      const focusToken = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot)
+      const focusToken = window.OBCSavedSyncCore.captureSavedFocus(focusRoot, document.activeElement)
         || desktopSavedPendingFocus[listKind];
       const rows = Array.isArray(items) ? items : [];
       if (!rows.length) {
         grid.replaceChildren();
         if (empty) empty.removeAttribute("hidden");
-        if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
+        if (window.OBCSavedSyncCore.restoreSavedFocus(focusRoot, focusToken)) {
           desktopSavedPendingFocus[listKind] = null;
         }
         return;
@@ -2037,7 +2074,7 @@
           || desktopSavedTaskRuntimes[listKind].coordinator.owns(item.item_key)) {
           item.sync_status = "syncing";
         }
-        const syncPresentation = window.OpenBiliClawSavedSync.getSavedSyncPresentation(item);
+        const syncPresentation = desktopSavedSyncPresentation(item);
         const card = document.createElement("article");
         card.className = "video-card saved-card";
         card.dataset.itemKey = item.item_key;
@@ -2067,12 +2104,12 @@
           if (url && event.button === 1) trackRecommendationClick(item);
         });
         card.querySelector(".saved-sync-one")?.addEventListener("click", (e) => {
-          desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, e.currentTarget);
+          desktopSavedPendingFocus[listKind] = window.OBCSavedSyncCore.captureSavedFocus(focusRoot, e.currentTarget);
           void runDesktopSavedSync(listKind, [item], e.currentTarget, reload);
         });
         card.querySelector(".saved-remove").addEventListener("click", async (e) => {
           const btn = e.currentTarget;
-          desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, btn);
+          desktopSavedPendingFocus[listKind] = window.OBCSavedSyncCore.captureSavedFocus(focusRoot, btn);
           btn.disabled = true;
           try {
             await removeDesktopSavedItem(listKind, item.item_key);
@@ -2085,7 +2122,7 @@
         });
         return card;
       }));
-      if (window.OpenBiliClawSavedSync.restoreSavedFocus(focusRoot, focusToken)) {
+      if (window.OBCSavedSyncCore.restoreSavedFocus(focusRoot, focusToken)) {
         desktopSavedPendingFocus[listKind] = null;
       }
     }
@@ -2103,7 +2140,7 @@
       let submitted = false;
       if (activeButton) {
         const focusRoot = activeButton.closest(".saved-page") || activeButton.parentElement;
-        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(focusRoot, activeButton)
+        desktopSavedPendingFocus[listKind] = window.OBCSavedSyncCore.captureSavedFocus(focusRoot, activeButton)
           || { kind: "list", action: "sync-all" };
         activeButton.disabled = true;
         activeButton.setAttribute("aria-disabled", "true");
@@ -2146,7 +2183,7 @@
       const count = items.filter((item) => savedSyncEligible(item, listKind)
         && !desktopSyncingKeys[listKind].has(item.item_key)).length;
       button.textContent = `同步未同步内容（${count}）`;
-      window.OpenBiliClawSavedSync.updateSavedBatchButtonState(button, count);
+      window.OBCSavedSyncCore.updateSavedBatchButtonState(button, count);
       button.onclick = () => runDesktopSavedSync(listKind, items, button, reload, true);
     }
 
@@ -2161,7 +2198,7 @@
       retry.textContent = "重试加载";
       retry.addEventListener("click", (event) => {
         const focusRoot = status.closest(".saved-page") || status.parentElement;
-        desktopSavedPendingFocus[listKind] = window.OpenBiliClawSavedSync.captureSavedFocus(
+        desktopSavedPendingFocus[listKind] = window.OBCSavedSyncCore.captureSavedFocus(
           focusRoot,
           event.currentTarget,
         ) || { kind: "list", action: "retry" };
@@ -5345,7 +5382,6 @@
     // Unified per-source login / cookie status (GET /api/sources/status),
     // rendered with separate scheduling and credential/plugin states.
     const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
-    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -5428,64 +5464,10 @@
       try { data = await requestJson("/sources/status"); } catch { data = null; }
       state.sourceStatus = data;
       renderSourcesStatusRows(data);
-    }
-
-    function renderSourceCredentialRows(data) {
-      const list = $("#sourceCredentialList");
-      if (!list) return;
-      CURRENT_CREDENTIAL_KEYS.forEach((key) => {
-        const row = list.querySelector(`[data-source-credential="${key}"]`);
-        if (!row) return;
-        const summary = row.querySelector(".source-credential-summary");
-        const value = row.querySelector(".source-credential-value");
-        const copyBtn = row.querySelector(".source-credential-copy");
-        const item = data?.[key];
-        if (!item) {
-          row.dataset.available = "false";
-          if (summary) summary.textContent = "状态暂不可用";
-          if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
-          if (copyBtn) copyBtn.disabled = true;
-          return;
-        }
-        row.dataset.available = item.available ? "true" : "false";
-        if (summary) {
-          if (key === "xiaohongshu" && item.available) {
-            summary.textContent = "xsec_token 内容令牌已保存（不代表账号登录），展开查看";
-          } else {
-            summary.textContent = item.available
-              ? `${item.label || "Cookie"} 已保存，展开查看`
-              : item.detail || "当前没有可展示 Cookie";
-          }
-        }
-        if (value) {
-          value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
-        }
-        if (copyBtn) copyBtn.disabled = !item.available;
-      });
       // Reddit's paste box has no config-side cookie field (the value goes to
-      // rdt-cli's credential store), so its "已保存/未保存" placeholder is driven
-      // by credential availability instead of the config snapshot.
-      setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
-    }
-
-    $("#sourceCredentialList")?.addEventListener("click", async (event) => {
-      const btn = event.target.closest(".source-credential-copy");
-      if (!btn || btn.disabled) return;
-      const value = btn.closest(".source-credential-row")?.querySelector(".source-credential-value")?.value?.trim() || "";
-      if (!value) return;
-      try {
-        await navigator.clipboard.writeText(value);
-        showToast("已复制当前凭据");
-      } catch {
-        showToast("复制失败：浏览器未授予剪贴板访问权限");
-      }
-    });
-
-    async function renderSourceCredentials() {
-      let data = null;
-      try { data = await requestJson(ENDPOINTS.sourceCredentials); } catch { data = null; }
-      state.sourceCredentials = data;
-      renderSourceCredentialRows(data);
+      // rdt-cli's credential store), so its "已保存/未保存" placeholder is
+      // driven by the safe sources-status login flag, not the config snapshot.
+      setCookieOverrideInput("redditCookie", data?.reddit?.logged_in ? "synced" : "", " Reddit");
     }
 
     // Login happens outside this page (user signs into a platform in another
@@ -5734,7 +5716,6 @@
       setInput("redditRequestInterval", config.sources?.reddit?.request_interval_seconds);
       setInput("redditMinInterval", config.sources?.reddit?.min_interval_minutes);
       void renderSourcesStatus();
-      void renderSourceCredentials();
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -5752,7 +5733,7 @@
 
     function normalizeDelight(item) {
       if (!item) return null;
-      const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
+      const canonical = window.OBCSavedSyncCore.normalizeSavedItem(item);
       // 后端 pending-batch 对喜欢过的候选下发 state="liked"，重灌后恢复
       // 「已喜欢」文案，让用户看出这条已经表过态。
       const serverState = String(item.state ?? "");
@@ -7281,7 +7262,7 @@
       if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，换一批忽略当前${frontend.dismissOnReshuffle ? "已开启" : "已关闭"}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
-        const result = await requestJsonStrict(ENDPOINTS.config.replace("?reveal_keys=true", ""), {
+        const result = await requestJsonStrict(ENDPOINTS.config, {
           method: "PUT",
           timeoutMs: 60000,
           headers: { "Content-Type": "application/json" },
@@ -7352,3 +7333,21 @@
         connectRuntimeStream();
       });
     })();
+    };
+
+    if (window.OBCSavedSyncCore) {
+        startDesktopApp();
+        return;
+    }
+    const coreReadyTimer = setInterval(() => {
+        if (!window.OBCSavedSyncCore) return;
+        clearInterval(coreReadyTimer);
+        startDesktopApp();
+    }, 10);
+    setTimeout(() => {
+        clearInterval(coreReadyTimer);
+        if (window.OBCSavedSyncCore) return;
+        const status = document.getElementById("statusLabel");
+        if (status) status.textContent = "界面脚本加载失败，请刷新重试";
+    }, 10_000);
+})();

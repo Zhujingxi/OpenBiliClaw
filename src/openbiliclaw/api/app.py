@@ -11289,6 +11289,7 @@ def create_app(
                 (_desktop_dir, "assets/js/app.js"),
                 (_desktop_dir, "assets/js/model-settings.js"),
                 (_desktop_dir.parent, "shared/model-config-state.js"),
+                (_desktop_dir.parent, "shared/saved-sync-core.js"),
             )
             for root, relative in assets:
                 path = root / relative
@@ -11316,6 +11317,10 @@ def create_app(
             html = html.replace(
                 'src="/web/assets/js/model-settings.js"',
                 f'src="/web/assets/js/model-settings.js?v={version}"',
+            )
+            html = html.replace(
+                'src="/web/shared/saved-sync-core.js"',
+                f'src="/web/shared/saved-sync-core.js?v={version}"',
             )
             return Response(
                 html,

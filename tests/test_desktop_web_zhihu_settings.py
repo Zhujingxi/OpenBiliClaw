@@ -59,7 +59,6 @@ def test_desktop_source_status_labels_distinguish_local_readiness() -> None:
     assert 'ready: { tone: "ready", label: "凭据已就绪" }' in js
     assert 'login_required: { tone: "warning", label: "需要登录" }' in js
     assert 'error: { tone: "danger", label: "检查失败" }' in js
-    assert "xsec_token 内容令牌已保存（不代表账号登录）" in js
 
 
 def test_desktop_cookie_fields_are_override_only() -> None:
@@ -77,22 +76,15 @@ def test_desktop_cookie_fields_are_override_only() -> None:
     assert "需要更换时粘贴新的 Cookie" in js
 
 
-def test_desktop_current_credentials_render_in_collapsed_panels() -> None:
+def test_desktop_credentials_are_write_only_without_raw_secret_reads() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
-    assert 'id="sourceCredentialList"' in html
-    for source_key in (
-        "bilibili",
-        "xiaohongshu",
-        "douyin",
-        "youtube",
-        "twitter",
-        "zhihu",
-    ):
-        assert f'data-source-credential="{source_key}"' in html
-
-    assert "/sources/credentials?reveal_keys=true" in js
-    assert "CURRENT_CREDENTIAL_KEYS" in js
-    assert "renderSourceCredentials" in js
-    assert "source-credential-value" in html
+    # The collapsed read-only credential panels and their copy buttons are
+    # gone; config reads are masked and no credential endpoint is called.
+    assert 'id="sourceCredentialList"' not in html
+    assert "source-credential" not in html
+    assert "reveal_keys" not in js
+    assert "sources/credentials" not in js
+    assert "CURRENT_CREDENTIAL_KEYS" not in js
+    assert "renderSourceCredentials" not in js

@@ -178,7 +178,7 @@ def test_desktop_recommendation_filters_include_enabled_sources() -> None:
 def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     """Desktop web should not render text-only X tweets as empty/broken covers."""
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
-    saved_sync_js = Path("src/openbiliclaw/web/desktop/assets/js/saved-sync-core.js").read_text(
+    saved_sync_js = Path("src/openbiliclaw/web/shared/saved-sync-core.js").read_text(
         encoding="utf-8"
     )
     app_css = Path("src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
@@ -192,7 +192,7 @@ def test_desktop_renders_x_recommendations_as_text_cards() -> None:
     normalize_body = normalize_recommendation.group("body")
     assert "content_type" in normalize_body
     assert "body_text" in normalize_body
-    assert "OpenBiliClawSavedSync.normalizeSavedItem" in normalize_body
+    assert "OBCSavedSyncCore.normalizeSavedItem" in normalize_body
     assert "PLATFORM_ALIASES[explicit] || explicit" in saved_sync_js
     assert 'x: "twitter"' in saved_sync_js
     assert 'host === "x.com"' in saved_sync_js
