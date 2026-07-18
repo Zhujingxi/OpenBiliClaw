@@ -10,8 +10,25 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
+# tomllib requires Python 3.11+. Prefer a `python3` that is already 3.11+;
+# otherwise fall back to an explicit python3.11 / python3.12 / python3.13 binary.
+pick_python() {
+  local candidate
+  for candidate in python3 python3.13 python3.12 python3.11; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+      && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "Python 3.11+ is required to read pyproject.toml (tomllib)" >&2
+  return 1
+}
+
+PY_BIN="$(pick_python)"
+
 project_version="$(
-  python3 - <<'PY'
+  "$PY_BIN" - <<'PY'
 import tomllib
 from pathlib import Path
 
