@@ -279,7 +279,9 @@ headed = false
 
 # ── 海外网络路由（仅作用于海外客户端）──
 # 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / openai_compatible
-# 的 chat + embedding、YouTube(yt-dlp)、GitHub 自动更新、Codex OAuth。
+# 的 chat + embedding、YouTube(yt-dlp)、Bangumi(api.bgm.tv 与封面 CDN
+# lain.bgm.tv 均为海外 Cloudflare,国内网络直连易超时,需走代理)、
+# GitHub 自动更新、Codex OAuth。
 # B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
 # direct = 忽略环境 / 系统代理；system = 明确继承；custom = 使用下方 proxy。
 # 支持 http:// | https:// | socks5:// | socks5h://,例如 "socks5://127.0.0.1:1080"。
@@ -402,6 +404,28 @@ daily_related_budget = 300              # 相关扩展 discovery 每日条目上
 request_interval_seconds = 3            # 插件任务轮询间隔 / 命令 fallback 超时估算
 min_interval_minutes = 60               # RedditDiscoveryProducer 两次执行最小间隔
 
+# ── Bangumi 官方公开 API（只读）──
+# 无需 Cookie 或 OAuth。username 留空时只参与后续内容发现；填写后，首次初始化可读取
+# 该账号的公开收藏。latest 是兼容配置名，实际为按日期浏览，可能包含未播出的未来条目。
+[sources.bangumi]
+enabled = false
+username = ""
+# Optional personal access token. Generate one (valid ~1 year) at
+# https://next.bgm.tv/demo/access-token. When set, init/discovery identify your
+# account via /v0/me and read your OWN collections — including PRIVATE ones —
+# with a Bearer header; the username above is auto-resolved. Leave empty to keep
+# the anonymous public-username path (only reads public collections). Treat this
+# token like a password; it is written to config.toml (which is gitignored).
+access_token = ""
+subject_types = ["anime", "book", "game"]
+source_modes = ["search", "ranked", "latest"]
+daily_search_budget = 300
+daily_ranked_budget = 100
+daily_latest_budget = 100
+request_interval_seconds = 1
+min_interval_minutes = 60
+bootstrap_limit = 300
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
@@ -475,6 +499,7 @@ youtube = 1
 twitter = 1
 zhihu = 1
 reddit = 1
+bangumi = 1
 
 # ── 统一关键词规划器 / Discover 背压 (P1) ──
 # 把"每平台各自定时调 LLM 生成搜索词"换成缺口拉动的双缓冲背压模型：一个关键词

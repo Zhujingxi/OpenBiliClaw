@@ -61,6 +61,7 @@ https://github.com/whiteguo233/OpenBiliClaw
 - 推荐、画像、反馈和运行数据默认保存在你的本机 SQLite 数据库里，不会发送到 OpenBiliClaw 开发者服务器。
 - 你自行配置的 LLM / embedding 服务可能接收完成相应功能所需的内容；可以使用本机 Ollama，也可以使用你自己的 API Key。具体数据边界见隐私政策。
 - 来源接入状态默认只读取本地后端保存的凭据、插件心跳和任务历史，不为了刷新配置页而访问外部平台，降低多余请求与封控风险。
+- 插件在 `bgm.tv` / `bangumi.tv` 上申请的 host permission 仅用于账号身份识别：读取页面公开的用户 uid 与用户名，实现零配置识别你的 Bangumi 账号；在这两个站点上不读取 Cookie、不采集浏览行为，也不上传任何个人令牌。Bangumi 内容本身由本地后端通过官方匿名只读 API 获取。
 - 「个人通讯」采集范围除侧边栏聊天消息外，还包含你在受支持平台上**成功提交**的评论正文与 B 站弹幕正文（经网络层在提交成功后采集，仅送本机后端，用于更准确地构建兴趣画像）。
 
 > **发版待办（商店后台隐私披露表单）**：Chrome Web Store 与 Firefox AMO 的数据用途申报中，「个人通讯 / Personal communications」条目需更新描述，覆盖新增的用户提交评论与弹幕正文采集（Firefox manifest 已声明 `personalCommunications`，无需改动权限，仅需同步商店后台文案）。

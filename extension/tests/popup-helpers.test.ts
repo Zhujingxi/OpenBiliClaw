@@ -44,6 +44,7 @@ import {
   normalizeProfileSummary,
   normalizeRuntimeStatus,
   platformDisplayName,
+  resolveInitBangumiUsername,
   shouldFetchProfileSummary,
   shouldAutoLoadRecommendations,
   validateCommentInput,
@@ -53,8 +54,25 @@ test("platformDisplayName maps known platforms and passes through unknown", () =
   assert.equal(platformDisplayName("bilibili"), "B 站");
   assert.equal(platformDisplayName("ZHIHU"), "知乎");
   assert.equal(platformDisplayName("reddit"), "Reddit");
+  assert.equal(platformDisplayName("bgm"), "Bangumi");
   assert.equal(platformDisplayName("newtube"), "newtube");
   assert.equal(platformDisplayName(""), "");
+});
+
+test("Bangumi cards keep canonical subject links and catalog metadata", () => {
+  const item = normalizeRecommendation({
+    content_id: "253",
+    source_platform: "bangumi",
+    title: "Cowboy Bebop",
+    rating_score: 8.9,
+    rating_count: 12345,
+    source_rank: 12,
+  });
+  assert.equal(item.up_name, "");
+  assert.equal(buildContentUrl(item), "https://bgm.tv/subject/253");
+  assert.equal(item.rating_score, 8.9);
+  assert.equal(item.rating_count, 12345);
+  assert.equal(item.source_rank, 12);
 });
 
 test("empty reshuffle preserves the visible recommendation batch", () => {
@@ -593,6 +611,9 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     comment_count: 0,
     favorite_count: 0,
     danmaku_count: 0,
+    rating_score: 0,
+    rating_count: 0,
+    source_rank: 0,
     turns: [],
     composer_open: false,
     chat_draft: "",
@@ -1889,4 +1910,53 @@ test("getHintBannerState normalizes supported tones", () => {
   assert.deepEqual(getHintBannerState("weird"), {
     tone: "info",
   });
+});
+
+test("resolveInitBangumiUsername sends a deliberately typed username", () => {
+  // Successful prefill, then the user types a real name → send it.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: " sai " }),
+    "sai",
+  );
+});
+
+test("resolveInitBangumiUsername sends '' to clear a successfully prefilled value", () => {
+  // Explicit clear of a prefilled field is a deliberate reset → send "".
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: true, value: "" }),
+    "",
+  );
+});
+
+test("resolveInitBangumiUsername omits an untouched field so config is kept", () => {
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: true, value: "sai" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits an empty field when prefill failed", () => {
+  // Config fetch failed/never populated the field → an empty value must not
+  // erase a configured username.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername omits on early submission before any prefill", () => {
+  // Nothing touched, nothing prefilled (fetch still pending) → omit.
+  assert.equal(resolveInitBangumiUsername({}), null);
+  assert.equal(
+    resolveInitBangumiUsername({ touched: false, prefilled: false, value: "" }),
+    null,
+  );
+});
+
+test("resolveInitBangumiUsername still sends a typed name when prefill failed", () => {
+  // A deliberately typed value is trustworthy even without a prior prefill.
+  assert.equal(
+    resolveInitBangumiUsername({ touched: true, prefilled: false, value: "kite" }),
+    "kite",
+  );
 });

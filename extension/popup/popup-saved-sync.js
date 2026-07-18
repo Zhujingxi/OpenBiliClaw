@@ -97,6 +97,7 @@ const PLATFORM_LABELS = {
   douyin: "抖音",
   zhihu: "知乎",
   reddit: "Reddit",
+  bangumi: "Bangumi",
 };
 
 function safeSyncText(value, maxLength = 240) {

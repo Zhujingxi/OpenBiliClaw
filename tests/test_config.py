@@ -142,6 +142,7 @@ class TestConfigDefaults:
             "twitter": 1,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 1,
         }
 
     def test_bilibili_source_enabled_defaults_true(self) -> None:
@@ -1003,6 +1004,7 @@ youtube = 3
         "twitter": 1,
         "zhihu": 1,
         "reddit": 1,
+        "bangumi": 1,
     }
 
 
@@ -1093,6 +1095,79 @@ def test_sources_reddit_defaults() -> None:
     assert config.sources.reddit.daily_related_budget == 300
     assert config.sources.reddit.request_interval_seconds == 3
     assert config.sources.reddit.min_interval_minutes == 60
+
+
+def test_sources_bangumi_defaults() -> None:
+    config = Config()
+
+    assert config.sources.bangumi.enabled is False
+    assert config.sources.bangumi.username == ""
+    assert config.sources.bangumi.access_token == ""
+    assert config.sources.bangumi.subject_types == ("anime", "book", "game")
+    assert config.sources.bangumi.source_modes == ("search", "ranked", "latest")
+    assert config.sources.bangumi.daily_search_budget == 300
+    assert config.sources.bangumi.daily_ranked_budget == 100
+    assert config.sources.bangumi.daily_latest_budget == 100
+    assert config.sources.bangumi.request_interval_seconds == 1
+    assert config.sources.bangumi.min_interval_minutes == 60
+    assert config.sources.bangumi.bootstrap_limit == 300
+
+
+def test_save_config_round_trips_sources_bangumi(tmp_path: Path) -> None:
+    config = Config()
+    config.sources.bangumi.enabled = True
+    config.sources.bangumi.username = "sai"
+    config.sources.bangumi.access_token = "tok-abc123"
+    config.sources.bangumi.subject_types = ("anime", "music")
+    config.sources.bangumi.source_modes = ("search", "ranked")
+    config.sources.bangumi.daily_search_budget = 42
+    config.sources.bangumi.daily_ranked_budget = 21
+    config.sources.bangumi.daily_latest_budget = 11
+    config.sources.bangumi.request_interval_seconds = 2
+    config.sources.bangumi.min_interval_minutes = 45
+    config.sources.bangumi.bootstrap_limit = 123
+    config.scheduler.pool_source_shares["bangumi"] = 2
+
+    target = tmp_path / "config.toml"
+    save_config(config, target)
+    loaded = load_config(target)
+
+    assert loaded.sources.bangumi == config.sources.bangumi
+    assert loaded.scheduler.pool_source_shares["bangumi"] == 2
+
+
+def test_save_config_rejects_invalid_bangumi_username(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.bangumi.username = "bad/name"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.bangumi.username" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported character"):
+        save_config(config, target)
+    assert not target.exists()
+
+
+def test_save_config_rejects_invalid_bangumi_access_token(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.bangumi.access_token = "bad token\nwith newline"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.bangumi.access_token" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported character"):
+        save_config(config, target)
+    assert not target.exists()
 
 
 def test_build_config_supports_sources_xiaohongshu(tmp_path: Path) -> None:
@@ -1287,6 +1362,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "twitter": 3,
         "zhihu": 1,
         "reddit": 2,
+        "bangumi": 1,
     }
 
     save_config(config, config_path)
@@ -1300,6 +1376,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "twitter": 3,
         "zhihu": 1,
         "reddit": 2,
+        "bangumi": 1,
     }
 
 

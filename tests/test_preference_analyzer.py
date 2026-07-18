@@ -1525,6 +1525,42 @@ async def test_analyze_events_default_drops_quick_exit_but_keeps_explicit_dislik
     assert "不要把负向事件提取为 interests" in str(system_instruction)
 
 
+def test_maybe_filter_events_keeps_bangumi_view_and_dislike() -> None:
+    """Bangumi collection events carry no ``inferred_satisfaction`` — a 'view'
+    (完成/搁置收藏 → 中性浏览) resolves to 'unknown' and must survive, while an
+    explicit dislike (低评分 → feedback/dislike) must survive as negative
+    evidence. The satisfaction filter runs for real here (no LLM involved);
+    earlier guided-init tests bypassed this layer with a soul double, so this
+    pins the real ``_maybe_filter_events`` path for Bangumi signals."""
+    from openbiliclaw.soul.preference_analyzer import PreferenceAnalyzer
+
+    analyzer = PreferenceAnalyzer(FakeStructuredService())  # filter on by default
+    events = [
+        # view → no inferred_satisfaction → treated as "unknown" → kept
+        {
+            "event_type": "view",
+            "title": "某番剧 EP1",
+            "metadata": {"source_platform": "bangumi"},
+        },
+        # feedback + feedback_type=dislike → explicit negative → kept
+        {
+            "event_type": "feedback",
+            "title": "不感兴趣的番",
+            "metadata": {"source_platform": "bangumi", "feedback_type": "dislike"},
+        },
+        # event_type=dislike → explicit negative → kept
+        {
+            "event_type": "dislike",
+            "title": "点踩的番",
+            "metadata": {"source_platform": "bangumi"},
+        },
+    ]
+
+    kept = analyzer._maybe_filter_events(events)
+
+    assert kept == events, "bangumi view + explicit dislikes must all pass the filter"
+
+
 def test_normalize_style_coerces_schema_defying_llm_output(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

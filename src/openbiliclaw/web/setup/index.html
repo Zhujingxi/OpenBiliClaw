@@ -81,6 +81,10 @@
     .init-source-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
     .init-source-row input { width: 16px; height: 16px; padding: 0; accent-color: var(--accent); }
     .init-source-row input:disabled { opacity: .75; }
+    .init-source-detail { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); font-size: 13px; }
+    .init-source-detail input { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--text); padding: 8px 10px; }
+    .init-source-detail input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .init-source-detail input:disabled { opacity: .58; }
     .progress { margin-top: 18px; padding: 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
     .progress-track { height: 8px; border-radius: 999px; background: #10131a; overflow: hidden; }
     .progress-fill { height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .3s ease; }
@@ -270,6 +274,7 @@
       { key: "twitter", label: "X" },
       { key: "zhihu", label: "知乎" },
       { key: "reddit", label: "Reddit" },
+      { key: "bangumi", label: "Bangumi" },
     ];
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。配置和前置检查在这里完成后，请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
@@ -280,6 +285,9 @@
       already_initialized: "已经初始化过了。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。",
+      invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+      bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -291,12 +299,14 @@
       none: "",
     };
     const INIT_SOURCE_LOGIN_HINT =
-      "勾选要纳入初始化的平台。使用某个平台前，请先在当前浏览器登录该平台账号；勾选会同时开启该来源。";
+      "勾选要纳入初始化的平台，勾选会同时开启该来源。Bangumi 使用公开 API，不需登录；其他平台请先在当前浏览器登录。";
     const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let initPollInFlight = false, initPollPending = false, initOffline = false;
+    let initBangumiUsername = "", initBangumiUsernameTouched = false, initBangumiUsernamePrefilled = false;
+    let initBangumiToken = "";
     // Providers whose api_key is already persisted server-side (GET /api/config
     // returns it masked). Lets a relaunch save step 0 without re-pasting the
     // key: PUT /api/config only touches fields present in the payload.
@@ -575,6 +585,51 @@
         label.append(input, text);
         root.append(label);
       }
+      const bangumiDetail = document.createElement("label");
+      bangumiDetail.className = "init-source-detail";
+      const bangumiText = document.createElement("span");
+      bangumiText.textContent = "Bangumi 公开用户名（可留空，仅启用条目发现）";
+      const bangumiInput = document.createElement("input");
+      bangumiInput.id = "initBangumiUsername";
+      bangumiInput.maxLength = 128;
+      bangumiInput.autocomplete = "off";
+      bangumiInput.value = initBangumiUsername;
+      bangumiInput.disabled = !root.querySelector('input[data-init-source="bangumi"]')?.checked;
+      bangumiInput.addEventListener("input", () => {
+        initBangumiUsername = bangumiInput.value || "";
+        initBangumiUsernameTouched = true;
+      });
+      bangumiDetail.append(bangumiText, bangumiInput);
+      root.append(bangumiDetail);
+
+      // Optional personal access token: identifies the account via /v0/me and
+      // reads private collections; when set the username above is auto-resolved.
+      const bangumiTokenDetail = document.createElement("label");
+      bangumiTokenDetail.className = "init-source-detail";
+      const bangumiTokenText = document.createElement("span");
+      bangumiTokenText.textContent = "Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）";
+      const bangumiTokenInput = document.createElement("input");
+      bangumiTokenInput.id = "initBangumiToken";
+      bangumiTokenInput.type = "password";
+      bangumiTokenInput.maxLength = 512;
+      bangumiTokenInput.autocomplete = "off";
+      bangumiTokenInput.value = initBangumiToken;
+      bangumiTokenInput.disabled = bangumiInput.disabled;
+      bangumiTokenInput.addEventListener("input", () => {
+        initBangumiToken = bangumiTokenInput.value || "";
+      });
+      bangumiTokenDetail.append(bangumiTokenText, bangumiTokenInput);
+      root.append(bangumiTokenDetail);
+      const bangumiTokenHint = document.createElement("p");
+      bangumiTokenHint.className = "hint";
+      bangumiTokenHint.innerHTML = '<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）';
+      root.append(bangumiTokenHint);
+
+      root.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
+        const checked = Boolean(event.currentTarget.checked);
+        bangumiInput.disabled = !checked;
+        bangumiTokenInput.disabled = !checked;
+      });
       const hint = document.createElement("p");
       hint.className = "hint";
       hint.textContent = INIT_SOURCE_LOGIN_HINT;
@@ -1045,6 +1100,27 @@
         setInitReason(INIT_REASON_TEXT.no_sources_selected);
         return;
       }
+      const bangumiUsernameInput = $("#initBangumiUsername");
+      const bangumiUsername = String(
+        bangumiUsernameInput ? bangumiUsernameInput.value : initBangumiUsername
+      ).trim();
+      // Send an explicit username only when the user deliberately edited the
+      // field, or a successful /api/config prefill gave us the value to clear.
+      // Otherwise omit it so the backend keeps the configured username instead
+      // of erasing it with an empty, never-prefilled field.
+      const sendBangumiUsername =
+        initBangumiUsernameTouched && (bangumiUsername !== "" || initBangumiUsernamePrefilled);
+      const bangumiTokenInput = $("#initBangumiToken");
+      const bangumiToken = String(
+        bangumiTokenInput ? bangumiTokenInput.value : initBangumiToken
+      ).trim();
+      if (selected.length === 1 && selected[0] === "bangumi" && !bangumiUsername && !bangumiToken) {
+        renderInitChecklist(status, selected);
+        $("#startInit").disabled = false;
+        $("#startInit").textContent = "开始初始化";
+        setInitReason(INIT_REASON_TEXT.no_profile_signal_sources);
+        return;
+      }
       if (selected.includes("bilibili") && !status?.prerequisites?.bilibili_logged_in) {
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
@@ -1060,16 +1136,25 @@
         return;
       }
 
+      let startBody = {};
       try {
+        const payload = { sources: selected };
+        if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
+          const bangumi = {};
+          if (sendBangumiUsername) bangumi.username = bangumiUsername;
+          // Only send a token the user actually typed; omit otherwise so the
+          // backend keeps any configured token.
+          if (bangumiToken) bangumi.access_token = bangumiToken;
+          payload.source_options = { bangumi };
+        }
         const r = await fetchWithTimeout("/api/init", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sources: selected }),
+          body: JSON.stringify(payload),
         }, 60000);
+        startBody = await r.json().catch(() => ({}));
         if (!r.ok) {
-          let details = {};
-          try { details = await r.json(); } catch {}
-          throw new Error(describeInitReason(details.error || details.reason) || details.detail || `HTTP ${r.status}`);
+          throw new Error(describeInitReason(startBody.error || startBody.reason) || startBody.detail || `HTTP ${r.status}`);
         }
       } catch (e) {
         renderInitChecklist(status, selected);
@@ -1081,6 +1166,12 @@
       connectInitStream();
       renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
       scheduleInitPoll(initStreamReady() ? INIT_STREAM_WATCHDOG_MS : INIT_START_POLL_MS);
+      // Surface backend warnings from the 202 (e.g. Bangumi selected without a
+      // public username → discovery-only). setInitReason renders via textContent.
+      const startWarnings = Array.isArray(startBody.warnings)
+        ? startBody.warnings.filter((text) => typeof text === "string" && text.trim())
+        : [];
+      if (startWarnings.length) setInitReason(startWarnings.join(" "), "warn");
     }
 
     async function cancelGuidedInit() {
@@ -1133,6 +1224,18 @@
         if (r.ok) {
           const data = await r.json();
           const llm = (data.config || data)?.llm || {};
+          const bangumiUsername = (data.config || data)?.sources?.bangumi?.username || "";
+          if (!initBangumiUsernameTouched) {
+            initBangumiUsername = String(bangumiUsername);
+            // A successful prefill populated the field; an explicit clear
+            // afterwards deliberately sends "" while an untouched or config-
+            // failed empty field omits the username to keep the configured one.
+            initBangumiUsernamePrefilled = true;
+          }
+          const bangumiInput = $("#initBangumiUsername");
+          if (bangumiInput && !initBangumiUsernameTouched) {
+            bangumiInput.value = initBangumiUsername;
+          }
           for (const [name, cfg] of Object.entries(llm)) {
             if (cfg && typeof cfg === "object") {
               savedProviderConfigs.set(name, { ...cfg });

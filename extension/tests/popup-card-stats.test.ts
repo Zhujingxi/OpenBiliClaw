@@ -26,6 +26,8 @@ test("popup exposes the shared count formatter + stats builder", () => {
     assert.ok(popupJs.includes(marker), `missing stats segment ${marker}`);
   }
   assert.ok(popupJs.includes('segments.join(" · ")'), "segments must join with ' · '");
+  assert.ok(!popupJs.includes("formatCountCn(item.source_rank)"), "rank must stay an ordinal");
+  assert.ok(popupJs.includes("segments.push(`排名 #${sourceRank}`)"));
 });
 
 test("recommendation card appends the stats element", () => {
@@ -69,6 +71,9 @@ test("delight normalizer threads the raw count fields through", () => {
     "comment_count",
     "favorite_count",
     "danmaku_count",
+    "rating_score",
+    "rating_count",
+    "source_rank",
   ]) {
     assert.ok(
       popupHelpers.includes(`${field}: Number(item?.${field}`),

@@ -2280,7 +2280,16 @@ class TestBackendAPI:
         assert response.status_code == 200
         body = response.json()
         # One status item per source, each with the unified shape.
-        for key in ("bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"):
+        for key in (
+            "bilibili",
+            "xiaohongshu",
+            "douyin",
+            "youtube",
+            "twitter",
+            "zhihu",
+            "reddit",
+            "bangumi",
+        ):
             assert key in body, f"{key} missing from sources status"
             item = body[key]
             assert set(item) >= {"enabled", "state", "detail", "logged_in"}
@@ -2298,6 +2307,84 @@ class TestBackendAPI:
             "stale",
             "error",
         }
+        assert body["bangumi"]["state"] == "disabled"
+        assert body["bangumi"]["logged_in"] is False
+
+    def test_bangumi_source_status_uses_local_readiness_for_logged_in_flag(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-source-status.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        unverified = client.get("/api/sources/status").json()["bangumi"]
+
+        assert unverified["state"] == "unverified"
+        assert unverified["logged_in"] is False
+
+        database.conn.execute(
+            "INSERT INTO bangumi_discovery_runs(mode, units, discovered, reason) "
+            "VALUES ('search', 1, 1, 'ok')"
+        )
+        database.conn.commit()
+        ready = client.get("/api/sources/status").json()["bangumi"]
+
+        assert ready["state"] == "ready"
+        assert ready["logged_in"] is True
+
+    def test_bangumi_status_exposes_token_state_three_states(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.runtime.bangumi_producer import (
+            BangumiDiscoveryProducer,
+            _persist_token_rejection,
+            _token_fingerprint,
+        )
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.bangumi.enabled = True
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "bangumi-token-state.db")
+        database.initialize()
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        # No token configured: the token_state dimension stays empty.
+        no_token = client.get("/api/sources/status").json()["bangumi"]
+        assert no_token["token_state"] == ""
+
+        # Token configured, no rejection marker: ok.
+        cfg.sources.bangumi.access_token = "tok"
+        ok = client.get("/api/sources/status").json()["bangumi"]
+        assert ok["token_state"] == "ok"
+        assert "无需登录" not in ok["detail"]
+
+        # A persisted rejection marker surfaces the actionable warning.
+        BangumiDiscoveryProducer(
+            database=database,
+            soul_engine=object(),
+            client=object(),
+            enabled=True,
+        )._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("tok"))
+        rejected = client.get("/api/sources/status").json()["bangumi"]
+        assert rejected["token_state"] == "rejected"
+        assert "已被拒绝" in rejected["detail"]
 
     def test_sources_credentials_returns_current_local_credentials(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2338,6 +2425,8 @@ class TestBackendAPI:
         assert "不代表账号登录" in body["xiaohongshu"]["detail"]
         assert body["youtube"]["available"] is False
         assert body["zhihu"]["available"] is False
+        assert body["bangumi"]["available"] is False
+        assert body["bangumi"]["label"] == "可选个人令牌"
 
         masked = client.get("/api/sources/credentials").json()
         assert masked["bilibili"]["value"] != body["bilibili"]["value"]
@@ -5588,6 +5677,9 @@ class TestBackendAPI:
                     "danmaku_count": 890,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 987654321,
                     "published_at": "2026-07-08T06:30:00Z",
                     "published_label": "3 days ago",
@@ -5614,6 +5706,9 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 0,
                     "published_at": "",
                     "published_label": "",
@@ -5835,6 +5930,9 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "rating_score": 0.0,
+                    "rating_count": 0,
+                    "source_rank": 0,
                     "up_mid": 0,
                     "published_at": "",
                     "published_label": "",
@@ -6174,6 +6272,152 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert memory.events[0]["metadata"]["source_platform"] == "bilibili"
         assert "在B 站忽略了" in str(memory.events[0]["context"])
+
+    def test_feedback_endpoint_preserves_bangumi_source_platform(self) -> None:
+        """Bangumi recommendation feedback (点赞 like + 不感兴趣 dismiss) must
+        carry ``source_platform='bangumi'`` onto the propagated event so profile
+        signals stay attributed to Bangumi rather than the bilibili default, and
+        the context string renders the Bangumi platform label."""
+        from fastapi.testclient import TestClient
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class FakeDatabase:
+            def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object]:
+                return {
+                    "id": recommendation_id,
+                    "bvid": "326",
+                    "title": "Cowboy Bebop",
+                    "source_platform": "bangumi",
+                }
+
+            def update_recommendation_feedback(
+                self,
+                recommendation_id: int,
+                *,
+                feedback_type: str,
+                feedback_note: str = "",
+            ) -> None:
+                return None
+
+        for feedback_type, verb in (("like", "点赞了"), ("dismiss", "忽略了")):
+            memory = FakeMemoryManager()
+            client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+            response = client.post(
+                "/api/feedback",
+                json={"recommendation_id": 11, "feedback_type": feedback_type, "note": ""},
+            )
+            assert response.status_code == 200, response.text
+            event = memory.events[0]
+            assert event["metadata"]["source_platform"] == "bangumi"
+            assert event["metadata"]["feedback_type"] == feedback_type
+            assert f"在Bangumi{verb}" in str(event["context"])
+
+    def test_saved_endpoint_round_trips_bangumi_item_key(self, tmp_path: Path) -> None:
+        """A Bangumi card saved via /api/saved canonicalizes to item_key
+        'bangumi:<id>' and passes item-key validation on the status read-back —
+        proving the saved surface accepts the Bangumi platform end-to-end."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.saved_sync.router import NativeSaveRouter
+        from openbiliclaw.saved_sync.service import SavedSyncService
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / "saved-bangumi.db")
+        database.initialize()
+        app = create_app(
+            memory_manager=SimpleNamespace(
+                load_discovery_runtime_state=lambda: {},
+                load_cognition_updates=lambda: [],
+            ),
+            database=database,
+            soul_engine=SimpleNamespace(get_profile=lambda: None),
+        )
+        # Bangumi is read-only (no native write-back adapter); the local save
+        # still commits and canonicalizes the item_key.
+        app.state.runtime_context.saved_sync_service = SavedSyncService(
+            database, NativeSaveRouter([])
+        )
+        client = TestClient(app)
+
+        response = client.post(
+            "/api/saved/favorite",
+            json={
+                "source_platform": "bangumi",
+                "content_id": "326",
+                "content_url": "https://bgm.tv/subject/326",
+                "content_type": "anime",
+                "title": "攻壳机动队",
+                "author_name": "",
+                "cover_url": "",
+                "note": "",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["item_key"] == "bangumi:326"
+        assert database.get_saved_membership("favorite", "bangumi:326") is not None
+
+        status = client.get(
+            "/api/saved/favorite/status", params={"item_key": "bangumi:326"}
+        )
+        assert status.status_code == 200, status.text
+        assert status.json()["saved"] is True
+
+    def test_chat_turn_endpoint_accepts_bangumi_delight_subject(self, tmp_path: Path) -> None:
+        """The 聊一聊 delight entry must accept a Bangumi card payload (subject_id
+        + subject_title) without erroring; the dialogue receives the context and
+        the turn completes with the Bangumi subject echoed back."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        class FakeDialogue:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            async def respond(self, user_message: str) -> str:
+                self.messages.append(user_message)
+                await asyncio.sleep(0.01)
+                return "这部番像是从另一个角度补上你的口味。"
+
+        db = Database(tmp_path / "chat-bangumi.db")
+        db.initialize()
+        dialogue = FakeDialogue()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=dialogue,
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-bangumi-1",
+                    "session": "popup",
+                    "scope": "delight",
+                    "subject_id": "326",
+                    "subject_title": "Cowboy Bebop",
+                    "message": "为什么这部番会推荐给我",
+                },
+            )
+            assert response.status_code == 200, response.text
+            turn = response.json()
+            for _ in range(50):
+                time.sleep(0.02)
+                turn = client.get("/api/chat/turns/turn-bangumi-1").json()
+                if turn["status"] == "completed":
+                    break
+            assert turn["status"] == "completed"
+            assert turn["scope"] == "delight"
+            assert turn["subject_id"] == "326"
+            assert dialogue.messages  # bangumi subject payload reached the dialogue
+            assert "Cowboy Bebop" in dialogue.messages[0]
 
     def test_feedback_endpoint_rejects_unknown_feedback_type(self) -> None:
         from fastapi.testclient import TestClient
@@ -9122,6 +9366,19 @@ class TestBackendAPI:
         assert signal.payload["source_platform"] == "reddit"
         assert signal.payload["content_url"] == "https://www.reddit.com/comments/abc123/"
 
+    def test_recommendation_click_builds_bangumi_fallback_url(self) -> None:
+        """Bangumi subjects must never fall back to a Bilibili video URL."""
+        from openbiliclaw.api.app import _fallback_recommendation_click_url
+
+        assert (
+            _fallback_recommendation_click_url(
+                source_platform="bangumi",
+                content_id="326",
+                bvid="326",
+            )
+            == "https://bgm.tv/subject/326"
+        )
+
     def test_recommendation_click_endpoint_persists_dwell_fields(self) -> None:
         """When the extension reports dwell on the click-through, those
         fields flow into the persisted click event so storage can classify
@@ -10180,6 +10437,246 @@ class TestBackendAPI:
         assert data["config"]["sources"]["reddit"]["daily_subreddit_budget"] == 4
         assert data["config"]["scheduler"]["pool_source_shares"]["reddit"] == 3
 
+    def test_put_config_persists_and_validates_bangumi_source(self, monkeypatch, tmp_path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            )
+        )
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        response = client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "bangumi": {
+                        "enabled": True,
+                        "username": " sai ",
+                        "subject_types": ["anime", "book", "music"],
+                        "source_modes": ["search", "ranked", "latest"],
+                        "daily_search_budget": 21,
+                        "daily_ranked_budget": 8,
+                        "daily_latest_budget": 5,
+                        "request_interval_seconds": 2,
+                        "min_interval_minutes": 30,
+                        "bootstrap_limit": 250,
+                    }
+                },
+                "scheduler": {"pool_source_shares": {"bilibili": 8, "bangumi": 3}},
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.enabled is True
+        assert cfg.sources.bangumi.username == "sai"
+        assert cfg.sources.bangumi.subject_types == ("anime", "book", "music")
+        assert cfg.sources.bangumi.source_modes == ("search", "ranked", "latest")
+        assert cfg.sources.bangumi.bootstrap_limit == 250
+        assert cfg.scheduler.pool_source_shares["bangumi"] == 3
+        assert response.json()["config"]["sources"]["bangumi"]["username"] == "sai"
+
+        invalid = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"username": "bad/name"}}},
+        )
+        assert invalid.status_code == 400
+        assert "username" in invalid.json()["detail"].lower()
+
+        invalid_mode = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"source_modes": ["hot"]}}},
+        )
+        assert invalid_mode.status_code == 400
+        assert "source_modes" in invalid_mode.json()["detail"]
+
+    def _bangumi_token_put_app(self, monkeypatch, tmp_path):
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            )
+        )
+        cfg.sources.bangumi.enabled = True
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        database = Database(tmp_path / "bangumi-token-put.db")
+        database.initialize()
+        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        return cfg, database, TestClient(app)
+
+    def test_put_config_bangumi_token_validates_live_and_writes_username(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.runtime.bangumi_producer import (
+            BangumiDiscoveryProducer,
+            _persist_token_rejection,
+            _read_token_rejection,
+            _token_fingerprint,
+        )
+
+        cfg, database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+
+        async def _fake_resolve(token, **_kw):
+            assert token == "live-token"
+            return "resolveduser"
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        # Pre-seed a stale rejection marker; a successful save must clear it.
+        BangumiDiscoveryProducer(
+            database=database, soul_engine=object(), client=object(), enabled=True
+        )._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("old-token"))
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "live-token"}}},
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.access_token == "live-token"
+        # /v0/me is the source of truth for the username.
+        assert cfg.sources.bangumi.username == "resolveduser"
+        assert _read_token_rejection(database) is None
+
+    def test_put_config_bangumi_token_401_rejected(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+
+        async def _reject(_token, **_kw):
+            raise BangumiAPIError("unauthorized", "denied", status_code=401)
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _reject,
+        )
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "bad-token"}}},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_bangumi_access_token"
+        # A rejected token is never persisted.
+        assert cfg.sources.bangumi.access_token == ""
+
+    def test_put_config_bangumi_token_check_failed_on_network(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+
+        async def _down(_token, **_kw):
+            raise BangumiAPIError("network_error", "unreachable")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _down,
+        )
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "some-token"}}},
+        )
+
+        assert response.status_code == 502
+        assert response.json()["error"] == "bangumi_token_check_failed"
+        assert cfg.sources.bangumi.access_token == ""
+
+    def test_put_config_bangumi_clear_token_is_offline_and_clears_marker(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.runtime.bangumi_producer import (
+            BangumiDiscoveryProducer,
+            _persist_token_rejection,
+            _read_token_rejection,
+            _token_fingerprint,
+        )
+
+        cfg, database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+        cfg.sources.bangumi.access_token = "existing"
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("clearing a token must not hit the network")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _boom,
+        )
+        BangumiDiscoveryProducer(
+            database=database, soul_engine=object(), client=object(), enabled=True
+        )._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("existing"))
+
+        response = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": ""}}},
+        )
+
+        assert response.status_code == 200, response.text
+        assert cfg.sources.bangumi.access_token == ""
+        assert _read_token_rejection(database) is None
+
+    def test_put_config_bangumi_masked_or_omitted_token_no_network(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
+        cfg.sources.bangumi.access_token = "keepme"
+
+        def _boom(*_a, **_kw):
+            raise AssertionError("unchanged token must not trigger a /v0/me call")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _boom,
+        )
+
+        # Omitted key: token untouched.
+        omitted = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"username": "sai"}}},
+        )
+        assert omitted.status_code == 200, omitted.text
+        assert cfg.sources.bangumi.access_token == "keepme"
+
+        # Masked echo (contains the **** mask marker): treated as unchanged.
+        masked = client.put(
+            "/api/config",
+            json={"sources": {"bangumi": {"access_token": "keep****eep"}}},
+        )
+        assert masked.status_code == 200, masked.text
+        assert cfg.sources.bangumi.access_token == "keepme"
+
     def test_put_config_updates_embedding_credentials(
         self,
         monkeypatch,
@@ -10796,12 +11293,18 @@ class TestEmbeddingAndCompatProviderE2E:
         cfg.sources.twitter.daily_search_budget = 7
         cfg.sources.twitter.daily_feed_budget = 14
         cfg.sources.twitter.daily_creator_budget = 5
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "sai"
+        cfg.sources.bangumi.subject_types = ("anime", "book")
+        cfg.sources.bangumi.source_modes = ("search", "ranked")
+        cfg.sources.bangumi.daily_search_budget = 23
         cfg.scheduler.pool_source_shares = {
             "bilibili": 6,
             "xiaohongshu": 2,
             "douyin": 2,
             "youtube": 1,
             "twitter": 3,
+            "bangumi": 4,
         }
         cfg.scheduler.account_sync_interval_hours = 9
         cfg.scheduler.refresh_check_interval_seconds = 75
@@ -10872,6 +11375,19 @@ class TestEmbeddingAndCompatProviderE2E:
             "subreddit",
             "related",
         ]
+        assert data["sources"]["bangumi"] == {
+            "enabled": True,
+            "username": "sai",
+            "subject_types": ["anime", "book"],
+            "source_modes": ["search", "ranked"],
+            "daily_search_budget": 23,
+            "daily_ranked_budget": 100,
+            "daily_latest_budget": 100,
+            "request_interval_seconds": 1,
+            "min_interval_minutes": 60,
+            "bootstrap_limit": 300,
+            "access_token_set": False,
+        }
         assert data["scheduler"]["pool_source_shares"] == {
             "bilibili": 6,
             "xiaohongshu": 2,
@@ -10880,6 +11396,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "twitter": 3,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 4,
         }
         assert data["scheduler"]["account_sync_interval_hours"] == 9
         assert data["scheduler"]["refresh_check_interval_seconds"] == 75
@@ -11268,6 +11785,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "twitter": 1,
             "zhihu": 1,
             "reddit": 1,
+            "bangumi": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.signal_event_threshold == 9
@@ -11406,6 +11924,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "bangumi": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -11415,6 +11934,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": False,
                 "zhihu": False,
                 "reddit": False,
+                "bangumi": False,
             },
             "suggested_shares": {
                 "bilibili": 8,
@@ -11492,6 +12012,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "bangumi": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -11501,6 +12022,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": False,
                 "zhihu": False,
                 "reddit": True,
+                "bangumi": False,
             },
             "suggested_shares": {
                 "bilibili": 6,
@@ -12196,6 +12718,474 @@ class TestGuidedInitEndpoints:
         assert captured["include_bili"] is False
         assert captured["include_reddit"] is True
         assert db.get_latest_init_run() is not None
+
+    def test_init_rejects_bangumi_only_without_public_username(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bangumi"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "no_profile_signal_sources"
+        assert db.get_latest_init_run() is None
+
+    def test_init_accepts_scoped_bangumi_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"username": " sai "}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "sai"
+
+    def test_init_mixed_sources_allow_discovery_only_bangumi(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "mixed-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "previous-user"
+        app.state.runtime_context.config = cfg
+        app.state.runtime_context.degraded = True
+        saved_usernames: list[str] = []
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda saved: saved_usernames.append(saved.sources.bangumi.username),
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["reddit", "bangumi"],
+                    "source_options": {"bangumi": {"username": ""}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            assert resp.json()["warnings"]
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_reddit"] is True
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == ""
+        assert cfg.sources.bangumi.username == ""
+        assert saved_usernames == [""]
+
+    def test_init_uses_configured_bangumi_username_when_option_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "configured-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        cfg.sources.bangumi.enabled = True
+        cfg.sources.bangumi.username = "configured-user"
+        app.state.runtime_context.config = cfg
+        captured = self._capture_run_guided_init(monkeypatch)
+
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "configured-user"
+
+    def test_init_accepts_bangumi_access_token_and_resolves_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        cfg = Config()
+        data_dir = tmp_path / "token-bangumi-data"
+        data_dir.mkdir()
+        cfg.data_dir = str(data_dir)
+        app.state.runtime_context.config = cfg
+        app.state.runtime_context.degraded = True
+
+        async def _fake_resolve(token, **kwargs):
+            assert token == "tok-123"
+            return "token-owner"
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        saved: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda cfg: saved.append(
+                (cfg.sources.bangumi.username, cfg.sources.bangumi.access_token)
+            ),
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    # A username differing from /v0/me should be overridden.
+                    "source_options": {
+                        "bangumi": {"username": "typed-name", "access_token": " tok-123 "}
+                    },
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            assert any("token-owner" in w for w in resp.json().get("warnings", []))
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "token-owner"
+        assert captured["bangumi_token"] == "tok-123"
+        # The validated token + resolved username are persisted for later syncs.
+        assert saved and saved[-1] == ("token-owner", "tok-123")
+
+    def test_init_rejects_invalid_bangumi_access_token(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+
+        async def _fake_resolve(token, **kwargs):
+            raise BangumiAPIError("unauthorized", "denied", status_code=401)
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"access_token": "expired"}},
+                },
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_bangumi_access_token"
+        assert db.get_latest_init_run() is None
+
+    def _install_fake_bangumi_user_api(self, monkeypatch, users: dict[str, dict] | Exception):
+        """Stub BangumiClient.get_user for the identity-verify path.
+
+        ``users`` maps lookup (username or uid string) → user object; a missing
+        key raises ``not_found``. Passing an Exception makes every lookup fail
+        with it (network-failure path).
+        """
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        lookups: list[str] = []
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def get_user(self, username: str):
+                lookups.append(username)
+                if isinstance(users, Exception):
+                    raise users
+                if username not in users:
+                    raise BangumiAPIError("not_found", "missing", status_code=404)
+                return users[username]
+
+        monkeypatch.setattr("openbiliclaw.sources.bangumi_client.BangumiClient", _FakeClient)
+        return lookups
+
+    def _identity_state_app(self, tmp_path: Path):
+        app, _ = self._make_app(tmp_path)
+        saved_states: list[dict[str, object]] = []
+        state: dict[str, object] = {}
+
+        def _update(mutator):
+            mutator(state)
+            saved_states.append(dict(state))
+            return state
+
+        app.state.runtime_context.runtime_controller = SimpleNamespace(
+            memory_manager=SimpleNamespace(
+                load_discovery_runtime_state=lambda: dict(state),
+                update_discovery_runtime_state=_update,
+            )
+        )
+        return app, state, saved_states
+
+    def test_bangumi_identity_endpoint_persists_public_identity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            {"sai": {"id": 123456, "username": "sai", "nickname": "Sai"}},
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": " sai "},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json() == {"ok": True, "uid": "123456", "username": "sai"}
+            # Idempotent second post: no extra write.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": "sai"},
+            )
+            assert resp2.status_code == 200
+            # Missing / non-positive uid is rejected outright.
+            assert (
+                client.post("/api/sources/bangumi/identity", json={"username": "sai"}).status_code
+                == 422
+            )
+            assert (
+                client.post(
+                    "/api/sources/bangumi/identity", json={"uid": 0, "username": "sai"}
+                ).status_code
+                == 422
+            )
+
+        assert saved_states[0]["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+        assert len(saved_states) == 1  # duplicate post did not rewrite
+        assert state["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+
+    def test_bangumi_identity_discards_username_belonging_to_another_uid(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: DOM scrape once reported a timeline stranger's username."""
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            # The stranger from the real E2E: yuzzyu belongs to uid 1216399.
+            {"yuzzyu": {"id": 1216399, "username": "yuzzyu"}},
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 999999001, "username": "yuzzyu"},
+            )
+            assert resp.status_code == 200
+            # Username discarded, uid kept — never persist a stranger identity.
+            assert resp.json() == {"ok": True, "uid": "999999001", "username": ""}
+            # A username that doesn't exist at all is discarded too.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 999999001, "username": "ghost-user"},
+            )
+            assert resp2.json()["username"] == ""
+        assert state["bangumi_self_info"] == {"uid": "999999001", "username": ""}
+
+    def test_bangumi_identity_uid_only_resolves_username_from_api(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default-slug users resolve from a bare uid (username == str(uid))."""
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            {"474349": {"id": 474349, "username": "474349", "nickname": "玉之米"}},
+        )
+        with TestClient(app) as client:
+            resp = client.post("/api/sources/bangumi/identity", json={"uid": 474349})
+            assert resp.status_code == 200
+            assert resp.json() == {"ok": True, "uid": "474349", "username": "474349"}
+        assert state["bangumi_self_info"] == {"uid": "474349", "username": "474349"}
+
+    def test_bangumi_identity_uid_only_custom_slug_stays_uid_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/v0/users/{uid} 404s for custom-slug users; keep the uid, no junk."""
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {})
+        with TestClient(app) as client:
+            resp = client.post("/api/sources/bangumi/identity", json={"uid": 1})
+            assert resp.status_code == 200
+            assert resp.json() == {"ok": True, "uid": "1", "username": ""}
+            # A structurally malformed username normalizes to missing first,
+            # then follows the same uid-only path.
+            resp2 = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 1, "username": "bad/name"},
+            )
+            assert resp2.json() == {"ok": True, "uid": "1", "username": ""}
+        assert state["bangumi_self_info"] == {"uid": "1", "username": ""}
+
+    def test_bangumi_identity_network_failure_accepts_dom_report(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Upstream unavailability degrades to best-effort, never a hard fail."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch, BangumiAPIError("timeout", "Bangumi API request timed out")
+        )
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123, "username": "maybe-me"},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"ok": True, "uid": "123", "username": "maybe-me"}
+        assert state["bangumi_self_info"] == {"uid": "123", "username": "maybe-me"}
+
+    def test_bangumi_identity_persisted_during_active_init(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Guided init is exactly when the three-tier account ladder needs the
+        extension's freshly-reported identity, so the init write-guard must let
+        POST /api/sources/bangumi/identity through (never 409 init_running)."""
+        from fastapi.testclient import TestClient
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(
+            monkeypatch,
+            {"sai": {"id": 123456, "username": "sai", "nickname": "Sai"}},
+        )
+        with TestClient(app) as client:
+            app.state.runtime_context.init_coordinator.try_start("active")
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": "sai"},
+            )
+        # Not gated by the init write-guard, and the identity still persists.
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"ok": True, "uid": "123456", "username": "sai"}
+        assert saved_states[0]["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+        assert state["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+
+    def test_init_falls_back_to_extension_reported_bangumi_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.load_bangumi_identity_username = lambda: "ext-user"
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            assert any("ext-user" in w for w in resp.json().get("warnings", []))
+            self._drive_until(client, captured, key="include_bangumi")
+
+        assert captured["include_bangumi"] is True
+        assert captured["bangumi_username"] == "ext-user"
+        assert captured["bangumi_token"] == ""
+
+    def test_init_bangumi_username_priority_ladder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """token /v0/me > explicit username > extension-reported username."""
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.load_bangumi_identity_username = lambda: "ext-user"
+
+        async def _fake_resolve(token, **kwargs):
+            return "token-owner"
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.bangumi_client.resolve_access_token_identity",
+            _fake_resolve,
+        )
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            # 1) token + explicit username + extension → token identity wins.
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {
+                        "bangumi": {"username": "typed-name", "access_token": "tok"}
+                    },
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="include_bangumi")
+            assert captured["bangumi_username"] == "token-owner"
+
+        # 2) explicit username + extension (no token) → explicit wins.
+        app2, _ = self._make_app(tmp_path / "second", prereqs=prereqs)
+        app2.state.load_bangumi_identity_username = lambda: "ext-user"
+        captured2 = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app2) as client:
+            resp = client.post(
+                "/api/init",
+                json={
+                    "sources": ["bangumi"],
+                    "source_options": {"bangumi": {"username": "typed-name"}},
+                },
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured2, key="include_bangumi")
+            assert captured2["bangumi_username"] == "typed-name"
+
+    def test_init_rejects_unknown_source_options(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={"sources": ["reddit"], "source_options": {"weibo": {}}},
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "invalid_source_options"
+        assert db.get_latest_init_run() is None
 
     def _capture_run_guided_init(self, monkeypatch):
         """Replace the shared pipeline with an async capture of its kwargs.

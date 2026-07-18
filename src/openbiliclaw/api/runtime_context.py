@@ -310,6 +310,7 @@ class RuntimeContext:
     llm_registry: Any = None
     llm_service: Any = None
     bilibili_client: Any = None
+    bangumi_client: Any = None
     saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
@@ -584,6 +585,17 @@ class RuntimeContext:
             ),
             proxy=new_config.bilibili.proxy or None,
         )
+        bangumi_cfg = getattr(getattr(new_config, "sources", None), "bangumi", None)
+        new_bangumi_client: Any = None
+        if bool(getattr(bangumi_cfg, "enabled", False)):
+            from openbiliclaw.sources.bangumi_client import BangumiClient
+
+            new_bangumi_client = BangumiClient(
+                access_token=str(getattr(bangumi_cfg, "access_token", "") or "") or None,
+                request_interval_seconds=float(
+                    getattr(bangumi_cfg, "request_interval_seconds", 1.0)
+                ),
+            )
         new_saved_sync_service = SavedSyncService(
             self.database,
             NativeSaveRouter(
@@ -855,6 +867,7 @@ class RuntimeContext:
         new_x_producer: Any = None
         new_zhihu_producer: Any = None
         new_reddit_producer: Any = None
+        new_bangumi_producer: Any = None
         if hasattr(self.database, "conn"):
             from openbiliclaw.runtime.bilibili_producer import BilibiliExtensionSearchProducer
             from openbiliclaw.runtime.xhs_producer import XhsTaskProducer
@@ -962,6 +975,29 @@ class RuntimeContext:
                 candidate_pipeline=new_candidate_pipeline,
                 keyword_fetch=new_keyword_fetch,
             )
+            if new_bangumi_client is not None:
+                from openbiliclaw.runtime.bangumi_producer import BangumiDiscoveryProducer
+
+                new_bangumi_producer = BangumiDiscoveryProducer(
+                    database=self.database,
+                    soul_engine=new_soul_engine,
+                    client=new_bangumi_client,
+                    access_token=str(getattr(bangumi_cfg, "access_token", "") or ""),
+                    enabled=bool(getattr(bangumi_cfg, "enabled", False))
+                    and bool(getattr(sched_cfg, "enabled", True)),
+                    subject_types=tuple(
+                        getattr(bangumi_cfg, "subject_types", ("anime", "book", "game"))
+                    ),
+                    source_modes=tuple(
+                        getattr(bangumi_cfg, "source_modes", ("search", "ranked", "latest"))
+                    ),
+                    daily_search_budget=int(getattr(bangumi_cfg, "daily_search_budget", 300)),
+                    daily_ranked_budget=int(getattr(bangumi_cfg, "daily_ranked_budget", 100)),
+                    daily_latest_budget=int(getattr(bangumi_cfg, "daily_latest_budget", 100)),
+                    min_interval_minutes=int(getattr(bangumi_cfg, "min_interval_minutes", 60)),
+                    candidate_pipeline=new_candidate_pipeline,
+                    keyword_fetch=new_keyword_fetch,
+                )
 
         # P1.6: unified keyword planner — deficit-pulled merged keyword
         # generation. Built as its OWN object (the controller has no
@@ -987,6 +1023,7 @@ class RuntimeContext:
                     new_config,
                     bilibili_client=new_bilibili_client,
                     x_client=new_x_client,
+                    bangumi_client=new_bangumi_client,
                 ),
                 platforms_per_probe=int(inspiration_params.platforms_per_probe),
                 riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
@@ -1034,6 +1071,7 @@ class RuntimeContext:
             x_producer=new_x_producer,
             zhihu_producer=new_zhihu_producer,
             reddit_producer=new_reddit_producer,
+            bangumi_producer=new_bangumi_producer,
             scheduler_config=new_config.scheduler,
             presence=self.presence,
             # gui-init D1: pause the controller's background loops while a guided
@@ -1128,6 +1166,7 @@ class RuntimeContext:
             new_douyin_producer,
             new_youtube_producer,
             new_zhihu_producer,
+            new_bangumi_producer,
         ):
             if producer is not None:
                 producer.candidate_evaluation_owned_by_coordinator = True
@@ -1194,6 +1233,8 @@ class RuntimeContext:
         self.llm_registry = new_registry
         self.llm_service = new_llm_service
         self.bilibili_client = new_bilibili_client
+        old_bangumi_client = self.bangumi_client
+        self.bangumi_client = new_bangumi_client
         self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
@@ -1202,6 +1243,11 @@ class RuntimeContext:
         self.runtime_controller = new_runtime_controller
         self.account_sync_service = new_account_sync
         self.auto_update_service = new_auto_update
+        if old_bangumi_client is not None and old_bangumi_client is not new_bangumi_client:
+            close = getattr(old_bangumi_client, "aclose", None)
+            if callable(close):
+                with suppress(RuntimeError):
+                    self.task_registry.track("close_old_bangumi_client", close())
         if new_inventory_available is not None:
             new_llm_gate.update_inventory(
                 available=new_inventory_available,

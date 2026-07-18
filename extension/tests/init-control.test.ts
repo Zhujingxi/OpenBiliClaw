@@ -280,7 +280,7 @@ test("idle status is not terminal", () => {
 test("reason + start-error text mapping", () => {
   assert.ok(describeInitReason("bilibili_not_logged_in").includes("B 站"));
   assert.equal(describeInitReason("none"), "");
-  assert.equal(describeInitReason("no_profile_signal_sources"), "");
+  assert.ok(describeInitReason("no_profile_signal_sources").includes("Bangumi"));
   assert.equal(describeInitReason("totally_unknown"), "");
   const err = Object.assign(new Error("boom"), {
     status: 409,
@@ -354,7 +354,15 @@ test("init source options: bilibili is default-checked but deselectable, others 
   assert.ok(bili && bili.defaultChecked === true);
   assert.ok(!("required" in bili), "bilibili must no longer be marked required");
   const optional = INIT_SOURCE_OPTIONS.filter((o) => !o.defaultChecked).map((o) => o.key);
-  assert.deepEqual(optional, ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"]);
+  assert.deepEqual(optional, [
+    "xiaohongshu",
+    "douyin",
+    "youtube",
+    "twitter",
+    "zhihu",
+    "reddit",
+    "bangumi",
+  ]);
   // The login reminder copy mentions logging in on this browser.
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("登录"));
 });
@@ -380,6 +388,14 @@ test("init source options: Reddit is present, opt-in, labelled Reddit", () => {
   assert.equal(reddit?.label, "Reddit");
 });
 
+test("init source options: Bangumi is anonymous and opt-in", () => {
+  const bangumi = INIT_SOURCE_OPTIONS.find((o) => o.key === "bangumi");
+  assert.ok(bangumi, "bangumi option must exist");
+  assert.ok(!bangumi?.defaultChecked);
+  assert.equal(bangumi?.label, "Bangumi");
+  assert.ok(INIT_SOURCE_LOGIN_HINT.includes("无需登录"));
+});
+
 test("start button allows Reddit as the only profile signal source", () => {
   const state = initStartButtonState(
     statusWith({
@@ -401,11 +417,12 @@ test("start button allows Reddit as the only profile signal source", () => {
 });
 
 test("initSourceLabels maps known keys and passes unknowns through", () => {
-  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "weibo"]), [
+  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "bangumi", "weibo"]), [
     "B 站",
     "小红书",
     "知乎",
     "Reddit",
+    "Bangumi",
     "weibo",
   ]);
   assert.deepEqual(initSourceLabels(undefined as unknown as string[]), []);

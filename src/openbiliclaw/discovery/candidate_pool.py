@@ -66,6 +66,9 @@ class DiscoveryCandidateWrite:
     reply_count: int = 0
     retweet_count: int = 0
     bookmark_count: int = 0
+    rating_score: float = 0.0
+    rating_count: int = 0
+    source_rank: int = 0
     tags: list[str] = field(default_factory=list)
     source_context: str = ""
     candidate_tier: str = "primary"
@@ -91,6 +94,8 @@ def _canonical_platform(raw_platform: object) -> str:
         return "twitter"
     if raw in {"zhihu", "知乎"}:
         return "zhihu"
+    if raw in {"bangumi", "bgm"}:
+        return "bangumi"
     return raw or "unknown"
 
 
@@ -203,6 +208,9 @@ def discovered_content_to_candidate_write(
         reply_count=item.reply_count,
         retweet_count=item.retweet_count,
         bookmark_count=item.bookmark_count,
+        rating_score=item.rating_score,
+        rating_count=item.rating_count,
+        source_rank=item.source_rank,
         tags=list(item.tags),
         source_context=source_context,
         candidate_tier=item.candidate_tier,
@@ -263,6 +271,9 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
         reply_count=int(row.get("reply_count") or 0),
         retweet_count=int(row.get("retweet_count") or 0),
         bookmark_count=int(row.get("bookmark_count") or 0),
+        rating_score=float(row.get("rating_score") or 0.0),
+        rating_count=int(row.get("rating_count") or 0),
+        source_rank=int(row.get("source_rank") or 0),
         tags=_json_list(row.get("tags")),
         topic_key=str(row.get("topic_key") or ""),
         topic_group=str(row.get("topic_group") or ""),

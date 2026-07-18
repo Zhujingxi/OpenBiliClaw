@@ -32,6 +32,7 @@ import {
   platformDisplayName,
   probeMessageKey,
   reconcileRecommendationReplacement,
+  resolveInitBangumiUsername,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -161,6 +162,10 @@ const state = {
   runtimeStatus: null,
   runtimeEvent: null,
   runtimeConfig: null,
+  initBangumiUsername: "",
+  initBangumiUsernameTouched: false,
+  initBangumiUsernamePrefilled: false,
+  initBangumiToken: "",
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -489,6 +494,17 @@ function renderRuntimeToggles(config = state.runtimeConfig) {
 function applyRuntimeConfig(config) {
   if (!config) return;
   state.runtimeConfig = config;
+  if (!state.initBangumiUsernameTouched) {
+    state.initBangumiUsername = String(config.sources?.bangumi?.username || "").trim();
+    // Mark that a successful /api/config prefill populated the field, so an
+    // explicit clear afterwards is a deliberate reset (sends username="") while
+    // an untouched or never-prefilled empty field omits it (keeps configured).
+    state.initBangumiUsernamePrefilled = true;
+    const input = document.getElementById("initBangumiUsername");
+    if (input instanceof HTMLInputElement) {
+      input.value = state.initBangumiUsername;
+    }
+  }
   renderRuntimeToggles(config);
 }
 
@@ -1354,6 +1370,56 @@ function _renderInitSources() {
     row.append(box, span);
     elements.initSources.append(row);
   }
+  const bangumiRow = document.createElement("label");
+  bangumiRow.className = "init-source-row";
+  const bangumiLabel = document.createElement("span");
+  bangumiLabel.textContent = "Bangumi 公开用户名（可留空，仅启用发现）";
+  const bangumiInput = document.createElement("input");
+  bangumiInput.id = "initBangumiUsername";
+  bangumiInput.maxLength = 128;
+  bangumiInput.autocomplete = "off";
+  bangumiInput.disabled = true;
+  bangumiInput.value = state.initBangumiUsername;
+  bangumiInput.addEventListener("input", () => {
+    state.initBangumiUsername = bangumiInput.value;
+    state.initBangumiUsernameTouched = true;
+  });
+  bangumiRow.append(bangumiLabel, bangumiInput);
+  elements.initSources.append(bangumiRow);
+
+  // Optional personal access token: identifies the account via /v0/me and reads
+  // private collections. When set, the username above is auto-resolved.
+  const bangumiTokenRow = document.createElement("label");
+  bangumiTokenRow.className = "init-source-row";
+  const bangumiTokenLabel = document.createElement("span");
+  bangumiTokenLabel.textContent = "Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）";
+  const bangumiTokenInput = document.createElement("input");
+  bangumiTokenInput.id = "initBangumiToken";
+  bangumiTokenInput.type = "password";
+  bangumiTokenInput.maxLength = 512;
+  bangumiTokenInput.autocomplete = "off";
+  bangumiTokenInput.disabled = true;
+  bangumiTokenInput.value = state.initBangumiToken;
+  bangumiTokenInput.addEventListener("input", () => {
+    state.initBangumiToken = bangumiTokenInput.value;
+  });
+  bangumiTokenRow.append(bangumiTokenLabel, bangumiTokenInput);
+  elements.initSources.append(bangumiTokenRow);
+  const bangumiTokenHint = document.createElement("p");
+  bangumiTokenHint.className = "init-sources-hint";
+  const bangumiTokenLink = document.createElement("a");
+  bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
+  bangumiTokenLink.target = "_blank";
+  bangumiTokenLink.rel = "noopener noreferrer";
+  bangumiTokenLink.textContent = "生成个人令牌";
+  bangumiTokenHint.append(bangumiTokenLink, document.createTextNode("（约 1 年有效，视同密码保管）"));
+  elements.initSources.append(bangumiTokenHint);
+
+  elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
+    const checked = Boolean(event.currentTarget.checked);
+    bangumiInput.disabled = !checked;
+    bangumiTokenInput.disabled = !checked;
+  });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
   hint.textContent = INIT_SOURCE_LOGIN_HINT;
@@ -1372,6 +1438,31 @@ function _readSelectedInitSources() {
     }
   }
   return selected;
+}
+
+function _readInitBangumiUsername() {
+  state.initBangumiUsername = String(
+    document.getElementById("initBangumiUsername")?.value || "",
+  ).trim();
+  return state.initBangumiUsername;
+}
+
+function _readInitBangumiToken() {
+  state.initBangumiToken = String(
+    document.getElementById("initBangumiToken")?.value || "",
+  ).trim();
+  return state.initBangumiToken;
+}
+
+// Decide what Bangumi username (if any) guided init should send, delegating the
+// omit-vs-clear rule to the shared pure helper. Returns the trimmed value to
+// send, or null to omit it so the backend keeps the configured username.
+function _resolveInitBangumiUsernameForSubmit(value) {
+  return resolveInitBangumiUsername({
+    touched: state.initBangumiUsernameTouched,
+    prefilled: state.initBangumiUsernamePrefilled,
+    value,
+  });
 }
 
 // Idle entry: source checkboxes + the actionable button + a one-line note.
@@ -1577,9 +1668,25 @@ function _startInitProgressPoll() {
 async function handleStartInitClick() {
   // Snapshot the source selection BEFORE we replace the panel contents.
   const selectedSources = _readSelectedInitSources();
+  const bangumiUsername = _readInitBangumiUsername();
+  const bangumiUsernameOption = _resolveInitBangumiUsernameForSubmit(bangumiUsername);
+  const bangumiToken = _readInitBangumiToken();
+  // Only send a token when the user typed one; omit otherwise so the backend
+  // keeps any configured token (empty string would clear a stored token).
+  const bangumiTokenOption = bangumiToken ? bangumiToken : null;
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
+    return;
+  }
+  if (
+    selectedSources.length === 1 &&
+    selectedSources[0] === "bangumi" &&
+    !bangumiUsername &&
+    !bangumiToken
+  ) {
+    _setInitStartButton("开始初始化", true);
+    _setInitReason("只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。");
     return;
   }
   _setInitStartButton("检查中…", false);
@@ -1632,15 +1739,30 @@ async function handleStartInitClick() {
   // All conditions pass → start with the chosen sources. The backend
   // re-validates in its critical section, so a race can still 409 — surface
   // that and let the user retry.
+  let startResult;
   try {
-    await startInit({ force: false, sources: selectedSources });
+    startResult = await startInit({
+      force: false,
+      sources: selectedSources,
+      bangumiUsername: bangumiUsernameOption,
+      bangumiToken: bangumiTokenOption,
+    });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
     _setInitStartButton("开始初始化", true);
     _setInitReason(describeInitStartError(error));
     return;
   }
-  setHint("初始化已开始，正在拉取数据…", "info");
+  // The 202 response may carry backend warnings (e.g. Bangumi selected without a
+  // public username → discovery-only). Surface them instead of the generic
+  // "已开始" note so the user knows the run is proceeding with a caveat.
+  const startWarnings = Array.isArray(startResult?.warnings)
+    ? startResult.warnings.filter((text) => typeof text === "string" && text.trim())
+    : [];
+  setHint(
+    startWarnings.length ? startWarnings.join(" ") : "初始化已开始，正在拉取数据…",
+    "info",
+  );
   renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
   _startInitProgressPoll();
 }
@@ -3013,11 +3135,15 @@ function formatCountCn(n) {
 // > 0 appear; when nothing qualifies the result is "" (render nothing).
 function recommendationStats(item) {
   const segments = [];
+  const sourceRank = Math.trunc(Number(item?.source_rank) || 0);
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
+  if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
+  if (item?.rating_count > 0) segments.push(`${formatCountCn(item.rating_count)} 人评分`);
+  if (sourceRank > 0) segments.push(`排名 #${sourceRank}`);
   return segments.join(" · ");
 }
 
@@ -5765,7 +5891,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -5791,7 +5917,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = `这位 UP：${item.up_name}`;
+    metaLine.textContent = item.up_name ? `这位 UP：${item.up_name}` : "";
     appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
@@ -7071,6 +7197,37 @@ function bindSettings() {
     return selected.length > 0 ? selected : ["search"];
   }
 
+  const BANGUMI_SOURCE_MODE_FIELDS = [
+    ["search", "cfgBangumiModeSearch"],
+    ["ranked", "cfgBangumiModeRanked"],
+    ["latest", "cfgBangumiModeLatest"],
+  ];
+  const BANGUMI_SUBJECT_TYPE_FIELDS = [
+    ["anime", "cfgBangumiTypeAnime"],
+    ["book", "cfgBangumiTypeBook"],
+    ["game", "cfgBangumiTypeGame"],
+    ["music", "cfgBangumiTypeMusic"],
+    ["real", "cfgBangumiTypeReal"],
+  ];
+
+  function setCheckedValues(fields, rawValues) {
+    const fallback = fields.map(([value]) => value);
+    const selected = new Set(
+      (Array.isArray(rawValues) && rawValues.length > 0 ? rawValues : fallback)
+        .map((value) => String(value).trim())
+        .filter(Boolean),
+    );
+    for (const [value, id] of fields) {
+      const el = document.getElementById(id);
+      if (el) el.checked = selected.has(value);
+    }
+  }
+
+  function collectCheckedValues(fields, fallback) {
+    const selected = fields.filter(([, id]) => checked(id)).map(([value]) => value);
+    return selected.length > 0 ? selected : fallback;
+  }
+
   // Unified per-source login / cookie status from GET /api/sources/status,
   // rendered as a uniform colored-dot line inside every source card. Only X is
   // live-validated (state ok); the rest report local cookie/token readiness.
@@ -7089,6 +7246,7 @@ function bindSettings() {
     error: "#e74c3c",
     expired_cookie: "#e74c3c",
     blocked: "#e74c3c",
+    disabled: "#9aa0a6",
   };
   const SOURCE_STATUS_LABEL = {
     ok: "接入可用",
@@ -7106,8 +7264,14 @@ function bindSettings() {
     expired: "凭据失效",
     expired_cookie: "Cookie 失效",
     blocked: "接入受阻",
+    disabled: "来源未启用",
   };
-  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
+  const BANGUMI_SAVE_ERROR_MESSAGES = {
+    invalid_bangumi_access_token:
+      "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
+    bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
+  };
 
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
@@ -7129,12 +7293,15 @@ function bindSettings() {
         row.style.opacity = "1";
         continue;
       }
+      // A rejected personal token (Bangumi) overrides the run-derived state so
+      // the user sees an actionable warning + a red dot, not a green chip.
+      const tokenRejected = item.token_state === "rejected";
       if (detail) {
-        const label = SOURCE_STATUS_LABEL[item.state] || "";
+        const label = tokenRejected ? "令牌已失效" : (SOURCE_STATUS_LABEL[item.state] || "");
         const statusDetail = label && item.detail ? `${label}：${item.detail}` : label || item.detail || "";
         detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
       }
-      if (dot) dot.style.color = SOURCE_STATUS_DOT[item.state] || "#9aa0a6";
+      if (dot) dot.style.color = tokenRejected ? "#e74c3c" : (SOURCE_STATUS_DOT[item.state] || "#9aa0a6");
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
   }
@@ -7269,6 +7436,36 @@ function bindSettings() {
     setVal("cfgRedditDailyRelatedBudget", cfg.sources?.reddit?.daily_related_budget);
     setVal("cfgRedditRequestInterval", cfg.sources?.reddit?.request_interval_seconds);
     setVal("cfgRedditMinInterval", cfg.sources?.reddit?.min_interval_minutes);
+    const bangumiEnabled = document.getElementById("cfgBangumiEnabled");
+    if (bangumiEnabled) bangumiEnabled.checked = cfg.sources?.bangumi?.enabled === true;
+    setVal("cfgBangumiUsername", cfg.sources?.bangumi?.username);
+    {
+      // Token is a secret and never returned by GET; access_token_set only
+      // signals whether one is stored. Keep the field empty and reflect the
+      // stored state in the placeholder so an untouched save never clobbers it.
+      const bangumiToken = document.getElementById("cfgBangumiAccessToken");
+      if (bangumiToken) {
+        bangumiToken.value = "";
+        bangumiToken.placeholder = cfg.sources?.bangumi?.access_token_set
+          ? "已配置（留空保持不变；填写新令牌以替换）"
+          : "填写以自动识别当前用户并读取私密收藏";
+      }
+      // Clear-token is a per-save action; never leave it pre-checked after a
+      // reload, and disable it when nothing is stored to clear.
+      const bangumiClearToken = document.getElementById("cfgBangumiClearToken");
+      if (bangumiClearToken) {
+        bangumiClearToken.checked = false;
+        bangumiClearToken.disabled = cfg.sources?.bangumi?.access_token_set !== true;
+      }
+    }
+    setCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, cfg.sources?.bangumi?.source_modes);
+    setCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, cfg.sources?.bangumi?.subject_types);
+    setVal("cfgBangumiDailySearchBudget", cfg.sources?.bangumi?.daily_search_budget);
+    setVal("cfgBangumiDailyRankedBudget", cfg.sources?.bangumi?.daily_ranked_budget);
+    setVal("cfgBangumiDailyLatestBudget", cfg.sources?.bangumi?.daily_latest_budget);
+    setVal("cfgBangumiRequestInterval", cfg.sources?.bangumi?.request_interval_seconds);
+    setVal("cfgBangumiMinInterval", cfg.sources?.bangumi?.min_interval_minutes);
+    setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
     void renderSourcesStatus();
 
     // General
@@ -7322,6 +7519,7 @@ function bindSettings() {
     setVal("cfgPoolShareTwitter", cfg.scheduler?.pool_source_shares?.twitter);
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
+    setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -7501,6 +7699,28 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
           min_interval_minutes: getInt("cfgRedditMinInterval", 60),
         },
+        bangumi: {
+          enabled: checked("cfgBangumiEnabled"),
+          username: getVal("cfgBangumiUsername"),
+          // Precedence: an explicit "clear token" checkbox sends access_token:""
+          // (backend clears the stored token + rejection marker). Otherwise send
+          // the token only when the user typed one; an empty field means "leave
+          // the stored token unchanged", so omit the key rather than clobbering
+          // the saved token with "".
+          ...(checked("cfgBangumiClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgBangumiAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgBangumiAccessToken") }
+              : {}),
+          subject_types: collectCheckedValues(BANGUMI_SUBJECT_TYPE_FIELDS, ["anime"]),
+          source_modes: collectCheckedValues(BANGUMI_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgBangumiDailySearchBudget", 300),
+          daily_ranked_budget: getInt("cfgBangumiDailyRankedBudget", 100),
+          daily_latest_budget: getInt("cfgBangumiDailyLatestBudget", 100),
+          request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
+          min_interval_minutes: getInt("cfgBangumiMinInterval", 60),
+          bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -7534,6 +7754,7 @@ function bindSettings() {
           twitter: getInt("cfgPoolShareTwitter", 1),
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
+          bangumi: getInt("cfgPoolShareBangumi", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -7803,6 +8024,7 @@ function bindSettings() {
             twitter: checked("cfgTwitterEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
+            bangumi: checked("cfgBangumiEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
@@ -7812,6 +8034,7 @@ function bindSettings() {
             twitter: getInt("cfgPoolShareTwitter", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
+            bangumi: getInt("cfgPoolShareBangumi", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -7822,6 +8045,7 @@ function bindSettings() {
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
+        if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");
@@ -7916,6 +8140,12 @@ function bindSettings() {
         showToast("未授予该后端地址的访问权限，地址未保存。", "error");
       } else if (err?.message === "invalid_backend_scheme") {
         showToast("后端协议无效。", "error");
+      } else if (BANGUMI_SAVE_ERROR_MESSAGES[err?.details?.error]) {
+        // Config PUT rejects a bad/expired Bangumi token live via /v0/me.
+        showToast(
+          err.details.message || BANGUMI_SAVE_ERROR_MESSAGES[err.details.error],
+          "error",
+        );
       } else if (!renderStructuredConfigError(err)) {
         showToast(`保存失败: ${err.message}`, "error");
       }

@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _BILI = "bilibili"
+_BANGUMI = "bangumi"
 _CLOCK = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 
 
@@ -181,6 +182,30 @@ async def test_pipeline_happy_path_persists_keywords_and_upserts_axis(db: Databa
     assert row is not None
     assert int(row["use_count"]) == 1
     assert str(row["status"]) == "active"
+
+
+async def test_pipeline_materializes_bangumi_axis_keywords(db: Database) -> None:
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    payload = _axis_payload()
+    keywords = payload["keywords"]
+    assert isinstance(keywords, list)
+    assert isinstance(keywords[0], dict)
+    keywords[0]["platform"] = _BANGUMI
+    keywords[0]["core_concept"] = "时间循环 独立游戏"
+    keywords[0]["decoration"] = ""
+    llm = _FakeLLM(payload=payload)
+    pipeline = _make_pipeline(
+        db,
+        llm=llm,
+        host=host,
+        provider=_FakeProvider(previews_by_query={}),
+    )
+
+    ledger = await pipeline._run_inspiration_stage([_BANGUMI], profile=profile, digest="d1")
+
+    assert ledger == {_BANGUMI: 1}
+    assert host.inserted == [(_BANGUMI, ["时间循环 独立游戏"])]
 
 
 async def test_pipeline_llm_failure_falls_back_deterministically(db: Database) -> None:

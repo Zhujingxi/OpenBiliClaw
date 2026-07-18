@@ -341,6 +341,7 @@ class ContinuousRefreshController:
     x_producer: Any | None = None
     zhihu_producer: Any | None = None
     reddit_producer: Any | None = None
+    bangumi_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -1417,6 +1418,7 @@ class ContinuousRefreshController:
             ├─ _loop_x_producer()        60s   X (Twitter) discovery when under quota
             ├─ _loop_zhihu_producer()    60s   Zhihu discovery when under quota
             ├─ _loop_reddit_producer()   60s   Reddit command-backed discovery when under quota
+            ├─ _loop_bangumi_producer()  60s   Bangumi official-API discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_keyword_planner()  120s   P1.6 — merged keyword generation (flag-gated)
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
@@ -1459,6 +1461,7 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_x_producer()),
             asyncio.create_task(self._loop_zhihu_producer()),
             asyncio.create_task(self._loop_reddit_producer()),
+            asyncio.create_task(self._loop_bangumi_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_keyword_planner()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
@@ -1745,6 +1748,16 @@ class ContinuousRefreshController:
                 await self._tick_reddit_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
+    async def _loop_bangumi_producer(self) -> None:
+        """Bangumi production — official anonymous API discovery when under quota."""
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_bangumi_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
     async def _loop_keyword_planner(self) -> None:
         """P1.6: deficit-pulled merged keyword generation (flag-gated).
 
@@ -2007,6 +2020,23 @@ class ContinuousRefreshController:
         if not self._is_initialized():
             return
         deficit = self._source_deficit("reddit")
+        if deficit <= 0:
+            return
+        produce_fn = getattr(producer, "produce_if_due", None)
+        if not callable(produce_fn):
+            return
+        limit = max(1, min(deficit, self.discovery_limit))
+        if _call_accepts_limit(produce_fn):
+            await produce_fn(limit=limit)
+        else:
+            await produce_fn()
+
+    async def _tick_bangumi_producer(self) -> None:
+        """Invoke Bangumi discovery when its source-family quota has a deficit."""
+        producer = self.bangumi_producer
+        if producer is None or not self._is_initialized():
+            return
+        deficit = self._source_deficit("bangumi")
         if deficit <= 0:
             return
         produce_fn = getattr(producer, "produce_if_due", None)
@@ -3233,6 +3263,8 @@ class ContinuousRefreshController:
                 stranded.append("zhihu")
             elif source == "reddit" and self.reddit_producer is None:
                 stranded.append("reddit")
+            elif source == "bangumi" and self.bangumi_producer is None:
+                stranded.append("bangumi")
             elif source not in {
                 "bilibili",
                 "xiaohongshu",
@@ -3241,6 +3273,7 @@ class ContinuousRefreshController:
                 "twitter",
                 "zhihu",
                 "reddit",
+                "bangumi",
             }:
                 # Unknown source family with an explicit share.
                 stranded.append(source)

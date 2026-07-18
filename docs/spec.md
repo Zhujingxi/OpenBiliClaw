@@ -6,7 +6,7 @@
 
 ## 1. 项目定位
 
-OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
+OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
 
 **核心理念**：
 - 不是冷冰冰的推荐算法，而是一个**有温度的 AI 朋友**
@@ -138,7 +138,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 | 策略 | 说明 |
 |------|------|
 | **兴趣关键词搜索** | 根据用户画像生成关键词组合搜索 |
-| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；默认关闭，开启后 admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
+| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit / Bangumi、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；默认关闭，开启后 admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
 | **相关推荐链探索** | 从已知好内容出发，沿相关推荐不断深入 |
 | **分区热门/排行榜** | 固定全站榜，并按本地洗牌轮转覆盖非 0 分区榜，结合用户画像筛选 |
 | **UP 主追踪** | 追踪关注的和发现的优质 UP 主的新动态 |
@@ -311,7 +311,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  └──────────────┘ └──────────────┘ └────────────────┘      │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
-│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit=5/1/1/1/1/1/1 │ │
+│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi=5/1/1/1/1/1/1/1 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
 │  │ OpenClaw refresh: first source/eval <=4 -> copy <=4/no split retry -> canonical subset; both hosts recover first │ │
 │  │ reshuffle: PoolServeSnapshot/serve worker -> MMR worker -> isolated atomic persist │ │
@@ -322,7 +322,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │     LLM gate: scheduler + extension presence          │   │
 │  │     Soul taxonomy: CATEGORY_VOCAB + category migration + homonym-aware consolidation │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
-│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit producers: 按平台缺口独立补池 │ │
+│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi producers: 按平台缺口独立补池 │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
 │  │     Interest probes: near 5 + challenge 3 独立 active 额度 │   │
@@ -365,7 +365,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │              │  │ + profile/search/feed/yt/zhihu)│ │ + LLM 抽取)│    │
 │  └──────────────┘  └──────────────────┘  └─────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ sources.platforms：七平台 alias / strategy / URL host      │ │
+│  │ sources.platforms：八平台 alias / strategy / URL host      │ │
 │  │                  → 统一 pool accounting / viewed identity │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -386,6 +386,11 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ RedditDiscoveryProducer: rdt-cli 默认 + 插件 fallback search/hot/subreddit/related -> pending eval │ │
 │  │   Reddit bootstrap_events: saved/upvoted/subscribed -> 首版画像信号 │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ BangumiDiscoveryProducer: 默认匿名 API search/ranked/latest；可选个人令牌读私密收藏(401降级) │ │
+│  │   显式公开 username collections -> 首版画像信号；无 Cookie、无站内写入 │ │
+│  │   扩展身份桥(bgm.tv/bangumi.tv): 上报公开 uid+用户名做零配置账号识别，非任务桥/无行为采集 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
@@ -478,7 +483,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 - [ ] 完善的安装和使用文档
 - [ ] 插件商店发布
 - [ ] 社区 Skill 市场
-- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / 通用 Web，后续继续扩展更多 adapter）
+- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web，后续继续扩展更多 adapter）
 
 ---
 

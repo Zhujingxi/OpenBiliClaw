@@ -143,6 +143,7 @@ test("settings source tab separates every platform into its own block", () => {
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
     "browser",
     "pool",
   ]) {
@@ -361,6 +362,58 @@ test("settings page round-trips Reddit discovery config", () => {
   assert.match(popupJs, /reddit: getInt\("cfgPoolShareReddit", 1\)/);
   assert.match(popupJs, /reddit: checked\("cfgRedditEnabled"\)/);
   assert.match(popupJs, /if \(shares\.reddit !== undefined\) setVal\("cfgPoolShareReddit", shares\.reddit\)/);
+});
+
+test("settings page round-trips Bangumi discovery config", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const id of [
+    "cfgBangumiEnabled",
+    "cfgBangumiUsername",
+    "cfgBangumiModeSearch",
+    "cfgBangumiModeRanked",
+    "cfgBangumiModeLatest",
+    "cfgBangumiTypeAnime",
+    "cfgBangumiTypeBook",
+    "cfgBangumiTypeGame",
+    "cfgBangumiTypeMusic",
+    "cfgBangumiTypeReal",
+    "cfgBangumiDailySearchBudget",
+    "cfgBangumiDailyRankedBudget",
+    "cfgBangumiDailyLatestBudget",
+    "cfgBangumiRequestInterval",
+    "cfgBangumiMinInterval",
+    "cfgBangumiBootstrapLimit",
+    "cfgPoolShareBangumi",
+  ]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  assert.match(popupJs, /cfg\.sources\?\.bangumi\?\.source_modes/);
+  assert.match(popupJs, /cfg\.sources\?\.bangumi\?\.subject_types/);
+  assert.match(popupJs, /username: getVal\("cfgBangumiUsername"\)/);
+  assert.match(popupJs, /daily_search_budget: getInt\("cfgBangumiDailySearchBudget", 300\)/);
+  assert.match(popupJs, /bangumi: getInt\("cfgPoolShareBangumi", 1\)/);
+  assert.match(popupJs, /bangumi: checked\("cfgBangumiEnabled"\)/);
+  assert.match(popupJs, /if \(shares\.bangumi !== undefined\) setVal\("cfgPoolShareBangumi", shares\.bangumi\)/);
+});
+
+test("settings page exposes Bangumi clear-token control and rejected status", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  // C: an explicit "clear token" checkbox that sends access_token:"".
+  assert.match(popupHtml, /id="cfgBangumiClearToken"/);
+  assert.match(popupJs, /checked\("cfgBangumiClearToken"\)/);
+  assert.match(popupJs, /access_token: ""/);
+  // A: a rejected personal token renders an actionable warning + red dot.
+  assert.match(popupJs, /item\.token_state === "rejected"/);
+  assert.match(popupJs, /令牌已失效/);
+  // B: config-save maps the live-validation error codes to friendly text.
+  assert.match(popupJs, /invalid_bangumi_access_token/);
+  assert.match(popupJs, /bangumi_token_check_failed/);
 });
 
 test("settings page round-trips multimodal discovery evaluation controls", () => {

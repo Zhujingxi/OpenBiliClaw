@@ -1393,6 +1393,16 @@
       color: #d93f00;
     }
 
+    .recommendation-source-corner.source-platform-bangumi {
+      background: rgba(105, 80, 161, 0.82);
+      color: #fff;
+    }
+
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-bangumi {
+      background: rgba(105, 80, 161, 0.12);
+      color: #6950a1;
+    }
+
     .recommendation-title {
       font-size: 17px;
       line-height: 1.38;
@@ -5683,6 +5693,49 @@
         </div>
       </div>
 
+      <div class="settings-section settings-source-card" data-source-card="bangumi">
+        <h3><span class="section-icon">B</span> Bangumi</h3>
+        <div class="settings-field-row">
+          <input id="cfgBangumiEnabled" type="checkbox">
+          <label for="cfgBangumiEnabled">启用 Bangumi 来源</label>
+        </div>
+        <p class="settings-hint source-status-row" id="cfgBangumiStatus" data-source-status="bangumi"><span class="src-dot">●</span> <span class="src-detail">Bangumi 来源状态加载中…</span></p>
+        <div class="settings-field">
+          <label for="cfgBangumiUsername">公开用户名（可留空）</label>
+          <input id="cfgBangumiUsername" type="text" maxlength="128" autocomplete="off" placeholder="例如 sai">
+        </div>
+        <div class="settings-field">
+          <label for="cfgBangumiAccessToken">个人令牌（可留空）</label>
+          <input id="cfgBangumiAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="填写以自动识别当前用户并读取私密收藏">
+          <div class="settings-field-row">
+            <input id="cfgBangumiClearToken" type="checkbox">
+            <label for="cfgBangumiClearToken">清除已保存的令牌（本次保存清空并降级为匿名公开发现）</label>
+          </div>
+          <p class="settings-hint">个人令牌可自动识别当前登录账号（含私密收藏），比公开用户名更完整。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变）。</p>
+        </div>
+        <div class="settings-field">
+          <label>内容发现分支</label>
+          <div class="settings-field-row"><input id="cfgBangumiModeSearch" type="checkbox"><label for="cfgBangumiModeSearch">搜索</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiModeRanked" type="checkbox"><label for="cfgBangumiModeRanked">排名</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiModeLatest" type="checkbox"><label for="cfgBangumiModeLatest">按日期浏览（可能含未播条目）</label></div>
+        </div>
+        <div class="settings-field">
+          <label>条目类型</label>
+          <div class="settings-field-row"><input id="cfgBangumiTypeAnime" type="checkbox"><label for="cfgBangumiTypeAnime">动画</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeBook" type="checkbox"><label for="cfgBangumiTypeBook">书籍</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeGame" type="checkbox"><label for="cfgBangumiTypeGame">游戏</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeMusic" type="checkbox"><label for="cfgBangumiTypeMusic">音乐</label></div>
+          <div class="settings-field-row"><input id="cfgBangumiTypeReal" type="checkbox"><label for="cfgBangumiTypeReal">三次元</label></div>
+        </div>
+        <div class="settings-field"><label for="cfgBangumiDailySearchBudget">每日搜索条目</label><input id="cfgBangumiDailySearchBudget" type="number" min="0" step="1" placeholder="300"></div>
+        <div class="settings-field"><label for="cfgBangumiDailyRankedBudget">每日排名条目</label><input id="cfgBangumiDailyRankedBudget" type="number" min="0" step="1" placeholder="100"></div>
+        <div class="settings-field"><label for="cfgBangumiDailyLatestBudget">每日日期条目</label><input id="cfgBangumiDailyLatestBudget" type="number" min="0" step="1" placeholder="100"></div>
+        <div class="settings-field"><label for="cfgBangumiRequestInterval">请求间隔秒数</label><input id="cfgBangumiRequestInterval" type="number" min="0" step="1" placeholder="1"></div>
+        <div class="settings-field"><label for="cfgBangumiMinInterval">最小调度间隔分钟</label><input id="cfgBangumiMinInterval" type="number" min="0" step="1" placeholder="60"></div>
+        <div class="settings-field"><label for="cfgBangumiBootstrapLimit">初始化公开收藏上限</label><input id="cfgBangumiBootstrapLimit" type="number" min="1" step="1" placeholder="300"></div>
+        <p class="settings-hint">官方公开只读 API，无需 Cookie。用户名只用于导入主动公开的收藏；留空仍可使用内容发现。</p>
+      </div>
+
       <div class="settings-section settings-source-card" data-source-card="pool">
         <h3><span class="section-icon">&#x1F4E6;</span> 候选池来源占比</h3>
         <div class="settings-field">
@@ -5712,6 +5765,10 @@
         <div class="settings-field">
           <label for="cfgPoolShareReddit">候选池 Reddit 占比</label>
           <input id="cfgPoolShareReddit" type="number" min="1" step="1" placeholder="1">
+        </div>
+        <div class="settings-field">
+          <label for="cfgPoolShareBangumi">候选池 Bangumi 占比</label>
+          <input id="cfgPoolShareBangumi" type="number" min="1" step="1" placeholder="1">
         </div>
         <div class="settings-actions">
           <button id="cfgSuggestPoolShares" class="settings-save" type="button">按已有信号建议比例</button>
