@@ -970,3 +970,92 @@ def test_setup_wizard_e2e_partial_success_enters_completion_screen(
     )
     assert "后台继续补池" in chromium_page.locator("#doneInit").inner_text()
     assert chromium_page.locator("#finish").is_enabled()
+
+
+def _open_init_sources(page: Any, base_url: str, surface: str) -> tuple[Any, Any]:
+    """Land on the source picker of either surface; return (start, reason)."""
+    if surface == "setup":
+        page.goto(f"{base_url}/setup/")
+        page.locator("#provider").select_option("ollama")
+        page.locator("#saveLlm").click()
+        page.wait_for_selector('[data-panel="1"].active')
+        page.locator("#next1").click()
+        page.wait_for_selector('[data-panel="2"].active')
+        return page.locator("#startInit"), page.locator("#initReason")
+    page.goto(f"{base_url}/web/")
+    page.wait_for_selector(".init-onboarding", state="attached")
+    return page.locator('[data-init-action="start"]'), page.locator(".init-reason")
+
+
+def _select_bangumi_only(page: Any) -> None:
+    page.locator('input[data-init-source="bilibili"]').uncheck()
+    page.locator('input[data-init-source="bangumi"]').check()
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_bangumi_only_without_username_still_reaches_backend(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    """Regression: a client-side Bangumi-only guard blocked /api/init entirely.
+
+    Every GUI surface used to refuse to POST when Bangumi was the only source
+    and neither a username nor a token was typed — the two covered here plus
+    the extension popup, which carried the same block under a different
+    variable name (``selectedSources``), so a narrow grep made it look like an
+    unaffected control. That copy of the backend's admission rule predated the
+    third tier of the account ladder — the identity the browser extension
+    reports from a logged-in bgm.tv page — so zero-config users (the
+    recommended path) could not start an init from any GUI at all. The
+    frontend must hand the decision to the backend.
+    """
+    base_url, stub = guided_init_server
+    _install_fake_runtime_stream(chromium_page)
+
+    start, _ = _open_init_sources(chromium_page, base_url, surface)
+    _select_bangumi_only(chromium_page)
+    start.click()
+
+    chromium_page.wait_for_function("() => window.__obcInitPosted === true")
+    assert stub.init_posts == [{"sources": ["bangumi"]}]
+
+
+@pytest.mark.parametrize("surface", ["setup", "desktop"])
+def test_web_e2e_bangumi_only_renders_backend_rejection_naming_the_extension(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+    surface: str,
+) -> None:
+    """With all three tiers genuinely empty, the backend 409 is what shows.
+
+    The rejection copy must name the extension tier too, otherwise deleting
+    the frontend guard just moves the same misleading "填令牌或用户名" text onto a
+    different code path.
+    """
+    base_url, stub = guided_init_server
+    stub.post_init_error = (
+        409,
+        {
+            "error": "no_profile_signal_sources",
+            "detail": (
+                "只选择 Bangumi 初始化时，需提供个人令牌（推荐，自动识别当前用户）、"
+                "公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别。"
+            ),
+        },
+    )
+    _install_fake_runtime_stream(chromium_page)
+
+    start, reason = _open_init_sources(chromium_page, base_url, surface)
+    _select_bangumi_only(chromium_page)
+    start.click()
+
+    chromium_page.wait_for_function("() => window.__obcInitPosted === true")
+    assert stub.init_posts == [{"sources": ["bangumi"]}]
+    chromium_page.wait_for_function("() => document.body.innerText.includes('bgm.tv')")
+    text = reason.inner_text()
+    assert "Bangumi" in text
+    assert "个人令牌" in text
+    # The extension tier is named, not just token / username.
+    assert "bgm.tv" in text
+    assert start.is_enabled()

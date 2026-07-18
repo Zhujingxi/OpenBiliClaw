@@ -1680,16 +1680,13 @@ async function handleStartInitClick() {
     _setInitReason("至少勾选一个数据来源。");
     return;
   }
-  if (
-    selectedSources.length === 1 &&
-    selectedSources[0] === "bangumi" &&
-    !bangumiUsername &&
-    !bangumiToken
-  ) {
-    _setInitStartButton("开始初始化", true);
-    _setInitReason("只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。");
-    return;
-  }
+  // No client-side Bangumi-only admission check here on purpose. The backend
+  // owns a THREE-tier account ladder (token → explicit username →
+  // browser-extension-reported identity); a local "username or token required"
+  // copy of it can't see the third tier and silently blocked zero-config
+  // extension users from ever reaching /api/init. The backend answers 409
+  // no_profile_signal_sources when all three are genuinely missing, and the
+  // startInit catch below renders it via describeInitStartError.
   _setInitStartButton("检查中…", false);
   _setInitReason("");
   if (elements.initChecklist instanceof HTMLElement) {

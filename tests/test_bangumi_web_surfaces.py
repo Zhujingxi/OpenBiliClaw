@@ -119,6 +119,73 @@ def test_setup_guided_init_username_omit_and_warnings() -> None:
     assert 'setInitReason(startWarnings.join(" "), "warn")' in html
 
 
+def test_web_surfaces_do_not_reimplement_the_bangumi_admission_check() -> None:
+    """The backend owns the three-tier account ladder; no surface may copy it.
+
+    setup, desktop web and the extension popup each carried a byte-identical
+    pre-flight guard that refused to POST /api/init for a Bangumi-only run
+    without a typed username or token. None of the three could see the third
+    tier (the identity the extension reports from a logged-in bgm.tv page), so
+    a zero-config Bangumi-only run was unreachable from every GUI surface —
+    the guard was originally believed to be absent from the popup, but it was
+    there too, only spelled with a different variable name.
+
+    The backend answers 409 ``no_profile_signal_sources`` when all three tiers
+    are genuinely missing, and each surface renders that reply instead.
+    """
+    surfaces = {
+        "setup": ROOT / "src/openbiliclaw/web/setup/index.html",
+        "desktop": ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js",
+        "popup": ROOT / "extension/popup/popup.js",
+    }
+    for name, path in surfaces.items():
+        source = path.read_text(encoding="utf-8")
+        # Both spellings: setup/desktop used `selected`, popup `selectedSources`.
+        assert 'selected[0] === "bangumi"' not in source, name
+        assert 'selectedSources[0] === "bangumi"' not in source, name
+
+    # The popup hardcoded the rejection sentence inline instead of going
+    # through its reason map, so deleting the guard has to take the copy with
+    # it — otherwise the stale "username or token" wording survives.
+    popup = surfaces["popup"].read_text(encoding="utf-8")
+    assert "请填写个人令牌（推荐）或公开用户名以读取收藏。" not in popup
+
+
+def test_popup_renders_the_backend_rejection_for_a_failed_init_start() -> None:
+    """Deleting the guard must not turn a rejected start into silence.
+
+    The popup now lets the request reach the backend, so the 409 reply is the
+    only feedback the user gets. Behaviour of the mapping itself is covered by
+    extension/tests/init-control.test.ts; this only pins the wiring, which is
+    what a future refactor of the click handler could quietly drop.
+    """
+    popup = (ROOT / "extension/popup/popup.js").read_text(encoding="utf-8")
+    assert "_setInitReason(describeInitStartError(error))" in popup
+
+
+def test_all_surfaces_name_the_extension_tier_in_the_rejection_copy() -> None:
+    """Deleting the guard is only half the fix: the 409 copy must be honest.
+
+    ``no_profile_signal_sources`` is rendered from each surface's own reason
+    map, so all three have to name the browser-extension tier — otherwise the
+    user is still told to type a username or token when logging into bgm.tv
+    would do.
+    """
+    reason_maps = {
+        "setup": ROOT / "src/openbiliclaw/web/setup/index.html",
+        "desktop": ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js",
+        "popup": ROOT / "extension/popup/popup-init-control.js",
+    }
+    for name, path in reason_maps.items():
+        source = path.read_text(encoding="utf-8")
+        marker = "no_profile_signal_sources:"
+        assert marker in source, name
+        copy = source[source.index(marker) : source.index(marker) + 220]
+        assert "个人令牌" in copy, name
+        assert "公开用户名" in copy, name
+        assert "bgm.tv" in copy, name
+
+
 def test_setup_exposes_anonymous_bangumi_bootstrap() -> None:
     html = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 

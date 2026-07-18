@@ -289,6 +289,26 @@ test("reason + start-error text mapping", () => {
   assert.ok(describeInitStartError(err).includes("进行中"));
 });
 
+test("a Bangumi-only 409 names all three account tiers", () => {
+  // The popup used to refuse this run client-side, which hid the third tier
+  // (extension-reported bgm.tv identity) from zero-config users. The guard is
+  // gone, so the backend's 409 body is now the user's only feedback and it has
+  // to arrive as readable text rather than a silent no-op.
+  const rejected = Object.assign(new Error("/api/init request failed: 409"), {
+    status: 409,
+    details: {
+      error: "no_profile_signal_sources",
+      detail: "只选择 Bangumi 初始化时，需提供个人令牌…",
+    },
+  });
+  const text = describeInitStartError(rejected);
+  assert.ok(text.includes("个人令牌"));
+  assert.ok(text.includes("公开用户名"));
+  // The tier that needs no typing at all must be named, otherwise the copy
+  // still tells a logged-in bgm.tv user to go fetch a token.
+  assert.ok(text.includes("bgm.tv"));
+});
+
 test("failure text appends backend detail so internal_error is diagnosable", () => {
   // Mapped reason + stored crash detail → generic copy with specifics appended.
   const crashed = statusWith({
