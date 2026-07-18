@@ -10,10 +10,10 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
-from typing import TYPE_CHECKING, Literal, NoReturn, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, TypeAlias, cast
 
+import click
 import typer
-from typer import _click as click
 from typer.core import TyperGroup, TyperOption
 
 from openbiliclaw.model_config import (
@@ -399,8 +399,8 @@ class SecretSafeTyperGroup(TyperGroup):
         complete_var: str | None = None,
         standalone_mode: bool = True,
         windows_expand_args: bool = True,
-        **extra: object,
-    ) -> object:
+        **extra: Any,
+    ) -> Any:
         if args is None:
             from_sys_argv = True
             protected_args = list(sys.argv[1:])
