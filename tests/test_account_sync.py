@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1761,3 +1763,69 @@ def test_user_facing_sync_message_empty_when_healthy() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
     assert AccountSyncService._user_facing_sync_message("", "") == ""
+
+
+def test_exclusive_file_lock_is_non_blocking_for_second_holder(tmp_path: Path) -> None:
+    from openbiliclaw.memory.json_state import exclusive_file_lock
+
+    lock_path = tmp_path / "account_sync.run.lock"
+    with exclusive_file_lock(lock_path, blocking=False) as first:
+        assert first is True
+        # Same process, same file: a second non-blocking attempt from another
+        # holder must lose rather than wait.
+        import subprocess
+        import sys
+
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys;"
+                    "from pathlib import Path;"
+                    "from openbiliclaw.memory.json_state import exclusive_file_lock;"
+                    f"p=Path({str(lock_path)!r});"
+                    "ctx=exclusive_file_lock(p, blocking=False);"
+                    "acquired=ctx.__enter__();"
+                    "print('acquired' if acquired else 'busy');"
+                    "ctx.__exit__(None, None, None)"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+        )
+        assert probe.stdout.strip() == "busy", probe.stderr
+
+    # After the holder releases, the lock is free again.
+    with exclusive_file_lock(lock_path, blocking=False) as reacquired:
+        assert reacquired is True
+
+
+def test_exclusive_file_lock_released_when_holder_process_dies(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from openbiliclaw.memory.json_state import exclusive_file_lock
+
+    lock_path = tmp_path / "account_sync.run.lock"
+    # A crashed holder must not strand the lock — the kernel releases it.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path;"
+                "from openbiliclaw.memory.json_state import exclusive_file_lock;"
+                f"p=Path({str(lock_path)!r});"
+                "ctx=exclusive_file_lock(p, blocking=False);"
+                "ctx.__enter__();"
+                "import os; os._exit(1)"
+            ),
+        ],
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
+
+    with exclusive_file_lock(lock_path, blocking=False) as acquired:
+        assert acquired is True

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, cast
 
@@ -129,6 +130,9 @@ class AccountSyncService:
     # session. Reset path is via fresh AccountSyncService instance,
     # which is what ``rebuild_from_config`` already produces.
     _last_seen_authenticated: bool = False
+    # Shared in-flight sync so overlapping callers reuse one result instead of
+    # queueing a second, redundant run behind the first.
+    _inflight_sync: asyncio.Task[dict[str, object]] | None = None
 
     async def sync_if_due(self) -> dict[str, object]:
         """Run one account sync only when the configured interval has elapsed."""
@@ -167,10 +171,67 @@ class AccountSyncService:
                 "new_event_count": 0,
                 "reason": "not_due",
             }
+        # Re-read the cursor after joining the single-flight: a concurrent sync
+        # may have finished between the check above and our turn, which would
+        # otherwise make this tick sync again immediately.
+        inflight = self._inflight_sync
+        if inflight is not None and not inflight.done():
+            await asyncio.shield(inflight)
+            state = self.memory_manager.load_account_sync_state()
+            if not self._is_due(str(state.get("last_account_sync_at", ""))):
+                return {
+                    "synced": False,
+                    "new_event_count": 0,
+                    "reason": "not_due",
+                }
         return await self.sync_now()
 
     async def sync_now(self) -> dict[str, object]:
-        """Run one immediate incremental account sync."""
+        """Run one immediate incremental account sync.
+
+        Single-flight in two layers. Within the process, overlapping callers
+        await the same task rather than each running a sync; across processes
+        (the API daemon and an OpenClaw adapter each build their own service
+        over the same data dir) a non-blocking OS lock makes the loser return
+        ``already_running``. Without this, both could load the same state and
+        the last writer would clobber the other's cursors and error kind.
+        """
+        inflight = self._inflight_sync
+        if inflight is not None and not inflight.done():
+            return await asyncio.shield(inflight)
+        task = asyncio.ensure_future(self._sync_now_guarded())
+        self._inflight_sync = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if self._inflight_sync is task:
+                self._inflight_sync = None
+
+    async def _sync_now_guarded(self) -> dict[str, object]:
+        """Hold the cross-process run lock for one sync, if it is free."""
+        lock_path = self._run_lock_path()
+        if lock_path is None:
+            return await self._sync_now_locked()
+        from openbiliclaw.memory.json_state import exclusive_file_lock
+
+        with exclusive_file_lock(lock_path, blocking=False) as acquired:
+            if not acquired:
+                logger.info("account_sync: another process holds the run lock; skipping")
+                return {
+                    "synced": False,
+                    "new_event_count": 0,
+                    "reason": "already_running",
+                }
+            return await self._sync_now_locked()
+
+    def _run_lock_path(self) -> Path | None:
+        """Sit beside the state file so every process resolves the same path."""
+        state_path = getattr(self.memory_manager, "_account_sync_state_path", None)
+        if state_path is None:
+            return None
+        return Path(state_path).with_name("account_sync.run.lock")
+
+    async def _sync_now_locked(self) -> dict[str, object]:
         # v0.3.57+: cookie race short-circuit. Daemon often starts before
         # the extension cookie sync arrives; without this gate, the first
         # tick fetches with empty cookies, gets 0 items, stamps
