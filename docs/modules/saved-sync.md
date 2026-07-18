@@ -130,7 +130,13 @@ adapter = BilibiliNativeSaveAdapter(client)
 | `POST` | `/api/saved/{favorite|watch_later}/sync` | 手动同步；`item_keys=[]` 表示全部 eligible，且始终无视自动同步开关。 |
 | `GET` | `/api/saved-sync/tasks/{uuid}` | 轮询持久化逐项状态；已存在的零项 task 返回 200，未知 UUID 返回 404；`login_required` / `rate_limited` / `failed` 不包装成泛化成功。 |
 
-所有 `/api/*` 路径继续受现有 API auth middleware 保护。所有 adapter-controlled `resolved_target/error_code/error_message` 在进入 task poll、单项 status、通用列表和 legacy 列表/state 响应前，都会先移除全部 Unicode category-C 字符，再按字段上限截断。旧 `/api/watch-later` 与 `/api/favorites` 保留 B 站 `bvid` 契约，state/list 响应增量返回 identity、sync 与脱敏后的逐项结果字段；POST 通过 service 本地保存但永不自动同步。
+所有 `/api/*` 路径继续受现有 API auth middleware 保护。所有 adapter-controlled `resolved_target/error_code/error_message` 在进入 task poll、单项 status、通用列表和 legacy 列表/state 响应前，都会先移除全部 Unicode category-C 字符，再按字段上限截断。旧 `/api/watch-later` 与 `/api/favorites` 保留 B 站 `bvid` 契约，state/list 响应增量返回 identity、sync 与脱敏后的逐项结果字段；POST 通过 service 本地保存但永不自动同步。两个 legacy 家族只保留服务端兼容，不再被任何已发布前端调用。
+
+### 前端契约与共享核心
+
+所有图形前端（桌面 Web `/web`、移动 Web `/m`、插件 popup）只调用平台中立家族：`POST /api/saved/{watch_later|favorite}` 保存、`GET` 同路径分页列表、`POST .../remove` 只删本地 membership、`GET .../status` 查询单项、`POST .../sync` 手动同步，以及 `GET /api/saved-sync/tasks/{id}` 轮询持久化逐项结果。
+
+桌面与移动共用 `src/openbiliclaw/web/shared/saved-sync-core.js` 作为唯一实现：核心同时以 ES module 导出并挂载 `globalThis.OBCSavedSyncCore`，承载提交 fence、retained 列表状态、mutation registry、严格 saved API、durable task tracker / coordinator 与焦点捕获恢复。桌面 `index.html` 用 `<script type="module">` 在 `app.js` 之前加载它，后端 `_desktop_asset_version()` 把它纳入桌面缓存版本指纹；移动 `js/saved-sync-runtime.js` 是薄适配器，向核心注入 `Date.now`、定时器、`document.hidden` 与 `activeElement` 等浏览器依赖，视图层调用签名保持不变。核心本身保持 surface-neutral：不含 CJK 文案，DOM 与计时器全部由调用方注入；`getSavedSyncPresentation()` 只返回 `labelKey / detailKey / actionKey`，桌面在 `desktopSavedSyncPresentation` 里映射为桌面中文文案，移动端在自有视图模型里映射移动端文案。插件保留包内 `popup-saved-sync.js` 运行时，不依赖 `/web/shared/`，行为对等由扩展保存测试钉住。
 
 ### Local-first service
 
