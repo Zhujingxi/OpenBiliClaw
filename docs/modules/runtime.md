@@ -67,7 +67,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 多源 bootstrap 去重 | ✅ | `/api/sources/{xhs,dy,yt}/task-result` 会用 `source_bootstrap_state.json` 过滤跨任务旧 identity key；任务结果仍完整保留，只有新增项进入 memory / profile pipeline。 |
 | 扩展任务 claim / 复用 | ✅ | XHS / 抖音 / YouTube bootstrap 任务在扩展 poll 时用短生命周期 SQLite 连接标记 `in_progress`，CLI 默认复用 6 小时内近期任务，避免重复打开前台 tab 全量扫描，也避免 FastAPI 并发 poll 在共享 connection 上嵌套事务。 |
 | Soul 画像自动 bootstrap | ✅ | `AccountSyncService` 首次成功写入账号行为并完成 `analyze_events()` 后，若 soul 画像仍为空，会自动调用 `build_initial_profile([])`；每进程生命周期最多尝试一次。 |
-| 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留健康检查、配置读取/保存、runtime status、runtime stream、`/m` 移动静态壳与 `/favicon.ico`，方便用户从 popup 或手机入口识别并修复错误配置。 |
+| 降级模式启动 | ✅ | 生产 `create_app()` 遇到 `RegistryBuildError` 时构造 degraded `RuntimeContext`，保留 provider-free ping、健康检查、配置读取/保存、runtime status、runtime stream、`/` → `/web`、`/web`、`/setup`、`/m` 四个静态恢复 surface 及 `/favicon.ico`。桌面端先用 ping 识别恢复态并停止业务 hydration，再读取配置、自动打开模型设置并展示中文修复指引；推荐、发现、画像等业务 API 继续返回 503。 |
 | 配置热重载 LLM override | ✅ | `RuntimeContext._rebuild_components()` 从 config 构造 `module_overrides`，同时注入主 `LLMService` 与 `SoulEngine` 内部 service；热重载后的正向兴趣和避雷 speculator tick 都 detached 到 `BackgroundTaskRegistry`，不阻塞 `/api/config` 响应。 |
 | 海外网络策略热更新 | ✅ | FastAPI 启动与 `PUT /api/config` 成功落盘后都会先把 `[network].mode + proxy` 镜像到 `openbiliclaw.network`，再构造 / 重建 LLM、YouTube、更新和 Codex OAuth 客户端；`POST /api/config/probe-service kind=network_proxy` 不落盘，按当前草稿的 direct/system/custom 策略真实发起 204 探测。Docker 启动器仅在容器内检测到代理变量且用户未显式选模式时补 `OPENBILICLAW_NETWORK_MODE=system`。 |
 | 原生保存 service 热重载 | ✅ | `saved_sync_service` 是可替换组件：每次构造新 `BilibiliAPIClient` 时同步创建 router + 六平台 extension adapters + `BilibiliNativeSaveAdapter` + `SavedSyncService`。重载先取消旧 registry inflight；所有新组件构造成功后才原子发布，任一构造失败保留完整旧组件与稳定 broker。 |
@@ -200,12 +200,14 @@ embedding_progress.reset()
 
 降级模式下可用接口：
 
+- `GET /`、`GET /web[/...]`、`GET /setup[/...]`、`GET /m[/...]` 与 `GET /favicon.ico`：静态恢复界面及其 CSS / JS / 图片继续可达；根路径仍 302 到桌面 Web。桌面端从配置响应或 runtime-stream 识别 `degraded` 后自动进入模型设置，展示 blocking issue，并提示补齐 Provider 配置、保存后重启。静态路径使用精确 segment 边界放行，不会把 `/webhook` 一类无关前缀误纳入白名单。
+- `GET /api/ping`：继续作为不访问数据库和模型 Provider 的快速 liveness probe；正常模式仍只返回原有 `status` / `service`，降级模式额外返回 `degraded=true`、`degraded_reason` 和 issues。桌面端先请求它；一旦确认降级，只读取 `/api/config` 并停止推荐、画像、平台源等业务 hydration，避免预期中的 503 控制台噪声与推荐重试。
 - `GET /api/health`：返回 `status="degraded"`、`reason="llm_registry_unavailable"` 和 blocking issues；当 `SoulEngine` 可用时会额外返回可选字段 `profile_ready`，表示 soul 画像是否已生成。v0.3.95+ 额外返回 `embedding_ready`（bool）。v0.3.137+ 该同一 live probe 也被 `/api/init-status` 复用：若 `[llm.embedding].provider` 已配置，初始化前置清单会下发 `embedding_required=true`，`can_start` 与 `POST /api/init` 都必须等真实 probe 通过；provider 留空则可降级初始化。v0.3.97+ 这是一次**实时探活**而非「服务是否构建」：经 `EmbeddingService.probe()` 绕过缓存真打一次 provider，探测缓存保存 `ready / failed / timed_out` 原始三态而非调用方布尔值，并由 `_EMBEDDING_PROBE_TIMEOUT_SECONDS`（默认 15s）上限兜住。普通 `/api/health` 仅把 loopback Ollama 的 `timed_out` 解释为冷加载中的乐观可用，避免外部 Homebrew / 官方 Ollama 默认 5 分钟卸载后让插件横幅误报停服；远程 Ollama 或非 Ollama provider 超时仍为 `false`。成功沿用 `_EMBEDDING_READY_TTL_SECONDS`（默认 30s），明确失败与超时使用 8s 短 TTL 重探；single-flight 锁继续让并发 health/init 共享同一次真实 probe，但各入口独立解释结果。provider 现已 404/500（如 `bge-m3` 没拉、Ollama 停了、随包缺 `llama-server`）、返回空向量或抛出异常仍会如实报 `false`，修好后下次探活即翻 `true`；服务对象不存在仍 `false`，老/无 `probe()` 的服务回退「构建即就绪」。`false` 表示语义去重 / MMR 多样性降级（可能刷到换皮重复内容），插件 popup 据此显示「一键启用本地 Ollama」横幅。
 - `GET /api/config`：返回完整配置、`degraded=true` 和同一组 issues。
 - `PUT /api/config`：允许保存修复配置，但跳过热重载并返回 `restart_required=true`。
 - `GET /api/runtime-status` 与 `/api/runtime-stream`：用于 popup 展示降级状态；stream 会先发送 `{type:"degraded", ...}` 并保持连接。
 
-其他 API 在降级模式下返回 503，避免在缺少 LLM registry、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。
+除上述静态恢复界面和 allow-list 接口外，其他 API 在降级模式下返回 503，避免在缺少 LLM registry、数据库/运行时组件不完整时继续执行推荐、发现或画像链路。
 
 ### Runtime Status Pool Counts
 

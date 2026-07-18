@@ -70,6 +70,25 @@ def test_create_app_boots_degraded_when_registry_build_fails(
     assert body["issues"][0]["severity"] == "blocking"
 
 
+def test_degraded_ping_stays_live_and_advertises_fast_recovery_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    response = client.get("/api/ping")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "openbiliclaw-api"
+    assert body["degraded"] is True
+    assert body["degraded_reason"] == "llm_registry_unavailable"
+    assert body["issues"][0]["severity"] == "blocking"
+
+
 def test_degraded_config_get_includes_recovery_context(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -123,6 +142,31 @@ def test_degraded_mode_keeps_mobile_static_shell_assets_reachable(
     assert mobile_response.status_code == 200
     assert favicon_response.status_code == 200
     assert favicon_response.headers.get("content-type", "").startswith("image/png")
+
+
+def test_degraded_mode_keeps_desktop_and_setup_recovery_shells_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    root_response = client.get("/", follow_redirects=False)
+    desktop_response = client.get("/web")
+    desktop_asset_response = client.get("/web/assets/js/app.js")
+    setup_response = client.get("/setup/")
+    unrelated_prefix_response = client.get("/webhook")
+
+    assert root_response.status_code == 302
+    assert root_response.headers["location"] == "/web"
+    assert desktop_response.status_code == 200
+    assert desktop_response.headers.get("content-type", "").startswith("text/html")
+    assert desktop_asset_response.status_code == 200
+    assert "javascript" in desktop_asset_response.headers.get("content-type", "")
+    assert setup_response.status_code == 200
+    assert setup_response.headers.get("content-type", "").startswith("text/html")
+    assert unrelated_prefix_response.status_code == 503
 
 
 @pytest.mark.parametrize(

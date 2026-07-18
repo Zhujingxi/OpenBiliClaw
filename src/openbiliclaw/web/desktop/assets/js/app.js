@@ -63,6 +63,7 @@
       delights: [],
       delightIndex: 0,
       delight: null,
+      degraded: false,
       config: null,
       sourceStatus: null,
       sourceCredentials: null,
@@ -171,6 +172,7 @@
     let desktopRecommendationRecoveryInFlight = false;
     let desktopRuntimeRecoveryInFlight = false;
     let desktopRuntimeGeneration = 0;
+    let degradedRecoveryPresented = false;
 
     function debounceAsync(fn, delayMs = 1000) {
       let timer = null;
@@ -1097,7 +1099,7 @@
     function configErrorMessage(details) {
       if (!details) return "";
       if (typeof details === "string") return details;
-      const issues = details.config?.issues || details.detail?.config?.issues;
+      const issues = details.issues || details.config?.issues || details.detail?.config?.issues;
       if (Array.isArray(issues) && issues.length) {
         return issues.map((issue) => `${issue.severity || "warning"}: ${issue.message || issue.code || JSON.stringify(issue)}`).join("\n");
       }
@@ -1105,6 +1107,24 @@
         return details.detail.map((item) => `${item.loc?.join(".") || "字段"}: ${item.msg || JSON.stringify(item)}`).join("\n");
       }
       return details.message || details.detail?.message || details.detail?.error || details.error || "";
+    }
+
+    function presentDegradedConfigRecovery(snapshot) {
+      if (snapshot?.degraded !== true) return;
+      state.degraded = true;
+      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL，保存后重启后端。";
+      const diagnostic = configErrorMessage(snapshot);
+      const configStatus = $("#configStatus");
+      if (configStatus) {
+        configStatus.setAttribute("role", "alert");
+        configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
+      }
+      $("#statusLabel").textContent = "模型配置待修复";
+      $("#runtimeSummary").textContent = "后端已安全降级；推荐功能暂停，模型设置仍可修改。";
+      if (degradedRecoveryPresented) return;
+      degradedRecoveryPresented = true;
+      openSettingsPage("models");
+      showToast("模型配置不可用，已打开恢复设置");
     }
 
     const toastManager = {
@@ -2056,8 +2076,10 @@
       setActiveSettingsPanel(panel || "models");
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
       void lanAuthControl?.reload();
       void bootAutostartControl?.reload();
       void refreshUpdateStatus();
@@ -6156,6 +6178,7 @@ ${cardFeedbackBarHtml()}`;
 
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
+      state.degraded = config.degraded === true;
       state.config = config;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
@@ -6357,8 +6380,10 @@ ${cardFeedbackBarHtml()}`;
         // empty field omits the username to keep the configured value.
         state.initBangumiUsernamePrefilled = true;
       }
-      void renderSourcesStatus();
-      void renderSourceCredentials();
+      if (!state.degraded) {
+        void renderSourcesStatus();
+        void renderSourceCredentials();
+      }
 
       setSelect("logLevel", config.logging?.level || "INFO");
       setSelect("logFileLevel", config.logging?.file_level || "DEBUG");
@@ -6849,6 +6874,13 @@ ${cardFeedbackBarHtml()}`;
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      if (event.type === "degraded") {
+        presentDegradedConfigRecovery({
+          degraded: true,
+          degraded_reason: event.reason || "",
+          issues: event.issues || [],
+        });
+      }
       // refresh.pool_updated / recommendation.reshuffled are pool-status signals, not
       // list-replacement signals: hydrating here would wipe locally appended cards
       // (/api/recommendations only returns the latest top window). Header/pool counts
@@ -7046,7 +7078,16 @@ ${cardFeedbackBarHtml()}`;
       }
 
       function applyHealthSnapshot(snapshot) {
-        if (snapshot) $("#statusLabel").textContent = "已连接本地后端";
+        if (!snapshot) return;
+        if (snapshot.degraded === true) {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: snapshot.degraded_reason || "",
+            issues: snapshot.issues || [],
+          });
+          return;
+        }
+        $("#statusLabel").textContent = "已连接本地后端";
       }
 
       function applyInitStatusSnapshot(snapshot) {
@@ -7115,7 +7156,9 @@ ${cardFeedbackBarHtml()}`;
       }
 
       function applyConfigSnapshot(snapshot) {
-        applyConfig(snapshot?.config || snapshot);
+        const configSnapshot = snapshot?.config || snapshot;
+        applyConfig(configSnapshot);
+        presentDegradedConfigRecovery(configSnapshot);
         renderFilters();
         syncSourceMetric();
       }
@@ -7141,6 +7184,17 @@ ${cardFeedbackBarHtml()}`;
         }
       }
 
+      // /api/ping is deliberately provider-free and carries recovery
+      // metadata only when the backend is degraded. Pay one loopback RTT
+      // before normal parallel hydration so a broken LLM registry does not
+      // generate a console storm from intentionally-blocked business APIs.
+      const pingSnapshot = await requestJson(ENDPOINTS.ping);
+      applyHealthSnapshot(pingSnapshot);
+      if (pingSnapshot?.degraded === true) {
+        applyConfigSnapshot(await requestJson(ENDPOINTS.config));
+        return;
+      }
+
       const recommendationsPromise = readRecommendationSnapshot();
       const runtimePromise = readRuntimeSnapshot();
 
@@ -7158,7 +7212,6 @@ ${cardFeedbackBarHtml()}`;
       );
 
       const secondaryPromises = [
-        requestJson(ENDPOINTS.ping).then(applyHealthSnapshot),
         requestJson(ENDPOINTS.health),
         requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),

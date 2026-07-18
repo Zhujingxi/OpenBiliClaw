@@ -603,6 +603,7 @@ background ─ background admission (default 3) ──────┘
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
+                       │ + ping 预检降级 → /web · /setup · /m → 配置后重启
 ┌──────────────────────▼─────────────────────────┐
 │                  Agent 编排层                    │
 │ Skill · 对话 · Runtime · 反馈 10s 可撤销提交屏障    │

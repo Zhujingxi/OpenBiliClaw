@@ -224,6 +224,10 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
+degraded registry → provider-free ping(degraded) → static /web | /setup | /m
+                  ├─ GET/PUT config → restart runtime
+                  └─ skip hydration; recommendation / discovery / profile APIs stay 503
+
 reshuffle HTTP → PoolServeSnapshot → isolated serve DB worker/read transaction
                → unchanged MMR → short atomic recommendation+shown write
 pool maintenance → isolated maintenance DB worker → ≤50 mutations/transaction
@@ -263,7 +267,7 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
 │  │ 开机自启动开关：/api/autostart-status + apply（本机可写）     │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 配置离线缓存 + 降级模式修复 UI（保存后提示重启）              │   │
+│  │ 配置离线缓存 + 降级模式静态恢复 UI（/web /setup /m，保存后重启）│   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 手机版二维码：桌面/插件 -> /api/qr-info(lan_ip) -> /m        │   │

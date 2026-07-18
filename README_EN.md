@@ -599,6 +599,7 @@ guided init: signals → preferences → full profile commit → discover → ev
 └──────────────────────┬─────────────────────────┘
                        │ REST API / WebSocket
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
+                       │ + ping preflight → /web · /setup · /m → config + restart
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
 │ Skills · Dialogue · Runtime · 10s undo barrier   │

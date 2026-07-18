@@ -1764,6 +1764,11 @@ def create_app(
             return await call_next(request)
         path = request.url.path
         method = request.method.upper()
+        static_recovery_surface = (
+            path == "/"
+            or path in {"/m", "/web", "/setup"}
+            or path.startswith(("/m/", "/web/", "/setup/"))
+        )
         allowed = (
             method == "OPTIONS"
             or path == "/api/ping"
@@ -1780,7 +1785,12 @@ def create_app(
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
             or path.startswith("/api/auth")
-            or path.startswith("/m")
+            # Keep every browser recovery shell loadable. Their static assets
+            # do not depend on the LLM registry, and the desktop/setup forms
+            # use the allowed config endpoints above to repair the blocking
+            # provider configuration. Blocking these paths exposes the raw 503
+            # envelope instead of the recovery UI.
+            or static_recovery_surface
         )
         if allowed:
             return await call_next(request)
@@ -2507,7 +2517,20 @@ def create_app(
         the panel. UI liveness indicators should hit this instead and keep
         ``/api/health`` for profile/embedding state.
         """
-        return JSONResponse({"status": "ok", "service": "openbiliclaw-api"})
+        body: dict[str, object] = {"status": "ok", "service": "openbiliclaw-api"}
+        if bool(getattr(ctx, "degraded", False)):
+            # Preserve pure liveness semantics (status stays "ok") while
+            # giving browser shells a provider-free fast path to avoid firing
+            # every intentionally-blocked business request before /config
+            # reveals the recovery state.
+            body.update(
+                {
+                    "degraded": True,
+                    "degraded_reason": str(getattr(ctx, "degraded_reason", "")),
+                    "issues": _degraded_issues_payload(),
+                }
+            )
+        return JSONResponse(body)
 
     @app.get("/api/qr-info")
     async def qr_info() -> JSONResponse:
