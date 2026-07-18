@@ -3128,12 +3128,24 @@ def create_app(
             and not effective_bangumi_username
             and not effective_bangumi_token
         ):
-            identity_loader = getattr(app.state, "load_bangumi_identity_username", None)
-            extension_bangumi_username = identity_loader() if callable(identity_loader) else ""
+            identity_loader = getattr(app.state, "load_bangumi_identity", None)
+            extension_bangumi_username, extension_identity_verified = (
+                identity_loader() if callable(identity_loader) else ("", False)
+            )
             if extension_bangumi_username:
                 effective_bangumi_username = extension_bangumi_username
+                # Say which one it is. An unverified identity is a best-effort
+                # DOM read that bgm.tv never confirmed, so the user has to be
+                # able to catch a wrong account instead of trusting the same
+                # confident sentence for both cases.
                 warnings.append(
                     f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}。"
+                    if extension_identity_verified
+                    else (
+                        f"Bangumi 使用浏览器扩展识别到的账号 {extension_bangumi_username}"
+                        "（未经 bgm.tv 校验，可能不准）。如果不是你本人，请填写公开用户名"
+                        "或个人令牌后重新初始化。"
+                    )
                 )
         if (
             effective_sources == {"bangumi"}
@@ -8607,55 +8619,70 @@ def create_app(
             username = ""
         return {"uid": str(uid), "username": username}
 
-    def _persist_bangumi_identity(identity: dict[str, str]) -> None:
-        """Save the extension-reported identity into discovery runtime state."""
+    def _persist_bangumi_identity(identity: dict[str, str], *, verified: bool) -> None:
+        """Save the extension-reported identity into discovery runtime state.
+
+        ``verified`` records whether the username actually survived a bgm.tv
+        cross-check. It is persisted alongside uid/username so every consumer
+        can tell an authoritative identity from a fail-open best-effort one
+        instead of treating both as equally true (project rule 7).
+        """
         memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
         if memory_manager is None:
             return
+        record: dict[str, Any] = {**identity, "verified": bool(verified)}
         try:
             state = memory_manager.load_discovery_runtime_state()
             existing = state.get("bangumi_self_info")
-            if isinstance(existing, dict) and existing == identity:
+            if isinstance(existing, dict) and existing == record:
                 return
             update_state = getattr(memory_manager, "update_discovery_runtime_state", None)
             if callable(update_state):
                 update_state(
-                    lambda runtime_state: runtime_state.update({"bangumi_self_info": identity})
+                    lambda runtime_state: runtime_state.update({"bangumi_self_info": record})
                 )
             else:
-                state["bangumi_self_info"] = identity
+                state["bangumi_self_info"] = record
                 memory_manager.save_discovery_runtime_state(state)
             logger.info(
-                "bangumi identity persisted: uid=%s username=%r",
+                "bangumi identity persisted: uid=%s username=%r verified=%s",
                 identity.get("uid", ""),
                 identity.get("username", ""),
+                bool(verified),
             )
         except Exception:
             logger.exception("Failed to persist bangumi identity")
 
-    def _load_bangumi_identity_username() -> str:
-        """Extension-reported Bangumi username from runtime state ('' on miss)."""
+    def _load_bangumi_identity() -> tuple[str, bool]:
+        """Extension-reported Bangumi ``(username, verified)`` from runtime state.
+
+        Returns ``("", False)`` on any miss. Records written before the
+        ``verified`` flag existed have no way to prove they were cross-checked,
+        so they read back as UNVERIFIED rather than silently claiming a check
+        that may never have run — the next bgm.tv page view re-reports and
+        upgrades the record in place.
+        """
         from openbiliclaw.sources.bangumi_client import validate_bangumi_username
 
         memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
         if memory_manager is None:
-            return ""
+            return "", False
         try:
             state = memory_manager.load_discovery_runtime_state()
             info = state.get("bangumi_self_info")
             if not isinstance(info, dict):
-                return ""
-            return validate_bangumi_username(info.get("username"))
+                return "", False
+            return validate_bangumi_username(info.get("username")), info.get("verified") is True
         except Exception:
             logger.debug("bangumi identity: runtime state unavailable", exc_info=True)
-            return ""
+            return "", False
 
     # Publish for start_guided_init's username fallback ladder — that route is
     # defined earlier in this factory, so it reads the hook off app.state at
     # request time (by then create_app has finished wiring everything).
-    app.state.load_bangumi_identity_username = _load_bangumi_identity_username
+    app.state.load_bangumi_identity = _load_bangumi_identity
 
-    async def _verify_bangumi_identity(identity: dict[str, str]) -> dict[str, str]:
+    async def _verify_bangumi_identity(identity: dict[str, str]) -> tuple[dict[str, str], bool]:
         """Authoritatively cross-check an extension-reported identity.
 
         A real-page E2E (2026-07-18) showed a DOM-scraped username can be a
@@ -8664,12 +8691,22 @@ def create_app(
         account's ``id``; users without a custom slug keep ``str(uid)`` as
         their username, so a uid-only report also resolves for them.
 
+        Returns ``(identity, verified)``. ``verified`` is True only when bgm.tv
+        actually answered — the caller persists that flag so a fail-open value
+        is never mistaken for a checked one.
+
         Rules (never cache failures; ``trust_env=False`` via BangumiClient):
-        - API ``id`` matches the reported uid → persist the API's username.
+        - API ``id`` matches the reported uid → persist the API's username,
+          verified.
         - Username resolves to a DIFFERENT id, or does not exist → keep the
-          uid, DISCARD the username, log WARNING (plausible-but-wrong guard).
-        - Network / upstream failure → accept the DOM username best-effort
-          (debug log); the next page view re-reports and re-verifies.
+          uid, DISCARD the username, log WARNING (plausible-but-wrong guard);
+          still verified, because bgm.tv gave a definitive answer.
+        - Network / upstream failure → accept the DOM username best-effort but
+          mark it UNVERIFIED and log WARNING with the real cause. Staying
+          fail-open keeps zero-config users working when bgm.tv is unreachable
+          (the default ``[network] mode = direct`` cannot reach it from CN at
+          all), so the guard's honesty has to come from the flag + log rather
+          than from rejecting the report.
         """
         from openbiliclaw.sources.bangumi_client import (
             BangumiAPIError,
@@ -8692,20 +8729,29 @@ def create_app(
                         reported_username,
                         uid,
                     )
-                    return {"uid": uid, "username": ""}
+                    return {"uid": uid, "username": ""}, True
                 # uid-only report from a custom-slug user: nothing to verify.
-                return identity
-            logger.debug(
-                "bangumi identity: verify unavailable (%s); accepting DOM report best-effort",
+                return identity, True
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
                 exc.code,
+                exc,
             )
-            return identity
-        except Exception:
-            logger.debug(
-                "bangumi identity: verify failed; accepting DOM report best-effort",
+            return identity, False
+        except Exception as exc:
+            logger.warning(
+                "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
+                "(%s: %s); storing the extension report UNVERIFIED",
+                uid,
+                reported_username,
+                type(exc).__name__,
+                exc,
                 exc_info=True,
             )
-            return identity
+            return identity, False
         api_id = user.get("id")
         try:
             api_uid = str(int(str(api_id).strip()))
@@ -8719,12 +8765,12 @@ def create_app(
                 api_uid or "?",
                 uid,
             )
-            return {"uid": uid, "username": ""}
+            return {"uid": uid, "username": ""}, True
         try:
             api_username = validate_bangumi_username(user.get("username"))
         except ValueError:
             api_username = ""
-        return {"uid": uid, "username": api_username or reported_username}
+        return {"uid": uid, "username": api_username or reported_username}, True
 
     @app.post("/api/sources/bangumi/identity")
     async def ingest_bangumi_identity(payload: dict[str, Any]) -> dict[str, Any]:
@@ -8735,14 +8781,21 @@ def create_app(
         page can never overwrite a previously known identity. The username is
         cross-checked against ``GET /v0/users/{username}`` before persisting —
         a mismatching or unknown username is dropped (uid kept) so a DOM
-        drift can never store a stranger's identity.
+        drift can never store a stranger's identity. When bgm.tv is
+        unreachable the report is still stored (zero-config users must keep
+        working) but flagged ``verified: false``, which the response echoes.
         """
         identity = _normalize_bangumi_identity(payload)
         if identity is None:
             raise HTTPException(status_code=422, detail="uid must be a positive integer")
-        identity = await _verify_bangumi_identity(identity)
-        _persist_bangumi_identity(identity)
-        return {"ok": True, "uid": identity["uid"], "username": identity["username"]}
+        identity, verified = await _verify_bangumi_identity(identity)
+        _persist_bangumi_identity(identity, verified=verified)
+        return {
+            "ok": True,
+            "uid": identity["uid"],
+            "username": identity["username"],
+            "verified": verified,
+        }
 
     # ── Bilibili extension search fallback endpoints ────────────────
 

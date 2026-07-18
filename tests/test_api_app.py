@@ -6362,9 +6362,7 @@ class TestBackendAPI:
         assert response.json()["item_key"] == "bangumi:326"
         assert database.get_saved_membership("favorite", "bangumi:326") is not None
 
-        status = client.get(
-            "/api/saved/favorite/status", params={"item_key": "bangumi:326"}
-        )
+        status = client.get("/api/saved/favorite/status", params={"item_key": "bangumi:326"})
         assert status.status_code == 200, status.text
         assert status.json()["saved"] is True
 
@@ -10589,9 +10587,7 @@ class TestBackendAPI:
         # A rejected token is never persisted.
         assert cfg.sources.bangumi.access_token == ""
 
-    def test_put_config_bangumi_token_check_failed_on_network(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_put_config_bangumi_token_check_failed_on_network(self, monkeypatch, tmp_path) -> None:
         from openbiliclaw.sources.bangumi_client import BangumiAPIError
 
         cfg, _database, client = self._bangumi_token_put_app(monkeypatch, tmp_path)
@@ -12969,7 +12965,12 @@ class TestGuidedInitEndpoints:
                 json={"uid": 123456, "username": " sai "},
             )
             assert resp.status_code == 200, resp.text
-            assert resp.json() == {"ok": True, "uid": "123456", "username": "sai"}
+            assert resp.json() == {
+                "ok": True,
+                "uid": "123456",
+                "username": "sai",
+                "verified": True,
+            }
             # Idempotent second post: no extra write.
             resp2 = client.post(
                 "/api/sources/bangumi/identity",
@@ -12988,9 +12989,10 @@ class TestGuidedInitEndpoints:
                 == 422
             )
 
-        assert saved_states[0]["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+        verified_sai = {"uid": "123456", "username": "sai", "verified": True}
+        assert saved_states[0]["bangumi_self_info"] == verified_sai
         assert len(saved_states) == 1  # duplicate post did not rewrite
-        assert state["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+        assert state["bangumi_self_info"] == verified_sai
 
     def test_bangumi_identity_discards_username_belonging_to_another_uid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13011,14 +13013,25 @@ class TestGuidedInitEndpoints:
             )
             assert resp.status_code == 200
             # Username discarded, uid kept — never persist a stranger identity.
-            assert resp.json() == {"ok": True, "uid": "999999001", "username": ""}
+            # bgm.tv answered, so the (empty) result is genuinely verified.
+            assert resp.json() == {
+                "ok": True,
+                "uid": "999999001",
+                "username": "",
+                "verified": True,
+            }
             # A username that doesn't exist at all is discarded too.
             resp2 = client.post(
                 "/api/sources/bangumi/identity",
                 json={"uid": 999999001, "username": "ghost-user"},
             )
             assert resp2.json()["username"] == ""
-        assert state["bangumi_self_info"] == {"uid": "999999001", "username": ""}
+            assert resp2.json()["verified"] is True
+        assert state["bangumi_self_info"] == {
+            "uid": "999999001",
+            "username": "",
+            "verified": True,
+        }
 
     def test_bangumi_identity_uid_only_resolves_username_from_api(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13034,8 +13047,17 @@ class TestGuidedInitEndpoints:
         with TestClient(app) as client:
             resp = client.post("/api/sources/bangumi/identity", json={"uid": 474349})
             assert resp.status_code == 200
-            assert resp.json() == {"ok": True, "uid": "474349", "username": "474349"}
-        assert state["bangumi_self_info"] == {"uid": "474349", "username": "474349"}
+            assert resp.json() == {
+                "ok": True,
+                "uid": "474349",
+                "username": "474349",
+                "verified": True,
+            }
+        assert state["bangumi_self_info"] == {
+            "uid": "474349",
+            "username": "474349",
+            "verified": True,
+        }
 
     def test_bangumi_identity_uid_only_custom_slug_stays_uid_only(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13048,20 +13070,32 @@ class TestGuidedInitEndpoints:
         with TestClient(app) as client:
             resp = client.post("/api/sources/bangumi/identity", json={"uid": 1})
             assert resp.status_code == 200
-            assert resp.json() == {"ok": True, "uid": "1", "username": ""}
+            assert resp.json() == {"ok": True, "uid": "1", "username": "", "verified": True}
             # A structurally malformed username normalizes to missing first,
             # then follows the same uid-only path.
             resp2 = client.post(
                 "/api/sources/bangumi/identity",
                 json={"uid": 1, "username": "bad/name"},
             )
-            assert resp2.json() == {"ok": True, "uid": "1", "username": ""}
-        assert state["bangumi_self_info"] == {"uid": "1", "username": ""}
+            assert resp2.json() == {"ok": True, "uid": "1", "username": "", "verified": True}
+        assert state["bangumi_self_info"] == {"uid": "1", "username": "", "verified": True}
 
     def test_bangumi_identity_network_failure_accepts_dom_report(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Upstream unavailability degrades to best-effort, never a hard fail."""
+        """Upstream unavailability degrades to best-effort, never a hard fail.
+
+        Staying fail-open is deliberate (the default ``[network] mode=direct``
+        cannot reach bgm.tv from CN, so fail-closed would break every
+        zero-config user). The honesty has to come from elsewhere: a WARNING
+        carrying the real cause, and a ``verified: false`` flag on the stored
+        record so no consumer mistakes it for a checked identity.
+        """
+        import logging
+
         from fastapi.testclient import TestClient
 
         from openbiliclaw.sources.bangumi_client import BangumiAPIError
@@ -13070,14 +13104,88 @@ class TestGuidedInitEndpoints:
         self._install_fake_bangumi_user_api(
             monkeypatch, BangumiAPIError("timeout", "Bangumi API request timed out")
         )
-        with TestClient(app) as client:
+        with caplog.at_level(logging.DEBUG), TestClient(app) as client:
             resp = client.post(
                 "/api/sources/bangumi/identity",
                 json={"uid": 123, "username": "maybe-me"},
             )
             assert resp.status_code == 200
-            assert resp.json() == {"ok": True, "uid": "123", "username": "maybe-me"}
-        assert state["bangumi_self_info"] == {"uid": "123", "username": "maybe-me"}
+            assert resp.json() == {
+                "ok": True,
+                "uid": "123",
+                "username": "maybe-me",
+                "verified": False,
+            }
+        assert state["bangumi_self_info"] == {
+            "uid": "123",
+            "username": "maybe-me",
+            "verified": False,
+        }
+        # Diagnosable at WARNING (was DEBUG-only), with the real cause.
+        failures = [
+            record
+            for record in caplog.records
+            if "bangumi identity" in record.getMessage()
+            and "could not verify" in record.getMessage()
+        ]
+        assert failures, "verify failure must be logged"
+        assert all(record.levelno >= logging.WARNING for record in failures)
+        assert "timeout" in failures[0].getMessage()
+        assert "UNVERIFIED" in failures[0].getMessage()
+
+    def test_bangumi_identity_unexpected_error_logs_warning_and_marks_unverified(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A non-BangumiAPIError (DNS, TLS, proxy) takes the same honest path."""
+        import logging
+
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, OSError("proxy refused"))
+        with caplog.at_level(logging.DEBUG), TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123, "username": "maybe-me"},
+            )
+            assert resp.json()["verified"] is False
+        assert state["bangumi_self_info"]["verified"] is False
+        failures = [
+            record for record in caplog.records if "could not verify" in record.getMessage()
+        ]
+        assert failures and all(record.levelno >= logging.WARNING for record in failures)
+        assert "OSError" in failures[0].getMessage()
+
+    def test_bangumi_identity_reverify_upgrades_unverified_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A later successful report replaces a fail-open record in place."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, saved_states = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app) as client:
+            client.post("/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"})
+            assert state["bangumi_self_info"]["verified"] is False
+            # bgm.tv reachable again on the next page view → record upgrades.
+            self._install_fake_bangumi_user_api(
+                monkeypatch, {"sai": {"id": 123456, "username": "sai"}}
+            )
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.json()["verified"] is True
+        assert state["bangumi_self_info"] == {
+            "uid": "123456",
+            "username": "sai",
+            "verified": True,
+        }
+        assert len(saved_states) == 2  # the flag change is a real write
 
     def test_bangumi_identity_persisted_during_active_init(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13100,9 +13208,15 @@ class TestGuidedInitEndpoints:
             )
         # Not gated by the init write-guard, and the identity still persists.
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"ok": True, "uid": "123456", "username": "sai"}
-        assert saved_states[0]["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
-        assert state["bangumi_self_info"] == {"uid": "123456", "username": "sai"}
+        assert resp.json() == {
+            "ok": True,
+            "uid": "123456",
+            "username": "sai",
+            "verified": True,
+        }
+        verified_sai = {"uid": "123456", "username": "sai", "verified": True}
+        assert saved_states[0]["bangumi_self_info"] == verified_sai
+        assert state["bangumi_self_info"] == verified_sai
 
     def test_init_falls_back_to_extension_reported_bangumi_username(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13111,17 +13225,45 @@ class TestGuidedInitEndpoints:
 
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
         app, _ = self._make_app(tmp_path, prereqs=prereqs)
-        app.state.load_bangumi_identity_username = lambda: "ext-user"
+        app.state.load_bangumi_identity = lambda: ("ext-user", True)
         captured = self._capture_run_guided_init(monkeypatch)
         with TestClient(app) as client:
             resp = client.post("/api/init", json={"sources": ["bangumi"]})
             assert resp.status_code == 202, resp.text
-            assert any("ext-user" in w for w in resp.json().get("warnings", []))
+            warnings = resp.json().get("warnings", [])
+            assert any("ext-user" in w for w in warnings)
+            # A cross-checked identity keeps the plain, confident wording.
+            assert not any("未经" in w for w in warnings)
             self._drive_until(client, captured, key="include_bangumi")
 
         assert captured["include_bangumi"] is True
         assert captured["bangumi_username"] == "ext-user"
         assert captured["bangumi_token"] == ""
+
+    def test_init_flags_unverified_extension_bangumi_identity_in_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fail-open identity is still usable, but the warning says so.
+
+        The old copy claimed "Bangumi 使用浏览器扩展识别到的账号 X。" for both
+        verified and never-checked reports, so a DOM drift (or a stranger's
+        username scraped off a timeline) read as confirmed fact.
+        """
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        app.state.load_bangumi_identity = lambda: ("ext-user", False)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"sources": ["bangumi"]})
+            assert resp.status_code == 202, resp.text
+            warnings = resp.json().get("warnings", [])
+            assert any("ext-user" in w and "未经 bgm.tv 校验" in w for w in warnings)
+            self._drive_until(client, captured, key="include_bangumi")
+
+        # Still runs with the identity — fail-open behaviour is unchanged.
+        assert captured["bangumi_username"] == "ext-user"
 
     def test_init_bangumi_username_priority_ladder(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13131,7 +13273,7 @@ class TestGuidedInitEndpoints:
 
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
         app, _ = self._make_app(tmp_path, prereqs=prereqs)
-        app.state.load_bangumi_identity_username = lambda: "ext-user"
+        app.state.load_bangumi_identity = lambda: ("ext-user", True)
 
         async def _fake_resolve(token, **kwargs):
             return "token-owner"
@@ -13158,7 +13300,7 @@ class TestGuidedInitEndpoints:
 
         # 2) explicit username + extension (no token) → explicit wins.
         app2, _ = self._make_app(tmp_path / "second", prereqs=prereqs)
-        app2.state.load_bangumi_identity_username = lambda: "ext-user"
+        app2.state.load_bangumi_identity = lambda: ("ext-user", True)
         captured2 = self._capture_run_guided_init(monkeypatch)
         with TestClient(app2) as client:
             resp = client.post(

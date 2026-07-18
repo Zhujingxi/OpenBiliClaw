@@ -7782,34 +7782,51 @@ def test_fetch_bangumi_init_data_missing_username_without_token(monkeypatch) -> 
     assert (events, counts, status) == ([], {}, "missing_username")
 
 
-def test_load_extension_bangumi_username_reads_runtime_state(monkeypatch, tmp_path) -> None:
+def test_load_extension_bangumi_identity_reads_runtime_state(monkeypatch, tmp_path) -> None:
     import json
 
     cfg = config_module.Config()
     cfg.data_dir = str(tmp_path)
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
 
-    # No state file yet → "".
-    assert cli_module._load_extension_bangumi_username() == ""
+    # No state file yet → ("", False).
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
 
     state_dir = tmp_path / "memory"
     state_dir.mkdir(parents=True)
     state_path = state_dir / "discovery_runtime.json"
 
     state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user", "verified": True}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", True)
+
+    # Fail-open (bgm.tv unreachable) record: usable, but flagged unverified.
+    state_path.write_text(
+        json.dumps(
+            {"bangumi_self_info": {"uid": "123", "username": "ext-user", "verified": False}}
+        ),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
+
+    # Backward compatibility: a record written before the flag existed cannot
+    # prove it was ever cross-checked, so it reads back as unverified.
+    state_path.write_text(
         json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user"}}),
         encoding="utf-8",
     )
-    assert cli_module._load_extension_bangumi_username() == "ext-user"
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
 
     # Malformed values are treated as missing, never propagated.
     state_path.write_text(
         json.dumps({"bangumi_self_info": {"uid": "123", "username": "bad/name"}}),
         encoding="utf-8",
     )
-    assert cli_module._load_extension_bangumi_username() == ""
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
     state_path.write_text("not-json", encoding="utf-8")
-    assert cli_module._load_extension_bangumi_username() == ""
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
 
 
 def test_fetch_bangumi_init_data_expired_token_returns_invalid_token(monkeypatch) -> None:
