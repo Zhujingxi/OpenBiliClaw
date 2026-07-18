@@ -6017,7 +6017,9 @@ def _load_extension_bangumi_identity() -> tuple[str, bool]:
     ``verified`` mirrors the backend flag: True only when bgm.tv confirmed the
     username belongs to the reported uid. Records written before the flag
     existed read back as unverified (they cannot prove a check ever ran) and
-    self-heal on the next bgm.tv page view.
+    self-heal on the next bgm.tv page view. A ``verified`` record with no
+    username is likewise read as unverified — the superseded 404 path wrote
+    those, and no current rule can produce one.
     """
     import json as _json
 
@@ -6033,7 +6035,8 @@ def _load_extension_bangumi_identity() -> tuple[str, bool]:
         info = state.get("bangumi_self_info") if isinstance(state, dict) else None
         if not isinstance(info, dict):
             return "", False
-        return validate_bangumi_username(info.get("username")), info.get("verified") is True
+        username = validate_bangumi_username(info.get("username"))
+        return username, bool(username) and info.get("verified") is True
     except Exception:
         return "", False
 

@@ -8657,14 +8657,28 @@ def create_app(
             the flag only ratchets up, and only for the SAME identity: a
             changed uid or username is a different claim the old evidence says
             nothing about, so it starts from this round's result.
+
+            Inheritance also requires the previous record to be one the current
+            rules could have produced, i.e. a non-empty username. Before the
+            flag meant "confirmed", the 404 path wrote
+            ``{"username": "", "verified": true}``; re-reporting that same 404
+            user matched on uid and on username (both ``""``) and inherited the
+            stale ``true``, pinning a record that contradicts the
+            verified-implies-a-username invariant. An illegal record is not
+            evidence, so it is not inherited.
             """
             sticky = bool(verified)
+            previous_username = previous.get("username") if isinstance(previous, dict) else None
             if (
                 not sticky
                 and isinstance(previous, dict)
                 and previous.get("verified") is True
+                # A confirmed record always names someone; an empty username
+                # with verified=true can only come from the superseded rules.
+                and isinstance(previous_username, str)
+                and previous_username
                 and previous.get("uid") == identity["uid"]
-                and previous.get("username") == identity["username"]
+                and previous_username == identity["username"]
             ):
                 sticky = True
             return {**identity, "verified": sticky}
@@ -8720,6 +8734,13 @@ def create_app(
         so they read back as UNVERIFIED rather than silently claiming a check
         that may never have run — the next bgm.tv page view re-reports and
         upgrades the record in place.
+
+        Records that cannot be legal under the current rules are normalised
+        here too: a ``verified`` record with no username (what the superseded
+        404 path used to write) reads back as unverified. Doing this on read as
+        well as on write means an installation that never revisits bgm.tv
+        still stops seeing the stale claim, instead of waiting for a report
+        that may never come.
         """
         from openbiliclaw.sources.bangumi_client import validate_bangumi_username
 
@@ -8731,7 +8752,8 @@ def create_app(
             info = state.get("bangumi_self_info")
             if not isinstance(info, dict):
                 return "", False
-            return validate_bangumi_username(info.get("username")), info.get("verified") is True
+            username = validate_bangumi_username(info.get("username"))
+            return username, bool(username) and info.get("verified") is True
         except Exception:
             logger.debug("bangumi identity: runtime state unavailable", exc_info=True)
             return "", False

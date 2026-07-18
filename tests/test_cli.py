@@ -7811,6 +7811,14 @@ def test_load_extension_bangumi_identity_reads_runtime_state(monkeypatch, tmp_pa
     )
     assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
 
+    # A verified record with no username is one the superseded 404 path wrote;
+    # no current rule produces it, so it normalises to unverified on read.
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "", "verified": True}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
+
     # Backward compatibility: a record written before the flag existed cannot
     # prove it was ever cross-checked, so it reads back as unverified.
     state_path.write_text(

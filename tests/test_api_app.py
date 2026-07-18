@@ -13319,6 +13319,55 @@ class TestGuidedInitEndpoints:
         assert state["bangumi_self_info"] == confirmed
         assert saved_states[-1]["bangumi_self_info"] == confirmed
 
+    def test_bangumi_identity_does_not_inherit_a_superseded_verified_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sticky-true must not resurrect a record the old rules produced.
+
+        The superseded 404 path wrote ``{"username": "", "verified": true}``.
+        Re-reporting that same 404 user matches on uid and on username (both
+        ``""``), so plain sticky inheritance carried the stale ``true``
+        forward forever — contradicting the invariant that a confirmed record
+        names someone. Inheritance now requires the previous record to be one
+        the current rules could have produced.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        # Exactly what the previous release persisted for a 404 lookup.
+        state["bangumi_self_info"] = {"uid": "123456", "username": "", "verified": True}
+        self._install_fake_bangumi_user_api(monkeypatch, {})
+
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 123456, "username": "does-not-exist"},
+            )
+            assert resp.json()["verified"] is False, "inherited a superseded verified record"
+        assert state["bangumi_self_info"] == {
+            "uid": "123456",
+            "username": "",
+            "verified": False,
+        }
+
+    def test_bangumi_identity_read_normalises_a_superseded_verified_record(
+        self, tmp_path: Path
+    ) -> None:
+        """The same bad record also reads back as unverified.
+
+        Fixing only the write path would leave an installation that never
+        revisits bgm.tv reporting the stale claim indefinitely, so the read
+        boundary normalises it too.
+        """
+        app, state, _ = self._identity_state_app(tmp_path)
+        state["bangumi_self_info"] = {"uid": "123456", "username": "", "verified": True}
+
+        assert app.state.load_bangumi_identity() == ("", False)
+
+        # A legal confirmed record still reads back as confirmed.
+        state["bangumi_self_info"] = {"uid": "123456", "username": "sai", "verified": True}
+        assert app.state.load_bangumi_identity() == ("sai", True)
+
     def test_bangumi_identity_404_is_not_a_confirmation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
