@@ -7,6 +7,7 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   buildVideoUrl,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   formatPublishedTime,
   getCommentSubmitUiState,
@@ -5917,7 +5918,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = item.up_name ? `这位 UP：${item.up_name}` : "";
+    metaLine.textContent = formatRecommendationAuthorLine(item);
     appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
