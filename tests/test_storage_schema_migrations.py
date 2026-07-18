@@ -33,9 +33,7 @@ def _snapshot_schema(conn: sqlite3.Connection) -> dict[str, list[str]]:
         ).fetchall()
     }
     return {
-        table: sorted(
-            str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
-        )
+        table: sorted(str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall())
         for table in sorted(tables)
     }
 
@@ -175,7 +173,80 @@ def test_initialize_is_idempotent(tmp_path: Path) -> None:
 def test_empty_raw_connection_has_no_tables() -> None:
     """Sanity check on the empty fixture itself."""
     conn = make_empty_db()
-    tables = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()
+    tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     assert tables == []
+
+
+# --- Phase 2A: ensure_columns helper ---
+
+
+def test_ensure_columns_adds_only_missing(tmp_path: Path) -> None:
+    """Helper adds missing columns and returns the added names in order."""
+    from openbiliclaw.storage.migrations import ensure_columns
+
+    conn = make_partial_db(
+        tmp_path, "content_cache", missing_columns={"delight_score", "delight_reason"}
+    )
+    added = ensure_columns(
+        conn,
+        "content_cache",
+        {
+            "delight_score": "REAL DEFAULT 0.0",
+            "delight_reason": "TEXT DEFAULT ''",
+            "delight_hook": "TEXT DEFAULT ''",  # already present
+        },
+    )
+    assert added == ["delight_score", "delight_reason"]
+    cols = _column_names(conn, "content_cache")
+    assert {"delight_score", "delight_reason", "delight_hook"} <= cols
+
+    # Second call is a no-op.
+    assert (
+        ensure_columns(
+            conn,
+            "content_cache",
+            {
+                "delight_score": "REAL DEFAULT 0.0",
+                "delight_reason": "TEXT DEFAULT ''",
+            },
+        )
+        == []
+    )
+
+
+def test_ensure_columns_rejects_non_whitelisted_table() -> None:
+    """Refuses to touch a table that is not in the static whitelist."""
+    import sqlite3 as _sqlite3
+
+    from openbiliclaw.storage.migrations import ensure_columns
+
+    conn = _sqlite3.connect(":memory:")
+    conn.row_factory = _sqlite3.Row
+    conn.execute("CREATE TABLE arbitrary (id INTEGER)")
+    with pytest.raises(ValueError, match="not in the static whitelist"):
+        ensure_columns(conn, "arbitrary", {"x": "TEXT"})
+
+
+def test_ensure_columns_rejects_non_whitelisted_column(tmp_path: Path) -> None:
+    """Refuses to add a column name that is not in the static whitelist."""
+    from openbiliclaw.storage.migrations import ensure_columns
+
+    conn = make_current_db(tmp_path)
+    with pytest.raises(ValueError, match="not in the static whitelist"):
+        ensure_columns(conn, "events", {"attacker_controlled": "TEXT"})
+
+
+def test_ensure_columns_rejects_identifier_shape_violation(tmp_path: Path) -> None:
+    """Defense-in-depth: even a whitelisted name must match snake_case ASCII."""
+    from openbiliclaw.storage import migrations
+
+    conn = make_current_db(tmp_path)
+    # Monkey-patch a bad name into the whitelist to prove the regex still bites.
+    bad = "events; DROP TABLE events--"
+    original = migrations._ALLOWED_TABLES
+    migrations._ALLOWED_TABLES = original | {bad}  # type: ignore[attr-defined]
+    try:
+        with pytest.raises(ValueError, match="identifier shape"):
+            migrations.ensure_columns(conn, bad, {"inferred_satisfaction": "TEXT"})
+    finally:
+        migrations._ALLOWED_TABLES = original  # type: ignore[attr-defined]
