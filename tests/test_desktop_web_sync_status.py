@@ -25,9 +25,12 @@ def test_desktop_renders_account_sync_error_chip() -> None:
 
     assert "function renderAccountSyncStatus(" in app_js
     assert "renderAccountSyncStatus(" in app_js
-    # auth-expired is a distinguishable, re-login-needed state.
+    # auth-expired is a distinguishable, re-login-needed state. The literal is
+    # only a fallback now — the backend renders the sentence so every surface
+    # says the same thing — but the branch must still exist.
     assert "B 站登录已失效，账号同步已停止 — 请重新登录" in app_js
-    assert 'last_account_sync_error_kind === "auth_expired"' in app_js
+    assert 'kind === "auth_expired"' in app_js
+    assert "last_account_sync_message" in app_js
 
     render = re.search(
         r"function renderAccountSyncStatus\((?P<args>[^)]*)\) \{(?P<body>.*?)\n    \}",
@@ -36,9 +39,12 @@ def test_desktop_renders_account_sync_error_chip() -> None:
     )
     assert render is not None, "desktop renderAccountSyncStatus not found"
     render_body = render.group("body")
-    # muted chip for generic errors carries the raw error text + last sync time.
+    # muted chip for generic errors carries the sync time, and the raw provider
+    # error stays available for diagnostics even though it is no longer shown.
     assert "last_account_sync_error" in render_body
     assert "last_account_sync_at" in render_body
+    # Timestamps go through the shared local-time formatter, not raw ISO.
+    assert "formatLocalTime(" in render_body
 
     assert 'id="accountSyncStatus"' in index_html
     assert ".account-sync-status" in app_css

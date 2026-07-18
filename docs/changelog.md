@@ -4,6 +4,14 @@
 
 ---
 
+## 未发布
+
+- **修复惊喜推荐文案渲染成结构化数据**：模型偶尔把整批结果塞进单个字段（如 `{"expression": [{...}, {...}]}`），而各处消费点都用 `str()` 无条件转换，于是 Python repr 通过了非空校验并作为推荐文案落库，用户在惊喜卡正文看到 `[{'expression': ..., 'topic_label': ...}]`。全程无任何日志，因为解析"成功"了——只是值不对。现对五个会持久化 LLM 文本的源头统一加类型守卫：推荐文案单条/批量、推荐分类（`reason` / `topic_group`）、发现分类单条/批量（`reason` / `topic_group` / `franchise_key`，经 `relevance_reason` 流向惊喜文案）。发现侧暴露面更大——`_clamp_score()` 遇到坏 score 返回 `0.0` 而非抛错，没有任何其他机制能拦住 repr 化的 reason。`update_pool_copy()` 另加一道基于解析的兜底（而非前缀匹配，后者既会漏 JSON/空白变体又会误伤含代码的正常文案）。**行为变更**：非字符串 `reason` 现在判为分类失败，不再持久化 repr。存量清洗脚本见 `scripts/clean_serialized_pool_copy.py`（默认 dry-run；已推荐的行写确定性 fallback 文案而非置空，因为待补文案查询会跳过已有 recommendation 的 bvid，置空只会让卡片变成空白）。
+- **修复 B 站 Cookie 过期只显示英文报错**：桌面端本就有中文「请重新登录」分支，但 `last_sync_error_kind` 从引入起就被 `memory/manager.py` 的两处 key 白名单和默认状态静默丢弃，读盘后恒为空，UI 永远落到兜底分支直出 458 字符的英文原文。同一原因还被重复拼接三遍——history 阶段打 `/x/web-interface/history/cursor`，favorites 与 following 各自调一次 `get_nav_info()` 取 mid，同一个 -101 抛了三次，现已去重。Cookie 过期是预期的生命周期事件而非故障，因此改由后端渲染用户文案（原始英文保留在诊断字段），桌面按 warning 而非红色 danger 呈现，时间戳复用本地化格式化器（`formatUpdateCheckTime` → `formatLocalTime`）。**本次仅覆盖桌面 Web 与 API**，扩展 popup、移动 Web、CLI、OpenClaw 适配器暂不展示该状态。
+- **修复账号同步并发覆写**：`sync_now()` 无互斥，而后台 `run_forever()` 循环与 OpenClaw 手动触发可同时进入，两者加载同一份状态、后写者覆盖对方的游标、错误串与 error kind。单纯的 `asyncio.Lock` 不够——API daemon 与独立 OpenClaw adapter 各自基于同一数据目录构造服务实例，实例锁互斥不到；且普通锁只是让第二个调用排队后再跑一遍冗余同步。现改为进程内共享 in-flight task + 状态文件旁的非阻塞 OS 文件锁，抢锁失败方返回 `already_running`，持锁进程崩溃由内核释放；`sync_if_due()` 在加入 in-flight 后重查游标，关闭 TOCTOU。
+
+---
+
 ## v0.3.174：Bangumi 平台来源（2026-07-18）
 
 - **新增第八个正式内容来源 Bangumi**：使用官方 `v0` API 匿名只读直连，`BangumiDiscoveryProducer` 以 `search / ranked / latest` 三分支、逐日预算、cursor、最小间隔和 `Retry-After` 冷却接入统一关键词与 `discovery_candidates → shared LLM eval/admission → content_cache` 主链；`sort=date` 在三端明确显示为“按日期浏览（可能含未播条目）”。用户显式提供公开用户名后，可把公开收藏转换为统一事件参与 guided init；Bangumi-only 初始化缺用户名会在预留 run 前拒绝，混合来源则仅跳过该画像分支并返回 warning。
