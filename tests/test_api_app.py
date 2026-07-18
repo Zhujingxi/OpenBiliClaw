@@ -12971,7 +12971,10 @@ class TestGuidedInitEndpoints:
                 "username": "sai",
                 "verified": True,
             }
-            # Idempotent second post: no extra write.
+            # Re-reporting the same identity is value-idempotent. It does cost
+            # one rewrite: deciding "unchanged" without the lock would mean
+            # answering from a snapshot a concurrent writer can already have
+            # invalidated, so the atomic section is always entered.
             resp2 = client.post(
                 "/api/sources/bangumi/identity",
                 json={"uid": 123456, "username": "sai"},
@@ -12991,7 +12994,8 @@ class TestGuidedInitEndpoints:
 
         verified_sai = {"uid": "123456", "username": "sai", "verified": True}
         assert saved_states[0]["bangumi_self_info"] == verified_sai
-        assert len(saved_states) == 1  # duplicate post did not rewrite
+        # Every write carries the same value — idempotent in content.
+        assert all(saved["bangumi_self_info"] == verified_sai for saved in saved_states)
         assert state["bangumi_self_info"] == verified_sai
 
     def test_bangumi_identity_discards_username_belonging_to_another_uid(
@@ -13013,12 +13017,14 @@ class TestGuidedInitEndpoints:
             )
             assert resp.status_code == 200
             # Username discarded, uid kept — never persist a stranger identity.
-            # bgm.tv answered, so the (empty) result is genuinely verified.
+            # NOT verified: bgm.tv refuted the username, it never told us who
+            # uid 999999001 actually is, so nothing about this identity is
+            # confirmed and sticky-true must not be able to pin it.
             assert resp.json() == {
                 "ok": True,
                 "uid": "999999001",
                 "username": "",
-                "verified": True,
+                "verified": False,
             }
             # A username that doesn't exist at all is discarded too.
             resp2 = client.post(
@@ -13026,11 +13032,11 @@ class TestGuidedInitEndpoints:
                 json={"uid": 999999001, "username": "ghost-user"},
             )
             assert resp2.json()["username"] == ""
-            assert resp2.json()["verified"] is True
+            assert resp2.json()["verified"] is False
         assert state["bangumi_self_info"] == {
             "uid": "999999001",
             "username": "",
-            "verified": True,
+            "verified": False,
         }
 
     def test_bangumi_identity_uid_only_resolves_username_from_api(
@@ -13070,15 +13076,17 @@ class TestGuidedInitEndpoints:
         with TestClient(app) as client:
             resp = client.post("/api/sources/bangumi/identity", json={"uid": 1})
             assert resp.status_code == 200
-            assert resp.json() == {"ok": True, "uid": "1", "username": "", "verified": True}
+            # A uid-only lookup that 404s checked nothing about this uid's
+            # owner, so it is NOT verified despite bgm.tv having answered.
+            assert resp.json() == {"ok": True, "uid": "1", "username": "", "verified": False}
             # A structurally malformed username normalizes to missing first,
             # then follows the same uid-only path.
             resp2 = client.post(
                 "/api/sources/bangumi/identity",
                 json={"uid": 1, "username": "bad/name"},
             )
-            assert resp2.json() == {"ok": True, "uid": "1", "username": "", "verified": True}
-        assert state["bangumi_self_info"] == {"uid": "1", "username": "", "verified": True}
+            assert resp2.json() == {"ok": True, "uid": "1", "username": "", "verified": False}
+        assert state["bangumi_self_info"] == {"uid": "1", "username": "", "verified": False}
 
     def test_bangumi_identity_network_failure_accepts_dom_report(
         self,
@@ -13193,11 +13201,10 @@ class TestGuidedInitEndpoints:
         """Regression: a flaky re-report must not erase proof we already hold.
 
         ``verified`` used to be overwritten with whatever this round produced,
-        so one bgm.tv timeout downgraded a genuinely cross-checked identity to
+        so one bgm.tv timeout downgraded a genuinely confirmed identity to
         ``false`` — and guided init then told the user their real account was
-        "未经 bgm.tv 校验". Network flapping also rewrote the file on every
-        flip. The flag is evidence about a uid↔username pair; it ratchets up
-        and is never downgraded for the same identity.
+        "未经 bgm.tv 校验". The flag records a confirmation of a uid↔username
+        pair; it ratchets up and is never downgraded for the same identity.
         """
         from fastapi.testclient import TestClient
 
@@ -13210,7 +13217,6 @@ class TestGuidedInitEndpoints:
                 "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
             )
             assert resp.json()["verified"] is True
-            assert len(saved_states) == 1
 
             # bgm.tv goes down; the extension re-reports the same identity.
             self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
@@ -13224,8 +13230,9 @@ class TestGuidedInitEndpoints:
             "username": "sai",
             "verified": True,
         }
-        # Nothing changed, so nothing was written — no flag flapping on disk.
-        assert len(saved_states) == 1
+        # Rewrites are allowed (the atomic section is always entered), but the
+        # value must never flap: every write carries verified=True.
+        assert all(saved["bangumi_self_info"]["verified"] is True for saved in saved_states)
 
     def test_bangumi_identity_verified_flag_does_not_carry_to_a_different_identity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -13271,13 +13278,19 @@ class TestGuidedInitEndpoints:
     def test_bangumi_identity_sticky_flag_reads_the_live_state_under_the_lock(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The merge must use the value seen INSIDE the atomic update.
+        """Regression: an unlocked snapshot must never decide the answer.
 
-        ``update_json_state`` takes a process + file lock and re-reads from
-        disk before invoking the mutator, so a concurrent report that verified
-        this identity between our pre-read and our write is visible there. If
-        the record were built from the stale pre-read instead, that concurrent
-        verification would be clobbered.
+        There used to be a write-avoidance fast path that read state outside
+        the lock and, when it looked unchanged, returned that snapshot's flag
+        without entering the atomic section. A concurrent request confirming
+        the identity in between made the snapshot stale, so the response said
+        ``false`` while the disk said ``true``.
+
+        Here the unlocked view deliberately disagrees with the locked truth:
+        ``load_discovery_runtime_state`` reports the identity as unverified —
+        exactly what the old fast path would have echoed — while the state the
+        mutator sees under the lock already carries the confirmation. Only an
+        answer derived inside the atomic section can be right.
         """
         from fastapi.testclient import TestClient
 
@@ -13285,32 +13298,167 @@ class TestGuidedInitEndpoints:
 
         app, state, saved_states = self._identity_state_app(tmp_path)
         manager = app.state.runtime_context.runtime_controller.memory_manager
-        original_update = manager.update_discovery_runtime_state
 
-        # The pre-read sees nothing; by the time the mutator runs, a concurrent
-        # request has landed a verified record for the very same identity.
-        manager.load_discovery_runtime_state = dict
-
-        def _update_after_race(mutator):  # type: ignore[no-untyped-def]
-            state["bangumi_self_info"] = {
-                "uid": "123456",
-                "username": "sai",
-                "verified": True,
-            }
-            return original_update(mutator)
-
-        manager.update_discovery_runtime_state = _update_after_race
+        confirmed = {"uid": "123456", "username": "sai", "verified": True}
+        state["bangumi_self_info"] = dict(confirmed)
+        # Stale unlocked view: same identity, but still flagged unverified. The
+        # old fast path compared against this and returned False from it.
+        manager.load_discovery_runtime_state = lambda: {
+            "bangumi_self_info": {"uid": "123456", "username": "sai", "verified": False}
+        }
 
         self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
         with TestClient(app) as client:
             resp = client.post(
                 "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
             )
-            # Built from the stale pre-read, this would have clobbered it.
-            assert resp.json()["verified"] is True
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["verified"] is True, "answered from the stale unlocked snapshot"
 
-        assert state["bangumi_self_info"]["verified"] is True
-        assert saved_states[-1]["bangumi_self_info"]["verified"] is True
+        # And what the response claimed is what a later read actually returns.
+        assert state["bangumi_self_info"] == confirmed
+        assert saved_states[-1]["bangumi_self_info"] == confirmed
+
+    def test_bangumi_identity_404_is_not_a_confirmation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: bgm.tv answering is not bgm.tv confirming.
+
+        ``verified: true`` means "bgm.tv positively confirmed this
+        uid↔username pair". A 404 refutes the reported username; it says
+        nothing about who the uid belongs to. Recording that as verified let
+        sticky-true pin an identity we had never established — a later
+        uid-only report during an outage would keep it ``true`` forever.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {})
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity",
+                json={"uid": 999999, "username": "does-not-exist"},
+            )
+            assert resp.json() == {
+                "ok": True,
+                "uid": "999999",
+                "username": "",
+                "verified": False,
+            }
+        assert state["bangumi_self_info"]["verified"] is False
+
+        # ...and the never-confirmed record cannot be locked in by a later
+        # outage: sticky-true has nothing to preserve.
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app) as client:
+            resp2 = client.post("/api/sources/bangumi/identity", json={"uid": 999999})
+            assert resp2.json()["verified"] is False
+        assert state["bangumi_self_info"]["verified"] is False
+
+    def test_bangumi_identity_verified_implies_a_non_empty_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A confirmed *pair* needs both halves.
+
+        When bgm.tv matches the uid but hands back an unusable username there
+        is no pair to have confirmed, so the flag stays False rather than
+        asserting a confirmation of nothing.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        self._install_fake_bangumi_user_api(monkeypatch, {"474349": {"id": 474349, "username": ""}})
+        with TestClient(app) as client:
+            resp = client.post("/api/sources/bangumi/identity", json={"uid": 474349})
+            assert resp.json() == {
+                "ok": True,
+                "uid": "474349",
+                "username": "",
+                "verified": False,
+            }
+        assert state["bangumi_self_info"] == {
+            "uid": "474349",
+            "username": "",
+            "verified": False,
+        }
+
+    def test_bangumi_identity_reports_a_failed_persist_instead_of_a_phantom_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 200 must never describe a state that was not stored.
+
+        The response used to be built from this round's raw verification
+        result, so a persistence failure still returned ``{"ok": true, …}``
+        with a flag nothing had written — the next read contradicted it.
+        Rule 7: propagate the real failure instead of appearing to work.
+        """
+        from fastapi.testclient import TestClient
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        manager = app.state.runtime_context.runtime_controller.memory_manager
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+
+        def _explode(_mutator):  # type: ignore[no-untyped-def]
+            raise OSError("disk full")
+
+        manager.update_discovery_runtime_state = _explode
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            # Verification succeeded, but the write did not: no phantom 200.
+            assert resp.status_code == 500, resp.text
+            assert "verified" not in resp.text
+        assert "bangumi_self_info" not in state
+
+    def test_bangumi_identity_failed_persist_does_not_downgrade_the_stored_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirror case: disk says true, this round fails to write, response
+        must not answer ``false`` off its own round result."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bangumi_client import BangumiAPIError
+
+        app, state, _ = self._identity_state_app(tmp_path)
+        manager = app.state.runtime_context.runtime_controller.memory_manager
+        confirmed = {"uid": "123456", "username": "sai", "verified": True}
+        state["bangumi_self_info"] = dict(confirmed)
+
+        def _explode(_mutator):  # type: ignore[no-untyped-def]
+            raise OSError("disk full")
+
+        manager.update_discovery_runtime_state = _explode
+        self._install_fake_bangumi_user_api(monkeypatch, BangumiAPIError("timeout", "down"))
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+            assert resp.status_code == 500, resp.text
+        # Disk untouched, and the response never claimed otherwise.
+        assert state["bangumi_self_info"] == confirmed
+
+    def test_bangumi_identity_without_a_memory_manager_reports_not_stored(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No persistence backend → the report is dropped, so say so.
+
+        This path used to answer ``{"ok": true, "verified": true}`` while
+        storing nothing at all; every later read returned ``("", False)``.
+        """
+        from fastapi.testclient import TestClient
+
+        app, _ = self._make_app(tmp_path)
+        app.state.runtime_context.runtime_controller = SimpleNamespace(memory_manager=None)
+        self._install_fake_bangumi_user_api(monkeypatch, {"sai": {"id": 123456, "username": "sai"}})
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/api/sources/bangumi/identity", json={"uid": 123456, "username": "sai"}
+            )
+        assert resp.status_code == 500, resp.text
+        assert '"ok":true' not in resp.text.replace(" ", "")
 
     def test_bangumi_identity_persisted_during_active_init(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

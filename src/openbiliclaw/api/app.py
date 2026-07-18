@@ -8619,23 +8619,32 @@ def create_app(
             username = ""
         return {"uid": str(uid), "username": username}
 
-    def _persist_bangumi_identity(identity: dict[str, str], *, verified: bool) -> bool:
+    def _persist_bangumi_identity(
+        identity: dict[str, str], *, verified: bool
+    ) -> dict[str, Any] | None:
         """Save the extension-reported identity into discovery runtime state.
 
-        ``verified`` records whether the username actually survived a bgm.tv
-        cross-check. It is persisted alongside uid/username so every consumer
-        can tell an authoritative identity from a fail-open best-effort one
-        instead of treating both as equally true (project rule 7), and it is
-        sticky-true per identity so a later unreachable-bgm.tv report cannot
-        erase evidence we already have (see ``_sticky_record``).
+        ``verified`` records whether bgm.tv positively confirmed the pair. It
+        is persisted alongside uid/username so every consumer can tell a
+        confirmed identity from a fail-open best-effort one instead of
+        treating both as equally true (project rule 7), and it is sticky-true
+        per identity so a later unreachable-bgm.tv report cannot erase a
+        confirmation we already hold (see ``_sticky_record``).
 
-        Returns the flag that is actually stored, which sticky-true may have
-        upgraded above this round's result — the caller echoes that rather
-        than the raw round value, so the response never contradicts the record.
+        Returns the record as actually written, or ``None`` when it could not
+        be persisted at all. Callers MUST NOT report a state this did not
+        store — an unpersisted "verified" would be a claim the next read
+        contradicts.
         """
         memory_manager = getattr(ctx.runtime_controller, "memory_manager", None)
         if memory_manager is None:
-            return bool(verified)
+            # No persistence backend: the report is dropped. Say so rather
+            # than echoing a flag nothing will read back (rule 7).
+            logger.warning(
+                "bangumi identity: no memory manager; cannot persist uid=%s",
+                identity.get("uid", ""),
+            )
+            return None
 
         def _sticky_record(previous: object) -> dict[str, Any]:
             """This round's record, upgraded to verified if ``previous`` proved it.
@@ -8660,42 +8669,48 @@ def create_app(
                 sticky = True
             return {**identity, "verified": sticky}
 
+        record: dict[str, Any] = {}
         try:
-            state = memory_manager.load_discovery_runtime_state()
-            existing = state.get("bangumi_self_info")
-            # Write-avoidance only. The authoritative merge happens inside the
-            # atomic section below; this just skips the lock + disk write when
-            # we provably have nothing new to contribute (the common case: a
-            # re-report of an already-verified identity while bgm.tv is down).
-            if isinstance(existing, dict) and existing == _sticky_record(existing):
-                return bool(existing.get("verified") is True)
             update_state = getattr(memory_manager, "update_discovery_runtime_state", None)
-            record: dict[str, Any] = {}
             if callable(update_state):
 
                 def _mutate(runtime_state: dict[str, Any]) -> None:
-                    # Re-derive from the live value: update_json_state holds a
+                    # The merge runs ONLY here. update_json_state holds a
                     # process + file lock and re-reads from disk before calling
-                    # us, so a concurrent report that just verified this
-                    # identity is visible here and cannot be clobbered.
+                    # us, so this sees the authoritative current value; a
+                    # pre-read outside the lock could be stale by now and was
+                    # how a concurrent confirmation used to get reported away.
                     record.update(_sticky_record(runtime_state.get("bangumi_self_info")))
                     runtime_state["bangumi_self_info"] = record
 
+                # Deliberately no lock-free write-avoidance fast path.
+                # update_json_state writes unconditionally, so re-reporting an
+                # unchanged identity costs one idempotent rewrite — accepted,
+                # because the only way to decide "unchanged" without the lock
+                # is a snapshot that a concurrent writer can already have
+                # invalidated, and answering from that snapshot contradicts
+                # what the next read returns.
                 update_state(_mutate)
             else:
-                record.update(_sticky_record(existing))
+                # Non-atomic fallback for runtimes without the atomic entry
+                # point (stubs). Same merge, weaker concurrency guarantee.
+                state = memory_manager.load_discovery_runtime_state()
+                record.update(_sticky_record(state.get("bangumi_self_info")))
                 state["bangumi_self_info"] = record
                 memory_manager.save_discovery_runtime_state(state)
-            logger.info(
-                "bangumi identity persisted: uid=%s username=%r verified=%s",
-                record.get("uid", ""),
-                record.get("username", ""),
-                record.get("verified"),
-            )
-            return bool(record.get("verified") is True)
         except Exception:
-            logger.exception("Failed to persist bangumi identity")
-            return bool(verified)
+            logger.exception(
+                "Failed to persist bangumi identity (uid=%s); reporting it as not stored",
+                identity.get("uid", ""),
+            )
+            return None
+        logger.info(
+            "bangumi identity persisted: uid=%s username=%r verified=%s",
+            record.get("uid", ""),
+            record.get("username", ""),
+            record.get("verified"),
+        )
+        return record
 
     def _load_bangumi_identity() -> tuple[str, bool]:
         """Extension-reported Bangumi ``(username, verified)`` from runtime state.
@@ -8739,12 +8754,21 @@ def create_app(
         actually answered — the caller persists that flag so a fail-open value
         is never mistaken for a checked one.
 
+        ``verified`` is True **only when bgm.tv positively confirmed this
+        uid↔username pair** — i.e. ``get_user`` returned and its ``id`` equals
+        the reported uid, yielding a non-empty username. Everything else is
+        False, including cases where bgm.tv answered clearly: a 404 *refutes*
+        the username, it does not confirm who the uid belongs to, and a
+        uid-only lookup that 404s never checked anything at all. Treating
+        "bgm.tv replied" as "identity confirmed" would let sticky-true pin an
+        account we never actually established as ``verified`` forever.
+
         Rules (never cache failures; ``trust_env=False`` via BangumiClient):
         - API ``id`` matches the reported uid → persist the API's username,
-          verified.
+          VERIFIED.
         - Username resolves to a DIFFERENT id, or does not exist → keep the
           uid, DISCARD the username, log WARNING (plausible-but-wrong guard);
-          still verified, because bgm.tv gave a definitive answer.
+          NOT verified — a refutation is not a confirmation.
         - Network / upstream failure → accept the DOM username best-effort but
           mark it UNVERIFIED and log WARNING with the real cause. Staying
           fail-open keeps zero-config users working when bgm.tv is unreachable
@@ -8769,13 +8793,15 @@ def create_app(
                 if reported_username:
                     logger.warning(
                         "bangumi identity: reported username %r does not exist; "
-                        "keeping uid=%s only",
+                        "keeping uid=%s only (NOT verified — a 404 refutes the "
+                        "username, it does not confirm the uid's owner)",
                         reported_username,
                         uid,
                     )
-                    return {"uid": uid, "username": ""}, True
-                # uid-only report from a custom-slug user: nothing to verify.
-                return identity, True
+                    return {"uid": uid, "username": ""}, False
+                # uid-only report from a custom-slug user: bgm.tv answered, but
+                # nothing about this uid's owner was established, so not verified.
+                return identity, False
             logger.warning(
                 "bangumi identity: could not verify uid=%s username=%r against bgm.tv "
                 "(%s: %s); storing the extension report UNVERIFIED",
@@ -8804,17 +8830,21 @@ def create_app(
         if api_uid != uid:
             logger.warning(
                 "bangumi identity: reported username %r belongs to uid %s, not %s; "
-                "discarding username",
+                "discarding username (NOT verified)",
                 reported_username or lookup,
                 api_uid or "?",
                 uid,
             )
-            return {"uid": uid, "username": ""}, True
+            return {"uid": uid, "username": ""}, False
         try:
             api_username = validate_bangumi_username(user.get("username"))
         except ValueError:
             api_username = ""
-        return {"uid": uid, "username": api_username or reported_username}, True
+        confirmed_username = api_username or reported_username
+        # Only a non-empty username makes this a confirmed *pair*. bgm.tv
+        # returning an unusable username leaves nothing to have confirmed, so
+        # the flag stays False rather than claiming a pair that does not exist.
+        return {"uid": uid, "username": confirmed_username}, bool(confirmed_username)
 
     @app.post("/api/sources/bangumi/identity")
     async def ingest_bangumi_identity(payload: dict[str, Any]) -> dict[str, Any]:
@@ -8829,21 +8859,30 @@ def create_app(
         unreachable the report is still stored (zero-config users must keep
         working) but flagged ``verified: false``.
 
-        The echoed ``verified`` is the flag as STORED, not this round's raw
-        result: a re-report of an already-verified identity keeps ``true``
-        even when this round could not reach bgm.tv, so the response never
-        contradicts what consumers will read back.
+        The whole body is read back off the record that was actually written,
+        so a 200 always describes what a subsequent read returns. If the
+        identity could not be persisted the request fails with 500 instead of
+        echoing a state nothing stored — the extension treats a failed report
+        as best-effort and re-reports on the next bgm.tv page view.
         """
         identity = _normalize_bangumi_identity(payload)
         if identity is None:
             raise HTTPException(status_code=422, detail="uid must be a positive integer")
         identity, verified = await _verify_bangumi_identity(identity)
-        stored_verified = _persist_bangumi_identity(identity, verified=verified)
+        stored = _persist_bangumi_identity(identity, verified=verified)
+        if stored is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Bangumi identity could not be persisted; see server logs. "
+                    "The next bgm.tv page view will re-report it."
+                ),
+            )
         return {
             "ok": True,
-            "uid": identity["uid"],
-            "username": identity["username"],
-            "verified": stored_verified,
+            "uid": stored["uid"],
+            "username": stored["username"],
+            "verified": stored["verified"],
         }
 
     # ── Bilibili extension search fallback endpoints ────────────────

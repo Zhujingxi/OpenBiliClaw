@@ -101,7 +101,7 @@ Subject identity 使用 `bangumi:<decimal subject id>`，页面 URL 为 `https:/
 
 `author_name` 由行内 `infobox` 解析，不额外请求上游：`AUTHOR_INFOBOX_KEYS` 存 SubjectType → 有序 credit key 的优先级阶梯（Bangumi 没有统一作者字段，书籍叫「作者」、动画叫「导演」、游戏叫「开发」），阶梯顺序与各 key 的填充率由 2026-07-18 的 250 行实测标定并写在代码注释里，schema 变化后需重跑该调查。`_infobox_value_text` 兼容官方三种 `value` 形态（裸字符串 / `[{v}]` / `[{k,v}]`，后两者都只读 `v`，`k` 是「总导演/副导演」这类子标签而非人名）；列表元素的 `v` **只在其本身是字符串时才采用**（不做 `str()` 兜底，否则 schema 漂移的 `{"v": ["押井守"]}` 会被制造成字面量 `"['押井守']"`）；同一 key 重复出现时取**首个非空**值，多名字最多保留 3 个以 `、` 连接，渲染长度硬限 `MAX_AUTHOR_LENGTH=80` 且优先切在名字分隔符上。`infobox` 缺失、类型漂移（裸字符串 / 字典 / 标量）、条目非映射、阶梯 key 全缺等情况一律返回 `""`——绝不字符串化成 `"None"` / `"[]"`，即历史上 `COALESCE` 无法自愈的那类脏行。
 
-`_is_placeholder_credit` 负责「值本身拼写出缺席」这一类：空串、语言级 null 字面量（`none`/`null`/`nil`/`nan`/`undefined`）、无歧义的 `n/a` 形式，以及**纯标点**（`-`/`——`/`/`/`?`/`（）`）归一为 `""`；裸字符串与两种 list 形态都过这道。边界是刻意收窄的——**不**过滤裸 `na`（可能是罗马音姓氏）、`无`/`未知`/`暂无`/`不明`（普通汉字，可能出现在真名里，且属编辑填写的散文而非序列化产物）、单字母与数字（可能是艺名），因为误杀会静默删掉真实数据；理由连同名单写在代码注释里。截断后若切口留下未闭合括号（`…（総監督`），回退到该括号之前再切；**已知取舍**：当未闭合括号就在第 0 位（整条 credit 是一个长括号块）时回退会把 credit 整个抹掉，宁可保留硬切结果也不丢真实署名，该分支有测试钉住以保持取舍可见。
+`_is_placeholder_credit` 负责「值本身拼写出缺席」这一类：空串、**本栈真能产出的** null 字面量（Python `str(None)` → `none`、JSON/JS `null` 与 `undefined`、`float('nan')` → `nan`）、无歧义的 `n/a` 形式，以及**不含任何字母或数字**的值（按 Unicode 类别判定，覆盖 `-`/`——`/`…`/`（）`/`?`/`★`/不换行空格等，不靠手写字符表——手写表已经漏过 U+2026）归一为 `""`；裸字符串与两种 list 形态都过这道。边界是刻意收窄的——**不**过滤 `nil`（真实存在的日本摇滚乐队，且 Python/JS/JSON 都产不出这个拼写，本就不是我们会造的脏值）、裸 `na`（可能是罗马音姓氏）、`无`/`未知`/`暂无`/`不明`（普通汉字，可能出现在真名里，且属编辑填写的散文而非序列化产物）、单字母与数字（可能是艺名），因为误杀会静默删掉真实数据；`none`/`null`/`nan` 保留了已知的小概率误杀风险（乐队可能这样起名），理由连同名单写在代码注释里。截断后若切口留下未闭合括号（`…（総監督`），回退到该括号之前再切（闭括号**只结算同族开括号**，`(credit]` 里的 `]` 不算闭合 `(`）；**已知取舍**：当未闭合括号就在第 0 位（整条 credit 是一个长括号块）时回退会把 credit 整个抹掉，宁可保留硬切结果也不丢真实署名，该分支有测试钉住以保持取舍可见。
 
 公开收藏通过 `bangumi_collection_to_event()` 转成统一事件：想看/看过/在看/搁置/抛弃使用不同信号强度，私有行丢弃，短评清洗后截断；官方 `updated_at` 不被当作可靠收藏时间或增量 cursor。令牌认证路径下（`include_private=True`，仅在读取令牌所有者本人收藏时传入），私密行同样转为画像信号；匿名路径行为不变。`fetch_bangumi_public_collection_events(..., include_private=...)` 逐 lane 透传该开关。
 
@@ -176,9 +176,22 @@ openbiliclaw discover --source bangumi --limit 30
 
 后端把身份持久化到 `discovery_runtime_state["bangumi_self_info"]`（`data/memory/discovery_runtime.json`；非正整数 uid 422 拒绝、非法用户名降为缺失）。**持久化前做权威校验**（匿名公开端点 `GET /v0/users/{username}`，`trust_env=False`，不缓存失败结果）：API 实测（2026-07-18）路径参数只认 username slug（`/v0/users/1` 404），但未设自定义 slug 的用户 `username == str(uid)`（`/v0/users/474349` → `id=474349`），故 uid-only 上报对默认 slug 用户也能解析。规则：API `id` 与上报 uid 一致 → 持久化 API 返回的 username（权威值）；username 属于其他 uid 或不存在 → **只存 uid、丢弃 username 并 log WARNING**（plausible-but-wrong 防线）；网络/上游失败 → best-effort 接受 DOM 值，下次上报再校验。
 
-**校验诚实性（`verified` 标记）**：fail-open 是刻意保留的——默认 `[network] mode = direct` 根本连不上 bgm.tv，改成 fail-closed 会让「零配置、不用令牌」这批目标用户直接不可用，于是这条护栏在默认配置下必然为空。诚实性因此不靠拒绝，而靠两件事：(1) 校验失败从 DEBUG **升为 WARNING**，带真实原因（`code`/异常类型 + 消息 + `UNVERIFIED` 字样），可诊断（铁律 7）；(2) 记录写成 `{uid, username, verified}`，`verified` 仅在 bgm.tv 真的给出确定答复（2xx 或 404）时为 `true`，网络/上游失败为 `false`；`POST /api/sources/bangumi/identity` 的响应体同步回传 `verified`（回传的是**落库后的值**，不是本轮原始结果，因此响应不会和读回的记录自相矛盾）。**向后兼容**：升级前写入的旧记录没有该键，读取端一律按**未校验**处理（无法证明校验跑过，宁可保守），用户下次访问 bgm.tv 页面时扩展重报即就地升级为已校验。
+**校验诚实性（`verified` 标记）**：fail-open 是刻意保留的——默认 `[network] mode = direct` 根本连不上 bgm.tv，改成 fail-closed 会让「零配置、不用令牌」这批目标用户直接不可用，于是这条护栏在默认配置下必然为空。诚实性因此不靠拒绝，而靠两件事：(1) 校验失败从 DEBUG **升为 WARNING**，带真实原因（`code`/异常类型 + 消息 + `UNVERIFIED` 字样），可诊断（铁律 7）；(2) 记录写成 `{uid, username, verified}`。
 
-**`verified` 对同一身份是单调的（sticky-true）**：一次成功的交叉校验是关于某个 uid↔username 配对的**证据**，不会因为我们后来连不上 bgm.tv 就失效。因此落盘时只允许把标记**往上抬**：本轮成功 → 写 `true`；本轮失败但已有记录的 uid **与** username 与本轮完全相同且已是 `true` → 保持 `true`；uid 或 username 任一不同 → 是另一个从未验证过的主张，旧证据不适用，按本轮结果写。没有这条，一次网络抖动就会把已校验身份降级成 `false`，让 guided init 对用户的真实账号谎报「未经 bgm.tv 校验」，并且每抖一次翻一次标记、写一次盘。合并逻辑跑在 `update_discovery_runtime_state` 的回调**内部**——`update_json_state` 会先取进程锁 + 文件锁再从磁盘重读，回调看到的是权威最新值，所以并发上报不会互相覆盖；回调外那次读取只用于「确实没有新信息就跳过加锁与写盘」的快路径（幂等，不产生翻转写入）。
+**`verified` 的定义**：`verified: true` ⟺ **bgm.tv 正面确认了这个 uid↔username 配对**，即 `get_user` 成功返回、其 `id` 与上报 uid 一致、且得到非空用户名。其余一律 `false`——包括 bgm.tv 明确答复的情形：404 是**否定**用户名，并没有告诉我们这个 uid 属于谁；uid-only 查询 404 更是压根没确认过任何东西。把「bgm.tv 答复了」当成「身份已确认」，会让 sticky-true 把一个从未确认过的身份永久钉成 `true`。逐路径取值见下表：
+
+| `get_user` 结果 | 落库 username | `verified` |
+| --- | --- | --- |
+| 成功且 `id == uid`，用户名非空 | API 用户名（回退上报值） | `true` |
+| 成功且 `id == uid`，但用户名不可用 | `""` | `false`（没有配对可谈） |
+| 成功但 `id != uid` | `""`（丢弃） | `false`（否定 ≠ 确认） |
+| 404，上报了用户名 | `""`（丢弃） | `false`（否定 ≠ 确认） |
+| 404，uid-only | `""` | `false`（未确认任何事） |
+| 网络 / 上游失败 | 保留 DOM 上报值 | `false` |
+
+`POST /api/sources/bangumi/identity` 的响应体**整体读自实际写入的那条记录**，所以 200 描述的一定是后续读取会拿到的状态；**落库失败则返回 500**（写异常或运行时没有 memory manager），绝不回传一个没能存下的状态（铁律 7）——扩展本就把上报当 best-effort，下次页面访问会重报。**向后兼容**：升级前写入的旧记录没有该键，读取端一律按**未校验**处理（无法证明校验跑过，宁可保守），用户下次访问 bgm.tv 页面时扩展重报即就地升级为已校验。
+
+**`verified` 对同一身份是单调的（sticky-true）**：一次成功的交叉校验是关于某个 uid↔username 配对的**证据**，不会因为我们后来连不上 bgm.tv 就失效。因此落盘时只允许把标记**往上抬**：本轮成功 → 写 `true`；本轮失败但已有记录的 uid **与** username 与本轮完全相同且已是 `true` → 保持 `true`；uid 或 username 任一不同 → 是另一个从未验证过的主张，旧证据不适用，按本轮结果写。没有这条，一次网络抖动就会把已校验身份降级成 `false`，让 guided init 对用户的真实账号谎报「未经 bgm.tv 校验」，并且每抖一次翻一次标记、写一次盘。合并逻辑**只**跑在 `update_discovery_runtime_state` 的回调内部——`update_json_state` 会先取进程锁 + 文件锁再从磁盘重读，回调看到的是权威最新值，所以并发上报不会互相覆盖。**刻意没有锁外快路径**：`update_json_state` 无条件写盘，因此重复上报同一身份要付一次幂等重写；接受这个代价，是因为不加锁判断「没变化」只能依赖一份并发写入者随时可能作废的快照，而按那份快照作答会和下一次读取自相矛盾（曾经就是这样把并发确认答没了）。
 
 guided init 与 CLI init 的用户名解析按优先级取值：**令牌 `/v0/me` > 显式/已配置用户名 > 扩展上报用户名 > 报错**；命中扩展身份时在 202 warnings/CLI 输出中明示来源，且**按 `verified` 分叉文案**——已校验保持"Bangumi 使用浏览器扩展识别到的账号 X。"，未校验则追加"（未经 bgm.tv 校验，可能不准）"并给出改用用户名/令牌的出路，避免把一次没跑成的校验说成既成事实。
 
