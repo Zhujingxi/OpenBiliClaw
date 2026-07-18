@@ -4,6 +4,17 @@
 
 ---
 
+## 设置向导与配置页收口到共享模型配置模块
+
+- **新增共享渲染层 `web/shared/model-config-render.js`**：把桌面 `web/js/views/model-settings.js` 与 `desktop/assets/js/model-settings.js` 中重复实现的 descriptor 字段、credential 编辑器与连接类型分组渲染抽到同一 ES module，桌面与移动两个 model-settings 入口改为 thin adapter，未来向导与插件也复用同一份 DOM 构造逻辑，消除四端渲染漂移。
+- **共享状态机补齐设置/向导需要的辅助能力**：`web/shared/model-config-state.js` 新增 `circuitView` / `circuitAnnouncementKey`（熔断状态 + 倒计时展示）、`hasUnverifiedChanges` / `unverifiedConnections`（自上次 exact probe 后 draft fingerprint 变化检测，保存前提示「存在未验证修改」）、`overrideLockFor` / `hasOverrideLocks`（`config.local.toml` 覆盖锁展示）、`createSingleConnectionDraft`（向导编辑单条 chat/embedding 记录的 lens，preservedFallbackCount 用于披露保留的 fallback 数量）、`prepareLocalOllamaEmbedding`（popup「一键启用本地 Ollama」动作的受守卫入口），并在 `applyProbeResult` 上写入 `probe.fingerprint` 作为后续变更检测的基线。
+- **设置向导 `/setup/index.html` 对齐共享模块并补齐缺失步骤**：改用 `<script type="module">` 从共享 state/render 模块构建单连接 draft，替代此前的内联实现；当 snapshot 报 `migration.state != "none"` 时整页切换为迁移 interstitial、禁用保存并指引到完整设置页的迁移面板（决策 3），向导不再尝试内联解决 legacy 迁移；新增可选 Embedding 配置节，沿用同一 descriptor 渲染与 `keep/set/env/clear` credential 语义；保存前披露 `preservedFallbackCount` 条已存在的 fallback 连接会被保留；继续沿用 probe-before-save 与 revision-gated `PUT /api/model-config`。
+- **插件 popup 删除 907 行 fork，改为受漂移保护的同步副本**：`extension/popup/popup-model-config-state.js` 现在是 `extension/scripts/sync-model-config-state.mjs` 从共享模块逐字节生成的 checked-in artifact（popup 以 loose ES module 形式打包，无法在运行时引用 extension/ 外的文件），`--check` 模式供 CI 检测漂移；`tests/js/model-config-parity.test.mjs` 在原有功能向量之上新增「popup 副本与共享源 byte-for-byte 一致」的守卫，并新增 14 个 web ↔ extension 行为对齐向量（hydrate / append / remove / move / field update / type switch / preset fill / payload / remote conflict / probe fingerprint 等）。
+- **桌面与移动 model-settings 同步接入新能力**：熔断状态 chip（含 `retry_after_seconds` 倒计时与 `failure_kind` tooltip）渲染在每条连接行；保存前检测到未验证修改时给出非阻塞警告；override 锁字段以禁用 + tooltip 标明来源文件。布局相关的窄/宽屏适配沿用 v0.3.168 已交付的断点体系，本次未改动。
+- 本条不提升版本号；后端 API、Pydantic 模型与持久化格式均无变更，属于纯前端重构 + 向导功能补齐。
+
+---
+
 ## 前端契约对齐与轻结构收口
 
 - **四端配置读取全部脱敏，凭据输入改为只写占位**：桌面 Web、移动 Web 与插件 popup 都只读 masked `GET /api/config`，任何前端不再请求 `reveal_keys=true`，也不再消费 `GET /api/sources/credentials`（该路由保留在服务端）；`/setup/` 向导不调用 `/api/config`，其模型与前置检查改走 `/api/model-config`、`/api/model-config/probe` 与 `/api/init-status`。B 站 / 抖音 / X / Reddit Cookie 等凭据输入框渲染为空，仅用 placeholder 显示「已保存 Cookie（留空保持不变，粘贴新值覆盖）/ 未保存」状态；空输入在 `PUT /api/config` 里整键省略，保存永不覆盖已存 secret。桌面设置页只读「当前 Cookie / 登录凭据」折叠列表（details + 只读 textarea + 复制按钮）的 markup、JS 与 CSS 一并删除，各源只保留写-only 覆盖输入框。
