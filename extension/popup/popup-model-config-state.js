@@ -814,6 +814,11 @@ export function applyProbeResult(state, signature, result) {
 }
 
 export function toModelConfigPayload(state) {
+  // The backend rejects enabled=false WITH providers outright
+  // (embedding_disabled_with_providers). Route items stay in client state so a
+  // same-session re-enable restores them, but the wire payload must not carry
+  // providers on a disabled route.
+  const embeddingEnabled = Boolean(state.models.embedding.enabled);
   return {
     revision: state.revision,
     models: {
@@ -824,9 +829,11 @@ export function toModelConfigPayload(state) {
         timeout_seconds: Math.max(10, Number(state.models.chat.timeout_seconds) || 10),
       },
       embedding: {
-        enabled: Boolean(state.models.embedding.enabled),
+        enabled: embeddingEnabled,
         settings: embeddingSettingsPayload(state.models.embedding.settings),
-        providers: state.models.embedding.providers.map(embeddingPayload),
+        providers: embeddingEnabled
+          ? state.models.embedding.providers.map(embeddingPayload)
+          : [],
       },
     },
     migration_resolutions: clone(state.migration_resolutions || {}),

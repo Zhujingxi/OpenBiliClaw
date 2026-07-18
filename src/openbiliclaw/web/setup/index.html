@@ -282,6 +282,7 @@
       updateRouteField,
       updateRouteSetting,
     } from "/web/shared/model-config-state.js";
+    import { escapeHtml } from "/web/shared/model-config-render.js";
 
     const $ = (s) => document.querySelector(s);
     // v0.3.118+: bilibili is selectable like every other source — default
@@ -361,15 +362,6 @@
 
     function clone(value) {
       return JSON.parse(JSON.stringify(value));
-    }
-
-    function escapeHtml(value) {
-      return String(value ?? "")
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#39;");
     }
 
     function setModelNarrowView(view) {
@@ -1781,7 +1773,11 @@
     $("#modelCredentialEditor").addEventListener("input", (event) => {
       const record = chatDraft();
       if (event.target.id === "modelCredentialValue" && record && !modelSaveInFlight) {
+        // Merge, don't replace: retain the action selected by the click
+        // handler — the shared reducer defaults a missing action to "keep"
+        // and clears the value for non-set/env actions.
         modelState = updateRouteField(modelState, "chat", record.id, "credential", {
+          ...record.credential,
           value: event.target.value,
         });
         refreshDraftLens();
@@ -1820,7 +1816,9 @@
     $("#embeddingCredential").addEventListener("input", (event) => {
       const provider = embeddingProvider();
       if (event.target.id === "embeddingCredentialValue" && provider && !modelSaveInFlight) {
+        // Merge, don't replace: retain the selected action (see chat handler).
         modelState = updateRouteField(modelState, "embedding", provider.id, "credential", {
+          ...provider.credential,
           value: event.target.value,
         });
         embeddingProbeOk = false;

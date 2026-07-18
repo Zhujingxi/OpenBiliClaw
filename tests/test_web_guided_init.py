@@ -344,20 +344,22 @@ def test_setup_model_editor_escapes_config_values_and_can_create_first_chat_rout
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required to execute the inline escaping regression")
-    helper = setup_html.split("    function escapeHtml(value) {", 1)[1].split(
-        "\n    }\n\n    function descriptorFor", 1
-    )[0]
-    function_source = "function escapeHtml(value) {" + helper + "\n}"
+    # The wizard imports escapeHtml from the shared render module — run the
+    # shared implementation through Node to guard the escaping contract.
     attack = '"><img src=x onerror="globalThis.injected=true">'
     result = subprocess.run(
         [
             node,
+            "--input-type=module",
             "-e",
-            f"{function_source}; process.stdout.write(escapeHtml({json.dumps(attack)}));",
+            "import { escapeHtml } from"
+            ' "./src/openbiliclaw/web/shared/model-config-render.js";'
+            f" process.stdout.write(escapeHtml({json.dumps(attack)}));",
         ],
         check=True,
         capture_output=True,
         text=True,
+        cwd=Path(__file__).parents[1],
     )
 
     assert (
@@ -835,6 +837,60 @@ def test_setup_wizard_config_save_401_points_to_login_instead_of_dead_end() -> N
     assert "r.status === 401" in setup_html
     assert "输入访问密码登录" in setup_html
     assert '<a href="/web">' in setup_html
+
+
+def test_setup_credential_typing_retains_selected_action() -> None:
+    """Regression (review t_7714e61c finding 1): the credential value input
+    handlers must merge with the current credential object so the action chosen
+    by the click handler survives; the shared reducer defaults a missing
+    action to "keep" and clears the value."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    chat_input = setup_html.split('$("#modelCredentialEditor").addEventListener("input"', 1)[
+        1
+    ].split("});", 1)[0]
+    assert "...record.credential" in chat_input
+
+    embedding_input = setup_html.split(
+        '$("#embeddingCredential").addEventListener("input"', 1
+    )[1].split("});", 1)[0]
+    assert "...provider.credential" in embedding_input
+
+
+def test_setup_disabled_embedding_payload_carries_no_providers() -> None:
+    """Regression (review t_7714e61c finding 2): toModelConfigPayload must
+    never serialize enabled=false WITH providers — the backend rejects that
+    shape as embedding_disabled_with_providers. Route items stay in client
+    state for same-session re-enable."""
+    shared_state = Path("src/openbiliclaw/web/shared/model-config-state.js").read_text(
+        encoding="utf-8"
+    )
+
+    payload_fn = shared_state.split("export function toModelConfigPayload(state)", 1)[1]
+    assert "providers: embeddingEnabled" in payload_fn
+    assert ": []" in payload_fn
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the payload regression")
+    assert node is not None
+    result = subprocess.run(
+        [node, "tests/js/repro-review-findings.mjs"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=Path(__file__).parents[1],
+    )
+    assert "repro OK" in result.stdout
+
+
+def test_setup_wizard_consumes_shared_escape_html() -> None:
+    """The setup wizard imports escapeHtml from the shared render module
+    instead of forking it locally (review t_7714e61c finding 3)."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    assert 'import { escapeHtml } from "/web/shared/model-config-render.js";' in setup_html
+    assert "function escapeHtml" not in setup_html
 
 
 def test_setup_api_calls_route_through_single_bounded_helper() -> None:

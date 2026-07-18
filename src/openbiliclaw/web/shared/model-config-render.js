@@ -1,6 +1,10 @@
 /**
- * Descriptor-driven DOM renderers shared by every model-route editor surface
- * (desktop web, mobile web, extension popup, setup wizard).
+ * Descriptor-driven DOM renderers shared by the desktop and mobile web
+ * model-route editors. The setup wizard consumes the escapeHtml primitive;
+ * its descriptor/credential/connection-type renderers stay wizard-local for
+ * layout reasons (full adoption is plan §10). The extension popup cannot
+ * import outside extension/ and keeps its own copies, drift-guarded by
+ * tests/js/model-config-parity.test.mjs.
  *
  * All renderers are pure string builders: they take the DOM-free state from
  * `model-config-state.js` plus the backend descriptor registry and return HTML

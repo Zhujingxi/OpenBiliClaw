@@ -66,9 +66,11 @@ def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
 
 def test_deepseek_disabled_thinking_uses_an_empty_wire_value_on_every_web_surface() -> None:
     # The empty-string choice rendering for reasoning_effort moved into the
-    # shared render module consumed by desktop + mobile; wizard and
-    # extension popup still carry the literal markup inline (their shared
-    # adoption is a follow-up — see plan §10).
+    # shared render module consumed by desktop + mobile; the wizard consumes
+    # the shared escapeHtml primitive but keeps its own descriptor-field
+    # markup (wizard layout uses div-wrapped .model-field instead of the
+    # shared label-wrapped .settings-field — full adoption is plan §10), and
+    # the extension popup carries the literal markup inline.
     surfaces = (
         (ROOT / "src/openbiliclaw/web/shared/model-config-render.js").read_text(
             encoding="utf-8"
