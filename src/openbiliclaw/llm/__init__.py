@@ -1,5 +1,6 @@
 """LLM package — multi-model provider support."""
 
+from .anthropic_provider import AnthropicCompatibleProvider
 from .base import (
     LLMFallbackError,
     LLMProvider,
@@ -11,7 +12,6 @@ from .base import (
     classify_llm_failure_kind,
     classify_llm_unavailability,
 )
-from .claude_provider import ClaudeProvider
 from .gemini_provider import GeminiProvider
 from .ollama_provider import OllamaProvider
 from .openai_provider import OpenAIProtocolProvider, OpenAIProvider
@@ -29,7 +29,7 @@ from .service import (
 )
 
 __all__ = [
-    "ClaudeProvider",
+    "AnthropicCompatibleProvider",
     "GeminiProvider",
     "LLMFallbackError",
     "LLMProvider",
