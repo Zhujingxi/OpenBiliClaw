@@ -143,6 +143,8 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 
    provider / LLM batch 级 transient 异常、空 scores、短 scores 或长 scores 都会释放回 `pending_eval` 后续重试，不消耗单条候选的 `eval_attempts`，避免一次短暂 provider outage 把整批内容永久打成 `failed_eval`；同时会递增独立的 `batch_eval_attempts`，高阈值熔断后才进入 `failed_eval`，避免永久坏 provider 无限 churn。batch prompt 明确要求不要因为平台不同而随意抬高或压低分数，只能按内容与用户画像匹配度打分。
 
+   **Reason 契约（v0.3.171 减肥）**：批量 / 单条评估 prompt 要求 `score` 严格低于固定 `0.5` 的条目 `reason` 写空串 `""`，`score >= 0.5` 的条目写一句不超过 30 个字、可直接展示给用户的中文。0.5 是 baked 进 system prompt 的静态常量（守缓存前缀 byte-identical 铁律），严格低于所有 admission 门槛（0.60 默认 / 0.58 explore），所以空 `reason` 的低分条目必被丢弃、永不入池、永不进 delight 兜底。解析侧零改动：`_evaluate_batch_once` 与单条路径本就用 `str(item_result.get("reason", "")).strip()` 把缺失 / 空 `reason` 归一为 `""`，eval 缓存写入不因空 `reason` 拒绝，delight 兜底链本就 `.strip()` 跳过空 `relevance_reason` 回落到 topic / 通用文案。
+
 5. **按相关性、供给层级和池子上限入推荐池**
    通过阈值的候选会先调用 `ContentDiscoveryEngine.normalize_evaluated_results()` 复用 discovery 旧路径的 topic_group / topic_key embedding normalization，再交给 `cache_evaluated_results()` 复用既有 `_cache_results()` 入库逻辑，写入正式推荐池 `content_cache`。`_cache_results()` 在真正写库前会再次调用同一 admission policy，任何兼容 / 手动调用即使绕过候选队列，也不能把未评估、缺分或低分内容写入正式池；`Database.cache_content()` 的缺省分数为 `0.0`，不再凭空赋予 `0.60`。数据库的普通取池、缓存回填、平台补位、文案预计算、池配额统计、历史推荐和 delight 出口同样使用来源感知的准入条件，所以 `explore=0.58` 能真实展示，而任意非 `explore=0.58` 仍被拒绝。写入前会检查 `count_pool_candidates()`；如果 `pool_available_count >= pool_target_count`，pipeline 直接停止 drain，runtime 也不会继续 discovery。因此“推荐池到了上限就不 discovery”的边界仍以正式可换池为准。成功 admission 的 item 会保存在 pipeline 的 `last_admitted_items` 中，供 runtime 更新 `recent_pool_topics`。
 

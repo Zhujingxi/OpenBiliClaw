@@ -1247,6 +1247,15 @@ def build_posture_gate_prompt(
 # 100% static system prompt for single-item content evaluation.
 # All variables (source_context, source_platform, profile, content)
 # go in user_prompt — see ``build_content_evaluation_prompt``.
+# Reason-diet floor (v0.3.171): the "< 0.5 → empty reason" threshold below is a
+# fixed 0.5 baked into the static prompt text, NOT the runtime
+# ``admission_min_score``. It must stay a literal constant for two reasons:
+# (1) cache convention — the system prompt has to be byte-identical across
+# calls, so it cannot interpolate a per-call/config value; (2) safety margin —
+# 0.5 is strictly below every admission path (0.60 default, 0.58 explore per
+# ``discovery/admission.py``), so a reason-less item can never be admitted,
+# pooled, or reach the delight fallback. Reopen this only if an admission path
+# ever drops at/below 0.5.
 _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要评估一个候选内容与一个用户画像的匹配度。下面 user 消息会给出 "
@@ -1256,7 +1265,10 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<rules>\n"
     "1. 输出必须是严格 JSON,不要附带解释。\n"
     "2. score 范围必须在 0 到 1 之间。\n"
-    "3. reason 只写一句中文,解释为什么这个人会喜欢或不喜欢这个内容。\n"
+    "3. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 "
+    '""(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);'
+    "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
+    "不超过 30 个字,说明为什么这个人会喜欢或不喜欢这个内容。\n"
     '4. 不要只说"因为热门"或"因为看过类似的",要结合用户画像。\n'
     "5. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
     "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
@@ -1352,6 +1364,11 @@ def build_content_evaluation_prompt(
 # profile data — all of those go in user_prompt). Provider-side prompt
 # cache (DeepSeek 90% / OpenAI 50% / Claude 90% / Gemini 75% off) only
 # fires when the prefix is byte-identical across calls.
+#
+# Reason-diet floor (v0.3.171): rule 3a bakes a fixed 0.5 skip threshold (see
+# the single-eval constant above for the full rationale) — a literal constant,
+# never the runtime ``admission_min_score``, so the prefix stays byte-stable and
+# stays strictly below every admission path (0.60 default, 0.58 explore).
 _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要批量评估多个候选内容与一个用户画像的匹配度。"
@@ -1364,8 +1381,12 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     '1. 输出必须是严格 JSON 对象,不要附带解释。顶层只包含 "results" 数组。\n'
     "2. results 数组长度必须与输入内容数量一致,顺序一一对应。\n"
     "3. 每项必须原样带回输入里的 bvid 或 content_id,并包含 score(0-1)、"
-    "reason(一句中文)、topic_group(2-4词粗分类)、style_key(13选1)、"
+    "reason、topic_group(2-4词粗分类)、style_key(13选1)、"
     "franchise_key(可空)。\n"
+    "3a. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 "
+    '""(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);'
+    "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
+    "不超过 30 个字,说明为什么这个人会喜欢这个内容。\n"
     "4. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
     "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
     "都必须按内容与用户画像的真实匹配度统一评分;"
@@ -1443,7 +1464,7 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     '"style_key": "deep_focus", "franchise_key": ""},\n'
     '    {"bvid": "BV2xxx", "score": 0.72, "reason": "...", "topic_group": "游戏摄影", '
     '"style_key": "aesthetic_browse", "franchise_key": "原神"},\n'
-    '    {"bvid": "BV3xxx", "score": 0.45, "reason": "...", "topic_group": "美食", '
+    '    {"bvid": "BV3xxx", "score": 0.45, "reason": "", "topic_group": "美食", '
     '"style_key": "social_chat", "franchise_key": ""}\n'
     "  ]\n"
     "}\n"

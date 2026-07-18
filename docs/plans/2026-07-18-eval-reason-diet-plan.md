@@ -33,15 +33,15 @@ output schema; only the reason-writing instruction changes (skip <0.5, ≤30字 
 
 **Steps:**
 
-- [ ] Write failing prompt-contract tests: batch + single system prompts contain the 0.5-skip
+- [x] Write failing prompt-contract tests: batch + single system prompts contain the 0.5-skip
       instruction and the ≤30字 cap phrasing.
-- [ ] Run `.venv/bin/python -m pytest tests/test_llm_prompts.py -q`; confirm the new tests FAIL.
-- [ ] Edit both system-prompt constants; keep them 100% static.
-- [ ] Rerun focused tests → PASS; run `test_prompt_builder_system_messages_are_call_invariant`.
-- [ ] Trace the empty-reason path once (eval parse → cache entry → candidate persistence →
+- [x] Run `.venv/bin/python -m pytest tests/test_llm_prompts.py -q`; confirm the new tests FAIL.
+- [x] Edit both system-prompt constants; keep them 100% static.
+- [x] Rerun focused tests → PASS; run `test_prompt_builder_system_messages_are_call_invariant`.
+- [x] Trace the empty-reason path once (eval parse → cache entry → candidate persistence →
       delight fallback `.strip()` skip) and add one regression test if any link lacks coverage.
-- [ ] Full suite; `ruff format` + `ruff check` + `mypy src/` clean.
-- [ ] Single commit (conventional; `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`),
+- [x] Full suite; `ruff format` + `ruff check` + `mypy src/` clean.
+- [x] Single commit (conventional; `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`),
       tick this plan's boxes, changelog bullet under the current version block.
 
 **Acceptance:**

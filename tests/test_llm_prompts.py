@@ -556,6 +556,29 @@ def test_content_evaluation_prompts_only_allow_explore_scoring_exception() -> No
         assert "related_chain 允许适度偏移" not in system
 
 
+def test_content_evaluation_prompts_skip_low_score_reason() -> None:
+    """Both eval system prompts bake the 0.5 skip floor + ≤30字 cap (static).
+
+    Reason-diet contract (v0.3.171): ``score`` strictly below the fixed 0.5
+    floor writes an empty ``reason`` (pure waste — never admitted); the rest get
+    one conversational sentence capped at 30 个字 so the delight fallback can
+    surface it verbatim. The floor is baked constant text, not a per-call value.
+    """
+    single_system = build_content_evaluation_prompt(
+        profile_summary={"interests": ["音乐"]},
+        content_summary={"title": "匿名视频"},
+    )[0]["content"]
+    batch_system = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["音乐"]},
+        content_items=[{"content_id": "x", "title": "匿名视频"}],
+    )[0]["content"]
+
+    for system in (single_system, batch_system):
+        assert "严格低于 0.5" in system
+        assert "必须写成空串" in system
+        assert "不超过 30 个字" in system
+
+
 def test_batch_content_evaluation_prompt_allows_per_item_platforms() -> None:
     messages = build_batch_content_evaluation_prompt(
         profile_summary={"interests": ["systems"]},

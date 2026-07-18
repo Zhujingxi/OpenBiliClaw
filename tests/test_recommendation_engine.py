@@ -5588,3 +5588,38 @@ async def test_generate_expression_rejects_nested_batch_payload() -> None:
             assert "topic_label" not in value
             assert "expression" not in value
             assert not value.lstrip().startswith(("[", "{"))
+
+
+def test_evo_delight_reason_falls_through_empty_relevance_reason() -> None:
+    """Reason-diet (v0.3.171): an empty ``relevance_reason`` (what a diet'd
+    sub-0.5 item would carry) must not surface blank — the delight fallback
+    chain skips it via ``.strip()`` and falls through to the topic label, then
+    to the generic sentence. A present reason is still shown verbatim.
+    """
+    # pool_expression wins first.
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(
+                bvid="BV1", title="x", pool_expression="现成文案", relevance_reason=""
+            )
+        )
+        == "现成文案"
+    )
+    # empty pool_expression + non-empty relevance_reason → reason verbatim.
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(bvid="BV2", title="x", relevance_reason="这条正合你的胃口。")
+        )
+        == "这条正合你的胃口。"
+    )
+    # empty pool_expression + empty relevance_reason → topic-label fallback.
+    topic_reason = RecommendationEngine._evo_delight_reason(
+        DiscoveredContent(bvid="BV3", title="x", relevance_reason="", topic_group="航天")
+    )
+    assert topic_reason != ""
+    assert "航天" in topic_reason
+    # everything empty → generic sentence, never blank.
+    generic = RecommendationEngine._evo_delight_reason(
+        DiscoveredContent(bvid="BV4", title="x", relevance_reason="")
+    )
+    assert generic.strip() != ""

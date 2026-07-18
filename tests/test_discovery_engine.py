@@ -3360,6 +3360,76 @@ async def test_evaluate_batch_matches_results_by_bvid_when_response_reorders() -
 
 
 @pytest.mark.asyncio
+async def test_evaluate_batch_tolerates_empty_reason_and_caches_it() -> None:
+    """Reason-diet (v0.3.171): sub-0.5 items emit ``"reason": ""`` and one item
+    may omit the key entirely; the batch parser must apply the score, store an
+    empty ``relevance_reason`` without error, round-trip that empty reason
+    through the eval cache, and the second pass must hit cache (no LLM re-call).
+    """
+
+    class _EmptyReasonLLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured_task(self, *, user_input: str, **kwargs: object) -> object:
+            self.calls += 1
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        # explicit empty reason (sub-0.5, the diet's common case)
+                        {"bvid": "BV_EMPTY", "score": 0.31, "reason": "", "style_key": "deep_dive"},
+                        # missing reason key entirely — parser must still tolerate it
+                        {"bvid": "BV_MISSING", "score": 0.2, "style_key": "deep_dive"},
+                        # admitted item keeps a presentable reason
+                        {
+                            "bvid": "BV_KEPT",
+                            "score": 0.72,
+                            "reason": "这条正好戳你最近的兴趣。",
+                            "style_key": "deep_dive",
+                        },
+                    ],
+                    ensure_ascii=False,
+                )
+            )
+
+    llm = _EmptyReasonLLM()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    batch = [
+        DiscoveredContent(bvid="BV_EMPTY", title="空理由", source_strategy="trending"),
+        DiscoveredContent(bvid="BV_MISSING", title="缺理由", source_strategy="trending"),
+        DiscoveredContent(bvid="BV_KEPT", title="入池", source_strategy="trending"),
+    ]
+    profile = _build_profile()
+
+    scores = await engine._evaluate_batch(batch, profile)
+
+    assert scores == [0.31, 0.2, 0.72]
+    assert batch[0].relevance_reason == ""
+    assert batch[1].relevance_reason == ""
+    assert batch[2].relevance_reason == "这条正好戳你最近的兴趣。"
+    assert llm.calls == 1
+
+    # The empty/missing-reason items are valid eval cache entries — reading the
+    # stored tuple back must yield an empty reason string (not a rejected or
+    # coerced value), so a later ``evaluate_content_batch`` pass reuses them.
+    profile_digest = engine._evaluation_profile_digest(profile)
+    negative_digest = engine._negative_examples_digest(None)
+    for content, expected_reason in (
+        (batch[0], ""),
+        (batch[1], ""),
+        (batch[2], "这条正好戳你最近的兴趣。"),
+    ):
+        cache_key = engine._batch_eval_cache_key(
+            content,
+            profile_digest=profile_digest,
+            negative_digest=negative_digest,
+        )
+        cached = engine._get_eval_cache_entry(cache_key)
+        assert cached is not None
+        assert cached[1] == expected_reason
+
+
+@pytest.mark.asyncio
 async def test_evaluate_batch_retries_only_missing_keyed_members() -> None:
     class _PartialLLM:
         def __init__(self) -> None:
