@@ -257,15 +257,6 @@ export async function ackNotification(bvid) {
   return requestJson("/notifications/sent", json({ bvid }));
 }
 
-// ── Cognition Updates ───────────────────────────────────────
-export async function fetchPendingCognitionUpdates() {
-  return requestJson("/cognition-updates/pending");
-}
-
-export async function markCognitionSeen(id) {
-  return requestJson(`/cognition-updates/${encodeURIComponent(id)}/seen`, { method: "POST" });
-}
-
 // ── Activity Feed ───────────────────────────────────────────
 export async function fetchActivityFeed({ limit, before } = {}) {
   const params = new URLSearchParams();
@@ -348,7 +339,7 @@ export async function respondToAvoidanceProbe(domain, responseType, message = ""
   });
 }
 
-// ── Watch-later ──────────────────────────────────────────────────
+// ── Saved lists (platform-neutral /saved/{kind}) ─────────────
 
 function savedListPath(listKind) {
   if (listKind !== "favorite" && listKind !== "watch_later") {
@@ -414,38 +405,4 @@ export async function pollSavedSyncTask(taskId, timeoutMs = SAVED_READ_TIMEOUT_M
   return requestJson(`/saved-sync/tasks/${encodeURIComponent(String(taskId || "").trim())}`, {
     timeoutMs,
   });
-}
-
-export async function addToWatchLater(bvid) {
-  return requestJson("/watch-later", { ...json({ bvid }), method: "POST" });
-}
-
-export async function removeFromWatchLater(bvid) {
-  return requestJson(`/watch-later/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-}
-
-export async function watchLaterStatus(bvid) {
-  return requestJson(`/watch-later/${encodeURIComponent(bvid)}`);
-}
-
-export async function fetchWatchLater(limit = 50, offset = 0) {
-  return requestJson(`/watch-later?limit=${limit}&offset=${offset}`);
-}
-
-// ── Favorites (收藏夹) ────────────────────────────────────────────
-
-export async function addToFavorite(bvid) {
-  return requestJson("/favorites", { ...json({ bvid }), method: "POST" });
-}
-
-export async function removeFromFavorite(bvid) {
-  return requestJson(`/favorites/${encodeURIComponent(bvid)}`, { method: "DELETE" });
-}
-
-export async function favoriteStatus(bvid) {
-  return requestJson(`/favorites/${encodeURIComponent(bvid)}`);
-}
-
-export async function fetchFavorites(limit = 50, offset = 0) {
-  return requestJson(`/favorites?limit=${limit}&offset=${offset}`);
 }

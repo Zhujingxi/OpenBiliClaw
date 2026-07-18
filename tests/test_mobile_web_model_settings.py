@@ -11,7 +11,7 @@ APP_PATH = WEB / "js/app.js"
 API_PATH = WEB / "js/api.js"
 MODEL_PATH = WEB / "js/views/model-settings.js"
 CSS_PATH = WEB / "css/app.css"
-FOCUS_RUNTIME_PATH = WEB / "js/saved-sync-runtime.js"
+FOCUS_RUNTIME_PATH = WEB / "shared/saved-sync-core.js"
 CONTROLLER_PATH = WEB / "js/mobile-model-settings-controller.js"
 
 
@@ -116,13 +116,49 @@ def test_mobile_routes_add_remove_and_touch_reorder_by_stable_id() -> None:
         "function addConnection()",
         "function removeSelected()",
         "function moveSelected(delta)",
-        "Move Up",
-        "Move Down",
+        ">上移</button>",
+        ">下移</button>",
         "record.id",
         "derivedRole(index)",
     ):
         assert marker in model
+    assert "Move Up" not in model
+    assert "Move Down" not in model
     assert "draggable" not in model
+
+
+def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -> None:
+    model = _read(MODEL_PATH)
+
+    for copy in (
+        '"未命名连接"',
+        '"未设置模型"',
+        '"API 协议"',
+        '"本地 Runtime"',
+        '"OAuth 连接"',
+        "<strong>已导入 OAuth 凭据</strong>",
+        '"保留现有凭据"',
+        '"设置 API Key"',
+        '"当前未配置凭据。"',
+        "<span>稳定 ID</span>",
+        "<span>Chat 路由</span>",
+        "<span>Embedding 路由</span>",
+        "<span>当前健康状态</span>",
+    ):
+        assert copy in model
+    for old_copy in (
+        "Unnamed connection",
+        "No model",
+        "API protocols",
+        "Local runtimes",
+        "OAuth connections",
+        "Imported OAuth credential",
+        "Keep existing",
+        "Credential source",
+        "Current health",
+        "Probe failed",
+    ):
+        assert old_copy not in model
 
 
 def test_connection_types_are_grouped_searchable_and_descriptor_driven() -> None:

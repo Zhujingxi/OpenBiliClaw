@@ -18,12 +18,18 @@ test("mobile web exposes watch-later API and tab entry", async () => {
 
   const api = await import("../../src/openbiliclaw/web/js/api.js?watch-later-api");
 
-  assert.equal(typeof api.fetchWatchLater, "function");
-  assert.deepEqual(await api.fetchWatchLater(20, 40), {
+  // The legacy bilibili-only helpers are gone; the platform-neutral saved
+  // API (/api/saved/{kind}) is the only watch-later path.
+  assert.equal(typeof api.fetchWatchLater, "undefined");
+  assert.equal(typeof api.addToWatchLater, "undefined");
+  assert.equal(typeof api.removeFromWatchLater, "undefined");
+  assert.equal(typeof api.watchLaterStatus, "undefined");
+  assert.equal(typeof api.fetchSavedItems, "function");
+  assert.deepEqual(await api.fetchSavedItems("watch_later", 20, 40), {
     items: [{ bvid: "BV1MOBILE" }],
     total: 1,
   });
-  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/watch-later?limit=20&offset=40");
+  assert.equal(calls[0].url, "http://127.0.0.1:8420/api/saved/watch_later?limit=20&offset=40");
 
   const appJs = readFileSync(resolve("../src/openbiliclaw/web/js/app.js"), "utf8");
   assert.match(appJs, /initWatchLaterView/);
