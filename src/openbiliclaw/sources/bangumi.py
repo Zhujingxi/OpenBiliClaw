@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import unicodedata
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -63,29 +62,35 @@ AUTHOR_INFOBOX_KEYS: dict[int, tuple[str, ...]] = {
 # and hard-cap the rendered length.
 MAX_AUTHOR_PARTS = 3
 MAX_AUTHOR_LENGTH = 80
-# Word-shaped credits that carry no name, only the fact that a name is absent.
-# Scope is deliberately narrow: a literal only qualifies if THIS stack can
-# actually emit it — Python ``str(None)`` → "None", JSON/JS ``null`` and
-# ``undefined``, ``float('nan')`` → "NaN" — plus unambiguous "not applicable"
-# spellings. A literal "None" reaching author_name is the dirty-row class
-# COALESCE cannot repair once persisted.
+# Credits that are a stringified null rather than a name. Scope is exactly
+# "spellings THIS stack can emit": Python ``str(None)`` → "None", JSON/JS
+# ``null`` and ``undefined``, ``float('nan')`` → "NaN". That is the dirty-row
+# class ``COALESCE`` cannot repair once persisted, and the only class this
+# guard is for.
 #
-# Deliberately NOT filtered, because each could be a genuine short credit and
-# over-filtering silently deletes real data:
-#   - "nil" — a real Japanese rock band, and no Python/JS/JSON path produces
-#     it (that spelling is Ruby/Lisp), so it was never an artifact we emit
-#   - bare "na" (romanised 나 / 娜 surname) — only the unambiguous "n/a" form
-#   - 无 / 暂无 / 未知 / 不明 — ordinary characters that can occur in a real
-#     name; these are editor prose, not a serialization artifact, so dropping
-#     them would be semantic cleanup rather than dirty-value defence
-#   - single letters and digits — plausible stage names
+# DO NOT WIDEN THIS. Three attempts to be cleverer each destroyed real data,
+# and the misses they were chasing are merely cosmetic:
+#   1. an enumerated punctuation table missed U+2026 "…"
+#   2. adding "nil" to catch more nulls deleted the Japanese rock band nil —
+#      and no Python/JS/JSON path even emits that spelling (it is Ruby/Lisp)
+#   3. replacing the table with "a real name contains a letter or digit"
+#      deleted the idol group ・・・・・・・・・ (all U+30FB) and the band !!!
+#      (chk chk chk), both of which the crude table had preserved
+# The costs are not symmetric: a punctuation-only credit renders oddly on a
+# card, while a wrong filter silently erases a real artist. So punctuation and
+# symbol values are deliberately NOT filtered at all — if a card ever shows
+# "……", that is the accepted price.
 #
-# "none"/"null"/"nan" carry a small false-positive risk (a band could stylise
-# itself that way), accepted knowingly: they are the exact output of the
-# stringification bug this guard exists to stop.
-_PLACEHOLDER_CREDITS = frozenset(
-    {"none", "null", "nan", "undefined", "n/a", "n.a.", "na.", "(none)", "<none>"}
-)
+# Also deliberately unfiltered, for the same "could be a real credit" reason:
+#   - "n/a" / "(none)" / "<none>" — editor prose, not something we emit; they
+#     belong to the same class as 无 / 未知 / 暂无 / 不明, which we already
+#     keep, so filtering them would be inconsistent as well as risky
+#   - bare "na" (romanised 나 / 娜 surname), single letters, digits
+#
+# "none"/"null"/"nan" keep a residual false-positive risk (a band could
+# stylise itself that way); accepted knowingly, because they are the literal
+# output of the stringification bug that put "None" in author_name before.
+_PLACEHOLDER_CREDITS = frozenset({"none", "null", "nan", "undefined"})
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -168,28 +173,18 @@ def _infobox_value_text(value: object) -> str:
 
 
 def _is_placeholder_credit(text: str) -> bool:
-    """True when ``text`` spells absence rather than naming anyone.
+    """True when ``text`` is an empty value or a stringified null.
 
-    Two rules. The word-shaped ones are enumerated in
-    :data:`_PLACEHOLDER_CREDITS`. The symbol-shaped ones are decided by Unicode
-    category rather than a hand-written character list: a real name contains at
-    least one letter or digit, so a value made up entirely of punctuation,
-    symbols, separators or format controls (``"-"``, ``"—"``, ``"…"``,
-    ``"()"``, ``"?"``, ``"★"``, a stray no-break space) names nobody. Category
-    coverage is what keeps this from missing the next dash or ellipsis variant
-    an editor happens to type — an enumerated list had already missed U+2026.
-
-    Anything else — including single characters and CJK words that merely
-    *mean* "none" — is treated as a real credit, because guessing wrong there
-    deletes genuine data.
+    One rule, by design: the empty string, or an exact match against
+    :data:`_PLACEHOLDER_CREDITS`. Everything else is treated as a real credit —
+    punctuation-only values included. See that constant for why the scope is
+    this small and why widening it has gone wrong every time.
     """
 
     stripped = text.strip()
     if not stripped:
         return True
-    if stripped.casefold() in _PLACEHOLDER_CREDITS:
-        return True
-    return not any(unicodedata.category(char)[0] in {"L", "N"} for char in stripped)
+    return stripped.casefold() in _PLACEHOLDER_CREDITS
 
 
 def _author_name(subject: Mapping[str, Any], subject_type: int) -> str:

@@ -303,38 +303,18 @@ def test_subject_author_name_never_ends_on_an_unclosed_bracket() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        # Bare strings that spell absence. A literal "None" in the source data
-        # is exactly as unusable as one we stringified ourselves. Only spellings
-        # THIS stack can emit qualify — see the "nil" case in the keep test.
+        # Stringified nulls — the only class this filter targets. A literal
+        # "None" in the source data is exactly as unusable as one we produced
+        # ourselves. Punctuation is NOT in scope; see the keep test for why.
         "None",
         "none",
         "NULL",
         "NaN",
         "undefined",
-        "N/A",
-        "n/a",
-        "-",
-        "——",
-        "/",
-        "?",
-        "（）",
         "   ",
-        # Symbol-shaped placeholders are decided by Unicode category, not by a
-        # hand-written character list — an enumerated list had already missed
-        # U+2026 and would keep missing the next variant an editor types.
-        "\u2026",  # HORIZONTAL ELLIPSIS
-        "\u2025",  # TWO DOT LEADER
-        "\u301c",  # WAVE DASH
-        "\uff0d",  # FULLWIDTH HYPHEN-MINUS
-        "\u2212",  # MINUS SIGN
-        "\u30fb",  # KATAKANA MIDDLE DOT
-        "\u2605\u2606",  # BLACK/WHITE STAR
-        "\u300c\u300d",  # CORNER BRACKETS
-        "\u00a0",  # NO-BREAK SPACE
         # ...and the same values arriving through either list shape.
         [{"v": "None"}],
         [{"k": "总导演", "v": "null"}],
-        [{"v": "-"}],
         # Non-string ``v``: str() would have manufactured "['押井守']" / "42".
         [{"v": ["押井守"]}],
         [{"v": {"name": "押井守"}}],
@@ -353,13 +333,53 @@ def test_subject_author_name_rejects_absence_spellings_and_non_string_values(
 def test_subject_author_name_keeps_ambiguous_short_credits() -> None:
     """The placeholder filter must not delete plausible real names.
 
-    "na" (romanised 나 / 娜), CJK words that merely *mean* absence, and single
-    characters are ordinary credits, not serialization artifacts — filtering
-    them would be semantic cleanup with a false-positive cost.
+    Every entry here was either a real false positive we shipped or is one
+    waiting to happen. Three separate attempts to widen the filter each
+    deleted a real artist, so the scope is now only stringified nulls.
     """
-    # "nil" is a real Japanese rock band, and no Python/JS/JSON path can emit
-    # that spelling (it is Ruby/Lisp), so it was never an artifact we produce.
-    for credit in ("Na", "na", "nil", "NIL", "无", "未知", "暂无", "不明", "0", "X", "N"):
+    credits = (
+        # Shipped false positive: a real Japanese rock band, and no
+        # Python/JS/JSON path emits that spelling (it is Ruby/Lisp).
+        "nil",
+        "NIL",
+        # Editor prose that merely *means* absence — same class as the CJK
+        # words below, and not something this stack can emit.
+        "N/A",
+        "n/a",
+        "(none)",
+        # Romanised 나 / 娜 surname; single letters and digits are stage names.
+        "Na",
+        "na",
+        "0",
+        "X",
+        "N",
+        "无",
+        "未知",
+        "暂无",
+        "不明",
+    )
+    for credit in credits:
+        assert _author_of(infobox=[{"key": "导演", "value": credit}]) == credit
+        assert _author_of(infobox=[{"key": "导演", "value": [{"v": credit}]}]) == credit
+
+
+def test_subject_author_name_keeps_punctuation_only_artist_names() -> None:
+    """Punctuation-only credits are kept — they can be real artist names.
+
+    A "real names contain a letter or digit" rule looked safe and deleted
+    both of these. A punctuation-only credit only renders oddly on a card;
+    erasing a real artist is data loss, so the asymmetry decides it.
+    """
+    for credit in (
+        "・・・・・・・・・",  # real idol group, all U+30FB
+        "!!!",  # real band (chk chk chk)
+        "△",
+        "-",
+        "——",
+        "…",
+        "?",
+        "（）",
+    ):
         assert _author_of(infobox=[{"key": "导演", "value": credit}]) == credit
         assert _author_of(infobox=[{"key": "导演", "value": [{"v": credit}]}]) == credit
 
@@ -367,7 +387,7 @@ def test_subject_author_name_keeps_ambiguous_short_credits() -> None:
 def test_subject_author_name_skips_placeholder_entries_within_a_list() -> None:
     # One junk entry must not poison the rest of the roster, and a key whose
     # value is entirely placeholders still falls through to the next ladder key.
-    value = [{"v": "None"}, {"v": "今敏"}, {"v": "-"}, {"v": "湯浅政明"}]
+    value = [{"v": "None"}, {"v": "今敏"}, {"v": "null"}, {"v": "湯浅政明"}]
     assert _author_of(infobox=[{"key": "导演", "value": value}]) == "今敏、湯浅政明"
     assert (
         _author_of(
