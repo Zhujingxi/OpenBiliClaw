@@ -294,6 +294,9 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
             if path.startswith("/web/assets/"):
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
+            if path.startswith("/web/shared/"):
+                rel = path.removeprefix("/web/shared/")
+                return self._serve_file(ROOT / "src/openbiliclaw/web/shared" / rel)
             if path == "/api/model-config":
                 return _json_response(self, state.model_snapshot)
             if path == "/api/model-connection-types":

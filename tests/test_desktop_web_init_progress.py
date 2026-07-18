@@ -97,7 +97,12 @@ def test_setup_wizard_surfaces_stall_and_expectation_copy() -> None:
     assert "stalenessView" in html
     assert "last_activity" in html
     assert "没有新进展" in html
-    assert "可以继续等待，或取消后重试" in html
+    # Setup wires no cancel action, so its stall copy must not promise one —
+    # it offers page-leave persistence instead (the desktop surface, which
+    # mirrors the popup copy, keeps its own wording).
+    assert "或取消后重试" not in html
+    assert "可以继续等待" in html
+    assert "进度会保留" in html
     assert "● 进行中" in html
     assert "整个过程通常需要 2–5 分钟" in html
     assert "本阶段通常约" in html

@@ -269,6 +269,8 @@
     const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
+    const API_READ_TIMEOUT_MS = Number(window.__OBC_TEST_API_READ_TIMEOUT_MS) || 12000;
+    const API_WRITE_TIMEOUT_MS = Number(window.__OBC_TEST_API_WRITE_TIMEOUT_MS) || 60000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
     let initPollInFlight = false, initPollPending = false;
     let modelSnapshot = null;
@@ -666,14 +668,49 @@
       return "";
     }
 
-    async function modelResponse(response) {
+    // Single bounded request helper for every backend call in the wizard —
+    // mirrors web/js/api.js requestJson: same-origin session cookie, the
+    // X-OBC-Auth CSRF header on every request (the gate requires it on GETs
+    // too), an AbortController timeout, and structured {status, details}
+    // errors. Callers pass an absolute /api path; 401 login guidance lives
+    // here instead of per-call checks.
+    async function apiFetch(path, options = {}) {
+      const { timeoutMs = API_READ_TIMEOUT_MS, acceptStatuses, ...init } = options;
+      const controller = new AbortController();
+      const tid = setTimeout(() => controller.abort(), timeoutMs);
+      let response;
+      try {
+        response = await fetch(path, {
+          ...init,
+          credentials: "same-origin",
+          signal: controller.signal,
+          headers: { ...(init.headers || {}), "X-OBC-Auth": "1" },
+        });
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          const timeoutError = new Error("请求超时，请确认后端仍在运行后重试。");
+          timeoutError.status = 0;
+          timeoutError.details = {};
+          throw timeoutError;
+        }
+        throw error;
+      } finally {
+        clearTimeout(tid);
+      }
       let details = {};
       try { details = await response.json(); } catch {}
-      if (response.ok) return details;
-      const error = new Error(details.message || details.detail || details.error || `HTTP ${response.status}`);
+      if (response.ok || (acceptStatuses || []).includes(response.status)) return details;
+      if (response.status === 401) showAuthRequired();
+      const error = new Error(
+        details.message || details.detail || details.error || `HTTP ${response.status}`,
+      );
       error.status = response.status;
       error.details = details;
       throw error;
+    }
+
+    function showAuthRequired() {
+      showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
     }
 
     function hydrateModelSetup(snapshot) {
@@ -697,19 +734,13 @@
     }
 
     async function loadModelSetup() {
-      const [typesResponse, snapshotResponse] = await Promise.all([
-        fetch("/api/model-connection-types?capability=chat"),
-        fetch("/api/model-config"),
+      const [descriptors, snapshot] = await Promise.all([
+        apiFetch("/api/model-connection-types?capability=chat"),
+        apiFetch("/api/model-config"),
       ]);
-      if (typesResponse.status === 401 || snapshotResponse.status === 401) {
-        const error = new Error("需要先登录");
-        error.status = 401;
-        throw error;
-      }
-      const descriptors = await modelResponse(typesResponse);
       modelDescriptors = Array.isArray(descriptors.connection_types) ? descriptors.connection_types : [];
       if (!modelDescriptors.length) throw new Error("后端没有可用的 Chat 连接类型。");
-      hydrateModelSetup(await modelResponse(snapshotResponse));
+      hydrateModelSetup(snapshot);
     }
 
     async function saveModelRoute() {
@@ -730,25 +761,27 @@
       btn.innerHTML = '<span class="spin"></span>正在测试精确配置…';
       renderModelSetup();
       try {
-        const probe = await modelResponse(await fetch("/api/model-config/probe", {
+        const probe = await apiFetch("/api/model-config/probe", {
           method: "POST",
+          timeoutMs: API_WRITE_TIMEOUT_MS,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             kind: "chat",
             revision: modelSnapshot.revision,
             connection: primaryDraft,
           }),
-        }));
+        });
         if (!probe.ok) {
           showTextMsg("#msg0", `连接测试未通过：${probe.message || probe.error_code || "未知错误"}`, "err");
           return;
         }
         btn.innerHTML = '<span class="spin"></span>测试通过，正在保存…';
-        const result = await modelResponse(await fetch("/api/model-config", {
+        const result = await apiFetch("/api/model-config", {
           method: "PUT",
+          timeoutMs: API_WRITE_TIMEOUT_MS,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
-        }));
+        });
         hydrateModelSetup(result.snapshot);
         const preset = currentPreset(descriptorFor(draftConnection.type));
         $("#doneLlm").textContent = `已连接 · ${preset?.label || descriptor.label}`;
@@ -772,14 +805,14 @@
       }
     }
 
+    // The guided-init login authority is /api/init-status: its prerequisites
+    // run the backend's real B站 probe. The legacy config endpoint only
+    // projects stored config, so a stale cookie string would read as
+    // logged-in — never gate on it here.
     async function checkBili() {
       try {
-        const r = await fetch("/api/config");
-        if (!r.ok) return false;
-        const data = await r.json();
-        const cfg = data.config || data;
-        const cookie = cfg?.bilibili?.cookie || "";
-        return Boolean(cookie && String(cookie).trim());
+        const status = await apiFetch("/api/init-status");
+        return Boolean(status?.prerequisites?.bilibili_logged_in);
       } catch { return false; }
     }
 
@@ -971,10 +1004,11 @@
       btn.disabled = true;
       btn.textContent = originalLabel === "重新检测" ? "检测中…" : "启动下载…";
       try {
-        const r = await fetch("/api/embedding/repair", { method: "POST" });
-        if (!r.ok && r.status !== 409) throw new Error("HTTP " + r.status);
-        const body = await r.json().catch(() => ({}));
-        if (r.status === 409 && body.error && body.error !== "already_running") {
+        const body = await apiFetch("/api/embedding/repair", {
+          method: "POST",
+          acceptStatuses: [409],
+        });
+        if (body?.error && body.error !== "already_running") {
           throw new Error(body.detail || body.error);
         }
         scheduleInitPoll(300);
@@ -994,15 +1028,11 @@
     }
 
     async function fetchInitStatus() {
-      const r = await fetch("/api/init-status");
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return await r.json();
+      return apiFetch("/api/init-status");
     }
 
     async function fetchRuntimeStatus() {
-      const r = await fetch("/api/runtime-status");
-      if (!r.ok) throw new Error("HTTP " + r.status);
-      return await r.json();
+      return apiFetch("/api/runtime-status");
     }
 
     function runtimeHasFirstPool(runtime) {
@@ -1066,7 +1096,8 @@
     // MIRROR of the reference implementation in
     // extension/popup/popup-init-control.js (and desktop web app.js) — the
     // three GUI surfaces share no module system, so keep the formulas in
-    // lock-step when editing any copy.
+    // lock-step. Copy exception: setup wires no init-cancel action, so its
+    // stall text points at page-leave persistence instead of cancellation.
     const STAGE_FRACTION_CAP = 0.95;
     const STAGE_FRACTION_FALLBACK = 0.5;
     // Calibration: backend heartbeat 30s × 3 missed beats (api/app.py
@@ -1140,7 +1171,7 @@
         return {
           fresh: false,
           staleSeconds,
-          text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，或取消后重试。`,
+          text: `后台已 ${minutes} 分钟没有新进展，可能是 AI 服务响应缓慢——可以继续等待，也可以先离开页面，进度会保留。`,
         };
       }
       return { fresh: true, staleSeconds, text: "● 进行中" };
@@ -1390,21 +1421,22 @@
       }
 
       try {
-        const r = await fetch("/api/init", {
+        await apiFetch("/api/init", {
           method: "POST",
+          timeoutMs: API_WRITE_TIMEOUT_MS,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sources: selected }),
         });
-        if (!r.ok) {
-          let details = {};
-          try { details = await r.json(); } catch {}
-          throw new Error(describeInitReason(details.error || details.reason) || details.detail || `HTTP ${r.status}`);
-        }
       } catch (e) {
         renderInitChecklist(status, selected);
         $("#startInit").disabled = false;
         $("#startInit").textContent = "开始初始化";
-        setInitReason("初始化没能启动：" + (e.message || "请稍后重试。"));
+        setInitReason(
+          "初始化没能启动：" +
+            (describeInitReason(e.details?.error || e.details?.reason) ||
+              e.message ||
+              "请稍后重试。"),
+        );
         return;
       }
       connectInitStream();

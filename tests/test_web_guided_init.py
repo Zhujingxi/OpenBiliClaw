@@ -13,8 +13,8 @@ def test_setup_wizard_static_contract_uses_guided_init_endpoint() -> None:
     html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
     assert 'data-panel="3"' in html
-    assert "GET /api/init-status" in html or 'fetch("/api/init-status"' in html
-    assert 'fetch("/api/init"' in html
+    assert 'apiFetch("/api/init-status"' in html
+    assert 'apiFetch("/api/init", {' in html
     assert "init_progress" in html
     assert "/api/init-completed" not in html
 
@@ -100,10 +100,10 @@ def test_setup_model_route_is_descriptor_driven_and_provider_first() -> None:
 
     assert 'id="connectionTypeList"' in setup_html
     assert 'class="connection-type-list"' in setup_html
-    assert 'fetch("/api/model-connection-types?capability=chat"' in setup_html
-    assert 'fetch("/api/model-config"' in setup_html
-    assert 'fetch("/api/model-config/probe"' in setup_html
-    assert 'fetch("/api/model-config", {' in setup_html
+    assert 'apiFetch("/api/model-connection-types?capability=chat"' in setup_html
+    assert 'apiFetch("/api/model-config"' in setup_html
+    assert 'apiFetch("/api/model-config/probe"' in setup_html
+    assert 'apiFetch("/api/model-config", {' in setup_html
     assert 'method: "PUT"' in setup_html
     assert "descriptor.fields" in setup_html
     assert "preset_definitions" in setup_html
@@ -381,8 +381,8 @@ def test_setup_model_save_requires_exact_probe_before_revisioned_put() -> None:
         "async function checkBili()", 1
     )[0]
 
-    assert save.index('fetch("/api/model-config/probe"') < save.index(
-        'fetch("/api/model-config", {'
+    assert save.index('apiFetch("/api/model-config/probe"') < save.index(
+        'apiFetch("/api/model-config", {'
     )
     assert "revision: modelSnapshot.revision" in save
     assert "connection: primaryDraft" in save
@@ -741,6 +741,65 @@ def test_setup_wizard_config_save_401_points_to_login_instead_of_dead_end() -> N
     assert "r.status === 401" in setup_html
     assert "输入访问密码登录" in setup_html
     assert '<a href="/web">' in setup_html
+
+
+def test_setup_api_calls_route_through_single_bounded_helper() -> None:
+    """One apiFetch owns every backend call in the wizard, mirroring the
+    hardened client in web/js/api.js: same-origin credentials, the X-OBC-Auth
+    CSRF header on every request, an AbortController timeout, and structured
+    {status, details} errors. No call site may use a raw fetch."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    assert "async function apiFetch(path, options = {}) {" in setup_html
+    helper = setup_html.split("async function apiFetch(path, options = {}) {", 1)[1].split(
+        "\n    function showAuthRequired()", 1
+    )[0]
+    assert 'credentials: "same-origin"' in helper
+    assert '"X-OBC-Auth": "1"' in helper
+    assert "AbortController" in helper
+    assert "error.status = response.status" in helper
+    assert "error.details = details" in helper
+    assert "fetch(" in helper
+    # The helper's own request is the only raw fetch( in the whole wizard.
+    assert setup_html.count("fetch(") == 1
+
+
+def test_setup_helper_owns_401_login_guidance() -> None:
+    """A session-gated 401 surfaces the /web login path from inside the helper,
+    not from ad-hoc per-call checks."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    helper = setup_html.split("async function apiFetch(path, options = {}) {", 1)[1].split(
+        "\n    function showAuthRequired()", 1
+    )[0]
+    assert "if (response.status === 401) showAuthRequired();" in helper
+    auth_notice = setup_html.split("function showAuthRequired()", 1)[1].split("\n    }\n", 1)[0]
+    assert '<a href="/web">' in auth_notice
+    assert "输入访问密码登录" in auth_notice
+
+
+def test_setup_bilibili_login_gate_reads_init_status_prerequisites() -> None:
+    """/api/config is gone from setup: the guided-init login authority is
+    /api/init-status — its prerequisites run the backend's real B站 probe,
+    while /api/config only projects stored config (a stale cookie string
+    reads as logged-in)."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    assert "/api/config" not in setup_html
+    check = setup_html.split("async function checkBili()", 1)[1].split("\n    }\n", 1)[0]
+    assert 'apiFetch("/api/init-status"' in check
+    assert "prerequisites?.bilibili_logged_in" in check
+
+
+def test_setup_stall_copy_does_not_offer_unwired_cancel_action() -> None:
+    """Setup wires no POST /api/init/cancel action, so its stall copy must not
+    promise cancellation — it points at page-leave persistence instead (the
+    run resumes on reload via the guard)."""
+    setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
+
+    assert "或取消后重试" not in setup_html
+    assert "可以继续等待" in setup_html
+    assert "进度会保留" in setup_html
 
 
 def test_web_surfaces_offer_embedding_repair_and_progress() -> None:
