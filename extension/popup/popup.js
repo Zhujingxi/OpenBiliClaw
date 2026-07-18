@@ -7,6 +7,7 @@ import {
   buildContentUrl,
   buildRecommendationClickPayload,
   buildVideoUrl,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   formatPublishedTime,
   getCommentSubmitUiState,
@@ -1407,12 +1408,31 @@ function _renderInitSources() {
   elements.initSources.append(bangumiTokenRow);
   const bangumiTokenHint = document.createElement("p");
   bangumiTokenHint.className = "init-sources-hint";
+  // Spell out the three-way choice: the backend accepts a token, an explicit
+  // public username, OR the account the extension reads off a logged-in
+  // bgm.tv page. Leaving both fields empty is a valid path, and users who
+  // aren't told that assume Bangumi needs a token they haven't got.
   const bangumiTokenLink = document.createElement("a");
   bangumiTokenLink.href = "https://next.bgm.tv/demo/access-token";
   bangumiTokenLink.target = "_blank";
   bangumiTokenLink.rel = "noopener noreferrer";
   bangumiTokenLink.textContent = "生成个人令牌";
-  bangumiTokenHint.append(bangumiTokenLink, document.createTextNode("（约 1 年有效，视同密码保管）"));
+  const bangumiTokenDocLink = document.createElement("a");
+  bangumiTokenDocLink.href =
+    "https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌";
+  bangumiTokenDocLink.target = "_blank";
+  bangumiTokenDocLink.rel = "noopener noreferrer";
+  bangumiTokenDocLink.textContent = "取令牌步骤";
+  bangumiTokenHint.append(
+    document.createTextNode(
+      "Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；" +
+        "公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，" +
+        "扩展会自动识别账号（只拿到账号名，可能未经校验）。",
+    ),
+    bangumiTokenLink,
+    document.createTextNode("（约 1 年有效，视同密码保管）·"),
+    bangumiTokenDocLink,
+  );
   elements.initSources.append(bangumiTokenHint);
 
   elements.initSources.querySelector('input[data-init-source="bangumi"]')?.addEventListener("change", (event) => {
@@ -1679,16 +1699,13 @@ async function handleStartInitClick() {
     _setInitReason("至少勾选一个数据来源。");
     return;
   }
-  if (
-    selectedSources.length === 1 &&
-    selectedSources[0] === "bangumi" &&
-    !bangumiUsername &&
-    !bangumiToken
-  ) {
-    _setInitStartButton("开始初始化", true);
-    _setInitReason("只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名以读取收藏。");
-    return;
-  }
+  // No client-side Bangumi-only admission check here on purpose. The backend
+  // owns a THREE-tier account ladder (token → explicit username →
+  // browser-extension-reported identity); a local "username or token required"
+  // copy of it can't see the third tier and silently blocked zero-config
+  // extension users from ever reaching /api/init. The backend answers 409
+  // no_profile_signal_sources when all three are genuinely missing, and the
+  // startInit catch below renders it via describeInitStartError.
   _setInitStartButton("检查中…", false);
   _setInitReason("");
   if (elements.initChecklist instanceof HTMLElement) {
@@ -5917,7 +5934,7 @@ function renderRecommendations(items, { append = false } = {}) {
 
     const metaLine = document.createElement("p");
     metaLine.className = "recommendation-meta-line";
-    metaLine.textContent = item.up_name ? `这位 UP：${item.up_name}` : "";
+    metaLine.textContent = formatRecommendationAuthorLine(item);
     appendPublishedTime(metaLine, item);
 
     content.append(top, copyBlock, metaLine);
@@ -7273,6 +7290,29 @@ function bindSettings() {
     bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
   };
 
+  // The overseas-egress advisory is authored by the backend
+  // (sources/platforms.py -> SourceStatusItem.network_hint) and rendered
+  // verbatim. This function must never learn a platform name nor read
+  // [network].mode: adding a platform must stay a one-line backend change.
+  // Only the `enabled` gate lives here — a disabled source makes no requests,
+  // so warning about its egress would be noise.
+  function applySourceNetworkHint(row, hint, enabled) {
+    const text = enabled ? String(hint || "") : "";
+    // The status row is a <p>; the hint is a sibling, never a nested <p>.
+    let node = row.nextElementSibling;
+    if (!node || !node.classList.contains("source-network-hint")) node = null;
+    if (!text) {
+      if (node) node.remove();
+      return;
+    }
+    if (!node) {
+      node = document.createElement("p");
+      node.className = "settings-hint source-network-hint";
+      row.insertAdjacentElement("afterend", node);
+    }
+    node.textContent = text;
+  }
+
   // Best-effort: when the backend is unreachable, leave a neutral hint.
   async function renderSourcesStatus() {
     let data = null;
@@ -7290,6 +7330,7 @@ function bindSettings() {
       if (!item) {
         if (detail) detail.textContent = "状态暂不可用(后端未连接)。";
         if (dot) dot.style.color = "#9aa0a6";
+        applySourceNetworkHint(row, "", false);
         row.style.opacity = "1";
         continue;
       }
@@ -7302,6 +7343,7 @@ function bindSettings() {
         detail.textContent = (item.enabled ? "" : "(未启用) ") + statusDetail;
       }
       if (dot) dot.style.color = tokenRejected ? "#e74c3c" : (SOURCE_STATUS_DOT[item.state] || "#9aa0a6");
+      applySourceNetworkHint(row, item.network_hint, Boolean(item.enabled));
       row.style.opacity = item.enabled ? "1" : "0.6";
     }
   }
@@ -7473,7 +7515,9 @@ function bindSettings() {
     if (lang) lang.value = cfg.language || "zh";
     setVal("cfgDataDir", cfg.data_dir);
     setVal("cfgStorageDbPath", cfg.storage?.db_path);
-    setVal("cfgNetworkProxyMode", cfg.network?.mode || "direct");
+    // Mirrors the [network].mode backend default (system since v0.3.175);
+    // only reached if /api/config omits the field.
+    setVal("cfgNetworkProxyMode", cfg.network?.mode || "system");
     setVal("cfgNetworkProxy", cfg.network?.proxy || "");
     const savedAutoSync = document.getElementById("cfgSavedAutoSync");
     if (savedAutoSync instanceof HTMLInputElement) {

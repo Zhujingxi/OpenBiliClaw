@@ -647,6 +647,15 @@ class SourceStatusItem(BaseModel):
     # token is configured and not rejected, ``"rejected"`` when Bangumi denied it
     # and discovery degraded to anonymous, ``""`` when no token is configured.
     token_state: str = ""
+    # Overseas-egress advisory, authored entirely by the backend so no settings
+    # surface has to keep its own platform list or re-read ``[network].mode``
+    # (both facts live in ``sources.platforms``). ``requires_overseas_network``
+    # is the static platform property; ``network_hint`` is ready-to-render copy
+    # that is non-empty ONLY when the user's current mode makes that platform
+    # unreachable-by-configuration. A surface renders ``network_hint`` verbatim
+    # when it is non-empty and the row is currently enabled.
+    requires_overseas_network: bool = False
+    network_hint: str = ""
 
 
 class SourcesStatusResponse(BaseModel):

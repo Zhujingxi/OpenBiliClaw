@@ -21,6 +21,17 @@ from urllib.parse import urlsplit
 OutboundProxyMode = Literal["direct", "system", "custom"]
 _VALID_MODES = frozenset({"direct", "system", "custom"})
 _outbound_proxy: str | None = None
+# Pre-init sentinel, NOT the config default (``[network].mode`` defaults to
+# ``system`` — see NetworkConfig). This is the value between module import and
+# the first ``set_outbound_proxy`` call, which every entry point makes right
+# after ``load_config()`` (cli ``_sync_outbound_proxy``, api ``create_app``) and
+# before any consumer is constructed — every call site below lives inside a
+# function, so nothing routes traffic during that window. It stays ``direct``
+# so an uninitialized process never touches the user's environment, and so it
+# agrees with the URL-only contract of ``set_outbound_proxy`` (empty URL and no
+# mode ⇒ direct). The "user never configured it" case is resolved one layer up,
+# in ``_build_network_config`` and the ``create_app`` mirror, both of which
+# default to ``system``.
 _outbound_mode: OutboundProxyMode = "direct"
 logger = logging.getLogger(__name__)
 

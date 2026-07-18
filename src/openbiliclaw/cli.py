@@ -521,6 +521,55 @@ async def _run_with_progress(
     return result
 
 
+def _content_author_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) author row for one content-like object.
+
+    Two source-agnostic rules, shared with the three GUI surfaces:
+
+    * **Value** — ``author_name`` is the universal author field and
+      ``up_name`` is the Bilibili-only legacy one. ``DiscoveredContent``
+      back-fills ``author_name`` from ``up_name`` but never the reverse,
+      so non-Bilibili sources (Bangumi, Zhihu, YouTube, …) populate only
+      ``author_name`` and reading ``up_name`` alone rendered "（未知）"
+      for all of them. Prefer ``author_name``, keep ``up_name`` as the
+      fallback for legacy rows — same order as the backend's
+      ``content.author_name or content.up_name``.
+    * **Label** — mirrors ``formatRecommendationAuthorLine`` in
+      ``extension/popup/popup-helpers.js``: Bilibili keeps the native
+      "UP 主", every other platform gets the neutral "作者" (a Bangumi
+      director or a Zhihu answerer is not an UP). A missing / unknown
+      ``source_platform`` falls back to bilibili so legacy rows keep
+      their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    name = str(getattr(content, "author_name", "") or getattr(content, "up_name", "") or "").strip()
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "UP 主" if (platform or "bilibili") == "bilibili" else "作者"
+    return (label, name or "（未知）")
+
+
+def _content_id_row(content: Any) -> tuple[str, str]:
+    """Return the (label, value) identifier row for one content-like object.
+
+    ``bvid`` is the universal identifier column, not a Bilibili-only one:
+    every non-Bilibili mapper stores its own id there (``bangumi.py``'s
+    ``bangumi_subject_to_content`` sets ``bvid=content_id``, i.e. the bgm
+    subject id). Labelling it "BV号" unconditionally printed rows like
+    ``BV号  8`` for Bangumi — 8 is a subject id, not a BV number.
+
+    Same two rules as :func:`_content_author_row`: Bilibili keeps its native
+    term, every other platform gets a neutral "内容 ID", and a missing /
+    unknown ``source_platform`` falls back to bilibili so legacy rows keep
+    their old label.
+    """
+    from openbiliclaw.saved_sync.identity import canonical_source_platform
+
+    platform = canonical_source_platform(str(getattr(content, "source_platform", "") or ""))
+    label = "BV号" if (platform or "bilibili") == "bilibili" else "内容 ID"
+    return (label, str(getattr(content, "bvid", "") or "") or "（暂无）")
+
+
 def _print_recommendation_card(item: Any, index: int) -> None:
     """Render one recommendation in a card-like format."""
     published = format_published_time(
@@ -529,7 +578,7 @@ def _print_recommendation_card(item: Any, index: int) -> None:
     )
     rows = [
         ("标题", item.content.title or "（暂无）"),
-        ("UP 主", item.content.up_name or "（未知）"),
+        _content_author_row(item.content),
     ]
     if published:
         rows.append(("发布时间", published))
@@ -538,7 +587,7 @@ def _print_recommendation_card(item: Any, index: int) -> None:
     rows.extend(
         [
             ("推荐理由", item.expression or "（暂无）"),
-            ("BV号", item.content.bvid or "（暂无）"),
+            _content_id_row(item.content),
         ]
     )
     _print_key_value_table(f"推荐 {index}", rows)
@@ -550,7 +599,7 @@ def _print_discovered_content_preview(item: Any, index: int) -> None:
         f"发现 {index}",
         [
             ("标题", item.title or "（暂无）"),
-            ("UP 主", item.up_name or "（未知）"),
+            _content_author_row(item),
             ("来源策略", item.source_strategy or "（未知）"),
             ("相关性分数", f"{float(item.relevance_score or 0.0):.2f}"),
         ],
@@ -6005,14 +6054,21 @@ async def _fetch_x_init_data(
     return likes, bookmarks
 
 
-def _load_extension_bangumi_username() -> str:
-    """Read the extension-reported Bangumi username from runtime state.
+def _load_extension_bangumi_identity() -> tuple[str, bool]:
+    """Read the extension-reported Bangumi ``(username, verified)``.
 
     The Bangumi content script reports the logged-in account's public uid +
     username to ``POST /api/sources/bangumi/identity``, which persists
     ``bangumi_self_info`` into ``data/memory/discovery_runtime.json``. Returns
-    ``""`` on any miss or malformed value — the caller falls through to its
-    normal error path.
+    ``("", False)`` on any miss or malformed value — the caller falls through
+    to its normal error path.
+
+    ``verified`` mirrors the backend flag: True only when bgm.tv confirmed the
+    username belongs to the reported uid. Records written before the flag
+    existed read back as unverified (they cannot prove a check ever ran) and
+    self-heal on the next bgm.tv page view. A ``verified`` record with no
+    username is likewise read as unverified — the superseded 404 path wrote
+    those, and no current rule can produce one.
     """
     import json as _json
 
@@ -6022,15 +6078,16 @@ def _load_extension_bangumi_username() -> str:
     try:
         state_path = load_config().data_path / "memory" / "discovery_runtime.json"
         if not state_path.exists():
-            return ""
+            return "", False
         with open(state_path, encoding="utf-8") as file:
             state = _json.load(file)
         info = state.get("bangumi_self_info") if isinstance(state, dict) else None
         if not isinstance(info, dict):
-            return ""
-        return validate_bangumi_username(info.get("username"))
+            return "", False
+        username = validate_bangumi_username(info.get("username"))
+        return username, bool(username) and info.get("verified") is True
     except Exception:
-        return ""
+        return "", False
 
 
 async def _fetch_bangumi_init_data(
@@ -7530,12 +7587,20 @@ def init(
                 # logged-in bgm.tv account's public username into runtime
                 # state. Priority: token /v0/me > explicit username >
                 # extension-reported username.
-                extension_username = _load_extension_bangumi_username()
+                extension_username, extension_verified = _load_extension_bangumi_identity()
                 if extension_username:
                     raw_username = extension_username
-                    console.print(
-                        f"[dim]  Bangumi 使用浏览器扩展识别到的账号 {extension_username}。[/dim]"
-                    )
+                    if extension_verified:
+                        console.print(
+                            f"[dim]  Bangumi 使用浏览器扩展识别到的账号 "
+                            f"{extension_username}。[/dim]"
+                        )
+                    else:
+                        console.print(
+                            f"[yellow]  Bangumi 使用浏览器扩展识别到的账号 "
+                            f"{extension_username}（未经 bgm.tv 校验，可能不准）。"
+                            "如果不是你本人，请用 --bangumi-username 指定。[/yellow]"
+                        )
             try:
                 selected_bangumi_username = validate_bangumi_username(raw_username)
             except ValueError as exc:

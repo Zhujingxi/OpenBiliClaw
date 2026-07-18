@@ -2,7 +2,7 @@
 
 > Bangumi 是只读的正式内容来源。实现使用官方 `https://api.bgm.tv/v0`，不读取 Cookie、不申请 OAuth，也不提供任何站内写操作。默认匿名；可选配置个人令牌（Personal Access Token，Bearer）以自动识别当前用户并读取本人私密收藏。
 
-> **网络要求**：Bangumi API（`api.bgm.tv`）与封面 CDN（`lain.bgm.tv`）都是**海外服务**（Cloudflare）。国内网络在默认 `[network].mode = "direct"` 下会连接超时（实测 2026-07-18），需把 `[network]` 配为 `system` 或 `custom` 代理才能正常抓取；Bangumi 出口复用统一的 `[network]` outbound policy。
+> **网络要求**：Bangumi API（`api.bgm.tv`）与封面 CDN（`lain.bgm.tv`）都是**海外服务**（Cloudflare），国内网络直连会连接超时（实测 2026-07-18），必须经代理出网；Bangumi 出口复用统一的 `[network]` outbound policy。`[network].mode` 的默认值自 v0.3.175 起是 `system`（继承环境 / 系统代理），机器上已有可用代理时开箱即可抓取；显式配了 `mode = "direct"` 的用户仍会超时，需改为 `system` 或 `custom`。
 
 ## 已实现功能
 
@@ -17,11 +17,14 @@
 | 拒绝状态持久化并可见 | ✅ | 401/403 降级时把拒绝标记持久化到 `bangumi_discovery_state`（`state_key='token_rejected'`，`note` 存令牌 SHA-256 前 12 位指纹 + ISO 时间戳，**绝不存令牌本身**）；重启后配置仍有该令牌且指纹未变 → 直接走匿名不再重复吃 401；令牌变化（指纹不同）→ 先试新令牌，成功即清标记，再 401 则按新指纹重记。`/api/sources/status` 增加 `token_state`（`ok`/`rejected`/未配置缺省），rejected 时 detail 明写"个人令牌已被拒绝（可能过期）…请重新生成"，桌面 Web 与扩展 popup 状态区渲染警示（红点/"令牌已失效"），凭据卡 detail 追加失效提示 |
 | 设置页保存 /v0/me 校验 | ✅ | `PUT /api/config` 收到**新的非 masked 非空** `access_token` 时镜像 init 语义经 `resolve_access_token_identity`(`/v0/me`) 校验：401 → HTTP 400 `invalid_bangumi_access_token`，网络/上游失败 → 502 `bangumi_token_check_failed`，绝不静默接受坏令牌；校验通过才写入令牌 + `/v0/me` 用户名并清除拒绝标记。masked echo / 省略 key / 其它配置保存零网络 |
 | 清除令牌入口 | ✅ | 桌面设置页与扩展 popup 设置页各有「清除已保存的令牌」勾选控件，勾选后本次保存显式发送 `access_token:""` → 后端清空令牌并清除拒绝标记，GET `access_token_set` 变 `false`；不破坏"留空=保持不变"语义 |
+| 未启用时的凭据可见性 | ✅ | 存了令牌 / 公开用户名却没开启用开关时，`/api/sources/status` 的 `disabled` 分支照样下发 `token_state`，`detail` 点名已存的凭据、说明它当前不会被使用并给出唯一剩余步骤（取值表见下文状态一节）；`state` 仍是 `disabled`，只有 `token_state=rejected` 才走红色警示 |
 | 扩展自动识别 | ✅ | 浏览器扩展在 bgm.tv/bangumi.tv 上读取公开的 `CHOBITS_UID`（MAIN-world 桥）+ 导航栏 `/user/<username>` 链接，上报 `POST /api/sources/bangumi/identity` 持久化；guided init/CLI 在既无令牌又无显式用户名时自动回退使用；只采集 uid+username（公开信息），不碰 Cookie，不采集浏览行为 |
 | 统一候选池 | ✅ | Subject 归一化后只进入 `discovery_candidates`，由共享 evaluator/admission 决定是否进入 `content_cache` |
 | 目录指标 | ✅ | `rating_score`、`rating_count`、`source_rank` 与真实 `favorite_count` 贯穿候选池、推荐/惊喜 API 和三端卡片 |
+| 作者字段（制作方署名） | ✅ | `bangumi_subject_to_content` 从 subject 行内 `infobox` 解析 `author_name`，按 SubjectType 走优先级阶梯（书籍 作者→原作→作画→出版社，动画 导演→原作→动画制作→製作，音乐 艺术家→作曲→厂牌，游戏 开发→发行→游戏开发商，三次元 导演→编剧→主演）。两个 discovery 端点（`POST /v0/search/subjects`、`GET /v0/subjects`）本就内联返回 `infobox`（2026-07-18 实测 250/250 行均带，`GET /v0/subjects/{id}` 无额外字段），因此**零额外请求**；缺失 / schema 漂移 / 非法值、以及本栈能产出的 null 字面量（`None`/`null`/`undefined`/`nan`）一律解析为 `""`，不落库字面量 `"None"`；纯标点值**刻意不过滤**（见「公开 API」一节）。收藏路径例外见「已知限制」 |
 | 设置与状态 | ✅ | 桌面 Web、扩展设置页和 `/api/sources/status` 支持开关、用户名、**个人令牌**、分支、类型、预算、节流和 pool share；令牌为 password 输入 + 生成链接，GET config 只回传 `access_token_set` 布尔（绝不回传明文），留空保存则保持已配置令牌不变 |
 | CLI smoke | ✅ | 公开收藏、搜索、排名和日期浏览默认只读；正式 `discover --source bangumi` 才写待评估池 |
+| 直连模式下的超时给出真因 | ✅ | `[network].mode = direct` 时 `BangumiClient` 在超时 / 网络失败处就地补上出网提示（`OVERSEAS_DIRECT_MODE_ERROR_SUFFIX`），原本只有一句无头无尾的 "Bangumi API network request failed"。提示挂在**失败点**而非各调用方，所以 `discover-bangumi{,-ranked,-latest}` 三条 CLI smoke、API 与 discovery 链路同时受益，谁都不用自己再判一遍（铁律 7）。注入的 httpx client 不加（那是调用方自己的传输，`[network].mode` 说明不了它） |
 | 账号写回 | 不支持 | 本地收藏/稍后再看仍可用；首版不修改 Bangumi 收藏、评分或进度 |
 
 ## 数据流
@@ -98,6 +101,16 @@ content = bangumi_subject_to_content(row, strategy="bangumi-ranked")
 
 Subject identity 使用 `bangumi:<decimal subject id>`，页面 URL 为 `https://bgm.tv/subject/<id>`，`content_type="subject"`。首选中文名、再回落原名；封面按官方 image variants 回落；`nsfw=true` 始终丢弃。评分不会冒充点赞或评论：只有官方收藏人数进入 `favorite_count`，其它缺失 engagement 字段保持 0。
 
+`author_name` 由行内 `infobox` 解析，不额外请求上游：`AUTHOR_INFOBOX_KEYS` 存 SubjectType → 有序 credit key 的优先级阶梯（Bangumi 没有统一作者字段，书籍叫「作者」、动画叫「导演」、游戏叫「开发」），阶梯顺序与各 key 的填充率由 2026-07-18 的 250 行实测标定并写在代码注释里，schema 变化后需重跑该调查。`_infobox_value_text` 兼容官方三种 `value` 形态（裸字符串 / `[{v}]` / `[{k,v}]`，后两者都只读 `v`，`k` 是「总导演/副导演」这类子标签而非人名）；列表元素的 `v` **只在其本身是字符串时才采用**（不做 `str()` 兜底，否则 schema 漂移的 `{"v": ["押井守"]}` 会被制造成字面量 `"['押井守']"`）；同一 key 重复出现时取**首个非空**值，多名字最多保留 3 个以 `、` 连接，渲染长度硬限 `MAX_AUTHOR_LENGTH=80` 且优先切在名字分隔符上。`infobox` 缺失、类型漂移（裸字符串 / 字典 / 标量）、条目非映射、阶梯 key 全缺等情况一律返回 `""`——绝不字符串化成 `"None"` / `"[]"`，即历史上 `COALESCE` 无法自愈的那类脏行。
+
+`_is_placeholder_credit` 只负责一类：**本技术栈真能产出的 null 字面量**——空串，以及 `none`/`null`/`undefined`/`nan`（分别对应 Python `str(None)`、JSON/JS `null` 与 `undefined`、`float('nan')`）；裸字符串与两种 list 形态都过这道。
+
+**纯标点/符号值刻意完全不过滤**，这条负面知识比代码值钱：过滤范围被放大过三次，每次都删掉了真实数据——(1) 手写标点表漏了 U+2026 `…`；(2) 为了多抓一个 null 而加入 `nil`，删掉了真实存在的日本摇滚乐队 **nil**（且 Python/JS/JSON 根本产不出这个拼写，那是 Ruby/Lisp）；(3) 改成「真实名字至少含一个字母或数字」的 Unicode 类别判据，删掉了偶像组合 **・・・・・・・・・**（全部 U+30FB）和乐队 **!!!**（chk chk chk）——这两个反而是粗糙的手写表保住的。代价并不对等：纯标点的作者名显示在卡片上只是观感怪，而删错一个真实艺名是**数据丢失**。原始契约要防的是「`COALESCE` 救不了的脏行」，即序列化产物，标点从来不属于那一类。因此现在宁可让卡片偶尔显示 `……`，也不再加判据。
+
+同理**不**过滤：`n/a` / `(none)` / `<none>`（编辑填写的散文，本栈产不出，与已经保留的 `无`/`未知`/`暂无`/`不明` 属同一类，过滤它们既有风险又不自洽）、裸 `na`（可能是罗马音姓氏）、单字母与数字（可能是艺名）。保留在名单里的 `none`/`null`/`nan` 仍有小概率误杀风险（乐队可能这样起名），属知情接受——它们正是历史上把 `"None"` 写进 `author_name` 那个 bug 的字面输出。理由连同名单写在代码注释里。
+
+截断后若切口留下未闭合括号（`…（総監督`），回退到该括号之前再切（闭括号**只结算同族开括号**，`(credit]` 里的 `]` 不算闭合 `(`）；**已知取舍**：当未闭合括号就在第 0 位（整条 credit 是一个长括号块）时回退会把 credit 整个抹掉，宁可保留硬切结果也不丢真实署名，该分支有测试钉住以保持取舍可见。
+
 公开收藏通过 `bangumi_collection_to_event()` 转成统一事件：想看/看过/在看/搁置/抛弃使用不同信号强度，私有行丢弃，短评清洗后截断；官方 `updated_at` 不被当作可靠收藏时间或增量 cursor。令牌认证路径下（`include_private=True`，仅在读取令牌所有者本人收藏时传入），私密行同样转为画像信号；匿名路径行为不变。`fetch_bangumi_public_collection_events(..., include_private=...)` 逐 lane 透传该开关。
 
 ## 配置与状态
@@ -125,7 +138,51 @@ bangumi = 1
 
 `GET /api/sources/status` 对 Bangumi 只读本地配置和 producer ledger，不会在打开设置页时访问上游。常见状态为：未启用 `disabled`、已启用但尚无真实运行 `unverified`、最近成功 `ready`、部分分支失败 `partial`、限流冷却 `rate_limited`、最近运行错误 `error`。配置了个人令牌时额外返回 `token_state`（`ok`=已配置且无拒绝标记 / `rejected`=令牌被拒已降级匿名；未配置则缺省），`rejected` 时 `detail` 明示已被拒绝并指引重新生成，配置了令牌时 detail 不再说"无需登录"。读取拒绝标记同样纯本地（`bangumi_discovery_state`），不访问上游。凭据说明固定为公开 API、无需 Cookie；令牌为可选。
 
+**未启用时也会说明已存的凭据。** 保存令牌与打开开关是两步，中间那个状态曾经完全静默（`detail` 只说"未启用"，`token_state` 恒空），用户刚做完生成 / 粘贴 / 保存并看到用户名被回填，不会意识到还差一步。现在 `disabled` 分支同样计算 `token_state`，`detail` 由 `bangumi_disabled_detail()` 按凭据取值：
+
+| 凭据 | `state` | `token_state` | `detail` |
+| --- | --- | --- | --- |
+| 无 | `disabled` | `""` | `Bangumi 来源未启用。` |
+| 个人令牌（未被拒） | `disabled` | `ok` | `已保存个人令牌，但它现在不会被使用；把 Bangumi 来源开关切到「启用」并保存后才会生效。` |
+| 仅公开用户名 | `disabled` | `""` | 同上，把「个人令牌」换成「公开用户名」 |
+| 个人令牌（已被拒） | `disabled` | `rejected` | 指向 https://next.bgm.tv/demo/access-token 重新生成，并提醒同时启用 |
+
+令牌与用户名同时配置时以令牌为准（账号由 `/v0/me` 决定）。`state` 保持 `disabled` 不变——它跟踪的是发现运行状况而非认证状态——所以桌面 Web 与扩展 popup 仍按中性灰渲染"来源未启用"，只有 `token_state=rejected` 才触发既有的红色「令牌已失效」；待启用不是出错。这些 `detail` **刻意不含"未启用"三字**：两个渲染器都会自己前置状态标签（popup 还额外加 `(未启用)` 前缀），后端再写一遍会让同一行出现三次。两端逐字渲染后端 `detail`，因此本项无前端改动。
+
 桌面 Web 与扩展设置页都列出官方五种合法条目类型：动画、书籍、游戏、音乐和三次元；默认仍只勾选 `anime/book/game`。保存已有 `music/real` 配置时不会因界面缺少控件而静默丢失。
+
+<!-- 锚点 #获取-bangumi-个人令牌 被三个 GUI 面的「取令牌步骤」链接引用
+     （setup 引导页 / 桌面 Web 设置页与初始化面板 / 扩展 popup 设置页与初始化面板）。
+     改这个标题前先改那些链接，tests/test_bangumi_web_surfaces.py 会检查两边一致。 -->
+
+## 获取 Bangumi 个人令牌
+
+Bangumi 账号有三条路，**三选一**即可，UI 上的取舍说明与这里一致：
+
+| 方式 | 能读到什么 | 代价 |
+| --- | --- | --- |
+| **个人令牌**（最完整） | 自动识别当前登录账号，读本人收藏**含私密条目** | 需要去 bgm.tv 生成一次，约 1 年后过期 |
+| **公开用户名**（次之） | 只读该账号的**公开**收藏 | 需要自己填对用户名 |
+| **扩展自动识别**（最省事） | 只拿到账号名，之后按公开用户名路径读取 | 需浏览器已登录 bgm.tv；拿到的账号名可能**未经 bgm.tv 校验** |
+
+### 生成步骤
+
+以下步骤以 **bgm.tv 实际页面为准**——那是外部站点，改版后此处可能过时；若对不上，以页面上的实际措辞为准。
+
+1. 用浏览器登录 <https://bgm.tv>（或 <https://bangumi.tv>，同一站点）。**必须先登录**，否则下一步的页面不会显示你的令牌。
+2. 打开 <https://next.bgm.tv/demo/access-token>。
+3. 在该页面创建一个新的 access token；有名称/备注一类的字段时随便填一个能认出用途的即可（例如 `OpenBiliClaw`）。
+4. 复制生成出来的令牌字符串。**它只在生成时完整显示一次**，先粘贴到安全的地方。
+5. 回到 OpenBiliClaw，粘进任一入口的「个人令牌」输入框并保存：初始化引导页、桌面 Web 设置 → Bangumi、扩展 popup 设置 → Bangumi。
+
+### 有效期与失效表现
+
+- 官方签发的令牌**约 1 年有效**。
+- 令牌**视同密码**：它能读你的私密收藏，不要外传、不要贴进 issue 或截图。本地写入 `config.toml`（已被 gitignore），日志只记录存在与否和长度，不记录明文。
+- 保存时后端会先用 `/v0/me` 实测一次：令牌错误或已过期会**当场拒绝**并回传真实原因，不会静默存下一个用不了的值。
+- 已保存的令牌在后续使用中被 bgm.tv 拒绝（401/403）时，发现链路会自动降级为匿名公开路径继续工作，同时把拒绝状态持久化：`GET /api/sources/status` 的 `token_state` 变为 `rejected`，桌面 Web 与扩展 popup 的 Bangumi 状态区显示「令牌已失效」。此时重新生成一个令牌填进去即可，成功后拒绝标记自动清除。
+- 想彻底不用令牌：勾选设置页的「清除已保存的令牌」保存一次，会清空令牌并降级为匿名公开发现。
+
 
 ## CLI
 
@@ -169,21 +226,45 @@ openbiliclaw discover --source bangumi --limit 30
 - **MAIN-world 桥 `dist/main/bgm-identity-bridge.js`** — 读取页面公开全局 `window.CHOBITS_UID`（>0 即已登录；隔离世界读不到页面全局，故需桥，模式同 xhs-state-bridge），postMessage `{source:"obc-bgm-identity", uid}`；登出（uid=0）时绝不上报，避免覆盖已知身份。
 - **isolated content script `dist/content/bangumi.js`** — 只做身份识别，不做行为采集：收到桥消息后**只**从本人专属导航区（`idBadgerNeue` / `#dock`）的 `/user/<username>` 链接解析用户名，非法值当缺失。真机 E2E（2026-07-18）实证泛化 `a.avatar[href*='/user/']` 兜底会在匿名首页命中时间线路人头像（/user/yuzzyu、/user/474349）并把陌生人用户名当成本人，该类兜底已删除；DOM 抓不到就上报 `username: ""`，交给后端权威解析。
 
-后端把身份持久化到 `discovery_runtime_state["bangumi_self_info"]`（`data/memory/discovery_runtime.json`；非正整数 uid 422 拒绝、非法用户名降为缺失）。**持久化前做权威校验**（匿名公开端点 `GET /v0/users/{username}`，`trust_env=False`，不缓存失败结果）：API 实测（2026-07-18）路径参数只认 username slug（`/v0/users/1` 404），但未设自定义 slug 的用户 `username == str(uid)`（`/v0/users/474349` → `id=474349`），故 uid-only 上报对默认 slug 用户也能解析。规则：API `id` 与上报 uid 一致 → 持久化 API 返回的 username（权威值）；username 属于其他 uid 或不存在 → **只存 uid、丢弃 username 并 log WARNING**（plausible-but-wrong 防线）；网络/上游失败 → best-effort 接受 DOM 值（debug log），下次上报再校验。guided init 与 CLI init 的用户名解析按优先级取值：**令牌 `/v0/me` > 显式/已配置用户名 > 扩展上报用户名 > 报错**；命中扩展身份时在 202 warnings/CLI 输出中明示"使用浏览器扩展识别到的账号"。隐私边界：uid 与用户名本就是公开资料（构成用户主页 URL），通道不读 Cookie、不传令牌、不采集任何浏览行为。init 写保护中间件对 `POST /api/sources/bangumi/identity` 做精确路径放行（`_init_write_allowlist`），因此扩展在 guided init 进行中上报的身份能当轮落地——正是三级账号解析最需要它的时刻，而非被 409 拦到下一轮。
+后端把身份持久化到 `discovery_runtime_state["bangumi_self_info"]`（`data/memory/discovery_runtime.json`；非正整数 uid 422 拒绝、非法用户名降为缺失）。**持久化前做权威校验**（匿名公开端点 `GET /v0/users/{username}`，`trust_env=False`，不缓存失败结果）：API 实测（2026-07-18）路径参数只认 username slug（`/v0/users/1` 404），但未设自定义 slug 的用户 `username == str(uid)`（`/v0/users/474349` → `id=474349`），故 uid-only 上报对默认 slug 用户也能解析。规则：API `id` 与上报 uid 一致 → 持久化 API 返回的 username（权威值）；username 属于其他 uid 或不存在 → **只存 uid、丢弃 username 并 log WARNING**（plausible-but-wrong 防线）；网络/上游失败 → best-effort 接受 DOM 值，下次上报再校验。
+
+**校验诚实性（`verified` 标记）**：fail-open 是刻意保留的——连不上 bgm.tv 时改成 fail-closed 会让「零配置、不用令牌」这批目标用户直接不可用（该结论标定于 v0.3.175 之前，当时默认 `[network] mode = direct` 根本连不上 bgm.tv，这条护栏在默认配置下必然为空；默认改为 `system` 后，有可用系统代理的机器会真的跑到校验，没有代理的仍然走 fail-open）。诚实性因此不靠拒绝，而靠两件事：(1) 校验失败从 DEBUG **升为 WARNING**，带真实原因（`code`/异常类型 + 消息 + `UNVERIFIED` 字样），可诊断（铁律 7）；(2) 记录写成 `{uid, username, verified}`。
+
+**`verified` 的定义**：`verified: true` ⟺ **bgm.tv 正面确认了这个 uid↔username 配对**，即 `get_user` 成功返回、其 `id` 与上报 uid 一致、且得到非空用户名。其余一律 `false`——包括 bgm.tv 明确答复的情形：404 是**否定**用户名，并没有告诉我们这个 uid 属于谁；uid-only 查询 404 更是压根没确认过任何东西。把「bgm.tv 答复了」当成「身份已确认」，会让 sticky-true 把一个从未确认过的身份永久钉成 `true`。逐路径取值见下表：
+
+| `get_user` 结果 | 落库 username | `verified` |
+| --- | --- | --- |
+| 成功且 `id == uid`，用户名非空 | API 用户名（回退上报值） | `true` |
+| 成功且 `id == uid`，但用户名不可用 | `""` | `false`（没有配对可谈） |
+| 成功但 `id != uid` | `""`（丢弃） | `false`（否定 ≠ 确认） |
+| 404，上报了用户名 | `""`（丢弃） | `false`（否定 ≠ 确认） |
+| 404，uid-only | `""` | `false`（未确认任何事） |
+| 网络 / 上游失败 | 保留 DOM 上报值 | `false` |
+
+`POST /api/sources/bangumi/identity` 的响应体**整体读自实际写入的那条记录**，所以 200 描述的一定是后续读取会拿到的状态；**落库失败则返回 500**（写异常或运行时没有 memory manager），绝不回传一个没能存下的状态（铁律 7）——扩展本就把上报当 best-effort，下次页面访问会重报。**向后兼容**：升级前写入的旧记录没有该键，读取端一律按**未校验**处理（无法证明校验跑过，宁可保守），用户下次访问 bgm.tv 页面时扩展重报即就地升级为已校验。
+
+**`verified` 对同一身份是单调的（sticky-true）**：一次成功的交叉校验是关于某个 uid↔username 配对的**证据**，不会因为我们后来连不上 bgm.tv 就失效。因此落盘时只允许把标记**往上抬**：本轮成功 → 写 `true`；本轮失败但已有记录的 uid **与** username 与本轮完全相同、已是 `true`、**且该记录本身在现行规则下合法（username 非空）** → 保持 `true`；uid 或 username 任一不同 → 是另一个从未验证过的主张，旧证据不适用，按本轮结果写。没有这条，一次网络抖动就会把已校验身份降级成 `false`，让 guided init 对用户的真实账号谎报「未经 bgm.tv 校验」，并且每抖一次翻一次标记、写一次盘。合并逻辑**只**跑在 `update_discovery_runtime_state` 的回调内部——`update_json_state` 会先取进程锁 + 文件锁再从磁盘重读，回调看到的是权威最新值，所以并发上报不会互相覆盖。**刻意没有锁外快路径**：`update_json_state` 无条件写盘，因此重复上报同一身份要付一次幂等重写；接受这个代价，是因为不加锁判断「没变化」只能依赖一份并发写入者随时可能作废的快照，而按那份快照作答会和下一次读取自相矛盾（曾经就是这样把并发确认答没了）。
+
+**旧版坏记录不被继承，且读取时归一（自愈）**：「合法」这一条是必需的：旧版 404 路径会写下 `{"username":"","verified":true}`，再次上报同一个 404 用户时 uid 与 username（都是 `""`）双双相等，纯 sticky 会把这条继承下去，永久违反「`verified` ⟹ username 非空」。该类记录**在读取侧也归一为未确认**（`_load_bangumi_identity` 与 CLI 的 `_load_extension_bangumi_identity` 同步处理），这样即使用户再也不访问 bgm.tv、没有新上报来覆盖，也不会继续读到旧断言。
+
+guided init 与 CLI init 的用户名解析按优先级取值：**令牌 `/v0/me` > 显式/已配置用户名 > 扩展上报用户名 > 报错**；命中扩展身份时在 202 warnings/CLI 输出中明示来源，且**按 `verified` 分叉文案**——已校验保持"Bangumi 使用浏览器扩展识别到的账号 X。"，未校验则追加"（未经 bgm.tv 校验，可能不准）"并给出改用用户名/令牌的出路，避免把一次没跑成的校验说成既成事实。
+
+**准入判定只由后端做**：packaged setup 与桌面 Web 曾各自带一份逐字相同的前端前置判断（"仅选 Bangumi 且没填用户名/令牌就不发请求"）。那份拷贝早于三级阶梯的第三级（扩展上报身份），看不见它，导致零配置用户在 GUI 里 `/api/init` 实际请求数为 **0**，而同一 payload 直打后端返回 202——正是铁律 5 说的四面契约漂移。两处已删除，改由后端 `409 no_profile_signal_sources` 说话（三级全空时才拒绝），三端 reason 文案同步补上"或先在浏览器登录 bgm.tv 让扩展自动识别账号"。**遗留**：`extension/popup/popup.js` 仍有同一份判断（含自己内联的一份拒绝文案），需同样删除，`tests/test_bangumi_web_surfaces.py` 里有一条 `strict=True` 的 xfail 钉住该缺口，修好后连同 xfail 一并移除。隐私边界：uid 与用户名本就是公开资料（构成用户主页 URL），通道不读 Cookie、不传令牌、不采集任何浏览行为。init 写保护中间件对 `POST /api/sources/bangumi/identity` 做精确路径放行（`_init_write_allowlist`），因此扩展在 guided init 进行中上报的身份能当轮落地——正是三级账号解析最需要它的时刻，而非被 409 拦到下一轮。
 
 ## 已知限制
 
-- **海外网络依赖**：见顶部「网络要求」——`api.bgm.tv` / `lain.bgm.tv` 均为海外服务，CN 网络默认 `direct` 会超时，需 `[network]` 走 `system`/`custom` 代理。
-- **作者字段恒空**：Subject 无「制作方 / 出版社」结构化字段，`sources/bangumi.py` 未填 `author_name`（归一化后恒为 `""`）。补制作方需对每个 subject 额外请求 `/v0/subjects/{id}` 的 `infobox`，成本与收益待后续评估，本版不做。
-- **delight 惊喜信号不适配 bangumi**：`recommendation/delight.py:443-449` 的 gem 信号要求 `view_count ≥ 100`，而 Bangumi 归一化从不写 `view_count`（无播放量语义），故该门对 bangumi 恒不满足；`rating_score` 目前也未纳入 delight。Bangumi 的惊喜因此依赖语义新颖 / 跨域信号而非播放量 gem。调整这些阈值属推荐质量改动、须过推荐质量门，列为已知限制不在本分支动。
+- **海外网络依赖**：见顶部「网络要求」——`api.bgm.tv` / `lain.bgm.tv` 均为海外服务，CN 网络直连会超时，需 `[network]` 走 `system`（v0.3.175 起的默认值）或 `custom` 代理。
+- **收藏路径作者字段恒空**：discovery 两个端点已能填 `author_name`（见上表），但用户收藏 `GET /v0/users/{username}/collections` 内嵌的是 **SlimSubject**，本身不带 `infobox`，故经该路径进来的条目 `author_name` 仍恒为 `""`。补齐需对每个 subject 额外请求 `/v0/subjects/{id}`，成本与收益待评估，本版不做；限制同时记在 `bangumi_subject_to_content` 的 docstring 里。
+- **`DelightScorer` 的 gem 信号对 bangumi 恒不满足（但不影响线上排序）**：`DelightScorer._quality_indicator` 的质量分要求 `view_count ≥ 100`，而 Bangumi 归一化从不写 `view_count`（无播放量语义），该门对 bangumi 恒不满足。**但这不影响实际推荐**——`DelightScorer` 在生产链路上零调用点（`src/` 内没有任何实例化，只有 `effective_delight_threshold` / `DEFAULT_DELIGHT_THRESHOLD` 被引用），线上 `delight_score` 由 `recommendation/engine.py` 的 `precompute_delight_scores` 复用 Evo 的 `relevance_score` 产出。Bangumi 的目录评分实际是经 `discovery/engine.py` 的 `_prompt_visible_content_fields` 在非零时进入 evaluator prompt（`rating_score` / `rating_count` / `source_rank`），由 LLM 在语境中权衡后体现在 `relevance_score` 上——评分**是**被计入的，只是不经过 scorer 的公式。改动 scorer 内部信号属推荐质量改动、须过推荐质量门，不在本分支动。
 
 ## 测试
 
 - `tests/test_bangumi_client.py`：请求契约、节流、分页、错误与 schema drift；令牌分支（Bearer 头、`get_me`、401→`unauthorized`、`disable_access_token` 降级、`me_username`/token 校验）。
-- `tests/test_bangumi_source.py`：subject/collection 归一化、NSFW、指标和信号矩阵；`include_private` 透传（匿名跳过私密行、认证保留）。
-- `tests/test_bangumi_producer.py`：预算、cursor、cooldown、关键词生命周期和本地状态；401 令牌降级（丢 Bearer 继续匿名发现）；拒绝标记持久化（指纹非明文）、同指纹重启即匿名不发 Bearer、换新令牌成功清标记，以及 `token_state` 三态。
-- `tests/test_bangumi_web_surfaces.py` 与扩展 Node tests：设置、身份、URL、目录指标和 guided init 契约（含 setup/popup 令牌输入与 `source_options.bangumi.access_token` 发送规则）；桌面与 popup 的「清除令牌」控件、`access_token:""` 发送与 `token_state==='rejected'` 警示渲染。
-- `tests/test_cli.py` / `tests/test_api_app.py`（`-k bangumi`）：init 令牌→用户名自动解析、坏令牌 400 拒绝、令牌+用户名持久化、`invalid_token` 状态与仅 Bangumi 无凭据的报错文案；`/api/sources/bangumi/identity` 校验/幂等/脏值降级、guided init 扩展身份回退与三级优先级、CLI `_load_extension_bangumi_username` 读取与脏值容错；`/api/sources/status` 的 `token_state` 三态、`PUT /api/config` 新令牌 401→400 拒绝 / 成功清标记且回写 `/v0/me` 用户名 / `access_token:""` 离线清空+清标记 / masked echo 与省略 key 零网络。
+- `tests/test_bangumi_source.py`：subject/collection 归一化、NSFW、指标和信号矩阵；`include_private` 透传（匿名跳过私密行、认证保留）；`author_name` 的每类型 credit key、阶梯逐级回落、两种 list value 形态与去重、首个非空 occurrence 生效、长 roster 截断（含带括号人名不截在半个括号里），以及 16 例缺失/漂移/脏值输入恒为 `""` 且绝不产出 `"None"` / `"[]"`（`infobox` fixture 取自真实 v0 响应切片）；另有占位串与非字符串 `v` 的 21 例参数化（含 `[{"v": ["押井守"]}]` 不得被 `str()` 造成 `"['押井守']"`）、歧义短名（`na`/`无`/`未知`/单字）必须保留、列表里单个占位项不污染其余 roster、以及未闭合括号回退与第 0 位硬切取舍。
+- `tests/test_bangumi_producer.py`：预算、cursor、cooldown、关键词生命周期和本地状态；401 令牌降级（丢 Bearer 继续匿名发现）；拒绝标记持久化（指纹非明文）、同指纹重启即匿名不发 Bearer、换新令牌成功清标记，以及 `token_state` 三态；`disabled` 分支的四种凭据组合各自的 `detail` 与 `token_state`（含"detail 不得再写'未启用'"这条防重复约束，以及被拒令牌在未启用时不得声称"已降级为匿名公开发现"）。
+- `tests/test_bangumi_web_surfaces.py` 与扩展 Node tests：设置、身份、URL、目录指标和 guided init 契约（含 setup/popup 令牌输入与 `source_options.bangumi.access_token` 发送规则）；桌面与 popup 的「清除令牌」控件、`access_token:""` 发送与 `token_state==='rejected'` 警示渲染；三端 reason 文案必须点名扩展这条腿，setup/desktop 不得重实现后端准入判定（popup 的同款判断以 `strict=True` xfail 钉住）。
+- `tests/test_web_guided_init_e2e.py`（`-k bangumi`，Playwright 真页面，setup + 桌面两面参数化）：仅选 Bangumi 且不填用户名/令牌时 `/api/init` **必须真的发出**（回归——回插旧判断后 4 条全部超时失败），以及后端 409 的拒绝文案在两面如实渲染且按钮可重试。
+- `tests/test_cli.py` / `tests/test_api_app.py`（`-k bangumi`）：init 令牌→用户名自动解析、坏令牌 400 拒绝、令牌+用户名持久化、`invalid_token` 状态与仅 Bangumi 无凭据的报错文案；`/api/sources/bangumi/identity` 校验/幂等/脏值降级、校验失败的 WARNING 级别与真因、`verified` 标记（仅正面确认为 true；404 / uid 不匹配 / 网络失败均为 false；复校成功就地升级；旧版写下的空用户名 `verified:true` 记录不被继承且读取时归一为未确认）、guided init 扩展身份回退与三级优先级、未校验身份的 warning 文案分叉、CLI `_load_extension_bangumi_identity` 读取与脏值容错（含旧记录缺 `verified` 键按未校验处理）；`/api/sources/status` 的 `token_state` 三态、未启用但已存令牌 / 已存公开用户名时的端到端 `detail` 与 `token_state`、`PUT /api/config` 新令牌 401→400 拒绝 / 成功清标记且回写 `/v0/me` 用户名 / `access_token:""` 离线清空+清标记 / masked echo 与省略 key 零网络。
 - `extension/tests/bangumi-identity.test.ts`：`CHOBITS_UID` 解析、`/user/<username>` 提取（本人专属选择器与登出空值）、匿名首页路人头像不泄漏进用户名的回归（真实 E2E DOM 场景）、桥消息过滤，及双 manifest 的 host/content-script 注册契约。后端侧另有 uid↔username 不一致丢弃、uid-only 权威解析、自定义 slug 404 保持 uid-only、API 失败降级四条 `-k bangumi_identity` 测试。
 
 完整设计与验收边界见 [Bangumi 来源 Spec](../plans/2026-07-17-bangumi-source-spec.md)。

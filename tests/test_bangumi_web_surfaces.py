@@ -119,6 +119,133 @@ def test_setup_guided_init_username_omit_and_warnings() -> None:
     assert 'setInitReason(startWarnings.join(" "), "warn")' in html
 
 
+def test_web_surfaces_do_not_reimplement_the_bangumi_admission_check() -> None:
+    """The backend owns the three-tier account ladder; no surface may copy it.
+
+    setup, desktop web and the extension popup each carried a byte-identical
+    pre-flight guard that refused to POST /api/init for a Bangumi-only run
+    without a typed username or token. None of the three could see the third
+    tier (the identity the extension reports from a logged-in bgm.tv page), so
+    a zero-config Bangumi-only run was unreachable from every GUI surface —
+    the guard was originally believed to be absent from the popup, but it was
+    there too, only spelled with a different variable name.
+
+    The backend answers 409 ``no_profile_signal_sources`` when all three tiers
+    are genuinely missing, and each surface renders that reply instead.
+    """
+    surfaces = {
+        "setup": ROOT / "src/openbiliclaw/web/setup/index.html",
+        "desktop": ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js",
+        "popup": ROOT / "extension/popup/popup.js",
+    }
+    for name, path in surfaces.items():
+        source = path.read_text(encoding="utf-8")
+        # Both spellings: setup/desktop used `selected`, popup `selectedSources`.
+        assert 'selected[0] === "bangumi"' not in source, name
+        assert 'selectedSources[0] === "bangumi"' not in source, name
+
+    # The popup hardcoded the rejection sentence inline instead of going
+    # through its reason map, so deleting the guard has to take the copy with
+    # it — otherwise the stale "username or token" wording survives.
+    popup = surfaces["popup"].read_text(encoding="utf-8")
+    assert "请填写个人令牌（推荐）或公开用户名以读取收藏。" not in popup
+
+
+def test_popup_renders_the_backend_rejection_for_a_failed_init_start() -> None:
+    """Deleting the guard must not turn a rejected start into silence.
+
+    The popup now lets the request reach the backend, so the 409 reply is the
+    only feedback the user gets. Behaviour of the mapping itself is covered by
+    extension/tests/init-control.test.ts; this only pins the wiring, which is
+    what a future refactor of the click handler could quietly drop.
+    """
+    popup = (ROOT / "extension/popup/popup.js").read_text(encoding="utf-8")
+    assert "_setInitReason(describeInitStartError(error))" in popup
+
+
+def test_all_surfaces_name_the_extension_tier_in_the_rejection_copy() -> None:
+    """Deleting the guard is only half the fix: the 409 copy must be honest.
+
+    ``no_profile_signal_sources`` is rendered from each surface's own reason
+    map, so all three have to name the browser-extension tier — otherwise the
+    user is still told to type a username or token when logging into bgm.tv
+    would do.
+    """
+    reason_maps = {
+        "setup": ROOT / "src/openbiliclaw/web/setup/index.html",
+        "desktop": ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js",
+        "popup": ROOT / "extension/popup/popup-init-control.js",
+    }
+    for name, path in reason_maps.items():
+        source = path.read_text(encoding="utf-8")
+        marker = "no_profile_signal_sources:"
+        assert marker in source, name
+        copy = source[source.index(marker) : source.index(marker) + 220]
+        assert "个人令牌" in copy, name
+        assert "公开用户名" in copy, name
+        assert "bgm.tv" in copy, name
+
+
+def test_every_token_field_explains_the_three_ways_to_supply_an_account() -> None:
+    """The token/username/extension choice is explained wherever it is asked.
+
+    Five screens ask for a Bangumi token and each stores its own copy, so the
+    wording drifts (rule 5). The setup wizard is where a new user meets the
+    field first and it used to say only "约 1 年有效" — nothing about what the
+    token buys, and nothing about the fact that leaving both fields blank is a
+    valid path when the browser is already logged into bgm.tv. That silence is
+    what made the admission bug plausible in the first place.
+
+    Each screen must name all three ways in, and the trade-off that picks
+    between them: the token reads private collections, the public username
+    does not, and the extension-read account may be unverified.
+    """
+    screens = {
+        "setup init": ROOT / "src/openbiliclaw/web/setup/index.html",
+        "desktop init": ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js",
+        "desktop settings": ROOT / "src/openbiliclaw/web/desktop/index.html",
+        "popup init": ROOT / "extension/popup/popup.js",
+        "popup settings": ROOT / "extension/popup/popup.html",
+    }
+    doc_anchor = (
+        "https://github.com/whiteguo233/OpenBiliClaw/blob/main/"
+        "docs/modules/bangumi.md#获取-bangumi-个人令牌"
+    )
+    for name, path in screens.items():
+        source = path.read_text(encoding="utf-8")
+        marker = "Bangumi 账号三选一"
+        assert marker in source, f"{name} lost the three-way explanation"
+        copy = source[source.index(marker) : source.index(marker) + 420]
+        assert "个人令牌" in copy, name  # tier 1
+        assert "私密收藏" in copy, name  # ...and why it is the most complete
+        assert "公开用户名" in copy, name  # tier 2
+        assert "公开收藏" in copy, name  # ...and its narrower reach
+        assert "bgm.tv" in copy, name  # tier 3
+        assert "未经校验" in copy, name  # ...and its caveat
+        # Step-by-step token instructions live in the doc, not in the UI: the
+        # generation page is somebody else's site and would go stale here.
+        assert doc_anchor in source, f"{name} lost the token how-to link"
+        assert "https://next.bgm.tv/demo/access-token" in source, name
+
+    # The linked anchor has to exist, or every screen deep-links to nothing.
+    module_doc = (ROOT / "docs/modules/bangumi.md").read_text(encoding="utf-8")
+    assert "\n## 获取 Bangumi 个人令牌\n" in module_doc
+
+
+def test_token_how_to_doc_covers_prerequisites_validity_and_expiry() -> None:
+    """The doc the UI defers to must actually answer what the UI stopped saying."""
+    doc = (ROOT / "docs/modules/bangumi.md").read_text(encoding="utf-8")
+    section = doc[doc.index("## 获取 Bangumi 个人令牌") :]
+    section = section[: section.index("\n## ", 1)] if "\n## " in section[1:] else section
+    assert "登录" in section  # must be signed in to bgm.tv first
+    assert "https://next.bgm.tv/demo/access-token" in section
+    assert "1 年" in section  # validity
+    assert "视同密码" in section  # handling
+    assert "token_state" in section and "rejected" in section  # expiry signal
+    assert "令牌已失效" in section  # ...as the status area words it
+    assert "bgm.tv 实际页面为准" in section  # external page may change
+
+
 def test_setup_exposes_anonymous_bangumi_bootstrap() -> None:
     html = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 

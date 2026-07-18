@@ -22,7 +22,7 @@ import pytest
 from openbiliclaw import network
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 _GUARD_PROXY = "socks5://127.0.0.1:9999"
 
@@ -72,6 +72,48 @@ def test_douyin_client_never_uses_outbound_proxy(
 
     DouyinDirectClient(cookie="sessionid=abc; ttwid=def")
     _assert_no_proxy_leak(_capture_httpx)
+
+
+def _build_bilibili_client() -> None:
+    from openbiliclaw.bilibili.api import BilibiliAPIClient
+
+    BilibiliAPIClient(cookie="SESSDATA=x; bili_jct=y; DedeUserID=1")
+
+
+def _build_douyin_client() -> None:
+    from openbiliclaw.sources.douyin_direct import DouyinDirectClient
+
+    DouyinDirectClient(cookie="sessionid=abc; ttwid=def")
+
+
+@pytest.mark.parametrize(
+    "client_factory",
+    [
+        pytest.param(_build_bilibili_client, id="bilibili"),
+        pytest.param(_build_douyin_client, id="douyin"),
+    ],
+)
+def test_cn_direct_clients_stay_direct_under_system_mode(
+    _capture_httpx: list[dict[str, Any]],
+    client_factory: Callable[[], None],
+) -> None:
+    """``system`` is the default since v0.3.175 — CN clients still ignore it.
+
+    The other isolation tests pin ``custom`` mode, where a leak shows up as a
+    stray proxy URL. ``system`` mode leaks differently and more quietly: no
+    URL appears anywhere, the client simply flips to ``trust_env=True`` and
+    starts honouring ambient ``HTTP(S)_PROXY``. Since that mode is now what a
+    fresh install gets, pin it directly (pitfall rule 1).
+    """
+    network.reset_outbound_proxy_for_tests()
+    network.set_outbound_proxy("", mode="system")
+    try:
+        client_factory()
+        assert _capture_httpx, "expected at least one httpx.AsyncClient construction"
+        for kwargs in _capture_httpx:
+            assert kwargs.get("trust_env") is False
+    finally:
+        network.reset_outbound_proxy_for_tests()
 
 
 def test_ollama_factory_provider_has_no_outbound_proxy() -> None:

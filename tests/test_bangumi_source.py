@@ -9,6 +9,31 @@ from openbiliclaw.sources.bangumi import (
 )
 from openbiliclaw.sources.bangumi_client import BangumiPage
 
+# Verbatim ``infobox`` slices captured from the live v0 API on 2026-07-18 so the
+# parser is pinned against the real payload shape (mixed bare-string and
+# ``[{"v": …}]`` / ``[{"k": …, "v": …}]`` list values), not an invented one.
+# Sources: GET /v0/subjects/237 (攻壳机动队 剧场版), /v0/subjects/62229
+# (塞尔达传说 旷野之息), and the ranked book page (SLAM DUNK 完全版).
+_ANIME_INFOBOX: list[dict[str, object]] = [
+    {"key": "中文名", "value": "攻壳机动队"},
+    {"key": "别名", "value": [{"v": "攻殻機動隊"}, {"v": "GHOST IN THE SHELL"}]},
+    {"key": "导演", "value": "押井守"},
+    {"key": "脚本", "value": "伊藤和典"},
+    {"key": "原作", "value": "士郎正宗（「攻殻機動隊」講談社刊）"},
+    {"key": "动画制作", "value": "Production I.G"},
+    {"key": "製作", "value": "講談社、バンダイビジュアル、MANGA ENTERTAINMENT"},
+]
+_BOOK_INFOBOX: list[dict[str, object]] = [
+    {"key": "别名", "value": [{"v": "篮球飞人 完全版"}]},
+    {"key": "作者", "value": "井上雄彦"},
+    {"key": "出版社", "value": "集英社"},
+]
+_GAME_INFOBOX: list[dict[str, object]] = [
+    {"key": "平台", "value": [{"v": "Nintendo Switch"}, {"v": "Wii U"}]},
+    {"key": "开发", "value": "任天堂企画制作本部"},
+    {"key": "发行", "value": "任天堂"},
+]
+
 
 def _subject(**overrides: object) -> dict[str, object]:
     row: dict[str, object] = {
@@ -24,6 +49,7 @@ def _subject(**overrides: object) -> dict[str, object]:
         "tags": [{"name": "科幻", "count": 99}, {"name": "tv", "count": 1}],
         "rating": {"score": 9.2, "total": 9959, "rank": 1},
         "collection": {"wish": 1, "collect": 2, "doing": 3, "on_hold": 4, "dropped": 5},
+        "infobox": list(_ANIME_INFOBOX),
     }
     row.update(overrides)
     return row
@@ -36,7 +62,7 @@ def test_subject_normalization_maps_catalog_fields_without_fake_engagement() -> 
     assert item.content_url == "https://bgm.tv/subject/326"
     assert item.content_type == "subject"
     assert item.title == "攻壳机动队"
-    assert item.author_name == ""
+    assert item.author_name == "押井守"
     assert item.body_text == "未来社会的故事"
     assert item.cover_url == "https://lain.bgm.tv/cover.jpg"
     assert item.favorite_count == 15
@@ -104,6 +130,274 @@ def test_subject_tags_preserve_valid_list_meta_tags() -> None:
     )
     assert item is not None
     assert item.tags == ["TV", "剧场版"]
+
+
+def _author_of(**overrides: object) -> str:
+    item = bangumi_subject_to_content(_subject(**overrides), strategy="bangumi-ranked")
+    assert item is not None
+    return item.author_name
+
+
+@pytest.mark.parametrize(
+    ("subject_type", "infobox", "expected"),
+    [
+        # Each type leads with its own credit key; Bangumi has no shared one.
+        (2, _ANIME_INFOBOX, "押井守"),
+        (1, _BOOK_INFOBOX, "井上雄彦"),
+        (4, _GAME_INFOBOX, "任天堂企画制作本部"),
+        (3, [{"key": "艺术家", "value": "菅野よう子"}], "菅野よう子"),
+        (6, [{"key": "导演", "value": "Frank Darabont"}], "Frank Darabont"),
+    ],
+)
+def test_subject_author_name_reads_the_per_type_credit_key(
+    subject_type: int, infobox: list[dict[str, object]], expected: str
+) -> None:
+    assert _author_of(type=subject_type, infobox=list(infobox)) == expected
+
+
+@pytest.mark.parametrize(
+    ("dropped_keys", "expected"),
+    [
+        ((), "押井守"),
+        (("导演",), "士郎正宗（「攻殻機動隊」講談社刊）"),
+        (("导演", "原作"), "Production I.G"),
+        (("导演", "原作", "动画制作"), "講談社、バンダイビジュアル、MANGA ENTERTAINMENT"),
+        (("导演", "原作", "动画制作", "製作"), ""),
+    ],
+)
+def test_subject_author_name_walks_the_priority_ladder(
+    dropped_keys: tuple[str, ...], expected: str
+) -> None:
+    # 导演 → 原作 → 动画制作 → 製作: a row that omits the leading credit must
+    # still surface the next-best one instead of falling back to empty.
+    infobox = [entry for entry in _ANIME_INFOBOX if entry["key"] not in dropped_keys]
+    assert _author_of(infobox=infobox) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # ``[{"v": …}]`` and ``[{"k": …, "v": …}]`` both read through ``v``;
+        # ``k`` is a sub-label (总导演 / 副导演), never a name.
+        ([{"v": "今敏"}, {"v": "湯浅政明"}], "今敏、湯浅政明"),
+        ([{"k": "总导演", "v": "庵野秀明"}, {"k": "副导演", "v": "摩砂雪"}], "庵野秀明、摩砂雪"),
+        ([{"v": "押井守"}, {"k": "演出", "v": "西久保瑞穂"}], "押井守、西久保瑞穂"),
+        # Duplicates collapse while order is preserved.
+        ([{"v": "新房昭之"}, {"v": "新房昭之"}], "新房昭之"),
+    ],
+)
+def test_subject_author_name_flattens_both_list_value_shapes(
+    value: list[dict[str, object]], expected: str
+) -> None:
+    assert _author_of(infobox=[{"key": "导演", "value": value}]) == expected
+
+
+@pytest.mark.parametrize(
+    "infobox",
+    [
+        None,  # field absent entirely (SlimSubject rows from collections)
+        "导演:押井守",  # schema drift to a bare string
+        {"导演": "押井守"},  # schema drift to an object
+        42,
+        [],
+        [{"key": "导演", "value": None}],
+        [{"key": "导演", "value": []}],
+        [{"key": "导演", "value": {}}],
+        [{"key": "导演", "value": True}],
+        [{"key": "导演", "value": 1995}],
+        [{"key": "导演", "value": [{"v": None}]}],
+        [{"key": "导演", "value": [{"k": "总导演"}]}],  # entry without a ``v``
+        [{"key": "导演", "value": ["押井守"]}],  # bare list entries, not mappings
+        ["押井守"],  # infobox entries that are not mappings
+        [{"key": "", "value": "押井守"}],
+        [{"key": "脚本", "value": "伊藤和典"}],  # no ladder key present
+    ],
+)
+def test_subject_author_name_never_leaks_a_placeholder(infobox: object) -> None:
+    # A missing credit must be "" — never a stringified "None" / "[]" / "{}",
+    # the dirty-row class that COALESCE cannot repair once persisted.
+    author = _author_of(infobox=infobox)
+    assert author == ""
+    assert author not in {"None", "[]", "{}", "null", "True"}
+
+
+def test_subject_author_name_takes_the_first_non_empty_occurrence() -> None:
+    # A duplicated key whose first value flattens to "" must not shadow the
+    # later occurrence that actually carries the credit.
+    infobox = [
+        {"key": "导演", "value": []},
+        {"key": "导演", "value": "細田守"},
+    ]
+    assert _author_of(infobox=infobox) == "細田守"
+
+
+def test_subject_author_name_bounds_a_long_credit_roster() -> None:
+    # Bangumi credits can list dozens of names (原画 rosters run 400+ chars).
+    # A card field keeps the leading names and stays length-bounded.
+    listed = [{"v": f"名字{index}"} for index in range(12)]
+    assert _author_of(infobox=[{"key": "导演", "value": listed}]) == "名字0、名字1、名字2"
+
+    # A single string holding a whole roster is cut on a name separator, so the
+    # credit never ends mid-name or inside an unclosed bracket.
+    long_credit = "、".join(f"制作公司{index:02d}" for index in range(20))
+    author = _author_of(infobox=[{"key": "导演", "value": long_credit}])
+    assert len(author) <= 80
+    assert author.startswith("制作公司00、制作公司01")
+    assert not author.endswith("、")
+    assert all(part in long_credit.split("、") for part in author.split("、"))
+
+    # Real-world shape (猫和老鼠 1965): bracketed names that a blind 80-char slice
+    # would leave open mid-bracket. 61 chars fit; the 4th name pushes past the
+    # cap, so the credit is cut back to the last complete name.
+    bracketed = (
+        "William Hanna（《猫和老鼠》）、Joseph Barbera（《猫和老鼠》）、Tex Avery（《德鲁比》）"
+    )
+    roster = bracketed + "、Michael Lah（《德鲁比》）、Chuck Jones（《兔八哥》）"
+    assert len(bracketed) == 61 and len(roster) > 80
+    author = _author_of(infobox=[{"key": "导演", "value": roster}])
+    assert author == bracketed
+    assert author.count("（") == author.count("）")
+
+    # No separator within budget → hard cut, still bounded.
+    author = _author_of(infobox=[{"key": "导演", "value": "名" * 200}])
+    assert author == "名" * 80
+
+
+def test_subject_author_name_never_ends_on_an_unclosed_bracket() -> None:
+    # A hard cut with no separator in range used to stop inside a bracket and
+    # render "…（総監督" on the card. Trim back to before the open bracket.
+    credit = "名" * 70 + "（総監督" + "字" * 40
+    author = _author_of(infobox=[{"key": "导演", "value": credit}])
+    assert author == "名" * 70
+    assert author.count("（") == author.count("）")
+
+    # Same for ASCII and other bracket families, and a nested pair only counts
+    # as open when it really is unbalanced.
+    assert _author_of(infobox=[{"key": "导演", "value": "A" * 70 + "[credit" + "B" * 40}]) == (
+        "A" * 70
+    )
+
+    # A closer only settles an opener of the SAME family. Popping on any
+    # closer declared "(credit]" balanced and kept the dangling "(".
+    for opener, stray in (("(", "]"), ("（", "】"), ("【", ")"), ("《", "」")):
+        credit = "A" * 70 + opener + "credit" + stray + "B" * 40
+        assert _author_of(infobox=[{"key": "导演", "value": credit}]) == "A" * 70
+
+    # A stray closer with no opener at all settles nothing and is harmless.
+    assert _author_of(infobox=[{"key": "导演", "value": "A" * 70 + "]tail" + "B" * 40}]) == (
+        "A" * 70 + "]tail" + "B" * 5
+    )
+    balanced = "名" * 60 + "《作品》" + "、" + "字" * 40
+    author = _author_of(infobox=[{"key": "导演", "value": balanced}])
+    assert author == "名" * 60 + "《作品》"
+
+    # Deliberate limitation: when the whole credit is one long parenthetical the
+    # opener sits at index 0, so trimming would erase a real credit entirely.
+    # The hard cut is kept instead — asserted so the trade-off stays visible.
+    whole = "（" + "甲" * 90 + "）"
+    author = _author_of(infobox=[{"key": "导演", "value": whole}])
+    assert author == "（" + "甲" * 79
+    assert len(author) == 80
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Stringified nulls — the only class this filter targets. A literal
+        # "None" in the source data is exactly as unusable as one we produced
+        # ourselves. Punctuation is NOT in scope; see the keep test for why.
+        "None",
+        "none",
+        "NULL",
+        "NaN",
+        "undefined",
+        "   ",
+        # ...and the same values arriving through either list shape.
+        [{"v": "None"}],
+        [{"k": "总导演", "v": "null"}],
+        # Non-string ``v``: str() would have manufactured "['押井守']" / "42".
+        [{"v": ["押井守"]}],
+        [{"v": {"name": "押井守"}}],
+        [{"v": 42}],
+        [{"v": True}],
+    ],
+)
+def test_subject_author_name_rejects_absence_spellings_and_non_string_values(
+    value: object,
+) -> None:
+    author = _author_of(infobox=[{"key": "导演", "value": value}])
+    assert author == ""
+    assert "押井守" not in author  # never reconstructed via str() on a drift
+
+
+def test_subject_author_name_keeps_ambiguous_short_credits() -> None:
+    """The placeholder filter must not delete plausible real names.
+
+    Every entry here was either a real false positive we shipped or is one
+    waiting to happen. Three separate attempts to widen the filter each
+    deleted a real artist, so the scope is now only stringified nulls.
+    """
+    credits = (
+        # Shipped false positive: a real Japanese rock band, and no
+        # Python/JS/JSON path emits that spelling (it is Ruby/Lisp).
+        "nil",
+        "NIL",
+        # Editor prose that merely *means* absence — same class as the CJK
+        # words below, and not something this stack can emit.
+        "N/A",
+        "n/a",
+        "(none)",
+        # Romanised 나 / 娜 surname; single letters and digits are stage names.
+        "Na",
+        "na",
+        "0",
+        "X",
+        "N",
+        "无",
+        "未知",
+        "暂无",
+        "不明",
+    )
+    for credit in credits:
+        assert _author_of(infobox=[{"key": "导演", "value": credit}]) == credit
+        assert _author_of(infobox=[{"key": "导演", "value": [{"v": credit}]}]) == credit
+
+
+def test_subject_author_name_keeps_punctuation_only_artist_names() -> None:
+    """Punctuation-only credits are kept — they can be real artist names.
+
+    A "real names contain a letter or digit" rule looked safe and deleted
+    both of these. A punctuation-only credit only renders oddly on a card;
+    erasing a real artist is data loss, so the asymmetry decides it.
+    """
+    for credit in (
+        "・・・・・・・・・",  # real idol group, all U+30FB
+        "!!!",  # real band (chk chk chk)
+        "△",
+        "-",
+        "——",
+        "…",
+        "?",
+        "（）",
+    ):
+        assert _author_of(infobox=[{"key": "导演", "value": credit}]) == credit
+        assert _author_of(infobox=[{"key": "导演", "value": [{"v": credit}]}]) == credit
+
+
+def test_subject_author_name_skips_placeholder_entries_within_a_list() -> None:
+    # One junk entry must not poison the rest of the roster, and a key whose
+    # value is entirely placeholders still falls through to the next ladder key.
+    value = [{"v": "None"}, {"v": "今敏"}, {"v": "null"}, {"v": "湯浅政明"}]
+    assert _author_of(infobox=[{"key": "导演", "value": value}]) == "今敏、湯浅政明"
+    assert (
+        _author_of(
+            infobox=[
+                {"key": "导演", "value": [{"v": "None"}, {"v": None}]},
+                {"key": "原作", "value": "士郎正宗"},
+            ]
+        )
+        == "士郎正宗"
+    )
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ import {
   buildNextCognitionHistoryState,
   buildVideoUrl,
   getDelightUiState,
+  formatRecommendationAuthorLine,
   formatRelativeTimestamp,
   getCommentSubmitUiState,
   getCognitionHistoryUiState,
@@ -49,6 +50,44 @@ import {
   shouldAutoLoadRecommendations,
   validateCommentInput,
 } from "../popup/popup-helpers.js";
+
+test("formatRecommendationAuthorLine keeps the UP prefix Bilibili-only", () => {
+  // "UP 主" is Bilibili jargon — it stays on Bilibili cards.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "机械工厂" }),
+    "这位 UP：机械工厂",
+  );
+  // Missing platform still means Bilibili (legacy payloads).
+  assert.equal(formatRecommendationAuthorLine({ up_name: "机械工厂" }), "这位 UP：机械工厂");
+
+  // Every other source shows the bare name — 押井守 directed Ghost in the
+  // Shell, he is not an UP 主. Matches desktop / mobile web rendering.
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "bgm", up_name: "押井守" }),
+    "押井守",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "youtube", up_name: "Veritasium" }),
+    "Veritasium",
+  );
+  assert.equal(
+    formatRecommendationAuthorLine({ source_platform: "zhihu", author_name: "张三" }),
+    "张三",
+  );
+});
+
+test("formatRecommendationAuthorLine returns empty text when no creator is known", () => {
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bangumi", up_name: "" }), "");
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili" }), "");
+  assert.equal(formatRecommendationAuthorLine({}), "");
+  assert.equal(formatRecommendationAuthorLine(undefined), "");
+  // Whitespace-only names must not render a dangling prefix.
+  assert.equal(formatRecommendationAuthorLine({ source_platform: "bilibili", up_name: "   " }), "");
+});
 
 test("platformDisplayName maps known platforms and passes through unknown", () => {
   assert.equal(platformDisplayName("bilibili"), "B 站");

@@ -7782,34 +7782,59 @@ def test_fetch_bangumi_init_data_missing_username_without_token(monkeypatch) -> 
     assert (events, counts, status) == ([], {}, "missing_username")
 
 
-def test_load_extension_bangumi_username_reads_runtime_state(monkeypatch, tmp_path) -> None:
+def test_load_extension_bangumi_identity_reads_runtime_state(monkeypatch, tmp_path) -> None:
     import json
 
     cfg = config_module.Config()
     cfg.data_dir = str(tmp_path)
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
 
-    # No state file yet → "".
-    assert cli_module._load_extension_bangumi_username() == ""
+    # No state file yet → ("", False).
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
 
     state_dir = tmp_path / "memory"
     state_dir.mkdir(parents=True)
     state_path = state_dir / "discovery_runtime.json"
 
     state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user", "verified": True}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", True)
+
+    # Fail-open (bgm.tv unreachable) record: usable, but flagged unverified.
+    state_path.write_text(
+        json.dumps(
+            {"bangumi_self_info": {"uid": "123", "username": "ext-user", "verified": False}}
+        ),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
+
+    # A verified record with no username is one the superseded 404 path wrote;
+    # no current rule produces it, so it normalises to unverified on read.
+    state_path.write_text(
+        json.dumps({"bangumi_self_info": {"uid": "123", "username": "", "verified": True}}),
+        encoding="utf-8",
+    )
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
+
+    # Backward compatibility: a record written before the flag existed cannot
+    # prove it was ever cross-checked, so it reads back as unverified.
+    state_path.write_text(
         json.dumps({"bangumi_self_info": {"uid": "123", "username": "ext-user"}}),
         encoding="utf-8",
     )
-    assert cli_module._load_extension_bangumi_username() == "ext-user"
+    assert cli_module._load_extension_bangumi_identity() == ("ext-user", False)
 
     # Malformed values are treated as missing, never propagated.
     state_path.write_text(
         json.dumps({"bangumi_self_info": {"uid": "123", "username": "bad/name"}}),
         encoding="utf-8",
     )
-    assert cli_module._load_extension_bangumi_username() == ""
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
     state_path.write_text("not-json", encoding="utf-8")
-    assert cli_module._load_extension_bangumi_username() == ""
+    assert cli_module._load_extension_bangumi_identity() == ("", False)
 
 
 def test_fetch_bangumi_init_data_expired_token_returns_invalid_token(monkeypatch) -> None:
@@ -7991,3 +8016,195 @@ async def test_run_with_progress_heartbeat_reports_status_and_honest_eta(monkeyp
     assert "已超预估" in out
     assert "已完成 2/5 批" in out
     assert "预计还需 ~0s" not in out
+
+
+def _render_cli_console(monkeypatch, render) -> str:
+    """Run ``render()`` against a captured CLI console and return the text."""
+    buf = io.StringIO()
+    monkeypatch.setattr(cli_module, "console", Console(file=buf, force_terminal=False, width=200))
+    render()
+    return buf.getvalue()
+
+
+def test_discovered_content_preview_shows_non_bilibili_author_as_neutral_label(
+    monkeypatch,
+) -> None:
+    """Bangumi rows carry only ``author_name`` — show it, and call it 作者.
+
+    Regression for the CLI half of the four-surface contract: the three GUI
+    surfaces already read the universal ``author_name``, but the CLI read the
+    Bilibili-only ``up_name``, so every non-Bilibili source printed "（未知）"
+    (real smoke: ``discover-bangumi 攻壳机动队`` hid 押井守). "UP 主" is also
+    wrong for a film director / Zhihu answerer / YouTube channel.
+    """
+    content = DiscoveredContent(
+        content_id="8",
+        title="攻壳机动队",
+        source_platform="bangumi",
+        author_name="押井守",
+        source_strategy="bangumi-search",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "押井守" in out
+    assert "作者" in out
+    assert "UP 主" not in out
+    assert "（未知）" not in out
+
+
+def test_discovered_content_preview_keeps_up_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili keeps its native "UP 主" label and still resolves the name."""
+    content = DiscoveredContent(
+        bvid="BV1AUTHOR",
+        title="城市与建筑的空间叙事",
+        up_name="城市观察局",
+        source_platform="bilibili",
+        source_strategy="search",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "UP 主" in out
+    assert "城市观察局" in out
+    assert "作者" not in out
+
+
+def test_discovered_content_preview_falls_back_to_bilibili_label_for_legacy_rows(
+    monkeypatch,
+) -> None:
+    """A row with no ``source_platform`` keeps the old "UP 主" label.
+
+    Matches ``formatRecommendationAuthorLine``'s ``|| "bilibili"`` default so
+    pre-multi-source rows do not silently re-label themselves.
+    """
+    content = DiscoveredContent(title="老数据行为", up_name="旧的观察局")
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_discovered_content_preview(content, 1),
+    )
+
+    assert "UP 主" in out
+    assert "旧的观察局" in out
+    assert "作者" not in out
+
+
+def test_recommendation_card_shows_non_bilibili_author_as_neutral_label(monkeypatch) -> None:
+    """The recommendation card reads the same universal author field."""
+    item = Recommendation(
+        recommendation_id=11,
+        content=DiscoveredContent(
+            content_id="8",
+            title="攻壳机动队",
+            source_platform="bangumi",
+            author_name="押井守",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "押井守" in out
+    assert "作者" in out
+    assert "UP 主" not in out
+
+
+def test_recommendation_card_keeps_up_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili recommendation cards are untouched by the author-row fix."""
+    item = Recommendation(
+        recommendation_id=12,
+        content=DiscoveredContent(
+            bvid="BV1REC",
+            title="讲透城市与建筑的空间叙事",
+            up_name="城市观察局",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "UP 主" in out
+    assert "城市观察局" in out
+    assert "作者" not in out
+
+
+def test_recommendation_card_labels_non_bilibili_id_neutrally(monkeypatch) -> None:
+    """A Bangumi subject id must not be announced as a "BV号".
+
+    ``bangumi_subject_to_content`` stores the subject id in the universal
+    ``bvid`` column, so the old unconditional label rendered ``BV号  8``.
+    """
+    item = Recommendation(
+        recommendation_id=13,
+        content=DiscoveredContent(
+            content_id="8",
+            bvid="8",
+            title="攻壳机动队",
+            source_platform="bangumi",
+            author_name="押井守",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "内容 ID" in out
+    assert "BV号" not in out
+    assert "8" in out
+
+
+def test_recommendation_card_keeps_bv_label_for_bilibili(monkeypatch) -> None:
+    """Bilibili rows keep the native "BV号" wording."""
+    item = Recommendation(
+        recommendation_id=14,
+        content=DiscoveredContent(
+            bvid="BV1REC",
+            title="讲透城市与建筑的空间叙事",
+            up_name="城市观察局",
+            source_platform="bilibili",
+        ),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "BV号" in out
+    assert "BV1REC" in out
+    assert "内容 ID" not in out
+
+
+def test_recommendation_card_falls_back_to_bv_label_for_legacy_rows(monkeypatch) -> None:
+    """No ``source_platform`` keeps the old "BV号" label, like the author row."""
+    item = Recommendation(
+        recommendation_id=15,
+        content=DiscoveredContent(bvid="BV1LEGACY", title="老数据行为", up_name="旧的观察局"),
+        expression="这条会对上你最近那种想把结构想透的劲头。",
+    )
+
+    out = _render_cli_console(
+        monkeypatch,
+        lambda: cli_module._print_recommendation_card(item, 1),
+    )
+
+    assert "BV号" in out
+    assert "BV1LEGACY" in out
+    assert "内容 ID" not in out

@@ -4325,6 +4325,15 @@
       color: #b91c1c;
     }
 
+    /* Overseas-egress advisory (backend-authored, inserted by
+       applySourceNetworkHint). Amber so it reads as actionable rather than as
+       one more informational hint. */
+    .source-network-hint {
+      background: rgba(234, 179, 8, 0.14);
+      border: 1px solid rgba(234, 179, 8, 0.38);
+      color: var(--text-primary);
+    }
+
     .settings-status-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -5711,7 +5720,7 @@
             <input id="cfgBangumiClearToken" type="checkbox">
             <label for="cfgBangumiClearToken">清除已保存的令牌（本次保存清空并降级为匿名公开发现）</label>
           </div>
-          <p class="settings-hint">个人令牌可自动识别当前登录账号（含私密收藏），比公开用户名更完整。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变）。</p>
+          <p class="settings-hint">Bangumi 账号三选一，填哪个都行：个人令牌最完整（自动认出你，还能读到私密收藏）；公开用户名次之（只能读公开收藏）；都留空也行——只要你浏览器里登录着 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管；留空则保持已配置的令牌不变）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a>。</p>
         </div>
         <div class="settings-field">
           <label>内容发现分支</label>
@@ -5855,7 +5864,7 @@
           <label for="cfgNetworkProxyMode">海外网络模式</label>
           <select id="cfgNetworkProxyMode">
             <option value="direct">直连（忽略系统代理）</option>
-            <option value="system">跟随系统代理</option>
+            <option value="system" selected>跟随系统代理</option>
             <option value="custom">自定义代理</option>
           </select>
         </div>
@@ -5863,7 +5872,7 @@
           <label for="cfgNetworkProxy">自定义代理地址</label>
           <input id="cfgNetworkProxy" type="text" placeholder="socks5://127.0.0.1:1080">
         </div>
-        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外 AI 服务 / YouTube / 更新检查；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。</p>
+        <p class="settings-hint" id="cfgNetworkProxyHint">仅作用于海外服务（海外 AI 服务、需要海外出网的内容来源、更新检查）；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。哪些来源需要海外出网，见各来源卡片的接入状态。</p>
         <div class="settings-probe-row">
           <button id="cfgProbeNetworkProxy" class="settings-secondary-btn" type="button">测试代理</button>
           <span id="cfgProbeNetworkProxyStatus" class="settings-probe-status" aria-live="polite"></span>

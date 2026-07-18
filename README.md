@@ -637,7 +637,7 @@ Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
-海外请求：设置页 `[network].mode` → 直连 / 系统代理 / 自定义代理 → LLM、YouTube、更新；国内平台保持独立直连
+海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、Bangumi、更新；国内平台保持独立直连
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。

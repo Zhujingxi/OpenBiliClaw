@@ -168,6 +168,27 @@ export function platformDisplayName(value) {
   return PLATFORM_DISPLAY_NAMES[key] || normalizeText(value);
 }
 
+/**
+ * Build the author line shown on a recommendation card.
+ *
+ * "UP 主" is Bilibili-specific jargon, so the warm "这位 UP：" prefix only
+ * applies to Bilibili content. Every other source carries a creator whose
+ * role differs per platform (Bangumi ships directors / studios, Zhihu ships
+ * answer authors, YouTube ships channels), so prefixing them with "UP" is
+ * simply wrong. Those fall back to the bare name — which is what desktop web
+ * (`recommendationMetaHtml`) and mobile web (`views/recommend.js`) already
+ * render, so this keeps the three surfaces consistent.
+ *
+ * @param {{ up_name?: string, author_name?: string, source_platform?: string }} [item]
+ * @returns {string} display text, or "" when there is no creator to show
+ */
+export function formatRecommendationAuthorLine(item) {
+  const name = normalizeText(item?.up_name) || normalizeText(item?.author_name);
+  if (!name) return "";
+  const platform = normalizeSourcePlatform(item?.source_platform) || "bilibili";
+  return platform === "bilibili" ? `这位 UP：${name}` : name;
+}
+
 export function buildVideoUrl(bvid) {
   return `https://www.bilibili.com/video/${normalizeText(bvid)}`;
 }
