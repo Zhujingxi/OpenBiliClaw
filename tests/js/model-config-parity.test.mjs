@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import * as popupState from "../../extension/popup/popup-model-config-state.js";
@@ -8,6 +10,23 @@ const IMPLEMENTATIONS = [
   ["web", webState],
   ["extension", popupState],
 ];
+
+test("extension popup state module is a synced copy of the shared source", () => {
+  const root = resolve(import.meta.dirname, "..", "..");
+  const source = readFileSync(
+    resolve(root, "src/openbiliclaw/web/shared/model-config-state.js"),
+    "utf-8",
+  );
+  const generated = readFileSync(
+    resolve(root, "extension/popup/popup-model-config-state.js"),
+    "utf-8",
+  );
+  assert.ok(
+    generated.endsWith(source),
+    "extension/popup/popup-model-config-state.js drifted from the shared source. "
+      + "Regenerate with: node extension/scripts/sync-model-config-state.mjs",
+  );
+});
 
 function connection(id, overrides = {}) {
   return {
