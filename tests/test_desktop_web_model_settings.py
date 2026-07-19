@@ -34,6 +34,9 @@ def test_model_page_has_three_route_tabs_and_list_inspector_landmarks() -> None:
 
 def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    shared_render = (
+        Path(__file__).parents[1] / "src/openbiliclaw/web/shared/model-config-render.js"
+    ).read_text(encoding="utf-8")
 
     assert 'id="modelTypeSearch"' in INDEX
     assert 'id="modelConnectionTypeGroups"' in INDEX
@@ -41,10 +44,12 @@ def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
     assert "/api/model-connection-types" in model_js
     assert "descriptor.fields" in model_js
     assert "preset_definitions" in model_js
-    assert "group.category" in model_js
-    assert "function moveTypeOptionFocus" in model_js
+    # The grouped rendering now lives in the shared render module; the
+    # desktop view keeps the keyboard wiring + change-type glue locally.
+    assert "group.category" in shared_render
+    assert "moveTypeOptionFocus" in model_js
     for key in ("ArrowUp", "ArrowDown", "Home", "End"):
-        assert key in model_js.split("function moveTypeOptionFocus", 1)[1]
+        assert key in shared_render.split("export function moveTypeOptionFocus", 1)[1]
     assert 'addEventListener("keydown", moveTypeOptionFocus)' in model_js
     assert "function focusSelectedTypeOption" in model_js
     change_type = model_js.split("function changeType(typeId)", 1)[1].split(
@@ -60,15 +65,32 @@ def test_connection_types_are_searchable_grouped_vertical_descriptors() -> None:
 
 
 def test_deepseek_disabled_thinking_uses_an_empty_wire_value_on_every_web_surface() -> None:
+    # The empty-string choice rendering for reasoning_effort moved into the
+    # shared render module consumed by desktop + mobile; the wizard consumes
+    # the shared escapeHtml primitive but keeps its own descriptor-field
+    # markup (wizard layout uses div-wrapped .model-field instead of the
+    # shared label-wrapped .settings-field — full adoption is plan §10), and
+    # the extension popup carries the literal markup inline.
     surfaces = (
-        MODEL_JS_PATH.read_text(encoding="utf-8"),
+        (ROOT / "src/openbiliclaw/web/shared/model-config-render.js").read_text(
+            encoding="utf-8"
+        ),
         (ROOT / "extension/popup/popup-model-settings.js").read_text(encoding="utf-8"),
-        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(encoding="utf-8"),
         (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8"),
     )
 
     for source in surfaces:
         assert 'field.name === "reasoning_effort" && choice === "" ? "disabled"' in source
+
+    # Desktop and mobile route through the shared renderer, so the literal
+    # string must NOT be forked into their per-surface modules.
+    for fork in (
+        MODEL_JS_PATH.read_text(encoding="utf-8"),
+        (ROOT / "src/openbiliclaw/web/js/views/model-settings.js").read_text(
+            encoding="utf-8"
+        ),
+    ):
+        assert "sharedRenderDescriptorField" in fork or "renderDescriptorField" in fork
 
 
 def test_route_rows_support_drag_buttons_keyboard_and_focus_restoration() -> None:
@@ -87,6 +109,13 @@ def test_route_rows_support_drag_buttons_keyboard_and_focus_restoration() -> Non
 
 def test_visible_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -> None:
     model_js = MODEL_JS_PATH.read_text(encoding="utf-8")
+    shared_render = (
+        Path(__file__).parents[1] / "src/openbiliclaw/web/shared/model-config-render.js"
+    ).read_text(encoding="utf-8")
+    # After the shared-render extraction the copy lives in either the
+    # desktop module (route list, drag handles) or the shared render module
+    # (descriptor fields, credential editor, category labels).
+    combined = model_js + "\n" + shared_render
 
     for copy in (
         'aria-label="拖拽排序"',
@@ -105,7 +134,7 @@ def test_visible_model_editor_copy_is_chinese_first_and_keeps_technical_terms() 
         "<span>Embedding 路由</span>",
         "<span>当前健康状态</span>",
     ):
-        assert copy in model_js
+        assert copy in combined
     for old_copy in (
         "Drag to reorder",
         "Unnamed connection",
@@ -119,7 +148,7 @@ def test_visible_model_editor_copy_is_chinese_first_and_keeps_technical_terms() 
         "Current health",
         "Probe failed",
     ):
-        assert old_copy not in model_js
+        assert old_copy not in combined
 
 
 def test_legacy_provider_fallback_and_module_override_fields_are_absent() -> None:

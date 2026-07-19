@@ -129,6 +129,11 @@ def test_mobile_routes_add_remove_and_touch_reorder_by_stable_id() -> None:
 
 def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    # After the shared-render extraction the descriptor copy (category
+    # labels, credential editor, OAuth/status strings) lives in the shared
+    # module; route-list copy (未命名连接/未设置模型/etc) remains local.
+    combined = model + "\n" + shared_render
 
     for copy in (
         '"未命名连接"',
@@ -145,7 +150,7 @@ def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -
         "<span>Embedding 路由</span>",
         "<span>当前健康状态</span>",
     ):
-        assert copy in model
+        assert copy in combined
     for old_copy in (
         "Unnamed connection",
         "No model",
@@ -158,31 +163,41 @@ def test_mobile_model_editor_copy_is_chinese_first_and_keeps_technical_terms() -
         "Current health",
         "Probe failed",
     ):
-        assert old_copy not in model
+        assert old_copy not in combined
 
 
 def test_connection_types_are_grouped_searchable_and_descriptor_driven() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
 
+    # Marker split: the listbox shell + search input live in the mobile
+    # HTML; group rendering moved to the shared render module; the
+    # keyboard handler stays in the mobile controller as a thin wrapper.
     for marker in (
         'id="mobileModelTypeSearch"',
         'role="listbox"',
         "connectionTypes.groups",
-        "group.category",
         "descriptor.fields",
         "preset_definitions",
-        "field.capabilities",
-        "field.presets",
-        "function moveTypeOptionFocus",
+        "moveTypeOptionFocus",
     ):
         assert marker in model
+    # Category-group markup + the actual keyboard handler live in the
+    # shared render module, along with the descriptor-field capability /
+    # preset gating.
+    assert "group.category" in shared_render
+    assert "export function moveTypeOptionFocus" in shared_render
+    assert "field.capabilities" in shared_render
+    assert "field.presets" in shared_render
 
 
 def test_credentials_and_embedding_shared_settings_keep_the_full_contract() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    combined = model + shared_render
 
     for action in ("keep", "set", "env", "clear"):
-        assert f'["{action}",' in model
+        assert f'["{action}",' in combined
     for marker in (
         "credential.action",
         "credential.status",
@@ -194,7 +209,7 @@ def test_credentials_and_embedding_shared_settings_keep_the_full_contract() -> N
         "settings.similarity_threshold",
         "settings.multimodal_enabled",
     ):
-        assert marker in model
+        assert marker in combined
 
 
 def test_runtime_override_migration_and_field_errors_are_rendered() -> None:
@@ -460,8 +475,12 @@ def test_mobile_numeric_preflight_and_error_lifecycle_use_production_seams() -> 
     assert 'aria-describedby="mobileModelEmbeddingSimilarityError"' in model
     assert "data-mobile-model-num-ctx-error" in model
     assert "mobileModelSelectedNumCtxError" in model
-    assert 'field.name === "num_ctx"' in model
-    assert 'min="0" step="1" inputmode="numeric"' in model
+    assert 'field.name === "num_ctx"' in model or 'field.name === "num_ctx"' in _read(
+        WEB / "shared/model-config-render.js"
+    )
+    numeric_attrs = 'min="0" step="1" inputmode="numeric"'
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    assert numeric_attrs in model or numeric_attrs in shared_render
     assert "parseMobileModelNumericDraft(event.target.value)" in model
     assert "runtimeFieldErrors" not in model
 
@@ -508,8 +527,10 @@ def test_opener_list_and_detail_focus_are_restored_with_semantic_controls() -> N
 
 def test_dynamic_model_data_is_escaped_before_inner_html_rendering() -> None:
     model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    combined = model + shared_render
 
-    assert "function escapeHtml(" in model
+    assert "function escapeHtml(" in combined
     for value in (
         "record.id",
         "record.name",
@@ -519,7 +540,7 @@ def test_dynamic_model_data_is_escaped_before_inner_html_rendering() -> None:
         "override.source",
         "error.message",
     ):
-        assert f"escapeHtml({value})" in model
+        assert f"escapeHtml({value})" in combined
 
 
 def test_mobile_model_controls_have_touch_targets_and_visible_focus() -> None:
@@ -529,6 +550,32 @@ def test_mobile_model_controls_have_touch_targets_and_visible_focus() -> None:
     assert "min-height: 44px" in css
     assert ".mobile-model-settings :focus-visible" in css
     assert ".mobile-model-route-layout.is-detail" in css
+
+
+def test_mobile_shared_renderers_emit_classes_covered_by_mobile_css() -> None:
+    model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    css = _read(CSS_PATH)
+
+    # Mobile passes the mobile class prefix into both shared renderers.
+    assert 'classPrefix: "mobile-model"' in model
+    assert model.count('classPrefix: "mobile-model"') >= 2
+
+    # The shared renderers must emit prefixed classes.
+    assert '"${classPrefix}-type-group"' in shared_render
+    assert '"${classPrefix}-type-option"' in shared_render
+    assert '"${classPrefix}-credential-actions"' in shared_render
+    assert '"${classPrefix}-credential-action"' in shared_render
+
+    # The mobile stylesheet must cover the emitted mobile classes.
+    for selector in (
+        ".mobile-model-type-group",
+        ".mobile-model-type-option",
+        '.mobile-model-type-option[aria-selected="true"]',
+        ".mobile-model-credential-actions",
+        '.mobile-model-credential-actions button[aria-pressed="true"]',
+    ):
+        assert selector in css
 
 
 def test_mobile_does_not_offer_the_one_click_ollama_convenience_path() -> None:

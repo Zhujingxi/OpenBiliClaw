@@ -142,6 +142,15 @@ export function createModelOperationGate() {
       saveInFlight = false;
       return true;
     },
+    canStartSaveAfterLoad({ startedSaveGeneration, loadResult, state }) {
+      return Boolean(
+        loadResult?.snapshotApplied === true
+        && loadResult?.descriptorsInstalled === true
+        && startedSaveGeneration === saveGeneration
+        && !saveInFlight
+        && !state?.dirty,
+      );
+    },
     controlState() {
       return {
         editorLocked: saveInFlight,
@@ -787,11 +796,23 @@ export function applyProbeResult(state, signature, result) {
     return { state: next, accepted: false };
   }
   const index = findIndex(next, signature.kind, signature.id);
-  routeItems(next, signature.kind)[index].probe = clone(result);
+  const stored = clone(result);
+  // Persist the exact-draft fingerprint alongside the probe so the settings UI
+  // can detect "changed since last verified" (decision 4) even if a later
+  // mutation path forgot to clear the probe chip.
+  if (stored && typeof stored === "object" && !stored.fingerprint) {
+    stored.fingerprint = signature.fingerprint;
+  }
+  routeItems(next, signature.kind)[index].probe = stored;
   return { state: next, accepted: true };
 }
 
 export function toModelConfigPayload(state) {
+  // The backend rejects enabled=false WITH providers outright
+  // (embedding_disabled_with_providers). Route items stay in client state so a
+  // same-session re-enable restores them, but the wire payload must not carry
+  // providers on a disabled route.
+  const embeddingEnabled = Boolean(state.models.embedding.enabled);
   return {
     revision: state.revision,
     models: {
@@ -802,9 +823,11 @@ export function toModelConfigPayload(state) {
         timeout_seconds: Math.max(10, Number(state.models.chat.timeout_seconds) || 10),
       },
       embedding: {
-        enabled: Boolean(state.models.embedding.enabled),
+        enabled: embeddingEnabled,
         settings: embeddingSettingsPayload(state.models.embedding.settings),
-        providers: state.models.embedding.providers.map(embeddingPayload),
+        providers: embeddingEnabled
+          ? state.models.embedding.providers.map(embeddingPayload)
+          : [],
       },
     },
     migration_resolutions: clone(state.migration_resolutions || {}),
@@ -814,6 +837,203 @@ export function toModelConfigPayload(state) {
 export function selectedRecord(state, kind) {
   if (kind !== "chat" && kind !== "embedding") return null;
   return routeItems(state, kind).find((item) => item.id === state.selected[kind]) || null;
+}
+
+/* ── Circuit-breaker view helpers (decision 6) ─────────────────────── */
+
+/**
+ * Project a record's circuit summary into a display model. Returns null for a
+ * closed/unknown circuit so callers can render nothing. `nowMs` is injectable
+ * for deterministic tests and countdown re-renders.
+ */
+export function circuitView(record, nowMs = Date.now()) {
+  const circuit = record?.circuit;
+  if (!circuit || circuit.state !== "open") return null;
+  const retryAfter = Number(circuit.retry_after_seconds);
+  const hasRetry = Number.isFinite(retryAfter) && retryAfter > 0;
+  const retrySeconds = hasRetry ? Math.max(0, Math.ceil(retryAfter)) : null;
+  return {
+    state: "open",
+    failureKind: String(circuit.failure_kind || ""),
+    permanent: Boolean(circuit.permanent),
+    retrySeconds,
+    label: circuit.permanent
+      ? `熔断打开 · ${circuit.failure_kind || "永久失败"}`
+      : retrySeconds !== null
+        ? `熔断打开 · ${retrySeconds}s 后重试`
+        : `熔断打开${circuit.failure_kind ? ` · ${circuit.failure_kind}` : ""}`,
+  };
+}
+
+/** Throttled aria-live announcement key: only changes on state transitions. */
+export function circuitAnnouncementKey(record) {
+  const circuit = record?.circuit;
+  if (!circuit || circuit.state !== "open") return "closed";
+  return `open:${circuit.failure_kind || ""}:${circuit.permanent ? "1" : "0"}`;
+}
+
+/* ── Changed-since-probe detection (decision 4) ────────────────────── */
+
+/**
+ * True when the record carries a successful probe whose exact-draft
+ * fingerprint no longer matches the current draft. Records never probed (or
+ * with a failed probe) return false — the settings UI only warns about
+ * *unverified changes* on top of a previously verified draft.
+ */
+export function hasUnverifiedChanges(state, kind, id) {
+  let index;
+  try {
+    index = findIndex(state, kind, id);
+  } catch (_error) {
+    return false;
+  }
+  const item = routeItems(state, kind)[index];
+  if (!item?.probe?.ok) return false;
+  // updateRouteField clears probe on fingerprint changes, so a surviving
+  // probe is by construction in sync — unless the caller re-attached an old
+  // probe result. Compare fingerprints defensively via the stored signature.
+  if (!item.probe?.fingerprint) return false;
+  try {
+    const current = createProbeSignature(state, kind, id);
+    return current.fingerprint !== item.probe.fingerprint;
+  } catch (_error) {
+    return false;
+  }
+}
+
+/** Collect every route item with unverified changes for a save-time warning. */
+export function unverifiedConnections(state) {
+  const changed = [];
+  for (const kind of ["chat", "embedding"]) {
+    for (const item of routeItems(state, kind)) {
+      if (hasUnverifiedChanges(state, kind, item.id)) {
+        changed.push({ kind, id: item.id, name: item.name || item.id });
+      }
+    }
+  }
+  return changed;
+}
+
+/* ── Override-lock selectors (decision 7) ──────────────────────────── */
+
+/** Lock descriptor ({path, source}) for a control path, or null when editable. */
+export function overrideLockFor(state, path) {
+  return state?.overrideLocks?.[path] || null;
+}
+
+/** True when any model control is locked by a higher-priority config source. */
+export function hasOverrideLocks(state) {
+  return Object.values(state?.overrideLocks || {}).some(Boolean);
+}
+
+/* ── Single-connection draft mode for the setup wizard ─────────────── */
+
+/**
+ * Wrap the full route state in a single-connection editing lens used by the
+ * setup wizard. The wizard edits exactly one chat connection (plus, in the
+ * embedding step, one provider) while preserving every other route item
+ * verbatim in the serialized PUT payload.
+ */
+export function createSingleConnectionDraft(state, kind, id) {
+  const index = findIndex(state, kind, id);
+  const record = routeItems(state, kind)[index];
+  return {
+    get record() {
+      return record;
+    },
+    get kind() {
+      return kind;
+    },
+    get id() {
+      return record.id;
+    },
+    /** Count of route items preserved untouched after the edited one. */
+    get preservedFallbackCount() {
+      return Math.max(0, routeItems(state, kind).length - 1);
+    },
+    updateField(field, value) {
+      return updateRouteField(state, kind, record.id, field, value);
+    },
+    applyPreset(presetDefinition, options) {
+      return applyPreset(state, kind, record.id, presetDefinition, options);
+    },
+    changeType(descriptor, options) {
+      return changeConnectionType(state, kind, record.id, descriptor, options);
+    },
+    probeSignature() {
+      return createProbeSignature(state, kind, record.id);
+    },
+    toPayload(nextState = state) {
+      return toModelConfigPayload(nextState);
+    },
+  };
+}
+
+/**
+ * Build the guarded one-click local Embedding draft used by the popup banner.
+ *
+ * This convenience action only creates an empty route or refreshes one existing
+ * Ollama provider.  It refuses to replace a configured provider list so no
+ * credential-bearing record can disappear without the user editing the model
+ * route explicitly.
+ */
+export function prepareLocalOllamaEmbedding(state, descriptor, defaults) {
+  if (state?.dirty) {
+    throw new Error("Unsaved model changes must be saved or reloaded first.");
+  }
+  if (
+    descriptor?.id !== "ollama"
+    || !descriptor?.capabilities?.includes("embedding")
+  ) {
+    throw new Error("The server does not advertise an Embedding-capable Ollama descriptor.");
+  }
+  const baseUrlField = (descriptor.fields || []).find((field) => (
+    field.name === "base_url"
+    && (!field.capabilities?.length || field.capabilities.includes("embedding"))
+  ));
+  if (!baseUrlField) {
+    throw new Error("The Ollama descriptor does not expose an Embedding endpoint field.");
+  }
+  for (const path of [
+    "models.embedding.providers",
+    "models.embedding.enabled",
+    "models.embedding.settings.model",
+    "models.embedding.settings.output_dimensionality",
+    "models.embedding.settings.multimodal_enabled",
+  ]) {
+    if (state?.overrideLocks?.[path]) {
+      throw new Error(`A read-only override controls ${path}.`);
+    }
+  }
+
+  const providers = state?.models?.embedding?.providers || [];
+  if (providers.length > 1 || providers.some((provider) => provider.type !== "ollama")) {
+    throw new Error(
+      "A configured Embedding route must be edited explicitly before enabling local Ollama.",
+    );
+  }
+
+  const next = clone(state);
+  const existing = next.models.embedding.providers[0] || null;
+  const id = String(existing?.id || defaults?.id || "embedding-local-ollama");
+  const record = cleanDraftRecord({
+    id,
+    name: String(existing?.name || defaults?.name || descriptor.label || "Local Ollama"),
+    type: "ollama",
+    preset: "",
+    base_url: String(existing?.base_url || defaults?.base_url || ""),
+    credential: { action: "clear", value: "" },
+  }, "embedding");
+  next.models.embedding.providers = [record];
+  next.models.embedding.enabled = true;
+  next.models.embedding.settings.model = String(defaults?.model || "");
+  next.models.embedding.settings.output_dimensionality = Math.max(
+    0,
+    Number(defaults?.output_dimensionality) || 0,
+  );
+  next.models.embedding.settings.multimodal_enabled = false;
+  next.selected.embedding = id;
+  return markChanged(next);
 }
 
 export { MAX_ROUTE_ITEMS };

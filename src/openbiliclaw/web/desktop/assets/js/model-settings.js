@@ -1,6 +1,10 @@
 const sharedStateUrl = new URL("/web/shared/model-config-state.js", import.meta.url);
+const sharedRenderUrl = new URL("/web/shared/model-config-render.js", import.meta.url);
 const sharedStateVersion = new URL(import.meta.url).searchParams.get("v");
-if (sharedStateVersion) sharedStateUrl.searchParams.set("v", sharedStateVersion);
+if (sharedStateVersion) {
+  sharedStateUrl.searchParams.set("v", sharedStateVersion);
+  sharedRenderUrl.searchParams.set("v", sharedStateVersion);
+}
 
 const {
   appendRouteItem,
@@ -9,8 +13,10 @@ const {
   applyPreset,
   changeConnectionType,
   changePreset,
+  circuitView,
   createLatestRequestGate,
   createProbeSignature,
+  hasUnverifiedChanges,
   hydrateModelConfig,
   mapServerFieldErrors,
   moveRouteItem,
@@ -21,20 +27,26 @@ const {
   selectedRecord,
   setMigrationResolution,
   toModelConfigPayload,
+  unverifiedConnections,
   updateRouteField,
   updateRouteSetting,
 } = await import(sharedStateUrl.href);
+
+const {
+  applyTypeOptionRovingTabindex,
+  disabledMarkup,
+  escapeHtml,
+  moveTypeOptionFocus: sharedMoveTypeOptionFocus,
+  renderConnectionTypeGroups,
+  renderCredentialEditor,
+  renderDescriptorField: sharedRenderDescriptorField,
+} = await import(sharedRenderUrl.href);
 
 const MODEL_CONFIG_API = "/api/model-config";
 const CONNECTION_TYPES_API = "/api/model-connection-types";
 const MODEL_PROBE_API = "/api/model-config/probe";
 const MODEL_PROBE_TIMEOUT_MS = 60_000;
 const CONFIG_RELOADED_TYPE = "config_reloaded";
-const CATEGORY_LABELS = {
-  api_protocol: "API 协议",
-  local_runtime: "本地 Runtime",
-  oauth: "OAuth 连接",
-};
 const ROUTE_OVERRIDE_PATHS = {
   chat: "models.chat.connections",
   embedding: "models.embedding.providers",
@@ -46,20 +58,10 @@ let draggedId = "";
 let probeGeneration = 0;
 let saveInFlight = false;
 let saveGeneration = 0;
+let circuitCountdownTimer = null;
 const snapshotRequestGate = createLatestRequestGate();
 
 const byId = (id) => document.getElementById(id);
-const disabledMarkup = (disabled) => (disabled ? ' disabled aria-disabled="true"' : "");
-const escapeHtml = (value) => String(value ?? "").replace(
-  /[&<>'"]/g,
-  (character) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    "'": "&#39;",
-    '"': "&quot;",
-  })[character],
-);
 
 function modelControlLocked(path) {
   if (!state) return null;
@@ -194,7 +196,8 @@ function setStatus(message, tone = "") {
 
 function safeHealth(record) {
   if (record?.circuit?.state === "open") {
-    return { label: record.circuit.failure_kind || "熔断已打开", tone: "error" };
+    const circuit = circuitView(record);
+    return { label: circuit?.label || record.circuit.failure_kind || "熔断已打开", tone: "warning" };
   }
   if (record?.probe?.ok === true) return { label: "探测通过", tone: "success" };
   if (record?.probe?.ok === false) return { label: record.probe.error_code || "探测失败", tone: "error" };
@@ -303,51 +306,19 @@ function renderConnectionTypes() {
   const record = selectedRecord(state, state.activeRoute);
   if (!record) return;
   const locked = Boolean(routeLocked(state.activeRoute));
-  const query = String(byId("modelTypeSearch")?.value || "").trim().toLowerCase();
   const host = byId("modelConnectionTypeGroups");
-  const blocks = [];
-  for (const group of connectionTypes.groups) {
-    const matches = group.connection_types.filter((descriptor) => {
-      if (!descriptor.capabilities?.includes(state.activeRoute)) return false;
-      const searchText = [
-        descriptor.id,
-        descriptor.label,
-        descriptor.help,
-        ...(descriptor.preset_definitions || []).map((preset) => `${preset.id} ${preset.label}`),
-      ].join(" ").toLowerCase();
-      return !query || searchText.includes(query);
-    });
-    if (!matches.length) continue;
-    blocks.push(`
-      <section class="model-type-group" data-model-type-category="${escapeHtml(group.category)}">
-        <p class="model-type-group-title">${escapeHtml(CATEGORY_LABELS[group.category] || group.category)}</p>
-        ${matches.map((descriptor) => `
-          <button class="model-type-option" type="button" role="option" tabindex="-1" data-model-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record.type ? "true" : "false"}"${disabledMarkup(locked)}>
-            <span><strong>${escapeHtml(descriptor.label)}</strong><small>${escapeHtml(descriptor.help)}</small></span>
-            <small>${escapeHtml(descriptor.category === "oauth" ? "OAuth" : descriptor.id)}</small>
-          </button>`).join("")}
-      </section>`);
-  }
-  host.innerHTML = blocks.join("") || '<p class="model-empty-types">没有匹配的连接类型。</p>';
-  const options = [...host.querySelectorAll('[role="option"]:not(:disabled)')];
-  const selected = options.find((option) => option.getAttribute("aria-selected") === "true");
-  const roving = selected || options[0];
-  if (roving) roving.tabIndex = 0;
+  host.innerHTML = renderConnectionTypeGroups({
+    groups: connectionTypes.groups,
+    record,
+    kind: state.activeRoute,
+    locked,
+    query: byId("modelTypeSearch")?.value || "",
+  });
+  applyTypeOptionRovingTabindex(host);
 }
 
 function moveTypeOptionFocus(event) {
-  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-  const options = [...event.currentTarget.querySelectorAll('[role="option"]:not(:disabled)')];
-  if (!options.length) return;
-  const current = event.target.closest('[role="option"]');
-  let index = Math.max(0, options.indexOf(current));
-  if (event.key === "Home") index = 0;
-  else if (event.key === "End") index = options.length - 1;
-  else if (event.key === "ArrowUp") index = Math.max(0, index - 1);
-  else index = Math.min(options.length - 1, index + 1);
-  event.preventDefault();
-  for (const option of options) option.tabIndex = option === options[index] ? 0 : -1;
-  options[index].focus();
+  sharedMoveTypeOptionFocus(event);
 }
 
 function focusSelectedTypeOption() {
@@ -361,68 +332,30 @@ function focusSelectedTypeOption() {
 }
 
 function renderDescriptorField(record, descriptor, field) {
-  if (field.name === "credential") return "";
-  if (field.capabilities?.length && !field.capabilities.includes(state.activeRoute)) return "";
-  if (field.presets?.length && !field.presets.includes(record.preset)) return "";
-  const required = field.required ? " required" : "";
-  const disabled = disabledMarkup(Boolean(routeLocked(state.activeRoute)));
-  const help = field.help ? `<small>${escapeHtml(field.help)}</small>` : "";
-  if (field.name === "preset") {
-    const presets = (descriptor.preset_definitions || []).filter(
-      (preset) => preset.capabilities?.includes(state.activeRoute),
-    );
-    return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-      <select data-model-field="preset"${required}${disabled}>${presets.map((preset) => `<option value="${escapeHtml(preset.id)}"${preset.id === record.preset ? " selected" : ""}>${escapeHtml(preset.label)}</option>`).join("")}</select>
-      ${help}${errorMarkup(record.id, "preset")}</label>`;
-  }
-  if (field.input_type === "select") {
-    return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-      <select data-model-field="${escapeHtml(field.name)}"${required}${disabled}>${(field.choices || []).map((choice) => `<option value="${escapeHtml(choice)}"${String(record[field.name] || "") === choice ? " selected" : ""}>${escapeHtml(field.name === "reasoning_effort" && choice === "" ? "disabled" : choice)}</option>`).join("")}</select>
-      ${help}${errorMarkup(record.id, field.name)}</label>`;
-  }
-  const type = field.input_type === "number" ? "number" : "text";
-  return `<label class="settings-field"><span>${escapeHtml(field.label)}</span>
-    <input type="${type}" data-model-field="${escapeHtml(field.name)}" value="${escapeHtml(record[field.name] ?? "")}" placeholder="${escapeHtml(field.placeholder || "")}" autocomplete="off"${required}${disabled}>
-    ${help}${errorMarkup(record.id, field.name)}</label>`;
+  return sharedRenderDescriptorField({
+    record,
+    descriptor,
+    field,
+    kind: state.activeRoute,
+    locked: Boolean(routeLocked(state.activeRoute)),
+    errorMarkup,
+    fieldClass: "settings-field",
+  });
 }
 
 function renderCredential(record, descriptor) {
   const host = byId("modelCredentialEditor");
-  const definition = descriptor?.fields?.find((field) => field.name === "credential");
-  if (!definition) {
-    host.hidden = true;
-    host.innerHTML = "";
-    return;
-  }
-  host.hidden = false;
-  const credential = record.credential;
-  const status = credential.status || {};
-  const disabled = disabledMarkup(Boolean(routeLocked(state.activeRoute)));
-  if (descriptor.category === "oauth") {
-    const importedReference = status.credential_ref || definition.choices?.[0] || descriptor.label;
-    host.innerHTML = `
-      <strong>已导入 OAuth 凭据</strong>
-      <p class="settings-note-inline">${status.oauth_logged_in ? "已登录" : "尚未检测到登录"} · ${escapeHtml(importedReference)}</p>
-      <input type="hidden" data-model-credential-action="keep" value="keep">
-      ${errorMarkup(record.id, "credential")}`;
-    return;
-  }
-  const actions = [
-    ["keep", "保留现有凭据"],
-    ["set", "设置 API Key"],
-    ["env", "环境变量"],
-    ["clear", "清除"],
-  ];
-  const sourceLabel = status.configured
-    ? `当前来源：${status.source}${status.env_name ? ` (${status.env_name})` : ""}`
-    : "当前未配置凭据。";
-  const needsValue = credential.action === "set" || credential.action === "env";
-  host.innerHTML = `
-    <strong>凭据来源</strong>
-    <p class="settings-note-inline">${escapeHtml(sourceLabel)}</p>
-    <div class="model-credential-actions">${actions.map(([action, label]) => `<button class="model-credential-action" type="button" data-model-credential-action="${action}" aria-pressed="${credential.action === action ? "true" : "false"}"${disabled}>${label}</button>`).join("")}</div>
-    ${needsValue ? `<label class="settings-field"><span>${credential.action === "env" ? "环境变量名" : "新 API Key"}</span><input id="modelCredentialValue" type="${credential.action === "set" ? "password" : "text"}" value="${escapeHtml(credential.value || "")}" autocomplete="new-password"${disabled}></label>` : ""}
-    ${errorMarkup(record.id, "credential")}`;
+  const rendered = renderCredentialEditor({
+    record,
+    descriptor,
+    kind: state.activeRoute,
+    locked: Boolean(routeLocked(state.activeRoute)),
+    errorMarkup,
+    fieldClass: "settings-field",
+    credentialValueId: "modelCredentialValue",
+  });
+  host.hidden = rendered.hidden;
+  host.innerHTML = rendered.html;
 }
 
 function renderInspector() {
@@ -444,9 +377,18 @@ function renderInspector() {
     || (kind === "embedding" && state.models.embedding.enabled && activeItems().length <= 1)
   );
   byId("modelTypeSearch").disabled = locked;
+  const circuit = circuitView(record);
+  const circuitChip = circuit
+    ? `<span class="model-circuit-chip" title="${escapeHtml(circuit.failureKind || "熔断打开")}">${escapeHtml(circuit.label)}</span>`
+    : "";
+  const unverified = hasUnverifiedChanges(state, kind, record.id)
+    ? '<p class="model-unverified-warning" role="status">此连接在上次探测通过后被修改，保存前建议重新探测。</p>'
+    : "";
   byId("modelInspectorFields").innerHTML = `
     <label class="settings-field full"><span>连接名称</span><input data-model-field="name" value="${escapeHtml(record.name)}" autocomplete="off" required${disabledMarkup(locked)}>${errorMarkup(record.id, "name")}</label>
-    <label class="settings-field full"><span>稳定 ID</span><input value="${escapeHtml(record.id)}" readonly aria-readonly="true"><small>排序或改名不会改变此 ID。</small>${errorMarkup(record.id, "id")}</label>`;
+    <label class="settings-field full"><span>稳定 ID</span><input value="${escapeHtml(record.id)}" readonly aria-readonly="true"><small>排序或改名不会改变此 ID。</small>${errorMarkup(record.id, "id")}</label>
+    ${circuitChip ? `<div class="settings-field full">${circuitChip}</div>` : ""}
+    ${unverified ? `<div class="settings-field full">${unverified}</div>` : ""}`;
   const descriptorFields = descriptor ? descriptor.fields : [];
   byId("modelDescriptorFields").innerHTML = descriptorFields
     .map((field) => renderDescriptorField(record, descriptor, field))
@@ -516,6 +458,26 @@ function renderMigration() {
     }).join("")}` : "";
 }
 
+function syncCircuitCountdown() {
+  const all = state
+    ? [...state.models.chat.connections, ...state.models.embedding.providers]
+    : [];
+  const anyOpen = all.some((record) => {
+    const view = circuitView(record);
+    return view && !view.permanent && view.retrySeconds !== null;
+  });
+  if (anyOpen && circuitCountdownTimer === null) {
+    circuitCountdownTimer = window.setInterval(() => {
+      if (!state) return;
+      renderRouteList();
+      renderInspector();
+    }, 1000);
+  } else if (!anyOpen && circuitCountdownTimer !== null) {
+    window.clearInterval(circuitCountdownTimer);
+    circuitCountdownTimer = null;
+  }
+}
+
 function render() {
   if (!state) return;
   renderTabs();
@@ -527,6 +489,7 @@ function render() {
   renderRouteList();
   renderInspector();
   renderRuntime();
+  syncCircuitCountdown();
   byId("modelSaveButton").disabled = saveInFlight;
   setStatus(state.dirty ? "有未保存的模型更改。" : `模型配置已同步 · ${state.revision.slice(0, 12)}`);
 }
@@ -788,6 +751,11 @@ function retainSelection(next, previous) {
 
 async function saveModels() {
   if (!state || saveInFlight) return;
+  const unverified = unverifiedConnections(state);
+  if (unverified.length) {
+    const names = unverified.map((item) => item.name).join("、");
+    showToast(`提示：${names} 在上次探测后被修改，保存未验证的更改。`);
+  }
   const generation = ++saveGeneration;
   saveInFlight = true;
   snapshotRequestGate.invalidate();
