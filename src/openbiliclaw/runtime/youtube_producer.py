@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_YOUTUBE as _PLATFORM_YOUTUBE
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 
 logger = logging.getLogger(__name__)
 
@@ -282,16 +283,9 @@ class YoutubeDiscoveryProducer:
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
 
     def _candidate_pool_full(self) -> bool:
-        if self.candidate_pipeline is None:
-            return False
-        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
-        if not callable(pool_full):
-            return False
-        try:
-            return bool(pool_full())
-        except Exception:
-            logger.debug("youtube producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "youtube", logger=logger, label="youtube producer"
+        )
 
     def _stamp_candidate_score_thresholds(self, items: list[Any], *, strategy: str) -> None:
         threshold = _YOUTUBE_SCORE_THRESHOLDS.get(strategy, 0.60)

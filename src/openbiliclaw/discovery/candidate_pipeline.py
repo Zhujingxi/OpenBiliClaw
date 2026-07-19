@@ -725,6 +725,36 @@ class DiscoveryCandidatePipeline:
 
         return self._pool_full()
 
+    def pool_full_for_source(self, source_family: str | None = None) -> bool:
+        """Share-aware pool fullness for one producer's own source family.
+
+        Pool-share fairness (spec 2026-07-20, Phase 5 / D6). A producer's
+        internal ``pool_full`` gate used the *global* pool, which dead-locked
+        under-share sources: bangumi could never produce while the pool was
+        full → no bangumi ``evaluated`` supply → the rebalancer (which only
+        evicts when an under-share source has supply waiting) never fired → the
+        pool stayed full forever. This gate breaks the loop: when a share
+        strategy is injected and the given family is below its own share, it
+        returns ``False`` even at a full global pool (two-round admission +
+        rebalance will free a slot); an at/over-share family (or no family)
+        falls back to the global判定. Without a strategy it is identical to
+        :meth:`pool_full` (invariant 5).
+        """
+
+        if not self._pool_full():
+            return False
+        family = str(source_family or "").strip()
+        if not family:
+            return True
+        targets = self._share_targets()
+        if targets is None:
+            return True
+        normalized = _source_family(family, family)
+        available = self._available_by_family()
+        # Under its own share → not full (admission + rebalance will free a
+        # slot); at/over share → defer to the global full判定 (True here).
+        return int(available.get(normalized, 0)) >= int(targets.get(normalized, 0))
+
     def admit_evaluated(self, *, limit: int) -> dict[str, int]:
         """Admit previously evaluated rows before spending another LLM call."""
 

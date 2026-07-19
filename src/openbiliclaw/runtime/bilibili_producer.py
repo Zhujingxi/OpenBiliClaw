@@ -17,6 +17,7 @@ from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
 from openbiliclaw.llm.prompts import build_search_queries_prompt
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_BILIBILI as _PLATFORM_BILIBILI
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.service import LLMService
@@ -229,19 +230,9 @@ class BilibiliExtensionSearchProducer:
             return False
 
     def _candidate_pool_full(self) -> bool:
-        if self.candidate_pipeline is None:
-            return False
-        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
-        if not callable(pool_full):
-            return False
-        try:
-            return bool(pool_full())
-        except Exception:
-            logger.debug(
-                "bili extension producer: candidate pool fullness unavailable",
-                exc_info=True,
-            )
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "bilibili", logger=logger, label="bili extension producer"
+        )
 
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:

@@ -14,6 +14,7 @@ from typing import Any
 from urllib import error, request
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_REDDIT
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.sources.reddit_tasks import (
     REDDIT_SOURCE_ORDER,
     REDDIT_SOURCE_STRATEGIES,
@@ -653,17 +654,9 @@ class RedditDiscoveryProducer:
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=min_interval)
 
     def _candidate_pool_full(self) -> bool:
-        pipeline = self.candidate_pipeline
-        if pipeline is None:
-            return False
-        checker = getattr(pipeline, "is_candidate_pool_full", None)
-        if not callable(checker):
-            return False
-        try:
-            return bool(checker())
-        except Exception:
-            logger.debug("reddit producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "reddit", logger=logger, label="reddit producer"
+        )
 
     def _skip(self, reason: str) -> dict[str, object]:
         self._last_skip_reason = reason

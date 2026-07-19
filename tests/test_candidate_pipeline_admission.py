@@ -94,6 +94,43 @@ def _pipeline(
     return pipeline
 
 
+def test_pool_full_for_source_is_false_for_under_share_family_when_global_full() -> None:
+    # Global pool full, bangumi 0/50 under its own share → NOT full for bangumi
+    # (two-round admission + rebalance will free a slot for it). This is the
+    # producer-internal gate fix (spec 2026-07-20, Phase 5 / D6).
+    db = _FakeAdmissionDB(available={"reddit": 169, "bangumi": 0}, pool_count=300)
+    pipeline = _pipeline(db, share_targets={"reddit": 25, "bangumi": 50})
+
+    assert pipeline.pool_full_for_source("bangumi") is False
+
+
+def test_pool_full_for_source_is_true_for_over_share_family_when_global_full() -> None:
+    db = _FakeAdmissionDB(available={"reddit": 169, "bangumi": 0}, pool_count=300)
+    pipeline = _pipeline(db, share_targets={"reddit": 25, "bangumi": 50})
+
+    assert pipeline.pool_full_for_source("reddit") is True
+
+
+def test_pool_full_for_source_without_strategy_equals_global_pool_full() -> None:
+    full = _FakeAdmissionDB(available={"bangumi": 0}, pool_count=300)
+    pipeline_full = _pipeline(full, share_targets=None)
+    assert pipeline_full.pool_full_for_source("bangumi") is True
+    assert pipeline_full.pool_full_for_source("bangumi") == pipeline_full.pool_full()
+
+    not_full = _FakeAdmissionDB(available={"bangumi": 0}, pool_count=250)
+    pipeline_open = _pipeline(not_full, share_targets=None)
+    assert pipeline_open.pool_full_for_source("bangumi") is False
+
+
+def test_pool_full_for_source_is_false_whenever_global_pool_below_target() -> None:
+    # Below target: never full for anyone, share strategy or not.
+    db = _FakeAdmissionDB(available={"reddit": 169, "bangumi": 0}, pool_count=250)
+    pipeline = _pipeline(db, share_targets={"reddit": 25, "bangumi": 50})
+
+    assert pipeline.pool_full_for_source("reddit") is False
+    assert pipeline.pool_full_for_source("bangumi") is False
+
+
 def test_admission_prefers_under_share_rows_over_queue_position() -> None:
     # Queue: 5 over-share reddit rows AHEAD of 2 under-share bangumi rows.
     # Only 2 global slots (298/300). Share-aware admission must admit the 2

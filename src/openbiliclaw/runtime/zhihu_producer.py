@@ -19,6 +19,7 @@ from typing import Any, cast
 from urllib import error, request
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_ZHIHU
+from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.sources.zhihu_tasks import (
     ZhihuTaskQueue,
     recent_zhihu_creator_urls,
@@ -326,16 +327,9 @@ class ZhihuDiscoveryProducer:
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
 
     def _candidate_pool_full(self) -> bool:
-        if self.candidate_pipeline is None:
-            return False
-        pool_full = getattr(self.candidate_pipeline, "pool_full", None)
-        if not callable(pool_full):
-            return False
-        try:
-            return bool(pool_full())
-        except Exception:
-            logger.debug("zhihu producer: candidate pool fullness unavailable", exc_info=True)
-            return False
+        return candidate_pool_full_for_source(
+            self.candidate_pipeline, "zhihu", logger=logger, label="zhihu producer"
+        )
 
     def _skip(self, reason: str) -> dict[str, object]:
         if reason != self._last_skip_reason:
