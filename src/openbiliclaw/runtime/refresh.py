@@ -3179,12 +3179,19 @@ class ContinuousRefreshController:
             )
         except TypeError:
             current_global_available = self.database.count_pool_candidates()
+        # Keep the durable inventory observation, but do NOT clamp per-source
+        # deficit by the global headroom. Pool-share fairness spec (2026-07-20,
+        # invariant 2): once the global pool is full, an over-supplied source
+        # (e.g. reddit 169/25) would zero out every under-share source's
+        # deficit via ``min(available_deficit, global_available_deficit)``,
+        # starving its producer forever. Own-share deficit is now bounded only
+        # by the per-source raw ceiling; admission stays globally capped so the
+        # visible pool never overshoots ``pool_target_count``.
         self._update_llm_inventory_state(current_global_available)
-        global_available_deficit = max(0, self.pool_target_count - int(current_global_available))
         raw_target = int(raw_target_counts.get(source_family, 0))
         current_raw = self._platform_source_count(source_raw_counts, source_family)
         raw_headroom = max(0, raw_target - current_raw)
-        requested_by_available = max(0, min(available_deficit, global_available_deficit))
+        requested_by_available = available_deficit
         if requested_by_available <= 0:
             return 0
         if raw_headroom > 0:
