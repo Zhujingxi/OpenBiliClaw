@@ -64,9 +64,9 @@
       <b>QQ 用户群</b>
     </td>
     <td align="center" width="50%">
-      <img src="docs/images/wechat-user-community-qrcode.jpg" width="200" alt="微信用户群二维码" /><br/>
-      <b>微信用户群</b><br/>
-      <sub>二维码 7 天内有效，失效后会更新</sub>
+      <a href="https://discord.gg/PU6Xgch8yg"><img src="https://img.shields.io/badge/Discord-加入服务器-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="加入 Discord 服务器" /></a><br/>
+      <b>Discord 社区</b><br/>
+      <sub>点击加入，链接长期有效</sub>
     </td>
   </tr>
 </table>

@@ -206,9 +206,9 @@ Full changelog: [docs/changelog.md](docs/changelog.md).
       <b>QQ Community</b>
     </td>
     <td align="center" width="50%">
-      <img src="docs/images/wechat-user-community-qrcode.jpg" width="200" alt="WeChat user community QR code" /><br/>
-      <b>WeChat Community</b><br/>
-      <sub>The QR code is valid for 7 days and will be refreshed after it expires.</sub>
+      <a href="https://discord.gg/PU6Xgch8yg"><img src="https://img.shields.io/badge/Discord-Join%20the%20server-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join the Discord server" /></a><br/>
+      <b>Discord Community</b><br/>
+      <sub>Click to join — this invite does not expire.</sub>
     </td>
   </tr>
 </table>
