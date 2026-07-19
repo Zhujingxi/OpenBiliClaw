@@ -580,6 +580,7 @@ test("embedding row becomes a hard prereq when the backend requires it", () => {
 
 import {
   INIT_EXPECTATION_HINT,
+  INIT_PROGRESS_STALL_FLOOR_SECONDS,
   INIT_STALL_THRESHOLD_SECONDS,
   resetInitProgressViewState,
   stageEtaText,
@@ -757,16 +758,55 @@ test("stalenessView distinguishes a live backend from stalled substantive work",
   const fresh = stalenessView(status("2026-07-10 08:00:00", 7), t0);
   assert.equal(fresh.fresh, true);
   assert.ok(fresh.text.includes("后端在线"));
-  // Heartbeat advances, but progress_sequence does not: connected yet stalled.
-  const stalled = stalenessView(status("2026-07-10 08:01:31", 10), t0 + 91_000);
+  // A slow-but-healthy work unit (91s — past the heartbeat threshold) must NOT
+  // read as stalled: only the connection check uses the 90s beat window.
+  const slowButHealthy = stalenessView(status("2026-07-10 08:01:31", 10), t0 + 91_000);
+  assert.equal(slowButHealthy.fresh, true);
+  assert.ok(slowButHealthy.staleSeconds > INIT_STALL_THRESHOLD_SECONDS);
+  // Past the work-unit floor with no milestone: connected yet genuinely stuck.
+  const stalled = stalenessView(
+    status("2026-07-10 08:05:10", 17),
+    t0 + (INIT_PROGRESS_STALL_FLOOR_SECONDS + 10) * 1000,
+  );
   assert.equal(stalled.fresh, false);
-  assert.ok(stalled.staleSeconds > INIT_STALL_THRESHOLD_SECONDS);
+  assert.ok(stalled.staleSeconds > INIT_PROGRESS_STALL_FLOOR_SECONDS);
   assert.ok(stalled.text.includes("后端在线"));
-  assert.ok(stalled.text.includes("没有完成新的工作单元"));
   assert.ok(stalled.text.includes("取消"));
   // A substantive milestone advances independently and clears the warning.
-  const revived = stalenessView(status("2026-07-10 08:01:35", 11, 11), t0 + 95_000);
+  const revived = stalenessView(
+    status("2026-07-10 08:05:15", 18, 18),
+    t0 + (INIT_PROGRESS_STALL_FLOOR_SECONDS + 15) * 1000,
+  );
   assert.equal(revived.fresh, true);
+});
+
+test("progress-stall threshold adapts to the pace this run demonstrates", () => {
+  resetInitProgressViewState();
+  const t0 = 9_000_000;
+  // The heartbeat keeps advancing throughout (the connection is fine); only
+  // the work-unit marker stalls, which is what the adaptive threshold judges.
+  let beat = 0;
+  const status = (progressSequence: number, progressAt: string) =>
+    runningStage2Status({
+      run_id: "run-slow-model",
+      last_activity: `2026-07-10 09:00:${String((beat += 1) % 60).padStart(2, "0")}`,
+      last_heartbeat_at: `2026-07-10 09:00:${String(beat % 60).padStart(2, "0")}`,
+      last_progress_at: progressAt,
+      progress_sequence: progressSequence,
+      sequence: 100 + beat,
+    });
+  // Two work units, each ~280s: slower than the floor, but a steady pace.
+  stalenessView(status(1, "2026-07-10 09:00:00"), t0);
+  stalenessView(status(2, "2026-07-10 09:04:40"), t0 + 280_000);
+  stalenessView(status(3, "2026-07-10 09:09:20"), t0 + 560_000);
+  // 330s into the next unit: past the 300s floor, but well within 1.5× the
+  // 280s pace this run has shown → still healthy, no alarm.
+  const withinPace = stalenessView(status(3, "2026-07-10 09:09:20"), t0 + 890_000);
+  assert.equal(withinPace.fresh, true);
+  // 450s: beyond 1.5 × 280s → now genuinely slower than its own rhythm.
+  const beyondPace = stalenessView(status(3, "2026-07-10 09:09:20"), t0 + 1_010_000);
+  assert.equal(beyondPace.fresh, false);
+  assert.ok(beyondPace.text.includes("比本轮此前的节奏慢"));
 });
 
 test("stalenessView reports a missing backend heartbeat separately", () => {

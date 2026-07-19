@@ -348,7 +348,28 @@ const STAGE_FRACTION_CAP = 0.95;
 const STAGE_FRACTION_FALLBACK = 0.5;
 // Stall threshold. Calibration: backend heartbeat period 30s × 3 missed beats
 // (api/app.py _INIT_HEARTBEAT_INTERVAL_SECONDS) — change them in lock-step.
+// This governs the CONNECTION check only.
 export const INIT_STALL_THRESHOLD_SECONDS = 90;
+// Work-unit stall floor. A heartbeat period says nothing about how long ONE
+// unit of work legitimately takes: an analysis batch on a slow/remote chat
+// model routinely runs minutes (field report 2026-07-20: 280s for 2 batches,
+// i.e. ~140s each — healthy, yet the old shared 90s threshold cried "stalled"
+// the whole way and read as a failure). Floor generously, then adapt below to
+// the cadence THIS run actually demonstrates.
+export const INIT_PROGRESS_STALL_FLOOR_SECONDS = 300;
+// Slack over the slowest work unit observed so far in this run: a stage is
+// only "stuck" once it exceeds its own demonstrated pace by half again.
+const PROGRESS_STALL_SLACK = 1.5;
+
+// How long without a completed work unit counts as stalled for THIS run.
+// max(floor, 1.5 × slowest unit seen), then capped by the backend's own hard
+// ceiling for the stage so the warning still precedes a real timeout.
+function _progressStallThreshold(st, stage) {
+  const observed = Math.round((st.slowestProgressIntervalSeconds || 0) * PROGRESS_STALL_SLACK);
+  const threshold = Math.max(INIT_PROGRESS_STALL_FLOOR_SECONDS, observed);
+  const maxSeconds = Number((stage && stage.progress && stage.progress.max_seconds) || 0);
+  return maxSeconds > 0 ? Math.min(threshold, maxSeconds) : threshold;
+}
 // Expectation copy shared by the idle checklist and the start-button area.
 export const INIT_EXPECTATION_HINT =
   "完整画像和首轮可用推荐会严格按顺序生成，通常需要 4–20 分钟；历史较多或本地模型较慢时会更久。期间可离开此页面，进度会保留。";
@@ -369,6 +390,9 @@ function _viewState(runId) {
       lastHeartbeatChangeMs: 0,
       lastProgressMark: null,
       lastProgressChangeMs: 0,
+      // Slowest gap between two completed work units seen in this run; drives
+      // the adaptive progress-stall threshold.
+      slowestProgressIntervalSeconds: 0,
     };
     _runViewState.set(runId, st);
     if (_runViewState.size > 8) {
@@ -467,6 +491,15 @@ export function stalenessView(status, nowMs = Date.now()) {
   }
   const progressMark = `${status.progress_sequence ?? status.sequence ?? ""}|${progressAt || ""}`;
   if (st.lastProgressMark !== progressMark) {
+    // Learn this run's pace from every completed unit (skip the first mark,
+    // which measures "since we started watching", not a unit's duration).
+    if (st.lastProgressMark !== null && st.lastProgressChangeMs) {
+      const interval = Math.max(0, Math.round((nowMs - st.lastProgressChangeMs) / 1000));
+      st.slowestProgressIntervalSeconds = Math.max(
+        st.slowestProgressIntervalSeconds || 0,
+        interval,
+      );
+    }
     st.lastProgressMark = progressMark;
     st.lastProgressChangeMs = nowMs;
   }
@@ -486,12 +519,15 @@ export function stalenessView(status, nowMs = Date.now()) {
       text: `后端已 ${minutes} 分钟没有心跳，连接可能中断。系统会继续重试；也可以取消后重试。`,
     };
   }
-  if (progressStale > INIT_STALL_THRESHOLD_SECONDS) {
+  const runningStage = Array.isArray(status.stages)
+    ? status.stages.find((stage) => stage && stage.status === "running")
+    : null;
+  if (progressStale > _progressStallThreshold(st, runningStage)) {
     const minutes = Math.max(1, Math.round(progressStale / 60));
     return {
       fresh: false,
       staleSeconds: progressStale,
-      text: `● 后端在线 · 本步骤已 ${minutes} 分钟没有完成新的工作单元；AI 或平台仍可能在处理，可继续等待或取消。`,
+      text: `● 后端在线 · 这一步已等待 ${minutes} 分钟，比本轮此前的节奏慢；AI 或平台可能正卡在一次较慢的请求上，可继续等待或取消。`,
     };
   }
   return {

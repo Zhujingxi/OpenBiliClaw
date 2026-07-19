@@ -45,7 +45,11 @@ def test_desktop_surfaces_stall_copy_after_90s_of_silence() -> None:
     assert "last_activity" in app_js
     assert "last_heartbeat_at" in app_js
     assert "last_progress_at" in app_js
-    assert "没有完成新的工作单元" in app_js
+    # Work-unit stall copy + the adaptive threshold that governs it (the 90s
+    # beat window is for the CONNECTION check only).
+    assert "比本轮此前的节奏慢" in app_js
+    assert "INIT_PROGRESS_STALL_FLOOR_SECONDS = 300" in app_js
+    assert "slowestProgressIntervalSeconds" in app_js
     assert "没有心跳" in app_js
     assert "● 后端在线" in app_js
     # Amber styling hook for the stalled state.
@@ -102,7 +106,9 @@ def test_setup_wizard_surfaces_stall_and_expectation_copy() -> None:
     assert "last_activity" in html
     assert "last_heartbeat_at" in html
     assert "last_progress_at" in html
-    assert "没有完成新的工作单元" in html
+    assert "比本轮此前的节奏慢" in html
+    assert "INIT_PROGRESS_STALL_FLOOR_SECONDS = 300" in html
+    assert "slowestProgressIntervalSeconds" in html
     assert "没有心跳" in html
     assert "● 后端在线" in html
     assert "严格按顺序生成" in html
