@@ -366,7 +366,7 @@ result = await service.sync_now()
 | 画像未就绪 | 旧路径：`analyze_events` + `_auto_bootstrap_soul_profile` |
 | `is_profile_ready` 缺失 / 抛错 | 按未就绪保守处理 |
 
-**错误可见化**：每个拉取阶段的异常都会 `logger.warning` 并分类进状态字段 `last_sync_error_kind`（`auth_expired`——B 站 Cookie 已失效，优先级高于其他 / `error`——一般失败 / 空——干净同步时清除），经 `get_runtime_status()` 与 `/api/runtime-status` 的 `last_account_sync_error_kind` 下发，桌面 Web 在有错时渲染状态 chip（auth_expired 显示"重新登录"提示；新字段需重启后端生效）。
+**错误可见化**：每个拉取阶段的异常都会 `logger.warning` 并分类进状态字段 `last_sync_error_kind`（`auth_expired`——B 站 Cookie 已失效，优先级高于其他 / `error`——一般失败 / 空——干净同步时清除），经 `get_runtime_status()` 与 `/api/runtime-status` 的 `last_account_sync_error_kind` 下发，桌面 Web 在有错时渲染状态 chip（auth_expired 显示"重新登录"提示；新字段需重启后端生效）。画像分析阶段的 LLM 故障额外经 `classify_llm_unavailability` 分类为 `no_provider` / `model_not_found` / `rate_limited` 并随 `last_sync_error_kind` 持久化：前两类是配置故障，文案指向设置页（「修复后会自动恢复」）而非虚假的「稍后会自动重试」，severity 为 `error`；`rate_limited` 是真实的退避重试，文案保留自动重试承诺，severity 降为 `warning`。目前仅桌面 Web 渲染该横幅（扩展 popup / 移动 Web / CLI 不展示此状态）。
 
 **X 定时增量**：注入 `x_client`（两处装配点在 `sources.x_auth.resolve_x_cookie` 解析到 cookie 时构造 `XClient`）后，同一 6h 周期内在 B 站各阶段之后拉取 likes / bookmarks（各上限 200，`_X_FETCH_LIMIT`），分别映射为 `like` / `favorite` 事件（`source_platform="twitter"`）。去重用状态集合 `x_like_ids` / `x_bookmark_ids`（归一化 tweet ID，取 URL 的 `/status/<id>` 尾段，兼容 `x.com/i/status/<id>` 与 `x.com/<handle>/status/<id>` 两种形态，集合上限 2000 保最新）；集合为空的首轮从 events 表已持久化的 X 事件播种，init 之后、首轮之前新增的 like 仍会正常发事件。X 拉取失败只记入 errors + WARN，不影响 B 站同步，反之亦然。
 
