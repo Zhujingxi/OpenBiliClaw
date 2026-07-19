@@ -36,10 +36,15 @@ jobs:
       - name: Run MyPy (capture output for baseline comparator)
         # `continue-on-error` so the baseline comparator decides whether the
         # diagnostics are acceptable; new diagnostics fail the next step.
+        # pipefail preserves the mypy exit code through `tee`; the raw status
+        # is recorded so the comparator step can reject crash/config-error
+        # runs that produced no diagnostics at all.
         continue-on-error: true
         run: |
           mkdir -p build
-          python -m mypy src/ | tee build/mypy.txt
+          set -o pipefail
+          python -m mypy src/ 2>&1 | tee build/mypy.txt
+          echo "mypy_exit=$?" > build/mypy.status
 
       - name: Run pytest (single run, emits JUnit XML + coverage)
         # Single-run collection per the refactor plan: JUnit XML and coverage
@@ -53,17 +58,26 @@ jobs:
           python -m pytest -q \
             --junitxml=build/pytest-junit.xml \
             --cov=openbiliclaw --cov-report=xml:build/coverage.xml
+          echo "pytest_exit=$?" > build/pytest.status
 
       - name: Check quality baseline (fail-closed)
         # Compares the live pytest/mypy/coverage outputs against the
         # normalized baseline in tests/contracts/quality-baseline.json.
         # New pytest failures, new mypy diagnostics, new skips, missing
-        # files, or unparseable output all fail the job here.
+        # files, or unparseable output all fail the job here. A nonzero
+        # mypy/pytest exit is allowed ONLY when the comparator can account
+        # for every diagnostic/failure via the baseline allowlist; a tool
+        # crash or missing summary grammar fails closed.
         run: |
+          cat build/mypy.status build/pytest.status
+          MYPY_EXIT=$(cut -d= -f2 build/mypy.status)
+          PYTEST_EXIT=$(cut -d= -f2 build/pytest.status)
           python scripts/check_quality_baseline.py \
             --junit-xml build/pytest-junit.xml \
             --mypy-output build/mypy.txt \
-            --coverage-xml build/coverage.xml
+            --coverage-xml build/coverage.xml \
+            --mypy-exit-code "$MYPY_EXIT" \
+            --pytest-exit-code "$PYTEST_EXIT"
 
   extension-firefox-build:
     name: Smoke-build Firefox extension

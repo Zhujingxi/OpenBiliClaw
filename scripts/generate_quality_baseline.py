@@ -3,15 +3,19 @@
 Run this once when establishing the baseline (or intentionally updating it
 after an approved change), then review the diff before committing::
 
-    python -m mypy src/ --no-error-summary --show-error-codes --no-color-output \\
+    python -m mypy src/ --show-error-codes --no-color-output \
         > build/mypy.txt || true
     python -m pytest -q --junitxml=build/pytest-junit.xml || true
     python -m pytest --cov=openbiliclaw --cov-report=xml:build/coverage.xml -q || true
-    python scripts/generate_quality_baseline.py \\
-        --junit-xml build/pytest-junit.xml \\
-        --mypy-output build/mypy.txt \\
-        --coverage-xml build/coverage.xml \\
+    python scripts/generate_quality_baseline.py \
+        --junit-xml build/pytest-junit.xml \
+        --mypy-output build/mypy.txt \
+        --coverage-xml build/coverage.xml \
         > tests/contracts/quality-baseline.json
+
+Note: do NOT pass ``--no-error-summary`` — the comparator requires the
+mypy summary line (``Success: no issues found ...`` / ``Found N errors
+...``) as part of its fail-closed grammar validation.
 """
 
 from __future__ import annotations
@@ -62,11 +66,15 @@ def main(argv: list[str] | None = None) -> int:
             "Normalized quality baseline for the incremental architecture refactor. "
             "New pytest failures / mypy diagnostics are rejected by "
             "scripts/check_quality_baseline.py; removals are always allowed. "
+            "known_failures entries are fingerprinted: a failure at the same node "
+            "with a different exception type/headline is rejected as a new bug. "
             "Update intentionally by re-running scripts/generate_quality_baseline.py "
             "and reviewing the diff."
         ),
         "pytest": {
-            "known_failures": sorted(failures),
+            "known_failures": [
+                {"node_id": node, "fingerprint": failures[node]} for node in sorted(failures)
+            ],
             "known_skips": sorted(skips),
         },
         "mypy": {

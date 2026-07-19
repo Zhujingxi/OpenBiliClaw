@@ -1,9 +1,12 @@
 {
   "version": 1,
-  "description": "Normalized quality baseline for the incremental architecture refactor. New pytest failures / mypy diagnostics are rejected by scripts/check_quality_baseline.py; removals are always allowed. Update intentionally by re-running scripts/generate_quality_baseline.py and reviewing the diff.",
+  "description": "Normalized quality baseline for the incremental architecture refactor. New pytest failures / mypy diagnostics are rejected by scripts/check_quality_baseline.py; removals are always allowed. known_failures entries are fingerprinted: a failure at the same node with a different exception type/headline is rejected as a new bug. Update intentionally by re-running scripts/generate_quality_baseline.py and reviewing the diff.",
   "pytest": {
     "known_failures": [
-      "tests/test_aggregate_release_workflow.py::test_aggregate_release_helper_does_not_backfill_previous_channel_assets"
+      {
+        "node_id": "tests/test_aggregate_release_workflow.py::test_aggregate_release_helper_does_not_backfill_previous_channel_assets",
+        "fingerprint": "AssertionError: Traceback (most recent call last):\\n    File \"<stdin>\", line 1, in <module>"
+      }
     ],
     "known_skips": [
       "tests/test_bili_extension_browser_e2e.py::test_bili_extension_search_producer_to_rendered_dom_result",
@@ -54,51 +57,10 @@
     ]
   },
   "mypy": {
-    "known_diagnostics": [
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "arg-type",
-        "message": "Argument \"command\" to \"_command_api_key_occurrences\" has incompatible type \"typer._click.core.Command\"; expected \"click.core.Command\""
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "arg-type",
-        "message": "Argument <N> to \"_root_models_argument_offset\" has incompatible type \"list[typer._click.core.Parameter]\"; expected \"Sequence[click.core.Parameter]\""
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "assignment",
-        "message": "Incompatible types in assignment (expression has type \"SecretSafeTyperGroup\", variable has type \"Command | None\")"
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "assignment",
-        "message": "Incompatible types in assignment (expression has type \"typer._click.core.Command | None\", variable has type \"click.core.Command | None\")"
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "attr-defined",
-        "message": "\"Parameter\" has no attribute \"count\""
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "attr-defined",
-        "message": "\"Parameter\" has no attribute \"is_flag\""
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "call-overload",
-        "message": "No overload variant of \"Option\" matches argument types \"None\", \"str\", \"_InlineApiKeyHandleType\", \"str\""
-      },
-      {
-        "path": "src/openbiliclaw/cli_models.py",
-        "error_code": "type-arg",
-        "message": "Missing type arguments for generic type \"ParamType\""
-      }
-    ]
+    "known_diagnostics": []
   },
   "coverage": {
     "noise_tolerance": 0.5,
-    "line_percent": 52.42
+    "line_percent": 52.26
   }
 }
