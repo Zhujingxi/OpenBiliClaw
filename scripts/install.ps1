@@ -528,6 +528,12 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
         }
     }
     Write-Host "Health URL:  $healthUrl"
+    if ($healthUrl) {
+        $setupUrl = $healthUrl -replace '/api/health$', '/setup/'
+        Write-Host "Setup wizard: $setupUrl"
+        Write-Host '             (open in a browser to configure LLM / embedding and'
+        Write-Host '              run prerequisite checks - same guided page as the desktop app)'
+    }
     if ($missing) { Write-Host "Missing:     $missing" }
     else { Write-Host 'Missing:     (none)' }
     if ($decisions) { Write-Host "Init choices needed: $decisions" }
@@ -617,8 +623,9 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
     } elseif ($missing) {
         Write-Host 'Next steps (credentials are missing):'
         Write-Host ''
-        Write-Host '  1. Choose your LLM provider (default: deepseek):'
-        Write-Host '     Supported: deepseek | openai | gemini | claude | openrouter | ollama | openai_compatible'
+        Write-Host '  1. Choose your LLM chat provider (default: deepseek):'
+        Write-Host '     Supported: deepseek | openai | gemini | claude | openrouter | openai_compatible'
+        Write-Host '     (Local Ollama is embedding-only here - not offered as a chat provider.)'
         Write-Host ''
         if ($missing -match 'api_key') {
             Write-Host '     LLM API key - get one from your chosen provider:'
@@ -627,7 +634,6 @@ print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
             Write-Host '         Gemini:     https://aistudio.google.com/apikey'
             Write-Host '         Claude:     https://console.anthropic.com/settings/keys'
             Write-Host '         OpenRouter: https://openrouter.ai/keys'
-            Write-Host '         Ollama:     (no key needed, just install and run)'
             Write-Host ''
         }
         if ($missing -match 'bilibili.cookie') {
