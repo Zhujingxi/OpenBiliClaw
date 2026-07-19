@@ -22,6 +22,8 @@
 
 ## Unreleased
 
+- **新增 `deploy/e2e/` 持久化 E2E Compose 栈**：把原先位于 `/tmp/obc-e2e-main`（重启即丢失）的 E2E Docker 栈迁移进仓库。`deploy/e2e/docker-compose.yml` 复制自主 `docker-compose.yml`（build context 改为仓库根 `../..`），`deploy/e2e/docker-compose.e2e-override.yml` 固定容器名 `obc-e2e-backend` / `obc-e2e-ollama`、宿主端口 **18421**（容器内 8420），并将四个既有 named volumes（`obc-e2e-main_openbiliclaw_{config,data,logs,ollama}`）声明为 external 以保留首次运行状态与已种入的 bge-m3 模型。`deploy/e2e/README.md` 记录构建、重建与重置流程（external volumes 不受 `down -v` 影响，重置需 `down` + 显式 `docker volume rm` 四个卷并重新创建后再 `up -d --build`）；E2E harness 目标地址为 `http://127.0.0.1:18421`。`docs/docker-deployment.md` 同步新增 E2E 测试栈小节。运行中的 E2E 栈已基于 `origin/main`（含 18df6a22 共享 E2E auth fixture）原地重建，`/api/ping` 返回 ok、`/api/health` 保持 `profile_ready: false`。本条不提升版本号；后端 API、配置格式与 CLI 均无变更。
+
 - **依赖地板：Click >= 8.4、Typer >= 0.27**：`pyproject.toml` 在 `[project.dependencies]` 中新增 `click>=8.4`，并把 `typer>=0.12` 提升为 `typer>=0.27`（仅地板，不加上限）。CI 使用 `pip install -e ".[dev,x]"` 一直解析到 PyPI 最新的 click 8.4.x / typer 0.27.x，而本地 `uv sync` 仍锁在 click 8.3.1 / typer 0.24.1，两端 Click/Typer 漂移曾掩盖 `cli_models.py` 在 Click 8.4 下的 typing 变化；本次把地板写进 pyproject 后，pip 与 uv 两条安装路径当前解析到同一主版本，当前 lock 与当前 CI 对齐。`click>=8.4` 允许 Click 9+、`typer>=0.27` 允许 Typer 1+，CI 仍会有意安装最新版，因此后续 CI 可能再次领先 lock，直到下一次 lock 刷新。`uv.lock` 通过 `uv lock --upgrade-package click --upgrade-package typer` 重新生成：click 由 8.3.1 升级到 8.4.2、typer 由 0.24.1 升级到 0.27.0（两者的 package 记录、源码/轮子 URL、hash、size 全部替换；typer 的依赖列表从 click 变为 colorama）；openbiliclaw 自身的 `dependencies` / `requires-dist` 元数据同步更新（新增 click、typer specifier 从 >=0.12 升至 >=0.27）；click、typer 与 openbiliclaw 三个 `[[package]]` 记录变更，其余 112 个 package 记录未动。本条不提升版本号；后端 API、模块边界、CLI 命令面均无变更。
 
 ---
