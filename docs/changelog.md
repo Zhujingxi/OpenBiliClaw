@@ -4,6 +4,12 @@
 
 ---
 
+## Unreleased
+
+- **依赖地板：Click >= 8.4、Typer >= 0.27**：`pyproject.toml` 在 `[project.dependencies]` 中新增 `click>=8.4`，并把 `typer>=0.12` 提升为 `typer>=0.27`（仅地板，不加上限）。CI 使用 `pip install -e ".[dev,x]"` 一直解析到 PyPI 最新的 click 8.4.x / typer 0.27.x，而本地 `uv sync` 仍锁在 click 8.3.1 / typer 0.24.1，两端 Click/Typer 漂移曾掩盖 `cli_models.py` 在 Click 8.4 下的 typing 变化；本次把地板写进 pyproject 后，pip 与 uv 两条安装路径当前解析到同一主版本，当前 lock 与当前 CI 对齐。`click>=8.4` 允许 Click 9+、`typer>=0.27` 允许 Typer 1+，CI 仍会有意安装最新版，因此后续 CI 可能再次领先 lock，直到下一次 lock 刷新。`uv.lock` 通过 `uv lock --upgrade-package click --upgrade-package typer` 重新生成：click 由 8.3.1 升级到 8.4.2、typer 由 0.24.1 升级到 0.27.0（两者的 package 记录、源码/轮子 URL、hash、size 全部替换；typer 的依赖列表从 click 变为 colorama）；openbiliclaw 自身的 `dependencies` / `requires-dist` 元数据同步更新（新增 click、typer specifier 从 >=0.12 升至 >=0.27）；click、typer 与 openbiliclaw 三个 `[[package]]` 记录变更，其余 112 个 package 记录未动。本条不提升版本号；后端 API、模块边界、CLI 命令面均无变更。
+
+---
+
 ## 设置向导与配置页收口到共享模型配置模块
 
 - **新增共享渲染层 `web/shared/model-config-render.js`**：把桌面 `web/js/views/model-settings.js` 与 `desktop/assets/js/model-settings.js` 中重复实现的 descriptor 字段、credential 编辑器与连接类型分组渲染抽到同一 ES module，桌面与移动两个 model-settings 入口改为 thin adapter；渲染器接受 `classPrefix`（桌面默认 `model`，移动传入 `mobile-model`）以输出各表面 stylesheet 实际覆盖的类名；`/setup/` 向导复用其中的 `escapeHtml` 转义原语（删除本地 fork），其 descriptor/credential/连接类型渲染因向导布局（`.model-field` 包装结构）仍保留本地实现，统一收敛为后续项（计划 §10）；插件 popup 继续以同步副本对齐状态机。
