@@ -24,7 +24,10 @@ Cleanup rules (unioned), see :func:`cleanup_image_cache`:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
+import logging
 import re
 import time
 from contextlib import suppress
@@ -32,6 +35,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -403,13 +408,44 @@ async def _read_bounded(response: httpx.Response) -> bytes:
     return b"".join(chunks)
 
 
+# Per-host rate limiter for cover-fetch failure WARNINGs. This module was
+# fully silent for years, which is how the 2026-07 xhscdn hotlink-protection
+# rollout (every server-side fetch → 403) went undiagnosable from logs — the
+# only symptom was xhscdn's *absence* from the slow-miss lines. First failure
+# per host logs immediately; afterwards at most one WARNING per host per
+# interval, carrying the suppressed-failure count.
+_FAILURE_LOG_INTERVAL_SECONDS = 600.0
+_failure_log_state: dict[str, tuple[int, float]] = {}
+
+
+def _log_cover_fetch_failure(url: str, reason: str) -> None:
+    try:
+        host = str(httpx.URL(url).host or "") or "<unparseable>"
+    except Exception:  # noqa: BLE001 — logging must never raise
+        host = "<unparseable>"
+    count, last_log = _failure_log_state.get(host, (0, 0.0))
+    count += 1
+    now = time.monotonic()
+    if last_log == 0.0 or now - last_log >= _FAILURE_LOG_INTERVAL_SECONDS:
+        logger.warning(
+            "cover fetch failed for host %s: %s (%d failure(s) since last report)",
+            host,
+            reason,
+            count,
+        )
+        _failure_log_state[host] = (0, now)
+    else:
+        _failure_log_state[host] = (count, last_log)
+
+
 async def fetch_cover_bytes(url: str) -> tuple[bytes, str]:
     """Fetch a whitelisted cover image, returning ``(data, content_type)``.
 
     Enforces scheme/host whitelist, manual redirect revalidation (max 3 hops),
     ``image/*`` content type, and a 10MB ceiling (rejected before reading the
     body when ``Content-Length`` says so, and during the read otherwise). Raises
-    :class:`CoverFetchError` (400/403/413/502/504) on any failure.
+    :class:`CoverFetchError` (400/403/413/502/504) on any failure. Upstream /
+    network failures additionally emit a per-host rate-limited WARNING.
     """
     parsed = _parse_image_url(url)
     try:
@@ -421,14 +457,18 @@ async def fetch_cover_bytes(url: str) -> tuple[bytes, str]:
             response = await _send_with_redirects(client, parsed)
             try:
                 if response.status_code < 200 or response.status_code >= 300:
-                    raise CoverFetchError(502, "Upstream request failed")
+                    detail = f"Upstream request failed (HTTP {response.status_code})"
+                    _log_cover_fetch_failure(url, detail)
+                    raise CoverFetchError(502, detail)
                 content_type = _validate_content_headers(response.headers)
                 data = await _read_bounded(response)
             finally:
                 await response.aclose()
     except httpx.TimeoutException as exc:
+        _log_cover_fetch_failure(url, f"timeout: {exc!r}")
         raise CoverFetchError(504, "Upstream request timed out") from exc
     except httpx.HTTPError as exc:
+        _log_cover_fetch_failure(url, f"network error: {exc!r}")
         raise CoverFetchError(502, "Upstream request failed") from exc
     return data, content_type
 
@@ -508,4 +548,51 @@ async def prefetch_cover(url: str) -> bool:
     except Exception:
         return False
     save_image_bytes(url, data, content_type)
+    return True
+
+
+# Upload ceiling for extension-harvested covers. XHS covers are ~30-80KB webp;
+# 1MB leaves headroom for large jpegs without letting a misbehaving client
+# write arbitrary blobs. Deliberately far below the 10MB proxy-fetch ceiling —
+# uploads are attacker-shaped input, fetches of whitelisted CDNs are not.
+MAX_EXTENSION_COVER_BYTES = 1 * 1024 * 1024
+
+
+def save_extension_cover(url: str, data_base64: str, content_type: str) -> bool:
+    """Persist a cover image the browser extension fetched in the page context.
+
+    Why this path exists: ``sns-webpic-qc.xhscdn.com`` rejects non-browser
+    clients (TLS-fingerprint hotlink protection, observed 2026-07 — curl and
+    httpx get 403 on fresh-token URLs regardless of headers, while an in-page
+    browser fetch returns 200). The user's browser is the only place these
+    covers can be fetched, so the extension harvests the bytes at scrape time
+    (when the URL token is freshest) and ships them with the note metadata.
+
+    Returns True only when a new cache entry was written. Rejections (bad
+    host, bad content type, oversize, undecodable base64) return False and
+    log at DEBUG — this is best-effort enrichment, a bad cover must never
+    break note ingestion.
+    """
+    if not is_allowed_image_url(url):
+        logger.debug("extension cover rejected (host not allowed): %.100s", url)
+        return False
+    normalized_type = content_type.split(";")[0].strip().lower()
+    if not normalized_type.startswith("image/"):
+        logger.debug("extension cover rejected (content type %r): %.100s", content_type, url)
+        return False
+    if is_cover_cached(url):
+        return False
+    # ~4/3 base64 expansion; cheap pre-check before decoding.
+    if len(data_base64) > MAX_EXTENSION_COVER_BYTES * 4 // 3 + 8:
+        logger.debug("extension cover rejected (oversize payload): %.100s", url)
+        return False
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        logger.debug("extension cover rejected (invalid base64): %.100s", url)
+        return False
+    if not data or len(data) > MAX_EXTENSION_COVER_BYTES:
+        logger.debug("extension cover rejected (empty or oversize): %.100s", url)
+        return False
+    save_image_bytes(url, data, normalized_type)
     return True

@@ -333,6 +333,12 @@ autostart.unregister()
 
 `RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 过滤掉非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多抓 40 张写入缓存。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。
 
+#### 小红书封面：扩展页面内采集（2026-07 起服务端抓取已死）
+
+2026-07 起 `sns-webpic-qc.xhscdn.com` 上线了指纹级防盗链：**新鲜 token 的 URL 用 curl / httpx 抓取一律 403**（补齐 Chrome UA / Referer / Origin / Sec-Fetch 全套头也无效），只有真实浏览器（页面内 `fetch`，CDN 返回 CORS 可读字节）能拿到 200。因此服务端预取与 proxy 实时抓取对小红书全部失效，唯一取图点是用户浏览器。扩展在提取笔记卡片的同时（`extension/src/content/xhs/cover-harvest.ts`）于页面上下文抓取封面（此刻 URL token 最新鲜），转 base64 挂在笔记元数据的 `cover_data` / `cover_content_type` 字段上，随既有 observed-urls / 搜索任务结果通道上报；后端 `_cache_xhs_notes` 经 `save_extension_cover`（白名单 / `image/*` / 1MB 上限 / base64 校验，坏封面绝不阻断笔记入库）写入同一 `data/image-cache/`，之后 serve 全走缓存命中，token 过期不再影响展示。已知候选去重跳过的笔记也会先存封面——用户重新刷到旧笔记时可就地治愈无封面的存量行。
+
+同期补齐了封面链路的可观测性（此前 `image_cache` 模块零日志，这次故障只能靠「日志里 xhscdn 完全缺席」反推）：`fetch_cover_bytes` 的上游非 2xx / 超时 / 网络错误按 host 限频打 WARNING（首次立即、之后每 host 每 10 分钟至多一条并携带抑制计数），错误 detail 携带真实上游状态码；`/api/image-proxy` 失败补 DEBUG 行关联具体请求;`_cache_xhs_notes` 每批打 INFO 汇报缓存的扩展采集封面数。
+
 ### AccountSyncService
 
 ```python

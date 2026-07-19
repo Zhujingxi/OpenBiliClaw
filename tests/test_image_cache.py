@@ -381,3 +381,120 @@ async def test_prefetch_cover_swallows_upstream_failure(
     fake_httpx.add(XHS, status_code=200, headers={"content-type": "text/html"}, chunks=[b"<html>"])
     assert await prefetch_cover(XHS) is False
     assert is_cover_cached(XHS) is False
+
+
+# ── Extension-harvested cover uploads ─────────────────────────────
+#
+# xhscdn's TLS-fingerprint hotlink protection (2026-07) 403s every
+# server-side fetch, so the extension ships cover bytes it fetched in the
+# page context. save_extension_cover is the validation gate before those
+# attacker-shaped bytes reach the disk cache.
+
+
+def test_save_extension_cover_writes_valid_payload(cache_dir: Path) -> None:
+    import base64
+
+    from openbiliclaw.runtime.image_cache import save_extension_cover
+
+    payload = base64.b64encode(b"webp-bytes").decode()
+    assert save_extension_cover(XHS, payload, "image/webp") is True
+    assert is_cover_cached(XHS) is True
+    # Token-rotated URL of the same cover hits the same cache entry.
+    assert is_cover_cached(XHS_ROTATED) is True
+
+
+def test_save_extension_cover_skips_already_cached(cache_dir: Path) -> None:
+    import base64
+
+    from openbiliclaw.runtime.image_cache import save_extension_cover
+
+    save_image_bytes(XHS, b"existing", "image/webp")
+    payload = base64.b64encode(b"newer").decode()
+    assert save_extension_cover(XHS, payload, "image/webp") is False
+
+
+@pytest.mark.parametrize(
+    ("url", "payload", "content_type"),
+    [
+        ("https://evil.example/x.jpg", "aGk=", "image/webp"),  # host not whitelisted
+        (XHS, "aGk=", "text/html"),  # not an image content type
+        (XHS, "aGk=", ""),  # missing content type
+        (XHS, "!!!not-base64!!!", "image/webp"),  # undecodable
+        (XHS, "", "image/webp"),  # empty payload
+    ],
+)
+def test_save_extension_cover_rejects_invalid(
+    cache_dir: Path, url: str, payload: str, content_type: str
+) -> None:
+    from openbiliclaw.runtime.image_cache import save_extension_cover
+
+    assert save_extension_cover(url, payload, content_type) is False
+    assert list(cache_dir.iterdir()) == []
+
+
+def test_save_extension_cover_rejects_oversize(cache_dir: Path) -> None:
+    import base64
+
+    from openbiliclaw.runtime.image_cache import (
+        MAX_EXTENSION_COVER_BYTES,
+        save_extension_cover,
+    )
+
+    payload = base64.b64encode(b"x" * (MAX_EXTENSION_COVER_BYTES + 1)).decode()
+    assert save_extension_cover(XHS, payload, "image/jpeg") is False
+    assert list(cache_dir.iterdir()) == []
+
+
+# ── Fetch-failure observability ───────────────────────────────────
+
+
+def test_cover_fetch_failure_warns_first_then_rate_limits(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First failure per host logs immediately; repeats within the interval
+    are suppressed (counted), and the next report carries the count."""
+    import logging
+
+    from openbiliclaw.runtime import image_cache
+
+    monkeypatch.setattr(image_cache, "_failure_log_state", {})
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.image_cache"):
+        image_cache._log_cover_fetch_failure(XHS, "Upstream request failed (HTTP 403)")
+        image_cache._log_cover_fetch_failure(XHS, "Upstream request failed (HTTP 403)")
+        image_cache._log_cover_fetch_failure(XHS, "Upstream request failed (HTTP 403)")
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "sns-webpic-qc.xhscdn.com" in warnings[0].message
+    assert "HTTP 403" in warnings[0].message
+
+    # After the interval elapses, the next failure reports the suppressed count.
+    host = "sns-webpic-qc.xhscdn.com"
+    count, _last = image_cache._failure_log_state[host]
+    assert count == 2
+    image_cache._failure_log_state[host] = (count, -10_000.0)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.image_cache"):
+        image_cache._log_cover_fetch_failure(XHS, "Upstream request failed (HTTP 403)")
+    assert any("3 failure(s)" in r.message for r in caplog.records)
+
+
+async def test_fetch_cover_bytes_logs_upstream_status(
+    cache_dir: Path,
+    fake_httpx: _FakeHTTPX,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hotlink-protection 403 must be visible in logs with the real status."""
+    import logging
+
+    from openbiliclaw.runtime import image_cache
+
+    monkeypatch.setattr(image_cache, "_failure_log_state", {})
+    fake_httpx.add(XHS, status_code=403, headers={}, chunks=[b""])
+    with (
+        caplog.at_level(logging.WARNING, logger="openbiliclaw.runtime.image_cache"),
+        pytest.raises(CoverFetchError) as excinfo,
+    ):
+        await fetch_cover_bytes(XHS)
+    assert "HTTP 403" in excinfo.value.detail
+    assert any("HTTP 403" in r.message for r in caplog.records)

@@ -54,6 +54,14 @@ export interface XhsNoteMetadata {
   title: string;
   author: string;
   cover_url: string;
+  /**
+   * Cover bytes (base64) harvested in the page context — xhscdn's
+   * TLS-fingerprint hotlink protection 403s every server-side fetch, so
+   * the extension is the only client that can still read these covers.
+   * Attached by cover-harvest.ts; absent when the fetch failed.
+   */
+  cover_data?: string;
+  cover_content_type?: string;
   view_count?: number;
   like_count?: number;
   collect_count?: number;

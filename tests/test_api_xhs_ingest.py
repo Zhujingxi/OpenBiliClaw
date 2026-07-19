@@ -1418,3 +1418,85 @@ class TestXhsTokens:
         )
         assert resp.status_code == 200
         assert resp.json()["upgraded"] == 0
+
+
+class TestExtensionHarvestedCovers:
+    """Cover bytes harvested by the extension ride the notes payload.
+
+    xhscdn's TLS-fingerprint hotlink protection (2026-07) 403s every
+    server-side fetch, so ingest is the only moment the backend can obtain
+    these covers — shipped as base64 alongside the note metadata."""
+
+    def test_notes_with_cover_data_populate_image_cache(
+        self,
+        app_client: TestClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import base64
+
+        from openbiliclaw.runtime.image_cache import is_cover_cached
+
+        cache_dir = tmp_path / "image-cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr("openbiliclaw.runtime.image_cache._CACHE_DIR", cache_dir)
+
+        cover_url = "https://sns-webpic-qc.xhscdn.com/202607191557/deadbeef/1000gabc"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/note-cover-001"],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/note-cover-001",
+                        "title": "封面测试",
+                        "author": "作者",
+                        "cover_url": cover_url,
+                        "cover_data": base64.b64encode(b"webp-bytes").decode(),
+                        "cover_content_type": "image/webp",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["enqueued"] == 1
+        assert is_cover_cached(cover_url) is True
+        # Token rotation maps to the same cache entry — a later serve with a
+        # newer (or long-dead) token still hits this copy.
+        rotated = "https://sns-webpic-qc.xhscdn.com/999912312359/ffffffff/1000gabc"
+        assert is_cover_cached(rotated) is True
+
+    def test_bad_cover_data_never_blocks_note_ingest(
+        self,
+        app_client: TestClient,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openbiliclaw.runtime.image_cache import is_cover_cached
+
+        cache_dir = tmp_path / "image-cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr("openbiliclaw.runtime.image_cache._CACHE_DIR", cache_dir)
+
+        cover_url = "https://sns-webpic-qc.xhscdn.com/202607191557/deadbeef/1000gbad"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/note-cover-002"],
+                "notes": [
+                    {
+                        "url": "https://www.xiaohongshu.com/explore/note-cover-002",
+                        "title": "坏封面",
+                        "author": "作者",
+                        "cover_url": cover_url,
+                        "cover_data": "!!!not-base64!!!",
+                        "cover_content_type": "image/webp",
+                    }
+                ],
+                "page_type": "search",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["enqueued"] == 1
+        assert is_cover_cached(cover_url) is False

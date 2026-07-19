@@ -11,6 +11,7 @@
  * it, but passive search/creator collection still only reads rendered cards.
  */
 
+import { attachCoverData } from "./cover-harvest.js";
 import {
   collectInViewportNoteUrls,
   extractNoteMetadataFromAnchor,
@@ -696,6 +697,10 @@ async function executeTaskInPage(
     const state = extractBootstrapStateFromDocument(doc);
     const selfInfo = state ? extractSelfInfoFromState(state) : null;
     const filteredNotes = filterSelfAuthoredNotes(notes, selfInfo);
+
+    // Harvest cover bytes while the page (and the URL token) is fresh —
+    // the backend can no longer fetch xhscdn covers itself. Best-effort.
+    await attachCoverData(filteredNotes);
 
     const result: TaskResultPayload = {
       task_id: msg.task_id,
