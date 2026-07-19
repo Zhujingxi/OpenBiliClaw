@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    failures, skips, _ = parse_junit_failures_and_skips(args.junit_xml)
+    failures, _errors, skips, _collection_errors = parse_junit_failures_and_skips(args.junit_xml)
     mypy_diags = parse_mypy_output(args.mypy_output.read_text(encoding="utf-8"))
 
     coverage: dict[str, object] = {"noise_tolerance": args.noise_tolerance}

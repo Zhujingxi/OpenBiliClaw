@@ -30,6 +30,7 @@ main = _checker.main
 parse_coverage_line_percent = _checker.parse_coverage_line_percent
 parse_junit_failures_and_skips = _checker.parse_junit_failures_and_skips
 parse_mypy_output = _checker.parse_mypy_output
+parse_mypy_summary = _checker.parse_mypy_summary
 parse_mypy_summary_kind = _checker.parse_mypy_summary_kind
 
 
@@ -38,25 +39,52 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
-def _minimal_junit(path: Path, *, failures: dict[str, str] | None = None) -> Path:
-    """Write a minimal JUnit XML with one passing test plus any failures."""
+def _minimal_junit(
+    path: Path,
+    *,
+    failures: dict[str, str] | None = None,
+    errors: dict[str, str] | None = None,
+    skips: list[str] | None = None,
+) -> Path:
+    """Write a minimal JUnit XML with one passing test plus any outcomes."""
+    import html
+
     cases = ['<testcase classname="tests.test_ok" name="test_pass"/>']
     failure_count = 0
+    error_count = 0
+    skip_count = 0
     for node, fingerprint in (failures or {}).items():
         cls, _, name = node.partition("::")
         cls_attr = cls.replace("/", ".").removesuffix(".py")
         cases.append(
             f'<testcase classname="{cls_attr}" name="{name}">'
-            f'<failure message="{fingerprint}">boom</failure>'
+            f'<failure message="{html.escape(fingerprint, quote=True)}">boom</failure>'
             "</testcase>"
         )
         failure_count += 1
+    for node, fingerprint in (errors or {}).items():
+        cls, _, name = node.partition("::")
+        cls_attr = cls.replace("/", ".").removesuffix(".py")
+        cases.append(
+            f'<testcase classname="{cls_attr}" name="{name}">'
+            f'<error message="{html.escape(fingerprint, quote=True)}">boom</error>'
+            "</testcase>"
+        )
+        error_count += 1
+    for node in skips or []:
+        cls, _, name = node.partition("::")
+        cls_attr = cls.replace("/", ".").removesuffix(".py")
+        cases.append(
+            f'<testcase classname="{cls_attr}" name="{name}">'
+            '<skipped message="skip">skip</skipped>'
+            "</testcase>"
+        )
+        skip_count += 1
     xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
         f'<testsuites><testsuite name="pytest" tests="{len(cases)}" '
-        f'failures="{failure_count}" errors="0">'
-        + "".join(cases)
-        + "</testsuite></testsuites>"
+        f'failures="{failure_count}" errors="{error_count}" '
+        f'skipped="{skip_count}">' + "".join(cases) + "</testsuite></testsuites>"
     )
     return _write(path, xml)
 
@@ -420,17 +448,17 @@ def test_compare_pytest_fingerprint_mismatch_unit() -> None:
         }
     }
     problems = compare_pytest(
-        baseline, {"tests/test_x.py::test_y": "AssertionError: new"}, set(), []
+        baseline, {"tests/test_x.py::test_y": "AssertionError: new"}, {}, set(), []
     )
     assert problems and "DIFFERENT failure fingerprint" in problems[0]
     # Matching fingerprint passes.
     assert (
-        compare_pytest(baseline, {"tests/test_x.py::test_y": "AssertionError: old"}, set(), [])
+        compare_pytest(baseline, {"tests/test_x.py::test_y": "AssertionError: old"}, {}, set(), [])
         == []
     )
     # Legacy string-form entries still allow any fingerprint at that node.
     legacy = {"pytest": {"known_failures": ["tests/test_x.py::test_y"], "known_skips": []}}
-    assert compare_pytest(legacy, {"tests/test_x.py::test_y": "anything"}, set(), []) == []
+    assert compare_pytest(legacy, {"tests/test_x.py::test_y": "anything"}, {}, set(), []) == []
 
 
 # ---------------------------------------------------------------------------
@@ -839,3 +867,250 @@ def test_parse_junit_failures_and_skips_rejects_counter_mismatch(tmp_path: Path)
     )
     with pytest.raises(JUnitStructureError, match="tests"):
         parse_junit_failures_and_skips(bad)
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff P1-1: fingerprint must capture the nested cause line
+# ---------------------------------------------------------------------------
+
+
+def test_fingerprint_captures_nested_cause_line(tmp_path: Path) -> None:
+    """The P1-1 repro: mutating only the nested cause on line 3 must change
+    the fingerprint and therefore fail comparison."""
+    node = (
+        "tests/test_aggregate_release_workflow.py"
+        "::test_aggregate_release_helper_does_not_backfill_previous_channel_assets"
+    )
+    original_fp = (
+        "AssertionError: Traceback (most recent call last):\n"
+        '  File "<stdin>", line 1, in <module>\n'
+        "ModuleNotFoundError: No module named 'tomllib'"
+    )
+    mutated_fp = original_fp.replace("ModuleNotFoundError", "SecurityError")
+
+    junit_orig = _minimal_junit(tmp_path / "orig.xml", failures={node: original_fp})
+    junit_mut = _minimal_junit(tmp_path / "mut.xml", failures={node: mutated_fp})
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[
+            {"node_id": node, "fingerprint": _checker._normalize_failure_fingerprint(original_fp)}
+        ],
+    )
+
+    # The original failure matches the baseline fingerprint and passes.
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit_orig),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 0
+
+    # The mutated nested cause produces a different fingerprint and fails.
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit_mut),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff P1-2: mypy summary count must reconcile with diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_mypy_found_errors_count_mismatch_fails_closed(tmp_path: Path) -> None:
+    """The P1-2 repro: 'Found 1 error' with zero parsed diagnostic rows and
+    mypy exit 1 must fail closed."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "Found 1 error in 1 file (checked 227 source files)\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1
+
+
+def test_mypy_found_errors_count_match_passes(tmp_path: Path) -> None:
+    """A matching summary count and diagnostic row count passes."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_WITH_ERROR)
+    baseline = _baseline(tmp_path / "baseline.json")
+    parsed = parse_mypy_output(MYPY_WITH_ERROR)
+    data = json.loads(baseline.read_text())
+    data["mypy"]["known_diagnostics"] = parsed
+    baseline.write_text(json.dumps(data))
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 0
+
+
+def test_parse_mypy_summary_unit() -> None:
+    assert parse_mypy_summary(MYPY_CLEAN) == ("success", 0)
+    assert parse_mypy_summary(MYPY_CLEAN_SINGULAR) == ("success", 0)
+    assert parse_mypy_summary(MYPY_WITH_ERROR) == ("errors", 1)
+    assert parse_mypy_summary("") == (None, None)
+    assert parse_mypy_summary("garbage\n") == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff P2-3: testsuite@skipped must match parsed <skipped>
+# ---------------------------------------------------------------------------
+
+
+def test_junit_skipped_counter_mismatch_fails_closed(tmp_path: Path) -> None:
+    """Declared skipped=N without matching <skipped> elements is corrupt."""
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="1" '
+        'failures="0" errors="0" skipped="1">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        "</testsuite></testsuites>",
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_junit_skipped_counter_match_passes(tmp_path: Path) -> None:
+    """A matching skipped counter is accepted."""
+    node = "tests/test_x.py::test_y"
+    junit = _minimal_junit(tmp_path / "junit.xml", skips=[node])
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json", known_failures=[])
+    # Add the skip to known_skips so it is tolerated.
+    data = json.loads(baseline.read_text())
+    data["pytest"]["known_skips"] = [node]
+    baseline.write_text(json.dumps(data))
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 0
+
+
+def test_parse_junit_skipped_counter_mismatch_unit(tmp_path: Path) -> None:
+    bad = _write(
+        tmp_path / "bad.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="1" '
+        'failures="0" errors="0" skipped="1">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        "</testsuite></testsuites>",
+    )
+    with pytest.raises(JUnitStructureError, match="skipped"):
+        parse_junit_failures_and_skips(bad)
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff P2-4: <error> outcomes are never allowlisted
+# ---------------------------------------------------------------------------
+
+
+def test_error_outcome_never_allowlisted(tmp_path: Path) -> None:
+    """The P2-4 repro: an <error> at a node listed in known_failures must
+    still be rejected independently."""
+    node = "tests/test_x.py::test_y"
+    fp = "ModuleNotFoundError: No module named 'tomllib'"
+    junit = _minimal_junit(tmp_path / "junit.xml", errors={node: fp})
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[{"node_id": node, "fingerprint": fp}],
+    )
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 1
+
+
+def test_compare_pytest_error_rejected_unit() -> None:
+    """Direct unit test: <error> outcomes are rejected even when the node is
+    in known_failures."""
+    baseline = {
+        "pytest": {
+            "known_failures": [{"node_id": "tests/test_x.py::test_y", "fingerprint": "anything"}],
+            "known_skips": [],
+        }
+    }
+    problems = compare_pytest(baseline, {}, {"tests/test_x.py::test_y": "anything"}, set(), [])
+    assert problems and "never allowlisted" in problems[0]

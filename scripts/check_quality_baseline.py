@@ -55,7 +55,7 @@ MYPY_LINE_RE = re.compile(
 # of a non-empty stream; anything else is treated as unparseable/crash
 # output and fails closed.
 MYPY_SUCCESS_RE = re.compile(r"^Success: no issues found in \d+ source files?\b")
-MYPY_FOUND_ERRORS_RE = re.compile(r"^Found \d+ errors? in \d+ files?\b")
+MYPY_FOUND_ERRORS_RE = re.compile(r"^Found (?P<count>\d+) errors? in \d+ files?\b")
 
 # Recognizable non-diagnostic lines mypy may emit alongside the summary
 # (config notes, unused-section notes, etc.). Anything else that is not a
@@ -90,23 +90,36 @@ class MypyOutputError(ValueError):
     """Raised when mypy stdout is empty, unparseable, or crash-only."""
 
 
-def parse_mypy_summary_kind(text: str) -> str | None:
-    """Return the kind of mypy summary line present in ``text``.
+def parse_mypy_summary(text: str) -> tuple[str | None, int | None]:
+    """Return the kind and declared error count of the mypy summary line.
 
-    Returns ``"success"`` for ``Success: no issues found ...``, ``"errors"``
-    for ``Found N errors ...``, or ``None`` when neither is present. Used by
-    the comparator to reconcile the raw process exit code against the
-    semantic content of the artifact (review-t_cce76b68 F1).
+    Returns ``("success", 0)`` for ``Success: no issues found ...``,
+    ``("errors", N)`` for ``Found N errors ...``, or ``(None, None)`` when
+    neither is present. Used by the comparator to reconcile the raw process
+    exit code against the semantic content of the artifact
+    (review-t_cce76b68 F1, review-t_e03bfeff P1-2).
     """
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         if not line:
             continue
         if MYPY_SUCCESS_RE.match(line):
-            return "success"
-        if MYPY_FOUND_ERRORS_RE.match(line):
-            return "errors"
-    return None
+            return "success", 0
+        m = MYPY_FOUND_ERRORS_RE.match(line)
+        if m:
+            return "errors", int(m.group("count"))
+    return None, None
+
+
+def parse_mypy_summary_kind(text: str) -> str | None:
+    """Return the kind of mypy summary line present in ``text``.
+
+    Returns ``"success"`` for ``Success: no issues found ...``, ``"errors"``
+    for ``Found N errors ...``, or ``None`` when neither is present. Kept
+    for backward compatibility with existing callers and tests.
+    """
+    kind, _ = parse_mypy_summary(text)
+    return kind
 
 
 def parse_mypy_output(text: str) -> list[dict[str, str]]:
@@ -172,14 +185,18 @@ def _normalize_failure_fingerprint(raw: str) -> str:
     fingerprint.
 
     The first line of pytest's failure message carries the exception type
-    and the headline message (e.g. ``AssertionError: Traceback (most recent
-    call last):`` followed by the nested error). We keep the exception
-    type plus the first content line, collapse whitespace, strip numeric
-    literals and tmp paths so the fingerprint is stable across runs and
-    machines, then truncate to keep the baseline JSON readable.
+    and the headline message; the second line is typically the traceback
+    frame; the third line carries the nested cause (e.g.
+    ``ModuleNotFoundError: No module named 'tomllib'``). We keep all three
+    lines, collapse whitespace, strip numeric literals and tmp paths so the
+    fingerprint is stable across runs and machines, then truncate to keep
+    the baseline JSON readable. Keeping the nested-cause line prevents a
+    real failure cause mutation from being masked by an allowlist entry
+    (review-t_e03bfeff P1-1).
     """
-    # Keep only the first two lines: exception headline + immediate cause.
-    head = "\\n".join((raw or "").splitlines()[:2])
+    # Keep the first three lines: exception headline + traceback frame +
+    # nested cause.
+    head = "\n".join((raw or "").splitlines()[:3])
     head = re.sub(r"\s+", " ", head).strip()
     # Strip machine-specific tmp paths and numeric literals.
     head = re.sub(r"/[^\s]*?(?:pytest-of-[^/]+|tmp[Tt][^/]*)/[^\s]*", "<TMP>", head)
@@ -193,25 +210,29 @@ class JUnitStructureError(ValueError):
 
 def parse_junit_failures_and_skips(
     xml_path: Path,
-) -> tuple[dict[str, str], set[str], list[str]]:
-    """Return ``(failures, skipped_node_ids, collection_errors)``.
+) -> tuple[dict[str, str], dict[str, str], set[str], list[str]]:
+    """Return ``(failures, errors, skipped_node_ids, collection_errors)``.
 
     ``failures`` maps node ID → normalized failure fingerprint (exception
-    type + headline). Node IDs are ``<classname>::<name>`` with the
-    classname's dotted module path converted to a ``tests/...`` path when
-    possible so IDs match pytest's command-line node format.
+    type + headline). ``errors`` maps node ID → normalized error fingerprint.
+    ``skipped_node_ids`` is the set of node IDs with a ``<skipped>`` child.
+    ``collection_errors`` lists non-testcase ``<error>`` messages. Node IDs
+    are ``<classname>::<name>`` with the classname's dotted module path
+    converted to a ``tests/...`` path when possible so IDs match pytest's
+    command-line node format.
 
     Raises ``JUnitStructureError`` when the report is structurally empty
     (no testsuite / no testcase), when declared aggregate counters do not
     match the parsed rows, when the same node ID appears twice, or when
-    declared failures/errors are not actually present as parsed elements.
-    A structurally empty or contradictory JUnit must fail closed — it is
-    indistinguishable from a truncated or stale artifact (review-t_cce76b68
-    F2).
+    declared failures/errors/skipped counts are not actually present as
+    parsed elements. A structurally empty or contradictory JUnit must fail
+    closed — it is indistinguishable from a truncated or stale artifact
+    (review-t_cce76b68 F2, review-t_e03bfeff P2-3/P2-4).
     """
     tree = ET.parse(xml_path)
     root = tree.getroot()
     failures: dict[str, str] = {}
+    errors: dict[str, str] = {}
     skips: set[str] = set()
     collection_errors: list[str] = []
 
@@ -247,15 +268,18 @@ def parse_junit_failures_and_skips(
         )
 
     # Aggregate-counter validation: declared totals must match the parsed
-    # rows, and declared failures/errors must be present as parsed elements.
-    # A counter mismatch indicates a truncated or hand-edited artifact.
+    # rows, and declared failures/errors/skipped must be present as parsed
+    # elements. A counter mismatch indicates a truncated or hand-edited
+    # artifact.
     declared_tests = 0
     declared_failures = 0
     declared_errors = 0
+    declared_skipped = 0
     for suite in testsuites:
         declared_tests += int(suite.get("tests", "0") or "0")
         declared_failures += int(suite.get("failures", "0") or "0")
         declared_errors += int(suite.get("errors", "0") or "0")
+        declared_skipped += int(suite.get("skipped", "0") or "0")
     if declared_tests != len(testcases):
         raise JUnitStructureError(
             f"JUnit report at {xml_path} declares tests={declared_tests} "
@@ -266,6 +290,7 @@ def parse_junit_failures_and_skips(
     seen_node_ids: set[str] = set()
     parsed_failure_count = 0
     parsed_error_count = 0
+    parsed_skipped_count = 0
     for testcase in testcases:
         classname = testcase.get("classname", "") or ""
         name = testcase.get("name", "") or ""
@@ -275,16 +300,19 @@ def parse_junit_failures_and_skips(
                 f"JUnit report at {xml_path} contains duplicate node id {nid!r}"
             )
         seen_node_ids.add(nid)
-        failure_el = next((child for child in testcase if child.tag in {"failure", "error"}), None)
+        outcome_el = next((child for child in testcase if child.tag in {"failure", "error"}), None)
         has_skip = any(child.tag == "skipped" for child in testcase)
-        if failure_el is not None:
-            failures[nid] = _normalize_failure_fingerprint(failure_el.get("message", ""))
-            if failure_el.tag == "failure":
+        if outcome_el is not None:
+            fingerprint = _normalize_failure_fingerprint(outcome_el.get("message", ""))
+            if outcome_el.tag == "failure":
+                failures[nid] = fingerprint
                 parsed_failure_count += 1
             else:
+                errors[nid] = fingerprint
                 parsed_error_count += 1
         if has_skip:
             skips.add(nid)
+            parsed_skipped_count += 1
 
     if declared_failures != parsed_failure_count:
         raise JUnitStructureError(
@@ -311,7 +339,13 @@ def parse_junit_failures_and_skips(
             f"but only {parsed_error_count} <error> elements were parsed"
         )
 
-    return failures, skips, collection_errors
+    if declared_skipped != parsed_skipped_count:
+        raise JUnitStructureError(
+            f"JUnit report at {xml_path} declares skipped={declared_skipped} "
+            f"but only {parsed_skipped_count} <skipped> elements were parsed"
+        )
+
+    return failures, errors, skips, collection_errors
 
 
 def parse_coverage_line_percent(coverage_xml_path: Path) -> float:
@@ -350,6 +384,7 @@ def parse_coverage_line_percent(coverage_xml_path: Path) -> float:
 def compare_pytest(
     baseline: dict[str, Any],
     failures: dict[str, str],
+    errors: dict[str, str],
     skips: set[str],
     collection_errors: list[str],
 ) -> list[str]:
@@ -359,7 +394,9 @@ def compare_pytest(
     # known_failures entries may be plain node-ID strings (legacy form,
     # fingerprint not enforced) or objects with ``node_id`` + ``fingerprint``
     # (reviewer-required form: a new failure cause at the same node is
-    # rejected). Known skips stay plain node-ID strings.
+    # rejected). Known skips stay plain node-ID strings. ``<error>``
+    # outcomes are NEVER allowlisted via known_failures — they must be
+    # rejected independently (review-t_e03bfeff P2-4).
     known_failures_raw = baseline.get("pytest", {}).get("known_failures", [])
     known_failure_nodes: set[str] = set()
     known_failure_fingerprints: dict[str, str] = {}
@@ -386,6 +423,14 @@ def compare_pytest(
         problems.append(
             "pytest failures at allowlisted nodes with a DIFFERENT failure "
             f"fingerprint (possible new bug masked by the allowlist): {fingerprint_mismatches}"
+        )
+
+    # <error> outcomes are rejected unconditionally: they indicate broken
+    # test infrastructure (import errors, fixture crashes, etc.) and must
+    # never be silently allowlisted (review-t_e03bfeff P2-4).
+    if errors:
+        problems.append(
+            f"pytest <error> outcomes not in baseline (never allowlisted): {sorted(errors)}"
         )
 
     new_skips = skips - known_skips
@@ -503,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     try:
-        failures, skips, collection_errors = parse_junit_failures_and_skips(args.junit_xml)
+        failures, errors, skips, collection_errors = parse_junit_failures_and_skips(args.junit_xml)
     except ET.ParseError as exc:
         print(f"FAIL: cannot parse pytest JUnit XML: {exc}", file=sys.stderr)
         return 2
@@ -523,11 +568,11 @@ def main(argv: list[str] | None = None) -> int:
     # accepting a contradictory pair is the classic stale-artifact fail-open
     # path. Reconciliation happens BEFORE baseline comparison so a
     # contradictory run never reaches the baseline checks.
-    pytest_has_failures = bool(failures) or bool(collection_errors)
+    pytest_has_failures = bool(failures) or bool(errors) or bool(collection_errors)
     if args.pytest_exit_code == 0 and pytest_has_failures:
         problems.append(
             "pytest exit code 0 (all passed) contradicts JUnit report "
-            f"containing {len(failures)} failure(s) and "
+            f"containing {len(failures)} failure(s), {len(errors)} error(s), and "
             f"{len(collection_errors)} collection error(s); "
             "refusing to accept a contradictory artifact (fail closed)"
         )
@@ -538,7 +583,7 @@ def main(argv: list[str] | None = None) -> int:
             "a contradictory artifact (fail closed)"
         )
 
-    mypy_summary_kind = parse_mypy_summary_kind(mypy_text)
+    mypy_summary_kind, mypy_summary_error_count = parse_mypy_summary(mypy_text)
     if args.mypy_exit_code == 0 and mypy_summary_kind != "success":
         problems.append(
             f"mypy exit code 0 (clean) contradicts mypy output summary "
@@ -552,7 +597,17 @@ def main(argv: list[str] | None = None) -> int:
             "refusing to accept a contradictory artifact (fail closed)"
         )
 
-    problems.extend(compare_pytest(baseline, failures, skips, collection_errors))
+    # Reconcile the mypy summary's declared error count against the number
+    # of parsed diagnostic occurrences (review-t_e03bfeff P1-2). A summary
+    # claiming N errors with zero parsed diagnostics is contradictory.
+    if mypy_summary_error_count is not None and mypy_summary_error_count != len(live_mypy):
+        problems.append(
+            f"mypy summary declares {mypy_summary_error_count} error(s) "
+            f"but {len(live_mypy)} diagnostic(s) were parsed; refusing "
+            "to accept a contradictory artifact (fail closed)"
+        )
+
+    problems.extend(compare_pytest(baseline, failures, errors, skips, collection_errors))
     problems.extend(compare_mypy(baseline, live_mypy))
 
     if args.coverage_xml is not None:
