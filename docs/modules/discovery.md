@@ -140,6 +140,8 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 
    如果评估后 admission 途中正式池达到上限，剩余通过阈值的候选会保留在 `evaluated`，下一次池子掉回目标以下时先重试入池，再领取新的 `pending_eval` 批次，避免高分候选被卡在待评估池里。
 
+   **份额感知入池（v0.3.181+，spec 2026-07-20）**：runtime 把 controller 的 `_source_target_counts`（family→target）注入 pipeline 后，`_admit_until_full` 两轮录取——第一轮只录「该源当前 available < 自身份额」的欠份额行（按 family 本地增量维护快照，来源归族一律用 `sources.platforms.source_family`，B 站四策略归 `bilibili` 族），第二轮才让被推迟的超份额行填满剩余全局坑位（可用性兜底，绝不 reject 超份额行、保持 `evaluated`）。`get_evaluated_discovery_candidates_for_admission(preferred_source_platforms=…)` 把欠份额来源排到 FIFO 窗口前面，防止超份额积压霸占取行窗口。未注入策略（旧测试 / OpenClaw one-shot）时行为与全局-cap-only FIFO 逐字节一致。配合 runtime 的 `_rebalance_pool_shares()` 温和退坑，超份额来源（如 reddit 169/25）不再顶满全局池饿死 bangumi 等欠份额来源。
+
    候选队列表本身按来源保留上限，默认上限为 `max(pool_target_count*2, pool_target_count+120, 600)`；入队时会把 `evaluating` 行纳入 cap 计数，但删除时保护 in-flight 行，并优先清理 terminal rows。这样正式池长期满时仍不继续消耗 discovery / LLM，同时不会让外部 observed / producer 队列无限增长，即使 `pool_target_count <= 0` 也保留 600 条的兜底上限。
 
    `evaluating` claim 的崩溃回收：`Database.initialize()` 回收旧租约，进程首个 pipeline 回收重启孤儿；正常热重载则由父 `refresh_loop` 等待 coordinator 取消 worker 并按 token 归还未完成行，再构造新 runtime。stale sweep 同时清空 `claim_token`，终态提交也清空 token / claimed_at。
