@@ -77,6 +77,9 @@ class GuidedInitStub:
         self.current_status = _status()
         self.post_init_error: tuple[int, dict[str, Any]] | None = None
         self.fail_next_status = False
+        # When set, replaces the default /api/config body. Used to simulate a
+        # saved default_provider the wizard no longer offers (e.g. "ollama").
+        self.config_override: dict[str, Any] | None = None
         self.runtime_status = {
             "initialized": False,
             "pool_available_count": 0,
@@ -253,6 +256,8 @@ def guided_init_server() -> tuple[str, GuidedInitStub]:
                 rel = path.removeprefix("/web/assets/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/assets" / rel)
             if path == "/api/config":
+                if state.config_override is not None:
+                    return _json_response(self, state.config_override)
                 return _json_response(
                     self,
                     {
@@ -484,6 +489,35 @@ def test_setup_wizard_e2e_restores_fields_per_provider(
         "() => Array.from(document.querySelectorAll('#provider option')).map((o) => o.value)"
     )
     assert "ollama" not in provider_values
+
+
+def test_setup_wizard_e2e_notifies_when_saved_provider_is_unlisted(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A saved default_provider the wizard no longer offers (e.g. "ollama",
+    which is embedding-only here) must not be silently dropped — the wizard
+    surfaces an info notice telling the user to re-pick a chat provider."""
+    base_url, stub = guided_init_server
+    stub.config_override = {
+        "config": {
+            "llm": {
+                "default_provider": "ollama",
+                "ollama": {"model": "qwen2.5:7b", "base_url": "http://127.0.0.1:11434/v1"},
+            },
+            "bilibili": {"cookie": "SESSDATA=test"},
+            "sources": {"bilibili": {"enabled": True}},
+        }
+    }
+    chromium_page.goto(f"{base_url}/setup/")
+
+    notice = chromium_page.locator("#msg0")
+    notice.wait_for(state="visible")
+    text = notice.inner_text()
+    assert "ollama" in text
+    assert "向量检索" in text
+    # The unlisted provider must not have been forced into the select.
+    assert chromium_page.locator("#provider").input_value() != "ollama"
 
 
 def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(

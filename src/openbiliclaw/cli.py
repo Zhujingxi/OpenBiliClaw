@@ -1729,10 +1729,17 @@ _SUPPORTED_PROVIDERS: tuple[str, ...] = (
 # Numbered menu shown in Phase 1. Order matters (v0.3.20+):
 # DeepSeek first as the default zero-friction recommendation
 # (¥0.001/千 token); OpenAI / Gemini / Claude / OpenRouter for users who
-# already have those keys; Ollama as the offline-only fallback (slow CPU
-# inference, real hardware floor); "OpenAI 协议兼容自建网关" demoted to
+# already have those keys; "OpenAI 协议兼容自建网关" demoted to
 # the final "(高级)" entry so 普通用户 don't pick it by mistake — most
 # people who think they want it actually want option 2 (OpenAI 官方).
+#
+# Local Ollama is intentionally NOT offered here as a chat provider
+# (v0.3.176+): the bundled Ollama is embedding-only (bge-m3), and small
+# local chat models don't meet the content-pipeline quality bar. Ollama
+# chat stays supported in the backend registry / desktop settings page
+# for advanced users, and ``ollama`` remains a valid ``default_provider``
+# when it arrives from an existing config or an explicit flag — we just
+# stop *offering* it in the interactive menu.
 _LLM_MENU: tuple[tuple[str, str, str], ...] = (
     (
         "deepseek",
@@ -1764,11 +1771,6 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
         "OpenRouter 聚合",
         "默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费",
     ),
-    (
-        "ollama",
-        "本地 Ollama（完全离线）",
-        "默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s",
-    ),
 )
 
 
@@ -1785,7 +1787,9 @@ def _print_provider_table() -> None:
     console.print(table)
     console.print(
         "[dim]Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。"
-        "已经买了中转站 / OneAPI Key 选 2 (协议兼容);想完全离线选 7 (Ollama,但 CPU 推理慢)。[/dim]"
+        "已经买了中转站 / OneAPI Key 选 2 (协议兼容)。"
+        "本地 Ollama 仅用于向量检索(embedding),不作为聊天服务商;"
+        "如需本地聊天模型请到设置页手动配置。[/dim]"
     )
 
 
@@ -2278,8 +2282,9 @@ def _interactive_runtime_config_setup() -> None:
     """Guide the user through missing LLM config before init.
 
     Four-phase flow:
-      1) Pick LLM service (Ollama-first menu; OpenAI-compat is its own entry,
-         not buried inside ``openai``).
+      1) Pick LLM service (DeepSeek-first menu; OpenAI-compat is its own entry,
+         not buried inside ``openai``). Local Ollama is not offered as a
+         chat provider — it's embedding-only here.
       2) Provide the fields that option actually needs.
       3) Choose how embeddings are served (separate question, not bundled).
       4) Optional per-module overrides (advanced, default skip).
@@ -2288,7 +2293,7 @@ def _interactive_runtime_config_setup() -> None:
     _print_provider_table()
 
     while True:
-        raw = typer.prompt("\n请输入序号或名称（默认 1=Ollama）", default="1")
+        raw = typer.prompt("\n请输入序号或名称（默认 1=DeepSeek）", default="1")
         choice = _resolve_menu_choice(raw)
         if choice is None:
             console.print("[bold red]看不懂这个输入，请重新输入序号或名称[/bold red]")
