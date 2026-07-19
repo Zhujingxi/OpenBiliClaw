@@ -23,11 +23,11 @@
 
 ## Must 切片修复（评审 #87 收口）
 
-- **Fail-closed 质量基线比较器（P1）**：`scripts/check_quality_baseline.py` 的 `parse_mypy_output()` 现在校验 mypy 摘要行语法（`Success: no issues found in N source files` 或 `Found N errors in M files` 形态），空流、crash-only stderr（`mypy: INTERNAL ERROR` 等无摘要场景）与不可解析的非空行一律抛 `MypyOutputError` 并以 exit 2 关闭；新增 `--mypy-exit-code` / `--pytest-exit-code` 参数，0/1 之外的退出码视为工具崩溃直接 fail。`.github/workflows/ci.yml` 用 `set -o pipefail` 跑 mypy 并把原始退出码写入 `build/*.status`，比较器步骤消费两个 status 文件——此前 `continue-on-error` + `| tee` 会把 mypy 崩溃吞掉让 CI 误判绿。
+- **Fail-closed 质量基线比较器（P1）**：`scripts/check_quality_baseline.py` 的 `parse_mypy_output()` 现在校验 mypy 摘要行语法（`Success: no issues found in N source files` 或 `Found N errors in M files` 形态），空流、crash-only stderr（`mypy: INTERNAL ERROR` 等无摘要场景）与不可解析的非空行一律抛 `MypyOutputError` 并以 exit 2 关闭；新增 `--mypy-exit-code` / `--pytest-exit-code` 参数，0/1 之外的退出码视为工具崩溃直接 fail。`.github/workflows/ci.yml` 用 `set -o pipefail` 跑 mypy 并把原始退出码写入 `build/*.status`，比较器步骤消费两个 status 文件——此前 `continue-on-error` + `| tee` 会把 mypy 崩溃吞掉让 CI 误判绿。复审（t_cce76b68）进一步发现 GitHub 默认 shell 带 `bash -e -o pipefail`，`continue-on-error` 并不关闭 errexit，预期非零的 pytest/mypy 会在写 status 行之前直接中止脚本；现两个步骤都在工具调用外加显式 `set +e`/`set -e` 保护区，mypy 取 `PIPESTATUS[0]`、pytest 取 `$?` 立即捕获后再恢复 errexit 写 status 文件，保证预期失败也能产出完整工件。
 - **pytest allowlist 指纹（评审 #2）**：`known_failures` 条目现在携带归一化失败指纹（异常类型 + headline，数字与 tmp 路径已 scrub），`compare_pytest()` 对 allowlist 节点的指纹不匹配失败判 fail——同一个节点上的新 bug 无法再躲在旧 allowlist 后面；旧字符串条目继续兼容解析（不强制指纹）。基线随之重生：聚合发布失败带指纹、10 条 cli_models mypy 诊断在 rebase 后消失、coverage 刷新到 52.26。
 - **Stale baseline 重基（评审 #7）**：分支 rebase 到 `origin/main @ 72addee8`（cli_models mypy 修复合入点），`git merge-base --is-ancestor origin/main HEAD` 为真；6 个原始重构 commit 完整保留。
 - **新增模块文档**：`docs/modules/api.md` 记录 `api/app.py` / `api/dependencies.py` / `api/routes/system.py` 的窄依赖路由提取边界，覆盖模块组成、对外契约、公共 API 与相关文档链接；架构图与对外 API 表面仍无变化，`README` 与 `docs/spec.md` 无需改动。
-- **测试**：新增 `tests/test_quality_baseline_comparator.py`（15 个用例）覆盖缺失文件、空文件、畸形行、crash-only stderr、baseline 期望诊断、干净成功、指纹匹配/不匹配等 fail-closed 路径；现有 `tests/test_architecture.py` / `tests/test_storage_schema_migrations.py` / `tests/test_api_route_contract.py` / `tests/test_api_pilot_endpoints_contract.py` 与新比较器测试合计 61 个用例全部通过。
+- **测试**：新增 `tests/test_quality_baseline_comparator.py`（15 个用例）覆盖缺失文件、空文件、畸形行、crash-only stderr、baseline 期望诊断、干净成功、指纹匹配/不匹配等 fail-closed 路径；新增 `tests/test_ci_status_capture.py`（6 个用例）在 `bash --noprofile --norc -e -o pipefail`（GitHub 默认 shell）下直接执行 ci.yml 的真实 run 片段，证明预期非零退出仍会同时产出工件与 status 文件、崩溃退出码（2/4）也被捕获、干净退出记 0，防止 errexit 保护被移除后回归；现有 `tests/test_architecture.py` / `tests/test_storage_schema_migrations.py` / `tests/test_api_route_contract.py` / `tests/test_api_pilot_endpoints_contract.py` 与新比较器测试合计 61 个用例全部通过。
 
 ---
 

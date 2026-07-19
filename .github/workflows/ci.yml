@@ -36,15 +36,21 @@ jobs:
       - name: Run MyPy (capture output for baseline comparator)
         # `continue-on-error` so the baseline comparator decides whether the
         # diagnostics are acceptable; new diagnostics fail the next step.
-        # pipefail preserves the mypy exit code through `tee`; the raw status
-        # is recorded so the comparator step can reject crash/config-error
-        # runs that produced no diagnostics at all.
+        # GitHub's default shell runs with `bash -e -o pipefail`, and
+        # continue-on-error does NOT disable shell errexit — so the tool
+        # invocation is wrapped in an explicit `set +e`/`set -e` region and
+        # its status is captured immediately from PIPESTATUS[0] (the left
+        # side of the `tee` pipeline), otherwise an expected nonzero mypy
+        # exit would abort the script before build/mypy.status is written.
         continue-on-error: true
         run: |
           mkdir -p build
           set -o pipefail
+          set +e
           python -m mypy src/ 2>&1 | tee build/mypy.txt
-          echo "mypy_exit=$?" > build/mypy.status
+          mypy_status=${PIPESTATUS[0]}
+          set -e
+          echo "mypy_exit=$mypy_status" > build/mypy.status
 
       - name: Run pytest (single run, emits JUnit XML + coverage)
         # Single-run collection per the refactor plan: JUnit XML and coverage
@@ -52,13 +58,19 @@ jobs:
         # baseline comparator never re-runs the suite. The known release-
         # workflow failure is expected to fail here; the comparator below
         # recognizes it via tests/contracts/quality-baseline.json.
+        # Same errexit guard as the mypy step: `set +e` around the expected-
+        # to-fail invocation, capture `$?` immediately, then re-enable `-e`
+        # before writing build/pytest.status.
         continue-on-error: true
         run: |
           mkdir -p build
+          set +e
           python -m pytest -q \
             --junitxml=build/pytest-junit.xml \
             --cov=openbiliclaw --cov-report=xml:build/coverage.xml
-          echo "pytest_exit=$?" > build/pytest.status
+          pytest_status=$?
+          set -e
+          echo "pytest_exit=$pytest_status" > build/pytest.status
 
       - name: Check quality baseline (fail-closed)
         # Compares the live pytest/mypy/coverage outputs against the
