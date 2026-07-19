@@ -163,7 +163,11 @@ def test_reddit_cookie_endpoint_rejects_cookie_without_reddit_session(
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["ok"] is True
+    # ``ok`` used to stay true here (it mirrored "the request was processed"),
+    # which made Reddit the one platform whose refusal did not look like one.
+    # All four cookie endpoints now share the unified write path's verdict; the
+    # extension keys its success branch off ``ok && has_cookie`` either way.
+    assert body["ok"] is False
     assert body["has_cookie"] is False
     assert body["error_code"] == "missing_reddit_session"
     assert not credential_file.exists()

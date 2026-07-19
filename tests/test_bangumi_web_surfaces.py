@@ -5,6 +5,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def shared_source_status_js() -> str:
+    """The status-row renderer the three surfaces share.
+
+    Desktop, the extension popup and the setup wizard all load this module, so
+    per-source rendering logic lives here rather than being hand-copied into
+    each bundle. Tests that assert "the frontend renders field X" have to look
+    here too, or they pin the behaviour to whichever copy existed first.
+    """
+    return (ROOT / "src/openbiliclaw/web/shared/source-status.js").read_text(encoding="utf-8")
+
+
 def test_desktop_round_trips_bangumi_settings() -> None:
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
@@ -100,8 +111,14 @@ def test_desktop_exposes_bangumi_clear_token_and_rejected_status() -> None:
     assert 'document.getElementById("bangumiClearToken")?.checked' in js
     assert '{ access_token: "" }' in js
     # A: the rejected token_state renders an actionable warning badge.
-    assert 'item.token_state === "rejected"' in js
-    assert "令牌已失效" in js
+    #
+    # The check lives wherever the status row is rendered, which is now the
+    # shared module the three surfaces load rather than this bundle. Asserting
+    # the literal in ``app.js`` pinned the test to one file's copy of the logic
+    # — exactly the duplication the shared module removed — so search both.
+    rendering_sources = js + shared_source_status_js()
+    assert 'token_state) === "rejected"' in rendering_sources
+    assert "令牌已失效" in rendering_sources
 
 
 def test_setup_guided_init_username_omit_and_warnings() -> None:
@@ -249,7 +266,13 @@ def test_token_how_to_doc_covers_prerequisites_validity_and_expiry() -> None:
 def test_setup_exposes_anonymous_bangumi_bootstrap() -> None:
     html = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
-    assert '{ key: "bangumi", label: "Bangumi" }' in html
+    # Bangumi has to be offered as an init source. The roster used to be a
+    # hand-written literal here; it is now derived from the shared module's
+    # SOURCE_KEYS, which is the point — one roster, not one per surface. So
+    # assert the derivation is wired *and* that it actually yields Bangumi,
+    # rather than pinning the test to a literal that duplication would restore.
+    assert "SourceStatus.SOURCE_KEYS.map(" in html, "init roster must derive from the shared roster"
+    assert '"bangumi"' in shared_source_status_js(), "shared roster must carry Bangumi"
     assert 'bangumiInput.id = "initBangumiUsername"' in html
     assert "Bangumi \u4f7f\u7528\u516c\u5f00 API，\u4e0d\u9700\u767b\u5f55" in html
     assert 'if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken))' in html

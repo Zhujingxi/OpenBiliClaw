@@ -319,6 +319,35 @@ def test_put_config_ignores_empty_embedding_model_and_base_url(monkeypatch, tmp_
 # ── Source cookie guards (bilibili masked/empty echo; dy/x file routing) ──
 
 
+def _stub_live_probes(monkeypatch, *, authenticated: bool = True) -> list[tuple[str, str]]:
+    """Answer the write-time live gate locally, and record what it was asked.
+
+    ``PUT /api/config`` now runs the same probe ``POST /api/bilibili/cookie``
+    has always run (spec D4 — the two paths disagreeing about the same cookie
+    was the bug), so without this these tests would reach out to bilibili.com
+    and douyin.com. Patching the single shared ``run_live_probe`` keeps them
+    offline; returning the call list lets them assert the gate actually fired
+    rather than merely that nothing blew up.
+    """
+    from openbiliclaw.api.source_auth import verify
+
+    calls: list[tuple[str, str]] = []
+
+    async def _probe(slug, *, cfg, cookie=None, probes=None, record=True):
+        calls.append((slug, str(cookie or "")))
+        return verify.LiveProbeOutcome(
+            slug=slug,
+            has_credential=True,
+            authenticated=authenticated,
+            network_error=False,
+            message="stubbed probe",
+            username="tester",
+        )
+
+    monkeypatch.setattr(verify, "run_live_probe", _probe)
+    return calls
+
+
 def _cookie_config(tmp_path: Path) -> Config:
     from openbiliclaw.config import BilibiliConfig
 
@@ -357,6 +386,7 @@ def test_put_config_ignores_empty_bilibili_cookie(monkeypatch, tmp_path) -> None
 
 
 def test_put_config_writes_real_new_bilibili_cookie(monkeypatch, tmp_path) -> None:
+    probes = _stub_live_probes(monkeypatch)
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _cookie_config(tmp_path))
 
     response = client.put(
@@ -368,12 +398,16 @@ def test_put_config_writes_real_new_bilibili_cookie(monkeypatch, tmp_path) -> No
     assert load_config_from_path(config_path).bilibili.cookie == (
         "SESSDATA=new-sess; bili_jct=new-csrf; DedeUserID=43"
     )
+    # The paste was live-checked before it landed, exactly as the extension's
+    # cookie-sync endpoint checks it (spec D4).
+    assert probes == [("bilibili", "SESSDATA=new-sess; bili_jct=new-csrf; DedeUserID=43")]
 
 
 def test_put_config_routes_douyin_cookie_to_data_file(monkeypatch, tmp_path) -> None:
     from openbiliclaw.sources.douyin_auth import DouyinCookieManager
 
     monkeypatch.delenv("OPENBILICLAW_DOUYIN_COOKIE", raising=False)
+    probes = _stub_live_probes(monkeypatch)
     cfg = _cookie_config(tmp_path)
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, cfg)
 
@@ -386,6 +420,7 @@ def test_put_config_routes_douyin_cookie_to_data_file(monkeypatch, tmp_path) -> 
     # Secret lands in data/douyin_cookie.json, never in config.toml.
     assert DouyinCookieManager(cfg.data_path).load_cookie() == "sessionid=dy-sess; ttwid=dy-tw"
     assert "dy-sess" not in config_path.read_text(encoding="utf-8")
+    assert probes == [("douyin", "sessionid=dy-sess; ttwid=dy-tw")]
 
 
 def test_put_config_routes_x_cookie_to_data_file(monkeypatch, tmp_path) -> None:

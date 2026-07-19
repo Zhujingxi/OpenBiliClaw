@@ -19,6 +19,7 @@ from pydantic import (
     model_validator,
 )
 
+from openbiliclaw.api.source_auth.contract import SourceAuthContract
 from openbiliclaw.saved_sync.identity import canonical_source_platform, make_item_key
 
 NativeSaveStatusOut = Literal[
@@ -461,8 +462,15 @@ class BilibiliCookieIn(BaseModel):
     )
     validate_with_bilibili: bool = Field(
         default=True,
-        description="If true, hit the Bilibili nav endpoint before saving "
-        "to confirm the cookie is actually authenticated.",
+        description=(
+            "**Accepted but ignored.** The live check always runs. Kept on the "
+            "wire because installed extensions send it on every cookie sync and "
+            "rejecting the key would 422 them into a silent sync failure — but "
+            "no request may lower the validation strength, which is the same "
+            "reason the unified endpoint carries no such flag at all. Sending "
+            "false once persisted a structurally complete, dead cookie with the "
+            "probe never called."
+        ),
     )
 
 
@@ -631,11 +639,20 @@ class SourceStatusItem(BaseModel):
       or its saved credential file is invalid.
     - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
     - ``no_auth``    — source needs no login (YouTube, public).
+    - ``disabled``   — source switched off in config (Bangumi only, and only
+      until it moves onto ``auth``, where scheduling and credential state are
+      separate dimensions rather than two values of one field).
 
-    ``logged_in`` is a legacy convenience flag
-    (``state in {ok, ready, no_auth}``) so the UI can pick a dot colour without
-    re-deriving the rule. For anonymous sources it represents local readiness,
-    not a literal authenticated session.
+    ``logged_in`` is a convenience flag (``state in {ok, ready, no_auth}``) so
+    the UI can pick a dot colour without re-deriving the rule. For anonymous
+    sources it represents local readiness, not a literal authenticated session.
+
+    **``state`` and ``logged_in`` are superseded by ``auth``.** They pack four
+    independent questions into one string, which is why the same ``ready`` can
+    mean "three cookie field names were counted" on one platform and "a file
+    exists on disk" on another. ``auth`` separates those questions; these two
+    stay for the frontends that have not switched over yet, and their output is
+    byte-identical to what the endpoint has always returned.
     """
 
     enabled: bool = False
@@ -643,6 +660,17 @@ class SourceStatusItem(BaseModel):
     detail: str = ""
     logged_in: bool = False
     feed_paused: bool = False
+    # ``None`` means "this source has no auth contract", the honest answer for a
+    # backend older than the contract — not a missing value to be defaulted away
+    # (a default-constructed contract reads ``auth_required=True`` +
+    # ``credential="none"``, which renders as 「需要登录」 and would be a fabricated
+    # verdict for a public source — the overclaim invariant I3 forbids). All eight
+    # sources now ship a real contract: Bangumi resolved the "auth optional" shape
+    # by staying ``auth_required=False`` (anonymous-public) while its optional
+    # personal token reports ``verify_method='live_probe'`` when configured. The
+    # ``| None`` is kept for the three surfaces' older-backend fallback path, not
+    # because any provider emits it today.
+    auth: SourceAuthContract | None = None
     # Optional personal-token dimension (currently Bangumi only): ``"ok"`` when a
     # token is configured and not rejected, ``"rejected"`` when Bangumi denied it
     # and discovery degraded to anonymous, ``""`` when no token is configured.
@@ -677,6 +705,146 @@ class SourcesStatusResponse(BaseModel):
     bangumi: SourceStatusItem = Field(default_factory=SourceStatusItem)
 
 
+class SourceVerifyResponse(BaseModel):
+    """Result of ``POST /api/sources/{slug}/verify``.
+
+    ``outcome`` is a deliberate third state alongside success and failure.
+    "Could not tell" is a real answer — a proxy hiccup, an extension that never
+    replied, a throttled platform, or YouTube needing no login at all — and
+    rendering any of those as a failure would tell users their credential is
+    broken when it is not. The frontends key their tone off this field rather
+    than each re-deriving one from ``auth.verification``; three surfaces
+    independently mapping six values to three tones is exactly the drift that
+    produced the two divergent status maps in spec D6.
+
+    ``changed`` is true only when the verification moved ``auth.credential`` or
+    ``auth.verification``. A live probe rewrites ``verified_at`` on every call,
+    so a timestamp refresh alone is not a change.
+
+    ``replayed`` says this response reused a stored result instead of doing the
+    work, so the frontends can stop a debounced click from looking identical to
+    a fresh one — otherwise a user who just repaired a cookie clicks again,
+    gets the cached failure back, and concludes the repair failed.
+    ``retry_after_seconds`` carries the debounce window itself so no surface has
+    to hardcode it (invariant I4).
+    """
+
+    slug: str = ""
+    outcome: Literal["verified", "failed", "indeterminate"] = "indeterminate"
+    changed: bool = False
+    message: str = ""
+    replayed: bool = False
+    retry_after_seconds: float = 0.0
+    auth: SourceAuthContract = Field(default_factory=SourceAuthContract)
+
+
+class SourceCredentialWriteIn(BaseModel):
+    """Body of ``POST /api/sources/{slug}/credential`` — the one write shape.
+
+    ``kind`` is explicit rather than inferred from the slug because 小红书
+    accepts two genuinely different things: a login *state* (a bare boolean the
+    extension reports) and content access *tokens* (per-note ``xsec_token``
+    values that say nothing about being logged in). Letting the platform imply
+    the kind is how those two ended up sharing a "credential" vocabulary in the
+    first place (spec D5).
+    """
+
+    kind: Literal["cookie", "token", "login_state"] = "cookie"
+    value: bool | str = ""
+    source: str = Field(
+        default="settings",
+        description="Where the credential came from. Telemetry only.",
+    )
+    pairs: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="``kind='token'`` only: {note_id, xsec_token} pairs.",
+    )
+    # There is deliberately no ``validate_live`` opt-out. It shipped here with
+    # no caller anywhere — not the extension, not the three frontends, not the
+    # CLI — and offered anything that could reach localhost a documented way to
+    # turn off the one promise this endpoint is named after, in exchange for
+    # nothing. **No write surface has such a switch any more**: the deprecated
+    # route's ``validate_with_bilibili`` is still accepted on the wire (installed
+    # extensions send it) but no longer consulted. Deleting the flag here while
+    # leaving the identical one running next door would have made the deletion
+    # cosmetic — "the extension always sends true" describes the extension, not
+    # everything that can reach this port.
+
+
+class SourceCredentialWriteResponse(BaseModel):
+    """Result of a unified credential write.
+
+    ``checked`` is the honesty field required by invariant I5: a write that
+    could not be verified says so instead of returning a bare success, and
+    ``unverified_reason`` carries the platform-specific "why". Without it the
+    only way to tell a probed B站 cookie from an unprobed 知乎 boolean would be
+    to know the implementation — which is exactly the confusion the orthogonal
+    contract exists to end.
+
+    ``auth`` is the freshly recomputed contract, so a save and a status poll
+    can never disagree about what just happened. It is the receipt that the old
+    save-and-hope-for-the-best flow never gave anyone (spec D7).
+    """
+
+    slug: str = ""
+    accepted: bool = False
+    error_code: str = ""
+    message: str = ""
+    # False on an accepted no-op: the incoming value was already the stored one.
+    persisted: bool = False
+    checked: Literal["live_probe", "structural", "none"] = "none"
+    unverified_reason: str = ""
+    cookie_names: list[str] = Field(default_factory=list)
+    auth: SourceAuthContract = Field(default_factory=SourceAuthContract)
+
+
+class FormAction(BaseModel):
+    """One button a settings surface may offer for a credential.
+
+    Actions are advertised only where the capability exists. ``clear`` is
+    deliberately absent from every platform: no endpoint can erase a stored
+    credential today (``PUT /api/config`` reads an empty field as "not edited",
+    which is the opposite of a delete), and a button that silently does nothing
+    is exactly the "appears to work" failure CLAUDE.md pitfall #7 is about.
+    """
+
+    action: Literal["verify", "copy", "open_login_window"]
+    label: str
+    #: ``open_login_window`` only — where the user goes to log in.
+    url: str = ""
+
+
+class CredentialFormSpec(BaseModel):
+    """How a settings surface should ask for one platform's credential.
+
+    The point of shipping this from the backend is invariant I4: with a
+    descriptor, three frontends render seven platforms without a single
+    ``key === "xiaohongshu"``. Without it, each surface re-derives "does this
+    platform even take a paste box" from platform knowledge it has no business
+    holding — and the two that got it wrong disagreed about 小红书.
+
+    ``kind`` is a *capability* statement, so ``extension_only`` is binding: the
+    backend stores no pasteable credential for those platforms, and a surface
+    that renders an input anyway is inviting the user to type into a void.
+    """
+
+    kind: Literal["cookie_textarea", "token_input", "extension_only", "none"] = "none"
+    label: str = ""
+    placeholder: str = ""
+    #: Name of the env var that overrides this credential, or ``None`` when the
+    #: platform honours no env var.
+    env_var: str | None = None
+    required_keys: list[str] = Field(default_factory=list)
+    #: How ``required_keys`` is evaluated. 抖音 accepts *any one* of three
+    #: session cookies, so rendering its three names as jointly required would
+    #: tell users the write path demands something it does not. The spec's
+    #: original field table had only ``required_keys``; splitting the mode out
+    #: keeps the descriptor honest instead of overstating the gate.
+    required_keys_mode: Literal["all", "any"] = "all"
+    actions: list[FormAction] = Field(default_factory=list)
+    help_text: str = ""
+
+
 class SourceCredentialItem(BaseModel):
     """Current local credential snapshot for a source settings page."""
 
@@ -684,6 +852,14 @@ class SourceCredentialItem(BaseModel):
     value: str = ""
     available: bool = False
     detail: str = ""
+    #: How to ask for this credential. Added in Phase 4 so the frontends stop
+    #: hardcoding per-platform form knowledge.
+    form: CredentialFormSpec = Field(default_factory=CredentialFormSpec)
+    #: Ready-to-render summary line for the credential row. Lives here rather
+    #: than in three ``if (available)`` ladders because 小红书 needs a different
+    #: sentence ("a content token is saved, which is not a login") and that
+    #: sentence was the last per-platform branch on the desktop page.
+    summary: str = ""
 
 
 class SourcesCredentialsResponse(BaseModel):

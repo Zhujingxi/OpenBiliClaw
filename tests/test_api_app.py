@@ -2307,12 +2307,25 @@ class TestBackendAPI:
             "stale",
             "error",
         }
-        assert body["bangumi"]["state"] == "disabled"
-        assert body["bangumi"]["logged_in"] is False
+        # Bangumi is now on the contract: anonymous-public, so state is always
+        # no_auth and logged_in True (discovery-health rides detail, not state,
+        # and the enable switch stays its own field).
+        assert body["bangumi"]["state"] == "no_auth"
+        assert body["bangumi"]["logged_in"] is True
+        assert body["bangumi"]["auth"] is not None
+        assert body["bangumi"]["auth"]["auth_required"] is False
 
-    def test_bangumi_source_status_uses_local_readiness_for_logged_in_flag(
+    def test_bangumi_status_is_no_auth_with_discovery_health_in_detail(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
+        """On the contract, Bangumi's auth verdict is fixed; discovery rides detail.
+
+        It used to fold discovery readiness into ``state`` (``unverified`` →
+        ``ready``) and derive ``logged_in`` from it — the D1 conflation the
+        contract removes. Now ``state`` is always ``no_auth`` (anonymous-public)
+        and ``logged_in`` always True; a completed discovery run moves the
+        *detail*, not the auth verdict.
+        """
         from fastapi.testclient import TestClient
 
         from openbiliclaw.config import Config
@@ -2327,20 +2340,25 @@ class TestBackendAPI:
             create_app(memory_manager=object(), database=database, soul_engine=object())
         )
 
-        unverified = client.get("/api/sources/status").json()["bangumi"]
+        before = client.get("/api/sources/status").json()["bangumi"]
 
-        assert unverified["state"] == "unverified"
-        assert unverified["logged_in"] is False
+        assert before["state"] == "no_auth"
+        assert before["logged_in"] is True
+        assert before["detail"] == "尚未运行 Bangumi 内容发现。"
+        assert before["auth"]["auth_required"] is False
+        assert before["auth"]["verify_method"] == "none"  # no token configured
 
         database.conn.execute(
             "INSERT INTO bangumi_discovery_runs(mode, units, discovered, reason) "
             "VALUES ('search', 1, 1, 'ok')"
         )
         database.conn.commit()
-        ready = client.get("/api/sources/status").json()["bangumi"]
+        after = client.get("/api/sources/status").json()["bangumi"]
 
-        assert ready["state"] == "ready"
-        assert ready["logged_in"] is True
+        # Auth verdict unchanged; only the discovery-health detail moved.
+        assert after["state"] == "no_auth"
+        assert after["logged_in"] is True
+        assert after["detail"] != before["detail"]
 
     def test_bangumi_status_exposes_token_state_three_states(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2410,15 +2428,18 @@ class TestBackendAPI:
         )
 
         bare = client.get("/api/sources/status").json()["bangumi"]
-        assert bare["state"] == "disabled"
+        # state is the auth verdict (no_auth) now, never the enable switch (D12);
+        # "off" lives in ``enabled``, and the saved-but-idle credential in detail.
+        assert bare["state"] == "no_auth"
+        assert bare["enabled"] is False
         assert bare["token_state"] == ""
         assert bare["detail"] == "Bangumi 来源未启用。"
 
         cfg.sources.bangumi.access_token = "tok"
         with_token = client.get("/api/sources/status").json()["bangumi"]
-        assert with_token["state"] == "disabled"
+        assert with_token["state"] == "no_auth"
         assert with_token["enabled"] is False
-        assert with_token["logged_in"] is False
+        assert with_token["logged_in"] is True
         # "ok" (not "rejected") so the desktop / popup renderers keep the
         # neutral "来源未启用" tone instead of the red token warning.
         assert with_token["token_state"] == "ok"
@@ -3505,10 +3526,29 @@ class TestBackendAPI:
 
         from fastapi.testclient import TestClient
 
+        from openbiliclaw.api.source_auth import verify
         from openbiliclaw.config import Config, save_config
 
         monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
         save_config(Config(), tmp_path / "config.toml")
+
+        # Douyin cookies are now live-checked before they land — the endpoint
+        # used to store whatever arrived, on the strength of a docstring claim
+        # that no clean login probe existed (refuted in spec D11). Stub the one
+        # shared probe so this test stays offline.
+        probed: list[str] = []
+
+        async def _probe(slug, *, cfg, cookie=None, probes=None, record=True):
+            probed.append(str(cookie or ""))
+            return verify.LiveProbeOutcome(
+                slug=slug,
+                has_credential=True,
+                authenticated=True,
+                network_error=False,
+                message="stubbed probe",
+            )
+
+        monkeypatch.setattr(verify, "run_live_probe", _probe)
 
         app = create_app(memory_manager=object(), database=object(), soul_engine=object())
         client = TestClient(app)
@@ -3531,6 +3571,7 @@ class TestBackendAPI:
         assert payload["cookie"] == cookie_value
         assert payload["source"] == "extension"
         assert cookie_value not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert probed == [cookie_value]
 
     def test_events_endpoint_persists_batch(self) -> None:
         from fastapi.testclient import TestClient

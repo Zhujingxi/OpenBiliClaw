@@ -148,9 +148,16 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
     setup_html = Path("src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
     app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
+    shared = Path("src/openbiliclaw/web/shared/source-status.js").read_text(encoding="utf-8")
+
     assert "勾选会同时开启该来源" in setup_html
     assert "selectedSourcesNeedingEnable" not in setup_html
     assert "还没在设置里开启" not in setup_html
+    # The wizard builds its checkbox list from the shared roster instead of a
+    # third hand-kept copy, so it can no longer offer a platform the settings
+    # pages do not know about (spec I6).
+    assert "SourceStatus.SOURCE_KEYS.map" in setup_html
+    assert 'src="/shared/source-status.js"' in setup_html
     for source in (
         "bilibili",
         "xiaohongshu",
@@ -161,7 +168,7 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
         "reddit",
         "bangumi",
     ):
-        assert f'key: "{source}"' in setup_html
+        assert f'"{source}"' in shared
         assert f'key: "{source}"' in app_js
 
 

@@ -172,8 +172,14 @@ def test_both_frontends_actually_render_the_backend_field() -> None:
     for name in ("desktop js", "popup js"):
         source = SETTINGS_SURFACES[name].read_text(encoding="utf-8")
         assert "applySourceNetworkHint" in source, name
-        # Rendered from the backend field, and gated only on `enabled`.
-        assert re.search(r"applySourceNetworkHint\(row, item\.network_hint,", source), name
+        # Rendered from the backend field. The call once read
+        # ``(row, item.network_hint, …)``; it now also gates on whether a
+        # credential is present, so a source with nothing configured does not
+        # get told which network its (absent) credential needs. Match the
+        # backend field reaching the call, not one particular argument shape —
+        # pinning the shape makes any refinement of the gate look like a
+        # regression.
+        assert re.search(r"applySourceNetworkHint\(\s*row,[^)]*item\.network_hint", source), name
         # Rendered as text, never as HTML — the copy reaches the DOM verbatim.
         assert "node.textContent = text;" in source, name
         assert "node.innerHTML" not in source, name

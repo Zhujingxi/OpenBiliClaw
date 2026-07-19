@@ -115,10 +115,23 @@ class XSourceHealthStore:
         *,
         rate_limit_cooldown_minutes: int = 30,
         feed_pause_after: int = 3,
+        credential_fingerprint: str = "",
     ) -> None:
+        """*credential_fingerprint* identifies the cookie this store's successes
+        belong to.
+
+        Supplied by the producer, which resolves the cookie once and hands the
+        same one to its :class:`XClient` — so a success recorded here is
+        provably about the credential that made the request. Readers construct
+        the store without it (they never record), and a store built without one
+        records an empty fingerprint, which reads back as "cannot attribute
+        this" and therefore as ``unverified``. That default errs toward
+        under-claiming, which is the only safe direction for a verdict.
+        """
         self._db = db
         self._rate_limit_cooldown_minutes = max(1, int(rate_limit_cooldown_minutes))
         self._feed_pause_after = max(1, int(feed_pause_after))
+        self._credential_fingerprint = str(credential_fingerprint or "")
         self._ensure_table()
 
     def _ensure_table(self) -> None:
@@ -132,11 +145,14 @@ class XSourceHealthStore:
                 feed_paused          INTEGER NOT NULL DEFAULT 0,
                 cooldown_until       TEXT NOT NULL DEFAULT '',
                 detail               TEXT NOT NULL DEFAULT '',
+                last_success_at      TEXT NOT NULL DEFAULT '',
+                last_success_credential TEXT NOT NULL DEFAULT '',
                 updated_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
-        # Auto-migrate: older DBs predate the escalating-cooldown counter.
+        # Auto-migrate: older DBs predate the escalating-cooldown counter and
+        # the last-success marker.
         columns = {
             str(row["name"])
             for row in self._db.conn.execute("PRAGMA table_info(x_source_health)").fetchall()
@@ -145,6 +161,24 @@ class XSourceHealthStore:
             self._db.conn.execute(
                 "ALTER TABLE x_source_health "
                 "ADD COLUMN consecutive_rate_limits INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_success_credential" not in columns:
+            # Also not backfilled, for the same reason as ``last_success_at``:
+            # an old row records that *a* success happened, never which cookie
+            # earned it, and inventing an attribution is the defect itself.
+            self._db.conn.execute(
+                "ALTER TABLE x_source_health "
+                "ADD COLUMN last_success_credential TEXT NOT NULL DEFAULT ''"
+            )
+        if "last_success_at" not in columns:
+            # Deliberately NOT backfilled from ``updated_at``. Nothing in an
+            # existing row distinguishes "a fetch succeeded" from "the row was
+            # created", which is the whole reason this column exists — guessing
+            # here would re-create the fabricated verdict one migration later.
+            # Cost of leaving it blank: X reads ``unverified`` until the next
+            # successful fetch, i.e. until the next discovery cycle.
+            self._db.conn.execute(
+                "ALTER TABLE x_source_health ADD COLUMN last_success_at TEXT NOT NULL DEFAULT ''"
             )
         self._db.conn.execute(
             "INSERT OR IGNORE INTO x_source_health (key, state) VALUES (?, 'ok')",
@@ -155,7 +189,15 @@ class XSourceHealthStore:
     # ── reads ────────────────────────────────────────────────────────
 
     def get(self) -> dict[str, Any]:
-        """Return the current health row as a JSON-friendly dict."""
+        """Return the current health row as a JSON-friendly dict.
+
+        ``last_success_at`` is the one field that separates "a real request
+        succeeded with this cookie" from "this row has never been used". The
+        row is *created* with ``state='ok'``, so ``state`` alone cannot tell
+        them apart — and reading ``ok`` as a verdict is how a never-used, even
+        long-expired cookie came to report ``verification="verified"`` on the
+        status endpoint (invariant I3).
+        """
         row = self._db.conn.execute(
             "SELECT * FROM x_source_health WHERE key = ?",
             (_ROW_KEY,),
@@ -167,6 +209,8 @@ class XSourceHealthStore:
                 "feed_paused": False,
                 "cooldown_until": "",
                 "detail": "",
+                "last_success_at": "",
+                "last_success_credential": "",
                 "updated_at": "",
             }
         data = dict(row)
@@ -176,6 +220,8 @@ class XSourceHealthStore:
             "feed_paused": bool(data.get("feed_paused")),
             "cooldown_until": str(data.get("cooldown_until") or ""),
             "detail": str(data.get("detail") or ""),
+            "last_success_at": str(data.get("last_success_at") or ""),
+            "last_success_credential": str(data.get("last_success_credential") or ""),
             "updated_at": str(data.get("updated_at") or ""),
         }
 
@@ -212,6 +258,12 @@ class XSourceHealthStore:
         For-You success additionally lifts the For-You auto-pause.
         """
         feed_clear = self._is_feed(strategy)
+        # The only writer of ``last_success_at`` / ``last_success_credential``.
+        # A real request came back clean, which is the sole evidence the
+        # ``passive_health`` verify method may rest on — and the fingerprint
+        # records *whose* evidence it is. Without that second half the marker
+        # says "this platform succeeded once", so swapping in a brand-new cookie
+        # silently inherited the previous one's verdict, timestamp and all.
         self._db.conn.execute(
             """
             UPDATE x_source_health
@@ -220,12 +272,20 @@ class XSourceHealthStore:
                    consecutive_rate_limits = 0,
                    cooldown_until = '',
                    detail = '',
+                   last_success_at = ?,
+                   last_success_credential = ?,
                    feed_failures = CASE WHEN ? THEN 0 ELSE feed_failures END,
                    feed_paused = CASE WHEN ? THEN 0 ELSE feed_paused END,
                    updated_at = CURRENT_TIMESTAMP
              WHERE key = ?
             """,
-            (1 if feed_clear else 0, 1 if feed_clear else 0, _ROW_KEY),
+            (
+                _now().isoformat(),
+                self._credential_fingerprint,
+                1 if feed_clear else 0,
+                1 if feed_clear else 0,
+                _ROW_KEY,
+            ),
         )
         self._db.conn.commit()
 
@@ -242,6 +302,12 @@ class XSourceHealthStore:
         cookie problem). Also lifts any For-You auto-pause, since the failures
         that tripped it were attributable to the same expired session. Returns
         True when a block was actually cleared.
+
+        ``last_success_at`` is *cleared*, not preserved: the reset is an
+        optimistic unblock granted on the strength of a new credential, not a
+        result obtained with it. Any earlier success belonged to the cookie
+        that just got replaced, and letting it stand would hand the new one a
+        verified badge it has done nothing to earn.
         """
         if self.get()["state"] not in _RELOGIN_STATES:
             return False
@@ -255,6 +321,8 @@ class XSourceHealthStore:
                    feed_paused = 0,
                    cooldown_until = '',
                    detail = '',
+                   last_success_at = '',
+                   last_success_credential = '',
                    updated_at = CURRENT_TIMESTAMP
              WHERE key = ?
             """,

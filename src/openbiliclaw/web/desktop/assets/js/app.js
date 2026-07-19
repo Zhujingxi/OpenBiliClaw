@@ -5873,8 +5873,16 @@ ${cardFeedbackBarHtml()}`;
 
     // Unified per-source login / cookie status (GET /api/sources/status),
     // rendered with separate scheduling and credential/plugin states.
-    const SOURCE_STATUS_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
-    const CURRENT_CREDENTIAL_KEYS = ["bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "bangumi"];
+    //
+    // The state -> label/tone table, the verify tones and the credential-row
+    // shape all come from /shared/source-status.js, which the extension side
+    // panel and the setup wizard load too. Keeping a private copy here is what
+    // let the two surfaces drift into painting `no_auth` and `unverified` the
+    // same colour (spec D6). The roster it exports includes Bangumi, so this
+    // page keeps rendering that row even though the backend sends it no `auth`
+    // contract yet; `describeAccess()` falls back to the legacy `state` for it.
+    const SourceStatus = globalThis.OpenBiliClawSourceStatus;
+    const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -5885,28 +5893,30 @@ ${cardFeedbackBarHtml()}`;
       reddit: "redditEnabled",
       bangumi: "bangumiEnabled"
     };
-    const SOURCE_ACCESS_STATE = {
-      ok: { tone: "ready", label: "接入可用" },
-      ready: { tone: "ready", label: "凭据已就绪" },
-      no_auth: { tone: "public", label: "无需登录" },
-      unverified: { tone: "pending", label: "状态待验证" },
-      missing: { tone: "warning", label: "需要登录" },
-      login_required: { tone: "warning", label: "需要登录" },
-      missing_cookie: { tone: "warning", label: "缺少 Cookie" },
-      rate_limited: { tone: "pending", label: "频率受限" },
-      partial: { tone: "warning", label: "部分可用" },
-      stale: { tone: "warning", label: "需要刷新" },
-      error: { tone: "danger", label: "检查失败" },
-      expired: { tone: "danger", label: "凭据失效" },
-      expired_cookie: { tone: "danger", label: "Cookie 失效" },
-      blocked: { tone: "danger", label: "接入受阻" },
-      disabled: { tone: "muted", label: "来源未启用" }
-    };
 
     function setSourceBadge(badge, text, tone) {
       if (!badge) return;
       badge.textContent = text;
       badge.dataset.tone = tone;
+    }
+
+    // How strong the evidence behind the access verdict is, as its own badge
+    // beside it. Two sources can honestly both read 已验证 while one asked the
+    // platform and the other only found a file on disk; before this they were
+    // the same green pill, which is the misreading the contract exists to fix.
+    // Hidden rather than blanked when there is nothing to rate — a source that
+    // needs no credential has no evidence, and an empty pill reads as a bug.
+    function setSourceEvidence(badge, evidence) {
+      if (!badge) return;
+      const shown = Boolean(evidence && evidence.text);
+      badge.hidden = !shown;
+      badge.textContent = shown ? evidence.text : "";
+      badge.dataset.rank = shown ? evidence.rank : "none";
+      // The glyph and the method name already carry the distinction; the title
+      // spells it out for anyone who wants it, and comes from the shared module
+      // so it cannot drift from the glyph it explains.
+      if (shown && evidence.hint) badge.title = evidence.hint;
+      else badge.removeAttribute("title");
     }
 
     // The overseas-egress advisory is authored by the backend
@@ -5949,34 +5959,35 @@ ${cardFeedbackBarHtml()}`;
         if (!row) return;
         const sourceBadge = row.querySelector(".source-source-badge");
         const accessBadge = row.querySelector(".source-access-badge");
+        const evidenceBadge = row.querySelector(".source-evidence-badge");
         const detail = row.querySelector(".src-detail");
         const item = data?.[key];
-        if (!item) {
+        const access = SourceStatus.describeAccess(item);
+        setSourceEvidence(evidenceBadge, access.evidence);
+        if (!access.present) {
           setSourceBadge(sourceBadge, "来源：状态未知", "muted");
-          setSourceBadge(accessBadge, "接入：后端未连接", "muted");
-          if (detail) detail.textContent = "暂时无法读取来源接入状态，请确认后端服务可用。";
+          setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
+          if (detail) detail.textContent = access.detail;
+          // No status means no basis for an egress advisory either; drop any
+          // hint left over from the last successful poll.
           applySourceNetworkHint(row, "", false);
           row.classList.remove("source-row-unsaved");
           row.dataset.sourceEnabled = "unknown";
-          row.dataset.accessTone = "muted";
+          row.dataset.accessTone = access.tone;
           return;
         }
         const enableState = getPendingSourceEnabled(key, item);
-        const tokenRejected = item.token_state === "rejected";
-        const accessState = tokenRejected
-          ? { tone: "danger", label: "令牌已失效" }
-          : (SOURCE_ACCESS_STATE[item.state] || { tone: "muted", label: "状态未知" });
         const sourceLabel = enableState.pending
           ? `来源：${enableState.currentEnabled ? "将启用" : "将停用"}，保存后生效`
           : `来源：${enableState.savedEnabled ? "启用" : "停用"}`;
         setSourceBadge(sourceBadge, sourceLabel, enableState.pending ? "pending" : enableState.savedEnabled ? "enabled" : "disabled");
-        setSourceBadge(accessBadge, `接入：${accessState.label}`, accessState.tone);
+        setSourceBadge(accessBadge, `接入：${access.label}`, access.tone);
         const detailPrefix = enableState.pending ? "开关已改动，保存配置后才会进入/退出调度。 " : "";
-        if (detail) detail.textContent = detailPrefix + (item.detail || "暂无更多状态细节。");
+        if (detail) detail.textContent = detailPrefix + (access.detail || "暂无更多状态细节。");
         applySourceNetworkHint(row, item.network_hint, enableState.currentEnabled);
         row.classList.toggle("source-row-unsaved", enableState.pending);
         row.dataset.sourceEnabled = enableState.currentEnabled ? "true" : "false";
-        row.dataset.accessTone = accessState.tone;
+        row.dataset.accessTone = access.tone;
       });
     }
 
@@ -5987,41 +5998,73 @@ ${cardFeedbackBarHtml()}`;
       renderSourcesStatusRows(data);
     }
 
+    function renderVerifyResult(statusEl, result) {
+      const view = SourceStatus.describeVerifyResult(result);
+      setProbeStatus(statusEl, view.tone, view.text);
+    }
+
+    const sourceVerifyInFlight = new Set();
+
+    async function runSourceVerify(row) {
+      const slug = row?.dataset?.sourceStatus || "";
+      if (!slug || sourceVerifyInFlight.has(slug)) return;
+      const button = row.querySelector(".source-verify-btn");
+      const statusEl = row.querySelector(".source-verify-status");
+      sourceVerifyInFlight.add(slug);
+      if (button) button.disabled = true;
+      renderProbePending(statusEl, "连接");
+      let cooldown = 0;
+      try {
+        const result = await requestJsonStrict(`/sources/${encodeURIComponent(slug)}/verify`, {
+          method: "POST",
+          timeoutMs: 30000
+        });
+        renderVerifyResult(statusEl, result);
+        cooldown = Number(result?.retry_after_seconds) || 0;
+        // Only a verification that actually moved the credential or the verdict
+        // makes the badge above it stale; a refreshed timestamp does not.
+        if (result?.changed) void renderSourcesStatus();
+      } catch (error) {
+        const view = SourceStatus.describeVerifyError(error);
+        setProbeStatus(statusEl, view.tone, view.text);
+      } finally {
+        sourceVerifyInFlight.delete(slug);
+        SourceStatus.startVerifyCooldown(button, cooldown);
+      }
+    }
+
+    $("#sourceStatusList")?.addEventListener("click", (event) => {
+      const button = event.target.closest(".source-verify-btn");
+      if (!button || button.disabled) return;
+      void runSourceVerify(button.closest(".source-status-row"));
+    });
+
     function renderSourceCredentialRows(data) {
       const list = $("#sourceCredentialList");
       if (!list) return;
-      CURRENT_CREDENTIAL_KEYS.forEach((key) => {
+      SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-credential="${key}"]`);
         if (!row) return;
         const summary = row.querySelector(".source-credential-summary");
         const value = row.querySelector(".source-credential-value");
         const copyBtn = row.querySelector(".source-credential-copy");
-        const item = data?.[key];
-        if (!item) {
-          row.dataset.available = "false";
-          if (summary) summary.textContent = "状态暂不可用";
-          if (value) value.value = "暂时无法读取当前 Cookie / 登录凭据。";
-          if (copyBtn) copyBtn.disabled = true;
-          return;
-        }
-        row.dataset.available = item.available ? "true" : "false";
-        if (summary) {
-          if (key === "xiaohongshu" && item.available) {
-            summary.textContent = "xsec_token 内容令牌已保存（不代表账号登录），展开查看";
-          } else {
-            summary.textContent = item.available
-              ? `${item.label || "Cookie"} 已保存，展开查看`
-              : item.detail || "当前没有可展示 Cookie";
-          }
-        }
-        if (value) {
-          value.value = item.value || item.detail || "当前没有可展示 Cookie / 登录凭据。";
-        }
-        if (copyBtn) copyBtn.disabled = !item.available;
+        // Summary wording is the backend's, including 小红书's "a stored
+        // content token is not a login" caveat. That caveat used to be a
+        // per-platform branch right here, so only this page ever showed it —
+        // the side panel and the setup wizard silently disagreed.
+        const view = SourceStatus.describeCredential(data?.[key]);
+        row.dataset.available = view.available ? "true" : "false";
+        row.dataset.formKind = view.form.kind;
+        if (summary) summary.textContent = view.summary;
+        if (value) value.value = view.value;
+        if (copyBtn) copyBtn.disabled = !view.canCopy;
       });
-      // Reddit's paste box has no config-side cookie field (the value goes to
-      // rdt-cli's credential store), so its "已保存/未保存" placeholder is driven
-      // by credential availability instead of the config snapshot.
+      // Not a display branch over the access enum: every other paste box gets
+      // its "已保存/未保存" placeholder from the config snapshot in
+      // populateForm(), but Reddit's credential goes to rdt-cli's own store, so
+      // config.toml has no field to read and the hint has to come from here.
+      // Generalising it would mean either a new contract field or moving three
+      // other platforms off the config snapshot — both beyond this change.
       setCookieOverrideInput("redditCookie", data?.reddit?.available ? "synced" : "", " Reddit");
     }
 
@@ -7786,18 +7829,26 @@ ${cardFeedbackBarHtml()}`;
       });
     }
 
+    // One DOM convention for every "click, wait, read a verdict" strip on this
+    // page: tone in the dataset, verdict in the text. The LLM/embedding probes
+    // and the per-source 测试连接 buttons share it instead of each keeping a
+    // private copy — two independent copies of one rendering rule is exactly
+    // the drift that left the codebase with two divergent source status maps.
+    function setProbeStatus(statusEl, tone, text) {
+      if (!statusEl) return;
+      statusEl.dataset.tone = tone;
+      statusEl.textContent = text;
+    }
+
     function renderProbeResult(statusEl, result) {
       if (!statusEl) return;
-      statusEl.dataset.tone = result?.ok ? "success" : "error";
-      statusEl.textContent = formatProbeResult(result);
+      setProbeStatus(statusEl, result?.ok ? "success" : "error", formatProbeResult(result));
       const configStatus = $("#configStatus");
       if (configStatus) configStatus.value = formatProbeResult(result);
     }
 
     function renderProbePending(statusEl, label) {
-      if (!statusEl) return;
-      statusEl.dataset.tone = "pending";
-      statusEl.textContent = `${label} 探测中…`;
+      setProbeStatus(statusEl, "pending", `${label} 探测中…`);
     }
 
     async function runLlmConfigProbe() {
