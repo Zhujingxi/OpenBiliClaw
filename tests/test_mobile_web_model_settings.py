@@ -552,6 +552,32 @@ def test_mobile_model_controls_have_touch_targets_and_visible_focus() -> None:
     assert ".mobile-model-route-layout.is-detail" in css
 
 
+def test_mobile_shared_renderers_emit_classes_covered_by_mobile_css() -> None:
+    model = _read(MODEL_PATH)
+    shared_render = _read(WEB / "shared/model-config-render.js")
+    css = _read(CSS_PATH)
+
+    # Mobile passes the mobile class prefix into both shared renderers.
+    assert 'classPrefix: "mobile-model"' in model
+    assert model.count('classPrefix: "mobile-model"') >= 2
+
+    # The shared renderers must emit prefixed classes.
+    assert '"${classPrefix}-type-group"' in shared_render
+    assert '"${classPrefix}-type-option"' in shared_render
+    assert '"${classPrefix}-credential-actions"' in shared_render
+    assert '"${classPrefix}-credential-action"' in shared_render
+
+    # The mobile stylesheet must cover the emitted mobile classes.
+    for selector in (
+        ".mobile-model-type-group",
+        ".mobile-model-type-option",
+        '.mobile-model-type-option[aria-selected="true"]',
+        ".mobile-model-credential-actions",
+        '.mobile-model-credential-actions button[aria-pressed="true"]',
+    ):
+        assert selector in css
+
+
 def test_mobile_does_not_offer_the_one_click_ollama_convenience_path() -> None:
     model = _read(MODEL_PATH)
     config_docs = _read(ROOT / "docs/modules/config.md")

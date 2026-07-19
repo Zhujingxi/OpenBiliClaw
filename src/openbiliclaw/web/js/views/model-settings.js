@@ -719,6 +719,7 @@ export async function openMobileSettings(opener) {
       kind: state.activeRoute,
       locked,
       query: byId("mobileModelTypeSearch")?.value || "",
+      classPrefix: "mobile-model",
     });
     applyTypeOptionRovingTabindex(host);
   }
@@ -762,6 +763,7 @@ export async function openMobileSettings(opener) {
       fieldClass: "mobile-model-field",
       credentialValueId: "mobileModelCredentialValue",
       noteClass: "mobile-settings-hint",
+      classPrefix: "mobile-model",
     });
     host.hidden = rendered.hidden;
     host.innerHTML = rendered.html;

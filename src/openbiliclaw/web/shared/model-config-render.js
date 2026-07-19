@@ -101,6 +101,13 @@ export function renderDescriptorField(options) {
 /**
  * Render the credential editor for a route item. OAuth descriptors render a
  * read-only status line (decision 10 of the redesign plan).
+ *
+ * @param {object} options
+ * @param {string} [options.classPrefix] class prefix for the action row and
+ *   buttons, e.g. "model" (desktop) or "mobile-model" (mobile). The mobile
+ *   stylesheet styles `.mobile-model-credential-actions` and its pressed
+ *   buttons; the desktop stylesheet styles `.model-credential-actions` and
+ *   `.model-credential-action`.
  */
 export function renderCredentialEditor(options) {
   const {
@@ -112,6 +119,7 @@ export function renderCredentialEditor(options) {
     fieldClass = "settings-field",
     credentialValueId = "modelCredentialValue",
     noteClass = "settings-note-inline",
+    classPrefix = "model",
   } = options;
   if (!record) return { hidden: true, html: "" };
   const definition = descriptor?.fields?.find((field) => field.name === "credential");
@@ -145,7 +153,7 @@ export function renderCredentialEditor(options) {
     html: `
     <strong>凭据来源</strong>
     <p class="${noteClass}">${escapeHtml(sourceLabel)}</p>
-    <div class="model-credential-actions">${actions.map(([action, label]) => `<button class="model-credential-action" type="button" data-model-credential-action="${action}" aria-pressed="${credential.action === action ? "true" : "false"}"${disabled}>${label}</button>`).join("")}</div>
+    <div class="${classPrefix}-credential-actions">${actions.map(([action, label]) => `<button class="${classPrefix}-credential-action" type="button" data-model-credential-action="${action}" aria-pressed="${credential.action === action ? "true" : "false"}"${disabled}>${label}</button>`).join("")}</div>
     ${needsValue ? `<label class="${fieldClass}"><span>${credential.action === "env" ? "环境变量名" : "新 API Key"}</span><input id="${escapeHtml(credentialValueId)}" type="${credential.action === "set" ? "password" : "text"}" value="${escapeHtml(credential.value || "")}" autocomplete="new-password"${disabled}></label>` : ""}
     ${errorMarkup(record.id, "credential")}`,
   };
@@ -154,6 +162,14 @@ export function renderCredentialEditor(options) {
 /**
  * Render the grouped, searchable connection-type listbox. The caller owns the
  * search-query state; this renders from the *filtered* descriptor groups.
+ *
+ * @param {object} options
+ * @param {string} [options.classPrefix] class prefix for the group, title,
+ *   option, and empty-state classes, e.g. "model" (desktop) or "mobile-model"
+ *   (mobile). The mobile stylesheet styles `.mobile-model-type-group`,
+ *   `.mobile-model-type-option`, and `.mobile-model-connection-type-groups`;
+ *   the desktop stylesheet styles `.model-type-group`, `.model-type-option`,
+ *   and `.model-empty-types`.
  */
 export function renderConnectionTypeGroups(options) {
   const {
@@ -163,6 +179,7 @@ export function renderConnectionTypeGroups(options) {
     locked = false,
     query = "",
     emptyLabel = "没有匹配的连接类型。",
+    classPrefix = "model",
   } = options;
   if (!record) return "";
   const needle = String(query || "").trim().toLowerCase();
@@ -182,16 +199,16 @@ export function renderConnectionTypeGroups(options) {
     });
     if (!matches.length) continue;
     blocks.push(`
-      <section class="model-type-group" data-model-type-category="${escapeHtml(group.category)}">
-        <p class="model-type-group-title">${escapeHtml(categoryLabel(group.category))}</p>
+      <section class="${classPrefix}-type-group" data-model-type-category="${escapeHtml(group.category)}">
+        <p class="${classPrefix}-type-group-title">${escapeHtml(categoryLabel(group.category))}</p>
         ${matches.map((descriptor) => `
-          <button class="model-type-option" type="button" role="option" tabindex="-1" data-model-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record.type ? "true" : "false"}"${disabledMarkup(locked)}>
+          <button class="${classPrefix}-type-option" type="button" role="option" tabindex="-1" data-model-type="${escapeHtml(descriptor.id)}" aria-selected="${descriptor.id === record.type ? "true" : "false"}"${disabledMarkup(locked)}>
             <span><strong>${escapeHtml(descriptor.label)}</strong><small>${escapeHtml(descriptor.help)}</small></span>
             <small>${escapeHtml(descriptor.category === "oauth" ? "OAuth" : descriptor.id)}</small>
           </button>`).join("")}
       </section>`);
   }
-  return blocks.join("") || `<p class="model-empty-types">${escapeHtml(emptyLabel)}</p>`;
+  return blocks.join("") || `<p class="${classPrefix}-empty-types">${escapeHtml(emptyLabel)}</p>`;
 }
 
 /** Keyboard roving-tabindex handler for the connection-type listbox. */
