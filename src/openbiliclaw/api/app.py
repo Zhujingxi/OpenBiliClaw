@@ -1282,6 +1282,34 @@ def _safe_logging_filename_for_wire(filename: str) -> str:
     return filename
 
 
+def _is_redacted_logging_echo(
+    canonical: str, submitted: str, wire_fn: Callable[[str], str]
+) -> bool:
+    """Return True when *submitted* is the harmless wire echo of *canonical*.
+
+    ``GET /api/config`` redacts absolute/``~``/UNC logging paths to their
+    basename.  When a client performs an unchanged round-trip (GET → modify
+    unrelated settings → PUT), the payload contains that basename instead of
+    the real path.  Treating it as a new value would silently rewrite the
+    canonical config.  This helper detects the echo so the PUT handler can
+    skip the field.
+
+    Rules:
+    - If *canonical* is not redacted (relative path), the wire form equals
+      the canonical form; any *submitted* value is therefore intentional.
+    - If *canonical* is redacted, the wire form is its basename.  A matching
+      *submitted* value is considered an unchanged echo and must be ignored.
+      A non-matching value is treated as an intentional edit.
+    """
+    if not canonical:
+        return False
+    wire = str(wire_fn(canonical))
+    if wire == canonical:
+        # Not redacted → no echo possible.
+        return False
+    return bool(submitted == wire)
+
+
 def create_app(
     *,
     memory_manager: Any | None = None,
@@ -11051,7 +11079,22 @@ def create_app(
         # Apply logging updates
         if "logging" in update:
             ldata = update["logging"]
-            for key in ("level", "file_level", "directory", "filename"):
+            # directory/filename may arrive as the redacted wire echo from
+            # GET /api/config (absolute paths reduced to basename).  An
+            # unchanged round-trip must not overwrite the canonical path.
+            if "directory" in ldata:
+                submitted_dir = str(ldata["directory"])
+                if not _is_redacted_logging_echo(
+                    cfg.logging.directory, submitted_dir, _safe_logging_directory_for_wire
+                ):
+                    cfg.logging.directory = submitted_dir
+            if "filename" in ldata:
+                submitted_name = str(ldata["filename"])
+                if not _is_redacted_logging_echo(
+                    cfg.logging.filename, submitted_name, _safe_logging_filename_for_wire
+                ):
+                    cfg.logging.filename = submitted_name
+            for key in ("level", "file_level"):
                 if key in ldata:
                     setattr(cfg.logging, key, str(ldata[key]))
             for key in (

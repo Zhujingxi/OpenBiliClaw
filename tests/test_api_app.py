@@ -10230,6 +10230,108 @@ class TestConfigApiE2E:
         assert "fileserver" not in data["logging"]["file_path"]
         assert "private" not in data["logging"]["file_path"]
 
+    def test_put_config_unchanged_roundtrip_preserves_absolute_logging_paths(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """GET → unchanged PUT must not overwrite canonical absolute paths.
+
+        Regression for the review finding that the redacted GET projection
+        (basename only) was accepted as canonical state by PUT, so saving an
+        unrelated setting silently rewrote ``/srv/private/openbiliclaw/logs``
+        to ``logs``.  The backend must detect the redacted echo and skip
+        applying directory/filename.
+        """
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "/srv/private/backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        # 1. GET returns the redacted wire form.
+        get_resp = client.get("/api/config")
+        assert get_resp.status_code == 200
+        wire_logging = get_resp.json()["logging"]
+        assert wire_logging["directory"] == "logs"
+        assert wire_logging["filename"] == "backend.log"
+        assert wire_logging["file_path"] == "logs/backend.log"
+
+        # 2. PUT the same logging object back (simulates unchanged settings
+        #    save from desktop/extension).  The redacted values must be
+        #    treated as echo, not as new canonical state.
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": wire_logging},
+        )
+        assert put_resp.status_code == 200
+
+        # Runtime config must still hold the original absolute paths.
+        assert cfg.logging.directory == "/srv/private/openbiliclaw/logs"
+        assert cfg.logging.filename == "/srv/private/backend.log"
+
+        # Persisted config.toml must also hold the original values.
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "/srv/private/openbiliclaw/logs"
+        assert persisted.logging.filename == "/srv/private/backend.log"
+
+    def test_put_config_unchanged_roundtrip_preserves_tilde_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """GET → unchanged PUT must not overwrite a ``~``-prefixed directory."""
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "~/private-logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        get_resp = client.get("/api/config")
+        assert get_resp.status_code == 200
+        wire_logging = get_resp.json()["logging"]
+        assert wire_logging["directory"] == "private-logs"
+        assert wire_logging["filename"] == "backend.log"
+
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": wire_logging},
+        )
+        assert put_resp.status_code == 200
+
+        assert cfg.logging.directory == "~/private-logs"
+        assert cfg.logging.filename == "backend.log"
+
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "~/private-logs"
+        assert persisted.logging.filename == "backend.log"
+
+    def test_put_config_intentional_logging_path_change_still_applies(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A genuinely edited log path must update the canonical config."""
+        from openbiliclaw.config import Config, load_config
+
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "/srv/private/openbiliclaw/logs"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        # Intentionally change to a new relative directory.
+        put_resp = client.put(
+            "/api/config",
+            json={"logging": {"directory": "new-logs", "filename": "new.log"}},
+        )
+        assert put_resp.status_code == 200
+
+        assert cfg.logging.directory == "new-logs"
+        assert cfg.logging.filename == "new.log"
+
+        persisted = load_config(tmp_path / "config.toml")
+        assert persisted.logging.directory == "new-logs"
+        assert persisted.logging.filename == "new.log"
+
     def test_put_config_reddit_cookie_paste_writes_rdt_credential_store(
         self, monkeypatch, tmp_path
     ) -> None:
