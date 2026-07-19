@@ -485,6 +485,151 @@ def test_partial_db_repairs_each_content_cache_column_group(tmp_path: Path) -> N
         assert _column_names(conn, "content_cache") == after_first
 
 
+@pytest.mark.parametrize("method_name,table,expected_columns", _CONVERTED_METHODS)
+def test_partial_db_repairs_each_non_content_table(
+    tmp_path: Path, method_name: str, table: str, expected_columns: set[str]
+) -> None:
+    """Crash-mid-migration shape for the NON-content_cache tables (events,
+    recommendations, llm_usage, discovery_candidates): each converted method
+    must repair its own missing columns from a partial fixture, and the
+    second invocation must be a no-op (review-t_cce76b68 F6).
+    """
+    if table == "content_cache":
+        pytest.skip("content_cache partial states covered by group test above")
+    conn = make_partial_db(tmp_path / table, table, missing_columns=expected_columns)
+    before = _column_names(conn, table)
+    assert not (expected_columns & before), (
+        f"partial fixture for {table} unexpectedly already has migrated columns"
+    )
+
+    db = _make_bare_db(conn)
+    method = getattr(db, method_name)
+
+    method()
+    after_first = _column_names(conn, table)
+    assert expected_columns <= after_first, f"{method_name} did not repair {table}"
+
+    method()
+    assert _column_names(conn, table) == after_first
+
+
+@pytest.mark.parametrize("method_name,table,expected_columns", _CONVERTED_METHODS)
+def test_ensure_columns_does_not_commit_or_rollback(
+    tmp_path: Path, method_name: str, table: str, expected_columns: set[str]
+) -> None:
+    """Transaction-boundary assertion: the additive migrations must NOT
+    commit or rollback on the caller's connection (storage/migrations.py
+    lines 148-151). We prove this by planting a sentinel row in an
+    uncommitted transaction, running the migration, and verifying the
+    sentinel is still uncommitted (visible on this connection but not yet
+    durable), then rolling back and confirming BOTH the sentinel and the
+    added columns are gone (review-t_cce76b68 F6).
+    """
+    if table == "content_cache":
+        # content_cache uses a non-integer primary key; handle separately below.
+        pytest.skip("content_cache transaction boundary covered by dedicated test")
+    conn = make_legacy_conn(tables=[table])
+    # Plant a sentinel row in an UNCOMMITTED transaction.
+    pk_col = "id" if table != "content_cache" else "bvid"
+    sentinel_val = 999999 if pk_col == "id" else "SENTINEL_BVID"
+    # Discover the other columns of the table so we can insert a valid row.
+    cols_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    insert_cols = []
+    insert_vals = []
+    for c in cols_info:
+        name = str(c[1])
+        notnull = bool(c[3])
+        pk = bool(c[5])
+        if pk:
+            insert_cols.append(name)
+            insert_vals.append(sentinel_val)
+        elif notnull:
+            # Provide a default for NOT NULL columns without a default.
+            insert_cols.append(name)
+            col_type = str(c[2]).upper()
+            if "INT" in col_type:
+                insert_vals.append(0)
+            elif "REAL" in col_type or "FLOA" in col_type or "DOUB" in col_type:
+                insert_vals.append(0.0)
+            elif "TEXT" in col_type or "CHAR" in col_type or "CLOB" in col_type:
+                insert_vals.append("")
+            elif "TIMESTAMP" in col_type or "DATE" in col_type:
+                insert_vals.append("2000-01-01 00:00:00")
+            else:
+                insert_vals.append("")
+    cols_csv = ", ".join(insert_cols)
+    placeholders = ", ".join("?" for _ in insert_vals)
+    conn.execute(f"INSERT INTO {table} ({cols_csv}) VALUES ({placeholders})", insert_vals)
+
+    db = _make_bare_db(conn)
+    method = getattr(db, method_name)
+    method()
+
+    # The sentinel row must still be visible on this connection (i.e. the
+    # migration did NOT commit), and the new columns must also be visible
+    # (they were added in the same uncommitted transaction).
+    row = conn.execute(
+        f"SELECT {pk_col} FROM {table} WHERE {pk_col} = ?", (sentinel_val,)
+    ).fetchone()
+    assert row is not None, f"{method_name} unexpectedly committed the transaction"
+    after = _column_names(conn, table)
+    assert expected_columns <= after, f"{method_name} did not add expected columns"
+
+    # Now rollback. Both the sentinel row and the added columns must vanish.
+    conn.rollback()
+    row_after_rollback = conn.execute(
+        f"SELECT {pk_col} FROM {table} WHERE {pk_col} = ?", (sentinel_val,)
+    ).fetchone()
+    assert row_after_rollback is None, (
+        f"{method_name} unexpectedly preserved the sentinel row across rollback"
+    )
+    cols_after_rollback = _column_names(conn, table)
+    assert not (expected_columns & cols_after_rollback), (
+        f"{method_name} columns survived rollback — transaction boundary violated"
+    )
+
+
+def test_ensure_columns_does_not_commit_or_rollback_content_cache(tmp_path: Path) -> None:
+    """Dedicated transaction-boundary test for the content_cache table
+    (TEXT primary key). Same contract as above: no commit, no rollback."""
+    method_name = "_ensure_content_cache_runtime_columns"
+    expected_columns = {
+        "last_scored_at",
+        "notification_sent",
+        "notified_at",
+        "pool_status",
+        "recommended_at",
+        "feedback_type",
+        "feedback_at",
+        "source",
+    }
+    conn = make_legacy_conn(tables=["content_cache"])
+    conn.execute("INSERT INTO content_cache (bvid, title) VALUES ('SENTINEL_BVID', 'sentinel')")
+
+    db = _make_bare_db(conn)
+    method = getattr(db, method_name)
+    method()
+
+    row = conn.execute(
+        "SELECT bvid FROM content_cache WHERE bvid = 'SENTINEL_BVID'"
+    ).fetchone()
+    assert row is not None, f"{method_name} unexpectedly committed the transaction"
+    after = _column_names(conn, "content_cache")
+    assert expected_columns <= after, f"{method_name} did not add expected columns"
+
+    conn.rollback()
+    row_after_rollback = conn.execute(
+        "SELECT bvid FROM content_cache WHERE bvid = 'SENTINEL_BVID'"
+    ).fetchone()
+    assert row_after_rollback is None, (
+        f"{method_name} unexpectedly preserved the sentinel row across rollback"
+    )
+    cols_after_rollback = _column_names(conn, "content_cache")
+    assert not (expected_columns & cols_after_rollback), (
+        f"{method_name} columns survived rollback — transaction boundary violated"
+    )
+
+
 def test_handwritten_multisource_backfill_still_runs_on_legacy() -> None:
     """The hand-written exceptions must still perform their backfill:
     _ensure_content_cache_multisource_columns backfills content_id = bvid

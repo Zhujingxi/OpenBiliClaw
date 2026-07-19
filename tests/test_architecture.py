@@ -188,6 +188,31 @@ def test_new_router_modules_do_not_import_transport_or_construct_storage() -> No
     assert not violations, f"router boundary violations: {violations}"
 
 
+# Direct engine-ish dependency fields that are forbidden on a router's
+# narrow deps dataclass. These names mirror the broad service-locator
+# surface (``ApiServices.database``, ``ApiServices.soul_engine``, etc.) and
+# must never appear as direct fields on a narrow deps bundle — routers
+# receive callables, not engines. Extend this list as new routers are
+# extracted and new engine names emerge (review-t_cce76b68 F5).
+FORBIDDEN_DIRECT_DEP_FIELDS: frozenset[str] = frozenset(
+    {
+        "database",
+        "soul_engine",
+        "engine",
+        "services",
+        "runtime_context",
+        "runtime",
+        "config",
+        "llm_service",
+        "embedding_service",
+        "recommendation_engine",
+        "discovery_engine",
+        "dialogue",
+        "memory",
+    }
+)
+
+
 def test_new_routers_reject_service_locator_and_broad_imports() -> None:
     """R2 mechanical enforcement: extracted routers stay narrow.
 
@@ -219,13 +244,28 @@ def test_new_routers_reject_service_locator_and_broad_imports() -> None:
                     _check_router_import(
                         rel, node.module, None, violations, names=[a.name for a in node.names]
                     )
-                elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute):
-                    # deps.services.<x> / deps.<broad-engine> reach-through.
-                    base = node.value
-                    if isinstance(base.value, ast.Name) and base.attr == "services":
+                elif isinstance(node, ast.Attribute):
+                    # deps.services.<x> reach-through (three-level attribute).
+                    if isinstance(node.value, ast.Attribute):
+                        base = node.value
+                        if isinstance(base.value, ast.Name) and base.attr == "services":
+                            violations.append(
+                                f"{rel}: service-locator reach-through "
+                                f"{base.value.id}.services.{node.attr}"
+                            )
+                    # deps.<engine> direct reach-through (two-level attribute).
+                    # The narrow deps dataclass must only expose callables;
+                    # direct access to an engine-ish field reintroduces
+                    # service-locator semantics through the back door
+                    # (review-t_cce76b68 F5).
+                    if (
+                        isinstance(node.value, ast.Name)
+                        and node.value.id == "deps"
+                        and node.attr in FORBIDDEN_DIRECT_DEP_FIELDS
+                    ):
                         violations.append(
-                            f"{rel}: service-locator reach-through "
-                            f"{base.value.id}.services.{node.attr}"
+                            f"{rel}: direct dependency-field reach-through "
+                            f"{node.value.id}.{node.attr}"
                         )
     assert not violations, f"service-locator / broad-import violations: {violations}"
 
@@ -302,6 +342,25 @@ def test_ratchet_bites_on_synthetic_violations() -> None:
             if isinstance(base.value, ast.Name) and base.attr == "services":
                 found = True
     assert found, "ratchet missed deps.services.<x> reach-through"
+
+    # Direct deps.<engine> reach-through check (review-t_cce76b68 F5).
+    direct_deps_sample = textwrap.dedent(
+        """
+        def handler(deps):
+            return deps.database
+        """
+    )
+    tree = ast.parse(direct_deps_sample)
+    found = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "deps"
+            and node.attr in FORBIDDEN_DIRECT_DEP_FIELDS
+        ):
+            found = True
+    assert found, "ratchet missed deps.<engine> direct reach-through"
 
     # Constructor check (mirrors
     # test_new_router_modules_do_not_import_transport_or_construct_storage).

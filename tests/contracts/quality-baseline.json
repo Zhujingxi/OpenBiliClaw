@@ -5,7 +5,7 @@
     "known_failures": [
       {
         "node_id": "tests/test_aggregate_release_workflow.py::test_aggregate_release_helper_does_not_backfill_previous_channel_assets",
-        "fingerprint": "AssertionError: Traceback (most recent call last):\\n    File \"<stdin>\", line 1, in <module>"
+        "fingerprint": "AssertionError: Traceback (most recent call last):\\n File \"<stdin>\", line <N>, in <module>"
       }
     ],
     "known_skips": [

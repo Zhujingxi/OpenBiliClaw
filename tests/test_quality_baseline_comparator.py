@@ -23,10 +23,14 @@ assert _spec is not None and _spec.loader is not None
 _checker = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_checker)
 
+JUnitStructureError = _checker.JUnitStructureError
 MypyOutputError = _checker.MypyOutputError
 compare_pytest = _checker.compare_pytest
-parse_mypy_output = _checker.parse_mypy_output
 main = _checker.main
+parse_coverage_line_percent = _checker.parse_coverage_line_percent
+parse_junit_failures_and_skips = _checker.parse_junit_failures_and_skips
+parse_mypy_output = _checker.parse_mypy_output
+parse_mypy_summary_kind = _checker.parse_mypy_summary_kind
 
 
 def _write(path: Path, text: str) -> Path:
@@ -37,6 +41,7 @@ def _write(path: Path, text: str) -> Path:
 def _minimal_junit(path: Path, *, failures: dict[str, str] | None = None) -> Path:
     """Write a minimal JUnit XML with one passing test plus any failures."""
     cases = ['<testcase classname="tests.test_ok" name="test_pass"/>']
+    failure_count = 0
     for node, fingerprint in (failures or {}).items():
         cls, _, name = node.partition("::")
         cls_attr = cls.replace("/", ".").removesuffix(".py")
@@ -45,9 +50,11 @@ def _minimal_junit(path: Path, *, failures: dict[str, str] | None = None) -> Pat
             f'<failure message="{fingerprint}">boom</failure>'
             "</testcase>"
         )
+        failure_count += 1
     xml = (
         '<?xml version="1.0" encoding="utf-8"?>'
-        f'<testsuites><testsuite name="pytest" tests="{len(cases)}" errors="0">'
+        f'<testsuites><testsuite name="pytest" tests="{len(cases)}" '
+        f'failures="{failure_count}" errors="0">'
         + "".join(cases)
         + "</testsuite></testsuites>"
     )
@@ -65,6 +72,7 @@ def _baseline(path: Path, *, known_failures: list | None = None) -> Path:
 
 
 MYPY_CLEAN = "Success: no issues found in 227 source files\n"
+MYPY_CLEAN_SINGULAR = "Success: no issues found in 1 source file\n"
 MYPY_WITH_ERROR = (
     "src/openbiliclaw/foo.py:10:5: error: Incompatible types  [assignment]\n"
     "Found 1 error in 1 file (checked 227 source files)\n"
@@ -82,6 +90,10 @@ def test_missing_junit_xml_fails(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 2
@@ -98,6 +110,10 @@ def test_missing_mypy_output_fails(tmp_path: Path) -> None:
             str(tmp_path / "absent.txt"),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 2
@@ -116,6 +132,10 @@ def test_empty_mypy_output_fails_closed(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 2
@@ -134,6 +154,10 @@ def test_crash_only_mypy_output_fails_closed(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 2
@@ -155,6 +179,10 @@ def test_mypy_output_without_summary_fails_closed(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 2
@@ -175,6 +203,10 @@ def test_mypy_output_with_malformed_line_fails_closed(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 2
@@ -196,6 +228,8 @@ def test_mypy_crash_exit_code_fails_even_with_valid_grammar(tmp_path: Path) -> N
             str(baseline),
             "--mypy-exit-code",
             "2",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 1
@@ -214,6 +248,8 @@ def test_pytest_crash_exit_code_fails(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
             "--pytest-exit-code",
             "2",
         ]
@@ -226,9 +262,12 @@ def test_known_failure_with_matching_fingerprint_passes(tmp_path: Path) -> None:
     fp = "AssertionError: expected 1 got 2"
     junit = _minimal_junit(tmp_path / "junit.xml", failures={node: fp})
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    # The fingerprint stored in the baseline must be the NORMALIZED form
+    # (numbers stripped to <N>) because the comparator normalizes the live
+    # JUnit message before comparing.
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[{"node_id": node, "fingerprint": fp}],
+        known_failures=[{"node_id": node, "fingerprint": "AssertionError: expected <N> got <N>"}],
     )
     rc = main(
         [
@@ -238,6 +277,8 @@ def test_known_failure_with_matching_fingerprint_passes(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
             "--pytest-exit-code",
             "1",
         ]
@@ -268,6 +309,8 @@ def test_known_failure_with_different_fingerprint_fails(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "0",
             "--pytest-exit-code",
             "1",
         ]
@@ -287,6 +330,10 @@ def test_new_mypy_diagnostic_fails(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 1
@@ -310,6 +357,10 @@ def test_expected_baseline_diagnostics_pass(tmp_path: Path) -> None:
             str(mypy),
             "--baseline",
             str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
         ]
     )
     assert rc == 0
@@ -380,3 +431,411 @@ def test_compare_pytest_fingerprint_mismatch_unit() -> None:
     # Legacy string-form entries still allow any fingerprint at that node.
     legacy = {"pytest": {"known_failures": ["tests/test_x.py::test_y"], "known_skips": []}}
     assert compare_pytest(legacy, {"tests/test_x.py::test_y": "anything"}, set(), []) == []
+
+
+# ---------------------------------------------------------------------------
+# review-t_cce76b68 F1: exit/artifact reconciliation matrix
+# ---------------------------------------------------------------------------
+
+
+def test_pytest_exit0_with_failing_junit_fails_closed(tmp_path: Path) -> None:
+    """pytest exit 0 (all passed) + JUnit containing a failure is a
+    contradictory pair: must fail closed even if the failure is allowlisted."""
+    node = "tests/test_x.py::test_y"
+    fp = "AssertionError: expected 1 got 2"
+    junit = _minimal_junit(tmp_path / "junit.xml", failures={node: fp})
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[{"node_id": node, "fingerprint": fp}],
+    )
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1
+
+
+def test_pytest_exit1_with_clean_junit_fails_closed(tmp_path: Path) -> None:
+    """pytest exit 1 (tests failed) + clean JUnit is contradictory."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 1
+
+
+def test_mypy_exit0_with_errors_summary_fails_closed(tmp_path: Path) -> None:
+    """mypy exit 0 (clean) + Found-errors summary is contradictory."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_WITH_ERROR)
+    baseline = _baseline(tmp_path / "baseline.json")
+    parsed = parse_mypy_output(MYPY_WITH_ERROR)
+    data = json.loads(baseline.read_text())
+    data["mypy"]["known_diagnostics"] = parsed
+    baseline.write_text(json.dumps(data))
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1
+
+
+def test_mypy_exit1_with_success_summary_fails_closed(tmp_path: Path) -> None:
+    """mypy exit 1 (diagnostics) + Success summary is contradictory."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# review-t_cce76b68 F2: structurally empty / contradictory JUnit
+# ---------------------------------------------------------------------------
+
+
+def test_empty_junit_fails_closed(tmp_path: Path) -> None:
+    """<testsuites/> (no testsuite, no testcase) must fail closed."""
+    junit = _write(tmp_path / "junit.xml", '<?xml version="1.0"?><testsuites/>')
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_junit_with_no_testcase_fails_closed(tmp_path: Path) -> None:
+    """A testsuite with zero testcase elements is also structurally empty."""
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="0" '
+        'failures="0" errors="0"></testsuite></testsuites>',
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_junit_counter_mismatch_fails_closed(tmp_path: Path) -> None:
+    """Declared test count must match parsed testcase rows."""
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="5" '
+        'failures="0" errors="0">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        "</testsuite></testsuites>",
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_junit_duplicate_node_id_fails_closed(tmp_path: Path) -> None:
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="2" '
+        'failures="0" errors="0">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        "</testsuite></testsuites>",
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_junit_declared_failure_but_unparsed_fails_closed(tmp_path: Path) -> None:
+    """Declared failures=N without matching <failure> elements is corrupt."""
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="1" '
+        'failures="1" errors="0">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        "</testsuite></testsuites>",
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# review-t_cce76b68 F3: non-finite / out-of-range coverage
+# ---------------------------------------------------------------------------
+
+
+def test_nan_coverage_fails_closed(tmp_path: Path) -> None:
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    coverage = _write(
+        tmp_path / "coverage.xml",
+        '<?xml version="1.0"?><coverage line-rate="nan"></coverage>',
+    )
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--coverage-xml",
+            str(coverage),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_inf_coverage_fails_closed(tmp_path: Path) -> None:
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    coverage = _write(
+        tmp_path / "coverage.xml",
+        '<?xml version="1.0"?><coverage line-rate="inf"></coverage>',
+    )
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--coverage-xml",
+            str(coverage),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_out_of_range_coverage_fails_closed(tmp_path: Path) -> None:
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(tmp_path / "baseline.json")
+    coverage = _write(
+        tmp_path / "coverage.xml",
+        '<?xml version="1.0"?><coverage line-rate="1.5"></coverage>',
+    )
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--coverage-xml",
+            str(coverage),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_parse_coverage_line_percent_unit(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="non-finite"):
+        parse_coverage_line_percent(
+            _write(tmp_path / "c1.xml", '<?xml version="1.0"?><coverage line-rate="nan"/>')
+        )
+    with pytest.raises(ValueError, match="non-finite"):
+        parse_coverage_line_percent(
+            _write(tmp_path / "c2.xml", '<?xml version="1.0"?><coverage line-rate="inf"/>')
+        )
+    with pytest.raises(ValueError, match="0..100"):
+        parse_coverage_line_percent(
+            _write(tmp_path / "c3.xml", '<?xml version="1.0"?><coverage line-rate="1.5"/>')
+        )
+    with pytest.raises(ValueError, match="non-numeric"):
+        parse_coverage_line_percent(
+            _write(tmp_path / "c4.xml", '<?xml version="1.0"?><coverage line-rate="abc"/>')
+        )
+    ok = parse_coverage_line_percent(
+        _write(tmp_path / "c5.xml", '<?xml version="1.0"?><coverage line-rate="0.85"/>')
+    )
+    assert ok == pytest.approx(85.0)
+
+
+# ---------------------------------------------------------------------------
+# review-t_cce76b68 F4: singular mypy summary grammar
+# ---------------------------------------------------------------------------
+
+
+def test_mypy_singular_success_summary_passes(tmp_path: Path) -> None:
+    """'Success: no issues found in 1 source file' (singular) must be
+    accepted as a valid success summary — one-file runs are legitimate."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN_SINGULAR)
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 0
+
+
+def test_parse_mypy_summary_kind_unit() -> None:
+    assert parse_mypy_summary_kind(MYPY_CLEAN) == "success"
+    assert parse_mypy_summary_kind(MYPY_CLEAN_SINGULAR) == "success"
+    assert parse_mypy_summary_kind(MYPY_WITH_ERROR) == "errors"
+    assert parse_mypy_summary_kind("") is None
+    assert parse_mypy_summary_kind("garbage\n") is None
+
+
+# ---------------------------------------------------------------------------
+# review-t_cce76b68 F2 (unit-level): parse_junit_failures_and_skips raises
+# ---------------------------------------------------------------------------
+
+
+def test_parse_junit_failures_and_skips_rejects_empty(tmp_path: Path) -> None:
+    empty = _write(tmp_path / "empty.xml", '<?xml version="1.0"?><testsuites/>')
+    with pytest.raises(JUnitStructureError, match="testsuite"):
+        parse_junit_failures_and_skips(empty)
+
+
+def test_parse_junit_failures_and_skips_rejects_counter_mismatch(tmp_path: Path) -> None:
+    bad = _write(
+        tmp_path / "bad.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="5" '
+        'failures="0" errors="0">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        "</testsuite></testsuites>",
+    )
+    with pytest.raises(JUnitStructureError, match="tests"):
+        parse_junit_failures_and_skips(bad)
