@@ -85,3 +85,12 @@ backend.err
 
 # Playwright CLI local cache (tool artifact)
 .playwright-cli/
+
+# TypeScript migration emitted artifacts (Phase B-E)
+node_modules/
+extension/popup-built/
+src/openbiliclaw/web/**/*.js.map
+# Emitted sibling .js next to migrated web .ts sources
+src/openbiliclaw/web/js/**/*.js
+src/openbiliclaw/web/shared/**/*.js
+src/openbiliclaw/web/desktop/assets/js/**/*.js

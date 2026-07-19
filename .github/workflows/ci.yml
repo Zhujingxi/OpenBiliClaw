@@ -130,14 +130,106 @@ jobs:
           fi
           echo "Firefox manifest version $firefox_version matches manifest.json"
 
+  js-lint:
+    name: Lint JS/TS (eslint + prettier)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install root dev tooling
+        run: npm ci
+
+      - name: ESLint
+        run: npx eslint .
+
+      - name: Prettier (changed files only)
+        shell: bash
+        run: |
+          git fetch origin main --depth=1 || true
+          changed=$(git diff --name-only origin/main...HEAD -- '*.js' '*.mjs' '*.ts' '*.json' 2>/dev/null || true)
+          if [ -n "$changed" ]; then
+            echo "$changed" | xargs npx prettier --check --ignore-unknown
+          else
+            echo "no changed JS/TS files"
+          fi
+
+  extension-test:
+    name: Extension typecheck + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install extension dependencies
+        run: npm ci
+        working-directory: extension
+
+      - name: Typecheck (src + popup + tests projects)
+        run: npm run typecheck
+        working-directory: extension
+
+      - name: Run extension tests
+        run: npm test
+        working-directory: extension
+
+  web-test:
+    name: Web JS build + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install root dev tooling
+        run: npm ci
+
+      - name: Build web assets (emits .js next to migrated .ts; no-op pre-migration)
+        run: npm run build:web
+
+      - name: Run web JS tests
+        run: node --test tests/js/
+
   web-guided-init-e2e:
     name: Web guided-init E2E
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, web-test]
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Build web assets
+        run: |
+          npm ci
+          npm run build:web
 
       - name: Set up Python
         uses: actions/setup-python@v6
