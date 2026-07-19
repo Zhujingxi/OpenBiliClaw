@@ -10385,6 +10385,80 @@ class TestConfigApiE2E:
         assert "C:" not in data["logging"]["file_path"]
         assert "secret" not in data["logging"]["file_path"]
 
+    def test_get_config_redacts_windows_drive_only_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Drive-only ``logging.directory`` (``C:`` / ``D:``) must not leak.
+
+        Regression for the review finding that ``directory="C:"`` passed
+        through unchanged because drive detection required ``len >= 3``, so
+        ``file_path`` became the absolute-looking ``C:/backend.log``.
+        ``PureWindowsPath("C:")`` is drive-qualified/drive-relative, so the
+        wire form must never emit a drive prefix.
+        """
+        from openbiliclaw.config import Config
+
+        for drive in ("C:", "D:", "c:"):
+            cfg = Config(data_dir="runtime-data")
+            cfg.logging.directory = drive
+            cfg.logging.filename = "backend.log"
+
+            client = self._make_client(monkeypatch, tmp_path, cfg)
+
+            response = client.get("/api/config")
+            assert response.status_code == 200, drive
+            data = response.json()
+
+            assert data["logging"]["directory"] == "", drive
+            assert data["logging"]["filename"] == "backend.log", drive
+            assert data["logging"]["file_path"] == "backend.log", drive
+            assert not data["logging"]["file_path"].startswith("/"), drive
+            assert ":" not in data["logging"]["file_path"], drive
+
+    def test_get_config_redacts_windows_drive_relative_logging_directory(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Drive-relative ``logging.directory`` (``C:foo``) must not leak.
+
+        Sibling of the drive-only regression: ``C:foo`` resolves against the
+        drive's current directory on Windows, so it is drive-qualified and
+        must reduce to its basename without emitting a drive prefix.
+        """
+        from openbiliclaw.config import Config
+
+        # Single-segment drive-relative collapses to that segment.
+        cfg = Config(data_dir="runtime-data")
+        cfg.logging.directory = "C:foo"
+        cfg.logging.filename = "backend.log"
+
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.get("/api/config")
+        assert response.status_code == 200
+        data = response.json()
+
+        assert data["logging"]["directory"] == "foo"
+        assert data["logging"]["filename"] == "backend.log"
+        assert data["logging"]["file_path"] == "foo/backend.log"
+        assert not data["logging"]["file_path"].startswith("/")
+        assert ":" not in data["logging"]["file_path"]
+
+        # Multi-segment drive-relative collapses to its basename.
+        cfg2 = Config(data_dir="runtime-data")
+        cfg2.logging.directory = "C:private/logs"
+        cfg2.logging.filename = "backend.log"
+
+        client2 = self._make_client(monkeypatch, tmp_path, cfg2)
+
+        response2 = client2.get("/api/config")
+        assert response2.status_code == 200
+        data2 = response2.json()
+
+        assert data2["logging"]["directory"] == "logs"
+        assert data2["logging"]["file_path"] == "logs/backend.log"
+        assert ":" not in data2["logging"]["file_path"]
+        assert "private" not in data2["logging"]["file_path"]
+
     def test_get_config_redacts_bare_tilde_logging_directory(self, monkeypatch, tmp_path) -> None:
         """Bare ``~`` ``logging.directory`` must not leak through /api/config.
 

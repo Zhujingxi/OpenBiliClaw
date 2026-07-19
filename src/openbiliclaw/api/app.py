@@ -1229,8 +1229,12 @@ def _is_absolute_or_unc_path(path: str) -> bool:
     # POSIX absolute
     if path.startswith("/"):
         return True
-    # Windows drive-absolute: C:\... or C:/...
-    if len(path) >= 3 and path[1] == ":" and path[0].isalpha():
+    # Windows drive-qualified: drive-absolute (``C:\...`` / ``C:/...``),
+    # drive-only (``C:``) and drive-relative (``C:foo``) forms. Drive-only
+    # and drive-relative paths are drive-qualified on Windows (they resolve
+    # against the drive's current directory), so the wire form must never
+    # emit a drive prefix either — the docs promise no ``C:`` disclosure.
+    if len(path) >= 2 and path[1] == ":" and path[0].isalpha():
         return True
     # Windows UNC (``\\server\share`` or ``//server/share``) and Windows
     # rooted-no-drive (``\Users\alice``): any leading backslash is a Windows
@@ -1257,6 +1261,10 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
     - Root/volume-only paths (``/``, ``C:\\``, ``~``) and bare ``~user``
       forms (``~alice``) → reduced to empty string so ``file_path`` falls
       back to the filename only.
+    - Drive-only (``C:``) and drive-relative (``C:foo``) forms: the drive
+      prefix is stripped first, then the remainder reduces by the same
+      rules — ``C:`` → empty, ``C:foo`` → ``foo``. The wire form never
+      emits a drive prefix.
 
     The on-disk logging path is unaffected — this redaction applies only to
     the API response.
@@ -1264,9 +1272,15 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
     if not directory:
         return directory
     if _is_absolute_or_unc_path(directory) or directory.startswith("~"):
+        # Strip any Windows drive prefix (``C:``, ``C:foo``) before
+        # splitting so drive-only and drive-relative forms never leak the
+        # drive letter into the wire form.
+        stripped = directory
+        if len(stripped) >= 2 and stripped[1] == ":" and stripped[0].isalpha():
+            stripped = stripped[2:]
         # Use both separators so Windows-style absolutes serialised on a
         # POSIX host (and vice versa) still reduce to their basename.
-        parts = [p for p in directory.replace("\\", "/").split("/") if p]
+        parts = [p for p in stripped.replace("\\", "/").split("/") if p]
         if not parts:
             return ""
         candidate = parts[-1]
