@@ -55,6 +55,7 @@ import {
   embeddingRepairStartAccepted,
   initProgressView,
   INIT_EXPECTATION_HINT,
+  INIT_RUNNING_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
   shouldAttachRunningInitProgress,
@@ -1506,8 +1507,8 @@ function renderInitPanelIdle() {
     li.className = "init-hint-row";
     li.textContent = "点「开始初始化」会先检查 AI 服务 / 向量模型，以及所选平台的登录状态，通过才开始。";
     elements.initChecklist.append(li);
-    // Expectation management (init-progress Phase 2): tell the user upfront
-    // how long the whole run typically takes.
+    // Expectation management: total time is highly variable, so orient the
+    // user about that variability instead of quoting a duration.
     const expectation = document.createElement("li");
     expectation.className = "init-hint-row";
     expectation.textContent = INIT_EXPECTATION_HINT;
@@ -1538,6 +1539,14 @@ function renderInitProgress(status) {
     elements.initChecklist.replaceChildren();
   }
   const progress = initProgressView(status);
+  // The one reassurance a waiting user needs, said once: after v0.3.180 a run
+  // that keeps producing results is literally never interrupted.
+  if (elements.initChecklist instanceof HTMLElement && progress.active) {
+    const patience = document.createElement("li");
+    patience.className = "init-hint-row";
+    patience.textContent = INIT_RUNNING_HINT;
+    elements.initChecklist.append(patience);
+  }
   if (elements.initProgress instanceof HTMLElement) {
     elements.initProgress.hidden = false;
     if (elements.initProgressBar instanceof HTMLElement) {
@@ -1561,13 +1570,13 @@ function renderInitProgress(status) {
       );
     }
   }
-  // Liveness line under the bar: "● 进行中 (+ typical stage duration)" while
+  // Liveness line under the bar: "● 进行中 (+ observed elapsed / counts)" while
   // the backend keeps writing; amber stall copy after >90s of silence.
   if (elements.initStallHint instanceof HTMLElement) {
     if (progress.active) {
       const staleness = stalenessView(status);
       const text = staleness.fresh
-        ? [staleness.text, progress.etaText].filter(Boolean).join(" · ")
+        ? [staleness.text, progress.stageDetailText].filter(Boolean).join(" · ")
         : staleness.text;
       elements.initStallHint.textContent = text;
       elements.initStallHint.classList.toggle("stale", !staleness.fresh);

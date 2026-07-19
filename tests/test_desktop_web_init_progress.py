@@ -21,11 +21,14 @@ def test_desktop_init_progress_mirrors_popup_fraction_formula() -> None:
     # Real sub-progress fraction (done/total) capped below stage completion.
     assert "STAGE_FRACTION_CAP" in app_js
     assert "0.95" in app_js
-    # Elapsed/eta pseudo progress for stages without sub-progress.
-    assert "Math.exp(-elapsed / eta)" in app_js
-    assert "eta_seconds" in app_js
-    # Legacy fallback half-step keeps old-backend ticks unchanged.
-    assert "STAGE_FRACTION_FALLBACK" in app_js
+    # No forecast anywhere: the elapsed/eta pseudo-progress and the flat
+    # half-step it fell back to are both gone, so the bar can only be moved by
+    # real done/total (2026-07-20 — a duration we cannot honour is worse than
+    # none). Stages without counts render indeterminate instead.
+    assert "Math.exp" not in app_js
+    assert "eta_seconds" not in app_js
+    assert "STAGE_FRACTION_FALLBACK" not in app_js
+    assert "STAGE_FRACTION_UNKNOWN = 0" in app_js
     # Sub-progress note joins the running stage label.
     assert "progress?.note" in app_js
 
@@ -57,16 +60,19 @@ def test_desktop_surfaces_stall_copy_after_90s_of_silence() -> None:
     assert ".init-stall-hint" in APP_CSS.read_text(encoding="utf-8")
 
 
-def test_desktop_shows_expectation_copy_and_stage_eta() -> None:
+def test_desktop_shows_expectation_copy_and_observed_stage_facts() -> None:
     app_js = _app_js()
     # Idle expectation management near the start button.
     assert "严格按顺序生成" in app_js
-    assert "通常需要 4–20 分钟" in app_js
+    assert "取决于你勾了几个平台" in app_js
     assert "进度会保留" in app_js
-    # Running stage row surfaces its typical duration.
-    assert "本阶段通常约" in app_js
-    assert "已超常见用时；本轮上限" in app_js
-    assert "stageEtaText" in app_js
+    # Running stage row reports observed facts, never a prediction.
+    assert "stageEtaText" not in app_js
+    assert "stageDetailText" in app_js
+    assert "已用时不到 1 分钟" in app_js
+    assert "已完成 ${done}/${total}" in app_js
+    # The one reassurance a waiting user needs, said once.
+    assert "只要还在出结果就不会被打断" in app_js
 
 
 def test_desktop_trusts_terminal_init_contract_and_keeps_embedding_override() -> None:
@@ -91,9 +97,10 @@ def _setup_html() -> str:
 def test_setup_wizard_mirrors_progress_fraction_and_clamp() -> None:
     html = _setup_html()
     assert "STAGE_FRACTION_CAP" in html
-    assert "Math.exp(-elapsed / eta)" in html
-    assert "STAGE_FRACTION_FALLBACK" in html
-    assert "eta_seconds" in html
+    assert "Math.exp" not in html
+    assert "STAGE_FRACTION_FALLBACK" not in html
+    assert "eta_seconds" not in html
+    assert "STAGE_FRACTION_UNKNOWN = 0" in html
     assert "progress?.note" in html
     assert "maxPct" in html
     assert "Math.max(st.maxPct, pct)" in html
@@ -112,9 +119,12 @@ def test_setup_wizard_surfaces_stall_and_expectation_copy() -> None:
     assert "没有心跳" in html
     assert "● 后端在线" in html
     assert "严格按顺序生成" in html
-    assert "通常需要 4–20 分钟" in html
-    assert "本阶段通常约" in html
-    assert "已超常见用时；本轮上限" in html
+    assert "取决于你勾了几个平台" in html
+    assert "stageEtaText" not in html
+    assert "stageDetailText" in html
+    assert "已用时不到 1 分钟" in html
+    assert "已完成 ${done}/${total}" in html
+    assert "只要还在出结果就不会被打断" in html
     assert "initStallHint" in html
 
 
