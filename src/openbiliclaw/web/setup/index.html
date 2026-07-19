@@ -284,7 +284,7 @@
       bilibili_not_logged_in: "还没检测到 B站 登录。",
       llm_not_ready: "AI 服务还没配好或当前不可用。",
       embedding_not_ready: "向量模型还没就绪，请等待 bge-m3 下载完成或修复 Ollama 后重试。",
-      already_initialized: "已经初始化过了。",
+      already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
@@ -303,6 +303,7 @@
     const INIT_SOURCE_LOGIN_HINT =
       "勾选要纳入初始化的平台，勾选会同时开启该来源。Bangumi 使用公开 API，不需登录；其他平台请先在当前浏览器登录。";
     const INIT_POLL_MS = Number(window.__OBC_TEST_INIT_POLL_MS) || 3000;
+    const BILI_POLL_MS = Number(window.__OBC_TEST_BILI_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
@@ -329,6 +330,10 @@
         d.classList.toggle("active", i === n);
         d.classList.toggle("done", i < n);
       });
+      // Leaving step 1: stop the 3s B站 poll so it can't keep hitting the
+      // backend from a step the user has moved past. Null it so re-entering
+      // step 1 restarts a fresh poll (startBiliPoll early-returns while set).
+      if (n !== 1 && biliPoll) { clearInterval(biliPoll); biliPoll = null; }
       if (n === 1) startBiliPoll();
       if (n === 2) renderInitIdle();
     }
@@ -1203,6 +1208,7 @@
 
     function startBiliPoll() {
       if (biliPoll) return;
+      let missedTicks = 0;
       const tick = async () => {
         const access = await checkBili();
         if (access) {
@@ -1218,10 +1224,22 @@
           const done = $("#biliDone"); done.classList.remove("pending");
           done.querySelector(".tick").textContent = "✓";
           $("#doneBili").textContent = `B 站${access.label}；其他平台按初始化勾选项检查`;
+          return;
+        }
+        // Still not synced. After a few ticks, stop spinning forever and swap the
+        // spinner row for a neutral hint that reads as "fine either way": install
+        // the extension + log in for auto-detection, or skip and use other
+        // sources. Keep polling while ON step 1, so it flips green the moment the
+        // extension syncs a cookie. (setStep clears biliPoll when leaving step 1.)
+        missedTicks += 1;
+        if (missedTicks === 3) {
+          const box = $("#biliStatus");
+          box.className = "msg show";
+          box.textContent = "还没检测到 B站 登录同步。装好扩展并登录 bilibili.com 后这里会自动变绿；只用其他来源可以直接跳过。";
         }
       };
       tick();
-      biliPoll = setInterval(tick, 3000);
+      biliPoll = setInterval(tick, BILI_POLL_MS);
     }
 
     function finish() {

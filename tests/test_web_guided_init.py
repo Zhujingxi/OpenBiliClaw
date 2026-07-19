@@ -69,6 +69,13 @@ def test_desktop_web_static_contract_exposes_guided_init_cta() -> None:
     assert "renderInitOnboarding" in app_js
     assert "buildInitChecklist" in app_js
     assert "INIT_SOURCE_OPTIONS" in app_js
+    # Roster drift lock: the desktop init picker derives WHICH sources exist from
+    # the shared roster (/shared/source-status.js), the same list the wizard and
+    # side panel build from — no third hand-kept copy that can silently drift.
+    assert "_initSourceStatus?.SOURCE_KEYS" in app_js
+    assert 'src="/shared/source-status.js"' in Path(
+        "src/openbiliclaw/web/desktop/index.html"
+    ).read_text(encoding="utf-8")
     assert "init_progress" in app_js
     # "openbiliclaw init" may appear ONLY inside the unsupported_runtime copy
     # (the container-blocked docker-exec fallback) — never as generic guidance

@@ -105,16 +105,27 @@
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
-    const INIT_SOURCE_OPTIONS = [
-      { key: "bilibili", label: "B 站", defaultChecked: true },
-      { key: "xiaohongshu", label: "小红书" },
-      { key: "douyin", label: "抖音" },
-      { key: "youtube", label: "YouTube" },
-      { key: "twitter", label: "X" },
-      { key: "zhihu", label: "知乎" },
-      { key: "reddit", label: "Reddit" },
-      { key: "bangumi", label: "Bangumi" }
-    ];
+    //
+    // WHICH sources exist comes from the shared roster (/shared/source-status.js,
+    // loaded before this script), the same list the setup wizard and the side
+    // panel build their pickers from — a hardcoded copy here is what let the
+    // three surfaces drift. Labels come from the shared module too, with a local
+    // fallback map so an unrecognised key still renders. defaultChecked stays
+    // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
+    const INIT_SOURCE_LABEL_FALLBACK = {
+      bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi"
+    };
+    const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
+    const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
+    const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
+      ? [..._initSourceStatus.SOURCE_KEYS]
+      : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
+    const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
+      key,
+      label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
+      ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {})
+    }));
     const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
@@ -7112,9 +7123,23 @@ ${cardFeedbackBarHtml()}`;
         scheduleAutoLoadCheck();
       }
 
-      function markDesktopRecommendationFailedAndRecover() {
+      function markDesktopRecommendationFailedAndRecover(error) {
         if (state.videos.length > 0) {
           clearDesktopRecommendationRecovery("ready");
+          return;
+        }
+        // A mid-session LLM-registry degrade blocks /api/recommendations with a
+        // 503 {status:"degraded", …} envelope, which requestJsonStrict rethrows
+        // as error.details (§4.8). Route that to the model-settings recovery
+        // instead of the generic retry UI — the pool cannot refill until the
+        // provider is fixed, so a retry loop here is a dead end.
+        const details = error && error.details;
+        if (details && details.status === "degraded") {
+          presentDegradedConfigRecovery({
+            degraded: true,
+            degraded_reason: details.reason || "",
+            issues: details.issues || [],
+          });
           return;
         }
         desktopRecommendationLoadState = "failed";
@@ -7269,7 +7294,7 @@ ${cardFeedbackBarHtml()}`;
 
       const recommendationApplicationPromise = recommendationsPromise.then(
         (items) => applyInitialRecommendations(items),
-        () => markDesktopRecommendationFailedAndRecover(),
+        (error) => markDesktopRecommendationFailedAndRecover(error),
       );
       const runtimeApplicationPromise = runtimePromise.then(
         (snapshot) => applyInitialRuntimeSnapshot(snapshot),

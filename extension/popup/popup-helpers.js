@@ -1323,7 +1323,9 @@ export function getPopupState({ online, items = [], error = null, runtimeStatus 
     if (!runtime.initialized && !hasPostInitRuntimeSignals) {
       return {
         kind: "uninitialized",
-        message: "还没完成初始化，先运行 openbiliclaw init",
+        // Button-driven copy, consistent with the rendered card in popup.js:
+        // guided init runs from the「开始初始化」button, not a CLI command.
+        message: "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
         items: [],
       };
     }
