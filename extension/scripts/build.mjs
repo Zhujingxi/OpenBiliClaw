@@ -1,4 +1,5 @@
 import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { build } from "esbuild";
 
@@ -109,7 +110,14 @@ if (isFirefox) {
   );
 
   // Firefox loads the extension from dist-firefox/, so popup/ and icons/ must be present there
-  await cp(resolve(root, "popup"), resolve(root, `${outDir}/popup`), { recursive: true });
+  await cp(resolve(root, "popup"), resolve(root, `${outDir}/popup`), {
+    recursive: true,
+    filter: (src) => !src.endsWith(".ts"),
+  });
+  // Overlay compiled popup JS (popup-built/) when the popup has been migrated to TS.
+  if (existsSync(resolve(root, "popup-built"))) {
+    await cp(resolve(root, "popup-built"), resolve(root, `${outDir}/popup`), { recursive: true });
+  }
   await cp(resolve(root, "icons"), resolve(root, `${outDir}/icons`), { recursive: true });
   console.log(`📁 Copied popup/ → ${outDir}/popup/`);
   console.log(`📁 Copied icons/ → ${outDir}/icons/`);

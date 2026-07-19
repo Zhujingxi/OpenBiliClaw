@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import { readFile, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
@@ -45,10 +46,16 @@ const includes = ["manifest.json", "dist", "icons", "popup"];
 
 console.log(`\nPackaging ${outName}...`);
 await rm(outPath, { force: true });
-execSync(`zip -r -9 "${outPath}" ${includes.join(" ")}`, {
+// Exclude popup TS sources and build intermediates from the zip; overlay
+// popup-built/ (compiled JS) when the popup has been migrated to TS.
+const zipExcludes = ["popup/*.ts", "popup/types/*"];
+execSync(`zip -r -9 "${outPath}" ${includes.join(" ")} -x ${zipExcludes.join(" ")}`, {
   cwd: root,
   stdio: "inherit",
 });
+if (existsSync(resolve(root, "popup-built"))) {
+  execSync(`cd popup-built && zip -r -9 "${outPath}" .`, { cwd: root, stdio: "inherit" });
+}
 
 // --- 4. Report --------------------------------------------------------
 const stats = await stat(outPath);

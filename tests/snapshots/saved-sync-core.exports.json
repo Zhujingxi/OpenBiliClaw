@@ -1,0 +1,18 @@
+[
+  "captureSavedFocus",
+  "createDialogFocusController",
+  "createDurableTaskTracker",
+  "createRetainedSavedListState",
+  "createSavedMutationRegistry",
+  "createSavedSubmissionFence",
+  "createSavedTaskCoordinator",
+  "createStrictSavedApi",
+  "getSavedSyncPresentation",
+  "isSavedSyncEligibleStatus",
+  "isSavedTaskTerminal",
+  "normalizeSavedItem",
+  "restoreSavedFocus",
+  "savedSyncCore",
+  "taskIsTerminal",
+  "updateSavedBatchButtonState"
+]

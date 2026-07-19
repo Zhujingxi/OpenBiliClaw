@@ -1,0 +1,12 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "rootDir": "popup",
+        "outDir": "popup-built",
+        "noEmit": false,
+        "declaration": false,
+        "sourceMap": true,
+        "types": ["chrome"]
+    },
+    "include": ["popup/*.ts", "popup/types/**/*.d.ts"]
+}
