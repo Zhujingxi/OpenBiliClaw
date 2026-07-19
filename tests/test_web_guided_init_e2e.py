@@ -780,6 +780,36 @@ def test_setup_wizard_e2e_blocks_missing_bilibili_without_post(
     assert "✗" in chromium_page.locator("#initChecklist").inner_text()
 
 
+def test_setup_wizard_e2e_shows_neutral_hint_when_bilibili_never_syncs(
+    guided_init_server: tuple[str, GuidedInitStub],
+    chromium_page: Any,
+) -> None:
+    """A never-synced B站 login must stop the spinner and show a neutral,
+    skippable hint — while the poll keeps running so it can still flip green."""
+    base_url, _ = guided_init_server
+    # /api/sources/status 404s in the stub, so checkBili always returns null.
+    # Speed the 3s poll up so the negative state lands within the test budget.
+    chromium_page.add_init_script("window.__OBC_TEST_BILI_POLL_MS = 30;")
+
+    chromium_page.goto(f"{base_url}/setup/")
+    chromium_page.locator("#provider").select_option("deepseek")
+    chromium_page.locator("#apiKey").fill("sk-e2e-test")
+    chromium_page.locator("#saveLlm").click()
+    chromium_page.wait_for_selector('[data-panel="1"].active')
+
+    # After a few ticks the spinner row becomes the neutral hint.
+    chromium_page.wait_for_function(
+        "() => document.querySelector('#biliStatus')"
+        "?.textContent.includes('还没检测到 B站 登录同步')"
+    )
+    box = chromium_page.locator("#biliStatus")
+    # Not painted as success, and the spinner element is gone.
+    assert "ok" not in (box.get_attribute("class") or "")
+    assert chromium_page.locator("#biliStatus .spin").count() == 0
+    # Still on step 1 (the poll keeps running; it did not crash or advance).
+    assert chromium_page.locator('[data-panel="1"].active').count() == 1
+
+
 def test_desktop_web_e2e_surfaces_init_start_conflict(
     guided_init_server: tuple[str, GuidedInitStub],
     chromium_page: Any,
