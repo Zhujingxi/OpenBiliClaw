@@ -21,6 +21,16 @@
 
 ---
 
+## Must 切片修复（评审 #87 收口）
+
+- **Fail-closed 质量基线比较器（P1）**：`scripts/check_quality_baseline.py` 的 `parse_mypy_output()` 现在校验 mypy 摘要行语法（`Success: no issues found in N source files` 或 `Found N errors in M files` 形态），空流、crash-only stderr（`mypy: INTERNAL ERROR` 等无摘要场景）与不可解析的非空行一律抛 `MypyOutputError` 并以 exit 2 关闭；新增 `--mypy-exit-code` / `--pytest-exit-code` 参数，0/1 之外的退出码视为工具崩溃直接 fail。`.github/workflows/ci.yml` 用 `set -o pipefail` 跑 mypy 并把原始退出码写入 `build/*.status`，比较器步骤消费两个 status 文件——此前 `continue-on-error` + `| tee` 会把 mypy 崩溃吞掉让 CI 误判绿。
+- **pytest allowlist 指纹（评审 #2）**：`known_failures` 条目现在携带归一化失败指纹（异常类型 + headline，数字与 tmp 路径已 scrub），`compare_pytest()` 对 allowlist 节点的指纹不匹配失败判 fail——同一个节点上的新 bug 无法再躲在旧 allowlist 后面；旧字符串条目继续兼容解析（不强制指纹）。基线随之重生：聚合发布失败带指纹、10 条 cli_models mypy 诊断在 rebase 后消失、coverage 刷新到 52.26。
+- **Stale baseline 重基（评审 #7）**：分支 rebase 到 `origin/main @ 72addee8`（cli_models mypy 修复合入点），`git merge-base --is-ancestor origin/main HEAD` 为真；6 个原始重构 commit 完整保留。
+- **新增模块文档**：`docs/modules/api.md` 记录 `api/app.py` / `api/dependencies.py` / `api/routes/system.py` 的窄依赖路由提取边界，覆盖模块组成、对外契约、公共 API 与相关文档链接；架构图与对外 API 表面仍无变化，`README` 与 `docs/spec.md` 无需改动。
+- **测试**：新增 `tests/test_quality_baseline_comparator.py`（15 个用例）覆盖缺失文件、空文件、畸形行、crash-only stderr、baseline 期望诊断、干净成功、指纹匹配/不匹配等 fail-closed 路径；现有 `tests/test_architecture.py` / `tests/test_storage_schema_migrations.py` / `tests/test_api_route_contract.py` / `tests/test_api_pilot_endpoints_contract.py` 与新比较器测试合计 61 个用例全部通过。
+
+---
+
 ## 增量式架构重构 Must 切片实施
 
 - **落地 Must 切片的全部六项内容**（依据 `docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` §6.0）：Phase 0 安全网（`tests/contracts/api-route-contract.json` 路由契约清单、`tests/test_api_pilot_endpoints_contract.py` `/api/ping` 与 `/api/qr-info` 精确响应测试、`tests/contracts/quality-baseline.json` + `scripts/check_quality_baseline.py` 归一化质量基线比较器、`tests/fixtures/storage_schema.py` 程序化 schema fixture、`tests/test_architecture.py` 窄架构棘轮）；试点路由提取；迁移去重 2A；CI 接线；文档更新。
@@ -28,7 +38,7 @@
 - **迁移去重 2A**：新 `storage/migrations.py` 提供数据驱动 `ensure_columns(conn, table, columns)` 工具，集中承载纯增量列迁移（先 `PRAGMA table_info` 再 `ALTER TABLE ... ADD COLUMN`）。表名与列名对照静态白名单校验并做标识符形态防御；不引入 schema 版本账（2B 显式推迟），不改变惰性调用点、事务时机或 `:memory:` 行为。9 个纯增量 `_ensure_*_columns` 方法迁移到 helper；带数据回填 / 索引联动 / 合并逻辑的 `_ensure_content_cache_multisource_columns`、`_ensure_content_identity_columns` 等保留手写并登记为例外。
 - **CI 接线**：`.github/workflows/ci.yml` 的既有 pytest 调用改为单次运行同时输出 JUnit XML 与 coverage XML（不为基线再跑一遍完整测试），mypy 输出经 `tee` 落盘；新增 `scripts/check_quality_baseline.py` 收尾步骤，对新增 pytest 失败、新增 mypy 诊断、新增 skip、缺失或不可解析的输出**一律 fail-closed**。发布工作流（`release-*.yml`、`verify-release-completeness.yml`）零改动。
 - **文档同步**：`docs/modules/storage.md` 新增 `storage/migrations.py` 模块组成说明；`docs/architecture.md` Storage 一节明确 `ensure_columns` 的承载边界。架构图与对外 API 表面无变化（试点为内部代码搬移，路由契约已机械锁定），`README` 与 `docs/spec.md` 无需改动。
-- **兼容性**：对外 HTTP 路由、方法、响应体与 content-type 完全不变；schema 终态与 `Database.initialize()` 不变量保持。回滚路径为单 PR revert。已知基线弱点：pytest allowlist 当前以 node ID 键控，未含异常指纹（见 planner 风险附录 #1）；如该测试未来以新原因失败，比较器会判定通过——留给评审裁决，不在本切片内扩展。
+- **兼容性**：对外 HTTP 路由、方法、响应体与 content-type 完全不变；schema 终态与 `Database.initialize()` 不变量保持。回滚路径为单 PR revert。原「pytest allowlist 仅按 node ID 键控、未含异常指纹」的已知弱点已在后续修复切片中通过指纹化（异常类型 + headline 归一化）解决。
 
 ---
 
