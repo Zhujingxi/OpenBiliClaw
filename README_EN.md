@@ -189,12 +189,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.177 (2026-07-19)**
+📌 Latest: **v0.3.178 (2026-07-20)**
 
-- **Fixed the first-run setup wizard freezing when the LLM config is broken** — degraded mode no longer blocks the wizard's shared script, so Base URL can be filled and the config repaired instead of dead-ending.
-- **The extension now points to the fix when the backend is degraded** — the recommend tab shows the actual config error plus a "repair in settings" button instead of a generic "API not responding".
-- **Init failures always state their cause** — invalid API key / unreachable service / missing model are distinguished, and a restart-interrupted init is labelled honestly instead of leaving phantom progress.
-- **Local Ollama is now embedding-only across onboarding** — the wizard, CLI and install script no longer offer it as a chat provider; advanced users can still enable it in settings.
+- **A degraded backend that was never initialized now opens guided init** — instead of only offering "repair in settings", the extension still renders the init panel and the checklist states the blocking reason.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
