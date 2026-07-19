@@ -21,6 +21,11 @@ guided init: signals → preferences → full profile commit
 
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
                → unchanged MMR selector → isolated short recommendation+shown transaction
+  optional source_platform (PC Web tabs only, additive):
+    canonical platform → platform-scoped candidate rows, no cross-platform floor
+                       → same curator / MMR / diversity / persistence path
+platform-availability HTTP → isolated read snapshot of the canonical available set
+                           → {total_available, by_platform}, total == sum(by_platform)
 background refresh → maintenance DB worker / isolated connection
                    → ≤50 mutations per transaction → commit/yield/retry next batch
 ```
@@ -138,6 +143,7 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 - `prewarm_supergroup_embeddings` — refresh tick 后台预热所有池中 topic_group embedding，让 reshuffle 跑全 cache hit
 - `PoolServeSnapshot` — 专属 serve DB worker 在一个只读事务内统一读取 readiness、候选窗口、平台补位、最近已看和 curator 信号；MMR/多样性纯函数与排序规则不变
 - `serve_with_result()` — 返回 items、提交后扣减库存与分阶段耗时；推荐历史和 shown 在独立短事务中原子提交，API 先广播结果库存，再 detached 精确收敛
+- 平台定向作用域（PC Web 平台 Tab）：`serve / reshuffle / append` 的可选 `source_platform` 让 snapshot 只装载该 canonical 平台的候选并跳过跨平台保底补位，其后的 curator、MMR、多样性、文案、持久化与 shown 提交完全复用同一实现；返回前校验并丢弃跨平台泄漏行（记 ERROR）。数据流为 `PC Web tab → POST {reshuffle,append}.source_platform → RecommendationEngine → Storage 平台候选`，配套只读 `GET /api/recommendations/platform-availability` 提供 Tab 库存徽标。库存与选片共用同一份 canonical available 行集合，`total_available == sum(by_platform)`。移动 Web、扩展与 CLI 无平台 Tab，继续走不带平台的兼容路径
 - 个性化专题生成
 
 ### Runtime (`runtime/`)

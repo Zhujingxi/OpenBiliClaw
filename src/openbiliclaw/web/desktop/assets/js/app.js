@@ -11,6 +11,7 @@
       refresh: "/recommendations/refresh",
       reshuffle: "/recommendations/reshuffle",
       append: "/recommendations/append",
+      platformAvailability: "/recommendations/platform-availability",
       runtimeStatus: "/runtime-status",
       activityFeed: "/activity-feed",
       notificationPending: "/notifications/pending",
@@ -69,6 +70,9 @@
       sourceCredentials: null,
       runtimeStatus: null,
       runtimeSocket: null,
+      // 最近一次「成功」读到的平台可推库存快照 {total_available, by_platform}。
+      // null = 尚未成功读取过（未知态）；读取失败绝不把它改写成 0。
+      platformAvailability: null,
       videos: [],
       messages: [],
       messageListSnapshot: null,
@@ -99,6 +103,9 @@
       { key: "bangumi", label: "Bangumi" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
+    // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
+    const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
+    const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
     const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
     const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
@@ -193,6 +200,63 @@
     }
 
     const scheduleDelightQueueRefresh = debounceAsync(() => fetchDelightQueue(), 1000);
+
+    // 库存变化事件可能成串到达（补货一轮会连发多条），去抖 + 单飞（合并 pending
+    // 调用）避免把只读快照接口打成风暴。debounceAsync 已实现这两点。
+    const schedulePlatformAvailabilityRefresh = debounceAsync(() => refreshPlatformAvailability(), 600);
+
+    let platformAvailabilityRetryAttempt = 0;
+    let platformAvailabilityRetryTimer = null;
+
+    function normalizePlatformAvailability(payload) {
+      const total = Number(payload?.total_available);
+      if (!Number.isFinite(total)) return null;
+      const byPlatform = {};
+      const raw = payload?.by_platform;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        for (const [key, value] of Object.entries(raw)) {
+          const slug = canonicalPlatformSlug(key);
+          const count = Number(value);
+          if (!slug || !Number.isFinite(count) || count <= 0) continue;
+          byPlatform[slug] = (byPlatform[slug] || 0) + Math.trunc(count);
+        }
+      }
+      return { total_available: Math.max(0, Math.trunc(total)), by_platform: byPlatform };
+    }
+
+    // 首次读取失败后的有界恢复；成功过一次就不再重试（后续由库存事件驱动）。
+    function schedulePlatformAvailabilityRetry() {
+      if (state.platformAvailability) return;
+      if (platformAvailabilityRetryTimer !== null) return;
+      if (platformAvailabilityRetryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) return;
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[platformAvailabilityRetryAttempt];
+      platformAvailabilityRetryAttempt += 1;
+      platformAvailabilityRetryTimer = window.setTimeout(() => {
+        platformAvailabilityRetryTimer = null;
+        void refreshPlatformAvailability();
+      }, delayMs);
+    }
+
+    async function refreshPlatformAvailability() {
+      try {
+        const snapshot = normalizePlatformAvailability(
+          await requestJsonStrict(ENDPOINTS.platformAvailability, { timeoutMs: 15000, cache: "no-store" })
+        );
+        if (!snapshot) throw new Error("platform availability unavailable");
+        // 只有成功 snapshot 才覆盖旧值。
+        state.platformAvailability = snapshot;
+        platformAvailabilityRetryAttempt = 0;
+        // 库存更新只允许重绘 Tab / 空态与自动续页 gate；已经 append 的推荐卡片
+        // 不重建、不覆盖（renderVideos 只在当前就是空态或 Tab 被迫回退时才跑）。
+        const previousFilter = state.filter;
+        renderFilters();
+        if (state.filter !== previousFilter || grid?.querySelector(".empty-state")) renderVideos();
+        maybeAutoLoadAfterPoolRefill();
+      } catch {
+        // 读取失败保留上一次成功的数字；"失败即全零" 是明确禁止的。
+        schedulePlatformAvailabilityRetry();
+      }
+    }
 
     async function runBackendHydration() {
       if (backendHydrationInFlight) {
@@ -409,6 +473,13 @@
       }
       if (recommendationRestarted) renderVideos();
       if (runtimeRestarted) renderDesktopRuntimeFailure();
+      // 用户重试也重开一次库存快照读取（首次失败后的 Tab 计数仍是未知态）。
+      if (!state.platformAvailability) {
+        if (platformAvailabilityRetryTimer !== null) window.clearTimeout(platformAvailabilityRetryTimer);
+        platformAvailabilityRetryTimer = null;
+        platformAvailabilityRetryAttempt = 0;
+        schedulePlatformAvailabilityRefresh();
+      }
     }
 
     async function runActivityPageRefresh() {
@@ -2548,6 +2619,86 @@ ${savedCardFeedbackBarHtml(listKind)}
       return platformLabel[String(value || "").toLowerCase()] || String(value || "").trim();
     }
 
+    // 别名只在这里归一化：引擎与库存快照只认 canonical slug。未知平台原样保留
+    // （小写），这样后端新增来源时 Tab 仍能显示而不是被悄悄吞掉。
+    function canonicalPlatformSlug(value) {
+      const raw = String(value || "").trim().toLowerCase();
+      if (!raw) return "";
+      return platformAliases[raw] || raw;
+    }
+
+    function recommendationPlatformSlug(item) {
+      return canonicalPlatformSlug(item?.platform ?? item?.source_platform);
+    }
+
+    // Tab 用中文标签做本地过滤，后端只认 canonical slug。"全部" 映射成空串，
+    // 调用方据此决定「不带 source_platform」（保持旧请求形状）。
+    function platformSlugForFilterLabel(label) {
+      const name = String(label || "").trim();
+      if (!name || name === "全部") return "";
+      const known = sourceFilterDefinitions.find((source) => source.label === name);
+      if (known) return known.key;
+      return canonicalPlatformSlug(name);
+    }
+
+    function activePlatformSlug() {
+      return platformSlugForFilterLabel(state.filter);
+    }
+
+    // 返回该平台「可立即推荐」的剩余数量；null = 未知（尚无成功快照）。
+    // 已启用但快照里缺键的平台按 0 处理（后端允许省略零库存平台）。
+    function platformAvailableCount(slug) {
+      const snapshot = state.platformAvailability;
+      if (!snapshot) return null;
+      if (!slug) return Number(snapshot.total_available) || 0;
+      const count = Number(snapshot.by_platform?.[slug]);
+      return Number.isFinite(count) && count > 0 ? count : 0;
+    }
+
+    function activePlatformAvailableCount() {
+      return platformAvailableCount(activePlatformSlug());
+    }
+
+    // 库存 snapshot 中数量大于 0 的平台也要出 Tab（配置里没启用、本会话也没
+    // 加载过卡片时同样成立）。
+    function availablePlatformSlugs() {
+      const byPlatform = state.platformAvailability?.by_platform || {};
+      return Object.keys(byPlatform).filter((slug) => Number(byPlatform[slug]) > 0);
+    }
+
+    // 平台定向换一批只替换该平台的卡片：其它平台本会话已加载的卡片必须原样保留，
+    // 新批次插在该平台原本第一张卡的位置，保持混合列表的相对交错。
+    function replacePlatformCards(videos, platform, fresh) {
+      const next = [];
+      let inserted = false;
+      for (const item of videos) {
+        if (recommendationPlatformSlug(item) === platform) {
+          if (!inserted) {
+            next.push(...fresh);
+            inserted = true;
+          }
+          continue;
+        }
+        next.push(item);
+      }
+      if (!inserted) next.push(...fresh);
+      return next;
+    }
+
+    // 平台定向请求返回跨平台内容 = 后端契约破坏。前端如实上报并放弃这一批，
+    // 绝不静默过滤后假装成功（设计文档 §8）。
+    function reportPlatformScopeLeak(action, requestPlatform, items) {
+      const leaked = items.filter((item) => recommendationPlatformSlug(item) !== requestPlatform);
+      if (!leaked.length) return false;
+      console.error("[openbiliclaw] platform-scoped recommendation leak", {
+        action,
+        requested: requestPlatform,
+        leaked: leaked.map((item) => ({ key: recommendationKey(item), platform: recommendationPlatformSlug(item) }))
+      });
+      showToast(`后端返回了 ${leaked.length} 条非「${platformName(requestPlatform)}」内容，已放弃这批${action}结果`);
+      return true;
+    }
+
     function configuredSourceFilterLabels() {
       const sources = state.config?.sources;
       const shares = state.config?.scheduler?.pool_source_shares || {};
@@ -2562,8 +2713,14 @@ ${savedCardFeedbackBarHtml(listKind)}
         .map((source) => source.label);
     }
 
+    // Tab 集合 = 已启用配置 ∪ 库存快照中数量>0 的平台 ∪ 本会话已加载卡片的平台。
+    // 已知平台沿用 sourceFilterDefinitions 顺序，其它值按稳定字典序，"全部"恒居首。
     function buildFilters() {
       const sourceSet = new Set(configuredSourceFilterLabels());
+      for (const slug of availablePlatformSlugs()) {
+        const label = platformName(slug);
+        if (label) sourceSet.add(label);
+      }
       for (const item of state.videos) {
         const label = platformName(item.platform);
         if (label) sourceSet.add(label);
@@ -2820,7 +2977,14 @@ ${savedCardFeedbackBarHtml(listKind)}
     function autoLoadBlockReason(now) {
       if (!state.autoLoadOnScroll) return "disabled";
       if (appendMoreInFlight) return "in-flight";
-      if (!(state.runtimeStatus?.pool_available_count > 0)) return "pool-empty";
+      // 库存 gate 用「当前平台」的可推数量：全局还有货不代表当前 Tab 有货，否则
+      // 0 库存平台会被反复空请求。库存未知（首次快照尚未成功 / 后端还没有这个
+      // 接口）时回退到全局 pool_available_count，保持既有行为。
+      const scopedAvailable = activePlatformAvailableCount();
+      const hasStock = scopedAvailable === null
+        ? state.runtimeStatus?.pool_available_count > 0
+        : scopedAvailable > 0;
+      if (!hasStock) return "pool-empty";
       const homePage = $("#homePage");
       if (!homePage || homePage.hidden) return "not-home";
       const loadMore = $("#loadMoreBtn");
@@ -2878,18 +3042,68 @@ ${savedCardFeedbackBarHtml(listKind)}
       }
     }
 
+    // 切换 Tab 只改变视图，不发任何推荐请求（设计文档 §5.2）。自动激活后 chip 会
+    // 被重建，所以键盘路径需要把 focus 还给新的同名 chip。
+    function setActiveFilter(name, { restoreFocus = false } = {}) {
+      state.filter = name;
+      renderAll();
+      if (!restoreFocus) return;
+      const chips = Array.from(document.querySelectorAll("#filterRow .chip"));
+      chips.find((chip) => chip.dataset.filter === name)?.focus();
+    }
+
+    function handleFilterChipKeydown(event, filters, index) {
+      const keys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+      if (!keys.includes(event.key)) return;
+      event.preventDefault();
+      let next = index;
+      if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = filters.length - 1;
+      else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + filters.length) % filters.length;
+      else next = (index + 1) % filters.length;
+      setActiveFilter(filters[next], { restoreFocus: true });
+    }
+
     function renderFilters() {
       const row = $("#filterRow");
       const filters = buildFilters();
       if (!filters.includes(state.filter)) state.filter = "全部";
-      row.replaceChildren(...filters.map((name) => {
+      // 整排 chip 每次都被替换掉：先记住焦点原本落在哪个 Tab 上，重建后还回去，
+      // 否则点一下 Tab 就把键盘焦点丢回 <body>，方向键再也走不动。
+      const focusedFilter = row.contains(document.activeElement) ? String(document.activeElement.dataset.filter || "") : "";
+      row.replaceChildren(...filters.map((name, index) => {
         const btn = document.createElement("button");
-        btn.className = `chip${state.filter === name ? " is-active" : ""}`;
+        const selected = state.filter === name;
+        const slug = platformSlugForFilterLabel(name);
+        const count = platformAvailableCount(slug);
+        btn.className = `chip${selected ? " is-active" : ""}`;
         btn.type = "button";
-        btn.textContent = name;
-        btn.addEventListener("click", () => { state.filter = name; renderAll(); });
+        btn.dataset.filter = name;
+        btn.dataset.platform = slug;
+        // role=tab + aria-selected：选中态不能只靠颜色表达，AT 也要能读到。
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", selected ? "true" : "false");
+        btn.setAttribute("aria-label", `${name}，可推荐 ${count === null ? PLATFORM_COUNT_UNKNOWN_LABEL : `${count} 条`}`);
+        btn.tabIndex = selected ? 0 : -1;
+        const labelSpan = document.createElement("span");
+        labelSpan.className = "chip-label";
+        labelSpan.textContent = name;
+        const countSpan = document.createElement("span");
+        countSpan.className = "chip-count";
+        countSpan.dataset.state = count === null ? "unknown" : "known";
+        countSpan.textContent = count === null ? PLATFORM_COUNT_UNKNOWN_TEXT : String(count);
+        countSpan.setAttribute("aria-hidden", "true");
+        btn.replaceChildren(labelSpan, countSpan);
+        btn.addEventListener("click", () => setActiveFilter(name));
+        btn.addEventListener("keydown", (event) => handleFilterChipKeydown(event, filters, index));
         return btn;
       }));
+      if (focusedFilter) {
+        const chips = Array.from(row.querySelectorAll(".chip"));
+        const restored = chips.find((chip) => chip.dataset.filter === focusedFilter)
+          || chips.find((chip) => chip.dataset.filter === state.filter);
+        restored?.focus();
+      }
       const resetButton = $("#resetFiltersBtn");
       if (resetButton) resetButton.hidden = state.filter === "全部" && !String(state.query || "").trim();
     }
@@ -3288,15 +3502,29 @@ ${savedCardFeedbackBarHtml(listKind)}
       if (loadMore) loadMore.hidden = false;
       const items = filteredVideos();
       if (!items.length) {
+        // 平台 Tab 的空态要区分「本会话还没装入」和「该平台暂时没有新候选」，
+        // 用的是同一份可推库存快照，不是 DOM 卡片数。
+        const activePlatform = activePlatformSlug();
+        const activePlatformCount = platformAvailableCount(activePlatform);
+        const loadFailed = desktopRecommendationLoadState === "failed" || desktopRecommendationLoadState === "failed-exhausted";
+        const platformMessage = activePlatform && !loadFailed
+          ? activePlatformCount === null
+            ? `${escapeHtml(platformName(activePlatform))}还没有装入推荐，可以点「加载更多推荐」试试。`
+            : activePlatformCount > 0
+              ? `${escapeHtml(platformName(activePlatform))}还有 ${activePlatformCount} 条候选没装进来，点「加载更多推荐」即可。`
+              : `${escapeHtml(platformName(activePlatform))}暂时没有新候选，后台会继续补货。`
+          : "";
         const message = state.query.trim()
           ? `没有找到包含“${escapeHtml(state.query.trim())}”的推荐。`
-          : state.videos.length
-            ? "当前筛选下没有推荐。"
-            : desktopRecommendationLoadState === "failed"
-              ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
-              : desktopRecommendationLoadState === "failed-exhausted"
-                ? "推荐加载失败，点一下重新加载。"
-                : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
+          : platformMessage
+            ? platformMessage
+            : state.videos.length
+              ? "当前筛选下没有推荐。"
+              : desktopRecommendationLoadState === "failed"
+                ? "推荐加载失败，正在重试；这不代表候选池真的为空。"
+                : desktopRecommendationLoadState === "failed-exhausted"
+                  ? "推荐加载失败，点一下重新加载。"
+                  : "当前列表里的推荐都已处理，可以加载更多推荐或等待后端补货。";
         const retry = desktopRecommendationLoadState === "failed-exhausted"
           ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
           : "";
@@ -5476,22 +5704,33 @@ ${cardFeedbackBarHtml()}`;
     async function reshuffle() {
       const reshuffleButton = $("#reshuffleBtn");
       const dismissToggle = $("#dismissOnReshuffleToggle");
+      // 请求发出前捕获当时选中的平台：用户在请求期间切 Tab 不能把响应写进错误批次。
+      const requestPlatform = activePlatformSlug();
+      // "换一批时忽略当前" 只提交本次请求对应平台、当时实际可见的卡片；
+      // 平台定向的排除集则覆盖该平台本会话已加载的全部内容（不止可见的那些）。
       const visibleForExclusion = filteredVideos().filter((item) => item?.id != null);
       const visibleKeys = new Set(visibleForExclusion.map((item) => recommendationKey(item)));
+      const scopedForExclusion = requestPlatform
+        ? state.videos.filter((item) => item?.id != null && recommendationPlatformSlug(item) === requestPlatform)
+        : visibleForExclusion;
       if (reshuffleButton) reshuffleButton.disabled = true;
       if (dismissToggle) dismissToggle.disabled = true;
       try {
-        const excludedBvids = visibleForExclusion.map((item) => item.bvid).filter(Boolean);
+        const excludedBvids = scopedForExclusion.map((item) => item.bvid).filter(Boolean);
+        const requestBody = { excluded_bvids: excludedBvids };
+        // "全部" 不带 source_platform：旧客户端 / 兼容路径的请求形状保持不变。
+        if (requestPlatform) requestBody.source_platform = requestPlatform;
         const payload = await requestJson(ENDPOINTS.reshuffle, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ excluded_bvids: excludedBvids })
+          body: JSON.stringify(requestBody)
         });
-        const fresh = payload?.items?.length
-          ? normalizeRecommendationList(payload.items).filter((item) => !visibleKeys.has(recommendationKey(item)))
-          : [];
+        const returned = payload?.items?.length ? normalizeRecommendationList(payload.items) : [];
+        if (requestPlatform && reportPlatformScopeLeak("换一批", requestPlatform, returned)) return;
+        const fresh = returned.filter((item) => !visibleKeys.has(recommendationKey(item)));
+        // 后端返回空数组时保留现有卡片，不制造空屏。
         if (fresh.length) {
-          state.videos = fresh;
+          state.videos = requestPlatform ? replacePlatformCards(state.videos, requestPlatform, fresh) : fresh;
           renderAll();
           if (state.dismissOnReshuffle && visibleForExclusion.length) {
             dismissVisibleRecommendationsBeforeReshuffle(visibleForExclusion);
@@ -5501,20 +5740,36 @@ ${cardFeedbackBarHtml()}`;
           showToast("暂时没有更多新推荐了");
         }
       } finally {
+        schedulePlatformAvailabilityRefresh();
         if (reshuffleButton) reshuffleButton.disabled = false;
         if (dismissToggle) dismissToggle.disabled = false;
       }
     }
 
+    // 手动「加载更多」与滚动自动续页共用这一条路径。库存为 0 时按钮仍可点：
+    // 它负责唤醒后端已有的补货链路；只有自动续页会被库存 gate 拦下。
     async function appendMore() {
       if (appendMoreInFlight) return;
       appendMoreInFlight = true;
+      // 与换一批同理：捕获请求开始时的平台，响应到达时不再读 state.filter。
+      const requestPlatform = activePlatformSlug();
       showAppendSkeletons();
       try {
-        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ excluded_bvids: state.videos.map((v) => v.bvid) }) });
+        const requestBody = { excluded_bvids: state.videos.map((v) => v.bvid) };
+        if (requestPlatform) requestBody.source_platform = requestPlatform;
+        const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody) });
         const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
         if (payload?.items?.length) {
-          const freshItems = normalizeRecommendationList(payload.items);
+          const returned = normalizeRecommendationList(payload.items);
+          if (requestPlatform && reportPlatformScopeLeak("加载更多", requestPlatform, returned)) return;
+          // 按稳定 recommendation key 去重后再追加。
+          const loadedKeys = new Set(state.videos.map((item) => recommendationKey(item)));
+          const freshItems = returned.filter((item) => {
+            const key = recommendationKey(item);
+            if (!key || loadedKeys.has(key)) return false;
+            loadedKeys.add(key);
+            return true;
+          });
           const appendCameUpShort = freshItems.length < APPEND_BATCH_SIZE;
           state.videos = state.videos.concat(freshItems);
           renderAll();
@@ -5536,6 +5791,7 @@ ${cardFeedbackBarHtml()}`;
         // showAppendSkeletons may have cleared an empty-state placeholder; if
         // nothing came back, re-render so the grid never ends up blank.
         if (!grid.childElementCount) renderVideos();
+        schedulePlatformAvailabilityRefresh();
         appendMoreInFlight = false;
       }
     }
@@ -6874,6 +7130,8 @@ ${cardFeedbackBarHtml()}`;
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      // 库存变化事件只刷新 Tab 数字 / 空态 / 自动续页 gate，不碰已加载的推荐卡片。
+      if (event.type === "refresh.pool_updated" || event.type === "pool_status") schedulePlatformAvailabilityRefresh();
       if (event.type === "degraded") {
         presentDegradedConfigRecovery({
           degraded: true,
@@ -7221,6 +7479,7 @@ ${cardFeedbackBarHtml()}`;
         requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`).then(applyChatSnapshot),
         requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`).then(applyDelightChatSnapshot),
         requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
+        refreshPlatformAvailability(),
       ];
 
       // 预取 LAN IP，供二维码面板使用；它不参与任一首屏资源的应用顺序。

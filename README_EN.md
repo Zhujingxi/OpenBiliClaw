@@ -616,6 +616,8 @@ guided init: signals → preferences → full profile commit → discover → ev
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle hot path: PoolServeSnapshot → isolated serve DB worker → short rec+shown write │
+│ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
+│ Platform inventory: platform-availability → same canonical servable set → total == Σ by_platform │
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │

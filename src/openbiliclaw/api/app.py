@@ -97,6 +97,7 @@ from openbiliclaw.api.models import (
     PendingDelightResponse,
     PendingNotificationOut,
     PendingNotificationResponse,
+    PlatformAvailabilityResponse,
     ProfileEditIn,
     ProfileSummaryResponse,
     RecommendationAppendIn,
@@ -1535,15 +1536,19 @@ def create_app(
             return max(0, int(cast("Any", configured_target)))
         return 0
 
-    def _canonical_pool_available() -> int | None:
-        nickname = ""
+    def _xhs_self_nickname() -> str:
+        """Persisted xhs nickname used by the pool's self-authored guard."""
         load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
         if callable(load_state):
             with suppress(Exception):
                 state = load_state()
                 info = state.get("xhs_self_info", {}) if isinstance(state, dict) else {}
                 if isinstance(info, dict):
-                    nickname = str(info.get("nickname", "") or "").strip()
+                    return str(info.get("nickname", "") or "").strip()
+        return ""
+
+    def _canonical_pool_available() -> int | None:
+        nickname = _xhs_self_nickname()
         readiness = getattr(ctx.database, "count_pool_readiness", None)
         if callable(readiness):
             with suppress(Exception):
@@ -5624,6 +5629,65 @@ def create_app(
         _fire_and_forget_tasks.add(task)
         task.add_done_callback(_fire_and_forget_tasks.discard)
 
+    def _platform_scope_kwargs(source_platform: str) -> dict[str, str]:
+        """Forward the platform scope only when the client actually sent one.
+
+        Engines and test doubles that predate platform scoping implement the
+        historical signature, so an unscoped request must keep its old call
+        shape rather than passing an empty keyword they cannot accept.
+        """
+        scope = str(source_platform or "").strip()
+        return {"source_platform": scope} if scope else {}
+
+    def _scoped_batch_came_up_short(
+        source_platform: str,
+        items: list[Any],
+        limit: int,
+    ) -> bool:
+        """Whether a platform-scoped request under-delivered.
+
+        A short scoped batch is the only signal that one platform ran dry
+        while the pool as a whole looks healthy, so it wakes the existing
+        replenishment entry point. This only requests a background refresh —
+        no discovery runs inside the HTTP request, and nothing here promises
+        the platform is refilled by the time the response returns.
+        """
+        if not str(source_platform or "").strip():
+            return False
+        return len(items) < max(0, int(limit))
+
+    @app.get(
+        "/api/recommendations/platform-availability",
+        response_model=PlatformAvailabilityResponse,
+    )
+    async def recommendation_platform_availability() -> PlatformAvailabilityResponse:
+        """Report servable inventory per canonical platform for the tab badges."""
+        loader = getattr(ctx.database, "load_pool_platform_availability_async", None)
+        if not callable(loader):
+            raise HTTPException(
+                status_code=503,
+                detail="platform availability is unavailable on this storage backend",
+            )
+        try:
+            snapshot = await loader(xhs_self_nickname=_xhs_self_nickname())
+        except Exception as exc:
+            # Never answer a failed read with zeros: the desktop keeps its last
+            # good snapshot, and a silent all-zero would read as "no stock
+            # anywhere" and disable auto-load across every platform.
+            logger.exception("Failed to read platform availability snapshot")
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to read platform availability: {exc}",
+            ) from exc
+        by_platform = {
+            str(name): max(0, int(count))
+            for name, count in dict(getattr(snapshot, "by_platform", {}) or {}).items()
+        }
+        return PlatformAvailabilityResponse(
+            total_available=max(0, int(getattr(snapshot, "total_available", 0))),
+            by_platform=by_platform,
+        )
+
     @app.post("/api/recommendations/reshuffle", response_model=RecommendationReshuffleResponse)
     async def reshuffle_recommendations(
         payload: Annotated[RecommendationReshuffleIn | None, Body()] = None,
@@ -5656,11 +5720,14 @@ def create_app(
                 if bvid and bvid.strip()
             )
         )
+        source_platform = payload.source_platform if payload is not None else ""
+        scope_kwargs = _platform_scope_kwargs(source_platform)
         if callable(result_fn):
             serve_result = await result_fn(
                 profile=profile,
                 excluded_bvids=excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             items = serve_result.items
             counts_after = dict(serve_result.pool_counts_after)
@@ -5670,13 +5737,14 @@ def create_app(
                 profile=profile,
                 excluded_bvids=excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             counts_after = {}
             timings = None
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(
-            force=available_after == 0,
+            force=available_after == 0 or _scoped_batch_came_up_short(source_platform, items, 10),
             available_count=available_after,
         )
         logger.info(
@@ -5720,11 +5788,13 @@ def create_app(
         except Exception:
             return RecommendationReshuffleResponse(items=[])
         profile_ms = (time.perf_counter() - profile_started) * 1000.0
+        scope_kwargs = _platform_scope_kwargs(payload.source_platform)
         if callable(result_fn):
             serve_result = await result_fn(
                 profile=profile,
                 excluded_bvids=payload.excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             items = serve_result.items
             counts_after = dict(serve_result.pool_counts_after)
@@ -5734,13 +5804,17 @@ def create_app(
                 profile=profile,
                 excluded_bvids=payload.excluded_bvids,
                 limit=10,
+                **scope_kwargs,
             )
             counts_after = {}
             timings = None
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(
-            force=available_after == 0,
+            force=(
+                available_after == 0
+                or _scoped_batch_came_up_short(payload.source_platform, items, 10)
+            ),
             available_count=available_after,
         )
         logger.info(

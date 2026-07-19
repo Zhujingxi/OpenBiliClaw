@@ -424,6 +424,109 @@ def test_desktop_reshuffle_swaps_before_background_dismiss() -> None:
     assert "excluded_bvids" in body
     assert "state.dismissOnReshuffle" in body
     assert "await dismissVisibleRecommendationsBeforeReshuffle" not in body
-    swap_index = body.index("state.videos = fresh;")
+    swap_index = body.index("state.videos = requestPlatform")
     dismiss_index = body.index("dismissVisibleRecommendationsBeforeReshuffle(")
     assert swap_index < dismiss_index
+
+
+def test_desktop_platform_availability_endpoint_and_snapshot_state() -> None:
+    """平台库存有独立只读接口；读取失败必须保留上一次成功的 snapshot。"""
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'platformAvailability: "/recommendations/platform-availability"' in app_js
+    # 首次成功读取前是「未知」而不是 0。
+    assert "platformAvailability: null," in app_js
+
+    body = _function_body(app_js, "refreshPlatformAvailability")
+    assert "ENDPOINTS.platformAvailability" in body
+    assert "state.platformAvailability = snapshot;" in body
+    # 失败分支不许触碰 snapshot —— 「失败即全零」是明确禁止的。
+    failure_branch = body[body.index("} catch") :]
+    assert "state.platformAvailability" not in failure_branch
+    # 库存更新只重绘 Tab / 空态 / 自动续页 gate，不重建已 append 的推荐卡片。
+    assert "renderFilters();" in body
+    assert "maybeAutoLoadAfterPoolRefill();" in body
+    assert "hydrateFromBackend" not in body
+    assert "normalizeRecommendationList" not in body
+
+    # 去抖 + 单飞（合并 pending 调用）复用既有 debounceAsync。
+    assert "const schedulePlatformAvailabilityRefresh = debounceAsync(" in app_js
+    assert (
+        'if (event.type === "refresh.pool_updated" || event.type === "pool_status") '
+        "schedulePlatformAvailabilityRefresh();"
+    ) in app_js
+
+    # 未成功读取过时是 null（未知），不是 0。
+    count_fn = _function_body(app_js, "platformAvailableCount")
+    assert "if (!snapshot) return null;" in count_fn
+
+
+def test_desktop_platform_tabs_union_enabled_inventory_and_loaded() -> None:
+    """Tab = 已启用配置 ∪ 库存>0 平台 ∪ 本会话已加载卡片，顺序稳定。"""
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    body = _function_body(app_js, "buildFilters")
+    assert "configuredSourceFilterLabels()" in body
+    assert "availablePlatformSlugs()" in body
+    assert "state.videos" in body
+    # 已知平台沿用 sourceFilterDefinitions 顺序，未知值按稳定字典序。
+    assert "sourceFilterOrder.filter" in body
+    assert 'a.localeCompare(b, "zh-Hans-CN")' in body
+    assert 'return ["全部", ...sources, ...otherSources];' in body
+
+    available = _function_body(app_js, "availablePlatformSlugs")
+    assert "state.platformAvailability?.by_platform" in available
+    assert "> 0" in available
+
+    # 搜索词只过滤已显示的卡片，不影响 Tab 集合 / 库存数字 / 后端平台参数。
+    assert "state.query" not in body
+    assert "state.query" not in _function_body(app_js, "platformAvailableCount")
+    assert "state.query" not in _function_body(app_js, "platformSlugForFilterLabel")
+
+    # 当前 Tab 因配置热更新 / 库存变化消失时回退到「全部」。
+    render_filters = _function_body(app_js, "renderFilters")
+    assert 'if (!filters.includes(state.filter)) state.filter = "全部";' in render_filters
+
+
+def test_desktop_platform_chips_render_counts_and_accessible_selected_state() -> None:
+    """chip 显示紧凑库存计数，选中态不能只靠颜色表达。"""
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    app_css = Path("src/openbiliclaw/web/desktop/assets/css/app.css").read_text(encoding="utf-8")
+    index_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+
+    body = _function_body(app_js, "renderFilters")
+    assert 'btn.setAttribute("role", "tab");' in body
+    assert 'btn.setAttribute("aria-selected", selected ? "true" : "false");' in body
+    assert "chip-count" in body
+    assert "platformAvailableCount(" in body
+    # accessible name 必须带完整平台名 + 库存数。
+    assert 'btn.setAttribute("aria-label"' in body
+    assert "PLATFORM_COUNT_UNKNOWN_TEXT" in body
+    assert "PLATFORM_COUNT_UNKNOWN_LABEL" in body
+    # 切 Tab 只改视图，不发推荐请求。
+    assert "ENDPOINTS.reshuffle" not in body
+    assert "ENDPOINTS.append" not in body
+    # 整排 chip 每次渲染都被替换，焦点必须还回去，否则方向键导航一点就断。
+    assert "row.contains(document.activeElement)" in body
+    assert "restored?.focus();" in body
+    assert "btn.tabIndex = selected ? 0 : -1;" in body
+
+    switch = _function_body(app_js, "setActiveFilter")
+    assert "state.filter = name;" in switch
+    assert "renderAll();" in switch
+    assert "requestJson" not in switch
+
+    assert '<div class="filter-row" id="filterRow" role="tablist"' in index_html
+
+    count_rule = re.search(r"\.filter-row \.chip \.chip-count \{[^}]*\}", app_css)
+    assert count_rule is not None, "chip count style not found"
+    assert "font-variant-numeric: tabular-nums" in count_rule.group(0)
+    assert "min-width:" in count_rule.group(0)
+    # hover 不许引发布局跳动；focus 必须可见；选中态有非颜色线索。
+    assert ".filter-row .chip:hover { transform: none;" in app_css
+    assert ".filter-row .chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }" in (
+        app_css
+    )
+    selected_rule = re.search(r'\.filter-row \.chip\[aria-selected="true"\] \{[^}]*\}', app_css)
+    assert selected_rule is not None, "chip selected style not found"
+    assert "font-weight:" in selected_rule.group(0)

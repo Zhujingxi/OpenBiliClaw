@@ -619,6 +619,8 @@ background ─ background admission (default 3) ──────┘
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │ 换屏快路：PoolServeSnapshot → 独立 Serve DB worker → recommendation+shown 短事务 │
+│ 平台定向（仅 PC Web Tab）：source_platform → 平台候选（不跨平台补位）→ 同一排序/文案/持久化 │
+│ 平台库存：platform-availability → 同一 canonical 可推集合 → total == Σ by_platform │
 │ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │

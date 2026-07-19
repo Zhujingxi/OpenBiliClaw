@@ -4246,6 +4246,10 @@ def test_get_pool_candidates_for_platform_returns_only_that_platform() -> None:
             source_platform="zhihu",
             content_id="zh1",
             content_url="https://www.zhihu.com/question/1/answer/1",
+            # Its own topic_group: the canonical available set applies a global
+            # per-group window, so sharing 测试分组 with three higher-scoring
+            # bilibili rows would (correctly) leave zhihu with zero inventory.
+            topic_group="知乎问答",
             relevance_score=0.85,
         )
 
@@ -4253,6 +4257,46 @@ def test_get_pool_candidates_for_platform_returns_only_that_platform() -> None:
 
         assert [row["bvid"] for row in rows] == ["ZH01"]
         assert all(str(row.get("source_platform")) == "zhihu" for row in rows)
+        # The strict reader and the advertised inventory must agree.
+        assert db.load_pool_platform_availability().by_platform["zhihu"] == 1
+
+
+def test_get_pool_candidates_for_platform_never_exceeds_advertised_inventory() -> None:
+    """A row the topic window excludes is not stock, so it must not be served.
+
+    Regression guard for the "tab says 0 but the picker still hands one out"
+    split brain: the strict reader used to run its own servable query without
+    the per-group window that ``count_pool_candidates`` applies.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Database(Path(tmp) / "pool.db")
+        db.initialize()
+        for i in range(3):
+            _seed_visible(
+                db,
+                f"BV{i:02d}",
+                title=f"bili {i}",
+                source="search",
+                source_platform="bilibili",
+                relevance_score=0.9,
+            )
+        _seed_visible(
+            db,
+            "ZH01",
+            title="zhihu crowded out of the shared topic window",
+            source="zhihu-extension-task",
+            source_platform="zhihu",
+            content_id="zh1",
+            content_url="https://www.zhihu.com/question/1/answer/1",
+            relevance_score=0.85,
+        )
+
+        availability = db.load_pool_platform_availability()
+
+        assert availability.by_platform.get("zhihu", 0) == 0
+        assert db.get_pool_candidates_for_platform("zhihu", limit=5) == []
+        assert db.list_servable_pool_platforms() == ["bilibili"]
+        assert availability.total_available == db.count_pool_candidates() == 3
 
 
 def test_get_pool_candidates_for_platform_excludes_non_servable_rows() -> None:
@@ -4318,6 +4362,404 @@ def test_list_servable_pool_platforms_returns_distinct_tokens() -> None:
         )
 
         assert db.list_servable_pool_platforms() == ["bilibili", "zhihu"]
+
+
+# ── Platform-scoped recommendation requests ─────────────────────────
+
+
+def _seed_platform_mix(db: Database) -> None:
+    """Seed a mixed pool with per-row topic groups so nothing is windowed out."""
+    for index in range(4):
+        _seed_visible(
+            db,
+            f"BVMIX{index:02d}",
+            title=f"B 站候选 {index}",
+            source="search",
+            source_platform="bilibili",
+            topic_group=f"B 组 {index}",
+            pool_expression=f"B 站候选 {index} 的文案。",
+            relevance_score=0.95 - index / 100,
+        )
+    for index in range(4):
+        _seed_visible(
+            db,
+            f"ZHMIX{index:02d}",
+            title=f"知乎候选 {index}",
+            source="zhihu-extension-task",
+            source_platform="zhihu",
+            content_id=f"zh-mix-{index}",
+            content_url=f"https://www.zhihu.com/question/{index}/answer/{index}",
+            topic_group=f"知乎组 {index}",
+            pool_expression=f"知乎候选 {index} 的文案。",
+            relevance_score=0.90 - index / 100,
+        )
+
+
+@pytest.mark.asyncio
+async def test_serve_with_source_platform_returns_only_that_platform() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_platform_mix(db)
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            recommendations = await engine.serve(
+                _build_profile(),
+                limit=4,
+                source_platform="zhihu",
+            )
+
+            assert recommendations
+            assert {item.content.source_platform for item in recommendations} == {"zhihu"}
+            # Still a real serve: copy is read from the pool and history is written.
+            assert all(item.expression for item in recommendations)
+            history = {row["bvid"] for row in db.get_recommendations(limit=20)}
+            assert history == {item.content.bvid for item in recommendations}
+            assert all(bvid.startswith("ZHMIX") for bvid in history)
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_with_source_platform_normalizes_aliases() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_platform_mix(db)
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            recommendations = await engine.serve(
+                _build_profile(),
+                limit=4,
+                source_platform="zh",
+            )
+
+            assert recommendations
+            assert {item.content.source_platform for item in recommendations} == {"zhihu"}
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_without_platform_keeps_mixed_batch() -> None:
+    """The no-platform path must keep its existing cross-platform behaviour."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_platform_mix(db)
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            recommendations = await engine.serve(_build_profile(), limit=8)
+
+            platforms = {item.content.source_platform for item in recommendations}
+            assert platforms == {"bilibili", "zhihu"}
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_serve_scoped_to_empty_platform_returns_empty_without_leaking() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_platform_mix(db)
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            recommendations = await engine.serve(
+                _build_profile(),
+                limit=5,
+                source_platform="reddit",
+            )
+
+            # No cross-platform floor top-up may rescue an empty platform.
+            assert recommendations == []
+            assert db.get_recommendations(limit=10) == []
+        finally:
+            db.close()
+
+
+class _SnapshotSpyDB:
+    """Database double recording how the serve snapshot is requested."""
+
+    def __init__(self, snapshot: Any) -> None:
+        self._snapshot = snapshot
+        self.snapshot_kwargs: list[dict[str, Any]] = []
+
+    async def load_pool_serve_snapshot_async(self, **kwargs: Any) -> Any:
+        self.snapshot_kwargs.append(dict(kwargs))
+        return self._snapshot
+
+    async def persist_pool_serve_async(
+        self, items: list[dict[str, Any]], shown_bvids: list[str]
+    ) -> Any:
+        from openbiliclaw.storage.database import PoolServePersistResult
+
+        return PoolServePersistResult(recommendation_ids=tuple(range(1, len(items) + 1)))
+
+
+def _snapshot_with(rows: list[dict[str, Any]]) -> Any:
+    from openbiliclaw.storage.database import PoolServeSnapshot
+
+    return PoolServeSnapshot(
+        readiness={"available": len(rows), "raw": len(rows), "pending": 0},
+        candidate_rows=tuple(rows),
+        loaded_count=len(rows),
+        platform_topups=(),
+        recent_viewed_bvids=frozenset(),
+        curator_signals=(),
+        feedback_signals=(),
+    )
+
+
+def _pool_row(bvid: str, platform: str) -> dict[str, Any]:
+    return {
+        "bvid": bvid,
+        "title": f"{platform} {bvid}",
+        "source_platform": platform,
+        "source": f"{platform}-task",
+        "content_id": bvid,
+        "content_url": f"https://example.com/{bvid}",
+        "relevance_score": 0.9,
+        "pool_expression": f"{bvid} 的文案。",
+        "pool_topic_label": "主题",
+        "style_key": "tutorial",
+        "topic_group": f"组 {bvid}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_serve_omits_platform_keyword_when_no_scope_requested() -> None:
+    """Old fakes/adapters must keep seeing the historical call shape."""
+    stub = _SnapshotSpyDB(_snapshot_with([_pool_row("BV01", "bilibili")]))
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+
+    await engine.serve(_build_profile(), limit=1)
+
+    assert stub.snapshot_kwargs
+    assert "source_platform" not in stub.snapshot_kwargs[0]
+
+
+@pytest.mark.asyncio
+async def test_serve_forwards_canonical_platform_to_snapshot_loader() -> None:
+    stub = _SnapshotSpyDB(_snapshot_with([_pool_row("ZH01", "zhihu")]))
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+
+    await engine.serve(_build_profile(), limit=1, source_platform="zh")
+
+    assert stub.snapshot_kwargs[0]["source_platform"] == "zhihu"
+
+
+@pytest.mark.asyncio
+async def test_serve_rejects_cross_platform_rows_leaked_by_the_snapshot(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A scoped batch never leaks another platform, and says so loudly."""
+    stub = _SnapshotSpyDB(
+        _snapshot_with([_pool_row("ZH01", "zhihu"), _pool_row("BV99", "bilibili")])
+    )
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+
+    caplog.set_level(logging.ERROR)
+    recommendations = await engine.serve(_build_profile(), limit=5, source_platform="zhihu")
+
+    assert [item.content.bvid for item in recommendations] == ["ZH01"]
+    assert "BV99" in caplog.text
+    assert "zhihu" in caplog.text
+
+
+class _LegacyCompatDB:
+    """Adapter without isolated snapshots — exercises the compatibility path."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.platform_calls: list[str] = []
+        self.plain_calls: list[int] = []
+        self.inserted: list[dict[str, Any]] = []
+
+    def count_pool_readiness(self, **_kwargs: Any) -> dict[str, int]:
+        return {"available": len(self._rows), "raw": len(self._rows), "pending": 0}
+
+    def get_pool_candidates(self, limit: int = 20, **_kwargs: Any) -> list[dict[str, Any]]:
+        self.plain_calls.append(limit)
+        return [dict(row) for row in self._rows][:limit]
+
+    def get_pool_candidates_for_platform(
+        self, platform: str, limit: int = 5, **_kwargs: Any
+    ) -> list[dict[str, Any]]:
+        self.platform_calls.append(platform)
+        rows = [dict(row) for row in self._rows if row["source_platform"] == platform]
+        return rows[:limit]
+
+    def list_servable_pool_platforms(self, **_kwargs: Any) -> list[str]:
+        return sorted({str(row["source_platform"]) for row in self._rows})
+
+    def get_recent_viewed_bvids(self) -> set[str]:
+        return set()
+
+    def batch_insert_recommendations(self, rows: list[dict[str, Any]]) -> list[int]:
+        self.inserted.extend(rows)
+        return list(range(1, len(rows) + 1))
+
+    def mark_pool_items_shown(self, bvids: list[str]) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_serve_compatibility_path_scopes_to_requested_platform() -> None:
+    stub = _LegacyCompatDB([_pool_row("BV01", "bilibili"), _pool_row("ZH01", "zhihu")])
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+
+    recommendations = await engine.serve(_build_profile(), limit=5, source_platform="zhihu")
+
+    assert [item.content.bvid for item in recommendations] == ["ZH01"]
+    assert stub.platform_calls == ["zhihu"]
+    # Strict mode must not fall back to the cross-platform window.
+    assert stub.plain_calls == []
+
+
+@pytest.mark.asyncio
+async def test_serve_compatibility_path_keeps_legacy_shape_without_scope() -> None:
+    stub = _LegacyCompatDB([_pool_row("BV01", "bilibili"), _pool_row("ZH01", "zhihu")])
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+
+    await engine.serve(_build_profile(), limit=5)
+
+    assert stub.plain_calls  # the historical cross-platform window
+    assert stub.platform_calls == []  # platform floor sees both platforms present
+
+
+@pytest.mark.asyncio
+async def test_serve_scope_keeps_legacy_rows_that_only_a_source_prefix_identifies(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Legacy rows carry their platform in ``source``, not ``source_platform``.
+
+    Storage resolves such a row to zhihu via the ``zhihu-`` strategy prefix, so
+    it is genuinely zhihu inventory. The engine's scope check must agree — a
+    stricter reading of ``source_platform`` alone would classify it as bilibili
+    (``_rows_to_discovered`` defaults blanks to bilibili), drop real stock as a
+    "leak", and log a phantom contract violation on every scoped request.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "zhihu-legacy-row",
+            title="旧策略知乎回答",
+            source="zhihu-hot",
+            content_id="zhihu-legacy-row",
+            content_url="https://www.zhihu.com/answer/legacy",
+            topic_group="知乎组",
+            pool_expression="旧策略知乎行的文案。",
+            relevance_score=0.9,
+        )
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            assert db.load_pool_platform_availability().by_platform == {"zhihu": 1}
+
+            caplog.set_level(logging.ERROR)
+            recommendations = await engine.serve(
+                _build_profile(),
+                limit=5,
+                source_platform="zhihu",
+            )
+
+            assert [item.content.bvid for item in recommendations] == ["zhihu-legacy-row"]
+            assert "leaked" not in caplog.text
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_unscoped_serve_calls_candidate_loader_with_the_legacy_signature() -> None:
+    """Subclasses/doubles overriding the loader keep the pre-feature call shape."""
+    stub = _LegacyCompatDB([_pool_row("BV01", "bilibili")])
+    engine = RecommendationEngine(llm=_DummyLLM(), database=stub)  # type: ignore[arg-type]
+    seen: list[dict[str, Any]] = []
+
+    def legacy_loader(
+        profile: Any,
+        *,
+        limit: int,
+        excluded_bvids: frozenset[str],
+    ) -> tuple[list[Any], int, int, int, int]:
+        seen.append({"limit": limit, "excluded_bvids": excluded_bvids})
+        return ([], 0, 0, 0, 0)
+
+    engine._load_filtered_serve_candidates = legacy_loader  # type: ignore[method-assign]
+
+    await engine.serve(_build_profile(), limit=3)
+
+    assert seen and "source_platform" not in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_reshuffle_and_append_forward_platform_scope() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_platform_mix(db)
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            reshuffled = await engine.reshuffle_recommendations(
+                profile=_build_profile(),
+                excluded_bvids=[],
+                limit=2,
+                source_platform="zhihu",
+            )
+            assert reshuffled
+            assert {item.content.source_platform for item in reshuffled} == {"zhihu"}
+
+            appended = await engine.append_recommendations(
+                profile=_build_profile(),
+                excluded_bvids=[item.content.bvid for item in reshuffled],
+                limit=2,
+                source_platform="zhihu",
+            )
+            assert appended
+            assert {item.content.source_platform for item in appended} == {"zhihu"}
+            assert not {item.content.bvid for item in appended} & {
+                item.content.bvid for item in reshuffled
+            }
+        finally:
+            db.close()
+
+
+@pytest.mark.asyncio
+async def test_reshuffle_and_append_with_result_expose_platform_scope() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_platform_mix(db)
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        try:
+            reshuffled = await engine.reshuffle_recommendations_with_result(
+                profile=_build_profile(),
+                excluded_bvids=[],
+                limit=2,
+                source_platform="bilibili",
+            )
+            assert {item.content.source_platform for item in reshuffled.items} == {"bilibili"}
+
+            appended = await engine.append_recommendations_with_result(
+                profile=_build_profile(),
+                excluded_bvids=[item.content.bvid for item in reshuffled.items],
+                limit=2,
+                source_platform="bilibili",
+            )
+            assert {item.content.source_platform for item in appended.items} == {"bilibili"}
+            # Inventory metadata stays pool-wide, as the API contract expects.
+            assert appended.pool_counts_after["available"] >= 0
+        finally:
+            db.close()
 
 
 @pytest.mark.asyncio
