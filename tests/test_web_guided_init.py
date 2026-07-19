@@ -691,7 +691,7 @@ async def test_run_guided_init_emits_stage_progress_for_sources_and_chunks(monke
     assert stage2[0]["note"] == "已完成 0/1 批 · AI 开始处理（并发上限 1）"
     assert stage2[-1]["note"] == "第 3/3 批"
     assert stage2[0]["elapsed_seconds"] == 0
-    assert all(call["max_seconds"] == 600 for call in stage2)
+    assert all(call["max_seconds"] == 2700 for call in stage2)
     assert ("analyze", True) in scope_observations
     assert ("profile", True) in scope_observations
     assert ("discover", False) in scope_observations
@@ -775,11 +775,14 @@ async def test_run_guided_init_bounds_hung_preference_analysis(monkeypatch) -> N
             profile_analysis_timeout_seconds=0.01,
         )
 
+    # Explicit caller budgets stay a pure wall clock, so this is the *absolute*
+    # ceiling message: it must not blame Base URL / 模型名 (nothing proves the
+    # service is unreachable) and must name the actionable fix instead.
     assert excinfo.value.reason == "analyze_failed"
-    assert "本轮 1 分钟上限" in excinfo.value.message
-    assert "Base URL" in excinfo.value.message
-    assert "模型名" in excinfo.value.message
+    assert "总时长超过上限（约 1 分钟）" in excinfo.value.message
+    assert "更快的模型" in excinfo.value.message
     assert "重试初始化" in excinfo.value.message
+    assert "Base URL" not in excinfo.value.message
     assert engine.cancelled is True
     assert engine.discover_profiles == []
     assert coord.started_stages == [1, 2]
@@ -882,7 +885,7 @@ async def test_run_guided_init_bounds_hung_profile_build(monkeypatch) -> None:
         )
 
     assert excinfo.value.reason == "profile_failed"
-    assert "超过 6 分钟" in excinfo.value.message
+    assert "超过 30 分钟" in excinfo.value.message
     assert "Base URL" in excinfo.value.message
     assert "模型名" in excinfo.value.message
     assert "重试初始化" in excinfo.value.message
@@ -922,7 +925,286 @@ async def test_run_guided_init_treats_hung_discovery_as_partial_success(monkeypa
     assert result.discovery_error is True
     assert isinstance(result.discover_exc, TimeoutError)
     assert result.discovery_reason == "discovery_timeout"
-    assert "超过 10 分钟" in result.discovery_detail
+    assert "超过 45 分钟" in result.discovery_detail
     assert "部分完成" in result.discovery_detail
     assert "后台继续补池" in result.discovery_detail
     assert discovery_cancelled is True
+
+
+# ── Progress-aware deadlines (idle + absolute) ───────────────────────────
+#
+# Regression cover for the 2026-07-20 field report: a healthy-but-slow gateway
+# was killed by stage 2's fixed wall clock while batches were still landing.
+# All of these drive `_await_with_progress_deadline` with an injected fake
+# clock so they assert the *policy*, not real elapsed time.
+
+
+class _FakeClock:
+    """Monotonic clock that only moves when the test says so."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+async def test_progress_deadline_survives_slow_but_progressing_run() -> None:
+    """The reported case: 6 chunks x ~140s used to die at the 15-min wall clock."""
+    import openbiliclaw.cli as cli
+
+    clock = _FakeClock()
+    marker = cli._InitProgressMarker(clock)
+    chunks_done = 0
+
+    async def _slow_but_progressing() -> str:
+        nonlocal chunks_done
+        for _ in range(6):
+            # One chunk of real work on a slow gateway.
+            clock.advance(140.0)
+            await asyncio.sleep(0)
+            chunks_done += 1
+            marker.touch()
+        return "ok"
+
+    old_fixed_budget = cli._profile_analysis_timeout_seconds(
+        event_count=1100, requested=None, concurrency=1
+    )
+    assert old_fixed_budget is not None
+    # 6 x 140s = 840s of work would have fitted, but the throttled real run
+    # overran the old budget; assert the new pair does not care about total
+    # elapsed as long as progress keeps arriving.
+    result = await cli._await_with_progress_deadline(
+        _slow_but_progressing(),
+        marker=marker,
+        idle_seconds=cli._INIT_PROGRESS_IDLE_SECONDS,
+        absolute_seconds=cli._INIT_PROGRESS_ABSOLUTE_SECONDS,
+        poll_seconds=0,
+    )
+
+    assert result == "ok"
+    assert chunks_done == 6
+    # Every gap between chunks is under the idle limit even though the run is
+    # far slower than the per-wave calibration it was previously killed by.
+    assert clock.now == 840.0
+    assert cli._INIT_PROGRESS_IDLE_SECONDS > 140.0
+
+
+async def test_progress_deadline_idle_limit_fires_when_nothing_returns() -> None:
+    import openbiliclaw.cli as cli
+
+    clock = _FakeClock()
+    marker = cli._InitProgressMarker(clock)
+    cancelled = False
+
+    async def _never_progresses() -> None:
+        nonlocal cancelled
+        try:
+            while True:
+                clock.advance(60.0)
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    with pytest.raises(cli._InitIdleTimeoutError):
+        await cli._await_with_progress_deadline(
+            _never_progresses(),
+            marker=marker,
+            idle_seconds=600.0,
+            absolute_seconds=2700.0,
+            poll_seconds=0,
+        )
+
+    assert cancelled is True
+    # Idle, not absolute: it gave up long before the 45-minute ceiling.
+    assert clock.now < 2700.0
+
+
+async def test_progress_deadline_absolute_ceiling_still_fires() -> None:
+    import openbiliclaw.cli as cli
+
+    clock = _FakeClock()
+    marker = cli._InitProgressMarker(clock)
+    cancelled = False
+
+    async def _progresses_forever() -> None:
+        nonlocal cancelled
+        try:
+            while True:
+                clock.advance(60.0)
+                marker.touch()
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    with pytest.raises(cli._InitAbsoluteTimeoutError):
+        await cli._await_with_progress_deadline(
+            _progresses_forever(),
+            marker=marker,
+            idle_seconds=600.0,
+            absolute_seconds=2700.0,
+            poll_seconds=0,
+        )
+
+    assert cancelled is True
+    assert clock.now >= 2700.0
+
+
+async def test_progress_deadline_propagates_cancellation() -> None:
+    """CancelledError must escape so the API wrapper records `cancelled`."""
+    import openbiliclaw.cli as cli
+
+    marker = cli._InitProgressMarker()
+    inner_cancelled = asyncio.Event()
+
+    async def _work() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            inner_cancelled.set()
+            raise
+
+    outer = asyncio.ensure_future(
+        cli._await_with_progress_deadline(
+            _work(),
+            marker=marker,
+            idle_seconds=600.0,
+            absolute_seconds=2700.0,
+            poll_seconds=0.01,
+        )
+    )
+    await asyncio.sleep(0.05)
+    outer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert inner_cancelled.is_set()
+
+
+async def test_profile_analysis_deadlines_split_idle_and_absolute() -> None:
+    import openbiliclaw.cli as cli
+
+    idle, absolute = cli._profile_analysis_deadlines(
+        event_count=1100, requested=None, concurrency=1
+    )
+    assert idle == cli._INIT_PROGRESS_IDLE_SECONDS
+    # Generous enough for the reported 6-chunk bootstrap on a slow gateway.
+    assert absolute == cli._INIT_PROGRESS_ABSOLUTE_SECONDS
+
+    # A bootstrap whose scaled wall clock exceeds the flat ceiling keeps the
+    # larger of the two — the ceiling never shrinks a big run's budget.
+    huge_idle, huge_absolute = cli._profile_analysis_deadlines(
+        event_count=6000, requested=None, concurrency=1
+    )
+    assert huge_idle == cli._INIT_PROGRESS_IDLE_SECONDS
+    assert huge_absolute is not None and huge_absolute > cli._INIT_PROGRESS_ABSOLUTE_SECONDS
+
+    # Explicit caller overrides stay an exact pure wall clock, no idle limit.
+    assert cli._profile_analysis_deadlines(event_count=1100, requested=12.5) == (None, 12.5)
+    assert cli._profile_analysis_deadlines(event_count=1100, requested=0) == (None, None)
+
+
+async def test_run_guided_init_idle_analysis_reports_connectivity_message(monkeypatch) -> None:
+    """A stage-2 run that returns nothing gets the idle message, not the slow one."""
+    import openbiliclaw.cli as cli
+
+    monkeypatch.setattr(cli, "_INIT_PROGRESS_IDLE_SECONDS", 0.01)
+    monkeypatch.setattr(cli, "_INIT_PROGRESS_ABSOLUTE_SECONDS", 600.0)
+
+    class _HangingAnalyzeEngine(_StubEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cancelled = False
+
+        async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    engine = _HangingAnalyzeEngine()
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+
+    with pytest.raises(cli.GuidedInitError) as excinfo:
+        await cli.run_guided_init(
+            client=object(),
+            memory=_StubMemory(),
+            soul_engine=engine,
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=True,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            target_pool_count=0,
+            discover_backfill=discover_backfill,
+        )
+
+    assert excinfo.value.reason == "analyze_failed"
+    assert "没有返回任何新结果" in excinfo.value.message
+    assert "Base URL" in excinfo.value.message
+    assert "模型名" in excinfo.value.message
+    assert "重试初始化" in excinfo.value.message
+    # Distinct from the absolute message — the user must be able to tell
+    # "unreachable" apart from "too slow".
+    assert "更快的模型" not in excinfo.value.message
+    assert engine.cancelled is True
+
+
+async def test_run_guided_init_slow_analysis_completes_past_old_fixed_budget(monkeypatch) -> None:
+    """Regression: steady per-chunk progress must outlive the old wall clock."""
+    import openbiliclaw.cli as cli
+
+    ticks = {"n": 0}
+
+    class _SlowProgressingEngine(_StubEngine):
+        async def analyze_events(self, events, *, event_chunk_size=0, progress_callback=None):
+            self.received_callback = progress_callback
+            for i in range(1, 7):
+                # Each chunk takes longer than the whole old floor budget would
+                # have allowed once summed, but progress keeps arriving.
+                await asyncio.sleep(0.01)
+                ticks["n"] += 1
+                if progress_callback is not None:
+                    await progress_callback(i, 6)
+
+    # Idle limit is comfortably above the per-chunk gap, so a run that keeps
+    # reporting batches must reach the end. (The clock-level proof that a run
+    # slower than the old fixed budget survives lives in
+    # ``test_progress_deadline_survives_slow_but_progressing_run``.)
+    monkeypatch.setattr(cli, "_INIT_PROGRESS_IDLE_SECONDS", 5.0)
+
+    engine = _SlowProgressingEngine()
+    discover_backfill = _patch_run_guided_init_collectors(monkeypatch, engine)
+    coord = _RecordingCoordinator()
+
+    await cli.run_guided_init(
+        client=object(),
+        memory=_StubMemory(),
+        soul_engine=engine,
+        favorite_limit=0,
+        follow_limit=0,
+        include_bili=True,
+        include_xhs=False,
+        include_dy=False,
+        include_yt=False,
+        target_pool_count=0,
+        discover_backfill=discover_backfill,
+        coordinator=coord,
+        run_id="run-slow",
+    )
+
+    assert ticks["n"] == 6
+    assert coord.done_stages == [1, 2, 3, 4]
+    stage2 = [c for c in coord.stage_progress_calls if c["stage"] == 2]
+    assert [c["done"] for c in stage2] == [0, 1, 2, 3, 4, 5, 6]
+    # The GUI's ETA copy quotes max_seconds; it must be the absolute ceiling,
+    # i.e. the only clock that can still end the stage on time.
+    _, expected_ceiling = cli._profile_analysis_deadlines(event_count=1, requested=None)
+    assert expected_ceiling is not None
+    assert all(c["max_seconds"] == int(expected_ceiling) for c in stage2)
