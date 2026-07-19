@@ -40,8 +40,16 @@
 
 ---
 
-## 质量基线比较器 Fail-Closed 修复（评审 t_cce76b68 F1-F9）
+## 质量基线比较器第四轮 Fail-Closed 修复（评审 t_e03bfeff run 171 P1+P2x2）
 
+- **P1 指纹盲区消除**：`_normalize_failure_fingerprint()` 从「headline 前 120 字符 + tail 后 80 字符」的盲中段截断改为对完整归一化消息做 SHA-256 摘要（格式 `<preview> | sha256:<hex>`，preview 供人类审阅 baseline diff）。此前 186 字符 headline + 200 字符 nested-cause payload 时异常类落在两个保留片段之间，`ModuleNotFoundError` → `SecurityError` 变异产生相同指纹并返回 0；现在摘要覆盖整条消息，任何位置的语义变化都改变指纹。`tests/contracts/quality-baseline.json` 的 `known_failures` 当前为空，无需重生成指纹；baseline 与 `scripts/generate_quality_baseline.py` 的 description 同步更新为新方案。
+- **P2 mypy 矛盾摘要拒绝**：`parse_mypy_summary()` 现在对多条 summary 形态行抛 `MypyOutputError`（此前静默返回第一条），`_parse_mypy_rows()` 拒绝终止摘要行之后的任何非空内容——「一条已 allowlist 诊断 + `Found 1 error` + 矛盾的 `Success: no issues found`」拼接工件此前返回 0，现在 exit 2 fail closed。
+- **P2 JUnit 互斥 outcome 拒绝**：`parse_junit_failures_and_skips()` 拒绝单个 testcase 上多个互斥 outcome 元素——`<failure>` + `<skipped>` 并存、多个 `<failure>`/`<error>` 子元素、多个 `<skipped>` 子元素均抛 `JUnitStructureError`（此前独立记录首个 failure 与任意 skip，结构不可能的工件在计数对齐时被接受）。
+- **测试**：`tests/test_quality_baseline_comparator.py` 新增 7 个端到端/单元回归（长 headline + 长 nested-cause 变异指纹、矛盾多摘要、摘要后内容、failure+skipped 并存、多 failure 子元素等），比较器测试 58 passed。
+
+---
+
+## 质量基线比较器 Fail-Closed 修复（评审 t_cce76b68 F1-F9）
 - **F1 [P1] 退出码/工件语义 reconciliation**：`scripts/check_quality_baseline.py` 新增 `parse_mypy_summary_kind()` 解析 mypy 摘要类型（success/errors），在 baseline 比较之前先对 `--pytest-exit-code` 与 `--mypy-exit-code` 做双向一致性校验：pytest 0 ↔ 无解析失败、pytest 1 ↔ 至少一个解析失败；mypy 0 ↔ Success 摘要、mypy 1 ↔ Found errors 摘要。矛盾组合（如 exit 0 + 含失败的 JUnit、exit 1 + clean JUnit、exit 1 + Success 摘要）一律 fail closed。两个 exit code 参数改为 required，消除 optional 带来的静默跳过。
 - **F2 [P2] 结构空 JUnit 拒绝**：`parse_junit_failures_and_skips()` 新增 `JUnitStructureError`：无 `<testsuite>`、无 `<testcase>`、tests/failures/errors 声明计数与解析行数不一致、重复 node ID、declared-but-unparsed failures/errors 均抛错并以 exit 2 关闭。此前 `<testsuites/>` 会被当作成功通过。
 - **F3 [P2] 非有限 coverage fail-closed**：`parse_coverage_line_percent()` 校验 `math.isfinite` 与 0..100 范围，NaN/inf/越界/非数字 line-rate 抛 `ValueError`（exit 2）；`compare_coverage()` 同步校验 baseline 中的 `line_percent` 与 `noise_tolerance` 为有限非负数。
@@ -79,6 +87,15 @@
 ## 架构清单与增量式重构计划
 
 - **新增仓库架构清单与增量式重构实施计划**：`docs/plans/2026-07-19-repository-inventory.md` 为时点性盘点快照，`docs/plans/2026-07-19-incremental-architecture-refactor-plan.md` 为实施基线。计划定义了五层边界模型与窄依赖 router 工厂契约、存储兼容门面、迁移去重 2A（`PRAGMA table_info` + `ALTER TABLE ... ADD COLUMN`，保留惰性调用点；schema 版本账推迟）、生产者 protocol（两个生产者迁移后才考虑基类）、Must/Should/Could 交付切片、测试门禁与回滚策略。CI/CD 边界同步明确：验证统一由 `.github/workflows/ci.yml` 拥有，渠道工作流只负责打包/签名/发布；既有 pytest/mypy 诊断将按结构化身份 allowlist 而非计数容忍，诊断输出缺失或不可解析一律判失败。本条仅新增文档，不改变运行时代码。
+
+---
+
+## 共享 E2E 认证 Fixture
+
+- **新增 `tests/e2e_auth_fixtures.py`**：为需要真实 FastAPI app + 数据库的 E2E 测试提供统一的认证绕过方案，避免每个测试文件重复实现 app 构建逻辑。默认使用 loopback 绕过（`trust_loopback=True`），同时提供 opt-in 的 extension-token 交换路径供后续容器内浏览器测试使用。
+- **新增 `tests/test_e2e_auth_fixtures.py`**：fixture 自身的单元测试，验证 loopback 无 token 通过、跨源请求 401、extension-token 交换与 Bearer 认证。
+- **迁移 `tests/test_xhs_e2e_smoke.py`**：作为首个使用共享 fixture 的隔离 E2E 测试，保持 `XHS_E2E_SMOKE=1` 环境门控不变。其中 `test_task_queue_round_trip` 按当前服务端契约（`POST /api/sources/xhs/task-result` 对未知 task 返回 409）改为真实往返：经 `XhsTaskQueue.enqueue_with_id` 在同一 DB 上入队 → `next-task` 认领 → 对已存在任务提交结果返回 200。
+- **新增 `docs/testing/e2e-guide.md`**：完整说明两种认证策略、使用方式和已迁移测试列表。
 
 ---
 
