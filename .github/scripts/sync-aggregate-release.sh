@@ -11,16 +11,57 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 # tomllib requires Python 3.11+. Prefer a `python3` that is already 3.11+;
-# otherwise fall back to an explicit python3.11 / python3.12 / python3.13 binary.
+# otherwise discover any `python3.<minor>` executable on PATH and pick the
+# highest minor version that satisfies >= 3.11. The scan is future-compatible:
+# a system whose only suitable interpreter is `python3.14` (or any later
+# versioned binary) still resolves, and the ordering is deterministic
+# (version-sorted descending) regardless of PATH order. Candidate names are
+# matched against a strict `python3.N` shape so stray executables like
+# `python3-config` or `python3.10-config` are never selected.
 pick_python() {
   local candidate
-  for candidate in python3 python3.13 python3.12 python3.11; do
-    if command -v "$candidate" >/dev/null 2>&1 \
-      && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+  if command -v python3 >/dev/null 2>&1 \
+    && python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+    printf '%s\n' python3
+    return 0
+  fi
+
+  local -a versioned=()
+  local dir base minor
+  local IFS=':'
+  for dir in $PATH; do
+    [ -d "$dir" ] || continue
+    for candidate in "$dir"/python3.*; do
+      [ -e "$candidate" ] || continue
+      base="${candidate##*/}"
+      # Strict `python3.N` (digits only after the dot); skip `python3.*-config`
+      # and any other non-interpreter that happens to share the prefix.
+      minor="${base#python3.}"
+      case "$minor" in
+        ''|*[!0-9]*)
+          continue
+          ;;
+        *)
+          versioned+=("$minor")
+          ;;
+      esac
+    done
   done
+  unset IFS
+
+  if [ "${#versioned[@]}" -gt 0 ]; then
+    # Sort numerically descending so the newest suitable minor wins and the
+    # choice is independent of directory listing / PATH ordering.
+    while IFS= read -r minor; do
+      candidate="python3.${minor}"
+      if command -v "$candidate" >/dev/null 2>&1 \
+        && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done < <(printf '%s\n' "${versioned[@]}" | sort -rn -u)
+  fi
+
   echo "Python 3.11+ is required to read pyproject.toml (tomllib)" >&2
   return 1
 }

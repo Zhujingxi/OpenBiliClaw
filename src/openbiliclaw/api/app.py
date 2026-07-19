@@ -1300,18 +1300,39 @@ def _safe_logging_filename_for_wire(filename: str) -> str:
     ``LoggingConfig.filename`` is documented as a plain basename, but the
     config layer does not enforce that. A filename containing path separators
     (absolute or relative) would leak the host filesystem layout when echoed
-    back or joined into ``file_path``.
+    back or joined into ``file_path``. Drive-qualified forms without any
+    separator (``C:backend.log``, ``D:``) are equally host-revealing: on
+    Windows ``PureWindowsPath("logs") / "C:backend.log"`` collapses to the
+    drive-qualified ``C:backend.log``, silently dropping the configured
+    directory, so the wire form must never carry a drive prefix either.
 
     Contract:
     - Plain basename (``"backend.log"``) → returned as-is.
     - Any filename containing ``/`` or ``\\`` → reduced to its basename.
+    - Drive-only (``C:`` / ``d:``) and drive-relative (``C:foo`` /
+      ``c:foo``) forms: the drive prefix is stripped first, then the
+      remainder reduces by the same rules — ``C:`` → empty (so
+      ``file_path`` falls back to the redacted directory only), ``C:foo``
+      → ``foo``. The wire form never emits a drive prefix, matching the
+      directory-side contract.
     """
     if not filename:
         return filename
-    if "/" in filename or "\\" in filename:
-        parts = [p for p in filename.replace("\\", "/").split("/") if p]
+    candidate = filename
+    # Strip any Windows drive prefix (``C:``, ``C:foo``) before separator
+    # handling so drive-only and drive-relative names never leak the drive
+    # letter into the wire form, independent of the host OS dialect. Keep the
+    # guard host-neutral (alpha + ``:``) rather than delegating to
+    # ``PureWindowsPath``, so POSIX-hosted daemons redact Windows dialects
+    # the same way a Windows-hosted daemon would.
+    if len(candidate) >= 2 and candidate[1] == ":" and candidate[0].isalpha():
+        candidate = candidate[2:]
+    if not candidate:
+        return ""
+    if "/" in candidate or "\\" in candidate:
+        parts = [p for p in candidate.replace("\\", "/").split("/") if p]
         return parts[-1] if parts else ""
-    return filename
+    return candidate
 
 
 def _logging_file_path_for_wire(directory: str, filename: str) -> str:

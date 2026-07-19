@@ -10178,6 +10178,67 @@ class TestConfigApiE2E:
         assert "/srv" not in data["logging"]["file_path"]
         assert "private" not in data["logging"]["file_path"]
 
+    def test_get_config_redacts_windows_drive_qualified_logging_filename(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Drive-qualified ``logging.filename`` must not leak through /api/config.
+
+        Regression for the review finding that ``filename="C:backend.log"``
+        and ``filename="D:"`` previously passed through unchanged because the
+        redactor only handled names containing ``/`` or ``\\\\``. On Windows
+        ``PureWindowsPath("logs") / "C:backend.log"`` collapses to the
+        drive-qualified ``C:backend.log`` and silently drops the configured
+        directory, so the wire form must never carry a drive prefix —
+        independent of the host OS dialect.
+        """
+        from openbiliclaw.config import Config
+
+        # Drive-relative: uppercase and lowercase drive letters reduce to
+        # their basename; the drive prefix never reaches the wire.
+        for drive_relative, expected_basename in (
+            ("C:backend.log", "backend.log"),
+            ("c:backend.log", "backend.log"),
+            ("D:private/backend.log", "backend.log"),
+            ("d:private\\backend.log", "backend.log"),
+        ):
+            cfg = Config(data_dir="runtime-data")
+            cfg.logging.directory = "logs"
+            cfg.logging.filename = drive_relative
+
+            client = self._make_client(monkeypatch, tmp_path, cfg)
+
+            response = client.get("/api/config")
+            assert response.status_code == 200, drive_relative
+            data = response.json()
+
+            assert data["logging"]["directory"] == "logs", drive_relative
+            assert data["logging"]["filename"] == expected_basename, drive_relative
+            assert data["logging"]["file_path"] == f"logs/{expected_basename}", drive_relative
+            assert ":" not in data["logging"]["file_path"], drive_relative
+            assert not data["logging"]["file_path"].startswith("/"), drive_relative
+
+        # Drive-only: uppercase and lowercase reduce to empty; ``file_path``
+        # falls back to the redacted directory + trailing slash only — no
+        # drive letter ever appears.
+        for drive_only in ("C:", "c:", "D:", "d:", "Z:", "z:"):
+            cfg = Config(data_dir="runtime-data")
+            cfg.logging.directory = "logs"
+            cfg.logging.filename = drive_only
+
+            client = self._make_client(monkeypatch, tmp_path, cfg)
+
+            response = client.get("/api/config")
+            assert response.status_code == 200, drive_only
+            data = response.json()
+
+            assert data["logging"]["directory"] == "logs", drive_only
+            assert data["logging"]["filename"] == "", drive_only
+            # file_path joins directory + "/" + empty filename; the drive
+            # prefix is gone and the wire form contains no drive letter.
+            assert data["logging"]["file_path"] == "logs/", drive_only
+            assert ":" not in data["logging"]["file_path"], drive_only
+            assert not data["logging"]["file_path"].startswith("/"), drive_only
+
     def test_get_config_redacts_windows_drive_logging_directory(
         self, monkeypatch, tmp_path
     ) -> None:
