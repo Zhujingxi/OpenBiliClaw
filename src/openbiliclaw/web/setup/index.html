@@ -1233,6 +1233,7 @@
     // instead of silently landing on step 0, and an initialized backend goes
     // straight to done / first-pool waiting.
     (async function guard() {
+      let unlistedProvider = "";
       try {
         const r = await fetch("/api/config");
         if (r.ok) {
@@ -1260,10 +1261,24 @@
           const optionExists = Array.from($("#provider").options).some((option) => option.value === prov);
           if (prov && optionExists) {
             $("#provider").value = prov;
+          } else if (prov && !optionExists) {
+            // A saved default_provider that the wizard no longer offers (e.g.
+            // "ollama", which is embedding-only here). Don't silently drop it —
+            // remember it so we can flag it after switchProvider() (which
+            // clears #msg0) instead of losing the notice.
+            unlistedProvider = prov;
           }
         }
       } catch {}
       switchProvider();
+      if (unlistedProvider) {
+        showMsg(
+          "#msg0",
+          "检测到已配置的 provider「" + unlistedProvider + "」不在推荐列表中（本地 Ollama 仅用于向量检索）；" +
+            "如需继续使用请到设置页，或在这里重新选择一个聊天服务商。",
+          "info",
+        );
+      }
       try {
         const status = await fetchInitStatus();
         if (status.running) {
