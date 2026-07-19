@@ -185,7 +185,14 @@ def _discard_inline_api_key_handle(handle: _InlineApiKeyHandle) -> None:
     _INLINE_API_KEY_VAULT.discard(handle)
 
 
-class _InlineApiKeyHandleType(click.types.ParamType):
+# Click >= 8.4 makes ``ParamType`` generic, so strict mypy under Click 8.4+
+# reports ``[type-arg]`` on a bare subclass, while Click < 8.4 (the repository
+# lock pins 8.3.1) types it as non-generic and reports ``[type-arg]`` on any
+# parameterization. The dual-code ignore satisfies both type environments:
+# ``[type-arg]`` is the live error under Click 8.4+, and ``[unused-ignore]``
+# keeps the comment valid under Click < 8.4 if ``warn_unused_ignores`` is ever
+# enabled. Runtime behavior is unchanged.
+class _InlineApiKeyHandleType(click.types.ParamType):  # type: ignore[type-arg,unused-ignore]
     """Accept only values protected before Click begins argument parsing."""
 
     name = "text"
@@ -215,8 +222,12 @@ def _root_models_argument_offset(
     parameters: Sequence[click.Parameter],
 ) -> int | None:
     """Locate the root's top-level models command without consuming option values."""
-    options = {
-        option_name: parameter
+    # isinstance() narrows each parameter to TyperOption for attribute access,
+    # but under typer>=0.25 (vendored click) the intersection with
+    # ``click.Parameter`` is empty, so mypy keeps the declared element type.
+    # Cast through Any to bridge both layouts.
+    options: dict[str, TyperOption] = {
+        option_name: cast("TyperOption", cast("Any", parameter))
         for parameter in parameters
         if isinstance(parameter, TyperOption)
         for option_name in (*parameter.opts, *parameter.secondary_opts)
@@ -271,8 +282,8 @@ def _command_api_key_occurrences(
     command: click.Command,
 ) -> tuple[_InlineApiKeyOccurrence, ...]:
     """Find credentials using the selected Click command's actual option grammar."""
-    options = {
-        option_name: parameter
+    options: dict[str, TyperOption] = {
+        option_name: cast("TyperOption", cast("Any", parameter))
         for parameter in command.params
         if isinstance(parameter, TyperOption)
         for option_name in (*parameter.opts, *parameter.secondary_opts)
@@ -320,7 +331,11 @@ def _model_api_key_occurrences(
     command = group.commands.get(args[command_offset]) if group is not None else None
     if command is None:
         return _conservative_api_key_occurrences(args, start=command_offset)
-    return _command_api_key_occurrences(args, start=command_offset + 1, command=command)
+    # Widen through ``Any`` so the click.Command annotation is accepted on both
+    # typer<0.25 (where TyperGroup uses real click) and typer>=0.25 (vendored).
+    return _command_api_key_occurrences(
+        args, start=command_offset + 1, command=cast("click.Command", cast("Any", command))
+    )
 
 
 def _protect_inline_api_key_args(
@@ -381,12 +396,20 @@ class SecretSafeTyperGroup(TyperGroup):
     def _model_argument_offset(self, args: Sequence[str]) -> int | None:
         if self._direct_model_scope:
             return 0
-        return _root_models_argument_offset(args, self.params)
+        # typer>=0.25 vendors click internally, so ``self.params`` is typed as
+        # typer's vendored Parameter list rather than click's. At runtime both
+        # are real click Parameter objects across the declared ``typer>=0.12``
+        # support range, so the cast is a no-op that satisfies strict mypy.
+        return _root_models_argument_offset(
+            args, cast("Sequence[click.Parameter]", self.params)
+        )
 
     def _model_group(self) -> TyperGroup | None:
-        candidate: click.Command | None = self
+        candidate = cast("click.Command | None", cast("Any", self))
         if not self._direct_model_scope:
-            candidate = self.commands.get("models")
+            candidate = cast(
+                "click.Command | None", cast("Any", self.commands.get("models"))
+            )
         return candidate if isinstance(candidate, TyperGroup) else None
 
     def main(
@@ -464,10 +487,14 @@ _RESOLVE_OPTION = typer.Option(
     "--resolve",
     help="Resolve a blocking migration issue as ISSUE=ACTION[@POSITION].",
 )
+# ``typer.Option(click_type=...)`` is typed against typer's vendored click
+# ParamType on typer>=0.25, but at runtime any click ParamType subclass works
+# across the declared ``typer>=0.12`` support range. Cast through ``Any`` so
+# strict mypy accepts the standard click subclass under both layouts.
 _INLINE_API_KEY_OPTION = typer.Option(
     None,
     "--api-key",
-    click_type=_InlineApiKeyHandleType(),
+    click_type=cast("Any", _InlineApiKeyHandleType()),
     help="Inline API key (shell-visible).",
 )
 
