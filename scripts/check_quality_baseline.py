@@ -33,6 +33,7 @@ script runs)::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -104,17 +105,37 @@ def parse_mypy_summary(text: str) -> tuple[str | None, int | None]:
     neither is present. Used by the comparator to reconcile the raw process
     exit code against the semantic content of the artifact
     (review-t_cce76b68 F1, review-t_e03bfeff P1-2).
+
+    Raises ``MypyOutputError`` when the stream contains MORE THAN ONE
+    summary-shaped line: contradictory summaries (e.g. a stale
+    ``Found 1 error ...`` line followed by ``Success: no issues found ...``)
+    are the classic concatenated-artifact fail-open path and must fail
+    closed rather than silently returning the first match
+    (review-t_e03bfeff round-4 P2).
     """
+    found: tuple[str, int] | None = None
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         if not line:
             continue
+        match: tuple[str, int] | None = None
         if MYPY_SUCCESS_RE.match(line):
-            return "success", 0
-        m = MYPY_FOUND_ERRORS_RE.match(line)
-        if m:
-            return "errors", int(m.group("count"))
-    return None, None
+            match = ("success", 0)
+        else:
+            m = MYPY_FOUND_ERRORS_RE.match(line)
+            if m:
+                match = ("errors", int(m.group("count")))
+        if match is not None:
+            if found is not None:
+                raise MypyOutputError(
+                    "mypy output contains multiple summary lines "
+                    f"({line!r} after an earlier summary); refusing to "
+                    "accept a concatenated/stale artifact (fail closed)"
+                )
+            found = match
+    if found is None:
+        return None, None
+    return found
 
 
 def parse_mypy_summary_kind(text: str) -> str | None:
@@ -177,6 +198,15 @@ def _parse_mypy_rows(text: str) -> tuple[set[tuple[str, str, str]], int]:
         line = raw_line.rstrip()
         if not line:
             continue
+        if summary_seen:
+            # The summary is the TERMINAL line of a well-formed mypy stream.
+            # Anything non-empty after it — diagnostics, a second summary,
+            # noise — means a concatenated/stale artifact and must fail
+            # closed (review-t_e03bfeff round-4 P2).
+            raise MypyOutputError(
+                f"mypy output has content after the terminal summary line: {line!r}; "
+                "refusing to accept a concatenated/stale artifact (fail closed)"
+            )
         if MYPY_SUCCESS_RE.match(line) or MYPY_FOUND_ERRORS_RE.match(line):
             summary_seen = True
             continue
@@ -221,18 +251,25 @@ def _normalize_failure_fingerprint(raw: str) -> str:
     frame; the third line carries the nested cause (e.g.
     ``ModuleNotFoundError: No module named 'tomllib'``). Because JUnit XML
     attributes flatten newlines to spaces, we cannot rely on line structure
-    at comparison time. Instead we extract a bounded headline component
-    (first 120 chars) and a bounded tail component (last 80 chars) so the
-    nested cause at the end is always captured regardless of headline length
-    (review-t_e03bfeff P1-1 and follow-up). Whitespace is collapsed and
-    numeric literals / tmp paths are scrubbed for stability.
+    at comparison time, and ANY blind middle omission (head[:N] + tail[-M:])
+    lets a semantic mutation hide between the retained slices
+    (review-t_e03bfeff round-4 P1: a 186-char headline plus a 200-char
+    nested-cause payload mutated ``ModuleNotFoundError`` -> ``SecurityError``
+    in the omitted middle and produced an identical fingerprint).
+
+    The fingerprint therefore digests the FULL normalized semantic text with
+    SHA-256 and prepends a bounded human-readable preview so baseline diffs
+    stay reviewable: ``<preview> | sha256:<hex>``. Whitespace is collapsed
+    and numeric literals / tmp paths are scrubbed for stability BEFORE the
+    digest, so two semantically identical messages hash identically while
+    any semantic change anywhere in the message changes the fingerprint.
     """
-    head = re.sub(r"\s+", " ", (raw or "")).strip()
-    head = re.sub(r"/[^\s]*?(?:pytest-of-[^/]+|tmp[Tt][^/]*)/[^\s]*", "<TMP>", head)
-    head = re.sub(r"\b\d+\b", "<N>", head)
-    if len(head) <= 200:
-        return head
-    return head[:120] + " ... " + head[-80:]
+    normalized = re.sub(r"\s+", " ", (raw or "")).strip()
+    normalized = re.sub(r"/[^\s]*?(?:pytest-of-[^/]+|tmp[Tt][^/]*)/[^\s]*", "<TMP>", normalized)
+    normalized = re.sub(r"\b\d+\b", "<N>", normalized)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    preview = normalized[:120]
+    return f"{preview} | sha256:{digest}"
 
 
 class JUnitStructureError(ValueError):
@@ -331,8 +368,28 @@ def parse_junit_failures_and_skips(
                 f"JUnit report at {xml_path} contains duplicate node id {nid!r}"
             )
         seen_node_ids.add(nid)
-        outcome_el = next((child for child in testcase if child.tag in {"failure", "error"}), None)
-        has_skip = any(child.tag == "skipped" for child in testcase)
+        outcome_children = [child for child in testcase if child.tag in {"failure", "error"}]
+        skip_children = [child for child in testcase if child.tag == "skipped"]
+        if len(outcome_children) > 1:
+            raise JUnitStructureError(
+                f"JUnit report at {xml_path} has testcase {nid!r} with "
+                f"{len(outcome_children)} failure/error outcome elements; a "
+                "testcase has exactly one outcome (fail closed)"
+            )
+        if outcome_children and skip_children:
+            raise JUnitStructureError(
+                f"JUnit report at {xml_path} has testcase {nid!r} with both "
+                "a failure/error outcome and a <skipped> element; these are "
+                "mutually exclusive outcomes (fail closed)"
+            )
+        if len(skip_children) > 1:
+            raise JUnitStructureError(
+                f"JUnit report at {xml_path} has testcase {nid!r} with "
+                f"{len(skip_children)} <skipped> elements; a testcase has "
+                "exactly one outcome (fail closed)"
+            )
+        outcome_el = outcome_children[0] if outcome_children else None
+        has_skip = bool(skip_children)
         if outcome_el is not None:
             fingerprint = _normalize_failure_fingerprint(outcome_el.get("message", ""))
             if outcome_el.tag == "failure":
@@ -615,7 +672,11 @@ def main(argv: list[str] | None = None) -> int:
             "a contradictory artifact (fail closed)"
         )
 
-    mypy_summary_kind, mypy_summary_error_count = parse_mypy_summary(mypy_text)
+    try:
+        mypy_summary_kind, mypy_summary_error_count = parse_mypy_summary(mypy_text)
+    except MypyOutputError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     if args.mypy_exit_code == 0 and mypy_summary_kind != "success":
         problems.append(
             f"mypy exit code 0 (clean) contradicts mypy output summary "

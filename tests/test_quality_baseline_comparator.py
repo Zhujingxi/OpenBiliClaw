@@ -291,11 +291,12 @@ def test_known_failure_with_matching_fingerprint_passes(tmp_path: Path) -> None:
     junit = _minimal_junit(tmp_path / "junit.xml", failures={node: fp})
     mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
     # The fingerprint stored in the baseline must be the NORMALIZED form
-    # (numbers stripped to <N>) because the comparator normalizes the live
-    # JUnit message before comparing.
+    # produced by the comparator (numbers stripped to <N>, then digested).
     baseline = _baseline(
         tmp_path / "baseline.json",
-        known_failures=[{"node_id": node, "fingerprint": "AssertionError: expected <N> got <N>"}],
+        known_failures=[
+            {"node_id": node, "fingerprint": _checker._normalize_failure_fingerprint(fp)}
+        ],
     )
     rc = main(
         [
@@ -1428,3 +1429,215 @@ def test_count_mypy_error_occurrences_unit() -> None:
     assert _checker.count_mypy_error_occurrences(MYPY_CLEAN) == 0
     assert _checker.count_mypy_error_occurrences(MYPY_WITH_ERROR) == 1
     assert _checker.count_mypy_error_occurrences(MYPY_TWO_SAME_MESSAGE) == 2
+
+
+# ---------------------------------------------------------------------------
+# review-t_e03bfeff run 171 (repair t_1660b803): round-4 fail-closed regressions
+# ---------------------------------------------------------------------------
+
+
+def test_fingerprint_long_headline_and_long_nested_cause(tmp_path: Path) -> None:
+    """Round-4 P1 repro: a long headline AND a long nested-cause payload used
+    to let the exception class fall into the blind middle between head[:120]
+    and tail[-80:]. Mutating only ``ModuleNotFoundError`` -> ``SecurityError``
+    must now change the digest and fail comparison."""
+    node = "tests/test_x.py::test_y"
+    long_headline = "AssertionError: " + "x" * 170  # 186 chars
+    original_fp = (
+        long_headline + '\n  File "<stdin>", line 1, in <module>\nModuleNotFoundError: ' + "x" * 200
+    )
+    mutated_fp = original_fp.replace("ModuleNotFoundError", "SecurityError")
+
+    # The normalized fingerprints must differ even though the mutation sits
+    # beyond the human-readable preview window.
+    norm_orig = _checker._normalize_failure_fingerprint(original_fp)
+    norm_mut = _checker._normalize_failure_fingerprint(mutated_fp)
+    assert norm_orig != norm_mut
+
+    junit_orig = _minimal_junit(tmp_path / "orig.xml", failures={node: original_fp})
+    junit_mut = _minimal_junit(tmp_path / "mut.xml", failures={node: mutated_fp})
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[{"node_id": node, "fingerprint": norm_orig}],
+    )
+
+    # The original failure matches the baseline fingerprint and passes.
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit_orig),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 0
+
+    # The mutated exception class produces a different fingerprint and fails.
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit_mut),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 1
+
+
+def test_mypy_contradictory_multiple_summaries_fail_closed(tmp_path: Path) -> None:
+    """Round-4 P2 repro: one allowlisted error followed by 'Found 1 error'
+    AND a contradictory 'Success: no issues found' used to return 0. A
+    concatenated/stale stream with multiple summaries must fail closed."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "src/openbiliclaw/foo.py:10:5: error: Incompatible types  [assignment]\n"
+        "Found 1 error in 1 file (checked 227 source files)\n"
+        "Success: no issues found in 227 source files\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    parsed = parse_mypy_output(MYPY_WITH_ERROR)
+    data = json.loads(baseline.read_text())
+    data["mypy"]["known_diagnostics"] = parsed
+    baseline.write_text(json.dumps(data))
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_mypy_content_after_summary_fails_closed(tmp_path: Path) -> None:
+    """Round-4 P2 follow-up: any non-empty content after the terminal summary
+    (here a diagnostic row) is a concatenated/stale artifact and fails
+    closed."""
+    junit = _minimal_junit(tmp_path / "junit.xml")
+    mypy = _write(
+        tmp_path / "mypy.txt",
+        "Found 1 error in 1 file (checked 227 source files)\n"
+        "src/openbiliclaw/foo.py:10:5: error: Incompatible types  [assignment]\n",
+    )
+    baseline = _baseline(tmp_path / "baseline.json")
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "1",
+            "--pytest-exit-code",
+            "0",
+        ]
+    )
+    assert rc == 2
+
+
+def test_parse_mypy_summary_rejects_multiple_unit() -> None:
+    contradictory = (
+        "Found 1 error in 1 file (checked 227 source files)\n"
+        "Success: no issues found in 227 source files\n"
+    )
+    with pytest.raises(MypyOutputError, match="multiple summary"):
+        parse_mypy_summary(contradictory)
+
+
+def test_junit_testcase_with_failure_and_skipped_fails_closed(tmp_path: Path) -> None:
+    """Round-4 P2 repro: a testcase with both <failure> and <skipped> is
+    structurally impossible (mutually exclusive outcomes) and must fail
+    closed even when declared counters and allowlists line up."""
+    node = "tests/test_x.py::test_y"
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="2" '
+        'failures="1" errors="0" skipped="1">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        '<testcase classname="tests.test_x" name="test_y">'
+        '<failure message="AssertionError: boom">boom</failure>'
+        '<skipped message="skip">skip</skipped>'
+        "</testcase>"
+        "</testsuite></testsuites>",
+    )
+    mypy = _write(tmp_path / "mypy.txt", MYPY_CLEAN)
+    fp = _checker._normalize_failure_fingerprint("AssertionError: boom")
+    baseline = _baseline(
+        tmp_path / "baseline.json",
+        known_failures=[{"node_id": node, "fingerprint": fp}],
+    )
+    data = json.loads(baseline.read_text())
+    data["pytest"]["known_skips"] = [node]
+    baseline.write_text(json.dumps(data))
+    rc = main(
+        [
+            "--junit-xml",
+            str(junit),
+            "--mypy-output",
+            str(mypy),
+            "--baseline",
+            str(baseline),
+            "--mypy-exit-code",
+            "0",
+            "--pytest-exit-code",
+            "1",
+        ]
+    )
+    assert rc == 2
+
+
+def test_junit_testcase_with_multiple_failures_fails_closed(tmp_path: Path) -> None:
+    """Round-4 P2 follow-up: multiple <failure>/<error> children on one
+    testcase are structurally impossible; selecting only the first is a
+    fail-open path."""
+    junit = _write(
+        tmp_path / "junit.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="2" '
+        'failures="2" errors="0" skipped="0">'
+        '<testcase classname="tests.test_ok" name="test_pass"/>'
+        '<testcase classname="tests.test_x" name="test_y">'
+        '<failure message="AssertionError: one">one</failure>'
+        '<failure message="AssertionError: two">two</failure>'
+        "</testcase>"
+        "</testsuite></testsuites>",
+    )
+    with pytest.raises(JUnitStructureError, match="exactly one outcome"):
+        parse_junit_failures_and_skips(junit)
+
+
+def test_parse_junit_failure_and_skipped_unit(tmp_path: Path) -> None:
+    junit = _write(
+        tmp_path / "bad.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest" tests="1" '
+        'failures="1" errors="0" skipped="1">'
+        '<testcase classname="tests.test_x" name="test_y">'
+        '<failure message="AssertionError: boom">boom</failure>'
+        '<skipped message="skip">skip</skipped>'
+        "</testcase>"
+        "</testsuite></testsuites>",
+    )
+    with pytest.raises(JUnitStructureError, match="mutually exclusive"):
+        parse_junit_failures_and_skips(junit)
