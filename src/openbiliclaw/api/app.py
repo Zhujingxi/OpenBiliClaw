@@ -1792,7 +1792,10 @@ def create_app(
         static_recovery_surface = (
             path == "/"
             or path in {"/m", "/web", "/setup"}
-            or path.startswith(("/m/", "/web/", "/setup/"))
+            # /shared/ hosts modules the recovery shells load at parse time
+            # (e.g. source-status.js); blocking it kills the setup wizard's
+            # script and leaves the degraded config unrepairable.
+            or path.startswith(("/m/", "/web/", "/setup/", "/shared/"))
         )
         allowed = (
             method == "OPTIONS"

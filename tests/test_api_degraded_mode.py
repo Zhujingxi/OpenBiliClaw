@@ -156,6 +156,7 @@ def test_degraded_mode_keeps_desktop_and_setup_recovery_shells_reachable(
     desktop_response = client.get("/web")
     desktop_asset_response = client.get("/web/assets/js/app.js")
     setup_response = client.get("/setup/")
+    shared_module_response = client.get("/shared/source-status.js")
     unrelated_prefix_response = client.get("/webhook")
 
     assert root_response.status_code == 302
@@ -166,6 +167,11 @@ def test_degraded_mode_keeps_desktop_and_setup_recovery_shells_reachable(
     assert "javascript" in desktop_asset_response.headers.get("content-type", "")
     assert setup_response.status_code == 200
     assert setup_response.headers.get("content-type", "").startswith("text/html")
+    # The setup wizard's <script src="/shared/source-status.js"> runs at parse
+    # time; a 503 here leaves SourceStatus undefined and the whole wizard dead,
+    # so the degraded config could never be repaired from the browser.
+    assert shared_module_response.status_code == 200
+    assert "javascript" in shared_module_response.headers.get("content-type", "")
     assert unrelated_prefix_response.status_code == 503
 
 
