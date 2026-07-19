@@ -17,7 +17,6 @@ import unicodedata
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from pathlib import PurePath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 from urllib.parse import parse_qsl, quote, urlparse
 from uuid import UUID
@@ -1217,6 +1216,25 @@ def _is_masked_proxy_echo(value: str) -> bool:
     return "***" in value
 
 
+def _is_absolute_or_unc_path(path: str) -> bool:
+    """Return True if *path* is absolute on any common platform.
+
+    ``PurePath.is_absolute()`` is host-native, so on POSIX it misses
+    Windows drive-absolute (``C:\\...``) and UNC (``\\\\server\\share``)
+    forms. This helper detects all three independent of the host OS.
+    """
+    if not path:
+        return False
+    # POSIX absolute
+    if path.startswith("/"):
+        return True
+    # Windows drive-absolute: C:\... or C:/...
+    if len(path) >= 3 and path[1] == ":" and path[0].isalpha():
+        return True
+    # Windows UNC: \\server\share or //server/share
+    return path.startswith("\\\\") or path.startswith("//")
+
+
 def _safe_logging_directory_for_wire(directory: str) -> str:
     """Redact a configured logging directory for ``GET /api/config``.
 
@@ -1236,15 +1254,32 @@ def _safe_logging_directory_for_wire(directory: str) -> str:
     """
     if not directory:
         return directory
-    # ``PurePath(directory).is_absolute()`` is platform-correct for the host
-    # the backend runs on; ``~`` is treated separately because ``Path`` does
-    # not expand it and it still leaks the home-directory layout.
-    if PurePath(directory).is_absolute() or directory.startswith("~"):
+    if _is_absolute_or_unc_path(directory) or directory.startswith("~"):
         # Use both separators so Windows-style absolutes serialised on a
         # POSIX host (and vice versa) still reduce to their basename.
         parts = [p for p in directory.replace("\\", "/").split("/") if p]
         return parts[-1] if parts else ""
     return directory
+
+
+def _safe_logging_filename_for_wire(filename: str) -> str:
+    """Redact a configured logging filename for ``GET /api/config``.
+
+    ``LoggingConfig.filename`` is documented as a plain basename, but the
+    config layer does not enforce that. An absolute filename (e.g.
+    ``/srv/private/backend.log``) would leak the host filesystem layout
+    when echoed back or joined into ``file_path``.
+
+    Contract:
+    - Plain basename (``"backend.log"``) → returned as-is.
+    - Absolute or ``~``-prefixed filename → reduced to its basename.
+    """
+    if not filename:
+        return filename
+    if _is_absolute_or_unc_path(filename) or filename.startswith("~"):
+        parts = [p for p in filename.replace("\\", "/").split("/") if p]
+        return parts[-1] if parts else ""
+    return filename
 
 
 def create_app(
@@ -10362,14 +10397,14 @@ def create_app(
                 # keeps relative directories as-is and reduces absolute or
                 # ``~``-prefixed directories to their basename (non-reversible).
                 directory=_safe_logging_directory_for_wire(cfg.logging.directory),
-                filename=cfg.logging.filename,
+                filename=_safe_logging_filename_for_wire(cfg.logging.filename),
                 # ``file_path`` is the wire-facing joined form of the redacted
                 # directory + filename. It never contains an absolute host
                 # path: relative directories pass through, absolute/``~``
                 # directories collapse to their basename first.
                 file_path=(
                     f"{_safe_logging_directory_for_wire(cfg.logging.directory)}"
-                    f"/{cfg.logging.filename}"
+                    f"/{_safe_logging_filename_for_wire(cfg.logging.filename)}"
                 ),
                 max_file_size_mb=cfg.logging.max_file_size_mb,
                 backup_count=cfg.logging.backup_count,
