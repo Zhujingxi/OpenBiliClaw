@@ -203,6 +203,33 @@ def test_degraded_non_config_endpoints_return_503(
     assert response.json()["reason"] == "llm_registry_unavailable"
 
 
+def test_degraded_mode_allows_llm_independent_repair_surfaces(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Sources status/verify and embedding repair only need config + database.
+
+    Blocking them made the settings 平台源 tab and the embedding banner fail
+    with misleading "backend unavailable" copy while degraded, even though
+    fixing platform logins / pulling bge-m3 is exactly what a user can
+    usefully do while repairing the LLM config.
+    """
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    status_response = client.get("/api/sources/status")
+    verify_response = client.post("/api/sources/bilibili/verify")
+    repair_status_response = client.get("/api/embedding/repair")
+
+    assert status_response.status_code == 200
+    assert "bilibili" in status_response.json()
+    # Verify may legitimately fail (no cookie configured) but must NOT be the
+    # degraded guard's 503 envelope.
+    assert verify_response.status_code != 503
+    assert repair_status_response.status_code != 503
+
+
 def test_degraded_update_status_is_reachable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

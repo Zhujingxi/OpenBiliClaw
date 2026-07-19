@@ -6445,6 +6445,10 @@ async function initializeRecommendations() {
     ]);
 
   state.runtimeStatus = runtimeResult.status === "fulfilled" ? runtimeResult.value : null;
+  // The banner is gated on the runtime snapshot (initialized + not degraded);
+  // the boot-time check usually races ahead of this fetch, so re-evaluate now
+  // that the snapshot is in.
+  void maybeShowEmbeddingBanner();
   if (configResult.status === "fulfilled") {
     applyRuntimeConfig(configResult.value);
   }
@@ -8390,7 +8394,7 @@ async function maybeShowEmbeddingBanner() {
   if (!banner) return;
   if (sessionStorage.getItem(EMBEDDING_BANNER_DISMISS_KEY) === "1") return;
   const health = await fetchHealth();
-  if (!shouldShowEmbeddingBanner(health)) {
+  if (!shouldShowEmbeddingBanner(health, state.runtimeStatus)) {
     banner.hidden = true;
     return;
   }

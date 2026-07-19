@@ -16,11 +16,28 @@
  * older backend without the field stays silent — the connection banner
  * already covers "backend down", and a false alarm is worse than no banner.
  *
- * @param {{ embedding_ready?: boolean } | null | undefined} health
+ * Timing gates (both must hold, field report 2026-07-20):
+ * - NOT degraded: while the LLM registry is down the only real task is
+ *   repairing that config; semantic-dedup nagging is noise on top of it.
+ * - Initialized: pre-init the panel's own checklist carries the canonical
+ *   「向量模型可用（推荐，非必须）」row, and "可能刷到重复视频" is meaningless
+ *   before any recommendations exist. The banner's moment is a healthy,
+ *   initialized backend actually serving a feed without dedup.
+ *   A null runtime snapshot counts as not-initialized (stay silent; the
+ *   next poll reclassifies).
+ *
+ * @param {{ embedding_ready?: boolean, status?: string } | null | undefined} health
+ * @param {{ initialized?: boolean } | null | undefined} [runtimeStatus]
  * @returns {boolean}
  */
-export function shouldShowEmbeddingBanner(health) {
-  return Boolean(health) && health.embedding_ready === false;
+export function shouldShowEmbeddingBanner(health, runtimeStatus = null) {
+  return (
+    Boolean(health) &&
+    health.embedding_ready === false &&
+    health.status !== "degraded" &&
+    Boolean(runtimeStatus) &&
+    runtimeStatus.initialized === true
+  );
 }
 
 /**

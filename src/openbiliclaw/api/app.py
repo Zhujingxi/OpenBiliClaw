@@ -1837,6 +1837,15 @@ def create_app(
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
+            # LLM-independent repair/config surfaces (degraded ctx has config +
+            # database, which is all these handlers touch). Blocking them made
+            # the settings 平台源 tab and the embedding banner fail with
+            # misleading "backend unavailable" copy while degraded, even though
+            # fixing platform logins / pulling bge-m3 is exactly what a user
+            # can usefully do while repairing the LLM config.
+            or path == "/api/sources/status"
+            or (path.startswith("/api/sources/") and path.endswith("/verify"))
+            or path == "/api/embedding/repair"
             or path.startswith("/api/auth")
             # Keep every browser recovery shell loadable. Their static assets
             # do not depend on the LLM registry, and the desktop/setup forms

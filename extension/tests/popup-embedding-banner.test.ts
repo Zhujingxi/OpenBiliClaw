@@ -15,12 +15,29 @@ const popupHtml = readFileSync(
 );
 
 test("shouldShowEmbeddingBanner nags only when backend explicitly reports embedding off", () => {
-  assert.equal(shouldShowEmbeddingBanner({ embedding_ready: false }), true);
-  assert.equal(shouldShowEmbeddingBanner({ embedding_ready: true }), false);
+  const initialized = { initialized: true };
+  assert.equal(shouldShowEmbeddingBanner({ embedding_ready: false }, initialized), true);
+  assert.equal(shouldShowEmbeddingBanner({ embedding_ready: true }, initialized), false);
   // backend unreachable / older backend without the field → stay silent
-  assert.equal(shouldShowEmbeddingBanner(null), false);
-  assert.equal(shouldShowEmbeddingBanner(undefined), false);
-  assert.equal(shouldShowEmbeddingBanner({}), false);
+  assert.equal(shouldShowEmbeddingBanner(null, initialized), false);
+  assert.equal(shouldShowEmbeddingBanner(undefined, initialized), false);
+  assert.equal(shouldShowEmbeddingBanner({}, initialized), false);
+});
+
+test("shouldShowEmbeddingBanner waits for a healthy, initialized backend", () => {
+  const off = { embedding_ready: false };
+  // Degraded backend: the only real task is repairing the LLM config.
+  assert.equal(
+    shouldShowEmbeddingBanner({ ...off, status: "degraded" }, { initialized: true }),
+    false,
+  );
+  // Pre-init: the init checklist owns embedding messaging; no feed to dedup yet.
+  assert.equal(shouldShowEmbeddingBanner(off, { initialized: false }), false);
+  // No runtime snapshot yet → stay silent until the next poll classifies.
+  assert.equal(shouldShowEmbeddingBanner(off), false);
+  assert.equal(shouldShowEmbeddingBanner(off, null), false);
+  // Healthy + initialized + embedding off → the banner's actual moment.
+  assert.equal(shouldShowEmbeddingBanner({ ...off, status: "ok" }, { initialized: true }), true);
 });
 
 function fakeHost(visibilityState = "visible") {
