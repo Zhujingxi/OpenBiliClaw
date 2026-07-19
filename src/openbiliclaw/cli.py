@@ -36,12 +36,60 @@ from openbiliclaw.runtime.ollama_supervisor import (
 )
 from openbiliclaw.soul.preference_analyzer import DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE
 
+# ── Init stage ceilings ──────────────────────────────────────────────────
+#
+# Calibration provenance (2026-07-20, field report): a healthy SenseTime
+# ``deepseek-v4-flash`` gateway (``openai_compatible``) needs ~140s for one
+# 200-event preference chunk and up to ~300s for a worst-case chunk. The old
+# ceilings were sized as *performance expectations* for a fast provider, so a
+# slow-but-perfectly-healthy gateway was killed mid-run while the progress UI
+# still showed batches landing ("已处理 280s", 2/6 批).
+#
+# EVERY constant below is now a **wedged-run backstop, not a performance
+# expectation**: it exists only so a permanently stuck run eventually ends. An
+# init that legitimately takes 30-60 minutes on a slow gateway must survive.
+# Where a stage emits real per-unit progress we additionally guard it with an
+# idle limit (see ``_INIT_PROGRESS_IDLE_*``), which is what actually catches a
+# wedged run quickly; the absolute ceiling is then free to be generous.
 _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS = 360.0
-_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 360.0
-_INIT_DISCOVERY_TIMEOUT_SECONDS = 600.0
-_INIT_COLLECTION_TIMEOUT_SECONDS = 600.0
-_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS = 240.0
-_INIT_X_COLLECTION_TIMEOUT_SECONDS = 180.0
+# Stage 3 (``build_initial_profile``) is ONE long LLM call with no per-unit
+# progress signal, so an idle limit is meaningless there — a single slow call
+# is indistinguishable from a hung one. Absolute backstop only: 30 min is ~6x
+# the ~300s a slow gateway needs for this single synthesis call.
+_INIT_PROFILE_BUILD_TIMEOUT_SECONDS = 1800.0
+# Stage 4 (discovery + scoring + copy) emits coarse per-plan-stage progress,
+# so it gets the idle+absolute pair. 45 min absolute matches stage 2's ceiling:
+# both are LLM fan-outs over the same gateway.
+_INIT_DISCOVERY_TIMEOUT_SECONDS = 2700.0
+# Stage 1 global budget across ALL selected sources. Eight sources each waiting
+# up to 3-5 min for a browser extension to answer cannot fit in 10 min, so the
+# old value silently starved whichever sources ran last. 30 min lets a full
+# eight-source bootstrap finish while still bounding a wedged extension.
+_INIT_COLLECTION_TIMEOUT_SECONDS = 1800.0
+# Per-source waits. Bilibili history+favorites+following on a throttled account
+# routinely walks many paginated calls; X likes/bookmarks likewise. Doubled
+# from the fast-network calibration so slow/proxied networks are not clipped.
+_INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS = 600.0
+_INIT_X_COLLECTION_TIMEOUT_SECONDS = 480.0
+
+# ── Progress-aware deadlines (idle + absolute) ───────────────────────────
+#
+# IDLE: max seconds with NO new progress signal. Derived from the same
+# slow-gateway figure as ``_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE`` — one
+# chunk on a slow real gateway ≈ 300s — doubled for slack, so a chunk that
+# takes twice the worst observed time still counts as alive. A genuinely
+# unreachable Base URL / wrong model name / dead proxy produces *zero* chunks
+# and therefore still fails fast (10 min), which is what users need diagnosed.
+_INIT_PROGRESS_IDLE_SECONDS = 600.0
+# Stage 4's progress reports are coarser (a handful per plan stage, each
+# covering a full discover+score+copy sweep), so it needs a wider idle window
+# than stage 2's per-chunk cadence.
+_INIT_DISCOVERY_PROGRESS_IDLE_SECONDS = 900.0
+# ABSOLUTE: hard stop for a run that keeps dribbling progress forever. The
+# reported case (6 chunks × ~140s, concurrency-throttled) lands in ~15 min;
+# 45 min leaves ~3x headroom for a larger bootstrap on the same slow gateway
+# while still bounding the lease. Wedged-run backstop, not an expectation.
+_INIT_PROGRESS_ABSOLUTE_SECONDS = 2700.0
 
 # Stage 2 fans bootstrap events into bounded LLM chunks. Real gateways can
 # legitimately need about three minutes for one 200-event chunk, and the
@@ -57,7 +105,8 @@ _INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE = 300.0
 _INIT_PROFILE_ANALYSIS_RECOVERY_RESERVE_SECONDS = 300.0
 
 _INIT_PROFILE_BUILD_TIMEOUT_MESSAGE = (
-    "画像生成等待 AI 服务超过 6 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "画像生成等待 AI 服务超过 30 分钟仍未返回结果，已自动停止，避免继续卡住。"
+    "这一步是一次性的完整综合分析，没有分批进度可判断，因此只设了一个很宽松的兜底上限。"
     "常见原因是 Base URL、模型名或代理配置错误，网络无法访问模型服务，"
     "或模型服务响应过慢。请到模型设置测试 AI 服务，修正后再重试初始化。"
 )
@@ -96,20 +145,142 @@ def _profile_analysis_timeout_seconds(
     )
 
 
-def _profile_analysis_timeout_message(seconds: float) -> str:
-    minutes = max(1, (max(1, int(seconds)) + 59) // 60)
+def _profile_analysis_deadlines(
+    *,
+    event_count: int,
+    requested: float | None,
+    concurrency: int = 1,
+) -> tuple[float | None, float | None]:
+    """Return stage 2's ``(idle_seconds, absolute_seconds)`` deadline pair.
+
+    An explicit caller override (API/test budget) stays an exact pure wall
+    clock — callers that ask for N seconds get N seconds, and ``<=0`` still
+    means "no limit". Only the default path becomes progress-aware.
+    """
+    if requested is not None:
+        return None, (requested if requested > 0 else None)
+    scaled = _profile_analysis_timeout_seconds(
+        event_count=event_count,
+        requested=None,
+        concurrency=concurrency,
+    )
+    absolute = max(_INIT_PROGRESS_ABSOLUTE_SECONDS, scaled or 0.0)
+    return _INIT_PROGRESS_IDLE_SECONDS, absolute
+
+
+def _timeout_minutes(seconds: float) -> int:
+    return max(1, (max(1, int(seconds)) + 59) // 60)
+
+
+def _profile_analysis_idle_timeout_message(seconds: float) -> str:
+    """Nothing came back at all — almost always a connectivity/config fault."""
     return (
-        f"偏好分析等待 AI 服务超过本轮 {minutes} 分钟上限仍未返回结果，"
+        f"AI 服务长时间没有返回任何新结果（约 {_timeout_minutes(seconds)} 分钟无进展），"
         "已自动停止，避免继续卡住。常见原因是 Base URL、模型名或代理配置错误，"
-        "网络无法访问模型服务，或模型服务响应过慢。请到模型设置测试 AI 服务，"
-        "修正后再重试初始化。"
+        "或网络无法访问模型服务。请到模型设置测试 AI 服务，修正后再重试初始化。"
     )
 
 
+def _profile_analysis_absolute_timeout_message(seconds: float, *, progress_note: str = "") -> str:
+    """Results kept coming, just too slowly for a bootstrap this size."""
+    progress_part = f"（{progress_note}）" if progress_note else ""
+    minutes = _timeout_minutes(seconds)
+    return (
+        f"偏好分析总时长超过上限（约 {minutes} 分钟），已自动停止{progress_part}。"
+        "AI 服务一直在返回结果，只是对这次初始化的数据量来说太慢了。"
+        "建议到模型设置换一个更快的模型，或稍后重试初始化。"
+    )
+
+
+class _InitIdleTimeoutError(TimeoutError):
+    """No progress signal within the idle limit."""
+
+
+class _InitAbsoluteTimeoutError(TimeoutError):
+    """Total runtime exceeded the absolute ceiling despite progress."""
+
+
+class _InitProgressMarker:
+    """Shared monotonic 'last progress' marker.
+
+    The work's own per-unit progress callbacks call :meth:`touch`; the
+    watchdog in :func:`_await_with_progress_deadline` reads :attr:`last`.
+    Heartbeat ticks deliberately do NOT touch it — a tick fires on a timer
+    regardless of whether the work advanced, so counting it as progress would
+    turn the idle limit into no limit at all.
+    """
+
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self._clock: Callable[[], float] = clock or _loop_clock
+        self.started = self._clock()
+        self.last = self.started
+
+    def now(self) -> float:
+        return self._clock()
+
+    def touch(self) -> None:
+        self.last = self._clock()
+
+
+def _loop_clock() -> float:
+    return asyncio.get_running_loop().time()
+
+
+async def _await_with_progress_deadline(
+    awaitable: Awaitable[Any],
+    *,
+    marker: _InitProgressMarker,
+    idle_seconds: float | None,
+    absolute_seconds: float | None,
+    poll_seconds: float = 1.0,
+) -> Any:
+    """Await ``awaitable`` under an idle limit AND an absolute ceiling.
+
+    A fixed wall clock cannot tell "hung" from "slow but progressing", which
+    is exactly how a healthy-but-slow gateway got killed mid-bootstrap. This
+    replaces it with two limits: ``idle_seconds`` since the last progress
+    signal, and ``absolute_seconds`` overall. Either limit (and cancellation)
+    cancels the work task and awaits its cancellation so nothing leaks.
+    """
+    task: asyncio.Future[Any] = asyncio.ensure_future(awaitable)
+    started = marker.now()
+    marker.touch()
+    try:
+        while True:
+            now = marker.now()
+            # Sleep only until the nearest limit so a tiny injected budget is
+            # honoured promptly instead of always costing a full poll interval.
+            wait_for = poll_seconds
+            if absolute_seconds is not None:
+                wait_for = min(wait_for, started + absolute_seconds - now)
+            if idle_seconds is not None:
+                wait_for = min(wait_for, marker.last + idle_seconds - now)
+            done_tasks, _ = await asyncio.wait({task}, timeout=max(0.0, wait_for))
+            if task in done_tasks:
+                return task.result()
+            now = marker.now()
+            if absolute_seconds is not None and now - started >= absolute_seconds:
+                raise _InitAbsoluteTimeoutError(absolute_seconds)
+            if idle_seconds is not None and now - marker.last >= idle_seconds:
+                raise _InitIdleTimeoutError(idle_seconds)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        raise
+
+
 _INIT_DISCOVERY_TIMEOUT_MESSAGE = (
-    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 10 分钟仍未完成，"
+    "画像已生成，但首轮内容池等待内容发现、个性化评分或推荐文案生成超过 45 分钟仍未完成，"
     "本次初始化已按“部分完成”结束，避免继续卡住。"
     "常见原因是所选内容源未登录或网络不可达，也可能是 AI 评估响应过慢。"
+    "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
+)
+_INIT_DISCOVERY_IDLE_MESSAGE = (
+    "画像已生成，但首轮内容池已经约 15 分钟没有任何新进展，"
+    "本次初始化已按“部分完成”结束，避免继续卡住。"
+    "常见原因是所选内容源未登录或网络不可达，也可能是 AI 服务无法访问。"
     "系统会在后台继续补池；你可以先进入应用，检查平台登录与网络/代理后再刷新。"
 )
 _INIT_DISCOVERY_PARTIAL_MESSAGE = (
@@ -6940,11 +7111,17 @@ async def run_guided_init(
     _print_section_title("2/4 分析偏好")
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
     profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
-    profile_analysis_budget = _profile_analysis_timeout_seconds(
+    # Progress-aware deadline: the idle limit is what actually catches a wedged
+    # gateway, so the absolute ceiling can stay generous for slow-but-healthy
+    # ones. ``profile_analysis_budget`` remains the number published to the GUI
+    # as ``progress.max_seconds`` — it is now the absolute ceiling, i.e. still
+    # the only limit that can end the stage on the clock.
+    profile_analysis_idle_budget, profile_analysis_budget = _profile_analysis_deadlines(
         event_count=len(events),
         requested=profile_analysis_timeout_seconds,
         concurrency=profile_analysis_concurrency,
     )
+    stage2_marker = _InitProgressMarker()
 
     # Per-chunk progress so stage 2 (a multi-minute chunked LLM batch) advances
     # instead of sitting static (init-progress spec Phase 1). We ALWAYS echo the
@@ -6968,6 +7145,8 @@ async def run_guided_init(
     async def _stage2_progress(done: int, total: int) -> None:
         _chunk_progress["done"] = done
         _chunk_progress["total"] = total
+        # Real per-chunk completion — the only thing that counts as progress.
+        stage2_marker.touch()
         console.print(f"  [dim]分析偏好：第 {done}/{total} 批完成[/dim]")
         await _report_stage_progress(
             2,
@@ -7010,7 +7189,7 @@ async def run_guided_init(
     )
     try:
         with _background_admission_bypass():
-            await asyncio.wait_for(
+            await _await_with_progress_deadline(
                 _run_with_progress(
                     soul_engine.analyze_events(
                         events,
@@ -7022,13 +7201,23 @@ async def run_guided_init(
                     status_provider=_chunk_status,
                     progress_callback=_stage2_tick,
                 ),
-                timeout=profile_analysis_budget,
+                marker=stage2_marker,
+                idle_seconds=profile_analysis_idle_budget,
+                absolute_seconds=profile_analysis_budget,
             )
+    except _InitIdleTimeoutError as exc:
+        raise GuidedInitError(
+            "analyze_failed",
+            _profile_analysis_idle_timeout_message(
+                profile_analysis_idle_budget or _INIT_PROGRESS_IDLE_SECONDS
+            ),
+        ) from exc
     except TimeoutError as exc:
         raise GuidedInitError(
             "analyze_failed",
-            _profile_analysis_timeout_message(
-                profile_analysis_budget or _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
+            _profile_analysis_absolute_timeout_message(
+                profile_analysis_budget or _INIT_PROFILE_ANALYSIS_TIMEOUT_SECONDS,
+                progress_note=_chunk_status(),
             ),
         ) from exc
     except Exception as exc:
@@ -7163,9 +7352,20 @@ async def run_guided_init(
     _stage4_live_done = 0
     _stage4_live_total = 4
     _stage4_live_note = "准备发现候选内容"
+    stage4_marker = _InitProgressMarker()
+    # Stage 4 reports real progress (per plan stage, from run_init_backfill), so
+    # it gets the idle+absolute pair too. Ticks are excluded for the same reason
+    # as stage 2: they fire on a timer, not on work.
+    stage4_idle_budget: float | None = (
+        _INIT_DISCOVERY_PROGRESS_IDLE_SECONDS
+        if discovery_timeout_seconds == _INIT_DISCOVERY_TIMEOUT_SECONDS
+        else None
+    )
+    stage4_absolute_budget = discovery_timeout_seconds if discovery_timeout_seconds > 0 else None
 
     async def _stage4_progress(done: int, total: int, note: str) -> None:
         nonlocal _stage4_live_done, _stage4_live_total, _stage4_live_note
+        stage4_marker.touch()
         _stage4_live_done = done
         _stage4_live_total = total
         _stage4_live_note = note
@@ -7207,14 +7407,16 @@ async def run_guided_init(
     # terminal *partial success*, and clients may enter the app while the
     # restarted runtime continues replenishment. Cancellation still propagates.
     try:
-        discovered_count = await asyncio.wait_for(
+        discovered_count = await _await_with_progress_deadline(
             _run_with_progress(
                 discover_backfill(profile_data, **backfill_kwargs),
                 label="基于完整画像生成首轮内容池",
                 eta_seconds=300,
                 progress_callback=_stage4_tick,
             ),
-            timeout=discovery_timeout_seconds if discovery_timeout_seconds > 0 else None,
+            marker=stage4_marker,
+            idle_seconds=stage4_idle_budget,
+            absolute_seconds=stage4_absolute_budget,
         )
         await _stage4_progress(4, 4, "首轮内容已完成评分与推荐文案，可直接浏览")
     except Exception as exc:
@@ -7222,7 +7424,10 @@ async def run_guided_init(
 
         discovered_count = max(0, int(getattr(exc, "discovered_count", 0) or 0))
         discover_exc = exc
-        if isinstance(exc, TimeoutError):
+        if isinstance(exc, _InitIdleTimeoutError):
+            discovery_reason = "discovery_timeout"
+            discovery_detail = _INIT_DISCOVERY_IDLE_MESSAGE
+        elif isinstance(exc, TimeoutError):
             discovery_reason = "discovery_timeout"
             discovery_detail = _INIT_DISCOVERY_TIMEOUT_MESSAGE
         elif isinstance(exc, InitialPoolUnavailableError):
