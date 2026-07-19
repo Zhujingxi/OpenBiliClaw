@@ -99,7 +99,7 @@ auto_sync_enabled = false
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `default_provider` | string | `"deepseek"` | 默认 Provider：`deepseek` / `openai` / `claude` / `gemini` / `ollama` / `openrouter` / `openai_compatible` |
+| `default_provider` | string | `"deepseek"` | 默认聊天 Provider：`deepseek` / `openai` / `claude` / `gemini` / `openrouter` / `openai_compatible`。`ollama` 仍被接受（后端注册表 / 设置页保留支持），但仅面向自备本地 chat 模型的进阶用户，其默认角色是 embedding；图形向导 / `init` / bootstrap 的交互菜单已不再把它当聊天默认提供（v0.3.176+） |
 | `concurrency` | int | `4` | 单 runtime 的 LLM provider 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。API/OpenClaw/CLI composition 内所有服务共享同一 gate；可在插件 / 桌面 Web 设置页「模型」tab 调整，合法范围为 `1..16`，显式正数旧值不会被覆盖 |
 | `fallback_provider` | string | `""` | 第二个备选 Provider。留空 = 不 fallback；非空时只按 `default_provider → fallback_provider` 尝试，不再自动遍历其它 provider。（v0.3.156+ 移除了从未被读取的 `fallback_enabled` 布尔开关：非空 provider 即启用；存量 config.toml 里的旧 key 会被忽略） |
 

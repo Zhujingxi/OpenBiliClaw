@@ -616,16 +616,19 @@ OpenBiliClaw 需要一个语言模型来理解你的兴趣、写推荐文案。
  4   Gemini 官方                           默认 gemini-2.5-flash (稳定 / 便宜)。Google AI Studio 申请 Key,免费档每天 1500 次够用
  5   Claude 官方                           默认 claude-sonnet-4-6。Anthropic console,按 token 付费,质量高
  6   OpenRouter 聚合                       默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费
- 7   本地 Ollama（完全离线）                默认 qwen2.5:7b (中文好)。不要 Key / 完全免费,但需 16GB+ 内存,CPU 推理首次响应 10-60s
 
-Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。已经买了中转站 / OneAPI Key 选 2 (协议兼容);想完全离线选 7 (Ollama,但 CPU 推理慢)。
+Tip:不确定就选 1 (DeepSeek),¥0.001/千 token 几乎免费,月度通常 ¥0.5-2。已经买了中转站 / OneAPI Key 选 2 (协议兼容)。本地 Ollama 仅用于向量检索(embedding),不作为聊天服务商;如需本地聊天模型请到设置页手动配置。
 
 请输入序号或名称（默认 1=DeepSeek） [1]:
 
 # (随后只问被选中那一项实际需要的字段——
 #  例如选 1/3/4/5/6: 只问 API Key + 模型名；
-#  选 2: 进协议兼容 preset 子菜单，按需问 Base URL + API Key + 模型名；
-#  选 7: 只问模型名，并自动安装 / 启动 Ollama)
+#  选 2: 进协议兼容 preset 子菜单，按需问 Base URL + API Key + 模型名)
+#
+# 注意（v0.3.176+）：本地 Ollama 已不再出现在聊天 provider 菜单里——随装的
+# Ollama 只带 embedding 模型（bge-m3），小体积本地聊天模型达不到内容管线质量线。
+# 后端注册表 / 桌面设置页仍支持 ollama 聊天；`ollama` 作为来自既有配置或
+# 显式 flag 的 default_provider 依然被接受，只是不再交互式「提供」它。
 
 Embedding(向量化)服务
 把视频标题/简介压成向量,跨视频做相似度对比 —— 决定"这条和你之前喜欢的那条是不是同一类"。和聊天 LLM 是分开的。
@@ -667,7 +670,9 @@ Cookie 只存在你本机 data/bilibili_cookie.json，不会上传任何地方�
 
 > **「OpenAI 官方」≠「OpenAI 协议兼容服务」**：向导把这俩拆成独立菜单项。选 3 时只问 API Key，base_url 走 `https://api.openai.com/v1`；选 2 时进入协议兼容 preset 子菜单（中转站 / Kimi / MiniMax / 通义 / 智谱 / Yi / Azure / vLLM / 自定义），按所选 preset 写入 `[llm.openai]` 段。两者底层走的是同一个 OpenAI 协议家族，但用户视角分得很清楚。
 >
-> **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。Ollama 仍保留为完全离线选项，但需要本机算力，首次响应会慢。
+> **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。
+>
+> **本地 Ollama 不再作为聊天 provider 出现在菜单里（v0.3.176+）**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需自行 `ollama pull` 且小模型跑内容管线质量不达标。后端注册表与桌面设置页仍支持 ollama 聊天，供进阶用户使用；来自既有 `config.toml` 或显式 flag 的 `default_provider = "ollama"` 也仍被接受，交互式向导只是不再主动提供它。同一口径也适用于 `scripts/agent_bootstrap.py` 的人类安装菜单。
 
 首次 `init` 的 discover 阶段可能持续几分钟，因为它会真实访问 B 站接口并调用当前 provider 进行候选打分与表达生成。
 当前实现已经对首轮 discover 做了保守受控并发优化，但默认并发上限仍偏保守，优先减少 B 站和 LLM 限流风险。
